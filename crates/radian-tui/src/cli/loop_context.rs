@@ -685,6 +685,17 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            // ADR 0047: one `/goal` change. The event journals first through the session's
+            // own writer; `Input::GoalDone` applies the change on success and nothing on
+            // failure — a failed append never diverges the live state from the journal.
+            Effect::GoalAppend { event, apply } => {
+                let result = self
+                    .runtime
+                    .block_on(self.host.journal.append_runtime_event(event))
+                    .map_err(|error| error.to_string());
+                self.send(AppInput::GoalDone { apply, result });
+                Ok(())
+            }
             Effect::OpenPicker { query } => {
                 self.send(load_picker(self.host, query));
                 Ok(())

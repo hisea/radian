@@ -61,6 +61,9 @@ pub(super) fn build_startup_screen(
     }
     // `/memory` runs against the same service the agent's tools and injection use.
     app.set_memory_enabled(session.facts().memory_enabled);
+    // ADR 0047: the TUI shares the host's folded goal (a resume parks an active goal as
+    // paused); the `goal` tool and the prompt hook advance the same state.
+    app.set_goal(session.goal());
     for message in history {
         app.push_message(message);
     }
@@ -186,6 +189,11 @@ pub(super) fn build_startup_screen(
     startup_lines.push(session_line);
     // ADR 0031 T3: the trust state, in the startup block (same style as `ask_user: off`).
     startup_lines.push(radian_host::trust::status_line(&session.trust()));
+    // ADR 0047: a paused goal at startup (a `--resume` parked it, or a `/fork` carried
+    // it) never auto-continues; the block names it and points at `/goal resume`.
+    if let Some(line) = goal_resume_hint(session) {
+        startup_lines.push(line);
+    }
     // The startup diagnostics the `--pick` path could not print: the
     // alternate screen was already up, so they were collected instead (`StartupLog`). They
     // belong to the startup block, next to the trust line that was already carried here. On a
@@ -240,6 +248,23 @@ pub(super) fn build_startup_screen(
         app.push_trust_modal(session.trust().workspace.clone());
     }
     herdr
+}
+
+/// ADR 0047: the startup hint for a paused goal. `None` when no goal waits — a fresh
+/// session without one, a finished one, or an active one (which cannot happen at startup:
+/// the resume fold parks it).
+fn goal_resume_hint(session: &radian_host::LocalSession) -> Option<String> {
+    let share = session.goal();
+    let guard = share.lock().unwrap_or_else(|e| e.into_inner());
+    let goal = guard.as_ref()?;
+    if goal.status != radian_session::GoalStatus::Paused {
+        return None;
+    }
+    let mut objective: String = goal.objective.chars().take(120).collect();
+    if goal.objective.chars().count() > 120 {
+        objective.push('…');
+    }
+    Some(format!("goal paused: {objective}; /goal resume to continue"))
 }
 
 /// `run()`'s loop phase: builds the session host, runs the event loop to completion,

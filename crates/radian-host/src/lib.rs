@@ -23,6 +23,7 @@ mod describe;
 mod diagnostics;
 mod errors;
 mod escape;
+pub mod goal;
 mod headers;
 pub mod headers_usage;
 pub mod herdr;
@@ -56,6 +57,7 @@ pub mod wake_gate;
 mod workspace;
 
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
+pub use goal::{GoalHooks, GoalTools, SharedGoal, fresh_share, goal_block};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, OAuthEntry, RADIAN_BASE_URL, ResolvedKey,
     auth_path, has_login, list as list_auth, remove as remove_auth, resolve_key, resolve_note,

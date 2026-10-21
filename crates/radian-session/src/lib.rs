@@ -24,6 +24,7 @@ mod fee;
 mod fork;
 mod fs;
 mod gate;
+pub mod goal;
 mod index;
 mod reader;
 mod runtime;
@@ -40,6 +41,10 @@ pub use export::{
     redact_text, redact_value,
 };
 pub use fee::UsageFee;
+pub use goal::{
+    DEFAULT_MAX_DURATION_SECS, DEFAULT_MAX_TURNS, GoalBudget, GoalState, GoalStatus, fold,
+    fold_for_resume, goal_tokens, is_goal_continuation,
+};
 pub use fork::{
     ForkError, ForkOutcome, ForkPoint, ForkRequest, fork, fork_point_history, fork_with_journal,
     last_fork_point, resolve_fork_point,

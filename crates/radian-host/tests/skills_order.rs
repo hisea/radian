@@ -87,6 +87,13 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         body: None,
     }];
     let skills_hooks = Arc::new(SkillsHooks::new(&skills));
+    // ADR 0047: an active goal, so the block renders and its position is pinned too.
+    let share = radian_host::fresh_share();
+    *share.lock().unwrap() = Some(radian_session::GoalState::fresh(
+        "ship it".into(),
+        radian_session::GoalState::default_budget(),
+    ));
+    let goal = Arc::new(radian_host::GoalHooks::new(share));
     let permissions = Arc::new(PermissionHooks::new(
         Profile::workspace_write(&ws).unwrap(),
         None,
@@ -120,7 +127,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
     ));
-    let hooks = session_hooks(role, permissions, commands, memory, skills_hooks, facts);
+    let hooks = session_hooks(role, permissions, commands, memory, skills_hooks, goal, facts);
     let mut request = ModelRequest {
         system_prompt: None,
         messages: vec![Message::user("what style?")],
@@ -153,6 +160,14 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     assert!(
         skills_at < session_at,
         "the <session> layer must come after the skills section:\n{prompt}"
+    );
+    // ADR 0047: the goal block rides after skills and before the session facts.
+    let goal_at = prompt
+        .find("<goal>")
+        .unwrap_or_else(|| panic!("no goal block in {prompt}"));
+    assert!(
+        skills_at < goal_at && goal_at < session_at,
+        "the <goal> block must sit between skills and <session>:\n{prompt}"
     );
     assert!(prompt.trim_end().ends_with("</session>"), "{prompt}");
 }

@@ -144,6 +144,12 @@ impl App {
                 if self.session.loop_state.active {
                     self.stop_loop("loop off");
                 } else {
+                    if self.goal_blocks_loop() {
+                        self.push_notice(
+                            "loop not started: a goal is active (/goal drop it or /goal pause it first)",
+                        );
+                        return UpdateResult::dirty();
+                    }
                     self.session.loop_state = LoopState {
                         active: true,
                         ..LoopState::default()
@@ -160,6 +166,12 @@ impl App {
             LoopCommand::Enable(options) => {
                 if let Some(refused) = self.refuse_if_session_ended() {
                     return refused;
+                }
+                if self.goal_blocks_loop() {
+                    self.push_notice(
+                        "loop not started: a goal is active (/goal drop it or /goal pause it first)",
+                    );
+                    return UpdateResult::dirty();
                 }
                 if !self.session.has_model {
                     self.push_notice(
@@ -476,7 +488,7 @@ fn describe_limits(options: &LoopOptions) -> String {
 }
 
 /// The one-word outcome for the pause notice on an unusual turn end.
-fn turn_outcome_word(outcome: TurnOutcome) -> &'static str {
+pub(crate) fn turn_outcome_word(outcome: TurnOutcome) -> &'static str {
     match outcome {
         TurnOutcome::Completed => "completed",
         TurnOutcome::Refused => "refused",

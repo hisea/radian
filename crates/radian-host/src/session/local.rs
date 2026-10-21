@@ -65,6 +65,10 @@ pub struct LocalSession {
     /// completion and `/skill:<name>` expansion; the prompt hook and the `skill` tool share the
     /// same `Arc`.
     pub(super) skills: Arc<Vec<Skill>>,
+    /// The persistent goal (ADR 0047): folded once at open, shared by the `goal` tool, the
+    /// `<goal>` prompt hook and the TUI. The TUI reads and advances it for `/goal` and the
+    /// turn-end continuation; every change is journaled first.
+    pub(super) goal: crate::goal::SharedGoal,
     /// The background-job notifier (ADR 0037 slices 3-4). `None` for a host with no coding
     /// tools. The host calls [`JobNotifier::reset_wakes`] when a user message arrives.
     pub(super) job_notifier: Option<Arc<crate::job_notify::JobNotifier>>,
@@ -200,6 +204,13 @@ impl LocalSession {
     /// method because the host owns the `SKILL.md` read.
     pub fn skills(&self) -> &[Skill] {
         &self.skills
+    }
+
+    /// The persistent goal's shared state (ADR 0047): the TUI's `/goal` commands and
+    /// turn-end continuation read and advance it; the `goal` tool and the prompt hook share
+    /// the same `Arc`.
+    pub fn goal(&self) -> crate::goal::SharedGoal {
+        Arc::clone(&self.goal)
     }
 
     /// Expands `/skill:<name> [args]` into the user message ADR 0025 S3 puts in the inbox (the

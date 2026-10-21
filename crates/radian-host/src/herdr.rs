@@ -115,6 +115,9 @@ pub enum Blocked {
     /// The wake budget is used up and degraded notices wait; the session is idle until a
     /// user message wakes it. The count is not reported, only the category.
     WakeBudget,
+    /// A `/goal` budget cap stopped the goal (ADR 0047); the session is idle until the user
+    /// raises the budget or sets a new goal. The cap is not reported, only the category.
+    GoalBudget,
 }
 
 /// The pure state function (ADR H2): trust and pending `blocked` wins over `working`; a
@@ -141,6 +144,7 @@ pub fn blocked_message(blocked: Option<&Blocked>, trust_modal: bool) -> String {
         Some(Blocked::Approval(tool)) => format!("approval: {tool}"),
         Some(Blocked::Question) => "question".to_owned(),
         Some(Blocked::WakeBudget) => "wake budget".to_owned(),
+        Some(Blocked::GoalBudget) => "goal budget".to_owned(),
         None => "blocked".to_owned(),
     }
 }
@@ -292,6 +296,7 @@ pub fn blocked_label(blocked: Option<&Blocked>, trust_modal: bool) -> Option<Str
         Some(Blocked::Approval(_)) => Some("approval".to_owned()),
         Some(Blocked::Question) => Some("question".to_owned()),
         Some(Blocked::WakeBudget) => Some("wake budget".to_owned()),
+        Some(Blocked::GoalBudget) => Some("goal budget".to_owned()),
         None => None,
     }
 }
@@ -695,6 +700,10 @@ mod tests {
             blocked_message(Some(&Blocked::WakeBudget), false),
             "wake budget"
         );
+        assert_eq!(
+            blocked_message(Some(&Blocked::GoalBudget), false),
+            "goal budget"
+        );
     }
 
     /// A used-up wake budget blocks an idle session, and the next turn start reads
@@ -1038,6 +1047,10 @@ mod tests {
         assert_eq!(
             blocked_label(Some(&Blocked::WakeBudget), false),
             Some("wake budget".to_owned())
+        );
+        assert_eq!(
+            blocked_label(Some(&Blocked::GoalBudget), false),
+            Some("goal budget".to_owned())
         );
         assert_eq!(blocked_label(None, true), Some("trust".to_owned()));
         assert_eq!(blocked_label(None, false), None);

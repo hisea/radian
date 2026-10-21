@@ -460,6 +460,33 @@ fn event_data_value(
             "state": state,
             "duration_ms": duration_ms,
         }),
+        EventData::GoalSet {
+            objective,
+            max_turns,
+            max_duration_secs,
+            max_tokens,
+        } => json!({
+            "objective": objective,
+            "max_turns": max_turns,
+            "max_duration_secs": max_duration_secs,
+            "max_tokens": max_tokens,
+        }),
+        EventData::GoalBudgetSet {
+            max_turns,
+            max_duration_secs,
+            max_tokens,
+        } => json!({
+            "max_turns": max_turns,
+            "max_duration_secs": max_duration_secs,
+            "max_tokens": max_tokens,
+        }),
+        EventData::GoalProgress { note } => json!({"note": note}),
+        EventData::GoalDone { note } => json!({"note": note}),
+        EventData::GoalPaused {} => json!({}),
+        EventData::GoalResumed {} => json!({}),
+        EventData::GoalDropped {} => json!({}),
+        EventData::GoalWait { secs } => json!({"secs": secs}),
+        EventData::GoalBudgetExhausted { kind } => json!({"kind": kind}),
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

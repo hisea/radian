@@ -246,14 +246,23 @@ pub(super) fn ui_loop(
                 .pending_fork
                 .map(|deadline| deadline.saturating_duration_since(now));
             // A `/loop --every` wait ends at the next iteration's due time (the turn-end
-            // decision still re-checks; the deadline only wakes an idle loop).
+            // decision still re-checks; the deadline only wakes an idle loop). A goal
+            // `wait` arms the same wake through `goal_deadline`.
             let loop_remaining = app
                 .loop_deadline()
                 .map(|deadline| deadline.saturating_duration_since(now));
-            let wait_remaining = [quit_remaining, fork_remaining, loop_remaining]
-                .into_iter()
-                .flatten()
-                .min();
+            let goal_remaining = app
+                .goal_deadline()
+                .map(|deadline| deadline.saturating_duration_since(now));
+            let wait_remaining = [
+                quit_remaining,
+                fork_remaining,
+                loop_remaining,
+                goal_remaining,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let first = if app.is_selecting() || wait_remaining.is_some() {
                 // The nearer of the deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
                 let timeout = match (app.is_selecting(), wait_remaining) {
@@ -288,9 +297,12 @@ pub(super) fn ui_loop(
                         }
                         // A `/loop --every` wait ended while idle: send the next iteration
                         // (a running turn ignores the deadline; its end decides instead).
-                        if app
-                            .loop_deadline()
-                            .is_some_and(|d| std::time::Instant::now() >= d)
+                        // The same wake fires an armed goal `wait` (`goal_deadline_fired`
+                        // runs beside the loop's in the one `LoopDeadline` arm).
+                        if (app.loop_deadline().is_some_and(|d| std::time::Instant::now() >= d)
+                            || app.goal_deadline().is_some_and(|d| {
+                                std::time::Instant::now() >= d
+                            }))
                             && app.update(AppInput::LoopDeadline).dirty
                             && !draw_frame(terminal, app)?
                         {
