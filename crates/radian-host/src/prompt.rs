@@ -46,7 +46,7 @@ pub enum SandboxFacts {
 /// Only read when the user asks about radian itself; read the relevant pages fully first.
 pub fn docs_index() -> String {
     let mut out = String::from(
-        "Documentation: read it only when the user asks about radian itself.          Read the relevant pages fully before answering.\n",
+        "Documentation: read it only when the user asks about radian itself. Read the relevant pages fully before answering.\n",
     );
     for (name, _) in radian_coding::docs::DOCS {
         let topic = name.strip_suffix(".md").unwrap_or(name);
