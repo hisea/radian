@@ -164,7 +164,7 @@ pub(super) fn wire_post_open(
         Arc::clone(&contributions),
         Arc::clone(&on_tick),
     ));
-    // ADR 0027 C4 + revision 5 + revision 14 decision 3: the provider's usage source comes
+    // ADR 0027 C4: the provider's usage source comes
     // from its descriptor (`usage = Endpoint`). It is spawned only when a key is stored, but it
     // refreshes (and its row shows) only while the **current** model's provider is
     // opencode-go. The watch channel is that gate: the UI flips it on a `/model` switch. The

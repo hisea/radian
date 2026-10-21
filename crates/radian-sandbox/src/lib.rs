@@ -432,7 +432,7 @@ impl Sandbox {
     }
 
     /// Whether outbound Unix socket connections are denied under this sandbox (ADR 0016
-    /// revision 1). This is the **effective** answer for this session: the policy may list
+    /// ). This is the **effective** answer for this session: the policy may list
     /// [`SandboxPolicy::allow_unix_sockets`], but only a backend that enforces the deny
     /// reports `true`. The `<runtime>` prompt layer reads this, so a session whose sockets
     /// stay reachable (any `workspace` session on a backend without the filter, Linux)

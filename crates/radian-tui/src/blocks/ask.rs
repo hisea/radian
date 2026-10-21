@@ -334,7 +334,7 @@ mod tests {
     /// is an **open** frame - a `╭─ ask …` top line with no right corner, `│ ` body rows, a
     /// `╰──` tail - and single, multi and `Other` share the circle marker pair `○`/`◉`. The
     /// unanswered, answered and declined states are the same block. The content is the ADR 0024
-    /// revision 1 R1 structure (prompt, options, `↳` description, note, status).
+    ///  R1 structure (prompt, options, `↳` description, note, status).
     #[test]
     fn the_ask_block_is_an_open_frame() {
         use serde_json::json;

@@ -107,7 +107,7 @@ pub fn add_cost(
 ///
 /// Both usage records count: `ModelUsageRecorded` (a conversation request) **and**
 /// `CompactionUsageRecorded` — the summarizer's calls are real money (ADR 0018), and
-/// the projection counts them live through `AgentEvent::CompactionUsage` (revision 7), so a
+/// the projection counts them live through `AgentEvent::CompactionUsage` (), so a
 /// resume must not disagree with the run that produced the file.
 ///
 /// **A record that carries its fee is added as it stands** (ADR 0027):

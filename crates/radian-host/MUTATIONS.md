@@ -567,7 +567,7 @@ Base `1d4f6e9` · 一次性 worktree `/tmp/radian-cf-mut`，还原后 `git statu
 
 5/5 抓住。
 
-## 系统提示词分层与三份角色（ADR 0036/2，切片 ②）
+## 系统提示词分层与三份角色（ADR 0036，切片 ②）
 
 Base `658b882` · 一次性 worktree `/tmp/radian-pl-mut`（detached，跑完删除）。
 
@@ -1343,7 +1343,7 @@ the_workspace_system_prompt_unix_socket_sentence_follows_the_backend` (after
 `open.rs`, so the end-to-end workspace-session test is the one that reds this wiring mutation;
 on macOS the same test asserts the sentence stays (seatbelt still restricts).
 
-## ADR 0021 D5/D7 revision: the model loses its write tools; `memory_search` mounts past the budget (2026-10-20)
+## ADR 0021 D5/D7: the model loses its write tools; `memory_search` mounts past the budget (2026-10-20)
 
 Worktree `.radian-worktrees/memory-tools`, branch `pi/memory-tools`. Mutations applied in
 place, each restored from a `cp` in `/tmp/memtools-mut/` and confirmed byte-identical with

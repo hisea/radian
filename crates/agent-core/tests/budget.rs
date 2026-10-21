@@ -494,7 +494,7 @@ async fn a_prefix_outside_the_transcript_leaves_the_estimate_alone() {
     assert_eq!(report.baseline_input_tokens, None);
 }
 
-/// ADR 0015 revision: the estimator counts only what a provider receives,
+/// ADR 0015: the estimator counts only what a provider receives,
 /// so a message's host-only `meta` (ADR 0005) does not change the estimate. Before this, a
 /// host that put a large `origin` on a message — ADR 0018's verbatim user messages
 /// do — inflated the request estimate for content the provider never sees.

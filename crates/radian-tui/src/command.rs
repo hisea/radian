@@ -149,7 +149,7 @@ pub enum Outcome {
     /// same workspace, then the loop runs again. No host work happens here (unlike
     /// `/fork`), so there is no `SessionOutcome`: setting the flag IS the execution.
     New,
-    /// `/theme <name>` (ADR 0008 revision): switch the theme now and write `tui.theme` back
+    /// `/theme <name>` (ADR 0008): switch the theme now and write `tui.theme` back
     /// to the config file. The loop loads the theme (I/O) and does the write-back.
     Theme(String),
     /// `/model <provider>/<model>` (ADR 0026 D5): the loop resolves the credential and the
@@ -1178,7 +1178,7 @@ fn jobs_request(args: &[String]) -> Outcome {
     }
 }
 
-/// `/theme <dark|light|mono|name>`: exactly one name (ADR 0008 revision). Anything else is
+/// `/theme <dark|light|mono|name>`: exactly one name (ADR 0008). Anything else is
 /// a usage notice.
 fn theme_name(args: &[String]) -> Outcome {
     match (args.first(), args.get(1)) {

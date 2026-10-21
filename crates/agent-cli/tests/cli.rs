@@ -4014,7 +4014,7 @@ async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
 }
 
 /// 3: a context window that cannot hold the output reservation is a startup error, before the
-/// session file or any request (ADR 0018). With revision 4's adaptive `R` it needs the
+/// session file or any request (ADR 0018). With adaptive `R` it needs the
 /// request's own output to reach `C`: Anthropic sends `max_tokens = 16384` by default, so an
 /// 8192-token window cannot hold the reservation.
 #[tokio::test]

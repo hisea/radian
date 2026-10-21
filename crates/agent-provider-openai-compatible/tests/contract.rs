@@ -384,7 +384,7 @@ async fn contract_12_attachment_parts_are_joined_by_blank_lines() {
     assert_eq!(content, "look at @notes.txt\n\nalpha\nbeta");
 }
 
-/// ADR 0018, decision 1: the request's `settings` win over the adapter config, so
+/// ADR 0018: the request's `settings` win over the adapter config, so
 /// the summary call can run at its own (lower) reasoning level. The adapter passes through the
 /// value it is given verbatim and invents nothing.
 #[tokio::test]

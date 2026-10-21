@@ -84,7 +84,7 @@ fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'s
         EntryKind::Assistant => Style::default(),
         EntryKind::Reasoning => theme.reasoning,
         // The tool block's own markers (`│ ` and the head's fold marker) are `frame` (ADR 0035
-        // revision 6 decision 2).
+        // ).
         EntryKind::ToolCall | EntryKind::ToolResult => theme.frame,
         EntryKind::Notice => theme.notice,
         // The `/context` grid entry (spec `tui-context-grid`): the transcript's
@@ -350,7 +350,7 @@ fn role_style(role: crate::tools::LineRole, style: Style, theme: &Theme) -> Styl
 /// head's [`blocks::HeadMarker`] (ADR 0035's 2026-10-16 "折叠标记统一" note, option A).
 ///
 /// A **running** call's status is the live spinner frame in place of the placeholder the
-/// layout carries (ADR 0027/13), drawn with the pulse's own colour.
+/// layout carries (ADR 0027), drawn with the pulse's own colour.
 #[allow(clippy::too_many_arguments)]
 fn render_head_row(
     row: &BodyLine,
@@ -806,7 +806,7 @@ fn md_style(style: blocks::MdStyle, body_style: Style, theme: &Theme) -> Style {
         blocks::MdStyle::HeadingMinor => theme.text.add_modifier(Modifier::BOLD),
         blocks::MdStyle::Strikethrough => theme.text.add_modifier(Modifier::CROSSED_OUT),
         blocks::MdStyle::TaskUnchecked | blocks::MdStyle::TaskChecked => theme.md_list_bullet,
-        // ADR 0035/7: bold is the text role plus bold (it never takes
+        // ADR 0035: bold is the text role plus bold (it never takes
         // the heading role's colour); a code block's frame line, its rail and the `ask_user`
         // record's open frame are the structural `frame` role (ADR 0029).
         blocks::MdStyle::Bold => theme.text.add_modifier(Modifier::BOLD),

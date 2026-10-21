@@ -256,7 +256,7 @@ impl LoopContext<'_> {
                 }
                 Ok(())
             }
-            // ADR 0008 revision: `/theme` loads the theme and writes `tui.theme` back. Both
+            // ADR 0008: `/theme` loads the theme and writes `tui.theme` back. Both
             // are I/O, so they run here and the result comes back as `Input::ThemeReady`.
             Effect::Theme { name } => {
                 let outcome = radian_tui::theme::switch(

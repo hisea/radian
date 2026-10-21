@@ -209,7 +209,7 @@ async fn offline_never_fetches() {
     assert_eq!(server.requests().len(), 0, "offline must not go out");
 
     // Offline with no cache uses the bundled snapshot, still without a request (ADR 0026
-    // revision 2 decision 3).
+    // ).
     let empty = scratch("offline-nocache");
     let mut q = query(&empty, &server, "deepseek-v4.1-flash");
     q.offline = true;

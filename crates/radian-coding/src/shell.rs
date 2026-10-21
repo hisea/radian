@@ -933,7 +933,7 @@ impl Capped {
 
     /// Writes the retained bytes (head, marker if the middle was dropped, then tail) to `out`.
     /// Used to seed a job's output file when a foreground command is adopted (ADR 0037
-    /// revision 1). Returns the number of bytes written. The seed is the whole capture
+    /// ). Returns the number of bytes written. The seed is the whole capture
     /// (up to `9/8` of the budget), not one view: the job file keeps the full history and
     /// the ring bounds the increment, so extra pre-adoption bytes are never lost here.
     fn write_to(&self, out: &mut impl Write) -> std::io::Result<u64> {
@@ -1721,7 +1721,7 @@ struct RetainedView {
 }
 
 /// The result of a foreground call that was adopted by the job registry in place (ADR 0037
-/// revision 1): the job id, the `job` hint, and a bounded tail of the output produced
+/// ): the job id, the `job` hint, and a bounded tail of the output produced
 /// before adoption. The command is **not** restarted, and its output file already holds that
 /// pre-adoption output.
 #[allow(clippy::too_many_arguments)]

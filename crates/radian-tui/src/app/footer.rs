@@ -51,7 +51,7 @@ impl App {
         self.now = now;
     }
 
-    /// The spinner's current frame (ADR 0027/13): a function of the injected clock,
+    /// The spinner's current frame (ADR 0027): a function of the injected clock,
     /// so a test advances it with `set_now`. Whether the pulse interpolates comes from the theme
     /// (and the glyph set); a frame is a pure function of its inputs, which is what makes
     /// "redraw only when it changed" a comparison of frames.
@@ -67,7 +67,7 @@ impl App {
         )
     }
 
-    /// How long the spinner's current frame stays (ADR 0027/13): the breath's step
+    /// How long the spinner's current frame stays (ADR 0027): the breath's step
     /// while the pulse interpolates, its 500 ms two-colour switch when it cannot, and the
     /// rotating kinds' 250 ms. The loop wakes at this interval while a spinner is visible.
     pub fn spinner_interval(&self) -> Duration {
@@ -79,7 +79,7 @@ impl App {
     }
 
     /// The style for a spinner frame: the pulse breathes between the accent and the dim level
-    /// when both ends are RGB (ADR 0027); otherwise it is revision 10's two-colour
+    /// when both ends are RGB (ADR 0027); otherwise it is two-colour
     /// switch, and the rotating frames stay on the accent.
     pub fn spinner_style(&self, frame: crate::spinner::Frame) -> ratatui::style::Style {
         // One definition, shared with the transcript's running tool head (`crate::render`).
@@ -179,8 +179,8 @@ impl App {
         }
     }
 
-    /// Publishes the current footer facts for the background `command` items (ADR 0027 revision
-    /// 14 decision 4). A pure state read plus one lock write; the command reads the latest
+    /// Publishes the current footer facts for the background `command` items (ADR 0027).
+    /// A pure state read plus one lock write; the command reads the latest
     /// snapshot when it runs, so the UI never waits for it.
     pub fn publish_footer_context(&self) {
         self.footer_context.set(self.footer_snapshot());
@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(app.spinner_status(), Some("Working"));
     }
 
-    /// ADR 0018, decision 3: a deterministic compaction shows "compacted without a
+    /// ADR 0018: a deterministic compaction shows "compacted without a
     /// summary (N dropped)", and the summary entry's folded line says "without a summary".
     #[test]
     fn a_deterministic_compaction_is_shown_without_a_summary() {

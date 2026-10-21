@@ -1,4 +1,4 @@
-//! The system prompt's layers (ADR 0036 and 2).
+//! The system prompt's layers (ADR 0036).
 //!
 //! The order is fixed: 0a `<runtime>` (static facts, never overridable), 1 `<role>` (the
 //! selected role prompt; `--system` replaces this layer only), 2 `<project_instructions>` (the
@@ -276,7 +276,7 @@ pub type SessionKeySource = Arc<dyn Fn() -> SessionKey + Send + Sync>;
 ///
 /// The section is computed when the hook is built and then reused **byte for byte**, except
 /// when the session's model route or thinking level changed — `/model` and `/thinking`
-/// (ADR 0036). Before revision 3 the model id in the section was the one
+/// (ADR 0036). The model id in the section was the one
 /// the process started with, so `/model` left the section naming the old model.
 pub struct SessionFactsHooks {
     /// The workspace the facts are read from (cwd, git state).

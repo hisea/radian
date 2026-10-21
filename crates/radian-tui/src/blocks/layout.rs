@@ -36,7 +36,7 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     // no blank edge counts without it (resume-perf2, `md_line_count`).
     if has_blank_edge(&text) {
         // Keep the caller's glyph tier: the `bar` input's padding rows follow it (ADR 0035
-        // revision 3), so the count must use the same one the draw does. Only the costly color
+        // ), so the count must use the same one the draw does. Only the costly color
         // pass is skipped.
         let plain = DisplayModes {
             highlight: false,
@@ -338,7 +338,7 @@ fn layout_unstripped(
             reasoning_body_lines(entry, blocks, modes, width, &text, spinner)
         }
         (EntryKind::User, _) => {
-            // The thin user row (ADR 0035/3): `❯ 文本`, no background,
+            // The thin user row (ADR 0035): `❯ 文本`, no background,
             // no half-cell padding and no rail. Just the wrapped text; the marker column is
             // drawn, not part of the body.
             prose_lines(&text, body_width)
@@ -1037,7 +1037,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_user_block_has_no_padding_rows_at_any_glyph_tier() {
-        // ADR 0035/3: the user row is `❯ 文本` with no background and
+        // ADR 0035: the user row is `❯ 文本` with no background and
         // no half-cell padding — the block is just the text under every tier.
         let entry = Entry::new(EntryKind::User, "hello");
         for glyphs in [
@@ -1064,7 +1064,7 @@ pub(crate) mod tests {
         );
         assert_eq!(line_count(&entry, modes_with(ReasoningMode::Hidden), 40), 0);
         // Expanded, the channel is the header plus the three Markdown lines (ADR 0028
-        // revision 5 decision 4).
+        // ).
         assert_eq!(line_count(&entry, EXPANDED, 40), 4);
         // The collapsed placeholder carries the spinner while streaming, not the line count.
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);

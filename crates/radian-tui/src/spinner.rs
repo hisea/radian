@@ -1,4 +1,4 @@
-//! The spinner (ADR 0027/9/10/13): one definition for every running indicator.
+//! The spinner (ADR 0027): one definition for every running indicator.
 //!
 //! The frame is a function of **time**, not of the text length (the old
 //! `SPINNER[text.len() % 4]` turned once per token). `pulse` is the default: a `⏺` that keeps
@@ -320,7 +320,7 @@ mod tests {
     }
 
     /// ADR 0027: a pulse that cannot interpolate — either end of the
-    /// breath is not RGB, or the glyph set is `ascii` — keeps revision 10's two-colour switch,
+    /// breath is not RGB, or the glyph set is `ascii` — keeps 's two-colour switch,
     /// and its interval is the switch's 500 ms.
     #[test]
     fn a_pulse_that_cannot_interpolate_keeps_the_two_colour_switch() {

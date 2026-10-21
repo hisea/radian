@@ -1,4 +1,4 @@
-//! The structured-question form (ADR 0024 Q7 and revision 1): the state of one `ask_user`
+//! The structured-question form (ADR 0024 Q7): the state of one `ask_user`
 //! request, as a [`Modal`](crate::app::Modal) over the transcript.
 //!
 //! Pure, like [`App`](crate::app::App): it turns keys into state changes and, at the end, one
@@ -16,7 +16,7 @@ use crate::composer::Composer;
 use crate::keys::Action;
 use crate::panel::Hint;
 
-/// The tab label's display width cap (ADR 0024 R4, revision 2: no scrolling).
+/// The tab label's display width cap (ADR 0024 R4: no scrolling).
 pub const MAX_TAB_WIDTH: usize = 16;
 
 /// One question's in-progress answer.
@@ -230,7 +230,7 @@ impl QuestionForm {
     }
 
     /// The tab labels: each question's `header` truncated to [`MAX_TAB_WIDTH`], a completion
-    /// mark on an answered one, then `Submit` (ADR 0024 R2, revision 2: no
+    /// mark on an answered one, then `Submit` (ADR 0024 R2: no
     /// scrolling — each label is capped and the row is clipped).
     pub fn tab_labels(&self) -> Vec<(String, bool)> {
         let mut tabs: Vec<(String, bool)> = self

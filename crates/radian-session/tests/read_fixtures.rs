@@ -358,7 +358,7 @@ fn the_compaction_fixtures_agree_with_the_reference_checker() {
     assert_eq!(candidate.history().unwrap(), vec![Message::user("old")]);
     assert!(candidate.uncommitted_replacements().is_empty());
 
-    // ADR 0018, decision 3: the deterministic flag round-trips, and the record has
+    // ADR 0018: the deterministic flag round-trips, and the record has
     // no matching `CompactionUsageRecorded` (the deterministic path makes no model call).
     let deterministic = Session::open(fixture("compaction-deterministic.jsonl")).unwrap();
     assert_eq!(deterministic.last_committed_revision(), 1);

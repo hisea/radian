@@ -107,7 +107,7 @@ impl Glyphs {
     }
 
     /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
-    /// The unicode set is covered by all six checked fonts (ADR 0027 and 6): omp's
+    /// The unicode set is covered by all six checked fonts (ADR 0027): omp's
     /// `⟳`/`✔`/`✘` are not, so `~`/`✓`/`×` stand in. The Nerd set uses the Font Awesome
     /// codepoints; the ASCII set is plain. The emoji set draws the hourglass and the ballot
     /// boxes from the system emoji font (ADR 0027).
@@ -397,14 +397,14 @@ impl Footer {
 mod tests {
     use super::*;
 
-    /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027 and 6, plus
+    /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027, plus
     /// ADR 0035's band half cells and the glyph note; `×` for a
     /// failed tool head, `•` for a one-line tool head). Each one is checked against the six
     /// fonts by `scripts/check-glyph-coverage.py` and listed in the README's coverage table. A
     /// new glyph makes this test fail until it is re-checked and added here.
     const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓•╭╰…▄▀·";
 
-    /// The documented exceptions to the coverage rule (ADR 0027/10 and ADR 0035's
+    /// The documented exceptions to the coverage rule (ADR 0027 and ADR 0035's
     /// 2026-10-16 notes): the arc and the pulse were picked after review, braille is
     /// an opt-in, and the fold marker pair `◼`/`◻` is the same kind of choice (four of the six
     /// reference fonts lack them; they were chosen after review), so these may fall
@@ -437,7 +437,7 @@ mod tests {
     }
 
     /// The brand mark is per glyph set (ADR 0027, plus the emoji set from
-    /// revision 14 decision 7): Nerd Font, unicode `R`, ascii `rad`, emoji bolt; `㎭`
+    /// ): Nerd Font, unicode `R`, ascii `rad`, emoji bolt; `㎭`
     /// is gone.
     #[test]
     fn the_brand_mark_is_per_glyph_set() {
@@ -726,7 +726,7 @@ mod tests {
     /// ADR 0027: the registry's default role must match the `631c8dd`
     /// `default_role` table. The `nerd` glyph set with no `tui.brand` is exactly the case the old
     /// plain values were reached in (`brand` is the one conditional: `text` here, the accent role
-    /// under `unicode` or a configured brand, ADR 0027/8).
+    /// under `unicode` or a configured brand, ADR 0027).
     #[test]
     fn the_registry_matches_the_pre_refactor_role_table() {
         let app = app_with_glyphs("nerd");

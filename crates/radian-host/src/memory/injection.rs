@@ -1,4 +1,4 @@
-//! Deterministic memory injection (ADR 0021 D6, revision 2) as an `agent_core::Hooks`
+//! Deterministic memory injection (ADR 0021 D6) as an `agent_core::Hooks`
 //! implementation plus the per-turn addition seam.
 //!
 //! Before every model call, [`MemoryHooks`] appends the **fixed** memory block to the **system
@@ -46,7 +46,7 @@ pub const TRUSTED_TITLE: &str = "\n### Memory: user or confirmed\n";
 /// The agent-unverified segment heading (ADR 0021 D6: the two segments are labelled apart).
 pub const UNVERIFIED_TITLE: &str = "\n### Memory: unverified, written by the agent\n";
 
-/// The ADR 0021 D6 injection budget, with revision 2 decision 5's two addition keys. The
+/// The ADR 0021 D6 injection budget, with two addition keys. The
 /// configuration file is not wired for memory injection yet, so this is a constant structure
 /// with the documented defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,7 +516,7 @@ fn addition_body(text: &str) -> String {
 }
 
 /// The injection hook: it appends the **fixed** block to the system prompt and records the
-/// injected set (ADR 0021 and 3).
+/// injected set (ADR 0021).
 pub struct MemoryHooks {
     injection: Arc<MemoryInjection>,
 }

@@ -18,7 +18,7 @@ fn key(code: KeyCode) -> KeyEvent {
 #[test]
 fn the_completion_tree_offers_providers_then_models() {
     // `/model ` offers the flat list of every logged-in provider's models (ADR 0035
-    // revision 2); the candidates need the host, so the level is `Needs`.
+    // ); the candidates need the host, so the level is `Needs`.
     let level = command::complete_in(command::tree(), "/model ", 7).expect("a completion");
     assert!(
         matches!(

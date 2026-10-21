@@ -1378,8 +1378,8 @@ fn md_table(
             }
             out.push(BodyLine::md(vec![None; indent + 1], base, pieces));
         }
-        // The header separator and, after every row but the last, another (ADR 0035 revision
-        // 1: every two rows are separated).
+        // The header separator and, after every row but the last, another (ADR 0035:
+        // every two rows are separated).
         if row_index < last_row {
             out.push(border_line(border(left, mid, right)));
         }

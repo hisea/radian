@@ -287,7 +287,7 @@ pub fn agent_session_line(
     }))
 }
 
-/// The display-only metadata radian reports (ADR 0034 and 2). Every field
+/// The display-only metadata radian reports (ADR 0034). Every field
 /// is optional: only what changed is queued, so an empty `Metadata` is never sent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Metadata {

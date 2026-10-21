@@ -398,7 +398,7 @@ pub async fn open_session(
             Arc::clone(&hooks),
         ));
     }
-    // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> carries
+    // ADR 0036: the system prompt is assembled from layers. 0a <runtime> carries
     // the tier/sandbox facts; 1 <role> is the role
     // prompt (or `--system`); 2 is the context files; 3 is appended by the skills/memory/goal
     // hooks; 0b <session> is appended last by its own hook, so the static prefix stays cacheable.

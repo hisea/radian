@@ -205,7 +205,7 @@ async fn a_non_overflow_model_error_does_not_compact() {
 
 /// 4. Window known and the estimate low: the reference is `min(T_before, B)`. The model summary
 ///    cannot reach `B/2`, so the deterministic fallback drops units until it does — proving the
-///    target is half of `B`, not half of the larger `T_before` (ADR 0018, decision 3).
+///    target is half of `B`, not half of the larger `T_before` (ADR 0018).
 #[tokio::test]
 async fn a_known_window_uses_min_of_projection_and_budget() {
     // `T_before` (~110000 tokens) is well over `B = 30000`; the deterministic fallback must
@@ -258,7 +258,7 @@ async fn a_known_window_uses_min_of_projection_and_budget() {
 }
 
 /// 5. Even the newest unit plus the deterministic summary does not reach the target: `NothingFits`,
-///    with nothing committed (ADR 0018, decision 3).
+///    with nothing committed (ADR 0018).
 #[tokio::test]
 async fn a_fallback_that_cannot_reach_the_target_is_nothing_fits() {
     let model = ScriptedModel::new([
@@ -632,7 +632,7 @@ async fn compact_now_scales_the_summary_ceiling_with_the_window() {
     assert!(prompt.contains("8192 tokens"), "{prompt}");
 }
 
-/// ADR 0018 + revision 8 decision 3: the verbatim user messages are part of `T_after`,
+/// ADR 0018: the verbatim user messages are part of `T_after`,
 /// so the deterministic fallback's target counts them. Here the two verbatim copies alone
 /// (~1024 tokens) exceed half of `B = 2000`, so even the newest unit cannot fit and the turn
 /// fails explicitly instead of sending a request that is still over the window.

@@ -125,7 +125,7 @@ pub enum EventData {
         tokens_after: u64,
         below_target: bool,
         model: String,
-        /// ADR 0018, decision 3: `true` for the deterministic fallback; absent in a
+        /// ADR 0018: `true` for the deterministic fallback; absent in a
         /// model summary's record (and in an old record) and read back as `false`.
         deterministic: bool,
     },
@@ -138,7 +138,7 @@ pub enum EventData {
         lane: InboxLane,
         source: InputSource,
         /// Whether the input may open a turn by itself when the driver is idle (ADR 0011
-        /// revision 1). Absent in an old file; the reader derives it from the lane
+        /// ). Absent in an old file; the reader derives it from the lane
         /// (`next_turn` true, `next_step` false), which is today's behaviour.
         wake: bool,
         /// Whether the input is a wake-gate degrade (ADR 0006 §5.5). Absent in an old
@@ -1261,7 +1261,7 @@ struct ContextCompactedData {
     tokens_after: u64,
     below_target: bool,
     model: String,
-    /// ADR 0018, decision 3: optional on disk; absent is `false`.
+    /// ADR 0018: optional on disk; absent is `false`.
     #[serde(default)]
     deterministic: bool,
 }

@@ -95,7 +95,7 @@ fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::s
 }
 
 /// A closed flowchart on a wide screen draws box drawing and shows its frame (ADR 0035
-/// revision 6 decision 7: the block's top line is titled with the language).
+/// : the block's top line is titled with the language).
 #[test]
 fn a_closed_flowchart_is_drawn_and_the_frame_is_shown() {
     let mut app = App::new("m", "s");

@@ -308,7 +308,7 @@ async fn escaping_pids(root: &Path) -> (i32, i32) {
 }
 
 /// Tools whose foreground calls are adopted once they run past `threshold` (ADR 0037
-/// revision 1). An adopted job's explicit `timeout_secs` is the only deadline left after
+/// ). An adopted job's explicit `timeout_secs` is the only deadline left after
 /// revision 2, so this is how the timeout stop path is reached.
 fn adopting_tools(ws: &Path, threshold: Duration) -> CodingTools {
     transparent_tools(ws).with_limits(Limits {

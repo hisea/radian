@@ -1440,7 +1440,7 @@ fn the_brand_config_replaces_the_glyph_default() {
     );
 }
 
-/// Without `tui.brand`, `App::brand_mark` is the glyph set's default (ADR 0027/8).
+/// Without `tui.brand`, `App::brand_mark` is the glyph set's default (ADR 0027).
 #[test]
 fn the_brand_default_follows_the_glyph_set() {
     for (set, expected) in [("unicode", "R"), ("nerd", "\u{f0c20}"), ("ascii", "rad")] {
@@ -1702,7 +1702,7 @@ fn the_context_fill_is_off_by_default() {
 }
 
 /// With no known budget the gap stays spaces: never a fabricated percentage (ADR 0027
-/// revision 6 item 4).
+/// item 4).
 #[test]
 fn the_context_fill_without_a_budget_is_spaces() {
     let mut app = App::new("mock", "s");

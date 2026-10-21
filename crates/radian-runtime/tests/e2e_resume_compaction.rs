@@ -3,7 +3,7 @@
 //! The other tests each cover one link: `compact_control.rs` the compaction commit,
 //! `budget.rs` resume, the adapters' `http.rs` the request body. This one chains them with
 //! the **real adapter** and looks at the last HTTP request after a resume, which is where
-//! ADR 0018 (revision 6: the user's words survive verbatim, the read-back uses `origin`),
+//! ADR 0018 (the user's words survive verbatim, the read-back uses `origin`),
 //! ADR 0019 (the replacement commit) and ADR 0005 (host meta invisible to adapters) have to
 //! hold together. Both adapters run the same scenario.
 //!

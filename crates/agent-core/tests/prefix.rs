@@ -17,7 +17,7 @@ async fn session_with(
     journal: Arc<dyn TranscriptJournal>,
 ) -> AgentSession<Arc<ScriptedModel>, NoTools, ()> {
     // These tests pin the interrupted-prefix behaviour of one attempt; retrying (ADR 0017
-    // revision 1) would turn "one failure" into several, so it is off here.
+    // ) would turn "one failure" into several, so it is off here.
     Arc::new(Agent::new(model, NoTools).with_config(AgentConfig {
         retries: 0,
         ..Default::default()

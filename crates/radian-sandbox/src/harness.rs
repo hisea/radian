@@ -912,7 +912,7 @@ impl Rig {
                 q(&radian.join("credentials/auth.json"))
             ),
         );
-        // ADR 0031 T2 / ADR 0020 revision: `trust/` is denied like sessions, memory and
+        // ADR 0031 T2 / ADR 0020: `trust/` is denied like sessions, memory and
         // credentials; the control (FullAccess) reads it, so the denial is the sandbox.
         self.sh_case(
             sandbox,
@@ -922,7 +922,7 @@ impl Rig {
             Expect::MustFail,
             &format!("cat {} > /dev/null", q(&radian.join("trust/trust.json"))),
         );
-        // ADR 0025 ruling 1 / ADR 0020 revision: `skills/` joins config and cache on the
+        // ADR 0025 ruling 1 / ADR 0020: `skills/` joins config and cache on the
         // readable side; only sessions, memory, credentials and trust are denied.
         self.sh_case(
             sandbox,

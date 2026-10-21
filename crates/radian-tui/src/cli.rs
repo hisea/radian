@@ -1368,7 +1368,7 @@ fn resume_extra_args(cli: &Cli, workspace: &Path) -> Vec<String> {
 }
 
 /// Looks up a route's catalog prices from the warm local cache (ADR 0026 D7, ADR 0027
-/// revision 1). Offline by construction: a switch never fetches, and a miss means "no price".
+/// ). Offline by construction: a switch never fetches, and a miss means "no price".
 /// The host owns the type because the resume fold prices historical calls with the same rule.
 type RoutePrice = radian_host::cost::RoutePrice;
 

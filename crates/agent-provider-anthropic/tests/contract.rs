@@ -458,7 +458,7 @@ async fn contract_12b_an_empty_text_part_is_dropped_and_the_attachment_remains()
     assert_eq!(blocks[0], json!({"type": "text", "text": "alpha\nbeta"}));
 }
 
-/// ADR 0018, decision 1: the request's `settings` win over the adapter config, so
+/// ADR 0018: the request's `settings` win over the adapter config, so
 /// the summary call can run at its own (lower) reasoning level. The adapter passes through the
 /// object it is given verbatim and invents nothing.
 #[tokio::test]

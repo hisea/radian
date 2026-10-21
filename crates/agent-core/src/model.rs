@@ -72,7 +72,7 @@ pub struct RateLimits {
 /// differs between providers, so the adapter says which it is: see
 /// [`ModelUsage::input_includes_cache`] and use [`ModelUsage::prompt_total`] /
 /// [`ModelUsage::uncached_input`] instead of adding the fields up by hand (ADR 0007
-/// revision 1).
+/// ).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelUsage {
     /// The provider's own input count, **exactly as reported**.

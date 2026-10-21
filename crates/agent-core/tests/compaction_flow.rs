@@ -30,7 +30,7 @@ fn summary_reply(summary: &str, input: u64) -> Reply {
 }
 
 /// A summary answer that is empty and reports no usage, so a failed attempt leaves no
-/// `CompactionUsage` record (ADR 0018, decision 3's acceptance).
+/// `CompactionUsage` record (ADR 0018's acceptance).
 fn empty_reply() -> Reply {
     Reply::Respond(ModelResponse {
         limits: None,
@@ -197,7 +197,7 @@ async fn a_request_over_the_budget_is_compacted_and_committed() {
 
 // ---------- 5. summary request failure falls back deterministically ----------
 
-/// ADR 0018, decision 3: a summarizer transport failure no longer fails the turn on
+/// ADR 0018: a summarizer transport failure no longer fails the turn on
 /// an automatic path — the deterministic fallback commits with no further model call, and the
 /// failed attempt (which reported no usage) leaves no `CompactionUsage` record.
 #[tokio::test]
@@ -437,7 +437,7 @@ async fn a_cancelled_summary_does_not_commit() {
 
 // ---------- 6a. insufficient gain falls back deterministically ----------
 
-/// ADR 0018, decision 3: a model summary that does not reach `B` is not the end of
+/// ADR 0018: a model summary that does not reach `B` is not the end of
 /// the turn — the deterministic fallback drops the oldest units until the request fits `B`.
 #[tokio::test]
 async fn an_insufficient_model_summary_falls_back_deterministically() {
@@ -480,7 +480,7 @@ async fn an_insufficient_model_summary_falls_back_deterministically() {
 }
 
 /// A manual `/compact` gets **no** deterministic fallback: it reports the failed summarizer to
-/// its caller and commits nothing (ADR 0018, decision 3).
+/// its caller and commits nothing (ADR 0018).
 #[tokio::test]
 async fn a_manual_compact_reports_a_summary_failure_instead_of_falling_back() {
     let model = ScriptedModel::new([Reply::Fail("summarizer down".into())]);
@@ -520,7 +520,7 @@ async fn a_manual_compact_reports_a_summary_failure_instead_of_falling_back() {
 // ---------- 6c. nothing fits ----------
 
 /// Even the newest atomic unit plus the deterministic summary does not fit the budget: today's
-/// `NothingFits` failure, with nothing committed (ADR 0018, decision 3).
+/// `NothingFits` failure, with nothing committed (ADR 0018).
 #[tokio::test]
 async fn nothing_fits_still_fails() {
     let model = ScriptedModel::new([summary_reply("a short summary", 50)]);
@@ -640,7 +640,7 @@ async fn an_invalid_summary_is_retried_once() {
 /// Two invalid summaries fail the turn; nothing commits.
 ///
 /// The retry is a **second real call**, so both attempts report their usage (ADR 0018
-/// revision 3): the journal gets two records and the host gets two events, one per attempt.
+/// ): the journal gets two records and the host gets two events, one per attempt.
 #[tokio::test]
 async fn each_summarization_attempt_reports_its_usage_once() {
     let model = ScriptedModel::new([
@@ -737,7 +737,7 @@ async fn a_summarization_call_without_usage_reports_nothing() {
 
 /// Two empty summaries (no usage) fall back to the deterministic compaction: the turn
 /// continues, the candidate is deterministic, and no `CompactionUsage` is written (ADR 0018
-/// revision 8, decision 3's acceptance).
+/// 's acceptance).
 #[tokio::test]
 async fn two_invalid_summaries_fall_back_deterministically() {
     let model = ScriptedModel::new([empty_reply(), empty_reply(), text("done")]);
@@ -1119,7 +1119,7 @@ async fn an_overlong_summary_is_shortened_on_the_retry() {
     );
 }
 
-/// ADR 0018, decision 1: the host's `compaction_settings` reaches the summary
+/// ADR 0018: the host's `compaction_settings` reaches the summary
 /// request and the shorten retry, and is **never** added to the conversation request.
 #[tokio::test]
 async fn the_compaction_setting_reaches_the_summary_and_the_shorten_requests_only() {
@@ -1214,7 +1214,7 @@ async fn an_empty_summary_resends_the_original_request() {
 }
 
 /// Both model summaries are over the limit: the deterministic fallback commits instead of
-/// failing the turn, and both real attempts are still billed (ADR 0018, decision 3).
+/// failing the turn, and both real attempts are still billed (ADR 0018).
 #[tokio::test]
 async fn two_overlong_summaries_fall_back_deterministically() {
     let overlong = "L".repeat(9_000);
@@ -1462,7 +1462,7 @@ async fn the_plan_reserves_the_verbatim_space() {
     );
 }
 
-// ---------- ADR 0018, decision 3: deterministic details ----------
+// ---------- ADR 0018: deterministic details ----------
 
 /// The deterministic fallback truncates kept tool results to `TOOL_RESULT_LIMIT_CHARS` (the
 /// marker is inside the limit), leaves the newest unit in place, and names the counts it
@@ -1547,7 +1547,7 @@ async fn the_deterministic_fallback_truncates_tools_and_drops_the_oldest_first()
 
     // The summary names the counts and the first user words survive. Six transcript messages
     // left the view, but the two user ones (`task`, `m`) are carried verbatim, so `N` is four —
-    // not the three dropped beyond the plan's cut alone (ADR 0018, decision 3).
+    // not the three dropped beyond the plan's cut alone (ADR 0018).
     let summary = history[0].text();
     assert!(summary.contains("without a summary"), "{summary}");
     assert!(summary.contains("4 messages dropped"), "{summary}");
@@ -1563,7 +1563,7 @@ async fn the_deterministic_fallback_truncates_tools_and_drops_the_oldest_first()
     ));
 }
 
-/// ADR 0018, decision 3: the fixed line's `N` is the number of transcript messages
+/// ADR 0018: the fixed line's `N` is the number of transcript messages
 /// that are **not** in the new view, not the number dropped beyond the plan's cut. Here the
 /// first deterministic stage (drop = 0) already reaches the target, so the old formula reported
 /// `0`, although the plan's whole head (`x`, `call`, `result`) left the transcript. The one

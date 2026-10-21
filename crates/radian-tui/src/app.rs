@@ -236,7 +236,7 @@ pub enum Effect {
     /// Ring the terminal bell: one `\x07` on stdout (`tui.bell`). The loop runs it at most
     /// once per frame — bell-class events that share a frame merge into one ring.
     Bell,
-    /// `/theme <name>` (ADR 0008 revision): load the theme and write `tui.theme` back to the
+    /// `/theme <name>` (ADR 0008): load the theme and write `tui.theme` back to the
     /// config file. Both are I/O, so the loop runs them and answers with
     /// [`Input::ThemeReady`].
     Theme { name: String },

@@ -1,4 +1,4 @@
-//! The `tokens` component (ADR 0027; `{cache_write}` is revision 4).
+//! The `tokens` component (ADR 0027; `{cache_write}`).
 
 use crate::app::App;
 use crate::footer::{Glyphs, Item};

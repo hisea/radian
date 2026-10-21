@@ -122,8 +122,8 @@ pub struct EndpointUsage {
     pub build: fn(&UsageArgs) -> Box<dyn UsageFetcher>,
 }
 
-/// The `Endpoint` usage source a provider's descriptor declares, or `None` (ADR 0027 revision
-/// 14 decision 3). The TUI spawns a refresh only for a provider with one; a `Headers`
+/// The `Endpoint` usage source a provider's descriptor declares, or `None` (ADR 0027).
+/// The TUI spawns a refresh only for a provider with one; a `Headers`
 /// provider has no endpoint to poll.
 pub fn usage_endpoint(provider: &str) -> Option<&'static EndpointUsage> {
     match descriptor(provider)?.usage.as_ref()? {
@@ -134,7 +134,7 @@ pub fn usage_endpoint(provider: &str) -> Option<&'static EndpointUsage> {
 
 /// Whether a provider's descriptor declares a usage source: the `usage` footer component's and
 /// `/usage`'s gate. A provider without one draws no row, never a fabricated empty one (ADR 0027
-/// revision 14 decision 3).
+/// ).
 pub fn has_usage_source(provider: &str) -> bool {
     descriptor(provider).is_some_and(|entry| entry.usage.is_some())
 }
@@ -316,7 +316,7 @@ pub struct NamedProvider {
     pub protocol: Protocol,
     pub base_url: String,
     /// The `[providers.<name>]` override for the catalog's reasoning replay (ADR 0014
-    /// revision 1 Q2). `None` falls through to the catalog.
+    ///  Q2). `None` falls through to the catalog.
     pub reasoning_replay: Option<ReasoningReplayOverride>,
 }
 
@@ -422,7 +422,7 @@ impl ProviderRef {
             Self::Named(named) => Ok(named.protocol),
             // The generic descriptor names no built-in models: the user typed the id and the
             // endpoint, so the catalog's `npm` must not dictate its protocol (ADR 0026
-            // revision 2 decision 5's spirit — only a descriptor's own model list is gated).
+            // 's spirit — only a descriptor's own model list is gated).
             Self::BuiltIn(descriptor) if descriptor.id == GENERIC_ID => {
                 Ok(descriptor.protocol_for(model))
             }

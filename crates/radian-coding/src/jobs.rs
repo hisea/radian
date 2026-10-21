@@ -106,7 +106,7 @@ pub enum JobState {
     /// Stopping a job (or a session-end cleanup) stopped it.
     Killed,
     /// Its deadline elapsed (the adopted-job stop below). Only an adopted foreground call's
-    /// `timeout_secs` sets one now (ADR 0037; revision 2 for explicit
+    /// `timeout_secs` sets one now (ADR 0037; for explicit
     /// background jobs).
     TimedOut,
 }

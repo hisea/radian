@@ -1025,7 +1025,7 @@ mutation applied by a patch that asserts its anchor is present, then `cargo test
 
 4/4 caught; no misses. C3's assertion is the copy: `a_copy_of_a_card_has_no_border_characters`
 pins the clipboard directly.
-## footer-s3：opencode-go 用量、deck、逐字段配置（ADR 0027 C3/C4、修订 3，2026-10-16）
+## footer-s3：opencode-go 用量、deck、逐字段配置（ADR 0027 C3/C4，2026-10-16）
 
 Base `6cd0879` · 一次性 worktree `/tmp/radian-mut-f3`（`git worktree add --detach`，独立
 ## bang：输入框的 `!` 与 `!!`（ADR 0033，2026-10-16）
@@ -1110,7 +1110,7 @@ Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checko
 
 1/1 抓住。（早先 ESC-M1「Esc → `TrustHere`」见上一节。）
 
-## ask-ui：问答界面照 omp（ADR 0024/2，2026-10-16）
+## ask-ui：问答界面照 omp（ADR 0024，2026-10-16）
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -1258,7 +1258,7 @@ Base `52265c1` · 一次性 worktree `/tmp/radian-fc-mut`，还原后 `git statu
 | FC-M2 | `ForkDeadline` 超时也执行 fork（生成空子会话） | `pty_a_fork_gives_up_when_the_turn_is_still_being_written` | ✅ |
 
 2/2 抓住。
-## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027/9/10，2026-10-15）
+## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027，2026-10-15）
 
 Base `c0ae44c` · 一次性 worktree `/tmp/radian-sp-mut2`，还原后 `git status --short` 为空。
 
@@ -1307,7 +1307,7 @@ Base `d72d17c`（本片三个提交的最后一块）· 就地变异：改前 `c
   `std::process::exit(128 + signal)`）后 `pty::pty_a_hung_main_loop_still_exits_on_a_signal`
   FAILED（该用例的挂起机制本片改成了 `--slow-draw`，见下），还原后逐字节相同、
   测试重新通过。这证明改用 `--slow-draw` 没有削弱该用例对看门狗的检查。
-## panels-adopt：其余弹出层改用共享面板与列表（ADR 0035/2，2026-10-16）
+## panels-adopt：其余弹出层改用共享面板与列表（ADR 0035，2026-10-16）
 
 Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktree remove --force`）。
 每个变异用 `--no-fail-fast`，还原后 `git status --short` 为空。
@@ -1480,7 +1480,7 @@ Base `19dc0d7`（worktree `.radian-worktrees/pulse`，分支 `dogfood/pulse`）�
 + 空块两侧的行）；`thinking_has_one_blank_line_on_both_sides` 直接压条目来测 thinking 这条规则本身，
 并在注释里写明这一点。
 
-## thin ⓪：新角色与内建取值（ADR 0029/6，ADR 0028 的片 ⓪）
+## thin ⓪：新角色与内建取值（ADR 0029，ADR 0028 的片 ⓪）
 
 Base：本片 HEAD（`oc/thin-roles`）· 就地变异，每个变异后从 `.radian/scratch/theme.rs.new`
 还原并用 `cmp` 确认逐字节相同（`git status --short` 只留本片改动）。测试 `--no-fail-fast`。
@@ -1543,7 +1543,7 @@ Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个�
 两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
 的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。
 
-## markdown-③：标题不画 `#`、加粗不上色、代码块线框、表格表头与单元格行内样式（ADR 0035/6/7/8、ADR 0028；2026-10-16）
+## markdown-③：标题不画 `#`、加粗不上色、代码块线框、表格表头与单元格行内样式（ADR 0035、ADR 0028；2026-10-16）
 
 Base `origin/main` `28f4703`（worktree `.radian-worktrees/thin-md`，branch `oc/thin-md`）。每个变异就地改完
 `blocks.rs` / `render.rs` 后跑 `cargo test -p radian-tui --locked --no-fail-fast --lib <名字>`
@@ -1596,7 +1596,7 @@ Base `origin/main` `28f4703`（worktree `.radian-worktrees/thin-ask`）。每个
 
 4/4 抓住。面板的「标记不加粗」仍由既有的 `the_ask_panel_marker_is_never_bold` 钉住（ASK3-M1）；
 本片把 `AskGlyphs` 的单选/多选/Other 从 `☐`/`☑` 改成 `○`/`◉` 后，这条用例找的格子也从 `☑` 改成 `◉`。
-## thin ⑥：用户行、默认输入框、压缩线（ADR 0035/9、ADR 0028，2026-10-16）
+## thin ⑥：用户行、默认输入框、压缩线（ADR 0035、ADR 0028，2026-10-16）
 
 Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.radian/scratch/render.rs.orig` /
 `blocks.rs.orig` 还原并用 `cmp` 确认逐字节相同。`--no-fail-fast`。
@@ -1671,7 +1671,7 @@ Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异，脚本仍是 `.rad
 跑脚本核对：六款字体（本机都装了）对 `× • │ ╭ ╰ ▼ ▶ ✓` 全是 ✅，与既有结论一致。
 `◉`/`○`（问答标记）**没有**加进任何一个清单——已知它们缺字，接受此缺口，README 的「kept」一段记下了这一点。
 
-## Theme format：TOML 主题、一次性 pi 导入、过渡期（ADR 0029/3/4，2026-10-16）
+## Theme format：TOML 主题、一次性 pi 导入、过渡期（ADR 0029，2026-10-16）
 
 Base：本片 HEAD（`oc/theme-format`；决定 1 = `cff5d35`，决定 4 = `e9f29ef`，决定 3 = 本提交）·
 就地变异，每个变异前把 `file.rs`/`importer.rs`/`toml_file.rs` 复制到 `.radian/scratch/mut-bak/`，

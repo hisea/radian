@@ -18,7 +18,7 @@ pub use color::{
 };
 pub use file::load;
 
-/// The outcome of `/theme <name>` (ADR 0008 revision): the theme to apply (`None` when the
+/// The outcome of `/theme <name>` (ADR 0008): the theme to apply (`None` when the
 /// switch did not happen — an unknown name or `NO_COLOR`), and the notices to show.
 pub struct Switch {
     pub theme: Option<Theme>,
@@ -166,7 +166,7 @@ pub enum Role {
     Find,
     /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
     Auto,
-    /// The thin transcript's structural lines (ADR 0029 and 6): the
+    /// The thin transcript's structural lines (ADR 0029): the
     /// `│ `/`╭─`/`╰──` rules, the `• `/`●` markers, table rules and the compaction rule. The
     /// weak level, the same value as `dim`.
     Frame,
@@ -764,7 +764,7 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            // ADR 0029/6: `user` is a foreground role in the accent
+            // ADR 0029: `user` is a foreground role in the accent
             // colour — the `❯ ` marker and the user's words — with no band.
             user: spec(pi::VIOLET, Modifier::empty(), truecolor),
             // ADR 0035: reasoning is upright now (no italic).
@@ -859,7 +859,7 @@ impl Theme {
             diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
             diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
             diff_context: muted,
-            // ADR 0029/6: `diff_hunk` steps down to the weak level (the
+            // ADR 0029: `diff_hunk` steps down to the weak level (the
             // thin design draws `@@`/file headers with `frame`).
             diff_hunk: dim,
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
@@ -882,7 +882,7 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            // ADR 0029/6: `user` is a foreground role in the accent
+            // ADR 0029: `user` is a foreground role in the accent
             // colour — the `❯ ` marker and the user's words — with no band.
             user: spec(pi::VIOLET, Modifier::empty(), truecolor),
             // ADR 0035: reasoning is upright now (no italic).
@@ -977,7 +977,7 @@ impl Theme {
             diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
             diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
             diff_context: muted,
-            // ADR 0029/6: `diff_hunk` steps down to the weak level (the
+            // ADR 0029: `diff_hunk` steps down to the weak level (the
             // thin design draws `@@`/file headers with `frame`).
             diff_hunk: dim,
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
@@ -1461,7 +1461,7 @@ mod tests {
         }
     }
 
-    /// ADR 0029 and 6: one assertion per role whose built-in value
+    /// ADR 0029: one assertion per role whose built-in value
     /// changed, on both built-ins. `frame`/`diff_line_number`/`diff_hunk` are the dim level;
     /// `tool_name` is the keyword colour; the status markers reuse the turn/notice/error
     /// colours; `user` is a foreground role in the accent colour; `md_heading` is the accent

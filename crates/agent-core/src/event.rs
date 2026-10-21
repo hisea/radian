@@ -103,7 +103,7 @@ pub enum AgentEvent {
     /// compacted view fit the budget but missed the 75% target, so the rest of this turn will
     /// not compact again.
     ///
-    /// ADR 0018, decision 3: `deterministic` is `true` when the summary path failed
+    /// ADR 0018: `deterministic` is `true` when the summary path failed
     /// and this is the deterministic fallback (no model call, so no `CompactionUsage`), and
     /// `dropped` is then the number of transcript messages the fallback left out of the new
     /// view: the whole summarized prefix the plan removed, minus the previous summary message

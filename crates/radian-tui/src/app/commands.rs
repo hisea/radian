@@ -143,7 +143,7 @@ impl App {
                 UpdateResult::dirty()
             }
             command::Outcome::Theme(name) => {
-                // ADR 0008 revision: the loop loads the theme (I/O) and writes `tui.theme`
+                // ADR 0008: the loop loads the theme (I/O) and writes `tui.theme`
                 // back to the config file; the notice says which of those happened.
                 UpdateResult::effect(Effect::Theme { name })
             }

@@ -279,7 +279,7 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
     // the base is always inside the workspace.
     let requested: &str = &path;
 
-    // ADR 0039 decision 2 and revision 1: the base and every file are opened through the
+    // ADR 0039 decision 2: the base and every file are opened through the
     // root's directory fd; the walk hands back open fds, never paths to re-open. An absolute
     // or `~` base must be under a read-only root, and its results are rendered with that
     // root's prefix so they can be passed to `read` again.

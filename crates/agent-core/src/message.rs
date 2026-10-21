@@ -133,7 +133,7 @@ impl ContentPart {
 }
 
 /// The `annotations.kind` a host sets on a text part that is an attached file (ADR 0018
-/// revision 6). Core reads it when it keeps the user's words verbatim; it never writes it.
+/// ). Core reads it when it keeps the user's words verbatim; it never writes it.
 pub const ATTACHMENT_KIND: &str = "attachment";
 
 /// A tool call requested by the model, to be executed by the host.
@@ -188,7 +188,7 @@ impl ToolResult {
 
 impl Message {
     /// The host-owned metadata (ADR 0005). A provider never sees it, so the size estimator
-    /// (ADR 0015, revision 2026-10-13) excludes it from the request it measures.
+    /// (ADR 0015) excludes it from the request it measures.
     pub fn meta(&self) -> &MessageMeta {
         match self {
             Self::User { meta, .. } | Self::Assistant { meta, .. } | Self::Tool { meta, .. } => {

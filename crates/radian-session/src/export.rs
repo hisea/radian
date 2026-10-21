@@ -179,7 +179,7 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
                 deterministic,
                 ..
             } if committed_revisions.contains(revision) => {
-                // ADR 0018, decision 3: a deterministic compaction had no model
+                // ADR 0018: a deterministic compaction had no model
                 // summary, so the export says so instead of naming a summary size.
                 if *deterministic {
                     out.push_str(&format!(

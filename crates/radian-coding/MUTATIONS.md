@@ -390,7 +390,7 @@ only this slice's own changes at the end). Each mutation run with
 the brief's first rule is "tests fail on the current branch": with `from_env` disabled the
 read-root tests fail on the boundary refusal, not on a missing API.
 
-## orch-s6b（2026-10-16，ADR 0030 O8 / 修订 1 R4）：heavy 门的 host 接线
+## orch-s6b（2026-10-16，ADR 0030 O8 R4）：heavy 门的 host 接线
 
 Base 是 `oc/orch-s6b`。变异就地施加，源文件先复制到 `.radian/scratch/mut/`，改完跑一条命名的测试，
 再从副本还原并用 `diff -q` 确认字节一致（禁用 `git checkout --`）。每条

@@ -956,7 +956,7 @@ fn the_box_frame_falls_back_to_ascii() {
     );
 }
 
-/// ADR 0035 (replacing revision 3 decision 4 for the user row): no tier draws a
+/// ADR 0035: no tier draws a
 /// user half-cell pad. The `ascii` tier draws its own `> ` marker, and two user rows are
 /// separated by the container's one blank line like any two blocks.
 #[test]
@@ -979,7 +979,7 @@ fn the_ascii_tier_has_no_half_cell_pads() {
 
 // ---------- the thin user row (ADR 0035) ----------
 
-/// ADR 0035/3: the user row is `❯ 文本` in the `user` role, the text
+/// ADR 0035: the user row is `❯ 文本` in the `user` role, the text
 /// from column 3, with no background band, no half-cell padding and no rail. Two user rows sit
 /// on consecutive lines (no pad rows between them).
 #[test]
@@ -1116,7 +1116,7 @@ fn the_compaction_line_starts_at_column_one_in_the_frame_role() {
     );
 }
 
-/// ADR 0035 (replacing revision 3 decision 3): thinking has **one blank line on both
+/// ADR 0035: thinking has **one blank line on both
 /// sides** — folded or expanded, and whether the block below it is the reply or a tool card. The
 /// gap above it stays one line (the container's gap after the user row).
 #[test]
@@ -2672,8 +2672,7 @@ fn the_user_row_has_no_band_at_80_and_120() {
     }
 }
 
-/// A tool block has **no** band, whatever its state (ADR 0028, replacing
-/// revision 4's neutral card background): every cell of the head row and of the body rows sits
+/// A tool block has **no** band, whatever its state (ADR 0028): every cell of the head row and of the body rows sits
 /// on the terminal's own background.
 #[test]
 fn a_tool_block_never_paints_a_band() {

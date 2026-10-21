@@ -61,7 +61,7 @@ async fn run_inputs(
     let recorder = Arc::new(Recorder::default());
     let agent = Arc::new(
         Agent::new(model(server), NoTools).with_config(agent_core::AgentConfig {
-            // These tests pin the one-failure-per-turn behaviour (ADR 0017 §2); revision 1's
+            // These tests pin the one-failure-per-turn behaviour (ADR 0017 §2); its
             // retry is exercised in agent-core's retry tests.
             retries: 0,
             ..Default::default()

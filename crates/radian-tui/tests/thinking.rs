@@ -377,7 +377,7 @@ fn the_thinking_markers_follow_the_ascii_glyph_tier() {
 }
 
 /// A fenced code block in the thinking body draws the same open frame as a reply (ADR 0035
-/// revision 6 decision 7): the `╭─ <lang>` top line, the `│ ` rail on the code rows and the
+/// ): the `╭─ <lang>` top line, the `│ ` rail on the code rows and the
 /// `╰──` bottom line — and the counted lines equal the drawn ones at two widths.
 #[test]
 fn a_thinking_code_block_draws_the_open_frame_and_counts_the_drawn_lines() {

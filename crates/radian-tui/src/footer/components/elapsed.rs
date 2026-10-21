@@ -1,4 +1,4 @@
-//! The `elapsed` component (ADR 0027; the clock is injected, revision 1).
+//! The `elapsed` component (ADR 0027; the clock is injected).
 
 use crate::app::App;
 use crate::footer::Item;

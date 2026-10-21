@@ -278,7 +278,7 @@ pub(crate) fn status_marks(glyphs: crate::footer::Glyphs) -> (char, char) {
 }
 
 /// The placeholder a running head row carries where the renderer then draws the live frame
-/// (ADR 0027/13). Every spinner glyph is one cell, so the head's shape is stable.
+/// (ADR 0027). Every spinner glyph is one cell, so the head's shape is stable.
 fn running_glyph(glyphs: crate::footer::Glyphs) -> char {
     match glyphs {
         crate::footer::Glyphs::Ascii => '*',

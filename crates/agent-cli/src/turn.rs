@@ -338,8 +338,8 @@ async fn jobs_quiescent(run: &Run) -> bool {
         .job_notifier()
         .map(|notifier| notifier.settled_handled())
         .unwrap_or(0);
-    // A waking entry — or a stranded job notice with a pending wake (ADR 0011 revision
-    // 2) — means a turn is about to open, so `-p` must wait for it instead of exiting
+    // A waking entry — or a stranded job notice with a pending wake (ADR 0011)
+    // — means a turn is about to open, so `-p` must wait for it instead of exiting
     // while the notice is still queued.
     let wake_pending = run
         .inbox

@@ -46,7 +46,7 @@ fn preset_source(preset: Preset) -> &'static str {
 }
 
 /// The shipped TOML of a named preset, for `radian footer export <preset>` (ADR 0027
-/// revision 14 decision 2): the exact file bytes, so a user can paste them under
+/// ): the exact file bytes, so a user can paste them under
 /// `[tui.footer]` and get the same footer. `Err` names the four presets.
 pub fn export_preset(name: &str) -> Result<&'static str, String> {
     match Preset::parse(name) {

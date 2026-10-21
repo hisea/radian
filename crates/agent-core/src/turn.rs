@@ -444,7 +444,7 @@ pub(crate) enum CompactionStep {
     Cancelled(CancelReason),
 }
 
-/// The result of trying to get a model summary (ADR 0018, decision 3).
+/// The result of trying to get a model summary (ADR 0018).
 enum SummarizeOutcome {
     /// A usable model summary.
     Model(String),
@@ -479,12 +479,12 @@ struct CompactionRun<'a> {
     instructions: Option<String>,
     events: &'a dyn EventSink,
     /// The request-level settings the summary and shorten-retry calls carry (ADR 0018
-    /// revision 8), already converted for the route in force by the host.
+    /// ), already converted for the route in force by the host.
     settings: Value,
 }
 
 /// Plans a compaction that reserves the space the verbatim user messages will take (ADR 0018
-/// revision 6).
+/// ).
 ///
 /// The plan is computed, the retained list is computed for it, and the keep target is reduced
 /// by the list's size — twice at most, because the list is bounded by `U + U₁` and the second
@@ -634,7 +634,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let revision = self.transcript_revision + 1;
         let source_revision = self.transcript_revision;
         let source_len = self.transcript.len();
-        // ADR 0018, decision 3: only the automatic paths (proactive and overflow)
+        // ADR 0018: only the automatic paths (proactive and overflow)
         // fall back to the deterministic compaction when the summary fails. A manual `/compact`
         // reports the error and commits nothing.
         let deterministic_allowed = !matches!(trigger, CompactionTrigger::Manual);
@@ -684,7 +684,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         };
 
         // The model summary first. When it fails on an automatic path the caller falls through
-        // to the deterministic fallback below (ADR 0018, decision 3).
+        // to the deterministic fallback below (ADR 0018).
         let model_summary = match self
             .summarize(
                 interrupt,
@@ -759,7 +759,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             }
         }
 
-        // The deterministic fallback (ADR 0018, decision 3): no model call. From the
+        // The deterministic fallback (ADR 0018): no model call. From the
         // plan's kept suffix, cut every over-long tool result, then drop the oldest atomic unit
         // until the request reaches the target; the newest unit always stays.
         let units = match compaction::units(&transcript) {
@@ -796,7 +796,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                 dropped_user_messages,
                 summary_budget,
             );
-            // ADR 0018, decision 3: `N` is the number of transcript messages that are
+            // ADR 0018: `N` is the number of transcript messages that are
             // **not** in the new view, not just the ones dropped beyond the plan's cut. The whole
             // removed prefix counts, minus the previous summary message (replaced by the new
             // summary) and minus the user messages the verbatim list still carries.
@@ -865,9 +865,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
     ///
     /// On an automatic path (`deterministic_allowed`) a failure is returned as
     /// [`SummarizeOutcome::Fallback`] so the caller can run the deterministic fallback; a manual
-    /// `/compact` gets the error instead (ADR 0018, decision 3). The summary call's
+    /// `/compact` gets the error instead (ADR 0018). The summary call's
     /// real usage is recorded and emitted per attempt, whether or not the compaction commits
-    /// (ADR 0018 §计费, revision 3).
+    /// (ADR 0018 §计费).
     #[allow(clippy::too_many_arguments)]
     async fn summarize(
         &mut self,
@@ -902,7 +902,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             // immediately, and every attempt's usage is recorded below. The retries are
             // announced to nobody: `ModelRetrying` makes a host clear its live projection, which
             // is wrong mid-compaction, and a failed attempt has no usage to report (ADR 0017
-            // revision 1, decision 6).
+            // ).
             let noop = NoopSink;
             let response = match model_call_with_retries(
                 &self.agent.model,

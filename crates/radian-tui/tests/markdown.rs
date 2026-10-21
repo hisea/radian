@@ -755,7 +755,7 @@ fn a_long_ordered_list_item_wraps_in_a_wide_window() {
 
 /// A code block draws an open frame (ADR 0035): a top line titled with
 /// the language, a rail on the code row, and a bottom line, all in the `frame` role (ADR 0029
-/// revision 2).
+/// ).
 #[test]
 fn a_code_block_draws_a_frame() {
     let mut app = App::new("m", "s");

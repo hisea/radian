@@ -309,7 +309,7 @@ fn load_file(
         ));
         return Theme::dark();
     };
-    // ADR 0029/4: a Radian TOML theme is the format; a `.json` is the old
+    // ADR 0029: a Radian TOML theme is the format; a `.json` is the old
     // pi format, still read this version so a user's existing file keeps working, with the
     // import hint. The next version drops the `.json` path.
     let toml_path = dir.join(format!("{name}.toml"));

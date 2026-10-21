@@ -8459,8 +8459,8 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
 
 /// The same rule, for the runtime half of the startup diagnostics: a memory warning (a malformed
 /// context file, a bad skill, a failed memory read) is a line the user must see, so it becomes a
-/// transcript notice rather than stderr, which the fullscreen UI draws over — ADR 0021 revision
-/// 1's rule for the memory *notice*, applied to the warning. On the `--pick` path the startup
+/// transcript notice rather than stderr, which the fullscreen UI draws over — ADR 0021's
+/// rule for the memory *notice*, applied to the warning. On the `--pick` path the startup
 /// ones would otherwise land on the alternate screen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -12107,7 +12107,7 @@ async fn pty_ctrl_c_clears_a_draft_before_quitting() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-// ---------- /theme: switch and write back (ADR 0008 revision) ----------
+// ---------- /theme: switch and write back (ADR 0008) ----------
 
 /// `/theme light` end to end: the notice names the saved file, the config's other bytes
 /// survive, and only `tui.theme` changed.

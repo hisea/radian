@@ -15,7 +15,7 @@
 //! The fetch is deliberately allowed to fail: a missing or stale catalog falls back to the
 //! cached copy, then to the bundled snapshot, never to a guessed number. The `provider.api`
 //! field is deliberately **not** parsed: radian never trusts the catalog's base URL (ADR 0026
-//! revision 2 decision 2).
+//! ).
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -1218,7 +1218,7 @@ mod tests {
         assert!(output_ceiling_warning(Some(4_000), Some(32_000)).is_none());
     }
 
-    /// ADR 0015 (revision 2026-10-16): a zero window is **unset**, never an explicit window.
+    /// ADR 0015: a zero window is **unset**, never an explicit window.
     /// `WindowQuery::production` drops it, so the resolver never takes the explicit branch for a
     /// zero; the same zero never becomes a budget. The command line's zero is refused earlier,
     /// by [`check_context_window_flag`].

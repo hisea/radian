@@ -322,7 +322,7 @@ pub(super) fn run_loop_and_teardown(
     secrets: &radian_tui::terminal::SharedSecrets,
     has_model: bool,
 ) -> Result<SessionEnd, RunError> {
-    // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
+    // ADR 0008: `/theme` writes to the file this process read, or to the path it
     // would read when there is no file yet (the write creates it).
     let theme_write_path = config
         .source

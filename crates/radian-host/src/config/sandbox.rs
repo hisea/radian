@@ -23,7 +23,7 @@ pub struct SandboxConfig {
     /// named on the startup line.
     pub allow_unix_sockets: Vec<String>,
     /// Environment variable **names** passed through to a sandboxed command (ADR 0034
-    /// revision 1 decision 7). Names only: a value cannot be set here.
+    /// ). Names only: a value cannot be set here.
     pub allow_env: Vec<String>,
 }
 

@@ -92,8 +92,8 @@ pub(crate) trait Component: Sync {
     fn id(&self) -> &str;
     /// The `{placeholder}`s its `data` fills, for parse-time validation and its README row.
     fn placeholders(&self) -> &'static [&'static str];
-    /// The default icon in each glyph set, `[unicode, nerd, ascii, emoji]` (ADR 0027 revision
-    /// 14 decision 7 added the fourth). An empty string is "no icon".
+    /// The default icon in each glyph set, `[unicode, nerd, ascii, emoji]` (ADR 0027).
+    /// An empty string is "no icon".
     fn glyphs(&self) -> [&'static str; 4];
     /// The default theme role, after a threshold and a configured `style` (ADR 0027 C2).
     fn role(&self, _app: &App) -> Option<Role> {

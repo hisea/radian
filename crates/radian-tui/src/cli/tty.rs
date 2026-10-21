@@ -275,7 +275,7 @@ fn terminal_gone(error: &std::io::Error) -> bool {
 }
 
 /// Advances the spinner's clock and returns the new frame when a spinner is visible and the
-/// frame changed since `last` (ADR 0027/13). The idle tick calls this, so an idle
+/// frame changed since `last` (ADR 0027). The idle tick calls this, so an idle
 /// app still makes no frame and a visible spinner redraws on its interval — the breath's step
 /// (about 125 ms) while it interpolates, the two-colour switch or the rotating frames otherwise.
 pub(super) fn spinner_tick(
