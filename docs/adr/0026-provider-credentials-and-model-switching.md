@@ -1,0 +1,119 @@
+# ADR 0026: Provider Credentials and Model Switching
+
+Status: accepted
+
+## Decisions
+
+### D0 Provider descriptor
+
+- `ProviderDescriptor` (`radian-host`) holds: `id`, display name, default base URL, login method, per-model online protocol (mapped to `openai-compatible`, `anthropic`, or `openai-responses`) plus that model base URL, `request_headers(session_id)` hook, optional usage source (Endpoint or Headers), and descriptor window table. Adapters never change; the descriptor only chooses which adapter and fills what parameters.
+- Built-in descriptors register at compile time: `opencode-go` (auto-adds `x-opencode-session`), `anthropic`, `openai`, `chatgpt` (subscription OAuth), generic `openai-compatible`. No dynamic third-party plugin loading exists.
+- **Model list**: descriptor built-in list first, then `~/.radian/cache/providers/<id>.json`, then background revalidation with a key (default `GET <base>/models`; a descriptor can name its own model-list URL; `opencode-go` uses `https://opencode.ai/zen/go/v1/models` because its chat base has no `/models`). Background validation never blocks startup. TTL is 1 hour. Failure retries in 5 minutes. Cache stores only the key fingerprint, never the key. Window caps still come from the models.dev catalog (ADR 0018); both merge by model id.
+- **Interface method comes from models.dev `provider.npm`** (entry level first, provider level as fallback): `@ai-sdk/openai-compatible` means OpenAI chat, `@ai-sdk/anthropic` means Anthropic, `@ai-sdk/openai` means Responses. Other values explicitly reject ("radian does not support this model interface (<npm>)"). **Addresses never read from models.dev**: each built-in descriptor hardcodes its own addresses (opencode-go chat and Responses use `https://opencode.ai/inference/go/openai/v1`; Anthropic uses `…/inference/go/anthropic/v1`). Data changes never move hosts.
+- **One catalog snapshot ships with the program**: fetch order is fresh cache, then network, then stale cache, then built-in snapshot, then none. The snapshot keeps only radian-used providers and fields. It records the fetch date. A script regenerates it. Parse failure is a build error. Models missing from the snapshot fall back to the descriptor hardcoded table. When catalog and table conflict, the catalog wins, and the startup line says so once.
+- CLI `--provider` and `--model` stay. `--base-url` and `--header` only work for generic `openai-compatible`. `--api-key-env` is removed.
+
+### D1 Credential file
+
+- Location is `~/.radian/credentials/auth.json`, directory 0700, file 0600. No system keychain exists: credentials live in the directory (Linux bwrap can only hide existing paths).
+- **Format exactly matches pi `auth.json`**: flat object, provider id as key, entry types `api_key` or `oauth`. A generic `openai-compatible` base URL lives in the entry `env` under key `RADIAN_BASE_URL`. `RADIAN_KIND` defaults to `openai-compatible`. Pi ignores these two keys. Files radian writes stay pi-readable.
+- `key` supports literal values and `$ENV` or `${ENV}`. **`!command` is unsupported** (it would run arbitrary commands outside the sandbox). A key starting with `!` means that provider has no credentials, plus one notice.
+- **Unknown or unsupported entries stay as-is**: radian writes keep them and only add or change its own entry. Writes are atomic (temp file plus rename), 0600. Reading with permissions wider than 0600 refuses and prints one fix command.
+- `config import-pi` never imports pi `auth.json`. Users who want reuse copy the file themselves.
+
+### D2 Keys come only from `auth.json`
+
+- The runtime key **sole** source is `auth.json`. `--api-key-env`, configuration `model.api_key`, and per-provider default environment-variable fallback logic are removed.
+- Scenarios needing environment variables (CI, no key on disk) write `"key": "$MY_KEY"` in the `auth.json` entry.
+- `model.api_key` in configuration errors and points at `/login`. It never silently ignores.
+- `auth.json` is sandbox-unreadable (ADR 0020). Keys never enter journal, export, panic log, or startup line. All resolved keys enter the redaction list.
+
+### D3 `/login` varies by provider
+
+- The descriptor declares its supported login methods: API key (input never echoes; generic `openai-compatible` also asks name, base URL, and key, all into that `auth.json` entry); browser OAuth (PKCE plus loopback; remote or headless pastes the final redirect URL); device code (RFC 8628); environment credentials (Bedrock and Vertex) unsupported.
+- **It sends one minimal validation request before saving** (`GET <base>/models`; a descriptor can name its own validation request; `opencode-go` uses its usage endpoint `GET https://opencode.ai/zen/go/v1/usage` with the same `Authorization: Bearer` because its chat base has no `/models`). Failure shows the reason, and the user can still save. This is an explicit network item (ADR 0013).
+- It writes only `auth.json`, never configuration. `/logout <provider>` deletes that entry and keeps other entries as-is. `radian login` and `radian logout` follow the same steps.
+
+### D4 Sandbox
+
+`~/.radian/credentials/` joins the deny list, and the `workspace` tier denies it. The host creates this directory (0700) before building the sandbox. The escape matrix covers `credentials_unreadable`.
+
+### D5 `/model`
+
+- Selection list: all **logged-in** provider descriptor model lists, grouped by provider. A hand-typed model name is also allowed. The current-route provider still lists even with no usable credentials, so the `✓` row never misses (switch still refuses per D6). `/model <provider>/<model>` completes both levels. The current model marks `✓`. The description column shows the provider. Typing matches both model and provider names.
+- On switch one user line states: "next round uses <model>; the first round after switch misses cache".
+- After select it pushes into `ConfigQueue` only a route reference `{"model":{"provider":"…","model":"…"}}`, **with no key and no header values**. Per ADR 0004 it takes effect **before the next turn**. The in-progress turn stays unaffected. The status bar shows "next: <model>".
+- The host holds one switchable model and takes out (or builds and caches) the matching `HostModel` per request by current route. The driver only swaps the slot between turns.
+
+### D6 Cross-provider switch
+
+- The target provider needs usable credentials in `auth.json`, or switch refuses and points at `/login <provider>`.
+- Cross-provider switch is safe under current request construction: both adapters building assistant messages never read `reasoning` (unless the route requires replay). The OpenAI-compatible adapter never reads `provider_payload` and always writes `None`. The Anthropic adapter only replays `thinking` and `redacted_thinking`. Tool-call ids emit as-is; Anthropic only requires a match with `^[a-zA-Z0-9_-]+$`.
+- Each adapter request-construction test covers "last round came from another home". The contract harness never extends.
+
+### D7 Switched context budget
+
+- `TurnOptions.context_budget` overrides `AgentConfig.context_budget`. The driver applies `ConfigChanged` and recomputes `B` from the catalog by new model.
+- Before switch it first judges `T` (ADR 0015 estimate):
+  - `T ≤ B'`: queues the switch directly, with one line.
+  - `T > B'`: opens a confirm box "switch to <model> needs compact first: current ≈ T tokens, over new model budget B'. Compact then switch? [y] compact and switch [n] cancel". `y` first compacts **with the current model** (same path as `/compact`), targeting `B'`. On compact success it queues the switch. On compact failure or cancel it never switches. `n` never switches. This is a Modal; `y` and `n` never rebind.
+- With auto-compaction off the same applies: this is a user-initiated switch.
+
+### D8 Which model resume uses
+
+- Default is the journal last `ConfigChanged` model.
+- An explicit CLI `--model` or `--provider` differing from the record wins: the CLI writes one new `ConfigChanged` before the first turn.
+- The configuration-file default model has lowest priority.
+- A restored model with no credentials in `auth.json` errors and points at `/login <provider>`. It never silently swaps to another model.
+
+### D9 Auto (automatic approval)
+
+- **The name is `auto`** (automatic approval), not `yolo`. Behavior matches `--yes`: it only auto-answers `ask` as allow. `deny` rules still reject. The sandbox still applies. The tier never changes.
+- Four entries: configuration `[permissions] approval = "auto"`; `--yes` (`--approval auto` shorthand); approval-screen **`!`** (approves this once and auto-approves after; `Y` stays equal to `y`); commands `/auto on` and `/auto off` (`/yolo` is an alias).
+- On and off each write one `ApprovalPolicyChanged` (non-critical) plus one `ConfigChanged { change: {"approval": "auto" | "on-ask"} }`.
+- **`full` tier**: configuration `approval = "auto"` is ignored with a warning. `full` only enables auto in-session (`/auto on`, `/yolo`, or `!`). `--yes` under `full` counts as an explicit CLI choice and works as usual.
+- **Resume**: `workspace` restores the last state. Under the `full` tier **resume never restores auto**, and the startup line says "auto was on in the previous run; run `/auto on` to re-enable". An explicit CLI `--approval` or `--yes` wins and backfills `ConfigChanged`.
+
+### D10 Named providers
+
+```toml
+[providers.<name>]
+kind = "openai-compatible"      # only openai-compatible and anthropic allowed
+base_url = "…"
+reasoning_replay = "reasoning_content"   # optional, overrides catalog
+```
+
+- `<name>` never clashes with built-in descriptor ids and is never `openai-compatible`. Rules: letters, digits, `-`, `_`.
+- `auth.json` stores the key under `<name>`. Multiple custom endpoints each hold their own key. Key lookup uses the **named provider name**.
+- Selection: `--provider <name>`, configuration `model.provider = "<name>"`, `/model <name>/<model>`. The model list comes from its `/v1/models` background refresh, plus hand-typed names.
+- `/login` "custom" writes name, protocol, base URL, and key all into that `auth.json` entry. Hand-written configuration also works. With a same-name entry in both places, **configuration wins** with one warning.
+- Named and custom providers **never read the catalog `npm`**. They follow the user-declared `kind`. A custom provider never chooses Responses.
+
+### D11 Unified thinking levels
+
+- **Seven levels**: `off | minimal | low | medium | high | xhigh | max`. Entries: `--thinking <level>`, configuration `model.thinking`, runtime `/thinking <level>`. The footer `reasoning` entry shows the **actual effective** level.
+- **Default is `medium`**.
+- **Mapping has two layers** (per the pi `thinkingLevelMap`, where `null` means unsupported): model layer (per-model table in the descriptor) then provider-level default table. With neither, it sends no parameter.
+- Online parameters: OpenAI-compatible sends `reasoning_effort`. Anthropic maps to `adaptive` or `enabled:<budget>`. It never invents a value a provider never knows.
+- **Unsupported levels never show**: `/thinking` completion and selection lists show only current-model supported levels. A hand-typed unsupported level **clamps up to the nearest supported level**. With none above, it clamps down to the nearest, with one line (for example `medium → high (this model supports low/high/max)`). Default `medium` clamps the same way. The startup line and footer show the clamped actual level.
+- **Anthropic per-level budgets**: `off` sends none. `minimal` 1024, `low` 2048, `medium` (default) `adaptive`, `high` 4096, `xhigh` 8192, `max` 12288 (all `enabled:<budget>`), under the `1024 <= budget < max_tokens` bound. Old `enabled:<budget>` spelling stays accepted for one version and sends the user budget as-is.
+- Timing matches `/model`: next-turn effect, one `ConfigChanged { change: {"thinking": "<level>"} }`, restore at resume. An explicit CLI `--thinking` wins.
+
+### D12 ChatGPT subscription login and Responses adapter
+
+- **Provider `chatgpt`** (display name "ChatGPT (subscription)"): credentials are the `auth.json` `oauth` entry. Requests use the Responses adapter to `https://chatgpt.com/backend-api/codex/responses`, with `chatgpt-account-id`, `OpenAI-Beta: responses=experimental`, and `originator: radian` (never impersonates Codex CLI).
+- **Keeps `openai` (API key)**: it still uses Chat Completions.
+- **Login**: `/login` adds "Sign in with ChatGPT": browser plus PKCE plus fixed callback `http://localhost:1455/auth/callback` (an occupied port errors explicitly and points at device code). Device code is the second entry. The token writes the `auth.json` `oauth` entry (0600). It **never enters logs, journal, or export** and enters the redaction list. Before expiry it auto-refreshes with the refresh token. Refresh failure prompts re-login. `account_id` decodes from the access token each time and never stores separately.
+- **Responses adapter** (`agent-provider-openai-responses`): streaming text, tool calls, reasoning (with `encrypted_content` replay, per ADR 0014), usage, error classes (`is_transient`, `retry_after`, `ContextOverflow`); `store: false`. It must pass the provider contract. Concepts a provider lacks declare absence per `crates/agent-provider-contract/README.md`.
+- **Responses works with an API key**: built-in-descriptor models through Responses use that provider key in `auth.json` as `Authorization: Bearer`, without the three ChatGPT and Codex headers and with no token refresh. The `chatgpt` descriptor OAuth path never changes. Custom providers still never choose Responses.
+- **Usage**: `GET https://chatgpt.com/backend-api/wham/usage` (same OAuth headers) returns `rate_limit.primary_window` and `secondary_window` plus `plan_type`. Response headers `x-codex-{primary,secondary}-*` also stay as a Headers source.
+
+## Constraints and Costs
+
+- **Switching models misses prompt cache**: prompt caches split by model (and provider). The first round after switch bills full input and runs slower. No mechanism offsets this; only one line in the `/model` hint states it. Cross-provider switch fully misses. Compaction rewrites the context prefix, so the first request after compaction never cache-hits.
+- ChatGPT subscription login is not officially open third-party access (it uses the public Codex OAuth client).
+- Background `/v1/models` refresh and `/login` validation are explicit network items (ADR 0013). Failures stay silent and produce no URL-bearing error text.
+
+## Verification
+
+`radian-host` auth, provider, and model tests cover `auth.json` shape and unknown-entry preservation, `!command` rejection, over-wide-permission rejection, keys in no output, descriptor parsing, catalog `npm` interface choice, hardcoded addresses, built-in snapshot fallback, Responses plus API-key headers, OAuth refresh, ChatGPT usage, `/model` switch and window recompute, resume rules, `auto` four entries and `full` rules, and thinking-level clamp and mapping. All three provider contracts (openai-compatible, anthropic, openai-responses) stay green. The sandbox matrix covers `credentials_unreadable`.

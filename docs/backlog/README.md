@@ -32,9 +32,6 @@
 
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
-| `public-release-tree.md` | decided | 0013、0020 | 公开前清理当前树：AGENTS.md 拆分、脱敏、删 pyc、docs 只留 adr/user/backlog/schema、去掉决策记录、补 CONTRIBUTING/SECURITY/CODE_OF_CONDUCT、`.gitleaksignore` |
-| `adr-english-ste.md` | decided | 全部 | 44 篇 ADR 改写为英文 ASD-STE100，只写现行决定，编号与小节编号不变，逐篇对照原文审查 |
-| `history-rewrite.md` | decided（依赖上两条） | 无 | filter-repo：历史里去掉旧 ADR、替换内网地址与本机路径、去掉决策记录（含提交信息）；gitleaks 前后各扫一次；force-push 前确认 |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
 | `turn-end-continuation.md` | A item 4 open；B 已落地 | 0036、0037、0008、0045、0011、0021、0034、0005、0017 | 轮末「只说不做」（`Now X.` 后无工具调用）：A 部分落地（删掉无效的结束回合规则、工作区外可见加任务文本例外、通知以 omp 形状收尾并修少换行、显式转后台返回文本按 opencode 形状、取消自动转后台即后台只走显式 `background: true` 且前台缺省 300 s），只剩查 lead 记忆漏进 worker（第 4 项）；B `Stop` 路径内建续跑已落地（保守规则粗筛 + 一条 System 续跑交模型判断，每回合一次、连续两次后 herdr `blocked`，计入唤醒闸门，stdin 加 `last_assistant_message`）；研究笔记 `research/2026-10-21-intent-stop.md` |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
