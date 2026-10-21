@@ -31,6 +31,8 @@ Add `--at <seq>` to fork at an exact sequence number.
 Type `/new` to start a new session in the same terminal.
 The old session stays saved.
 The notice names the resume command.
+A goal that was active comes back paused after `--resume`.
+Use `/goal resume` to continue it.
 
 Type `/export` to export the current session.
 The default format is Markdown.

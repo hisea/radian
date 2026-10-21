@@ -10,6 +10,20 @@ Type `/queue <text>` to queue a message for the next turn.
 Type `/retry` to resend the last message after a model error.
 Type `/loop` to repeat a prompt every turn.
 Type `/loop --every <time> --times <n> --for <time> <prompt>` to bound the repeat.
+Type `/goal <objective>` to set a persistent goal that repeats every turn.
+An objective holds up to 4000 characters.
+Type `/goal` alone to show the goal, its progress, and its budget use.
+Type `/goal pause` to stop continuing and keep the goal.
+Type `/goal resume` to continue a paused goal.
+Type `/goal drop` to forget the goal entirely.
+Type `/goal budget <N> turns <dur> <N> tokens` to cap the goal.
+Durations look like `30s`, `5m`, or `2h`.
+Type `/goal budget` alone to show the budget.
+The default budget is 30 turns or 2 hours with no token cap.
+Setting a new goal resets the budget to the default.
+When a cap runs out the goal stops and names the cap.
+Raise the budget to continue a stopped goal.
+A resumed session starts with the goal paused.
 Type `/copy` to copy the last assistant message.
 Type `/copy code` to copy only its last code block.
 Type `/compact` to summarize history now and keep the recent part.
