@@ -1,0 +1,25 @@
+# Nextest config: how the Verify suite runs in parallel.
+#
+# `cargo test` runs every test binary one after another; nextest runs each test
+# as its own process and schedules them across threads. The pty suite drives a
+# whole app per test, so it gets its own group capped at 6 concurrent tests: 6
+# kept a 10-core M4 and the 16-core Linux gate busy without flaking, and a fixed
+# number is all nextest's `max-threads` allows (it cannot scale with the machine).
+# Everything else runs at nextest's default (one thread per CPU).
+#
+# `slow-timeout`: a hung test is sent SIGTERM after `period`, SIGKILL after
+# `terminate-after` more periods, and counts as failed instead of wedging the run.
+# The slowest measured pty test takes ~12 s (queue-during-turn, 6-wide on a 10-core
+# M4); 120 s is 10x that and 2x the tests' own 60 s per-wait deadline, so a loaded
+# gate does not trip it while a real hang is still cut within minutes.
+
+[profile.default]
+fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 1 }
+
+[test-groups.pty]
+max-threads = 6
+
+[[profile.default.overrides]]
+filter = "package(radian-tui) and binary(pty)"
+test-group = "pty"
