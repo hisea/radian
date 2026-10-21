@@ -300,7 +300,7 @@ async fn an_offset_past_the_end_is_empty_with_a_note() {
 }
 
 #[tokio::test]
-async fn a_non_positive_offset_or_limit_is_invalid_arguments() {
+async fn a_zero_offset_or_a_non_positive_limit_is_invalid_arguments() {
     let dir = TempDir::new("read-bad-args");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -309,7 +309,6 @@ async fn a_non_positive_offset_or_limit_is_invalid_arguments() {
 
     for arguments in [
         json!({"path": "f.txt", "offset": 0}),
-        json!({"path": "f.txt", "offset": -1}),
         json!({"path": "f.txt", "limit": 0}),
         json!({"path": "f.txt", "limit": -3}),
     ] {
@@ -319,6 +318,154 @@ async fn a_non_positive_offset_or_limit_is_invalid_arguments() {
             "{arguments}: {failure:?}"
         );
     }
+}
+
+fn thousand_lines() -> String {
+    let mut out = String::new();
+    for n in 1..=1000 {
+        out.push_str(&format!("line {n}\n"));
+    }
+    out
+}
+
+/// `offset: -5` on a 1000-line file returns lines 996–1000 with their file numbers.
+#[tokio::test]
+async fn a_negative_offset_reads_the_last_lines_with_file_numbers() {
+    let dir = TempDir::new("read-tail");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), thousand_lines()).unwrap();
+
+    let output = call(&tools, "read", json!({"path": "f.txt", "offset": -5}))
+        .await
+        .unwrap();
+    let mut expected = String::new();
+    for n in 996..=1000 {
+        expected.push_str(&format!("{n}: line {n}\n"));
+    }
+    assert_eq!(text(&output), expected);
+    let info = structured(&output);
+    assert_eq!(info["start_line"], 996);
+    assert_eq!(info["end_line"], 1000);
+    assert!(info.get("next_offset").is_none(), "{info}");
+}
+
+/// `limit` and `next_offset` work as for a positive offset, with absolute line numbers.
+#[tokio::test]
+async fn a_negative_offset_with_a_limit_names_the_absolute_next_offset() {
+    let dir = TempDir::new("read-tail-limit");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), thousand_lines()).unwrap();
+
+    let output = call(
+        &tools,
+        "read",
+        json!({"path": "f.txt", "offset": -5, "limit": 2}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text(&output),
+        "996: line 996\n997: line 997\n[truncated: continue with offset=998]"
+    );
+    let info = structured(&output);
+    assert_eq!(info["start_line"], 996);
+    assert_eq!(info["end_line"], 997);
+    assert_eq!(info["next_offset"], 998);
+}
+
+/// A negative `offset` past the start reads from line 1; an empty file is an empty read.
+#[tokio::test]
+async fn a_negative_offset_past_the_start_reads_from_line_one() {
+    let dir = TempDir::new("read-tail-clamp");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), thousand_lines()).unwrap();
+
+    let output = call(&tools, "read", json!({"path": "f.txt", "offset": -2000}))
+        .await
+        .unwrap();
+    let info = structured(&output);
+    assert_eq!(info["start_line"], 1);
+    assert!(
+        text(&output).starts_with("1: line 1\n"),
+        "{}",
+        text(&output)
+    );
+
+    std::fs::write(root.join("empty"), "").unwrap();
+    let empty = call(&tools, "read", json!({"path": "empty", "offset": -3}))
+        .await
+        .unwrap();
+    assert_eq!(structured(&empty)["bytes_read"], 0);
+}
+
+/// `offset: -1` is the last line, with or without a trailing newline: the count treats a
+/// non-empty tail without `\\n` as one more line, matching what a forward read shows.
+#[tokio::test]
+async fn a_negative_one_is_the_last_line_with_or_without_a_trailing_newline() {
+    let dir = TempDir::new("read-tail-newline");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("lf.txt"), "a\nb\nc\n").unwrap();
+    std::fs::write(root.join("no-lf.txt"), "a\nb\nc").unwrap();
+
+    for (name, expected) in [("lf.txt", "3: c\n"), ("no-lf.txt", "3: c")] {
+        let output = call(&tools, "read", json!({"path": name, "offset": -1}))
+            .await
+            .unwrap();
+        assert_eq!(text(&output), expected, "{name}: {}", text(&output));
+        let info = structured(&output);
+        assert_eq!(info["start_line"], 3, "{name}: {info}");
+        assert_eq!(info["end_line"], 3, "{name}: {info}");
+    }
+}
+
+/// A file larger than `max_bytes` read from the end stays within the budget.
+#[tokio::test]
+async fn a_negative_offset_on_a_file_larger_than_the_budget_stays_bounded() {
+    let dir = TempDir::new("read-tail-budget");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), thousand_lines()).unwrap();
+    let total = std::fs::metadata(root.join("f.txt")).unwrap().len();
+    assert!(total > 64, "the file must exceed the budget");
+
+    let output = call(
+        &tools,
+        "read",
+        json!({"path": "f.txt", "offset": -5, "max_bytes": 64}),
+    )
+    .await
+    .unwrap();
+    let info = structured(&output);
+    assert!(info["bytes_read"].as_u64().unwrap() <= 64, "{info}");
+    assert_eq!(info["start_line"], 996);
+}
+
+/// A negative `offset` on a directory is ignored like a positive one.
+#[tokio::test]
+async fn a_negative_offset_on_a_directory_is_ignored() {
+    let dir = TempDir::new("read-tail-dir");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub/f.txt"), "x\n").unwrap();
+    let tools = tools(&root);
+
+    let output = call(&tools, "read", json!({"path": "sub", "offset": -5}))
+        .await
+        .unwrap();
+    assert!(
+        text(&output).contains("ignored for this directory"),
+        "{}",
+        text(&output)
+    );
 }
 
 #[tokio::test]
