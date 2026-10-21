@@ -431,6 +431,43 @@ mod tests {
         }
     }
 
+    /// Say-each-fact-once (ADR 0037's rule, like the `skill` tool): no parameter
+    /// description repeats a sentence of the `goal` description. Fragments under 24
+    /// characters are too short to be a repeated fact.
+    #[tokio::test]
+    async fn no_parameter_description_repeats_a_sentence_of_the_description() {
+        use agent_core::{ToolProvider, ToolSession};
+        let temp = TempJournal::new("desc");
+        let session = GoalTools::new(fresh_share(), Arc::clone(&temp.journal))
+            .open_session()
+            .await
+            .unwrap();
+        let spec = session
+            .tool_specs()
+            .iter()
+            .find(|spec| spec.name == "goal")
+            .expect("the goal spec");
+        let sentences: Vec<&str> = spec
+            .description
+            .split(". ")
+            .map(str::trim)
+            .filter(|sentence| sentence.len() >= 24)
+            .collect();
+        let properties = spec.input_schema["properties"]
+            .as_object()
+            .expect("the goal properties");
+        for sentence in sentences {
+            for (name, property) in properties {
+                if let Some(text) = property["description"].as_str() {
+                    assert!(
+                        !text.contains(sentence),
+                        "the `{name}` field repeats {sentence:?}: {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// `progress` journals first and replaces the latest note; the hook sees it at once.
     #[tokio::test]
     async fn progress_records_a_note_and_the_hook_sees_it() {
