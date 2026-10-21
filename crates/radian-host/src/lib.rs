@@ -31,6 +31,7 @@ pub mod headers_usage;
 pub mod herdr;
 mod home;
 pub mod hooks;
+pub mod intent_stop;
 pub mod job_notify;
 pub mod login;
 mod mcp;

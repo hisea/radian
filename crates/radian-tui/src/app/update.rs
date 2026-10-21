@@ -176,6 +176,7 @@ impl App {
             Input::GoalDone { apply, result } => self.goal_applied(apply, result),
             Input::WakeBudgetNotice(text) => self.wake_budget_notice(text),
             Input::JobNoticeLost(text) => self.job_notice_lost(text),
+            Input::IntentStopBlocked(text) => self.intent_stop_blocked(text),
             Input::TrustMove(delta) => {
                 if let Some(Modal::Trust(wizard)) =
                     self.layers.iter_mut().rev().find_map(|layer| match layer {

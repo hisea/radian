@@ -364,6 +364,7 @@ pub(super) fn run_loop_and_teardown(
             session: &facade,
             host: &session_host,
             memory: memory_service,
+            command_hooks: Some(session.command_hooks()),
         },
         (provider_name.to_owned(), model_name.to_owned()),
         Arc::clone(route_price),

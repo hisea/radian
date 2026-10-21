@@ -41,6 +41,10 @@ pub(super) enum Phase<'a> {
         session: &'a Arc<dyn radian_host::SessionFacade>,
         host: &'a SessionHost,
         memory: &'a Option<MemoryService>,
+        /// The session's Stop hooks: the loop syncs `/loop` into them after every
+        /// update, so the host's intent-stop validator stays off while `/loop` owns
+        /// the turn end (backlog `turn-end-continuation.md` §B.5).
+        command_hooks: Option<Arc<radian_host::CommandHooks>>,
     },
 }
 
@@ -182,6 +186,7 @@ pub(super) fn ui_loop(
             session,
             host,
             memory,
+            command_hooks,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
             route_price: Arc::clone(&route_price),
@@ -196,6 +201,7 @@ pub(super) fn ui_loop(
             host,
             tx,
             queue: session.pending(),
+            command_hooks,
             signal: None,
             clipboard: app.clipboard,
             bell_rang: false,

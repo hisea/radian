@@ -183,6 +183,7 @@ impl Fixture {
                 hooks_warning: Arc::new(|_message: &str| {}),
                 wake_warning: Arc::new(|_message: &str| {}),
                 notice_lost_warning: Arc::new(|_message: &str| {}),
+                intent_stop_warning: Arc::new(|_message: &str| {}),
             },
         )
         .await

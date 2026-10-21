@@ -254,6 +254,20 @@ impl App {
         // The slot holds one line: the latest stop owns it, so its flag stands alone.
         self.session.notice_lost_waiting = true;
         self.session.wake_waiting = false;
+        self.session.intent_stop_waiting = false;
+        result
+    }
+
+    /// The intent-stop validator capped after two continuations in a row: the visible
+    /// stop on the same notice slot. The first cap pushes the line; a later one
+    /// rewrites it, so repeated hits still show one line. The next turn start clears
+    /// the stop (the line stays as plain history) and herdr reports normal again.
+    pub fn intent_stop_blocked(&mut self, text: impl Into<String>) -> UpdateResult {
+        let result = self.push_stop_line(text.into());
+        // The slot holds one line: the latest stop owns it, so its flag stands alone.
+        self.session.intent_stop_waiting = true;
+        self.session.wake_waiting = false;
+        self.session.notice_lost_waiting = false;
         result
     }
 
@@ -263,8 +277,10 @@ impl App {
     /// line stays as plain history) and herdr reports normal again.
     pub fn wake_budget_notice(&mut self, text: impl Into<String>) -> UpdateResult {
         let result = self.push_stop_line(text.into());
+        // The slot holds one line: the latest stop owns it, so its flag stands alone.
         self.session.wake_waiting = true;
         self.session.notice_lost_waiting = false;
+        self.session.intent_stop_waiting = false;
         result
     }
 
@@ -311,6 +327,9 @@ impl App {
                 // A lost notice's stop ends the same way: the next turn is running, so
                 // herdr reports normal again (ADR 0037 decision 5's failure rule).
                 self.session.notice_lost_waiting = false;
+                // The intent-stop cap ends the same way: the next turn is running, so
+                // herdr reports normal again (backlog `turn-end-continuation.md` §B.3).
+                self.session.intent_stop_waiting = false;
             }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
@@ -1159,5 +1178,121 @@ mod tests {
             radian_host::herdr::working_label(radian_host::herdr::State::Working, turn, jobs),
             Some("jobs".to_owned())
         );
+    }
+
+    /// The intent-stop cap is the same visible stop with its own herdr label: one
+    /// notice line with the cap text, `blocked` with `intent stop` until the next turn
+    /// starts, which clears it.
+    #[test]
+    fn an_intent_stop_cap_shows_one_line_and_the_herdr_label_until_the_next_turn() {
+        let mut app = App::new("m", "s");
+        let _ = app.update(Input::IntentStopBlocked(
+            radian_host::intent_stop::intent_stop_cap_line(),
+        ));
+        assert_eq!(app.session.entries.len(), 1, "one line for the stop");
+        assert_eq!(app.session.entries[0].kind, EntryKind::Notice);
+        assert!(
+            app.session.entries[0].text.contains("two continuations"),
+            "the line names the cap: {}",
+            app.session.entries[0].text
+        );
+        assert!(
+            app.session.entries[0]
+                .text
+                .contains("send any message to continue"),
+            "the line says how to continue: {}",
+            app.session.entries[0].text
+        );
+        assert!(app.session.intent_stop_waiting);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::IntentStop)
+        );
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            radian_host::herdr::blocked_message(app.herdr_blocked().as_ref(), false),
+            "intent stop"
+        );
+        assert_eq!(
+            radian_host::herdr::blocked_label(app.herdr_blocked().as_ref(), false),
+            Some("intent stop".to_owned())
+        );
+
+        // The next turn start ends the stop but keeps the line as history.
+        app.apply_event(&AgentEvent::TurnStarted);
+        assert!(!app.session.intent_stop_waiting);
+        assert!(!app.session.wake_waiting);
+        assert!(!app.session.notice_lost_waiting);
+        assert_eq!(app.session.wake_notice, None);
+        assert_eq!(
+            app.herdr_blocked(),
+            None,
+            "herdr is back to normal on the next turn start"
+        );
+        assert!(!app.herdr_state_inputs().3);
+        assert_eq!(app.session.entries.len(), 1, "the line stays as history");
+    }
+
+    /// The latest stop owns the burst's one line: a cap after a wake-budget notice
+    /// rewrites the line and moves the herdr label with it.
+    #[test]
+    fn an_intent_stop_cap_after_a_wake_budget_notice_rewrites_the_line() {
+        let mut app = App::new("m", "s");
+        app.wake_budget_notice(
+            "wake budget used up: 1 job notices are waiting — send any message to continue",
+        );
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::WakeBudget)
+        );
+        app.intent_stop_blocked(radian_host::intent_stop::intent_stop_cap_line());
+        assert_eq!(app.session.entries.len(), 1, "one line per burst");
+        assert!(
+            app.session.entries[0].text.contains("two continuations"),
+            "the latest stop owns the line: {}",
+            app.session.entries[0].text
+        );
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::IntentStop)
+        );
+        assert!(!app.session.wake_waiting);
+    }
+
+    /// Label priority across the four idle blocks: a lost notice first, then the
+    /// intent-stop cap, then the goal stop, then the wake budget.
+    #[test]
+    fn idle_block_labels_report_lost_then_intent_then_goal_then_wake() {
+        let mut app = App::new("m", "s");
+        app.session.wake_waiting = true;
+        app.session.goal_mode.blocked = true;
+        app.session.intent_stop_waiting = true;
+        app.session.notice_lost_waiting = true;
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::JobNoticeLost)
+        );
+        app.session.notice_lost_waiting = false;
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::IntentStop)
+        );
+        app.session.intent_stop_waiting = false;
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::GoalBudget)
+        );
+        app.session.goal_mode.blocked = false;
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::WakeBudget)
+        );
+        app.session.wake_waiting = false;
+        assert!(!app.herdr_state_inputs().3);
+        assert_eq!(app.herdr_blocked(), None);
     }
 }
