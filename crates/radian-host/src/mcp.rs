@@ -37,21 +37,27 @@ use std::time::Duration;
 use agent_extensions::McpServerConfig;
 use serde::Deserialize;
 
-/// Credential variables blanked in project `.mcp.json` entries: each
-/// built-in provider's customary key variable. A fixed table, never a `*_API_KEY` pattern;
-/// synced when a built-in provider is added. The exact list was meant to come from
-/// models.dev's per-provider `env`, but the bundled snapshot carries none (unverified), so
-/// these names come from this code base and its docs — **needs owner check**:
-/// `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` (the documented key defaults), `OPENCODE_API_KEY`
-/// (models.dev research for the opencode providers), `OPENCODE_GO_API_KEY` (used across this
-/// repo's own tests). Radian's own keys are never in process env (ADR 0026 D2 reads
-/// `auth.json`); this table only stops a project file from inheriting the user's shell keys.
-/// `chatgpt` is OAuth-only and has no key variable.
+/// Credential variables blanked in project `.mcp.json` entries (
+/// revised round 1: the table protects the user's shell keys from project servers,
+/// built-in or not): each built-in provider's customary key variable, plus the common
+/// third-party provider keys. A fixed table, never a `*_API_KEY` pattern; synced when a
+/// built-in provider is added. The exact list was meant to come from models.dev's
+/// per-provider `env`, but the bundled snapshot carries none (unverified), so these names
+/// come from this code base and its docs. Radian's own keys are never in process env
+/// (ADR 0026 D2 reads `auth.json`); this table only stops a project file from inheriting
+/// the user's shell keys. `chatgpt` is OAuth-only and has no key variable.
 pub const CREDENTIAL_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "OPENCODE_API_KEY",
     "OPENCODE_GO_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "XAI_API_KEY",
+    "MISTRAL_API_KEY",
 ];
 
 /// Which source an entry is loaded from. User sources (`--mcp-config`, `[mcp]`) expand
@@ -1111,12 +1117,15 @@ mod tests {
         unsafe {
             std::env::set_var("RADIAN_MCP_B2_KEY", "from-env");
             std::env::set_var("ANTHROPIC_API_KEY", "sk-b2-live");
+            // Round 1: a common third-party provider key is in the table too.
+            std::env::set_var("DEEPSEEK_API_KEY", "sk-b2-deepseek");
         }
         let dir = temp_dir("credential-blank");
         let text = r#"{"mcpServers":{"a":{
             "command": "run ${ANTHROPIC_API_KEY}",
             "args": ["${RADIAN_MCP_B2_KEY}", "${ANTHROPIC_API_KEY:-dflt}"],
-            "env": {"TOKEN": "${ANTHROPIC_API_KEY}", "OTHER": "${RADIAN_MCP_B2_KEY}"}}}}"#;
+            "env": {"TOKEN": "${ANTHROPIC_API_KEY}", "OTHER": "${RADIAN_MCP_B2_KEY}",
+                "ENGINE": "${DEEPSEEK_API_KEY}"}}}}"#;
         let user_path = write(&dir, "user.json", text);
         let user = load_mcp_config(user_path.to_str().unwrap()).unwrap();
         assert!(user.warnings.is_empty(), "{:?}", user.warnings);
@@ -1138,6 +1147,7 @@ mod tests {
             .collect();
         assert_eq!(env["TOKEN"], "sk-b2-live");
         assert_eq!(env["OTHER"], "from-env");
+        assert_eq!(env["ENGINE"], "sk-b2-deepseek");
 
         let project_path = write(&dir, ".mcp.json", text);
         let project = load_project_file(&project_path).unwrap();
@@ -1167,20 +1177,23 @@ mod tests {
             .collect();
         assert_eq!(env["TOKEN"], "");
         assert_eq!(env["OTHER"], "from-env");
-        // One warning per credential reference: command, one arg, one env value.
+        assert_eq!(env["ENGINE"], "", "third-party keys blank too");
+        // One warning per credential reference: command, one arg, two env values.
         let blanked: Vec<&String> = project
             .warnings
             .iter()
             .filter(|w| w.contains("credential variable"))
             .collect();
-        assert_eq!(blanked.len(), 3, "{:?}", project.warnings);
+        assert_eq!(blanked.len(), 4, "{:?}", project.warnings);
         assert!(
-            blanked.iter().all(|w| w.contains("`ANTHROPIC_API_KEY`")),
+            blanked.iter().any(|w| w.contains("`ANTHROPIC_API_KEY`"))
+                && blanked.iter().any(|w| w.contains("`DEEPSEEK_API_KEY`")),
             "{:?}",
             project.warnings
         );
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("DEEPSEEK_API_KEY");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
