@@ -1415,12 +1415,17 @@ mod tests {
     }
 
     /// `workspace` runs the hook sandboxed: a hook writing outside the workspace fails
-    /// (fail closed), and nothing lands outside.
+    /// (fail closed), and nothing lands outside. The trailing `exit 1` pins the
+    /// verdict to the hook-error path on every shell: without it dash exits 2 on
+    /// a failed redirection (a `Deny`) while bash exits 1 (a hook error).
     #[tokio::test]
     async fn workspace_runs_the_hook_sandboxed() {
         let root = TempRoot::new("sandbox");
         let outside = root.outside("escaped.txt");
-        let config = pre_config("shell", &format!("echo escaped > {}", outside.display()));
+        let config = pre_config(
+            "shell",
+            &format!("echo escaped > {}; exit 1", outside.display()),
+        );
         let sandbox =
             radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::WorkspaceWrite, &root.ws)
                 .expect("the workspace sandbox probes clean on this machine");
