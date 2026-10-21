@@ -39,7 +39,6 @@
 | `tui-new-session.md` | decided（第一档） | 0022、0023、0043、0026、0037 | `/new` 空闲时原地开新会话，沿用当前生效的模型/档位；有 job 时拒绝；不加 `/clear` 别名 |
 | `tui-context-command.md` | decided（第一档） | 0015、0036、0021、0018 | `/context` 按类别打印下一次请求的估算，reported 与 estimated 分开标 |
 | `tui-loop-continuation.md` | decided | 0011、0005、0037、0027、0023、0017 | 续跑引擎第一、二步：`/loop [--every] [--times] [--for] [prompt]` 轮末重投，`User` 来源 + meta，缺省上限 20 次/1 h，不计唤醒闸门 |
-| `goal-mode.md` | decided（依赖 tui-loop-continuation） | 新 ADR；0018、0036、0011、0005、0043、0037、0034、0006、0022 | `/goal` 持久目标 + `goal {progress\|done\|wait}` 工具 + 预算；目标块确定性注入不进摘要；resume 后 paused；`exec -p --goal` 待决 |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
