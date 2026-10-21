@@ -23,7 +23,7 @@ pub(super) struct HerdrReporter {
     /// The last `blocked` label sent (revision 1 decision 2).
     last_label: Option<String>,
     /// The last `working` label sent (the jobs item): `Some("jobs")` while background jobs
-    /// keep an idle session working. Forgotten when the session leaves that state, so
+    /// keep an idle session working. Leaving that state clears herdr's labels on the wire, so
     /// re-entering it reports again.
     last_working: Option<String>,
     /// `display_agent` is constant, so it rides the first metadata report only.
@@ -88,13 +88,14 @@ impl HerdrReporter {
             self.last_working = Some(label.clone());
             state_labels.insert("working".to_owned(), label.clone());
         }
-        if working.is_none() {
-            self.last_working = None;
-        }
+        // Herdr keeps labels until cleared: leaving idle-with-jobs (a turn starts, or the
+        // last job settles) clears them, so a later turn is not shown as `working · jobs`.
+        let clearing = working.is_none() && self.last_working.take().is_some();
         let metadata = radian_host::herdr::Metadata {
             tokens: changed,
             state_labels,
             display_agent: (!self.display_agent_sent).then(|| radian_host::herdr::AGENT.to_owned()),
+            clear_state_labels: clearing,
         };
         if metadata.is_empty() {
             return;

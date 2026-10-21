@@ -505,9 +505,8 @@ pub struct SessionView {
     /// This session's running background jobs, in start order (ADR 0027 slice ③
     /// item 5): the footer's `jobs` item reads them. A `BackgroundJobStarted` runtime event
     /// appends with the loop's clock, its settle removes; while any runs and the footer shows
-    /// the `jobs` item, the idle loop waits only until the displayed age text changes (ADR
-    /// 0023 U2) — every second under a minute, each minute boundary after — so the age ticks
-    /// with no other timer.
+    /// the `jobs` item, the idle loop waits the sooner of the hang-up tick and the next
+    /// age-text change (ADR 0023 U2), so the age ticks with no other timer.
     pub(crate) running_jobs: Vec<RunningJob>,
     /// The `next_turn` inputs this process sent that the runtime has not admitted yet: one
     /// entry per `InboxEnqueued` without a matching `InputAdmitted`, by message id. The

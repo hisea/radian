@@ -288,12 +288,19 @@ pub struct Metadata {
     pub state_labels: BTreeMap<String, String>,
     /// `display_agent`: sent once, at startup.
     pub display_agent: Option<String>,
+    /// `clear_state_labels`: herdr keeps labels until cleared. Send `true` when leaving a
+    /// labeled state with no replacement label, so a later turn is not misread with the old
+    /// label. Only ever `true` on the wire; `false` is left out like any default.
+    pub clear_state_labels: bool,
 }
 
 impl Metadata {
     /// Whether this carries nothing to report.
     pub fn is_empty(&self) -> bool {
-        self.tokens.is_empty() && self.state_labels.is_empty() && self.display_agent.is_none()
+        self.tokens.is_empty()
+            && self.state_labels.is_empty()
+            && self.display_agent.is_none()
+            && !self.clear_state_labels
     }
 }
 
@@ -373,6 +380,9 @@ pub fn metadata_line(env: &HerdrEnv, metadata: &Metadata, seq: u64, id: &str) ->
             "tokens".into(),
             serde_json::to_value(&metadata.tokens).expect("tokens serialize"),
         );
+    }
+    if metadata.clear_state_labels {
+        object.insert("clear_state_labels".into(), serde_json::Value::Bool(true));
     }
     line(&serde_json::json!({
         "id": id,
@@ -1038,6 +1048,7 @@ mod tests {
             tokens,
             state_labels: labels,
             display_agent: Some("radian".to_owned()),
+            clear_state_labels: false,
         };
         let text = metadata_line(&env(), &metadata, 12, "r");
         assert!(text.ends_with('\n'));
@@ -1070,6 +1081,27 @@ mod tests {
         }
         assert!(!metadata.is_empty());
         assert!(Metadata::default().is_empty(), "nothing to report");
+    }
+
+    /// Leaving a labeled state with no replacement label clears herdr's labels (herdr keeps
+    /// them until cleared): `clear_state_labels: true` with nothing else is still a report.
+    #[test]
+    fn clearing_the_labels_is_a_report_of_its_own() {
+        let metadata = Metadata {
+            clear_state_labels: true,
+            ..Metadata::default()
+        };
+        assert!(!metadata.is_empty());
+        let value: serde_json::Value =
+            serde_json::from_str(metadata_line(&env(), &metadata, 12, "r").trim()).unwrap();
+        assert_eq!(value["method"], "pane.report_metadata");
+        assert_eq!(value["params"]["clear_state_labels"], true);
+        assert!(value["params"].get("state_labels").is_none());
+        // `false` is left out like any default.
+        let value: serde_json::Value =
+            serde_json::from_str(metadata_line(&env(), &Metadata::default(), 12, "r").trim())
+                .unwrap();
+        assert!(value["params"].get("clear_state_labels").is_none());
     }
 
     #[test]

@@ -11110,6 +11110,48 @@ async fn pty_herdr_reports_working_while_a_job_runs() {
             .contains("sleep 3"),
         "the command text must never be sent"
     );
+    // Leaving idle-with-jobs clears herdr's labels (it keeps them until cleared): one
+    // metadata with `clear_state_labels`, after the jobs label and before the followup
+    // turn's working — otherwise later turns show `working · jobs`.
+    let log = sock.snapshot();
+    let jobs_at = log
+        .iter()
+        .position(|value| {
+            value["method"] == "pane.report_metadata"
+                && value["params"]["state_labels"]["working"] == "jobs"
+        })
+        .expect("the jobs label");
+    let clears: Vec<usize> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| {
+            value["method"] == "pane.report_metadata"
+                && value["params"]["clear_state_labels"].as_bool() == Some(true)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        clears.len(),
+        1,
+        "leaving idle-with-jobs clears once: {log:?}"
+    );
+    let followup_at = {
+        let mut workings = 0;
+        log.iter()
+            .position(|value| {
+                if value["method"] == "pane.report_agent" && value["params"]["state"] == "working" {
+                    workings += 1;
+                    workings == 2
+                } else {
+                    false
+                }
+            })
+            .expect("the followup turn's working")
+    };
+    assert!(
+        jobs_at < clears[0] && clears[0] < followup_at,
+        "label, then clear, then the followup turn's working: {log:?}"
+    );
     pty.quit();
     assert!(
         sock.wait_for_release(wait_positive()),
