@@ -33,6 +33,39 @@ radian is a coding agent in one Rust binary, and the agent runtime it is built o
   <br><sub>radian at 120 columns, rendered by the TUI prototype script (<code>research/2026-10-16-render-prototype/</code>).</sub>
 </p>
 
+## Install
+
+Install the current release from Homebrew, from a release tarball, or from
+source with Cargo.
+
+```sh
+brew install hisea/tap/radian
+```
+
+The tap links only `radian`: homebrew-core already has a `rad` formula, so
+this one does not link its `rad` alias. The macOS packages are signed and
+notarized.
+
+Or download `radian-<version>-<target>.tar.gz` from the
+[releases page](https://github.com/hisea/radian/releases), check it against
+its `.sha256`, and unpack the `radian` (and `rad`) binary inside:
+
+```sh
+shasum -a 256 -c radian-<version>-<target>.tar.gz.sha256
+tar -xzf radian-<version>-<target>.tar.gz
+./radian --version
+```
+
+Or build from source (this installs both `radian` and `rad`):
+
+```sh
+cargo install --git https://github.com/hisea/radian radian-tui
+```
+
+On Linux the `workspace` tier runs the sandbox through `bubblewrap`;
+install it first (for example `sudo apt install bubblewrap` on Debian
+and Ubuntu).
+
 New users start with [`docs/user/quickstart.md`](docs/user/quickstart.md). The design is in [`ARCHITECTURE.md`](ARCHITECTURE.md), and the decisions that constrain the code are in [`docs/adr/`](docs/adr/). Read [`AGENTS.md`](AGENTS.md) before you change code. How to contribute is in [CONTRIBUTING.md](CONTRIBUTING.md). To report a security problem, see [SECURITY.md](SECURITY.md).
 
 ## Crates
@@ -84,39 +117,6 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
   provider-overflow fallback (compact to half and retry once), and a manual `/compact` in both
   hosts. `--no-auto-compact` turns off the proactive path only; the overflow fallback still
   runs. The model catalog and the context-budget projection are its inputs.
-
-## Install
-
-Install the current release from Homebrew, from a release tarball, or from
-source with Cargo.
-
-```sh
-brew install hisea/tap/radian
-```
-
-The tap links only `radian`: homebrew-core already has a `rad` formula, so
-this one does not link its `rad` alias. The macOS packages are signed and
-notarized.
-
-Or download `radian-<version>-<target>.tar.gz` from the
-[releases page](https://github.com/hisea/radian/releases), check it against
-its `.sha256`, and unpack the `radian` (and `rad`) binary inside:
-
-```sh
-shasum -a 256 -c radian-<version>-<target>.tar.gz.sha256
-tar -xzf radian-<version>-<target>.tar.gz
-./radian --version
-```
-
-Or build from source (this installs both `radian` and `rad`):
-
-```sh
-cargo install --git https://github.com/hisea/radian radian-tui
-```
-
-On Linux the `workspace` tier runs the sandbox through `bubblewrap`;
-install it first (for example `sudo apt install bubblewrap` on Debian
-and Ubuntu).
 
 ## Build
 
