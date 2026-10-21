@@ -82,6 +82,10 @@ use state::{bash_context_text, bash_entry, bash_entry_from_context, is_user_inpu
 // path keeps working.
 pub use radian_host::projection::TurnState;
 
+// The `/loop` message tags (the `origin` the journal audits, ADR 0005): the integration
+// tests build the expected followups with them, the unit tests cover the round trip.
+pub use loop_mode::{loop_iteration, loop_message};
+
 /// How long the first idle Ctrl-C arms "press again to quit" (ADR 0023 U4, owner
 /// 2026-10-14). A second Ctrl-C inside the window quits; the window closing, or any other
 /// key, disarms it and the hint disappears.

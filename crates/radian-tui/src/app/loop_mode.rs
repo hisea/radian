@@ -37,9 +37,13 @@ pub(crate) struct LoopState {
     pub(crate) every: Option<Duration>,
     /// Stop after this many loop turns (`--times N`, default [`DEFAULT_MAX_ITERATIONS`]).
     pub(crate) max_iterations: u64,
+    /// Whether `--times` was given (the stop notice names it; otherwise the default cap).
+    pub(crate) times_explicit: bool,
     /// Stop this long after the first loop turn (`--for <dur>`, default
     /// [`DEFAULT_MAX_DURATION`]).
     pub(crate) max_duration: Duration,
+    /// Whether `--for` was given (the stop notice names it; otherwise the default cap).
+    pub(crate) for_explicit: bool,
     /// When the first loop turn was admitted (starts the `--for` clock).
     pub(crate) started_at: Option<Instant>,
     /// Completed loop turns. The next send is tagged `iterations + 1`.
@@ -71,7 +75,9 @@ impl Default for LoopState {
             prompt: None,
             every: None,
             max_iterations: DEFAULT_MAX_ITERATIONS,
+            times_explicit: false,
             max_duration: DEFAULT_MAX_DURATION,
+            for_explicit: false,
             started_at: None,
             iterations: 0,
             last_start: None,
@@ -169,7 +175,9 @@ impl App {
                     prompt: options.prompt.clone(),
                     every: options.every,
                     max_iterations: options.times.unwrap_or(DEFAULT_MAX_ITERATIONS),
+                    times_explicit: options.times.is_some(),
                     max_duration: options.for_duration.unwrap_or(DEFAULT_MAX_DURATION),
+                    for_explicit: options.for_duration.is_some(),
                     ..LoopState::default()
                 };
                 if let Some(prompt) = options.prompt.clone() {
@@ -369,12 +377,10 @@ impl App {
         }
         if self.session.loop_state.iterations >= self.session.loop_state.max_iterations {
             let max = self.session.loop_state.max_iterations;
-            let notice = if max == DEFAULT_MAX_ITERATIONS
-                && self.session.loop_state.max_duration == DEFAULT_MAX_DURATION
-            {
-                format!("loop finished after {max} turns (the default cap of 20 turns or 1h)")
-            } else {
+            let notice = if self.session.loop_state.times_explicit {
                 format!("loop finished after {max} turns (--times {max})")
+            } else {
+                format!("loop finished after {max} turns (the default cap of 20 turns or 1h)")
             };
             self.stop_loop(&notice);
             return UpdateResult::dirty();
@@ -383,12 +389,10 @@ impl App {
             && self.now.saturating_duration_since(started) >= self.session.loop_state.max_duration
         {
             let max = format_loop_duration(self.session.loop_state.max_duration);
-            let notice = if self.session.loop_state.max_duration == DEFAULT_MAX_DURATION
-                && self.session.loop_state.max_iterations == DEFAULT_MAX_ITERATIONS
-            {
-                format!("loop finished after {max} (the default cap of 20 turns or 1h)")
-            } else {
+            let notice = if self.session.loop_state.for_explicit {
                 format!("loop finished after {max} (--for {max})")
+            } else {
+                format!("loop finished after {max} (the default cap of 20 turns or 1h)")
             };
             self.stop_loop(&notice);
             return UpdateResult::dirty();

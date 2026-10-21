@@ -96,3 +96,91 @@ impl WakeGate {
         u32::try_from(wakes.len()).unwrap_or(u32::MAX)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use agent_core::{InputSource, Message, OpaqueJson};
+    use radian_runtime::{Inbox, RuntimeEvents};
+    use radian_session::{InboxLane, RuntimeEvent};
+
+    /// A loop-tagged message the way the TUI builds it: the `origin` the journal audits
+    /// (ADR 0005), with `continuation = "loop"` and the iteration number.
+    fn loop_message(text: &str, iteration: u64) -> Message {
+        let origin = OpaqueJson::parse(
+            serde_json::json!({ "continuation": "loop", "iteration": iteration }).to_string(),
+        )
+        .expect("the loop origin we build is valid JSON");
+        let mut message = Message::user(text);
+        match &mut message {
+            Message::User { meta, .. }
+            | Message::Assistant { meta, .. }
+            | Message::Tool { meta, .. } => meta.origin = Some(origin),
+        }
+        message
+    }
+
+    /// The loop iteration a message carries, or `None` when it is not a loop re-send.
+    fn loop_iteration(message: &Message) -> Option<u64> {
+        let origin = match message {
+            Message::User { meta, .. }
+            | Message::Assistant { meta, .. }
+            | Message::Tool { meta, .. } => meta.origin.as_ref()?,
+        };
+        let value: serde_json::Value = serde_json::from_str(origin.get()).ok()?;
+        if value.get("continuation")?.as_str()? != "loop" {
+            return None;
+        }
+        value.get("iteration")?.as_u64()
+    }
+
+    /// The `/loop` continuation re-sends through `Inbox::followup` (source `User`, the
+    /// loop's own caps as the bound) and never touches the wake gate: twenty loop
+    /// iterations keep `source = User` with increasing `iteration` meta, and the budget
+    /// stays at zero (backlog `tui-loop-continuation.md` acceptance).
+    #[tokio::test]
+    async fn loop_iterations_use_user_followups_outside_the_wake_budget() {
+        let gate = WakeGate::new();
+        let inbox = Inbox::new(64);
+        // The inbox keeps the last installed sink: one shared probe for the whole test.
+        let seen: Arc<std::sync::Mutex<Vec<(InboxLane, InputSource, Message)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let probe = Arc::clone(&seen);
+        inbox.set_runtime_events(Arc::new(move |event: &RuntimeEvent| {
+            if let RuntimeEvent::InboxEnqueued {
+                lane,
+                source,
+                message,
+                ..
+            } = event
+            {
+                probe
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((*lane, *source, message.clone()));
+            }
+        }));
+        for iteration in 1..=20u64 {
+            inbox
+                .followup(loop_message("go", iteration), InputSource::User)
+                .await
+                .expect("the inbox has room");
+            assert!(gate.wake_allowed(), "the loop never fills the budget");
+        }
+        assert_eq!(gate.wakes(), 0, "twenty loop iterations record no wake");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 20);
+        for (index, (lane, source, message)) in seen.iter().enumerate() {
+            let iteration = index as u64 + 1;
+            assert_eq!(*lane, InboxLane::NextTurn);
+            assert_eq!(*source, InputSource::User);
+            assert_eq!(
+                loop_iteration(message),
+                Some(iteration),
+                "iteration {iteration} is tagged"
+            );
+        }
+    }
+}
