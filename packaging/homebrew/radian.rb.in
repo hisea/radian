@@ -1,5 +1,5 @@
 # Homebrew formula template for radian. Filled in by scripts/release-macos.sh;
-# never edited by hand. Placeholders look like @VERSION@.
+# never edited by hand. The @PLACEHOLDERS@ below are filled by that script.
 class Radian < Formula
   desc "Coding agent in one Rust binary (full-screen TUI plus headless exec)"
   homepage "https://github.com/hisea/radian"

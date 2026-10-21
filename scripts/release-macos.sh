@@ -221,12 +221,14 @@ linux_sha() {
     printf '%s' "$hash"
 }
 mac_sha() {
-    (cd "$DIST" && shasum -a 256 -c "radian-$VERSION-$1.tar.gz.sha256") \
+    # mac_sha <target>: echoes the hash. Refuses when the file does not
+    # match its .sha256.
+    (cd "$DIST" && shasum -a 256 -c "radian-$VERSION-$1.tar.gz.sha256" > /dev/null) \
         || { echo "release-macos.sh: sha mismatch for $1." >&2; exit 1; }
     cut -d' ' -f1 "$DIST/radian-$VERSION-$1.tar.gz.sha256"
 }
 formula_url() {
-    printf 'https://github.com/%s/radian/releases/download/%s/radian-%s-%s.tar.gz' \
+    printf 'https://github.com/%s/releases/download/%s/radian-%s-%s.tar.gz' \
         "$REPO" "$TAG" "$VERSION" "$1"
 }
 FORMULA="$DIST/Formula/radian.rb"
