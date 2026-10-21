@@ -1,0 +1,291 @@
+---
+description: Every radian command, subcommand, flag, and exit code.
+---
+
+# CLI
+
+This page lists every command `radian` accepts.
+The running binary is the source of truth: `radian <cmd> --help` prints the same facts.
+`rad` is an alias of `radian`.
+
+## `radian`: the full-screen interface
+
+Run `radian` with no subcommand to open the full-screen interface.
+Run it only in a real terminal: it takes over the screen.
+`--model` is required unless the configuration file sets `model.model`.
+
+### TUI options
+
+| Flag | Value | Default | Overrides | Conflicts | What it does |
+|---|---|---|---|---|---|
+| `--config` | `FILE` | `RADIAN_CONFIG`, else `~/.radian/config/config.toml` | `RADIAN_CONFIG` | — | Read this configuration file. Radian never writes it. |
+| `-w`, `--workspace` | `DIR` | current directory | — | — | Root the built-in file tools here. Without it the current directory is the workspace. |
+| `--system` | `SYSTEM` | — | — | — | System prompt text. |
+| `-h`, `--help` | — | — | — | — | Print help and exit. |
+| `-V`, `--version` | — | — | — | — | Print the version and exit. |
+
+### Model options
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `-m`, `--model` | `MODEL` | `model.model` from the file | The model name sent to the API. A bare name, never `provider/model`. |
+| `--provider` | `PROVIDER` | `openai-compatible` | The wire protocol: `openai-compatible` or `anthropic`. |
+| `--base-url` | `URL` | provider public endpoint | Everything before the provider path (`/chat/completions`, `/v1/messages`). Only for `openai-compatible`; refused for other providers. |
+| `--max-tokens` | `N` | `16384` | `max_tokens` for anthropic; the API requires it. Refused for `openai-compatible`. |
+| `--thinking` | `MODE` | `medium` | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Clamped to what the route supports. Legacy `adaptive` and `enabled:<budget>` still work with a warning. |
+| `--header` | `NAME=VALUE` | — | One extra request header. Repeat the flag for more headers. `Authorization` is refused. Only for `openai-compatible`; refused for other providers. `{session_id}` in a value expands to the session id. A flag of the same name wins over the file. |
+| `--max-model-calls` | `N` | `1000` | Per-turn model call fuse. A loop of small calls is not stopped by the context budget. |
+| `--context-window` | `TOKENS` | catalog lookup | Explicit context window in tokens. Wins over the models.dev catalog. With neither, the budget guard is off. |
+| `--offline-catalog` | — | fetch | Use only the local catalog cache, never the network. |
+| `--catalog-provider` | `PROVIDER` | derived from `--base-url` host | The models.dev provider id to look the model up under. |
+| `--no-auto-compact` | — | compact | Turn automatic compaction off. Over budget the request goes out unchanged. |
+
+### Session options
+
+| Flag | Value | Default | Overrides | Conflicts | What it does |
+|---|---|---|---|---|---|
+| `--session-dir` | `DIR` | `RADIAN_SESSION_DIR`, else `~/.radian/sessions` | `RADIAN_SESSION_DIR` | — | Where session files live. |
+| `--session-id` | `VALUE` | generated per process | — | `--resume` | The session file name for this run. |
+| `-r`, `--resume` | optional `SESSION_ID` | — | — | `--session-id`, `--list` | Resume a session by id. A bare `--resume` opens the picker. |
+| `-l`, `--list` | — | — | — | `--resume` | Print this workspace sessions and exit. |
+| `--pick` | — | — | — | `--resume`, `--session-id` | Pick a session in a full-screen list before opening one. Creates no file. |
+
+### MCP options
+
+| Flag | Value | What it does |
+|---|---|---|
+| `--mcp-config` | `FILE` | Start MCP stdio servers from this JSON file (`{"servers": [...]}`). Under `workspace` their tools ask first. The servers themselves are never sandboxed. |
+
+### Permission options
+
+| Flag | Value | Default | Conflicts | What it does |
+|---|---|---|---|---|
+| `--profile` | `TIER` | `full` | — | `workspace` (sandboxed) or `full` (unsandboxed). A project file can only narrow it. |
+| `--approval` | `POLICY` | `on-ask` | — | `on-ask`, `always`, `never`, or `auto`. Falls back to the file, then the session state, then `on-ask`. |
+| `-y`, `--yes` | — | ask | — | Approve every tool question without asking. Deny rules still deny. The sandbox still applies. |
+| `--allow-shell-command` | `PREFIX` | — | — | Allow one simple shell prefix without asking. Repeat the flag. A compound command needs every segment allowed. |
+| `--trust` | — | — | `--no-trust` | Trust this workspace project resources for this process only. Never written to disk. |
+| `--no-trust` | — | — | — | Distrust this workspace project resources for this process only. |
+
+Example:
+
+```sh
+radian --provider openai-compatible --model gpt-5 --profile workspace -w "$PWD" --session-id demo
+```
+
+## `radian exec`: the headless command
+
+`radian exec` runs one turn or a line session without a terminal.
+With `-p` it prints only the model text to stdout and exits; status goes to stderr.
+Without `-p` it runs a line prompt loop.
+The print-and-exit modes (`--list`, `--export`, `--search`, `--fork`) need no model and read no key.
+
+| Flag | Value | Default | Conflicts | What it does |
+|---|---|---|---|---|
+| `--model` | `MODEL` | file `model.model` | — | Bare model name. Required for a conversation unless the file sets it. |
+| `--provider` | `PROVIDER` | `openai-compatible` | — | `openai-compatible` or `anthropic`. |
+| `--base-url` | `URL` | provider endpoint | — | Everything before the provider path. Only for `openai-compatible`; refused for other providers. |
+| `--config` | `FILE` | `RADIAN_CONFIG`, else default file | — | Read this configuration file. Radian never writes it. |
+| `--max-tokens` | `N` | `16384` | — | `max_tokens` for anthropic. Refused for `openai-compatible`. |
+| `--thinking` | `MODE` | `medium` | — | Thinking level (`off` to `max`), clamped per route. Legacy `adaptive` / `enabled:<budget>` warn. |
+| `--system` | `SYSTEM` | — | `--system-file` | System prompt text. |
+| `--system-file` | `FILE` | — | — | Read the system prompt from this file. |
+| `--mcp-config` | `FILE` | — | — | MCP servers JSON file. |
+| `--workspace` | `DIR` | current directory | — | Root the built-in file tools here. |
+| `--profile` | `workspace` \| `full` | `full` | — | Permission tier. A project file can only narrow it. |
+| `--allow-shell-command` | `PREFIX` | — | — | Allow one simple shell prefix without asking. Repeatable. |
+| `--approval` | `POLICY` | `on-ask` | — | `on-ask`, `always`, `never`, or `auto`. The file is the fallback. |
+| `--yes` | — | ask | — | Shorthand for `--approval auto`. |
+| `-p`, `--prompt` | `PROMPT` | — | `--list` | One-shot mode: run this prompt, then exit. `-p -` reads stdin to EOF. |
+| `--output` | `jsonl` | model text | — | Print every journal line, live deltas, and a closing `Result` record as JSON lines. |
+| `--header` | `NAME=VALUE` | — | — | Extra request header. Repeatable. `Authorization` is refused. Only for `openai-compatible`; refused for other providers. `{session_id}` expands. A flag of the same name wins over the file. |
+| `--session-id` | `VALUE` | generated | `--resume`, `--list`, `--search` | The session file name for this process. |
+| `--resume` | `SESSION_ID` | — | `--list` | Resume a session by id. |
+| `--list` | — | — | — | Print this workspace sessions and exit. |
+| `--export` | `SESSION_ID` | — | `--prompt`, `--resume`, `--list`, `--search` | Export one session of this workspace and exit. |
+| `--search` | `TEXT` | — | `--prompt`, `--resume`, `--list`, `--export` | Search this workspace sessions and exit. |
+| `--fork` | `SESSION_ID` | — | `--prompt`, `--resume`, `--list`, `--export`, `--search` | Fork a session at a turn boundary. Needs no model and reads no key. |
+| `--at` | `SEQ` | last boundary | — | Fork at this parent sequence number. Needs `--fork`. |
+| `--format` | `markdown` \| `json` | `markdown` | — | Export shape. Needs `--export`. |
+| `--out` | `FILE` | stdout | — | Write the export here. Refuses to overwrite unless `--force`. Needs `--export`. |
+| `--force` | — | — | — | Overwrite `--out`. Needs `--out`. |
+| `--include-reasoning` | — | off | — | Include assistant reasoning in the export. Needs `--export`. |
+| `--include-provider-payload` | — | off | — | Include raw provider payloads in the export. Needs `--export`. |
+| `--session-dir` | `DIR` | `RADIAN_SESSION_DIR`, else default | — | Where session files live. |
+| `--include-usage` | optional `true` \| `false` | on for `api.openai.com`, off elsewhere | — | Ask the server to include usage in the stream. |
+| `--max-model-calls` | `N` | `1000` | — | Per-turn model call fuse. |
+| `--turn-timeout-secs` | `N` | — | — | Per-turn time limit in seconds. |
+| `--context-window` | `TOKENS` | catalog lookup | — | Explicit context window. Wins over the catalog. |
+| `--offline-catalog` | — | fetch | — | Use only the local catalog cache. |
+| `--catalog-provider` | `PROVIDER` | derived from host | — | The models.dev provider id for the lookup. |
+| `--no-auto-compact` | — | compact | — | Turn automatic compaction off. |
+| `--trust` | — | — | `--no-trust` | Trust project resources for this process only. |
+| `--no-trust` | — | — | — | Distrust project resources for this process only. |
+
+Examples:
+
+```sh
+radian exec --provider openai-compatible --model gpt-5 -p "summarize Cargo.toml"
+radian exec --resume demo -p "now read docs/"
+radian exec --list
+radian exec --export demo --format json --out demo.json
+radian exec --search "bubblewrap"
+radian exec --fork demo --at 12
+```
+
+## `radian login` and `radian logout`
+
+`radian login [PROVIDER]` stores an API key in `~/.radian/credentials/auth.json`.
+A bare `radian login` shows a numbered provider list.
+`custom` names a new endpoint: name, protocol, base URL, and key.
+The key never echoes.
+A verification request (`GET <base>/models`) runs before the save.
+A failure shows and still offers to save.
+Without a terminal the command refuses and points at `auth.json` instead.
+
+```sh
+radian login
+radian login anthropic
+```
+
+`radian logout <provider>` removes one stored credential.
+It asks first.
+Every other entry stays untouched.
+Exit `0` on removal or on an explicit keep, `2` when the entry is missing or the run has no terminal.
+
+```sh
+radian logout anthropic
+```
+
+## `radian memory`
+
+`radian memory` runs the same grammar as the `/memory` slash command.
+Needs no model, no key, no session file, no network.
+`--workspace <DIR>` resolves the project against another directory.
+
+| Command | Arguments and flags | What it does |
+|---|---|---|
+| `list` | `--global`, `--project`, `--all`, `--json` | List records, project first then global. `--all` includes archived records. |
+| `search` | `--global`, `--project`, `--json`, `WORD...` (required) | Search by keyword. Every word must match. |
+| `show` | `--global`, `--project`, `--json`, `ID` | Show one record by id. |
+| `add` | `--global`, `--kind preference\|decision\|fact\|lesson` (default `fact`), `--key KEY`, `CONTENT` (`-` reads stdin) | Add a project record, or a global record with `--global`. A git workspace registers itself on first write. |
+| `edit` | `--global`, `--revision REV` (required), `ID`, `CONTENT` | Change a record. Needs the current revision. |
+| `archive` | `--global`, `--revision REV` (required), `ID` | Archive a record. It stays stored but leaves injection and default search. |
+| `restore` | `--global`, `--revision REV` (required), `ID` | Restore an archived record. |
+| `forget` | `--global`, `--yes`, `ID` | Forget a record, after confirmation. The bytes stay until `purge`. |
+| `purge` | `--global`, `--project`, `--yes` | Rewrite the log and remove forgotten content, after confirmation. |
+| `confirm` | `--global`, `--revision REV` (required), `ID` | Confirm a record. Keeps its original source. |
+| `export` | `--global`, `--project` | Print one scope as editable Markdown. |
+| `import` | `--global`, `--project`, `SOURCE` (`-` reads stdin) | Import an edited Markdown export. |
+| `project` | `--json`, `project new` | Show project identity and state, or register this workspace as a project. |
+| `relink` | `PROJECT_ID` | Attach this workspace identity key to an existing project. |
+| `split` | `--yes`, `FROM`, `TO`, `ID...` | Move records between projects, after confirmation. |
+| `merge` | `--yes`, `INTO`, `FROM` | Merge one project into another, after confirmation. Reports key conflicts. |
+
+`--global` and `--project` conflict except where both are absent (the default scope).
+`list`, `search`, `show`, and `project` accept `--json` for machine output.
+`forget`, `purge`, `split`, and `merge` ask for confirmation unless `--yes` is passed.
+Exit `0` on success, `1` for a conflict or a missing record, `2` for bad use.
+See `memory` for scopes, revisions, and confirmation rules.
+
+```sh
+radian memory add "prefers tabs" --kind preference --key style
+radian memory search tabs --json
+radian memory list --all
+```
+
+## `radian config`
+
+`radian config import-pi --from <DIR>` drafts a configuration from a Pi agent directory.
+The draft goes to stdout and the mapping report to stderr.
+`--write` saves the draft to the configuration path (`--config`, else `RADIAN_CONFIG`, else the default file) and refuses an existing file.
+Nothing is written without `--write`.
+The command reads only the directory you name: never `auth.json`, never a secret value, never a `!command`.
+Exit `0` for a draft, `1` for a missing directory, a malformed file, a refused write, or an invalid draft, `2` without `--from`.
+
+```sh
+radian config import-pi --from ~/.pi/agent > draft.toml
+radian config import-pi --from ~/.pi/agent --write
+```
+
+`radian config import-claude --claude-home <DIR> --project <DIR>` drafts a configuration from Claude Code files.
+At least one of `--claude-home` and `--project` is required.
+Stdout carries the draft: the config, then each skill file and `AGENTS.md` body under a header line.
+`--write` saves every file instead; nothing that exists is ever changed.
+Exit `0` for a draft, `2` when neither source is given, `1` for other failures.
+See `configuration` for the file format and `pi-migration` for the Pi mapping table.
+
+```sh
+radian config import-claude --claude-home ~/.claude > draft.toml
+radian config import-claude --project "$PWD" --write
+```
+
+## `radian theme import`
+
+`radian theme import <PI-THEME.json> [--name <NAME>] [--force]` converts a Pi theme JSON file to a Radian TOML theme under `~/.radian/themes/`.
+The name defaults to the file `name` field, else the file stem.
+`--force` overwrites an existing file.
+The command prints the written path and one report line per mapped value.
+Exit `0` on success, `1` for a missing or bad input, or an existing output without `--force`.
+See `themes` for names, fallback, and overrides.
+
+```sh
+radian theme import night.json --name night
+```
+
+## `radian footer export`
+
+`radian footer export <PRESET>` prints one built-in preset TOML: `deck`, `full`, `pi`, or `classic`.
+Use it as the `[tui.footer]` section to start a customization.
+An unknown preset exits `2` and names the four.
+See `configuration` for the footer keys.
+
+```sh
+radian footer export pi
+```
+
+## `radian docs`
+
+`radian docs` prints one line per manual topic with its description.
+`radian docs <topic>` prints that page verbatim, the same text the agent reads.
+The topic is a page stem (`commands`) or a file name (`commands.md`).
+An unknown topic exits `2` and lists the pages on stderr.
+
+```sh
+radian docs
+radian docs cli
+```
+
+## `radian attach`
+
+`radian attach [SESSION_ID] [--follow] [--session-dir <DIR>]` views a session read-only.
+No input reaches the session and nothing is written.
+A bare `radian attach` opens the workspace session picker.
+`--follow` keeps reading new committed events until `q`, Esc, or Ctrl-C.
+Exit `0` for the view, `2` for an unknown id or no terminal, `1` when rendering fails.
+See `sessions` for ids, resume, and export.
+
+```sh
+radian attach demo --follow
+```
+
+## `radian serve` and `radian mcp`
+
+Both names are placeholders in this build.
+Each exits `2` without serving anything.
+
+## Exit codes
+
+Both hosts share these codes.
+`radian exec --list | head` and every print-and-exit mode still exit `0` on a broken pipe.
+
+| Code | Meaning |
+|---|---|
+| `0` | Success: the turn completed, the view printed, the draft saved. |
+| `1` | The run failed: a model or turn error, a failed sandbox probe target, a missing record, a refused write. |
+| `2` | Bad use or refused setup: clap usage errors, a bad configuration, an unknown keybinding, a startup refusal, a reserved subcommand, an unknown `docs` topic or footer preset, a bad `memory` invocation. |
+| `3` | The budget ran out: `BudgetExceeded` or a exceeded deadline. |
+| `4` | The answer is unfinished: `Incomplete` or `Refused`. |
+| `101` | The app panicked. A crash log lands under `~/.radian/cache/diagnostics`. |
+| `130` | Requested cancellation, or a forced exit after a second Ctrl-C. |
+| `143` | SIGTERM (`128 + 15`). A signal-driven exit otherwise follows the shell rule `128 + signal`. |
