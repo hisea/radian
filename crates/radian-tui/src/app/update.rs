@@ -37,7 +37,15 @@ impl App {
             }
             // A `/loop --every` wait ended while idle: the turn-end decision re-checks
             // everything (a running turn ignores the deadline; its end decides).
-            Input::LoopDeadline => self.loop_deadline_fired(),
+            Input::LoopDeadline => {
+                // A `/loop --every` wait or a goal `wait` ended while idle: each
+                // decision re-checks everything (a running turn ignores the deadline).
+                let mut result = self.loop_deadline_fired();
+                let goal_result = self.goal_deadline_fired();
+                result.dirty |= goal_result.dirty;
+                result.effects.extend(goal_result.effects);
+                result
+            }
             Input::Action(action) => {
                 // A completion menu is a selectable list: while it is up,
                 // Up/Down (and Ctrl-N) move the highlight and wrap, Enter and Tab accept the
@@ -157,6 +165,7 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            Input::GoalDone { apply, result } => self.goal_applied(apply, result),
             Input::WakeBudgetNotice(text) => self.wake_budget_notice(text),
             Input::TrustMove(delta) => {
                 if let Some(Modal::Trust(wizard)) =

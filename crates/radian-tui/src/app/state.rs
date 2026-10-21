@@ -350,6 +350,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::ModelChecked { .. }
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
+        | Input::GoalDone { .. }
         | Input::WakeBudgetNotice(_)
         | Input::TrustResolved(_)
         | Input::AccessApplied { .. }

@@ -36,6 +36,51 @@ fn text_reply(text: &str) -> Reply {
 }
 
 async fn open(label: &str, base_url: &str, scratch: &Path) -> Arc<LocalSession> {
+    open_inner(label, base_url, scratch, false).await
+}
+
+/// Opens with a paused goal already in the journal: `GoalSet` then `GoalPaused`, so
+/// the fold parks it before the first turn and the `<goal>` block rides every request.
+async fn open_with_paused_goal(
+    label: &str,
+    base_url: &str,
+    scratch: &Path,
+    objective: &str,
+) -> Arc<LocalSession> {
+    let workspace = scratch.join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_dir = scratch.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let journal = radian_session::SessionJournal::create(
+        session_dir.join(format!("{label}.jsonl")),
+        label,
+        radian_session::SessionCreatedData::new(workspace.to_str().unwrap(), json!({})),
+    )
+    .expect("create the session file");
+    let budget = radian_session::GoalState::default_budget();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::GoalSet {
+            objective: objective.to_owned(),
+            max_turns: budget.max_turns,
+            max_duration_secs: budget.max_duration_secs,
+            max_tokens: budget.max_tokens,
+        })
+        .await
+        .expect("seed the goal");
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::GoalPaused {})
+        .await
+        .expect("pause the goal");
+    drop(journal);
+    open_inner(label, base_url, scratch, true).await
+}
+
+async fn open_inner(
+    label: &str,
+    base_url: &str,
+    scratch: &Path,
+    resume: bool,
+) -> Arc<LocalSession> {
     let workspace = scratch.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
     let session_dir = scratch.join("sessions");
@@ -105,7 +150,7 @@ async fn open(label: &str, base_url: &str, scratch: &Path) -> Arc<LocalSession> 
             memory_injection: radian_host::memory::InjectionConfig::default(),
             hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
-            resume: false,
+            resume,
             config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
             turn_options: TurnOptions::default(),
             turn_timeout: None,
@@ -305,6 +350,89 @@ async fn the_side_body_is_the_next_formal_body_with_the_question_swapped_in() {
     assert_eq!(next_messages.last().unwrap()["content"], "second");
     // Everything besides the messages is identical: system prompt, tools,
     // settings, model.
+    let mut next_rest = next_formal.clone();
+    let mut body_rest = body.clone();
+    next_rest["messages"] = Value::Null;
+    body_rest["messages"] = Value::Null;
+    assert_eq!(body_rest, next_rest, "system/tools/settings are identical");
+
+    session.stop();
+    let _ = session.join().await;
+    drop(server);
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// A paused goal rides both bodies: with `GoalSet` + `GoalPaused` in the journal the
+/// `<goal>` block is in the formal system prompt (the hook) and in the side shape, so
+/// they stay byte-identical. Paused, not active: an active goal would keep sending
+/// continuations, so the request counts would never settle.
+#[tokio::test]
+async fn the_side_body_matches_the_formal_body_with_a_paused_goal() {
+    let server = MockServer::start(vec![
+        text_reply("formal-answer"),
+        text_reply("side-answer"),
+        text_reply("formal-two"),
+    ])
+    .await;
+    let scratch = scratch("byte-equal-goal");
+    let session =
+        open_with_paused_goal("byte-equal-goal", &server.base_url, &scratch, "SIDE-GOAL-9").await;
+
+    send(&session, "hello").await;
+    wait_requests(&server, 1).await;
+    wait_quiescent(&session, "formal-answer").await;
+    let before = journal_bytes(&session);
+
+    let (outcome, deltas) = side(&session, "what file was that").await;
+    let btw::SideOutcome::Done {
+        text,
+        tool_calls_dropped,
+        ..
+    } = outcome
+    else {
+        panic!("the side request is Done, got {outcome:?}");
+    };
+    assert_eq!(text, "side-answer");
+    assert_eq!(
+        deltas, "side-answer",
+        "the deltas streamed the whole answer"
+    );
+    assert!(!tool_calls_dropped);
+    assert_eq!(
+        journal_bytes(&session),
+        before,
+        "no transcript or usage record was journaled"
+    );
+
+    send(&session, "second").await;
+    wait_requests(&server, 3).await;
+    wait_quiescent(&session, "formal-two").await;
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3, "two formal calls, one side call");
+    let next_formal = requests[2].json();
+    let body = requests[1].json();
+    let next_messages = next_formal["messages"].as_array().unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len() + 1,
+        next_messages.len() + 1,
+        "both carry the same history plus their own last message: {body} vs {next_formal}"
+    );
+    assert_eq!(
+        &messages[..messages.len() - 1],
+        &next_messages[..next_messages.len() - 1],
+        "the prefix is byte-identical"
+    );
+    // The `<goal>` block rides both bodies: the formal hook appended it and the side
+    // shape rebuilt it in hook order.
+    for (name, value) in [("side", &body), ("formal", &next_formal)] {
+        let text = serde_json::to_string(value).unwrap();
+        assert!(
+            text.contains("<goal>") && text.contains("SIDE-GOAL-9"),
+            "the {name} body must carry the goal block"
+        );
+    }
     let mut next_rest = next_formal.clone();
     let mut body_rest = body.clone();
     next_rest["messages"] = Value::Null;

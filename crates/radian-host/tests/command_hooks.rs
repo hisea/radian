@@ -119,8 +119,11 @@ fn production_chain(
         Arc::new(|_message: &str| {}),
     ));
     let skills = Arc::new(radian_host::SkillsHooks::new(&[]));
+    // ADR 0047: the goal block rides between skills and the session facts; empty here, so
+    // it writes nothing and the permission/command order this test pins is unaffected.
+    let goal = Arc::new(radian_host::GoalHooks::new(radian_host::fresh_share()));
     let facts = Arc::new(radian_host::prompt::SessionFactsHooks::new(ws, "m-1", None));
-    session_hooks(role, permissions, commands, memory, skills, facts)
+    session_hooks(role, permissions, commands, memory, skills, goal, facts)
 }
 
 /// A denied call never reaches the command hooks: the hook's marker stays absent and the
