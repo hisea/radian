@@ -1,7 +1,7 @@
-# 轮末「只说不做」：提示词与通知文案（A）+ 内建续跑（B）
+# 轮末「只说不做」：提示词与通知文案（A）
 
-- 状态：decided（A、B 都可派发，两个独立切片；B 不等 A 的度量）
-- 涉及 ADR：0036（角色规则清单；完成通知作为消息追加）、0037（§2 自动转后台删除、前台缺省超时；决定 5 完成通知的形状、唤醒速率闸门）、0008（`[shell] auto_background_secs` 从 schema 删除）、0045 §3（`Stop` 续跑路径）、0011（`followup` lane、L2 来源、L5 空闲唤醒）、0021（memory 注入范围）、0034（herdr `blocked`）、0005（宿主消息 meta）、0017（只有 `Completed` 续跑）
+- 状态：decided（可派发）
+- 涉及 ADR：0036（角色规则清单；完成通知作为消息追加）、0037（§2 自动转后台删除、前台缺省超时；决定 5 完成通知的形状、唤醒速率闸门）、0008（`[shell] auto_background_secs` 从 schema 删除）、0021（memory 注入范围）
 - 来源：`docs/research/2026-10-21-intent-stop.md`（§3.4 提示词对比、§4 频率、§5 选项、§6 建议）
 
 ## 背景
@@ -32,25 +32,3 @@ radian 独有、且与停顿共现的，是「回合中途结束、等通知唤�
 - `shell` 单测：前台命令超过旧阈值不再转后台，到前台缺省超时（300 s）按超时结束，超时文本含两条路；`background: true` 照旧；`auto_background_secs` 出现在配置里时警告并忽略；config fixture 通过。
 - `job_notify` 单测：通知末尾是那句「继续任务」；尾部为空时三行之间都有换行。
 - 同一任务集 A/B/C 各 3 次：人工 `Continue` 次数（ab6 metrics 已有这列）与「纯文本中途结束」次数，改前改后对比。
-
-## B. 内建续跑（decided）
-
-在 ADR 0045 §3 的 `Stop` 续跑路径上内建一条验证器，和用户的 `Stop` hook 同一条链、同一闸门、同一降级可见：
-
-1. **触发**：回合以 `RunStatus::Completed` 结束，且最后一条助手消息命中保守规则——纯文本、无工具调用；全文不超过约 200 字符；句末无问号，也没有「要不要 / 说一声 / 告诉我 / 需要我」一类问人的句式；最后一句以动名词、`Now`/`Next`/`Then`/`Let me`/`I'll`/`I will`/`Time to`，或「接下来 / 现在 / 然后 / 下一步」开头；动作主体不是 `you`/`p1`/`lead`/「你」；`Nothing` 不算动名词；结束时没有后台 job 在跑。规则只做粗筛（本机数据：真停顿 12/12 命中，误报集中在「Next: 由别人决定」「Nothing further」「现在重启你的 radian 就能试」三类，加上这些过滤后剩 1–2 条）。
-2. **动作**：发一条 `System` `followup`（ADR 0011 L2，`source = System`），meta `continuation = "intent-stop"`（ADR 0005），正文固定：`Your last message announced a next step but made no tool call. If the task is not done, continue now. If it is done, or you need the user, say so in one line.` 判断权交给模型：误报的代价是一次短调用加一行 transcript，不会做计划外的事。
-3. **上限**：每回合最多一次；连续两次续跑后仍以命中的纯文本结束，第三次不再续，herdr 报 `blocked`（ADR 0034 H2 新增一类 `blocked` 消息，只给类别不给正文），TUI 一行通知，journal 里能看出。用户消息到来即清零（与唤醒闸门同款）。
-4. **闸门与可见**：计入 ADR 0037 决定 5 的唤醒速率闸门；到顶时按现有方式降级为 `inject` 并标 `degraded`，三路可见不变。
-5. **不触发**：用户 Esc 取消的回合（非 `Completed`，已由 ADR 0045 §3 保证）；`/loop` 或 `/goal` 开着（它们自己轮末重投）；`exec -p` 与 TUI 行为相同。
-6. **可替换**：`Stop` hook 的 stdin 多带 `last_assistant_message`（Claude 的字段名），用户能用自己的脚本做检测；配置项 `[hooks] intent_stop = true` 关掉内建规则（名字待定，ADR 0008 schema 与 fixture 同步）。
-7. 涉及 ADR：0045（内建验证器与 stdin 字段）、0011、0037 决定 5、0034、0005、0008。
-
-### B 的验收
-
-- mock provider：一回合以 `Now the docs-only ADR updates.` 纯文本结束 → 恰好一条 `source = System`、meta `continuation = "intent-stop"` 的 `followup` 入队并开启下一轮；以 `Done.`、以问句、以 `Waiting on the completion notice.`（且有 job 在跑）、以 `Next: the reviewer decides.` 结束 → 不入队。
-- 规则的单元测试用一份固定样本：本机普查里标出的 23 条与 20 条未标出的最后一句，断言标签。
-- 连续停顿两次后第三次不续，herdr 纯函数输出 `blocked`，TUI 收到一行通知；用户消息后计数清零。
-- 唤醒闸门计数包含这类续跑；到顶时降级为 `inject` 并标 `degraded`。
-- `Stop` hook stdin 含 `last_assistant_message`；配置项关掉后不续跑。
-- 变异：去掉规则、去掉每回合一次、去掉连续两次上限、让所有终态都续跑、去掉闸门计数，各有一条点名的测试失败。
-- 线上指标：A/B/C 同任务重跑，人工 `Continue` 次数归零；误续跑次数（续跑后模型一行说已完成）单独计数。
