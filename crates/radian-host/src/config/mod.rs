@@ -1510,10 +1510,7 @@ theme = "light"
         ] {
             let config = parse_str(text).unwrap();
             assert!(
-                config
-                    .skipped
-                    .iter()
-                    .any(|key| key.starts_with("shell.")),
+                config.skipped.iter().any(|key| key.starts_with("shell.")),
                 "{text}: {:?}",
                 config.skipped
             );

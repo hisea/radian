@@ -226,8 +226,7 @@ mod tests {
         let jobs_dir = root.join("sessions/sid.jobs");
 
         let slot = SandboxSlot::from_option(Some(full_access(&ws)));
-        let (_coding, jobs) =
-            build_coding_tools(Some(&ws), slot, &jobs_dir, false).expect("tools");
+        let (_coding, jobs) = build_coding_tools(Some(&ws), slot, &jobs_dir, false).expect("tools");
         let jobs = jobs.expect("a registry");
 
         assert_eq!(

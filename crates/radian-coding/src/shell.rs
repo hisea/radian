@@ -212,7 +212,6 @@ pub async fn run_user_bash(
     )
     .await
     .map_err(|failure| failure.message)?;
-    let outcome = outcome;
     Ok(UserBash {
         stdout: outcome.stdout.render_for(outcome.succeeded()),
         stderr: outcome.stderr.render_for(outcome.succeeded()),
@@ -332,8 +331,8 @@ pub(crate) async fn run(
     // The exit status is known only now, so the view (success 1/4:3/4, failure
     // 1/8:7/8) is picked here; the capture kept the maximum of both.
     let success = outcome.succeeded();
-    let truncated = outcome.stdout.is_truncated_for(success)
-        || outcome.stderr.is_truncated_for(success);
+    let truncated =
+        outcome.stdout.is_truncated_for(success) || outcome.stderr.is_truncated_for(success);
     let retained = match (foreground, &retention) {
         (Some(foreground), Some(retention)) if truncated => {
             let state = if outcome.timed_out {
@@ -553,17 +552,10 @@ async fn run_outside_sandbox(
     let (deadline, clamped) = clamp_timeout(args.timeout_secs, limits);
     let (output_cap, output_clamped) = clamp_output(args.max_output_bytes, limits);
     let mut process = unsandboxed_command(sandbox, cwd, &args.command, harden_git)?;
-    let outcome = execute_built(
-        &mut process,
-        deadline,
-        output_cap,
-        &cx.cancellation,
-        None,
-    )
-    .await?;
+    let outcome = execute_built(&mut process, deadline, output_cap, &cx.cancellation, None).await?;
     let success = outcome.succeeded();
-    let truncated = outcome.stdout.is_truncated_for(success)
-        || outcome.stderr.is_truncated_for(success);
+    let truncated =
+        outcome.stdout.is_truncated_for(success) || outcome.stderr.is_truncated_for(success);
     // An outside call is never retained: the foreground file (if any) is dropped.
     let _ = truncated;
     Ok(report(

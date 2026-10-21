@@ -1028,7 +1028,10 @@ fn the_default_shell_timeout_is_300_seconds() {
         Limits::default().default_shell_timeout,
         Duration::from_secs(300)
     );
-    assert_eq!(Limits::default().max_shell_timeout, Duration::from_secs(600));
+    assert_eq!(
+        Limits::default().max_shell_timeout,
+        Duration::from_secs(600)
+    );
 }
 
 /// When a foreground call hits its timeout, the result names both re-run options: a

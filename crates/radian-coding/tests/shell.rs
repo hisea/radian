@@ -876,9 +876,13 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
     );
     let background = &spec.input_schema["properties"]["background"]["description"];
     assert!(
-        background.as_str().is_some_and(|text| text.contains("no deadline")
-            && text.contains("Use for servers, watchers and commands expected to run longer than 600 s.")
-            && text.contains("Run tests and builds in the foreground with timeout_secs.")),
+        background
+            .as_str()
+            .is_some_and(|text| text.contains("no deadline")
+                && text.contains(
+                    "Use for servers, watchers and commands expected to run longer than 600 s."
+                )
+                && text.contains("Run tests and builds in the foreground with timeout_secs.")),
         "the `background` field must say a background command has no deadline and when to use it: {background}"
     );
 }
