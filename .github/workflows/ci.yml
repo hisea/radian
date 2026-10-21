@@ -58,9 +58,9 @@ jobs:
           cargo build -p agent-extensions --bin mcp-fixture --locked
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo clippy -p agent-core --all-targets --features journal-selfcheck -- -D warnings
+      - run: cargo clippy -p radian-core --all-targets --features journal-selfcheck -- -D warnings
       - run: cargo test --workspace --locked --no-fail-fast
-      - run: cargo test -p agent-core --locked --features journal-selfcheck
+      - run: cargo test -p radian-core --locked --features journal-selfcheck
       - run: bash docs/schema/check-fixtures.sh
       - run: bash docs/schema/check-config-fixtures.sh
       - name: provider contract suites
