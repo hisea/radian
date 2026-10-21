@@ -30,6 +30,8 @@ def rows(m: re.Match) -> str:
 
 
 figure = re.sub(r'(<pre class="frame-\w+">)(.*?)(</pre>)', rows, figure, flags=re.S)
+# the rows above no longer fill 74 lines, so the bar shows only the width
+figure = figure.replace("<span>120 × 74</span>", "<span>120</span>")
 
 BANNER = """<!doctype html><html data-theme="{theme}"><head><meta charset="utf-8">{fonts}
 <style>{style}
