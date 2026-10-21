@@ -27,12 +27,13 @@ Set `model.provider`, `model.base_url`, and `model.model` in the config file for
 
 Pass `--max-tokens <n>` for Anthropic requests.
 The default is 16384.
-This flag has no effect on `openai-compatible` requests.
-Pass `--thinking <mode>` for Anthropic extended thinking.
-Use `off` to turn it off.
-Use `adaptive` to let the provider decide.
-Use `enabled:<budget>` to set a numeric budget.
-This flag has no effect on `openai-compatible` requests.
+This flag is refused for `openai-compatible` requests.
+Pass `--thinking <level>` to set the thinking level.
+Use one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+Omit it to use `medium`.
+Radian clamps the level to what the route supports.
+The older `adaptive` and `enabled:<budget>` spellings still work with a warning.
+On `openai-compatible` routes the level becomes the `reasoning_effort` request value.
 Use `/thinking <level>` inside the full screen interface to set the level.
 
 Pass `--header NAME=VALUE` to add one request header.
@@ -55,3 +56,7 @@ Omit it to derive the name from the base URL host.
 Define named endpoints under `[providers.<name>]`.
 Set `kind` and `base_url` for each name.
 Set `model.provider` to the name to use it.
+
+Read `cli` for every flag and exit code.
+Read `configuration` for every file key.
+Read `environment` for the key variables and lookup order.

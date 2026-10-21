@@ -1699,4 +1699,305 @@ future_option = "alpha"
             vec![("send".to_string(), vec!["ctrl-s".to_string()])]
         );
     }
+
+    /// Every configuration key the parser accepts appears in `docs/user/configuration.md`.
+    /// Mutation: delete one key row from configuration.md → this fails naming it.
+    /// Why this cannot drift: the list below is fed through the real reader (a renamed or
+    /// removed key fails the parse or lands in `skipped`), and every
+    /// `docs/schema/config/` fixture the reader accepts must resolve to the same list — a
+    /// new accepted key needs a fixture by repo convention, so it fails here until the
+    /// list and the page both name it. Fixture keys the reader ignores land in
+    /// `skipped` instead and are exempt, exactly like unknown user keys.
+    #[test]
+    fn every_accepted_key_appears_in_configuration_md() {
+        /// Full key paths, each one a literal string `configuration.md` must contain.
+        const KEYS: &[&str] = &[
+            "schema_version",
+            "model.provider",
+            "model.base_url",
+            "model.model",
+            "model.headers",
+            "model.context_window",
+            "model.retries",
+            "model.smol",
+            "model.smol.provider",
+            "model.smol.model",
+            "model.include_usage",
+            "permissions.profile",
+            "permissions.approval",
+            "sandbox.allow_unix_sockets",
+            "sandbox.allow_env",
+            "integrations.herdr",
+            "control.enabled",
+            "compaction.auto",
+            "compaction.thinking",
+            "hooks.PreToolUse",
+            "hooks.PostToolUse",
+            "hooks.Stop",
+            "hooks.intent_stop",
+            "skills.extra_paths",
+            "skills.builtin",
+            "skills.disabled",
+            "memory.injection.additions",
+            "memory.injection.addition_budget",
+            "shell",
+            "tui.theme",
+            "tui.colors",
+            "tui.keybindings",
+            "tui.mouse",
+            "tui.input_style",
+            "tui.clipboard",
+            "tui.bell",
+            "tui.tips",
+            "tui.banner",
+            "tui.brand",
+            "tui.spinner",
+            "tui.usage_period_secs",
+            "tui.display.reasoning",
+            "tui.display.tool_output",
+            "tui.display.tool_preview_lines",
+            "tui.display.mermaid",
+            "tui.display.highlight",
+            "tui.footer.preset",
+            "tui.footer.separator",
+            "tui.footer.separator_style",
+            "tui.footer.glyphs",
+            "tui.footer.context_line",
+            "tui.footer.transparent",
+            "tui.footer.items",
+            "tui.footer.rows",
+            "tui.widgets.above_input",
+            "tui.widgets.below_input",
+            "mcp.servers",
+        ];
+        /// Dynamic families: the doc names the section, fixture leaves may live under it.
+        const SECTIONS: &[&str] = &[
+            "providers",
+            "model.headers",
+            "model.smol",
+            "tui.colors",
+            "tui.keybindings",
+            "tui.display",
+            "tui.footer",
+            "tui.footer.items",
+            "tui.footer.rows",
+            "tui.widgets",
+            "hooks.PreToolUse",
+            "hooks.PostToolUse",
+            "hooks.Stop",
+            "mcp.mcpServers",
+            "memory.injection",
+            "shell",
+        ];
+        fn covered(path: &str) -> bool {
+            if KEYS.contains(&path) {
+                return true;
+            }
+            if SECTIONS
+                .iter()
+                .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}.")))
+            {
+                return true;
+            }
+            let mut rest = path;
+            while let Some((parent, _)) = rest.rsplit_once('.') {
+                if KEYS.contains(&parent) || SECTIONS.contains(&parent) {
+                    return true;
+                }
+                rest = parent;
+            }
+            false
+        }
+
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let doc = std::fs::read_to_string(manifest.join("../../docs/user/configuration.md"))
+            .expect("configuration.md exists");
+        for key in KEYS.iter().chain(SECTIONS.iter()) {
+            assert!(
+                doc.contains(key),
+                "{key} is missing from docs/user/configuration.md"
+            );
+        }
+
+        // The list parses through the real reader with nothing skipped.
+        let path = std::path::Path::new("/tmp/test/config.toml");
+        let parsed = parse(
+            path,
+            concat!(
+                "schema_version = 1\n",
+                "[model]\n",
+                "provider = \"office\"\n",
+                "base_url = \"https://models.example.test/v1\"\n",
+                "model = \"m-1\"\n",
+                "retries = 3\n",
+                "context_window = 100\n",
+                "[model.headers]\n",
+                "x-tenant = \"team\"\n",
+                "[model.smol]\n",
+                "provider = \"openai-compatible\"\n",
+                "model = \"m-1\"\n",
+                "[providers.office]\n",
+                "kind = \"openai-compatible\"\n",
+                "base_url = \"https://models.example.test/v1\"\n",
+                "reasoning_replay = \"reasoning_content\"\n",
+                "[permissions]\n",
+                "profile = \"workspace\"\n",
+                "approval = \"on-ask\"\n",
+                "[sandbox]\n",
+                "allow_unix_sockets = [\"/tmp/x.sock\"]\n",
+                "allow_env = [\"MY_NAME\"]\n",
+                "[integrations]\n",
+                "herdr = false\n",
+                "[control]\n",
+                "enabled = false\n",
+                "[compaction]\n",
+                "auto = false\n",
+                "thinking = \"low\"\n",
+                "[[hooks.PreToolUse]]\n",
+                "matcher = \"shell\"\n",
+                "[[hooks.PreToolUse.hooks]]\n",
+                "type = \"command\"\n",
+                "command = \"echo hi\"\n",
+                "timeout = 10\n",
+                "[[hooks.PostToolUse]]\n",
+                "[[hooks.PostToolUse.hooks]]\n",
+                "type = \"command\"\n",
+                "command = \"echo hi\"\n",
+                "[[hooks.Stop]]\n",
+                "[[hooks.Stop.hooks]]\n",
+                "type = \"command\"\n",
+                "command = \"echo hi\"\n",
+                "[hooks]\n",
+                "intent_stop = false\n",
+                "[skills]\n",
+                "builtin = false\n",
+                "disabled = [\"review\"]\n",
+                "extra_paths = [\"skills\"]\n",
+                "[memory.injection]\n",
+                "additions = false\n",
+                "addition_budget = 10\n",
+                "[shell]\n",
+                "[tui]\n",
+                "theme = \"mono\"\n",
+                "mouse = false\n",
+                "input_style = \"box\"\n",
+                "clipboard = \"off\"\n",
+                "bell = \"all\"\n",
+                "tips = false\n",
+                "banner = false\n",
+                "brand = \"R\"\n",
+                "spinner = \"arc\"\n",
+                "usage_period_secs = 60\n",
+                "[tui.colors]\n",
+                "user = \"#ffffff\"\n",
+                "[tui.keybindings]\n",
+                "send = [\"ctrl-s\"]\n",
+                "[tui.display]\n",
+                "reasoning = \"hidden\"\n",
+                "tool_output = \"expanded\"\n",
+                "tool_preview_lines = 3\n",
+                "mermaid = false\n",
+                "highlight = false\n",
+                "[tui.footer]\n",
+                "preset = \"pi\"\n",
+                "separator = \"|\"\n",
+                "separator_style = \"dim\"\n",
+                "glyphs = \"ascii\"\n",
+                "context_line = \"percentage\"\n",
+                "transparent = true\n",
+                "[tui.footer.items.status]\n",
+                "symbol = \"S\"\n",
+                "format = \"x\"\n",
+                "disabled = true\n",
+                "priority = 1\n",
+                "width = 20\n",
+                "[[tui.footer.rows]]\n",
+                "left = [\"model\"]\n",
+                "right = [\"usage\"]\n",
+                "separator = \"|\"\n",
+                "position = \"footer\"\n",
+                "[tui.widgets]\n",
+                "above_input = [\"status\"]\n",
+                "below_input = [\"usage\"]\n",
+                "[[mcp.servers]]\n",
+                "id = \"s\"\n",
+                "command = \"/bin/true\"\n",
+            ),
+        )
+        .expect("the key list parses");
+        assert!(
+            parsed.skipped.is_empty(),
+            "the key list must leave nothing skipped: {:?}",
+            parsed.skipped
+        );
+
+        // Every fixture the reader accepts resolves to the same list.
+        fn leaves(value: &Value, path: String, out: &mut Vec<String>) {
+            match value {
+                Value::Table(table) => {
+                    let sensitive = path.rsplit('.').next().is_some_and(|last| {
+                        SENSITIVE_KEYS.contains(&last.to_ascii_lowercase().as_str())
+                    });
+                    if table.len() == 2
+                        && table.contains_key("from")
+                        && table.contains_key("name")
+                        && sensitive
+                    {
+                        out.push(path);
+                        return;
+                    }
+                    for (key, value) in table {
+                        let here = if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{path}.{key}")
+                        };
+                        leaves(value, here, out);
+                    }
+                }
+                Value::Array(items) => {
+                    if items.iter().all(|item| item.is_table()) {
+                        for item in items {
+                            leaves(item, path.clone(), out);
+                        }
+                    } else {
+                        out.push(path);
+                    }
+                }
+                _ => out.push(path),
+            }
+        }
+        let dir = manifest.join("../../docs/schema/config");
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect("config fixtures exist")
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("toml"))
+            .collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        assert!(!entries.is_empty(), "no fixtures found in {dir:?}");
+        for entry in entries {
+            let fixture = entry.path();
+            let text = std::fs::read_to_string(&fixture).expect("fixture reads");
+            let Ok(parsed) = parse(&fixture, &text) else {
+                continue; // a reject-fixture: nothing to document.
+            };
+            let value: Value = toml::from_str(&text).expect("fixture parses as TOML");
+            let mut paths = Vec::new();
+            leaves(&value, String::new(), &mut paths);
+            for leaf in paths {
+                if leaf == "schema_version" {
+                    continue;
+                }
+                let ignored = parsed
+                    .skipped
+                    .iter()
+                    .any(|key| key == &leaf || leaf.starts_with(&format!("{key}.")));
+                assert!(
+                    covered(&leaf) || ignored,
+                    "{}: {leaf} is neither documented nor skipped",
+                    fixture.display()
+                );
+            }
+        }
+    }
 }

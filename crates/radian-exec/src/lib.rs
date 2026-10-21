@@ -66,7 +66,7 @@ pub struct Cli {
     #[arg(long)]
     model: Option<String>,
 
-    /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
+    /// Provider wire protocol: `openai-compatible` (the default) or `anthropic`.
     #[arg(long, value_name = "PROVIDER")]
     provider: Option<String>,
 
@@ -76,17 +76,18 @@ pub struct Cli {
     base_url: Option<String>,
 
     /// The configuration file. Overrides `RADIAN_CONFIG` and
-    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
+    /// `~/.radian/config/config.toml`. Read-only: radian never writes it.
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
+    /// `max_tokens` for anthropic (the Messages API requires it). Refused for
     /// openai-compatible. Defaults to 16384.
     #[arg(long, value_name = "N")]
     max_tokens: Option<u32>,
 
-    /// Extended thinking for anthropic: `off` (default), `adaptive`, or `enabled:<budget>`.
-    /// Ignored for openai-compatible.
+    /// Thinking level: one of `off|minimal|low|medium|high|xhigh|max` (default `medium`),
+    /// clamped to what the route supports. The legacy `adaptive` and `enabled:<budget>`
+    /// spellings still work with a warning.
     #[arg(long, value_name = "MODE")]
     thinking: Option<String>,
 
@@ -244,12 +245,6 @@ pub struct Cli {
     /// (on for `api.openai.com` only, off elsewhere); `--include-usage=false` turns it off.
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     include_usage: Option<bool>,
-
-    /// Allow a simple shell command prefix without asking (repeatable), e.g.
-    /// `--allow-shell-command "git status"`. Only a simple command matches; a compound
-    /// command is allowed only when every segment is allowed, otherwise it still asks
-    /// (`git status; rm -x` asks). The `workspace` tier has no allow
-    /// rule for shell by default; the `full` tier allows shell without asking.
 
     /// The per-turn model call limit. The default is shared with the TUI and named in
     /// `--help`; radian-core's own default is a lower fuse for a host that sets no limit.
@@ -472,5 +467,42 @@ mod tests {
         for page in &pages {
             assert!(!page.contains("ADR"), "help names an ADR:\n{page}");
         }
+    }
+
+    /// Every long option of every `radian exec` subcommand appears in `docs/user/cli.md`.
+    /// Mutation: delete one `--flag` row from cli.md → this fails naming it.
+    /// Why the clap tree is the source that cannot drift: it is the parser itself, so a
+    /// renamed or added flag fails here without any list to update. Hidden flags are test
+    /// seams, not user surface, so they are not required.
+    #[test]
+    fn every_long_option_appears_in_cli_md() {
+        use clap::CommandFactory;
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cli_md = std::fs::read_to_string(manifest.join("../../docs/user/cli.md"))
+            .expect("cli.md exists");
+        fn collect(command: &clap::Command, out: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if arg.is_hide_set() {
+                    continue;
+                }
+                if let Some(long) = arg.get_long() {
+                    out.push(format!("--{long}"));
+                }
+            }
+            for sub in command.get_subcommands() {
+                collect(sub, out);
+            }
+        }
+        let mut options = Vec::new();
+        collect(&Cli::command(), &mut options);
+        assert!(!options.is_empty(), "the tree has options");
+        let missing: Vec<_> = options
+            .iter()
+            .filter(|option| !cli_md.contains(option.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these long options are missing from docs/user/cli.md: {missing:?}"
+        );
     }
 }
