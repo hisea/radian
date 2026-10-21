@@ -110,7 +110,7 @@ pi 有而 radian 没有的内容里，没有一条和回合有关。pi 不停顿
 
 三点启发：
 
-1. **只有 radian 缺省自动转后台。** 别家都要模型每次显式选 background，并把它定位成 dev server、长 build。radian 任何没写 `timeout_secs` 的命令过 60 s 就转后台，等于每跑一次 `cargo test` 就把模型推进「结束回合等通知」模式；opencode 的模型给自己 300–600 s 超时同步等完，pi 等了 288 s。结论：取消自动转后台（ADR 0037 §2），后台只留显式 `background: true`；前台缺省超时另定（见 §6）。
+1. **只有 radian 缺省自动转后台。** 别家都要模型每次显式选 background，并把它定位成 dev server、长 build。radian 任何没写 `timeout_secs` 的命令过 60 s 就转后台，等于每跑一次 `cargo test` 就把模型推进「结束回合等通知」模式；opencode 的模型给自己 300–600 s 超时同步等完，pi 等了 288 s。结论：取消自动转后台（ADR 0037 §2），后台只留显式 `background: true`，并限定为服务、监视器和超过 600 s 的命令；前台缺省超时 300 s（§6）。
 2. **opencode 的措辞把「结束回合」写成最后一招**（`Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically.`），而且放在**转后台时的返回文本**里，不在系统提示里：模型只在真的进入等待时才看到。radian 的角色句把它写成三个平级理由之一，且每轮都在。
 3. **通知不要像用户消息。** omp 用 `custom` 角色加 `<system-notice>… Resume your work using the result below.`，Claude Code 用系统提醒。radian 的通知是 user 角色，后面只跟 `Read its output with job.`。角色改不了的话，文本至少改成 `Resume the task using this result. Do not reply to this notice.`。
 
@@ -197,7 +197,7 @@ A（提示词与通知文案）和 B（内建续跑）都做，两个独立切�
    - 完成通知末尾加 `Continue the task; do not end the turn only to report this result.`，修掉尾部为空时少换行的 bug（`job_notify.rs` 的 `completion_message`）。
    - 查 memory 注入：lead 会话的记忆为什么进了 worker 会话（同一 project scope），是否该按角色或会话隔离。
    - `shell` 转后台时的返回文本借 opencode 的那段（§3.5）：先做不依赖结果的事，实在没事再结束回复，会被自动唤醒；通知文本以「Resume the task using this result. Do not reply to this notice.」收尾。
-   - 取消自动转后台（ADR 0037 §2）：七家里只有 radian 缺省这样做，它是把模型推进「结束回合等通知」模式的独有推力；后台只留显式 `background: true`。连带要定前台缺省超时（今天与阈值绑在 60 s；建议 300 s，上限 600 s 不变）。
+   - 取消自动转后台（ADR 0037 §2）：七家里只有 radian 缺省这样做，它是把模型推进「结束回合等通知」模式的独有推力；后台只留显式 `background: true`。前台缺省超时 300 s、上限 600 s 不变；`background` 参数限定为服务、监视器和预计超过 600 s 的命令，测试与构建在前台跑；`job` 描述去掉 `Prefer the notice over wait`。
    - 角色正文的内容清单写在 ADR 0036 里，落地时同一分支的 docs-only commit 改 ADR。
 2. **量**：同一任务集 A/B/C 各 3 次，看人工 `Continue` 次数和「无 `waiting for job` 标记的纯文本结束」次数。
 3. **B，内建续跑**（backlog B 部分）：`Stop` 路径上的保守规则粗筛 + 一条固定措辞的 `System` 续跑，让模型自己判断是继续还是一行说明已完成；每回合一次、连续两次后 herdr `blocked`；计入唤醒闸门；`Stop` stdin 加 `last_assistant_message`，配置可关。
