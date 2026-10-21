@@ -127,7 +127,18 @@ pub(crate) async fn run(
     // regular-file / hard-link checks run on that fd. The same fd is read and later written;
     // nothing is re-opened by path.
     let opened = root.open_write(&args.path, false)?;
-    let mut file = opened.file;
+    let mut file = match opened.source {
+        crate::workspace::OpenedSource::File(file) => file,
+        crate::workspace::OpenedSource::Embedded(_) => {
+            return Err(crate::fail(
+                crate::CODE_OUTSIDE,
+                format!(
+                    "`{}` is in the bundled manual (`radian://docs/`), which is read-only",
+                    args.path
+                ),
+            ));
+        }
+    };
     if opened.stat.size as usize > limits.max_patch_bytes {
         return Err(fail(
             "patch_limit_exceeded",

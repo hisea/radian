@@ -334,7 +334,20 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                     {
                         let display = display_path(prefix.as_deref(), &relative);
                         if seen.insert(display.clone()) {
-                            files.push((opened.file, display));
+                            match opened.source {
+                                crate::workspace::OpenedSource::File(file) => {
+                                    files.push((file, display));
+                                }
+                                crate::workspace::OpenedSource::Embedded(_) => {
+                                    return Err(crate::fail(
+                                        crate::CODE_OUTSIDE,
+                                        format!(
+                                            "`{segment}` is a bundled manual page; `grep` and `glob` do not search it, \
+                                             use `read radian://docs/<page>.md`"
+                                        ),
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
