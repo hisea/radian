@@ -1,6 +1,6 @@
 //! `ModelRequest` -> Anthropic Messages request body. Pure, so it is tested without a server.
 
-use agent_core::{
+use radian_core::{
     ContentPart, Message, ModelError, ModelRequest, OpaqueJson, ToolCall, ToolResult,
 };
 use serde_json::{Map, Value, json};
@@ -376,7 +376,7 @@ fn text_of(part: &ContentPart) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{InputSource, MessageId, MessageMeta, OpaqueJson, ToolConcurrency, ToolSpec};
+    use radian_core::{InputSource, MessageId, MessageMeta, OpaqueJson, ToolConcurrency, ToolSpec};
 
     fn config() -> AnthropicConfig {
         AnthropicConfig::new("http://localhost", "claude-test")

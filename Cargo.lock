@@ -9,10 +9,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agent-cli"
+name = "radian-exec"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "agent-extensions",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
@@ -32,10 +32,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-core"
+name = "radian-core"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "futures-util",
  "jsonschema",
  "serde",
@@ -49,7 +49,7 @@ dependencies = [
 name = "agent-extensions"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "libc",
  "rmcp",
  "serde_json",
@@ -62,7 +62,7 @@ dependencies = [
 name = "agent-provider-anthropic"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "agent-provider-anthropic",
  "agent-provider-contract",
  "reqwest",
@@ -75,7 +75,7 @@ dependencies = [
 name = "agent-provider-contract"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "serde_json",
  "tokio",
 ]
@@ -84,7 +84,7 @@ dependencies = [
 name = "agent-provider-openai-compatible"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "agent-provider-contract",
  "agent-provider-openai-compatible",
  "reqwest",
@@ -97,7 +97,7 @@ dependencies = [
 name = "agent-provider-openai-responses"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "agent-provider-contract",
  "agent-provider-openai-responses",
  "reqwest",
@@ -2286,7 +2286,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "radian-coding"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "futures-util",
  "globset",
  "ignore",
@@ -2305,7 +2305,7 @@ dependencies = [
 name = "radian-host"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "agent-extensions",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
@@ -2349,7 +2349,7 @@ dependencies = [
 name = "radian-permissions"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "futures-util",
  "radian-sandbox",
  "radian-session",
@@ -2363,7 +2363,7 @@ dependencies = [
 name = "radian-runtime"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
  "radian-runtime",
@@ -2387,7 +2387,7 @@ dependencies = [
 name = "radian-session"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "radian-core",
  "chrono",
  "fs2",
  "futures-util",
@@ -2404,8 +2404,8 @@ dependencies = [
 name = "radian-tui"
 version = "0.1.0"
 dependencies = [
- "agent-cli",
- "agent-core",
+ "radian-exec",
+ "radian-core",
  "agent-extensions",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 //! A synthetic long session, for the long-session measurements (Phase 5 / Phase 7).
 //!
-//! One generator, shared by the `radian-session`, `radian-tui` and `agent-cli` perf tests via
+//! One generator, shared by the `radian-session`, `radian-tui` and `radian-exec` perf tests via
 //! `#[path]`, so all three measure the **same** file. It writes valid v1 JSONL directly (the
 //! envelope, `MessageAppended`, and the ADR 0019 replacement/compaction records), without
 //! going through the writer's per-record fsync.
@@ -16,7 +16,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use agent_core::{
+use radian_core::{
     ContentPart, InputSource, Message, MessageMeta, OpaqueJson, ToolCall, ToolResult,
 };
 use serde_json::json;

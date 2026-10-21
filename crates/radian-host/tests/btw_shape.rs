@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::{NoopSink, TurnOptions};
+use radian_core::{NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{Barrier, MockServer, Reply, chunk};
 use radian_host::{
     ApprovalRouting, HostBindings, LocalSession, SessionCapability, SessionCommand, SessionFacade,

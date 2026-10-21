@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use agent_core::{
+use radian_core::{
     CancellationToken, NoopSink, ToolCall, ToolConcurrency, ToolContext, ToolFailure, ToolOutput,
     ToolProvider, ToolSession,
 };

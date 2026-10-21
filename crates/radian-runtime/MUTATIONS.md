@@ -99,7 +99,7 @@ M5 同时证明"必须先在旧代码上失败"：去掉 requeue 就是旧代码
   `before_tool_call`/`after_tool_call` 的错误**不结束本轮**（fail closed：给该调用一条
   `hook_error` 结果并继续），而会 `RunError::Hook` 的两个点（`before_model_call` /
   `after_model_response`）都在本步 assistant 消息 commit **之前**跑，本批次没有未完成的调用。
-  所以没有"补结果"的代码可变异；正确性由 `agent-core::hooks` 的两条测试与
+  所以没有"补结果"的代码可变异；正确性由 `radian-core::hooks` 的两条测试与
   `hook_failure` 的端到端测试钉住（transcript 每个 tool_call 都有结果）。
 
 ## ADR 0018：不再写 `ContextBudgetReached`（`pi/guard`）
@@ -175,7 +175,7 @@ Base `a858ba6` · 一次性 worktree `/tmp/e2e-mut`（`git worktree add` 自本�
 | E2 | `compacted_history` 写入 origin 时丢掉 `user_messages`（正文仍渲染） | 原话必须在 `origin` 里，读回（第二次压缩）不靠正文解析 | 同上 FAILED（"the first user's words survive the second compaction"，两个适配器） |
 | E3 | `Driver::open` 不 `restore_transcript_revision`（resume 后 revision 从 0 起） | 滚动压缩的 revision 必须严格递增 | 同上 FAILED（`Compacted { revision: 1 }` 而非 `revision: 2`，两个适配器） |
 
-3/3 抓住，无等价变异。E1/E3 的代码在 `agent-core`/`radian-runtime` 的产品路径上；由本片新增的
+3/3 抓住，无等价变异。E1/E3 的代码在 `radian-core`/`radian-runtime` 的产品路径上；由本片新增的
 `e2e_resume_compaction` 专门抓住。
 
 ## ADR 0018：摘要设置随 /model 后的活动路由换算（2026-10-15）

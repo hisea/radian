@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use agent_core::Hooks;
+use radian_core::Hooks;
 use radian_coding::CodingTools;
 use radian_permissions::{PermissionHooks, Preset};
 #[cfg(test)]

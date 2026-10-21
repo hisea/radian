@@ -464,7 +464,7 @@ pub(super) fn open_session_and_refresh(
     // ADR 0043 §1: `[model.smol]` rides the shared settings into the child's launch
     // parameters; it is cloned here because `settings` moves into `LeadSetup` below.
     let smol_route = settings.smol_route.clone();
-    // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
+    // ADR 0023 U5: the one place a session is established; `radian-exec` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
     // first thing that creates durable state. ADR 0032 slice 5: `LeadSetup::setup` fills what
     // every host-opened session shares; what the TUI decides itself is written here.
@@ -518,7 +518,7 @@ pub(super) fn open_session_and_refresh(
                 resume: resume.is_some(),
                 // The effective startup route (a `/new` carry resolves here like a flag),
                 // so `SessionCreated` names the route and tier this session actually runs.
-                // `agent-cli` records the same `access` key (ADR 0043 1a).
+                // `radian-exec` records the same `access` key (ADR 0043 1a).
                 config_snapshot: serde_json::json!({
                     "provider": provider_name,
                     "model": model_name,

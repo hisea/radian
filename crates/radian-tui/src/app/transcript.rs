@@ -338,7 +338,7 @@ impl App {
                 // request -> batch -> request), so nothing in the running set can still be
                 // running here. A call left in it is a `ToolStarted` whose `ToolFinished` never
                 // came — the core discards the results of the calls already running when a
-                // journal append fails (`agent-core/src/turn.rs`, the `journal_failed` path) —
+                // journal append fails (`radian-core/src/turn.rs`, the `journal_failed` path) —
                 // and the note must not outlive the batch it belongs to.
                 self.session.forget_running_tools();
                 self.session.timer.request_started(self.now);
@@ -457,7 +457,7 @@ impl App {
                 // ADR 0015: the per-turn **call-count** budget (not the context window). The
                 // one line names the limit and the flag; it is the same wording `radian exec`
                 // prints. The TUI showed nothing for this status before.
-                if matches!(status, agent_core::RunStatus::BudgetExceeded) {
+                if matches!(status, radian_core::RunStatus::BudgetExceeded) {
                     self.push_notice(radian_host::budget_exceeded_line(
                         self.session.max_model_calls,
                     ));
@@ -575,11 +575,11 @@ impl App {
                 // `compaction_summary` origin (ADR 0018); it shows as one line, not as a wall
                 // of user text. Core's readers supply the summary and the verbatim user
                 // words - nothing is parsed out of the body here.
-                if agent_core::compaction::is_compaction_summary(message) {
+                if radian_core::compaction::is_compaction_summary(message) {
                     let mut info = CompactionInfo {
-                        summary: agent_core::compaction::compaction_summary_text(message)
+                        summary: radian_core::compaction::compaction_summary_text(message)
                             .unwrap_or_default(),
-                        user_messages: agent_core::compaction::compaction_user_messages(message)
+                        user_messages: radian_core::compaction::compaction_user_messages(message)
                             .into_iter()
                             .map(|message| message.text)
                             .collect(),
@@ -756,9 +756,9 @@ thread_local! {
 mod tests {
     use super::*;
 
-    fn filler(count: usize) -> Vec<agent_core::Message> {
+    fn filler(count: usize) -> Vec<radian_core::Message> {
         (0..count)
-            .map(|i| agent_core::Message::user(format!("message {i}")))
+            .map(|i| radian_core::Message::user(format!("message {i}")))
             .collect()
     }
 
@@ -792,7 +792,7 @@ mod tests {
         let mut app = App::new("m", "s");
         app.set_live(EntryKind::Assistant, "partial");
         let before = scans();
-        app.push_message(&agent_core::Message::user("committed"));
+        app.push_message(&radian_core::Message::user("committed"));
         assert!(scans() > before, "a live entry makes the walk run");
         assert!(app.session.entries.iter().all(|entry| !entry.live));
         assert_eq!(app.session.live_count, 0);
@@ -808,7 +808,7 @@ mod tests {
             EntryKind::Notice,
             "context over the budget; compacting\u{2026}",
         ));
-        app.push_message(&agent_core::Message::user("committed"));
+        app.push_message(&radian_core::Message::user("committed"));
         assert!(
             app.session.entries.iter().all(|entry| !entry.live),
             "the live entry is dropped wherever it sits"
@@ -833,13 +833,13 @@ mod tests {
     /// is the property; no wall clock.
     #[test]
     fn tool_result_pairing_does_not_walk_the_transcript() {
-        use agent_core::{ContentPart, ToolCall, ToolResult};
+        use radian_core::{ContentPart, ToolCall, ToolResult};
 
         let mut app = App::new("m", "s");
         let pairs = 400u64;
         let before = pair_scans();
         for i in 0..pairs {
-            app.push_message(&agent_core::Message::Assistant {
+            app.push_message(&radian_core::Message::Assistant {
                 content: Vec::new(),
                 reasoning: Vec::new(),
                 tool_calls: vec![ToolCall {
@@ -851,7 +851,7 @@ mod tests {
                 interrupted: false,
                 meta: Default::default(),
             });
-            app.push_message(&agent_core::Message::Tool {
+            app.push_message(&radian_core::Message::Tool {
                 result: ToolResult::success(format!("call-{i}"), vec![ContentPart::text("ok")]),
                 meta: Default::default(),
             });
@@ -870,10 +870,10 @@ mod tests {
     /// call, not the first one in the batch.
     #[test]
     fn a_batch_of_tool_results_pairs_each_with_its_own_call() {
-        use agent_core::{ContentPart, ToolCall, ToolResult};
+        use radian_core::{ContentPart, ToolCall, ToolResult};
 
         let mut app = App::new("m", "s");
-        app.push_message(&agent_core::Message::Assistant {
+        app.push_message(&radian_core::Message::Assistant {
             content: Vec::new(),
             reasoning: Vec::new(),
             tool_calls: vec![
@@ -894,7 +894,7 @@ mod tests {
         });
         // The results arrive in the reverse order (allowed): each must pair with its own call.
         for id in ["b", "a"] {
-            app.push_message(&agent_core::Message::Tool {
+            app.push_message(&radian_core::Message::Tool {
                 result: ToolResult::success(id.to_owned(), vec![ContentPart::text("ok")]),
                 meta: Default::default(),
             });
@@ -951,7 +951,7 @@ mod tests {
         let mut app = App::new("m", "s");
         app.session.max_model_calls = 7;
         app.apply_event(&AgentEvent::RunFinished {
-            status: agent_core::RunStatus::BudgetExceeded,
+            status: radian_core::RunStatus::BudgetExceeded,
         });
         let notice = app
             .session
@@ -968,7 +968,7 @@ mod tests {
         // A completed turn shows no such notice.
         let mut app = App::new("m", "s");
         app.apply_event(&AgentEvent::RunFinished {
-            status: agent_core::RunStatus::Completed,
+            status: radian_core::RunStatus::Completed,
         });
         assert!(app.session.entries.is_empty());
     }

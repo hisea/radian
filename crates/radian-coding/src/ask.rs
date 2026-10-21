@@ -2,7 +2,7 @@
 //!
 //! The tool itself knows nothing about a UI. The host injects a [`Prompter`] through
 //! [`AskTools`]; a host without one does not mount the provider at all, so a model never asks
-//! into the void. The wait is raced against [`agent_core::ToolContext::cancellation`] and
+//! into the void. The wait is raced against [`radian_core::ToolContext::cancellation`] and
 //! **never** fabricates an answer.
 //!
 //! `ask_user` is its **own** provider, not a member of [`crate::CodingTools`]: a host with no
@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use agent_core::{
+use radian_core::{
     ContentPart, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput,
     ToolProvider, ToolSession, ToolSpec,
 };

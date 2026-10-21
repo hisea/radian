@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "Runtime layer: the durable inbox and the per-session driver (ADR 0011)"
 
 [dependencies]
-agent-core = { path = "../agent-core" }
+radian-core = { path = "../radian-core" }
 radian-session = { path = "../radian-session" }
 serde_json.workspace = true
 thiserror.workspace = true
@@ -19,7 +19,7 @@ tokio = { workspace = true }
 testing = ["radian-session/testing"]
 # Forward the core's journal self-check, so this crate's failure-path tests (ADR 0017) also
 # run with replay verified against the transcript.
-journal-selfcheck = ["agent-core/journal-selfcheck"]
+journal-selfcheck = ["radian-core/journal-selfcheck"]
 
 [dev-dependencies]
 # The crate's own tests always build with the fault seams, so a plain `cargo test` (the

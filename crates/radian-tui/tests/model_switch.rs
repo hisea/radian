@@ -148,7 +148,7 @@ fn a_succeeded_compaction_queues_the_switch() {
     let result = app.update(Input::SwitchCompacted {
         provider: "anthropic".into(),
         model: "claude".into(),
-        result: Ok(agent_core::CompactionOutcome::Compacted {
+        result: Ok(radian_core::CompactionOutcome::Compacted {
             revision: 1,
             tokens_before: 500,
             tokens_after: 100,

@@ -1,4 +1,4 @@
-//! Deterministic memory injection (ADR 0021 D6) as an `agent_core::Hooks`
+//! Deterministic memory injection (ADR 0021 D6) as an `radian_core::Hooks`
 //! implementation plus the per-turn addition seam.
 //!
 //! Before every model call, [`MemoryHooks`] appends the **fixed** memory block to the **system
@@ -26,7 +26,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use agent_core::{
+use radian_core::{
     ContentPart, HookContext, HookError, Hooks, InputSource, Message, MessageMeta, ModelRequest,
     OpaqueJson, RequestSize,
 };
@@ -73,7 +73,7 @@ impl Default for InjectionConfig {
             max_tokens: 2000,
             global_budget: 500,
             project_budget: 1500,
-            bytes_per_token: agent_core::DEFAULT_BYTES_PER_TOKEN,
+            bytes_per_token: radian_core::DEFAULT_BYTES_PER_TOKEN,
             additions: true,
             addition_budget: 500,
         }
@@ -273,7 +273,7 @@ pub fn exceeds_budget(view: &[MemoryRecord], config: &InjectionConfig) -> bool {
     total > config.max_tokens
 }
 
-/// Counts a string the way `agent_core` does, without building a `ModelRequest`.
+/// Counts a string the way `radian_core` does, without building a `ModelRequest`.
 fn request_size_of(text: &str) -> RequestSize {
     let mut size = RequestSize::default();
     for ch in text.chars() {
@@ -667,8 +667,8 @@ mod tests {
     #[test]
     fn the_query_is_the_first_user_message() {
         let summary = Message::User {
-            content: vec![agent_core::ContentPart::text("This is a summary.")],
-            meta: agent_core::MessageMeta {
+            content: vec![radian_core::ContentPart::text("This is a summary.")],
+            meta: radian_core::MessageMeta {
                 id: None,
                 source: Some(InputSource::System),
                 origin: Some(OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#).unwrap()),

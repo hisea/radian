@@ -10,7 +10,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use agent_core::{ContentPart, Message};
+use radian_core::{ContentPart, Message};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::ReadError;

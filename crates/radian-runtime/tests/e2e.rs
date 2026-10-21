@@ -4,7 +4,7 @@ mod common;
 
 use std::sync::Arc;
 
-use agent_core::{Agent, InputSource, Message, TurnOptions};
+use radian_core::{Agent, InputSource, Message, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, events, text};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{Session, SessionJournal};
@@ -29,7 +29,7 @@ async fn a_full_turn_survives_a_restart_and_continues() {
         &agent,
         journal,
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -55,7 +55,7 @@ async fn a_full_turn_survives_a_restart_and_continues() {
         &agent2,
         journal2,
         Arc::clone(&inbox2),
-        Arc::clone(&recorder2) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder2) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await

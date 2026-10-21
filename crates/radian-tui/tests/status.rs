@@ -1,7 +1,7 @@
 //! The status bar: the permission tier, provider-reported usage, the MCP state, and the
 //! narrow-terminal truncation rule. Pure `App` state on a `TestBackend`, so it needs no pty.
 
-use agent_core::ModelUsage;
+use radian_core::ModelUsage;
 use radian_tui::App;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;

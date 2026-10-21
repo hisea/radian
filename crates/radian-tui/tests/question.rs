@@ -746,7 +746,7 @@ fn an_unanswered_question_is_marked_in_the_overview() {
 /// the bottom (a live reply is visible), not stuck where the small viewport left it.
 #[test]
 fn the_transcript_follows_after_the_panel_closes() {
-    use agent_core::Message;
+    use radian_core::Message;
     let mut app = App::new("m", "s");
     for i in 0..40 {
         app.push_message(&Message::user(format!("line {i}")));

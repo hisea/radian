@@ -15,8 +15,8 @@
 //! journal's revision records.
 //!
 //! **Journal self-check coverage**: this test lives in `radian-runtime`, so the AGENTS.md
-//! command `cargo test -p agent-core --features journal-selfcheck` does *not* run it (that
-//! builds agent-core's own tests only). `radian-runtime` forwards the same feature, so
+//! command `cargo test -p radian-core --features journal-selfcheck` does *not* run it (that
+//! builds radian-core's own tests only). `radian-runtime` forwards the same feature, so
 //! `cargo test -p radian-runtime --features journal-selfcheck --test e2e_resume_compaction`
 //! runs it with the self-check armed, and that run is part of this slice's verification. The
 //! plain `cargo test --workspace` run covers it without the feature.
@@ -26,7 +26,7 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use agent_core::{Agent, AgentConfig, ContextBudget, InputSource, NoTools, TurnOptions};
+use radian_core::{Agent, AgentConfig, ContextBudget, InputSource, NoTools, TurnOptions};
 use common::{Recorder, TempDir, created};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
@@ -131,7 +131,7 @@ fn committed_revisions(path: &Path) -> Vec<u64> {
 
 /// Opens a driver over `journal`, spawns it, and returns the handle plus the recorder.
 #[allow(clippy::type_complexity)]
-async fn open<M: agent_core::Model + 'static>(
+async fn open<M: radian_core::Model + 'static>(
     agent: &Arc<Agent<M, NoTools, ()>>,
     journal: Arc<SessionJournal>,
 ) -> (
@@ -145,7 +145,7 @@ async fn open<M: agent_core::Model + 'static>(
         agent,
         journal,
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -197,7 +197,7 @@ macro_rules! e2e_scenario {
             assert!(
                 matches!(
                     outcome,
-                    agent_core::CompactionOutcome::Compacted { revision: 1, .. }
+                    radian_core::CompactionOutcome::Compacted { revision: 1, .. }
                 ),
                 "{outcome:?}"
             );
@@ -248,7 +248,7 @@ macro_rules! e2e_scenario {
             assert!(
                 matches!(
                     outcome,
-                    agent_core::CompactionOutcome::Compacted { revision: 2, .. }
+                    radian_core::CompactionOutcome::Compacted { revision: 2, .. }
                 ),
                 "{outcome:?}"
             );

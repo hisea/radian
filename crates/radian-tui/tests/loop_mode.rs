@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use agent_core::{InputSource, Message, MessageId};
+use radian_core::{InputSource, Message, MessageId};
 use radian_host::config::TuiFooterConfig;
 use radian_session::{InboxLane, RuntimeEvent, TurnOutcome};
 use radian_tui::app::{

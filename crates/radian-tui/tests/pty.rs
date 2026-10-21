@@ -1973,18 +1973,18 @@ async fn pty_resume_renders_the_stored_history() {
         radian_session::SessionCreatedData::new("/tmp", json!({})),
     )
     .expect("create the session file");
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 0,
-            message: agent_core::Message::user("OLD-USER-TURN"),
+            message: radian_core::Message::user("OLD-USER-TURN"),
         })
         .await
         .unwrap();
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 1,
-            message: agent_core::Message::assistant("OLD-ASSISTANT-REPLY"),
+            message: radian_core::Message::assistant("OLD-ASSISTANT-REPLY"),
         })
         .await
         .unwrap();
@@ -3248,7 +3248,7 @@ async fn pty_reasoning_is_not_sent_back_to_the_provider() {
     pty.quit();
 }
 
-/// The TUI's `--header` is the same parser `agent-cli` uses: `{session_id}` expands to this
+/// The TUI's `--header` is the same parser `radian-exec` uses: `{session_id}` expands to this
 /// process's session id, so a routing header can name the conversation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
@@ -5622,7 +5622,7 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
 /// and a session that is not attached to is never on screen. Returns the writer, still holding
 /// the file's lock, so the caller can append again while a reader watches.
 async fn fill_session(dir: &Path, id: &str, count: usize) -> radian_session::SessionJournal {
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     let path = dir.join(format!("{id}.jsonl"));
     let journal = radian_session::SessionJournal::resume(&path, id).expect("resume to append");
     for index in 0..count {
@@ -5632,9 +5632,9 @@ async fn fill_session(dir: &Path, id: &str, count: usize) -> radian_session::Ses
             format!("{id}-FILLER-{index}")
         };
         journal
-            .append(agent_core::JournalRecord::Message {
+            .append(radian_core::JournalRecord::Message {
                 index: index + 2,
-                message: agent_core::Message::assistant(text),
+                message: radian_core::Message::assistant(text),
             })
             .await
             .unwrap();
@@ -5670,18 +5670,18 @@ async fn seed_session(dir: &Path, id: &str, workspace: &str, user: &str) {
         radian_session::SessionCreatedData::new(workspace, json!({})),
     )
     .expect("create the session file");
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 0,
-            message: agent_core::Message::user(user),
+            message: radian_core::Message::user(user),
         })
         .await
         .unwrap();
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 1,
-            message: agent_core::Message::assistant("REPLY"),
+            message: radian_core::Message::assistant("REPLY"),
         })
         .await
         .unwrap();
@@ -6143,11 +6143,11 @@ async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
         radian_session::SessionCreatedData::new("/tmp", json!({})),
     )
     .expect("create the session file");
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 0,
-            message: agent_core::Message::user("hello parent config"),
+            message: radian_core::Message::user("hello parent config"),
         })
         .await
         .unwrap();
@@ -9677,11 +9677,11 @@ async fn pty_a_picked_resume_uses_the_journals_model() {
         radian_session::SessionCreatedData::new(&workspace, json!({})),
     )
     .unwrap();
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 0,
-            message: agent_core::Message::user("earlier"),
+            message: radian_core::Message::user("earlier"),
         })
         .await
         .unwrap();
@@ -10746,11 +10746,11 @@ async fn pty_resume_restores_auto_on_workspace() {
         radian_session::SessionCreatedData::new("/tmp", json!({})),
     )
     .expect("create the session file");
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 0,
-            message: agent_core::Message::user("older turn"),
+            message: radian_core::Message::user("older turn"),
         })
         .await
         .unwrap();
@@ -10991,11 +10991,11 @@ async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
         radian_session::SessionCreatedData::new("/tmp", json!({})),
     )
     .expect("create the session file");
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 0,
-            message: agent_core::Message::user("SELECT-ME-PLEASE"),
+            message: radian_core::Message::user("SELECT-ME-PLEASE"),
         })
         .await
         .unwrap();
@@ -12435,24 +12435,24 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
             ),
         )
         .unwrap();
-        use agent_core::TranscriptJournal;
+        use radian_core::TranscriptJournal;
         journal
-            .append(agent_core::JournalRecord::Message {
+            .append(radian_core::JournalRecord::Message {
                 index: 0,
-                message: agent_core::Message::user("earlier turn"),
+                message: radian_core::Message::user("earlier turn"),
             })
             .await
             .unwrap();
         journal
-            .append(agent_core::JournalRecord::Message {
+            .append(radian_core::JournalRecord::Message {
                 index: 1,
-                message: agent_core::Message::assistant("earlier answer"),
+                message: radian_core::Message::assistant("earlier answer"),
             })
             .await
             .unwrap();
         journal
-            .append(agent_core::JournalRecord::ModelUsage {
-                usage: agent_core::ModelUsage {
+            .append(radian_core::JournalRecord::ModelUsage {
+                usage: radian_core::ModelUsage {
                     input: Some(1_000_000),
                     output: Some(100_000),
                     input_includes_cache: Some(true),
@@ -13225,7 +13225,7 @@ async fn pty_resume_restores_the_access_tier() {
 /// (attach never takes it — a reader that locked would block here). The messages are
 /// `ATTACH-OLD-USER`/`ATTACH-OLD-REPLY` followed by `extra` filler replies.
 async fn attach_session(dir: &Path, id: &str, extra: usize) -> radian_session::SessionJournal {
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     let path = dir.join(format!("{id}.jsonl"));
     let journal = radian_session::SessionJournal::create(
         &path,
@@ -13234,24 +13234,24 @@ async fn attach_session(dir: &Path, id: &str, extra: usize) -> radian_session::S
     )
     .expect("create the session file");
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 0,
-            message: agent_core::Message::user("ATTACH-OLD-USER"),
+            message: radian_core::Message::user("ATTACH-OLD-USER"),
         })
         .await
         .unwrap();
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 1,
-            message: agent_core::Message::assistant("ATTACH-OLD-REPLY"),
+            message: radian_core::Message::assistant("ATTACH-OLD-REPLY"),
         })
         .await
         .unwrap();
     for index in 0..extra {
         journal
-            .append(agent_core::JournalRecord::Message {
+            .append(radian_core::JournalRecord::Message {
                 index: index + 2,
-                message: agent_core::Message::assistant(format!("ATTACH-FILLER-{index}")),
+                message: radian_core::Message::assistant(format!("ATTACH-FILLER-{index}")),
             })
             .await
             .unwrap();
@@ -13320,7 +13320,7 @@ fn picker_hint(screen: &str) -> Option<String> {
 #[allow(clippy::await_holding_lock)]
 async fn pty_attach_follow_shows_new_committed_events() {
     let _serial = pty_guard();
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     let dir = TempDir::new("attach-follow");
     let journal = attach_session(dir.path(), "attach-me", 0).await;
 
@@ -13354,9 +13354,9 @@ async fn pty_attach_follow_shows_new_committed_events() {
         .await
         .unwrap();
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 2,
-            message: agent_core::Message::assistant("ATTACH-FOLLOW-NEW"),
+            message: radian_core::Message::assistant("ATTACH-FOLLOW-NEW"),
         })
         .await
         .unwrap();
@@ -13781,7 +13781,7 @@ async fn pty_attach_without_an_id_escapes_the_picker_without_writing() {
 #[allow(clippy::await_holding_lock)]
 async fn pty_attach_without_an_id_follows_the_chosen_session() {
     let _serial = pty_guard();
-    use agent_core::TranscriptJournal;
+    use radian_core::TranscriptJournal;
     let scratch = TempDir::new("attach-pick-follow");
     let sessions = scratch.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -13833,9 +13833,9 @@ async fn pty_attach_without_an_id_follows_the_chosen_session() {
     );
 
     journal
-        .append(agent_core::JournalRecord::Message {
+        .append(radian_core::JournalRecord::Message {
             index: 2,
-            message: agent_core::Message::assistant("ALPHA-FOLLOWED"),
+            message: radian_core::Message::assistant("ALPHA-FOLLOWED"),
         })
         .await
         .unwrap();

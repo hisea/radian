@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::{ContextBudget, EventSink, TurnOptions};
+use radian_core::{ContextBudget, EventSink, TurnOptions};
 use agent_extensions::McpServerConfig;
 use radian_permissions::{Approver, AuditSink, Preset, Profile};
 use radian_runtime::{BudgetFor, CompactionSettingsFor, ConfigQueue, ConfigSlot, RuntimeEvents};

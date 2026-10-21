@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use agent_core::{Message, OpaqueJson};
+use radian_core::{Message, OpaqueJson};
 use radian_session::{
     GoalBudget, GoalState, GoalStatus, RuntimeEvent, TurnOutcome, goal_tokens, is_goal_continuation,
 };
@@ -503,7 +503,7 @@ impl App {
 
     /// A live model response's usage accrues to the open stretch (the fold's
     /// [`goal_tokens`] rule, so the live count and the resume count agree).
-    pub(super) fn note_goal_usage(&mut self, usage: &agent_core::ModelUsage) {
+    pub(super) fn note_goal_usage(&mut self, usage: &radian_core::ModelUsage) {
         if self.session.goal_mode.stretch_start.is_some() {
             self.session.goal_mode.stretch_tokens += goal_tokens(usage);
         }
@@ -909,7 +909,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use agent_core::InputSource;
+    use radian_core::InputSource;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::mention::Expansion;

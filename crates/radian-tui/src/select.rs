@@ -470,7 +470,7 @@ mod tests {
         glyphs: crate::footer::Glyphs::Unicode,
     };
     use crate::app::{Entry, EntryKind};
-    use agent_core::{ContentPart, Message, MessageMeta};
+    use radian_core::{ContentPart, Message, MessageMeta};
 
     /// An assistant entry (prefix `"  "`: body columns start at 2).
     fn entry(text: &str) -> Entry {

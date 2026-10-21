@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use agent_core::ToolConcurrency;
-use agent_core::{
+use radian_core::ToolConcurrency;
+use radian_core::{
     ToolCall, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use serde_json::Value;
@@ -206,7 +206,7 @@ fn specs() -> Vec<ToolSpec> {
 mod tests {
     use super::*;
     use crate::skills::{SKILL_FILE_NAME, discover};
-    use agent_core::NoopSink;
+    use radian_core::NoopSink;
     use serde_json::json;
 
     struct Scratch {
@@ -261,7 +261,7 @@ mod tests {
             .content
             .iter()
             .map(|part| match part {
-                agent_core::ContentPart::Text { text, .. } => text.clone(),
+                radian_core::ContentPart::Text { text, .. } => text.clone(),
                 _ => String::new(),
             })
             .collect()
@@ -273,7 +273,7 @@ mod tests {
             .execute(
                 call,
                 ToolContext {
-                    cancellation: agent_core::CancellationToken::new(),
+                    cancellation: radian_core::CancellationToken::new(),
                     events: &sink,
                     index: 0,
                 },
@@ -450,7 +450,7 @@ mod tests {
     /// description. Fragments under 24 characters are too short to be a repeated fact.
     #[tokio::test]
     async fn no_parameter_description_repeats_a_sentence_of_the_description() {
-        use agent_core::{ToolProvider, ToolSession};
+        use radian_core::{ToolProvider, ToolSession};
         let session = SkillTools::new(Arc::new(Vec::new()))
             .open_session()
             .await

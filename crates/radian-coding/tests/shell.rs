@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use agent_core::{
+use radian_core::{
     CancellationToken, ContentPart, NoopSink, ToolCall, ToolContext, ToolOutput, ToolProvider,
     ToolSession,
 };

@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 
-use agent_core::{Message, ModelUsage};
+use radian_core::{Message, ModelUsage};
 
 use crate::reader::{EventData, SessionEvent};
 use crate::runtime::TurnOutcome;
@@ -341,7 +341,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::MessageId;
+    use radian_core::MessageId;
 
     /// One event with a fixed `ts` and no envelope meaning beyond the fold.
     fn event(ts: &str, data: EventData) -> SessionEvent {
@@ -443,8 +443,8 @@ mod tests {
     /// a failed goal turn plus an ordinary completed turn count for nothing.
     #[test]
     fn only_completed_goal_turns_consume_the_turn_budget() {
-        fn origin_goal() -> agent_core::OpaqueJson {
-            agent_core::OpaqueJson::parse(r#"{"continuation":"goal","iteration":1}"#.to_owned())
+        fn origin_goal() -> radian_core::OpaqueJson {
+            radian_core::OpaqueJson::parse(r#"{"continuation":"goal","iteration":1}"#.to_owned())
                 .expect("test origin")
         }
         let mut goal_message = Message::user("continue");
@@ -452,7 +452,7 @@ mod tests {
             meta.origin = Some(origin_goal());
         }
         let plain = Message::user("a user note");
-        let usage = agent_core::ModelUsage {
+        let usage = radian_core::ModelUsage {
             input: Some(100),
             output: Some(50),
             total: None,
@@ -469,7 +469,7 @@ mod tests {
                     message: goal_message,
                     message_id: MessageId("m-1".into()),
                     lane: crate::runtime::InboxLane::NextTurn,
-                    source: agent_core::InputSource::User,
+                    source: radian_core::InputSource::User,
                     wake: true,
                     degraded: false,
                     pending_wake: false,
@@ -481,7 +481,7 @@ mod tests {
                     message: plain,
                     message_id: MessageId("m-2".into()),
                     lane: crate::runtime::InboxLane::NextTurn,
-                    source: agent_core::InputSource::User,
+                    source: radian_core::InputSource::User,
                     wake: true,
                     degraded: false,
                     pending_wake: false,
@@ -546,7 +546,7 @@ mod tests {
             event(
                 "2026-10-20T10:00:11Z",
                 EventData::ModelUsageRecorded {
-                    usage: agent_core::ModelUsage {
+                    usage: radian_core::ModelUsage {
                         input: Some(1000),
                         output: Some(1000),
                         total: None,
@@ -573,7 +573,7 @@ mod tests {
     /// a summary can neither contain it nor drop it.
     #[test]
     fn a_compaction_in_the_journal_leaves_the_goal_alone() {
-        let usage = agent_core::ModelUsage {
+        let usage = radian_core::ModelUsage {
             input: Some(10),
             output: Some(5),
             total: None,
@@ -623,7 +623,7 @@ mod tests {
     /// value — the context budget's own lower-bound convention.
     #[test]
     fn token_accounting_prefers_total_and_never_double_counts_cache() {
-        let base = agent_core::ModelUsage {
+        let base = radian_core::ModelUsage {
             input: Some(100),
             output: Some(50),
             total: None,
@@ -638,14 +638,14 @@ mod tests {
             "unmarked: input at face value plus output"
         );
         assert_eq!(
-            goal_tokens(&agent_core::ModelUsage {
+            goal_tokens(&radian_core::ModelUsage {
                 total: Some(1000),
                 ..base.clone()
             }),
             1000
         );
         assert_eq!(
-            goal_tokens(&agent_core::ModelUsage {
+            goal_tokens(&radian_core::ModelUsage {
                 input_includes_cache: Some(false),
                 ..base.clone()
             }),

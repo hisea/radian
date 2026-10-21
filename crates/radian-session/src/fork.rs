@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_core::{JournalError, JournalRecord, Message, ReplayError, TranscriptJournal, recover};
+use radian_core::{JournalError, JournalRecord, Message, ReplayError, TranscriptJournal, recover};
 use serde_json::Value;
 
 use crate::error::ReadError;

@@ -9,7 +9,7 @@
 //! `required` and `additionalProperties`), which is why each tool keeps its schema in a
 //! `schema()` function the spec and the parser share.
 
-use agent_core::ToolFailure;
+use radian_core::ToolFailure;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 

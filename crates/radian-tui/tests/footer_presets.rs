@@ -13,7 +13,7 @@
 //! host, session, a dirty branch, the repo name, the worktree, and a usage snapshot all carry
 //! distinct non-empty values, so every item of every preset draws at the widest width.
 
-use agent_core::{BudgetReport, UsageSource};
+use radian_core::{BudgetReport, UsageSource};
 use radian_host::config::TuiFooterConfig;
 use radian_session::RuntimeEvent;
 use radian_tui::App;
@@ -86,7 +86,7 @@ fn fixed_app(preset: &str, glyphs: &str) -> App {
         cache_write: Some(1_500_000),
         tiers: Vec::new(),
     }));
-    app.session.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(19_000),
         output: Some(760),
         cache_read: Some(33_000),
@@ -208,10 +208,10 @@ fn start_job(app: &mut App) {
 /// inputs without a matching admission.
 fn enqueue(app: &mut App, id: &str) {
     app.update(Input::Runtime(RuntimeEvent::InboxEnqueued {
-        message: agent_core::Message::user("queued text"),
-        message_id: agent_core::MessageId(id.to_string()),
+        message: radian_core::Message::user("queued text"),
+        message_id: radian_core::MessageId(id.to_string()),
         lane: radian_session::InboxLane::NextTurn,
-        source: agent_core::InputSource::User,
+        source: radian_core::InputSource::User,
         wake: true,
         degraded: false,
         pending_wake: false,

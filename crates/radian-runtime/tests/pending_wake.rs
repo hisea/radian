@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::{Agent, EventSink, InputSource, Message, MessageId, TurnOptions};
+use radian_core::{Agent, EventSink, InputSource, Message, MessageId, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
 use radian_runtime::{Driver, Inbox, InboxEntry, Lane, RuntimeEvents};
 use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};

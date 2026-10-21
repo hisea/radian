@@ -5,7 +5,7 @@
 
 mod common;
 
-use agent_core::{JournalRecord, Message, ReplacementEnd, TranscriptJournal};
+use radian_core::{JournalRecord, Message, ReplacementEnd, TranscriptJournal};
 use common::{TempDir, created};
 use radian_session::{
     ExportOptions, Index, ReadError, Session, SessionJournal, UncommittedReplacement, WriteError,

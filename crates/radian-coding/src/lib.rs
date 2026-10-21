@@ -91,7 +91,7 @@ pub use shell::{
 };
 pub use workspace::{WorkspaceError, WorkspaceRoot};
 
-use agent_core::ToolFailure;
+use radian_core::ToolFailure;
 
 /// The single error code for every workspace-boundary refusal, so a model (and a test) can
 /// recognise "you tried to leave the workspace" without parsing prose.

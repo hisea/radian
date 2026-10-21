@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_core::*;
+use radian_core::*;
 use agent_extensions::{McpServerConfig, McpSession, McpToolProvider, tool_alias};
 use serde_json::{Value, json};
 

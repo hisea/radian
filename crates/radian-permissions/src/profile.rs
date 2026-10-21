@@ -403,7 +403,7 @@ fn write_under(workspace: &Path) -> Vec<Rule> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::ToolCall;
+    use radian_core::ToolCall;
     use serde_json::json;
 
     fn call(name: &str) -> ToolCall {

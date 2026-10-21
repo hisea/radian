@@ -1,6 +1,6 @@
 # radian-runtime
 
-The runtime layer above `agent-core` (the turn loop) and `radian-session` (the JSONL
+The runtime layer above `radian-core` (the turn loop) and `radian-session` (the JSONL
 journal): a **durable inbox** and a **per-session driver** (ADR 0011, ADR 0004 path B, ADR
 0010).
 

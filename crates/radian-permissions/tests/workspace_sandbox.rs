@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use agent_core::{Hooks, InputSource, ToolDecision};
+use radian_core::{Hooks, InputSource, ToolDecision};
 use common::{ScriptedApprover, TempDir, call, ctx};
 use radian_permissions::*;
 use radian_sandbox::{Sandbox, SandboxMode};
@@ -30,7 +30,7 @@ fn hooks_with(
 async fn decide_shell(
     hooks: &PermissionHooks,
     arguments: serde_json::Value,
-) -> Result<ToolDecision, agent_core::HookError> {
+) -> Result<ToolDecision, radian_core::HookError> {
     Hooks::before_tool_call(hooks, &ctx(), &call("shell", arguments)).await
 }
 

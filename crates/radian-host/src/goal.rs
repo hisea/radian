@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use agent_core::{
+use radian_core::{
     HookContext, HookError, Hooks, ModelRequest, ToolCall, ToolConcurrency, ToolContext, ToolError,
     ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
@@ -328,7 +328,7 @@ impl Hooks for GoalHooks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{CancellationToken, ContentPart, Hooks, ToolCall};
+    use radian_core::{CancellationToken, ContentPart, Hooks, ToolCall};
     use serde_json::json;
 
     /// A share holding one active goal, for the tool tests below.
@@ -358,7 +358,7 @@ mod tests {
     fn cx<'a>(cancellation: &'a CancellationToken) -> ToolContext<'a> {
         ToolContext {
             cancellation: cancellation.clone(),
-            events: &agent_core::NoopSink,
+            events: &radian_core::NoopSink,
             index: 0,
         }
     }
@@ -407,7 +407,7 @@ mod tests {
     /// characters are too short to be a repeated fact.
     #[tokio::test]
     async fn no_parameter_description_repeats_a_sentence_of_the_description() {
-        use agent_core::{ToolProvider, ToolSession};
+        use radian_core::{ToolProvider, ToolSession};
         let temp = TempJournal::new("desc");
         let session = GoalTools::new(fresh_share(), Arc::clone(&temp.journal))
             .open_session()

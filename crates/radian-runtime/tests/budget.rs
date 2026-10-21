@@ -7,7 +7,7 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use agent_core::{
+use radian_core::{
     Agent, AgentConfig, ContextBudget, InputSource, JournalRecord, Message, ModelResponse,
     ModelUsage, TranscriptJournal, TurnOptions, UsageSource,
 };
@@ -48,7 +48,7 @@ async fn open_env(
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -185,7 +185,7 @@ async fn resume_driver(
         &agent,
         journal,
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -194,7 +194,7 @@ async fn resume_driver(
 }
 
 /// 3. A session whose turn was over `B` resumes normally: the next turn runs and the history
-///    stays consistent. (The restored baseline is covered by `agent-core`'s
+///    stays consistent. (The restored baseline is covered by `radian-core`'s
 ///    `a_restored_baseline_matches_an_uninterrupted_projection`.)
 #[tokio::test]
 async fn resume_after_an_over_budget_turn_keeps_the_history() {

@@ -5,7 +5,7 @@
 //! counts, and an empty transcript, a missing block, an oversized message or a disabled
 //! backend is a notice.
 
-use agent_core::Message;
+use radian_core::Message;
 use radian_tui::app::{App, Effect, Entry, EntryKind};
 use radian_tui::clip::ClipboardMode;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

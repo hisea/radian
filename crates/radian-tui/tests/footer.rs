@@ -2,7 +2,7 @@
 //! preset, glyphs, thresholds, truncation and the warnings. Pure `App` state on a
 //! `TestBackend`, so no pty is needed.
 
-use agent_core::{BudgetReport, EventSink, UsageSource};
+use radian_core::{BudgetReport, EventSink, UsageSource};
 use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig};
 use radian_session::RuntimeEvent;
 use radian_tui::App;
@@ -745,10 +745,10 @@ fn a_compaction_usage_reaches_the_footer_totals() {
     let (tx, _rx) = channel();
     let sink =
         radian_tui::events::ProjectionSink::new(tx, std::sync::Arc::clone(&app.session.projection));
-    sink.emit(agent_core::AgentEvent::CompactionUsage {
+    sink.emit(radian_core::AgentEvent::CompactionUsage {
         revision: 1,
         model: "current".into(),
-        usage: agent_core::ModelUsage {
+        usage: radian_core::ModelUsage {
             input: Some(50_000),
             output: Some(2_000),
             input_includes_cache: Some(false),
@@ -768,10 +768,10 @@ fn a_compaction_usage_reaches_the_footer_totals() {
     assert!(line.contains("$0.180"), "the summary's fee: {line:?}");
 
     // A conversation response then adds to the same totals through the same sink.
-    sink.emit(agent_core::AgentEvent::ModelResponseReceived {
-        stop_reason: agent_core::StopReason::EndTurn,
+    sink.emit(radian_core::AgentEvent::ModelResponseReceived {
+        stop_reason: radian_core::StopReason::EndTurn,
         tool_calls: 0,
-        usage: Some(agent_core::ModelUsage {
+        usage: Some(radian_core::ModelUsage {
             input: Some(50_000),
             input_includes_cache: Some(false),
             ..Default::default()
@@ -799,7 +799,7 @@ fn an_incomplete_fee_is_marked() {
         cache_write: None, // the catalog lists no cache-write rate
         tiers: Vec::new(),
     }));
-    app.session.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(10_000),
         cache_write: Some(10_000),
         input_includes_cache: Some(false),
@@ -828,7 +828,7 @@ fn an_estimated_fee_shows_the_tilde_and_wins_over_incomplete() {
     // The resume path for an old record: re-priced with today's catalog and marked estimated.
     app.session.projection.add_usage_at(
         Some(&price),
-        &agent_core::ModelUsage {
+        &radian_core::ModelUsage {
             input: Some(10_000),
             cache_write: Some(10_000),
             input_includes_cache: Some(false),
@@ -864,7 +864,7 @@ fn the_cost_item_uses_the_model_price() {
     let terminal = render(&mut app, 80, 12);
     assert!(!row(&terminal, 11).contains('$'), "{}", row(&terminal, 11));
 
-    app.session.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(1_000_000),
         output: Some(100_000),
         input_includes_cache: Some(false),
@@ -879,7 +879,7 @@ fn the_cost_item_uses_the_model_price() {
     unpriced
         .session
         .projection
-        .add_usage(&agent_core::ModelUsage {
+        .add_usage(&radian_core::ModelUsage {
             input: Some(1_000_000),
             ..Default::default()
         });
@@ -902,7 +902,7 @@ fn a_cache_hit_is_billed_once_at_the_cache_rate() {
         tiers: Vec::new(),
     }));
     app.apply_footer(&rows(vec![item("cost")]));
-    app.session.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(200_000),
         output: Some(2_000),
         cache_read: Some(190_000),
@@ -927,7 +927,7 @@ fn a_model_switch_prices_only_the_calls_after_it() {
         cache_write: None,
         tiers: Vec::new(),
     }));
-    let cheap = agent_core::ModelUsage {
+    let cheap = radian_core::ModelUsage {
         input: Some(1_000_000),
         input_includes_cache: Some(false),
         ..Default::default()
@@ -960,7 +960,7 @@ fn an_all_zero_response_hides_the_cost() {
         tiers: Vec::new(),
     }));
     app.apply_footer(&rows(vec![item("cost")]));
-    app.session.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(0),
         output: Some(0),
         cache_read: Some(0),
@@ -976,7 +976,7 @@ fn an_all_zero_response_hides_the_cost() {
     );
 
     // Once a real call lands, the fee appears (and the earlier zero added nothing).
-    app.session.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(1_000_000),
         input_includes_cache: Some(false),
         ..Default::default()
@@ -990,7 +990,7 @@ fn an_all_zero_response_hides_the_cost() {
 #[test]
 fn the_cache_tokens_are_shown() {
     let mut app = App::new("mock", "s");
-    app.session.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(19_000),
         output: Some(760),
         cache_read: Some(33_000),
@@ -1004,7 +1004,7 @@ fn the_cache_tokens_are_shown() {
     assert!(line.contains("33K"), "the cache total: {line:?}");
 
     let mut none = App::new("mock", "s");
-    none.session.projection.add_usage(&agent_core::ModelUsage {
+    none.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(5),
         ..Default::default()
     });
@@ -1020,7 +1020,7 @@ fn the_cache_tokens_are_shown() {
 #[test]
 fn the_cache_write_tokens_show_only_when_the_format_asks_for_them() {
     let mut app = App::new("mock", "s");
-    app.session.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(10_000),
         output: Some(760),
         cache_read: Some(33_000),
@@ -1054,7 +1054,7 @@ fn the_cache_write_tokens_show_only_when_the_format_asks_for_them() {
 
     // A provider that never reported a write shows `-`, never a fabricated 0.
     let mut none = App::new("mock", "s");
-    none.session.projection.add_usage(&agent_core::ModelUsage {
+    none.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(10_000),
         cache_read: Some(33_000),
         ..Default::default()
@@ -1469,7 +1469,7 @@ fn the_deck_numbers_row_matches_the_sample() {
         cache_write: None,
         tiers: Vec::new(),
     }));
-    app.session.projection.add_usage(&agent_core::ModelUsage {
+    app.session.projection.add_usage(&radian_core::ModelUsage {
         input: Some(15_000_000),
         output: Some(2_600_000),
         cache_read: Some(1_962_000_000),
@@ -1561,7 +1561,7 @@ fn the_other_tiers_keep_the_ascii_token_arrows() {
             }],
             ..Default::default()
         });
-        app.session.projection.add_usage(&agent_core::ModelUsage {
+        app.session.projection.add_usage(&radian_core::ModelUsage {
             input: Some(15_000_000),
             output: Some(2_600_000),
             ..Default::default()
@@ -2359,11 +2359,11 @@ fn rate_limit_headers_reach_the_usage_row() {
     );
 
     // A response carrying the headers publishes the snapshot; the row draws it.
-    app.apply_event(&agent_core::AgentEvent::ModelResponseReceived {
-        stop_reason: agent_core::StopReason::EndTurn,
+    app.apply_event(&radian_core::AgentEvent::ModelResponseReceived {
+        stop_reason: radian_core::StopReason::EndTurn,
         tool_calls: 0,
         usage: None,
-        limits: Some(agent_core::RateLimits {
+        limits: Some(radian_core::RateLimits {
             headers: vec![
                 (
                     "anthropic-ratelimit-requests-remaining".to_owned(),
@@ -2420,8 +2420,8 @@ fn a_response_without_headers_leaves_the_usage_row_absent() {
     let mut app = App::new("mock", "s");
     app.set_footer_facts(None, None, Some("openai".to_string()), None);
     app.apply_footer(&rows(vec![item("usage")]));
-    app.apply_event(&agent_core::AgentEvent::ModelResponseReceived {
-        stop_reason: agent_core::StopReason::EndTurn,
+    app.apply_event(&radian_core::AgentEvent::ModelResponseReceived {
+        stop_reason: radian_core::StopReason::EndTurn,
         tool_calls: 0,
         usage: None,
         limits: None,

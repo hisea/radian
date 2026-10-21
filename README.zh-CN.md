@@ -39,8 +39,8 @@ radian 是一个编码 agent，一个 Rust 二进制；仓库里也包含它所�
 
 | Crate | 是什么 | 详细文档 |
 |---|---|---|
-| `agent-core` | 运行时本身：轮次循环（`Agent`/`AgentSession`/`ActiveRun`）、消息、工具、hooks、steering、日志接缝、事件、上下文预算估算。 | `crates/agent-core/README.md` |
-| `agent-extensions` | 把 MCP stdio 服务器包装成 `agent-core` 工具，别名固定为 `server__tool`。 | `crates/agent-extensions/README.md` |
+| `radian-core` | 运行时本身：轮次循环（`Agent`/`AgentSession`/`ActiveRun`）、消息、工具、hooks、steering、日志接缝、事件、上下文预算估算。 | `crates/radian-core/README.md` |
+| `agent-extensions` | 把 MCP stdio 服务器包装成 `radian-core` 工具，别名固定为 `server__tool`。 | `crates/agent-extensions/README.md` |
 | `agent-provider-contract` | 与适配器无关的契约测试集：每个 `Model` 实现都必须满足的语义，与线上格式无关。 | `crates/agent-provider-contract/README.md` |
 | `agent-provider-openai-compatible` | OpenAI 兼容 Chat Completions（`/chat/completions`）的模型适配器，流式。 | `crates/agent-provider-openai-compatible/README.md`、`crates/agent-provider-contract/README.md` |
 | `agent-provider-anthropic` | Anthropic Messages API（`/v1/messages`）的模型适配器，流式，API key 认证，extended thinking。 | `crates/agent-provider-anthropic/README.md`、`crates/agent-provider-anthropic/WIRE.md` |
@@ -51,7 +51,7 @@ radian 是一个编码 agent，一个 Rust 二进制；仓库里也包含它所�
 | `radian-coding` | 内置编码工具：`read`（文件和目录）、`write`、`patch`（单处或原子的多处编辑）、`glob`、`grep`，在宿主提供工作区时挂载；`shell` 和 `job` 工具还需要沙箱。模型通过 `shell` 运行 git（在不受信任的项目里用 `GIT_CONFIG_*` 加固）。被截断的前台结果登记为普通 job id；保留输出还需要会话私有的输出目录。所有工具都限制在工作区路径内。 | `crates/radian-coding/README.md` |
 | `radian-memory` | 记忆存储层：Global/Project 两种作用域的日志和重放、来源规则（agent 不能改用户写的记录）、Forget/Purge、`projects.jsonl` 登记表、Markdown 导入导出视图。不依赖宿主：调用方传入 `~/.radian/memory/`。 | `crates/radian-memory/README.md` |
 | `radian-host` | TUI 和无头命令共用的宿主管道，保证两者不会走偏：`--header` 解析、会话 id、`--mcp-config` 文件、模型构造、启动说明、"内置工具 + MCP" 提供者、`~/.radian/` 目录布局和诊断、模型目录，以及记忆层（`MemoryService`、项目身份、agent 记忆工具、注入、共用的 `radian memory` / `/memory` 命令）。 | `crates/radian-host/README.md` |
-| `agent-cli` | `radian exec` 背后的库：行提示聊天客户端，可选内置工具、MCP 服务器、会话管理命令和 `radian memory` 命令。 | `crates/agent-cli/README.md` |
+| `radian-exec` | `radian exec` 背后的库：行提示聊天客户端，可选内置工具、MCP 服务器、会话管理命令和 `radian memory` 命令。 | `crates/radian-exec/README.md` |
 | `radian-tui` | `radian` 二进制：基于 `radian-runtime` 的全屏 TUI（只有全屏，没有内联模式），带斜杠命令层（`/help`、`/memory …`、`/access`、`/jobs`）和自己的对话滚动。 | `crates/radian-tui/README.md` |
 
 另有两个二进制不属于产品界面：`agent-extensions` 的 `mcp-fixture`（给它的测试用的手写 MCP 服务器）和 `radian-sandbox` 的 `sandbox-escape`（需要 `--features testing`）。

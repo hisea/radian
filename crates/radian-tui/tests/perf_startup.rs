@@ -290,7 +290,7 @@ fn ms(d: Duration) -> f64 {
 
 /// Writes a valid v1 session file with `n` messages; the last one is a visible marker.
 fn write_session(path: &std::path::Path, session_id: &str, n: usize) {
-    use agent_core::Message;
+    use radian_core::Message;
     use std::io::BufWriter;
     let mut out = BufWriter::new(File::create(path).unwrap());
     let ts = "2026-10-12T00:00:00.000000Z";

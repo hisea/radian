@@ -1,7 +1,7 @@
 //! ADR 0023 U2 (plan B): the mouse wheel scrolls the transcript, not the input history.
 //! Pure `App` state, so the regression (dogfood p5) has a fast test.
 
-use agent_core::Message;
+use radian_core::Message;
 use radian_host::{PendingRequest, PendingView};
 use radian_permissions::ApprovalRequest;
 use radian_tui::app::{App, Input, MOUSE_WHEEL_LINES, MouseScrollDirection, Overlay};

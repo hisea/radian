@@ -7,7 +7,7 @@
 //! These assert the **rendered** frame (TestBackend), because the shapes are the point: the
 //! marker column, the rail in columns 1-2, the body from column 3, and the one colour.
 
-use agent_core::{AgentEvent, ContentPart, Message};
+use radian_core::{AgentEvent, ContentPart, Message};
 use radian_tui::app::{App, Entry, EntryKind};
 use radian_tui::blocks::{self, ReasoningMode};
 use radian_tui::projection::{SessionProjection, StreamKind};

@@ -7,7 +7,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::{
+use radian_core::{
     Agent, AgentConfig, ContentPart, ContextBudget, InputSource, JournalRecord, Message,
     ModelResponse, StopReason, TranscriptJournal, TurnOptions,
 };
@@ -70,7 +70,7 @@ async fn a_steer_during_an_open_segment_does_not_deadlock_the_driver() {
         text("done"),
     ]);
     let agent = Arc::new(
-        Agent::new(Arc::clone(&model), agent_core::NoTools).with_config(AgentConfig {
+        Agent::new(Arc::clone(&model), radian_core::NoTools).with_config(AgentConfig {
             context_budget: Some(ContextBudget::new(3_000).with_bytes_per_token(1)),
             auto_compact: true,
             ..Default::default()
@@ -84,7 +84,7 @@ async fn a_steer_during_an_open_segment_does_not_deadlock_the_driver() {
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
-        Arc::clone(&live) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&live) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await

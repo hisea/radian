@@ -51,7 +51,7 @@ impl App {
     pub fn prefill_history(&mut self, messages: &[Message]) {
         for message in messages {
             if let Message::User { content, meta } = message
-                && matches!(meta.source, None | Some(agent_core::InputSource::User))
+                && matches!(meta.source, None | Some(radian_core::InputSource::User))
             {
                 self.session.history.push(text_of(content));
             }

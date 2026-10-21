@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use agent_core::{InputSource, Message, NoopSink, TurnOptions};
+use radian_core::{InputSource, Message, NoopSink, TurnOptions};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_host::{
     ApprovalRouting, AuthStore, HostBindings, ModelRoute, SessionId, SessionProjection,

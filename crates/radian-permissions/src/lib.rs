@@ -1,5 +1,5 @@
 //! The permission layer (ADR 0012): `ApprovalPolicy` + `ToolRuleSet`, as one
-//! `agent_core::Hooks`.
+//! `radian_core::Hooks`.
 //!
 //! `SandboxMode` (the execution boundary) is a separate layer and is not widened here: this
 //! crate only decides `allow` / `ask` / `deny`.

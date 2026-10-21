@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use agent_core::{ContentPart, Message};
+use radian_core::{ContentPart, Message};
 use serde_json::{Map, Value, json};
 
 use crate::reader::{EventData, Session};

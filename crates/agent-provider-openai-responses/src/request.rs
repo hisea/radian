@@ -4,7 +4,7 @@
 //! `crates/agent-provider-openai-responses/WIRE.md`; the wire is the standard Responses
 //! `input` item list (also used by the Codex endpoint).
 
-use agent_core::{ContentPart, Message, ModelError, ModelRequest, ToolCall, ToolResult};
+use radian_core::{ContentPart, Message, ModelError, ModelRequest, ToolCall, ToolResult};
 use serde_json::{Map, Value, json};
 
 use crate::config::OpenAiResponsesConfig;
@@ -152,7 +152,7 @@ fn input_items(messages: &[Message]) -> Vec<Value> {
 /// the JSON array of `reasoning` output items from the producing response, kept byte-for-byte.
 /// A payload from another provider (e.g. Anthropic `thinking` blocks) or malformed JSON is
 /// ignored rather than misinterpreted: cross-provider histories must stay valid (ADR 0026 D6).
-fn replay_reasoning(payload: Option<&agent_core::OpaqueJson>, items: &mut Vec<Value>) {
+fn replay_reasoning(payload: Option<&radian_core::OpaqueJson>, items: &mut Vec<Value>) {
     let Some(payload) = payload else { return };
     let Ok(Value::Array(blocks)) = serde_json::from_str::<Value>(payload.get()) else {
         return;
@@ -238,7 +238,7 @@ fn plain_text(parts: &[ContentPart]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{InputSource, MessageId, MessageMeta, OpaqueJson, ToolConcurrency, ToolSpec};
+    use radian_core::{InputSource, MessageId, MessageMeta, OpaqueJson, ToolConcurrency, ToolSpec};
 
     fn config() -> OpenAiResponsesConfig {
         OpenAiResponsesConfig::new("http://localhost/v1", "test-model")

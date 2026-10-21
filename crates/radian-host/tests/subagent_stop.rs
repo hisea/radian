@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_core::{CancellationToken, NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
+use radian_core::{CancellationToken, NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
 use radian_host::{SubagentParts, SubagentTools};
 use radian_permissions::{ApprovalPolicy, NoopAudit, Profile};
 use radian_sandbox::SandboxSlot;

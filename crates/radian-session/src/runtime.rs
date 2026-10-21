@@ -1,14 +1,14 @@
 //! The v1 events whose producer is the **runtime** (ADR 0006 §5.5–§5.7).
 //!
 //! Transcript events are deliberately absent: `MessageAppended`, `TranscriptReplaced` and
-//! the tool/usage records go through [`agent_core::TranscriptJournal::append`], which is the
+//! the tool/usage records go through [`radian_core::TranscriptJournal::append`], which is the
 //! only path that keeps `MessageAppended.index` contiguous with what `replay` expects.
 //! Writing them from here would decouple `index` from the transcript.
 //!
 //! `critical` is a property of the event type (ADR 0006 §4), never a caller argument: the
 //! same event must not be writable with two different skip policies.
 
-use agent_core::{InputSource, Message, MessageId, UsageSource};
+use radian_core::{InputSource, Message, MessageId, UsageSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

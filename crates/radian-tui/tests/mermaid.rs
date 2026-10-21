@@ -255,7 +255,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ),
     (
         "radian crates (12 nodes)",
-        "flowchart TD\n  cli[agent-cli] --> host[radian-host]\n  tui[radian-tui] --> host\n  host --> core[agent-core]\n  host --> sess[radian-session]\n  host --> rt[radian-runtime]\n  host --> perm[radian-permissions]\n  host --> sb[radian-sandbox]\n  host --> coding[radian-coding]\n  host --> mem[radian-memory]\n  host --> ext[agent-extensions]\n  ext --> core\n  coding --> sb",
+        "flowchart TD\n  cli[radian-exec] --> host[radian-host]\n  tui[radian-tui] --> host\n  host --> core[radian-core]\n  host --> sess[radian-session]\n  host --> rt[radian-runtime]\n  host --> perm[radian-permissions]\n  host --> sb[radian-sandbox]\n  host --> coding[radian-coding]\n  host --> mem[radian-memory]\n  host --> ext[agent-extensions]\n  ext --> core\n  coding --> sb",
     ),
     (
         "sequence",

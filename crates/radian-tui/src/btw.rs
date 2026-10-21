@@ -98,7 +98,7 @@ pub fn last_line(answer: &BtwAnswer) -> String {
 /// The usage line for one finished side call: the provider-reported counters
 /// that exist (never a zero invented for a missing one, ADR 0007 J1) and the
 /// fee at the route in force (`None` hides the fee, never invents one).
-pub fn usage_line(usage: Option<&agent_core::ModelUsage>, fee_micros: Option<u64>) -> String {
+pub fn usage_line(usage: Option<&radian_core::ModelUsage>, fee_micros: Option<u64>) -> String {
     let Some(usage) = usage else {
         return match fee_micros {
             Some(micros) => format!(
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn the_usage_line_reports_only_reported_counters() {
         assert_eq!(usage_line(None, None), "usage not reported");
-        let usage = agent_core::ModelUsage {
+        let usage = radian_core::ModelUsage {
             input: Some(10),
             output: Some(3),
             ..Default::default()
@@ -233,7 +233,7 @@ mod tests {
             usage_line(Some(&usage), Some(1_000_000)),
             format!("10 in · 3 out · {}", crate::timing::format_cost(1_000_000))
         );
-        let empty = agent_core::ModelUsage::default();
+        let empty = radian_core::ModelUsage::default();
         assert_eq!(usage_line(Some(&empty), None), "usage not reported");
     }
 

@@ -896,11 +896,11 @@ fn dbg_gen_sessions() {
             let text = format!(
                 "回答 {i}：\n\n```mermaid\ngraph TD; A{i}-->B{i}; B{i}-->C{i};\n```\n\n下面是代码：\n\n```typescript\ninterface X{i} {{ a: number; b: string; }}\nfunction f{i}(x: X{i}): number {{ return x.a + x.b.length; }}\n```\n\n还有 Rust：\n\n```rust\nfn g{i}(x: &str) -> usize {{ x.len() + {i} }}\n```\n"
             );
-            agent_core::TranscriptJournal::append(
+            radian_core::TranscriptJournal::append(
                 &journal,
-                agent_core::JournalRecord::Message {
+                radian_core::JournalRecord::Message {
                     index: i,
-                    message: agent_core::Message::assistant(text),
+                    message: radian_core::Message::assistant(text),
                 },
             )
             .await
@@ -920,11 +920,11 @@ fn dbg_gen_sessions() {
             .map(|i| format!("fn f{i}(x: &str) -> usize {{ x.len() + {i} }}\n"))
             .collect();
         let text = format!("```rust\n{code}```\n");
-        agent_core::TranscriptJournal::append(
+        radian_core::TranscriptJournal::append(
             &journal,
-            agent_core::JournalRecord::Message {
+            radian_core::JournalRecord::Message {
                 index: 0,
-                message: agent_core::Message::assistant(text),
+                message: radian_core::Message::assistant(text),
             },
         )
         .await

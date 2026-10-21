@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use agent_core::{
+use radian_core::{
     Agent, AgentEvent, EventSink, HookContext, HookError, Hooks, InputSource, ModelRequest,
     RunStatus, TurnOptions,
 };

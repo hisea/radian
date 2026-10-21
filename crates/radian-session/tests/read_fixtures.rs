@@ -4,7 +4,7 @@
 
 mod common;
 
-use agent_core::{InputSource, Message, recover};
+use radian_core::{InputSource, Message, recover};
 use common::{TempDir, fixture};
 use radian_session::{
     EventData, InboxLane, PermissionApprover, PermissionDecision, ReadError, ReplacementEnd,
@@ -225,7 +225,7 @@ fn replace_resets_the_index_and_repairs_the_new_revision_only() {
         Message::Assistant {
             reasoning: Vec::new(),
             content: vec![],
-            tool_calls: vec![agent_core::ToolCall {
+            tool_calls: vec![radian_core::ToolCall {
                 id: "call-9".into(),
                 name: "check_a".into(),
                 arguments: json!({}),
@@ -349,7 +349,7 @@ fn the_compaction_fixtures_agree_with_the_reference_checker() {
     assert_eq!(committed.last_committed_revision(), 1);
     let history = committed.history().unwrap();
     assert_eq!(history.len(), 2, "{history:?}");
-    assert!(agent_core::compaction::is_compaction_summary(&history[0]));
+    assert!(radian_core::compaction::is_compaction_summary(&history[0]));
     assert_eq!(history[1].text(), "old two");
 
     // The candidate-only file never replaced anything: the old history stands.
@@ -390,7 +390,7 @@ fn the_usage_cache_semantics_fixture_reads_back_field_for_field() {
     assert!(session.skipped().is_empty());
     assert_eq!(session.history().unwrap().len(), 4);
 
-    let usages: Vec<&agent_core::ModelUsage> = session
+    let usages: Vec<&radian_core::ModelUsage> = session
         .events()
         .iter()
         .filter_map(|event| match &event.data {

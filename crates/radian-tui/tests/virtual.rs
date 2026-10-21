@@ -3,7 +3,7 @@
 //! the virtualized window to the full, unvirtualized wrap, and hold the scroll position past
 //! the 65,535 lines a `u16` could count.
 
-use agent_core::AgentEvent;
+use radian_core::AgentEvent;
 use radian_tui::app::App;
 use radian_tui::render::{self, transcript_lines, visible_lines};
 use radian_tui::theme::Theme;
@@ -156,7 +156,7 @@ fn a_transcript_past_u16_lines_scrolls_to_its_real_bottom() {
     for i in 0..700 {
         app.apply_event(&AgentEvent::TranscriptAppended {
             index: i,
-            message: agent_core::Message::user(format!("{block}\nEND-{i}")),
+            message: radian_core::Message::user(format!("{block}\nEND-{i}")),
         });
     }
     let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();

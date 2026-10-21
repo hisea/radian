@@ -163,12 +163,12 @@ impl RoleHooks {
     }
 }
 
-impl agent_core::Hooks for RoleHooks {
+impl radian_core::Hooks for RoleHooks {
     async fn before_model_call(
         &self,
-        _cx: &agent_core::HookContext,
-        request: &mut agent_core::ModelRequest,
-    ) -> Result<(), agent_core::HookError> {
+        _cx: &radian_core::HookContext,
+        request: &mut radian_core::ModelRequest,
+    ) -> Result<(), radian_core::HookError> {
         request.system_prompt = Some(self.base.clone());
         Ok(())
     }
@@ -339,12 +339,12 @@ impl SessionFactsHooks {
     }
 }
 
-impl agent_core::Hooks for SessionFactsHooks {
+impl radian_core::Hooks for SessionFactsHooks {
     async fn before_model_call(
         &self,
-        _cx: &agent_core::HookContext,
-        request: &mut agent_core::ModelRequest,
-    ) -> Result<(), agent_core::HookError> {
+        _cx: &radian_core::HookContext,
+        request: &mut radian_core::ModelRequest,
+    ) -> Result<(), radian_core::HookError> {
         let section = self.section();
         if section.is_empty() {
             return Ok(());
@@ -363,7 +363,7 @@ impl agent_core::Hooks for SessionFactsHooks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::Hooks;
+    use radian_core::Hooks;
     use serde_json::json;
 
     #[test]
@@ -449,7 +449,7 @@ mod tests {
 
     /// The `<session>` text this hook appends to a request.
     async fn appended(hooks: &SessionFactsHooks) -> String {
-        let mut request = agent_core::ModelRequest {
+        let mut request = radian_core::ModelRequest {
             system_prompt: Some("base".into()),
             messages: Vec::new(),
             tools: Vec::new(),
@@ -457,8 +457,8 @@ mod tests {
         };
         hooks
             .before_model_call(
-                &agent_core::HookContext {
-                    cancellation: agent_core::CancellationToken::new(),
+                &radian_core::HookContext {
+                    cancellation: radian_core::CancellationToken::new(),
                     model_calls: 1,
                 },
                 &mut request,
@@ -733,7 +733,7 @@ mod tests {
     /// Every index path opens through `read`.
     #[tokio::test]
     async fn every_docs_index_path_opens_through_read() {
-        use agent_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
+        use radian_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
         let dir = std::env::temp_dir().join(format!("radian-prompt-docs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -755,7 +755,7 @@ mod tests {
             };
             let sink = NoopSink;
             let cx = ToolContext {
-                cancellation: agent_core::CancellationToken::new(),
+                cancellation: radian_core::CancellationToken::new(),
                 events: &sink,
                 index: 0,
             };

@@ -14,7 +14,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_core::{
+use radian_core::{
     CancellationToken, ContentPart, NoopSink, ToolCall, ToolContext, ToolFailure, ToolOutput,
     ToolProvider, ToolSession,
 };

@@ -67,7 +67,7 @@ not silent at all. The faithful mutation is the one in the table; it is caught b
 
 Base: `1953b12` · one-shot worktree `/tmp/sessfix-mut` (created from HEAD, deleted after) · a
 private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast` against
-`cargo test -p radian-session` and `cargo test -p agent-core --features journal-selfcheck`,
+`cargo test -p radian-session` and `cargo test -p radian-core --features journal-selfcheck`,
 then `git checkout -- .`; `git status --short` empty at the end.
 
 | # | Mutation (each fix reverted) | Caught by | Result |
@@ -78,7 +78,7 @@ then `git checkout -- .`; `git status --short` empty at the end.
 | M4 | reader: an orphan tool marker is accepted again | `findings::a_marker_whose_call_id_never_appeared_is_refused` | ✅ failed |
 | M5 | reader: the torn-tail check is disabled (`if false && ...`) | `fuzz::corruption_replay_is_total_and_never_writes_the_file`, `read_fixtures::a_torn_tail_is_dropped_at_read_time`, `index::a_deleted_index_rebuilds_to_the_same_rows`, `index::a_torn_tail_is_not_indexed_and_is_picked_up_after_truncate_and_append`, `findings::a_crash_mid_replacement_is_recovered_as_the_written_prefix` | ✅ failed |
 
-5/5 caught. **`agent-core --features journal-selfcheck` failed on none of them**: Core's
+5/5 caught. **`radian-core --features journal-selfcheck` failed on none of them**: Core's
 `replay`/`repair` never consult `TranscriptReplaced.len` (they only check `index` contiguity
 and reset at a marker), and the selfcheck slices from the last replacement and replays, so
 finding 0 had no Core equivalent. The other three fixes are reader/writer-only, so Core is
@@ -92,7 +92,7 @@ tightening it was only caught by the `read_fixtures`/`index` tests.
 
 Base: `d5d936d` · one-shot worktree `/tmp/sessfix2-mut` (created from HEAD, deleted after) · a
 private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast` against
-`cargo test -p radian-session` and `cargo test -p agent-core --features journal-selfcheck`,
+`cargo test -p radian-session` and `cargo test -p radian-core --features journal-selfcheck`,
 then `git checkout -- .`; `git status --short` empty at the end.
 
 | # | Mutation | Caught by | Result |
@@ -100,7 +100,7 @@ then `git checkout -- .`; `git status --short` empty at the end.
 | M6 | reader: a short segment before a new `TranscriptReplaced` is refused again | `findings::a_short_replacement_followed_by_another_replacement_reads_back`, `replace::resume_continues_after_a_short_replacement_is_replaced_again` | ✅ failed |
 | M2 | reader: a short segment at end of file is refused again (recheck after the round-2 change) | `findings::a_crash_mid_replacement_is_recovered_as_the_written_prefix`, `replace::resume_continues_after_a_short_replacement`, `fuzz::corruption_replay_is_total_and_never_writes_the_file` | ✅ failed |
 
-2/2 caught; `agent-core --features journal-selfcheck` failed on neither, as before. The M6
+2/2 caught; `radian-core --features journal-selfcheck` failed on neither, as before. The M6
 catch is exactly the two new tests, so the decision "accept a short segment before a new
 marker" is pinned.
 
@@ -109,8 +109,8 @@ marker" is pinned.
 Base: `90a91a6` · one-shot worktree `/tmp/privacy-mut` (created from HEAD, deleted after) · a
 private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast`, then `git checkout -- .`;
 `git status --short` empty at the end. The permission tests live in
-`crates/radian-session/tests/privacy.rs` and `crates/agent-cli/tests/cli.rs`; the redaction
-tests in `crates/agent-cli/tests/cli.rs`.
+`crates/radian-session/tests/privacy.rs` and `crates/radian-exec/tests/cli.rs`; the redaction
+tests in `crates/radian-exec/tests/cli.rs`.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
@@ -130,7 +130,7 @@ chance to differ.
 
 Base: `8858046` · one-shot worktree `/tmp/0019-mut`（detached，跑完删除）· 每个变异 `--no-fail-fast`
 跑完即 `git checkout -- .`，结束时 `git status --short` 为空。Core 侧三项（提交、待定段前缀、
-段内第二个 marker）记在 `crates/agent-core/MUTATIONS-0019.md`。
+段内第二个 marker）记在 `crates/radian-core/MUTATIONS-0019.md`。
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|

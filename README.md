@@ -39,8 +39,8 @@ New users start with [`docs/user/quickstart.md`](docs/user/quickstart.md). The d
 
 | Crate | What it is | Detailed docs |
 |---|---|---|
-| `agent-core` | The runtime itself: turn loop (`Agent`/`AgentSession`/`ActiveRun`), messages, tools, hooks, steering, the journal seam, events, context budget estimation. | `crates/agent-core/README.md` |
-| `agent-extensions` | MCP stdio servers exposed as `agent-core` tools, under stable `server__tool` aliases. | `crates/agent-extensions/README.md` |
+| `radian-core` | The runtime itself: turn loop (`Agent`/`AgentSession`/`ActiveRun`), messages, tools, hooks, steering, the journal seam, events, context budget estimation. | `crates/radian-core/README.md` |
+| `agent-extensions` | MCP stdio servers exposed as `radian-core` tools, under stable `server__tool` aliases. | `crates/agent-extensions/README.md` |
 | `agent-provider-contract` | Adapter-neutral contract suite: the semantics every `Model` implementation must satisfy, independent of wire format. | `crates/agent-provider-contract/README.md` |
 | `agent-provider-openai-compatible` | Model adapter for OpenAI-compatible Chat Completions (`/chat/completions`), streaming. | `crates/agent-provider-openai-compatible/README.md`, `crates/agent-provider-contract/README.md` |
 | `agent-provider-anthropic` | Model adapter for the Anthropic Messages API (`/v1/messages`), streaming, API-key auth, extended thinking. | `crates/agent-provider-anthropic/README.md`, `crates/agent-provider-anthropic/WIRE.md` |
@@ -51,7 +51,7 @@ New users start with [`docs/user/quickstart.md`](docs/user/quickstart.md). The d
 | `radian-coding` | Built-in coding tools — `read` (files and directories), `write`, `patch` (single or atomic multi-edit), `glob`, `grep`, when the host supplies a workspace; `shell` and the `job` tool additionally require a sandbox. The model runs git through `shell` (hardened via `GIT_CONFIG_*` in untrusted projects). A truncated foreground result registers under a normal job id; retention additionally requires a session-private output directory. Workspace path confinement applies throughout. | `crates/radian-coding/README.md` |
 | `radian-memory` | The memory storage layer: Global/Project scope logs with replay, the source rules (an agent cannot touch a user record), Forget/Purge, the `projects.jsonl` registry and the Markdown import/export view. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md` |
 | `radian-host` | Host plumbing shared by the TUI and the headless command so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, and the memory layer (`MemoryService`, project identity, the agent memory tools, injection, and the shared `radian memory` / `/memory` commands). | `crates/radian-host/README.md` |
-| `agent-cli` | The library behind `radian exec`: the line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `radian memory` commands. | `crates/agent-cli/README.md` |
+| `radian-exec` | The library behind `radian exec`: the line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `radian memory` commands. | `crates/radian-exec/README.md` |
 | `radian-tui` | The `radian` binary: a full-screen TUI (full screen only, no inline mode) over `radian-runtime`, with a slash-command layer (`/help`, `/memory …`, `/access`, `/jobs`) and its own transcript scrolling. | `crates/radian-tui/README.md` |
 
 Two more binaries exist but are not part of the product surface: `agent-extensions`'s

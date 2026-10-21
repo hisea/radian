@@ -1069,7 +1069,7 @@ was not recorded. **All items passed**:
 Usability feedback on the UI that is not recorded yet comes later.
 
 Gap found while preparing the test: the TUI's `--header` took a literal value and had no
-`{session_id}` placeholder, unlike `agent-cli`. **Fixed in slice D**: both hosts now use
+`{session_id}` placeholder, unlike `radian-exec`. **Fixed in slice D**: both hosts now use
 `radian-host`'s parser, so `{session_id}` expands (for `--session-id` and `--resume`),
 `authorization` is refused, names are validated, and a malformed argument never echoes its
 value.
@@ -1222,7 +1222,7 @@ continue it: `... the session file <path> exists; after fixing the problem, cont
 
 ## Sessions
 
-The session directory and id convention is **the same as `agent-cli`**, so a session written
+The session directory and id convention is **the same as `radian-exec`**, so a session written
 by one is resumable by the other:
 
 - `--session-dir DIR`, else `RADIAN_SESSION_DIR`, else `~/.radian/sessions`
@@ -1275,7 +1275,7 @@ read only from the named environment variable and is never printed.
 entered. The version is the package's own (`CARGO_PKG_VERSION` in `Cargo.toml`), never a
 literal in the source.
 
-`--header`, `--mcp-config` and the session-id rules are the **same code** `agent-cli` uses
+`--header`, `--mcp-config` and the session-id rules are the **same code** `radian-exec` uses
 (`crates/radian-host`), so the two hosts cannot drift: `{session_id}` expands to the
 process's id (or the resumed one), `authorization` is refused because the key has one source,
 and a malformed argument is reported without echoing its value.
@@ -1285,7 +1285,7 @@ and a malformed argument is reported without echoing its value.
 `--workspace DIR` mounts the built-in file tools (`read`, `write`, `patch`,
 `glob`, `grep`) rooted at that directory, plus **`shell`** and **`job`** when a sandbox
 could be built. The model runs git through `shell` (hardened via `GIT_CONFIG_*` in
-untrusted projects, ADR 0039 decision 5). This is the same wiring `agent-cli` uses:
+untrusted projects, ADR 0039 decision 5). This is the same wiring `radian-exec` uses:
 
 - The sandbox is built **before** the tools: `workspace` and `full` call
   `radian_sandbox::Sandbox::new`, and a missing backend or a failed probe is an **error**, never
@@ -1555,7 +1555,7 @@ owns fork/rewind).
 
 ## MCP servers
 
-`--mcp-config FILE` starts MCP stdio servers from the same JSON file `agent-cli` reads:
+`--mcp-config FILE` starts MCP stdio servers from the same JSON file `radian-exec` reads:
 
 ```json
 {"servers": [{"id": "fx", "command": "/path/to/server", "args": [], "env": {},

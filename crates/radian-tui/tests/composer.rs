@@ -168,8 +168,8 @@ fn editing_keys_edit_at_the_cursor() {
 #[test]
 fn resume_prefills_the_history_from_user_messages_only() {
     let mut app = App::new("m", "s");
-    let user = agent_core::Message::user("from the user");
-    let assistant = agent_core::Message::assistant("from the model");
+    let user = radian_core::Message::user("from the user");
+    let assistant = radian_core::Message::assistant("from the model");
     app.prefill_history(&[user, assistant]);
     assert_eq!(app.session.history, vec!["from the user".to_string()]);
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::{
+use radian_core::{
     AgentEvent, ContentPart, OpaqueJson, ToolCall, ToolConcurrency, ToolContext, ToolError,
     ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };

@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use agent_core::{Agent, InputSource, Message, MessageId, Step, TurnOptions};
+use radian_core::{Agent, InputSource, Message, MessageId, Step, TurnOptions};
 use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
 use radian_runtime::{ConfigQueue, Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
@@ -37,7 +37,7 @@ async fn open_env(
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -233,7 +233,7 @@ async fn a_config_change_is_not_seen_by_the_turn_that_queued_it() {
         .recorder
         .events()
         .iter()
-        .filter(|e| matches!(e, agent_core::AgentEvent::RunFinished { .. }))
+        .filter(|e| matches!(e, radian_core::AgentEvent::RunFinished { .. }))
         .count()
         < 2
     {
@@ -327,7 +327,7 @@ async fn a_model_switch_writes_a_route_and_never_a_key() {
     let (mut driver, env) = open_env("switch-route", Arc::clone(&model), tools.clone()).await;
     driver.set_budget_for(Arc::new(|provider, model| {
         (provider == "anthropic" && model == "claude")
-            .then_some(agent_core::ContextBudget::new(4321))
+            .then_some(radian_core::ContextBudget::new(4321))
     }));
     let slot = Arc::clone(driver.config_slot());
     let queue = Arc::clone(driver.config_queue());
@@ -354,7 +354,7 @@ async fn a_model_switch_writes_a_route_and_never_a_key() {
         .recorder
         .events()
         .iter()
-        .filter(|e| matches!(e, agent_core::AgentEvent::RunFinished { .. }))
+        .filter(|e| matches!(e, radian_core::AgentEvent::RunFinished { .. }))
         .count()
         < 2
     {
@@ -424,7 +424,7 @@ async fn resume_replays_the_last_model_and_thinking_changes() {
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
-        Arc::new(Recorder::default()) as Arc<dyn agent_core::EventSink>,
+        Arc::new(Recorder::default()) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -445,7 +445,7 @@ async fn a_switch_moves_the_next_turns_budget() {
     let (mut driver, _env) = open_env("switch-budget", Arc::clone(&model), tools).await;
     driver.set_budget_for(Arc::new(|provider, model| {
         (provider == "anthropic" && model == "claude")
-            .then_some(agent_core::ContextBudget::new(1234))
+            .then_some(radian_core::ContextBudget::new(1234))
     }));
     assert_eq!(driver.test_turn_budget(), None, "nothing switched yet");
     driver
@@ -454,7 +454,7 @@ async fn a_switch_moves_the_next_turns_budget() {
     driver.test_apply_pending_config().await.unwrap();
     assert_eq!(
         driver.test_turn_budget(),
-        Some(agent_core::ContextBudget::new(1234)),
+        Some(radian_core::ContextBudget::new(1234)),
         "the switch moved the budget"
     );
 }
@@ -496,7 +496,7 @@ async fn resume_merges_every_config_change_not_one_per_kind() {
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
-        Arc::new(Recorder::default()) as Arc<dyn agent_core::EventSink>,
+        Arc::new(Recorder::default()) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -541,7 +541,7 @@ async fn the_resumed_model_gets_its_budget_when_the_resolver_arrives() {
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
-        Arc::new(Recorder::default()) as Arc<dyn agent_core::EventSink>,
+        Arc::new(Recorder::default()) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await
@@ -551,11 +551,11 @@ async fn the_resumed_model_gets_its_budget_when_the_resolver_arrives() {
     assert_eq!(driver2.test_turn_budget(), None, "no resolver yet");
     driver2.set_budget_for(Arc::new(|provider, model| {
         (provider == "anthropic" && model == "claude")
-            .then_some(agent_core::ContextBudget::new(4321))
+            .then_some(radian_core::ContextBudget::new(4321))
     }));
     assert_eq!(
         driver2.test_turn_budget(),
-        Some(agent_core::ContextBudget::new(4321)),
+        Some(radian_core::ContextBudget::new(4321)),
         "the restored route gets its budget when the resolver arrives"
     );
 }
@@ -651,14 +651,14 @@ async fn a_host_addition_lands_after_the_user_message_and_before_the_first_call(
 /// System and whose origin names the records it carries.
 fn addition_message(text: &str) -> Message {
     Message::User {
-        content: vec![agent_core::ContentPart::text(format!(
+        content: vec![radian_core::ContentPart::text(format!(
             "<memory>hit {text}</memory>"
         ))],
-        meta: agent_core::MessageMeta {
+        meta: radian_core::MessageMeta {
             id: None,
             source: Some(InputSource::System),
             origin: Some(
-                agent_core::OpaqueJson::parse(r#"{"kind":"memory_addition","records":[]}"#)
+                radian_core::OpaqueJson::parse(r#"{"kind":"memory_addition","records":[]}"#)
                     .unwrap(),
             ),
         },
@@ -689,17 +689,17 @@ async fn switch_env(label: &str, startup_settings: serde_json::Value) -> SwitchE
     let model = ScriptedModel::new([text("ack"), text("summary"), text("done")]);
     let tools = MemTools::new();
     let agent = Arc::new(Agent::new(Arc::clone(&model), tools).with_config(
-        agent_core::AgentConfig {
-            context_budget: Some(agent_core::ContextBudget::new(3_000).with_bytes_per_token(1)),
+        radian_core::AgentConfig {
+            context_budget: Some(radian_core::ContextBudget::new(3_000).with_bytes_per_token(1)),
             compaction_settings: startup_settings,
-            ..agent_core::AgentConfig::default()
+            ..radian_core::AgentConfig::default()
         },
     ));
     let mut driver = Driver::open(
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
-        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        Arc::clone(&recorder) as Arc<dyn radian_core::EventSink>,
         TurnOptions::default(),
     )
     .await

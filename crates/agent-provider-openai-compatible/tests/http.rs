@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_core::*;
+use radian_core::*;
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use agent_provider_openai_compatible::{
     ApiKey, ConfigError, OpenAiCompatible, OpenAiCompatibleConfig,
@@ -47,7 +47,7 @@ fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
 async fn chat<M: Model, P: ToolProvider>(model: M, tools: P) -> AgentSession<M, P, ()> {
     Arc::new(Agent::new(model, tools).with_config(AgentConfig {
         // These tests drive the real turn loop but pin the **adapter's** one-shot behaviour:
-        // ADR 0017's retry is exercised in agent-core's `retry` tests.
+        // ADR 0017's retry is exercised in radian-core's `retry` tests.
         retries: 0,
         ..Default::default()
     }))

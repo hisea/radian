@@ -1,7 +1,7 @@
 //! The startup helpers the two hosts share (ADR 0032 slice 5): where session files live, which
 //! workspace a session belongs to, the `--list` table, and the loopback-endpoint rule.
 //!
-//! Both `radian exec` (`agent-cli`) and `radian` (`radian-tui`) used to carry their own copy of
+//! Both `radian exec` (`radian-exec`) and `radian` (`radian-tui`) used to carry their own copy of
 //! each of these, so a change to one could leave the other behind. The rules live here; a host
 //! keeps what is really its own — its flags, its error type and exit code, its wording. Every
 //! host-specific input arrives as a plain value (a path, a string), never as a host's struct, and
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::{ContextBudget, TurnOptions};
+use radian_core::{ContextBudget, TurnOptions};
 use agent_extensions::McpServerConfig;
 use radian_permissions::{Preset, Profile};
 use radian_runtime::{BudgetFor, CompactionSettingsFor, ConfigQueue, ConfigSlot, ModelRoute};
@@ -259,7 +259,7 @@ impl SessionSettings {
             retries: config
                 .model
                 .retries
-                .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
+                .unwrap_or(radian_core::DEFAULT_MODEL_RETRIES),
             compaction_settings,
             compaction_settings_for: Some(compaction_settings_for),
             smol_route: config

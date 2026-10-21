@@ -1,7 +1,7 @@
 //! The shared model construction for both hosts: one [`HostModel`] over the two provider
 //! adapters, and one [`build_model`] from resolved arguments.
 //!
-//! `agent_core::Model::complete` returns `impl Future` (RPITIT), so `Model` is **not object
+//! `radian_core::Model::complete` returns `impl Future` (RPITIT), so `Model` is **not object
 //! safe**: a host cannot hold a `Box<dyn Model>`. An enum that implements `Model` by matching
 //! on its variants keeps static dispatch and lets either provider live behind one type.
 //!
@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use radian_runtime::{ConfigSlot, ModelRoute};
 
-use agent_core::{Model, ModelContext, ModelError, ModelRequest, ModelResponse};
+use radian_core::{Model, ModelContext, ModelError, ModelRequest, ModelResponse};
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ThinkingConfig};
 use agent_provider_openai_compatible::{OpenAiCompatible, OpenAiCompatibleConfig};
 use agent_provider_openai_responses::{OpenAiResponses, OpenAiResponsesConfig};
@@ -31,7 +31,7 @@ pub const DEFAULT_MAX_TOKENS: u32 = 16384;
 
 /// The per-turn model call limit both `radian exec` and the TUI use when `--max-model-calls`
 /// is not given. One constant in the crate both hosts depend on, so
-/// the two binaries cannot drift. `agent-core`'s `DEFAULT_MAX_MODEL_CALLS` (32) stays the
+/// the two binaries cannot drift. `radian-core`'s `DEFAULT_MAX_MODEL_CALLS` (32) stays the
 /// runtime's own fuse for a host that configures no limit. Overridable with `--max-model-calls`.
 pub const DEFAULT_MAX_MODEL_CALLS: u32 = 1000;
 
@@ -385,7 +385,7 @@ pub const COMPACTION_THINKING_CURRENT: &str = "current";
 /// configured `[compaction] thinking` level (ADR 0018). Returns
 /// `(settings, notice)`:
 ///
-/// * `settings` is the object for `agent_core::AgentConfig::compaction_settings` — the wire
+/// * `settings` is the object for `radian_core::AgentConfig::compaction_settings` — the wire
 ///   value the route's protocol expects (`{"reasoning_effort":…}` for OpenAI-compatible,
 ///   `{"thinking":…}` for Anthropic) — or [`serde_json::Value::Null`] when the call must carry
 ///   no setting: the level is [`COMPACTION_THINKING_CURRENT`], the route's map supports no

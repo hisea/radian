@@ -20,7 +20,7 @@ mod common;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
-use agent_core::{
+use radian_core::{
     ContentPart, InputSource, JournalRecord, Message, MessageId, ModelUsage, ToolCall, ToolResult,
     TranscriptJournal, UsageSource,
 };

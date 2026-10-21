@@ -1,6 +1,6 @@
 # radian-host
 
-Host plumbing that `agent-cli` and `radian-tui` both need, kept in one place so the two hosts
+Host plumbing that `radian-exec` and `radian-tui` both need, kept in one place so the two hosts
 cannot drift. It is the part of a host that is the same whether the user is at a line prompt or
 in a full-screen UI: `--header` parsing, session-id generation and validation, the
 `--mcp-config` file, model construction, the startup description of the permission tier, and the
@@ -13,7 +13,7 @@ decides a permission.
 
 ## Model construction
 
-`agent_core::Model::complete` returns `impl Future` (RPITIT), so `Model` is **not object safe**
+`radian_core::Model::complete` returns `impl Future` (RPITIT), so `Model` is **not object safe**
 and a host cannot hold a `Box<dyn Model>`. `HostModel` is therefore an enum
 (`OpenAi` / `Anthropic` / `ChatGpt` / `Responses`) that implements `Model` by matching on its
 variant: every protocol lives behind one type with static dispatch. `ChatGpt` is the OAuth
@@ -177,7 +177,7 @@ so a moved repository still matches its old project.
 | A Project record overrides a Global one with the same key | `a_project_record_overrides_a_global_one_with_the_same_key` | `src/memory/service.rs` |
 | User commands check the revision and keep `Source::User` | `user_commands_set_the_user_source_and_check_the_revision` | `src/memory/service.rs` |
 
-End to end through the CLI: `agent-cli/tests/cli.rs` (`memory_…`), including a real
+End to end through the CLI: `radian-exec/tests/cli.rs` (`memory_…`), including a real
 `git worktree` sharing a project.
 
 ### The agent's memory tool (ADR 0021 D5/D7)
@@ -196,7 +196,7 @@ commands.
 
 ### Deterministic injection (ADR 0021 D6)
 
-`MemoryHooks` (an `agent_core::Hooks`) appends the **fixed** block to the **system prompt**
+`MemoryHooks` (an `radian_core::Hooks`) appends the **fixed** block to the **system prompt**
 before each model call. It ranks all Active records with `radian_memory::ranked` in the D6
 order (scope → trust → match score → `updated_at` → `id`), selects whole records under
 `InjectionConfig { max_tokens: 2000, global_budget: 500, project_budget: 1500 }` (a scope may
@@ -244,9 +244,9 @@ line's skipped list.
 | Resume rebuilds from the current memory | `a_new_hook_instance_resumes_with_the_current_memory` | `tests/memory_injection.rs` |
 | A broken memory log warns but never fails the turn | `a_broken_memory_log_warns_but_does_not_fail_the_turn` | `tests/memory_injection.rs` |
 | The driver places an addition after the user message and before the first call; a System turn gets none | `a_host_addition_lands_after_the_user_message_and_before_the_first_call` | `radian-runtime/tests/driver.rs` |
-| One process, two turns: byte-identical system prompts and tool definitions, the addition in the transcript | `the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once` | `agent-cli/tests/cli.rs` |
-| `memory_search` mounts only past the budget; a `memory_save` call is an unknown tool and the turn still succeeds | `memory_search_mounts_only_past_the_injection_budget`, `a_model_call_to_memory_save_is_an_unknown_tool_and_the_turn_succeeds` | `agent-cli/tests/cli.rs` |
-| A single-turn run (`-p`) appends nothing; a resume ranks by the session's first user message | `exec_p_ranks_the_block_by_its_prompt_and_appends_nothing`, `a_resumed_session_ranks_the_block_by_its_first_user_message` | `agent-cli/tests/cli.rs` |
+| One process, two turns: byte-identical system prompts and tool definitions, the addition in the transcript | `the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once` | `radian-exec/tests/cli.rs` |
+| `memory_search` mounts only past the budget; a `memory_save` call is an unknown tool and the turn still succeeds | `memory_search_mounts_only_past_the_injection_budget`, `a_model_call_to_memory_save_is_an_unknown_tool_and_the_turn_succeeds` | `radian-exec/tests/cli.rs` |
+| A single-turn run (`-p`) appends nothing; a resume ranks by the session's first user message | `exec_p_ranks_the_block_by_its_prompt_and_appends_nothing`, `a_resumed_session_ranks_the_block_by_its_first_user_message` | `radian-exec/tests/cli.rs` |
 | `[memory.injection]` carries `additions`/`addition_budget`; the rest is reported as skipped | `the_memory_injection_keys_are_read_and_the_rest_is_reported` | `tests/config_fixtures.rs` |
 | `memory_search` is `allow` in both tiers; no memory tool asks | `memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks` | `radian-permissions/src/profile.rs` |
 
@@ -304,13 +304,13 @@ End-to-end, through the binaries (this crate has no integration tests of its own
 
 | Guarantee | Test | Where |
 |---|---|---|
-| `--provider anthropic` really uses the Messages API, and the snapshot names the real provider | `anthropic_provider_sends_a_messages_request_and_shows_the_reply`, `the_session_snapshot_names_the_real_provider` | `agent-cli/tests/cli.rs` |
-| The default key env switches with the provider and the key never leaks | `anthropic_reads_anthropic_api_key_env_by_default_and_never_leaks_it` | `agent-cli/tests/cli.rs` |
-| `--thinking` reaches the request body | `anthropic_thinking_modes_are_sent_in_the_body` | `agent-cli/tests/cli.rs` |
-| A thinking budget outside the documented range is refused before a session file exists | `anthropic_rejects_a_thinking_budget_out_of_range_before_creating_a_session` | `agent-cli/tests/cli.rs` |
-| Anthropic-only flags are refused under `openai-compatible` in both hosts | `anthropic_only_flags_are_refused_under_openai_compatible`, `pty_anthropic_only_flags_are_refused_under_openai_compatible` | `agent-cli/tests/cli.rs`, `radian-tui/tests/pty.rs` |
-| The startup text does not claim credential isolation, and the `workspace-write` notice names the MCP sandbox gap | `the_startup_text_does_not_claim_credential_isolation`, `pty_the_workspace_write_notice_names_the_mcp_sandbox_gap` | `agent-cli/tests/cli.rs`, `radian-tui/tests/pty.rs` |
-| A base URL with credentials is redacted in errors | `a_base_url_with_credentials_is_redacted_in_errors` | `agent-cli/tests/cli.rs` |
+| `--provider anthropic` really uses the Messages API, and the snapshot names the real provider | `anthropic_provider_sends_a_messages_request_and_shows_the_reply`, `the_session_snapshot_names_the_real_provider` | `radian-exec/tests/cli.rs` |
+| The default key env switches with the provider and the key never leaks | `anthropic_reads_anthropic_api_key_env_by_default_and_never_leaks_it` | `radian-exec/tests/cli.rs` |
+| `--thinking` reaches the request body | `anthropic_thinking_modes_are_sent_in_the_body` | `radian-exec/tests/cli.rs` |
+| A thinking budget outside the documented range is refused before a session file exists | `anthropic_rejects_a_thinking_budget_out_of_range_before_creating_a_session` | `radian-exec/tests/cli.rs` |
+| Anthropic-only flags are refused under `openai-compatible` in both hosts | `anthropic_only_flags_are_refused_under_openai_compatible`, `pty_anthropic_only_flags_are_refused_under_openai_compatible` | `radian-exec/tests/cli.rs`, `radian-tui/tests/pty.rs` |
+| The startup text does not claim credential isolation, and the `workspace-write` notice names the MCP sandbox gap | `the_startup_text_does_not_claim_credential_isolation`, `pty_the_workspace_write_notice_names_the_mcp_sandbox_gap` | `radian-exec/tests/cli.rs`, `radian-tui/tests/pty.rs` |
+| A base URL with credentials is redacted in errors | `a_base_url_with_credentials_is_redacted_in_errors` | `radian-exec/tests/cli.rs` |
 
 `MUTATIONS.md` records the mutation checks for provider selection and the shared `describe`
 (M1–M4 caught; M5–M7 for the thinking-budget and Anthropic-only-flag checks).
@@ -318,7 +318,7 @@ End-to-end, through the binaries (this crate has no integration tests of its own
 ## Known limits and what is not verified
 
 - **This crate has no integration tests.** Every guarantee above is a unit test in the module,
-  or a test in `agent-cli` / `radian-tui`. A change here that only the hosts exercise is caught
+  or a test in `radian-exec` / `radian-tui`. A change here that only the hosts exercise is caught
   only when those suites run.
 - **`describe` is wording, not enforcement.** It reports what was chosen; it cannot check that
   the sandbox was actually built. The unreachable `(WorkspaceWrite, None)` arm says so in its

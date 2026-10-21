@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use agent_core::Message;
+use radian_core::Message;
 use radian_permissions::{ApprovalPolicy, PermissionHooks, Preset};
 use radian_runtime::{BudgetFor, CancelCause, ConfigQueue, ConfigSlot};
 use radian_sandbox::SandboxSlot;
@@ -83,7 +83,7 @@ pub struct LocalSession {
     /// own list, not a reconstruction. Old alias names are still registered here; the
     /// model request strips them (ADR 0043 decision 3), and the inspector applies the same
     /// strip so its list matches the request's set exactly.
-    pub(super) tool_specs: Vec<agent_core::ToolSpec>,
+    pub(super) tool_specs: Vec<radian_core::ToolSpec>,
     /// The `/context` estimate inputs (ADR 0015): the system layers split so the
     /// categories add up, the memory injection for the fixed block, and the
     /// estimate ruler. Read-only; the loop reads them while a turn runs.
@@ -111,7 +111,7 @@ pub struct LocalSession {
     /// How many listable skills the listing names (ADR 0025 S2).
     pub(super) skills_count: usize,
     pub(super) memory_injection: Arc<MemoryInjection>,
-    pub(super) context_budget: Option<agent_core::ContextBudget>,
+    pub(super) context_budget: Option<radian_core::ContextBudget>,
     /// `C` (ADR 0018): the context window size. `None` when unknown.
     pub(super) window_context: Option<u64>,
     /// The MCP server configs this session was opened with (the inspector's mcp page).
@@ -150,7 +150,7 @@ impl LocalSession {
     /// (the memory hook would journal a second `MemoryInjected`), and works
     /// mid-turn. `/context` renders through it; `/btw` appends one trailing
     /// user message and sends it.
-    pub fn next_request_shape(&self) -> Result<agent_core::ModelRequest, String> {
+    pub fn next_request_shape(&self) -> Result<radian_core::ModelRequest, String> {
         use crate::memory::first_user_text;
 
         let (history, _, _) = read_committed(&self.journal_path)?;
@@ -183,7 +183,7 @@ impl LocalSession {
             system_prompt.push('\n');
             system_prompt.push_str(&session);
         }
-        Ok(agent_core::ModelRequest {
+        Ok(radian_core::ModelRequest {
             system_prompt: Some(system_prompt),
             messages: history,
             tools: self.tool_specs.clone(),
@@ -204,7 +204,7 @@ impl LocalSession {
         request
             .messages
             .push(crate::btw::side_user_message(&question));
-        let cancel = agent_core::CancellationToken::new();
+        let cancel = radian_core::CancellationToken::new();
         let token = cancel.clone();
         let model = Arc::clone(&self.side_model);
         let price_for = self.price_for.clone();
@@ -280,7 +280,7 @@ impl LocalSession {
             .collect();
         let (bytes_per_token, count_reasoning) = match self.context_budget {
             Some(budget) => (budget.bytes_per_token, budget.count_reasoning),
-            None => (agent_core::DEFAULT_BYTES_PER_TOKEN, false),
+            None => (radian_core::DEFAULT_BYTES_PER_TOKEN, false),
         };
         let threshold = self
             .projection
@@ -699,7 +699,7 @@ impl SessionFacade for LocalSession {
         }
     }
 
-    fn tool_specs(&self) -> Vec<agent_core::ToolSpec> {
+    fn tool_specs(&self) -> Vec<radian_core::ToolSpec> {
         self.tool_specs.clone()
     }
 
@@ -728,7 +728,7 @@ impl SessionFacade for LocalSession {
         self.context_report_inner()
     }
 
-    fn next_request_shape(&self) -> Result<agent_core::ModelRequest, String> {
+    fn next_request_shape(&self) -> Result<radian_core::ModelRequest, String> {
         LocalSession::next_request_shape(self)
     }
 
@@ -753,7 +753,7 @@ impl SessionFacade for LocalSession {
                 // `HookContext` has no source field, so the host declares each turn's source
                 // before it starts; an unset source is treated as non-human and denied.
                 self.hooks
-                    .set_turn_source(Some(agent_core::InputSource::User));
+                    .set_turn_source(Some(radian_core::InputSource::User));
                 // A user message resets the notification wake budgets (ADR 0037 decision 3,
                 // ADR 0045).
                 if let Some(notifier) = &self.job_notifier {
@@ -761,19 +761,19 @@ impl SessionFacade for LocalSession {
                 }
                 self.command_hooks.reset_wakes();
                 self.runtime
-                    .block_on(self.inbox.followup(text, agent_core::InputSource::User))
+                    .block_on(self.inbox.followup(text, radian_core::InputSource::User))
                     .map(|_| ())
                     .map_err(|error| CommandRefused::inbox(name, &error))
             }
             SessionCommand::Steer(text) => {
                 self.hooks
-                    .set_turn_source(Some(agent_core::InputSource::User));
+                    .set_turn_source(Some(radian_core::InputSource::User));
                 if let Some(notifier) = &self.job_notifier {
                     notifier.reset_wakes();
                 }
                 self.command_hooks.reset_wakes();
                 self.runtime
-                    .block_on(self.inbox.steer(text, agent_core::InputSource::User))
+                    .block_on(self.inbox.steer(text, radian_core::InputSource::User))
                     .map(|_| ())
                     .map_err(|error| CommandRefused::inbox(name, &error))
             }
@@ -781,13 +781,13 @@ impl SessionFacade for LocalSession {
                 // ADR 0033 + ADR 0011: `inject` is the "no wake" lane, so a `!` output never
                 // starts a turn; the source is `User` (the human typed the command).
                 self.hooks
-                    .set_turn_source(Some(agent_core::InputSource::User));
+                    .set_turn_source(Some(radian_core::InputSource::User));
                 if let Some(notifier) = &self.job_notifier {
                     notifier.reset_wakes();
                 }
                 self.command_hooks.reset_wakes();
                 self.runtime
-                    .block_on(self.inbox.inject(message, agent_core::InputSource::User))
+                    .block_on(self.inbox.inject(message, radian_core::InputSource::User))
                     .map(|_| ())
                     .map_err(|error| CommandRefused::inbox(name, &error))
             }
@@ -801,7 +801,7 @@ impl SessionFacade for LocalSession {
     fn compact(
         &self,
         instructions: Option<String>,
-        on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+        on_done: Box<dyn FnOnce(Result<radian_core::CompactionOutcome, String>) + Send>,
     ) {
         self.compact_with_budget(instructions, None, on_done)
     }
@@ -810,7 +810,7 @@ impl SessionFacade for LocalSession {
         &self,
         instructions: Option<String>,
         budget_tokens: Option<u64>,
-        on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+        on_done: Box<dyn FnOnce(Result<radian_core::CompactionOutcome, String>) + Send>,
     ) {
         if !self.capabilities.contains(&SessionCapability::SendMessage) {
             on_done(Err(
@@ -826,7 +826,7 @@ impl SessionFacade for LocalSession {
                 let result = inbox
                     .compact_with(
                         instructions,
-                        budget_tokens.map(agent_core::ContextBudget::new),
+                        budget_tokens.map(radian_core::ContextBudget::new),
                     )
                     .await;
                 on_done(result);

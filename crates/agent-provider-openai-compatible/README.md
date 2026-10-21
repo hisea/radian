@@ -1,10 +1,10 @@
 # agent-provider-openai-compatible
 
 A model adapter for OpenAI-compatible Chat Completions APIs (OpenAI, and the many servers that
-copy it), implementing `agent_core::Model` with streaming. `OpenAiCompatible::new(config)`
+copy it), implementing `radian_core::Model` with streaming. `OpenAiCompatible::new(config)`
 builds it; `OpenAiCompatibleConfig` holds the knobs.
 
-It does **not** own: the turn loop, tools, hooks or the transcript (`agent-core`); where the API
+It does **not** own: the turn loop, tools, hooks or the transcript (`radian-core`); where the API
 key comes from (the library never reads the environment — the host decides); retries (a failed
 request ends the turn with a `ModelError` and the host decides whether to try again); and any
 provider-specific extension beyond the Chat Completions shape. It does not implement OAuth,
@@ -85,7 +85,7 @@ Wire-level behaviour, over a real HTTP mock (`tests/http.rs`) and in unit tests:
 | Assembly: text deltas become one part and stream as events; fragments join by index; servers that omit the index still work; missing ids are made up and repeated ids renamed; empty arguments mean `{}` and broken ones stay text; finish reasons map; a refusal is a refusal; a stream with no finish reason is an error; `[DONE]` without one is inferred; an error chunk ends the response; garbage is a protocol error; usage-only chunks carry usage; the dogfooded `completion_tokens_details` shape is kept; `total` is never invented; an over-limit response is cut off | `text_deltas_become_one_part_and_stream_as_events`, `tool_call_fragments_are_joined_by_index`, `servers_that_omit_the_index_still_work`, `missing_ids_are_made_up_and_repeated_ids_are_renamed`, `empty_arguments_mean_none_and_broken_ones_are_kept_as_text`, `finish_reasons_map_to_stop_reasons`, `a_refusal_is_a_refusal_and_its_text_is_kept`, `a_stream_with_no_finish_reason_is_an_error_not_a_partial_answer`, `done_without_a_finish_reason_is_inferred`, `an_error_chunk_ends_the_response`, `garbage_is_a_protocol_error`, `usage_only_chunks_carry_the_usage`, `usage_in_every_chunk_takes_the_last_non_empty_one`, `usage_maps_openai_and_anthropic_field_names`, `the_dogfooded_usage_shape_keeps_completion_tokens_details`, `total_is_never_invented_from_input_plus_output`, `a_response_over_the_limit_is_cut_off` | `src/stream.rs` |
 | Request building: host `meta` and `reasoning` are not sent; a tool conversation maps to the expected messages; interrupted assistants are plain; no tools means no `tools` key; `stream_options` only when enabled and always reserved; arguments that were not JSON go back as received; a tool error is marked for the model; images and audio are sent where the API takes them; what the API cannot take becomes a placeholder; settings override the config and reserved keys are refused | `host_message_meta_is_not_sent_to_the_provider`, `reasoning_is_not_sent_to_the_provider`, `a_tool_conversation_maps_to_the_expected_messages`, `interrupted_assistants_are_sent_as_plain_assistants`, `no_tools_means_no_tools_key`, `stream_options_carries_include_usage_only_when_enabled`, `stream_options_is_reserved_like_stream`, `arguments_that_were_not_json_go_back_as_received`, `a_tool_error_is_marked_for_the_model`, `images_and_audio_are_sent_where_the_api_takes_them`, `what_the_api_cannot_take_becomes_a_placeholder_in_text`, `settings_override_the_config_and_reserved_keys_are_refused` | `src/request.rs` |
 
-Mutation records for the usage behaviour are in `agent-core/MUTATIONS-0007.md` (M-D1…M-D12, all
+Mutation records for the usage behaviour are in `radian-core/MUTATIONS-0007.md` (M-D1…M-D12, all
 caught; the usage slice was driven from this adapter).
 
 ## The `testing` feature

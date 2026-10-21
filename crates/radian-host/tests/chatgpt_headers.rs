@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-use agent_core::{
+use radian_core::{
     CancellationToken, Message, Model, ModelContext, ModelRequest, NoopSink, StopReason,
 };
 use agent_provider_openai_responses::testing::{

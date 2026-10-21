@@ -2,7 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use agent_core::ToolCall;
+use radian_core::ToolCall;
 
 use crate::shell;
 

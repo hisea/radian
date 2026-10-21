@@ -92,7 +92,7 @@ fn envelope(seq: u64, event: &str, critical: bool, data: serde_json::Value) -> S
 }
 
 /// A `MessageAppended` body for the message at transcript `index`.
-fn appended(index: u64, message: agent_core::Message) -> serde_json::Value {
+fn appended(index: u64, message: radian_core::Message) -> serde_json::Value {
     serde_json::json!({"index": index, "message": message})
 }
 
@@ -116,7 +116,7 @@ fn committed_journal() -> Vec<String> {
             2,
             "MessageAppended",
             true,
-            appended(0, agent_core::Message::user("ATTACH-COMMITTED-USER")),
+            appended(0, radian_core::Message::user("ATTACH-COMMITTED-USER")),
         ),
         // The live delta: `ModelTextDelta` is never durable (ADR 0010 K2), so it can only
         // reach the frame through a reader that renders live events.
@@ -130,7 +130,7 @@ fn committed_journal() -> Vec<String> {
             4,
             "MessageAppended",
             true,
-            appended(1, agent_core::Message::assistant("ATTACH-COMMITTED-REPLY")),
+            appended(1, radian_core::Message::assistant("ATTACH-COMMITTED-REPLY")),
         ),
         envelope(
             5,
@@ -300,7 +300,7 @@ fn a_follow_read_shows_a_new_committed_message() {
             6,
             "MessageAppended",
             true,
-            appended(2, agent_core::Message::assistant("ATTACH-NEW-MESSAGE")),
+            appended(2, radian_core::Message::assistant("ATTACH-NEW-MESSAGE")),
         )],
     );
 
@@ -315,14 +315,14 @@ fn a_follow_read_shows_a_new_committed_message() {
 
 /// One assistant message that requests `n` `read` calls (`a`, `b`, …), the shape the fold's
 /// repair works from (a call with no committed result message).
-fn assistant_with_calls(n: usize) -> agent_core::Message {
-    agent_core::Message::Assistant {
+fn assistant_with_calls(n: usize) -> radian_core::Message {
+    radian_core::Message::Assistant {
         content: Vec::new(),
         reasoning: Vec::new(),
         tool_calls: (0..n)
             .map(|i| {
                 let id = ((b'a' + i as u8) as char).to_string();
-                agent_core::ToolCall {
+                radian_core::ToolCall {
                     id: id.clone(),
                     name: "read".into(),
                     arguments: serde_json::json!({"path": format!("{id}.txt")}),
@@ -336,12 +336,12 @@ fn assistant_with_calls(n: usize) -> agent_core::Message {
 }
 
 /// A `ToolExecutionSettled` body and the committed `Message::Tool` for the same result.
-fn settled(call_id: &str, text: &str) -> (serde_json::Value, agent_core::Message) {
+fn settled(call_id: &str, text: &str) -> (serde_json::Value, radian_core::Message) {
     let result =
-        agent_core::ToolResult::success(call_id, vec![agent_core::ContentPart::text(text)]);
+        radian_core::ToolResult::success(call_id, vec![radian_core::ContentPart::text(text)]);
     (
         serde_json::json!({"call_id": call_id, "result": result}),
-        agent_core::Message::Tool {
+        radian_core::Message::Tool {
             result,
             meta: Default::default(),
         },
@@ -451,7 +451,7 @@ fn a_live_sessions_open_calls_show_as_running_and_queued_then_their_results() {
     let history = view
         .history()
         .iter()
-        .map(agent_core::Message::text)
+        .map(radian_core::Message::text)
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
@@ -544,7 +544,7 @@ fn the_scroll_keys_move_the_window_and_bottom_follows_again() {
             true,
             appended(
                 index,
-                agent_core::Message::assistant(format!("line {index}")),
+                radian_core::Message::assistant(format!("line {index}")),
             ),
         ));
     }
@@ -727,13 +727,13 @@ fn attach_shows_a_subagent_child_session() {
             2,
             "MessageAppended",
             true,
-            appended(0, agent_core::Message::user("CHILD-INPUT")),
+            appended(0, radian_core::Message::user("CHILD-INPUT")),
         ),
         envelope(
             3,
             "MessageAppended",
             true,
-            appended(1, agent_core::Message::assistant("CHILD-CONCLUSION-OK")),
+            appended(1, radian_core::Message::assistant("CHILD-CONCLUSION-OK")),
         ),
         envelope(
             4,
@@ -882,7 +882,7 @@ impl Pty {
 /// A valid v1 session file with `n` messages; the last one is a visible marker, so "the first
 /// frame is up" is the moment it appears.
 fn write_session(path: &Path, session_id: &str, n: usize) {
-    use agent_core::Message;
+    use radian_core::Message;
     use std::io::BufWriter;
     let mut out = BufWriter::new(std::fs::File::create(path).unwrap());
     let ts = "2026-10-12T00:00:00.000000Z";

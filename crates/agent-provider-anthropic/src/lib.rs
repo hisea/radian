@@ -1,4 +1,4 @@
-//! A model adapter for the Anthropic Messages API, implementing `agent_core::Model` with
+//! A model adapter for the Anthropic Messages API, implementing `radian_core::Model` with
 //! streaming, using **API key** authentication only.
 //!
 //! The wire format follows Anthropic's official developer documentation; every event, field

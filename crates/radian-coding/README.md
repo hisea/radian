@@ -221,7 +221,7 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
 ## Mounting
 
-- In `agent-cli`: `--workspace <dir>` exposes the file/search tools (`read`, `write`,
+- In `radian-exec`: `--workspace <dir>` exposes the file/search tools (`read`, `write`,
   `patch`, `glob`, `grep`), plus `shell` and `job` when the profile built a sandbox (`workspace`/`full`). Without the flag nothing changes.
 - Directly: `CodingTools::new(root)` returns a `ToolProvider` (no shell); pass it to
   `Agent::new(model, tools)`.
@@ -245,4 +245,4 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
 已知局限（硬链接读、父目录 TOCTOU 窗口）与 crate 文档所述一致，评审者未另行发现被掩盖的问题。
 
-**一处与本 crate 无关、但复核时撞上的真问题**：`agent-cli` 的 `every_exit_reaps_the_mcp_children` 在机器高负载下（当时 load average 51，三个并行构建）超过了测试里 30 秒的上限而失败；单独重跑 5 次全过（3.7–13 秒）。**不是回归，是这个超时对负载敏感**。修法留给后续切片（放宽上限或改成不依赖墙钟的等待）。
+**一处与本 crate 无关、但复核时撞上的真问题**：`radian-exec` 的 `every_exit_reaps_the_mcp_children` 在机器高负载下（当时 load average 51，三个并行构建）超过了测试里 30 秒的上限而失败；单独重跑 5 次全过（3.7–13 秒）。**不是回归，是这个超时对负载敏感**。修法留给后续切片（放宽上限或改成不依赖墙钟的等待）。

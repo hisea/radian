@@ -7,6 +7,6 @@ rust-version.workspace = true
 description = "Adapter-neutral provider contract suite: every Model implementation must pass these checks"
 
 [dependencies]
-agent-core = { path = "../agent-core" }
+radian-core = { path = "../radian-core" }
 serde_json.workspace = true
 tokio.workspace = true

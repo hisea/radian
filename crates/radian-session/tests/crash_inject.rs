@@ -21,7 +21,7 @@
 
 mod common;
 
-use agent_core::{
+use radian_core::{
     ContentPart, JournalRecord, Message, ModelUsage, ToolCall, ToolResult, TranscriptJournal,
 };
 use common::{TempDir, created};

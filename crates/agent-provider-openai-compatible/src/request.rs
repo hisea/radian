@@ -1,6 +1,6 @@
 //! `ModelRequest` -> Chat Completions request body. Pure, so it is tested without a server.
 
-use agent_core::{ContentPart, Message, ModelError, ModelRequest, ToolCall, ToolResult};
+use radian_core::{ContentPart, Message, ModelError, ModelRequest, ToolCall, ToolResult};
 use serde_json::{Map, Value, json};
 
 use crate::config::OpenAiCompatibleConfig;
@@ -229,7 +229,7 @@ fn audio_format(mime_type: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{InputSource, MessageId, MessageMeta, OpaqueJson, ToolConcurrency, ToolSpec};
+    use radian_core::{InputSource, MessageId, MessageMeta, OpaqueJson, ToolConcurrency, ToolSpec};
 
     fn config() -> OpenAiCompatibleConfig {
         OpenAiCompatibleConfig::new("http://localhost/v1", "test-model")

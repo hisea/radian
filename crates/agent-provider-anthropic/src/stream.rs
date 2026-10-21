@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use agent_core::{
+use radian_core::{
     AgentEvent, ContentPart, EventSink, ModelError, ModelResponse, ModelUsage, OpaqueJson,
     StopReason, ToolCall,
 };

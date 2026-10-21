@@ -3,7 +3,7 @@
 
 mod common;
 
-use agent_core::{
+use radian_core::{
     ContentPart, JournalRecord, Message, MessageMeta, ModelUsage, OpaqueJson, ToolCall, ToolResult,
     TranscriptJournal,
 };

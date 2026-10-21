@@ -38,7 +38,7 @@
 
 use std::path::Path;
 
-use agent_core::ToolCall;
+use radian_core::ToolCall;
 
 use crate::{rule, shell};
 

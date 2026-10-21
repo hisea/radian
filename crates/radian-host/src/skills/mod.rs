@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 pub mod tools;
 
-use agent_core::{HookContext, HookError, Hooks, ModelRequest, RequestSize};
+use radian_core::{HookContext, HookError, Hooks, ModelRequest, RequestSize};
 
 /// The one file name discovery recognizes (ADR 0025 S1, like pi).
 pub const SKILL_FILE_NAME: &str = "SKILL.md";
@@ -702,7 +702,7 @@ pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
     })
 }
 
-/// Counts a string the way `agent_core` does, without building a `ModelRequest` (the same
+/// Counts a string the way `radian_core` does, without building a `ModelRequest` (the same
 /// helper as `memory/injection.rs`; ADR 0015 C2's conservative estimate).
 fn request_size_of(text: &str) -> RequestSize {
     let mut size = RequestSize::default();
@@ -729,7 +729,7 @@ impl SkillsHooks {
             section: prompt_section(
                 skills,
                 SECTION_BUDGET_TOKENS,
-                agent_core::DEFAULT_BYTES_PER_TOKEN,
+                radian_core::DEFAULT_BYTES_PER_TOKEN,
             ),
         }
     }
@@ -809,7 +809,7 @@ pub type SharedSkills = Arc<Vec<Skill>>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::CancellationToken;
+    use radian_core::CancellationToken;
 
     struct Scratch {
         root: PathBuf,
@@ -1820,7 +1820,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_hook_appends_the_section_to_the_system_prompt() {
-        use agent_core::HookContext;
+        use radian_core::HookContext;
         let scratch = Scratch::new("hook");
         scratch.skill("a", &frontmatter("a", "One."));
         let skills = discover(&scratch.skills_dir()).skills;

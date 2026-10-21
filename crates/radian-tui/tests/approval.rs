@@ -2,7 +2,7 @@
 //! it (ADR 0023 U7). Pure `App` state plus a `TestBackend` frame, so it runs everywhere
 //! without a terminal.
 
-use agent_core::{AgentEvent, CancelReason, RunStatus};
+use radian_core::{AgentEvent, CancelReason, RunStatus};
 use radian_host::{PendingRequest, PendingResponse, PendingView};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_tui::app::{App, Effect, Input};

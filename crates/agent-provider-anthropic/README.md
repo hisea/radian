@@ -1,12 +1,12 @@
 # agent-provider-anthropic
 
 A model adapter for the Anthropic Messages API (`POST /v1/messages`), implementing
-`agent_core::Model` with streaming, using **API key** authentication only.
+`radian_core::Model` with streaming, using **API key** authentication only.
 `Anthropic::new(config)` builds it; `AnthropicConfig` holds the knobs.
 
 It does **not** implement subscription OAuth — Anthropic's policy forbids routing consumer
 subscriptions through third-party tools, and `spikes/oauth/README.md` records the spike. It also
-does not own: the turn loop, tools, hooks or the transcript (`agent-core`); where the key comes
+does not own: the turn loop, tools, hooks or the transcript (`radian-core`); where the key comes
 from (the library never reads the environment); retries; and server-side tools
 (`server_tool_use`, `web_search_tool_result`, …) — those are ignored, never turned into a
 `ToolCall`, because the core's rule is that a tool the provider runs on its own side is never a

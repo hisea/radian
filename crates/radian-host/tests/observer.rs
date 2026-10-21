@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use agent_core::Message;
+use radian_core::Message;
 use radian_host::{JournalObserver, SessionCapability, SessionObserver};
 use radian_session::Session;
 

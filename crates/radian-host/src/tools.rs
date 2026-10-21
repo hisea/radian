@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use agent_core::{
+use radian_core::{
     ToolCall, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use agent_extensions::{McpSession, McpToolProvider};
@@ -362,7 +362,7 @@ pub fn merge_tool_specs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::ToolConcurrency;
+    use radian_core::ToolConcurrency;
     use serde_json::json;
 
     fn spec(name: &str) -> ToolSpec {

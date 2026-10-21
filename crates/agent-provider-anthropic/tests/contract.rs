@@ -11,7 +11,7 @@
 
 use std::sync::Mutex;
 
-use agent_core::*;
+use radian_core::*;
 use agent_provider_anthropic::testing::{
     MockServer, Reply, block_stop, error, input_json_delta, message_delta, message_start,
     message_stop, text_delta, text_start, tool_start,

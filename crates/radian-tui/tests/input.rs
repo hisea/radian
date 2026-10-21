@@ -42,7 +42,7 @@ fn enter_expands_then_sends_a_followup_when_idle_and_a_steer_while_running() {
     let result = app.update(Input::MentionsExpanded(Ok(expanded("hello"))));
     assert_eq!(
         result.effects,
-        vec![Effect::SendFollowup(agent_core::Message::user("hello"))]
+        vec![Effect::SendFollowup(radian_core::Message::user("hello"))]
     );
 
     app.session.projection.set_turn(TurnState::Running);
@@ -56,7 +56,7 @@ fn enter_expands_then_sends_a_followup_when_idle_and_a_steer_while_running() {
     let result = app.update(Input::MentionsExpanded(Ok(expanded("change of plan"))));
     assert_eq!(
         result.effects,
-        vec![Effect::Steer(agent_core::Message::user("change of plan"))]
+        vec![Effect::Steer(radian_core::Message::user("change of plan"))]
     );
 }
 
@@ -113,7 +113,7 @@ fn ctrl_j_inserts_a_newline_and_enter_sends_the_whole_text() {
     let result = app.update(Input::MentionsExpanded(Ok(expanded("a\nb"))));
     assert_eq!(
         result.effects,
-        vec![Effect::SendFollowup(agent_core::Message::user("a\nb"))]
+        vec![Effect::SendFollowup(radian_core::Message::user("a\nb"))]
     );
 }
 
@@ -150,7 +150,7 @@ fn esc_on_an_empty_input_cancels_a_running_turn() {
     // The turn is a session fact written by the event sink (ADR 0023 U5); the test sets it on
     // the projection the way the sink would, then feeds the tool the turn is running.
     app.session.projection.set_turn(TurnState::Running);
-    app.apply_event(&agent_core::AgentEvent::ToolStarted {
+    app.apply_event(&radian_core::AgentEvent::ToolStarted {
         index: 0,
         call_id: "c1".into(),
         name: "shell".into(),

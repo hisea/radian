@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::{
+use radian_core::{
     ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
@@ -337,7 +337,7 @@ impl ToolSession for CodingSession {
 
     async fn execute(
         &self,
-        call: &agent_core::ToolCall,
+        call: &radian_core::ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
         match call.name.as_str() {

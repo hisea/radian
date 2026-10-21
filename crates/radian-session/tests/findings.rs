@@ -10,7 +10,7 @@
 
 mod common;
 
-use agent_core::Message;
+use radian_core::Message;
 use common::TempDir;
 use radian_session::{
     ReadError, ReplacementEnd, Session, SessionCreatedData, SessionJournal, UncommittedReplacement,

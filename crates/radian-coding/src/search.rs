@@ -38,7 +38,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use agent_core::ToolFailure;
+use radian_core::ToolFailure;
 use globset::{GlobBuilder, GlobMatcher};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 

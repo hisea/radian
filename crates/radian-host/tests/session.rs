@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use agent_core::{NoopSink, TurnOptions};
+use radian_core::{NoopSink, TurnOptions};
 use radian_host::{
     HostBindings, SessionCapability, SessionCommand, SessionFacade, SessionId, SessionProjection,
     SessionSetup, build_model, open_session,
@@ -67,13 +67,13 @@ async fn open_with_resume(
 ) -> (Scratch, Arc<radian_host::LocalSession>) {
     let records = resume.then(|| {
         vec![
-            agent_core::JournalRecord::Message {
+            radian_core::JournalRecord::Message {
                 index: 0,
-                message: agent_core::Message::user("go"),
+                message: radian_core::Message::user("go"),
             },
-            agent_core::JournalRecord::Message {
+            radian_core::JournalRecord::Message {
                 index: 1,
-                message: agent_core::Message::assistant("ok"),
+                message: radian_core::Message::assistant("ok"),
             },
         ]
     });
@@ -85,7 +85,7 @@ async fn open_with_resume(
 async fn open_with_records(
     label: &str,
     capabilities: Vec<SessionCapability>,
-    records: Option<Vec<agent_core::JournalRecord>>,
+    records: Option<Vec<radian_core::JournalRecord>>,
 ) -> (Scratch, Arc<radian_host::LocalSession>) {
     let scratch = Scratch::new(label);
     let workspace = scratch.0.join("ws");
@@ -100,7 +100,7 @@ async fn open_with_records(
         )
         .unwrap();
         for record in records {
-            agent_core::TranscriptJournal::append(&journal, record)
+            radian_core::TranscriptJournal::append(&journal, record)
                 .await
                 .unwrap();
         }
@@ -497,7 +497,7 @@ async fn a_resume_parses_the_journal_once() {
 /// the abort closes the segment the way the fold on disk does.
 #[tokio::test]
 async fn a_resume_aborts_a_pending_segment_and_the_driver_matches_the_disk_fold() {
-    use agent_core::{JournalRecord, Message};
+    use radian_core::{JournalRecord, Message};
     let records = vec![
         JournalRecord::Message {
             index: 0,
@@ -556,7 +556,7 @@ async fn a_resume_aborts_a_pending_segment_and_the_driver_matches_the_disk_fold(
 /// The comparison is the assertion; no wall clock.
 #[tokio::test]
 async fn a_resumed_history_matches_the_disk_fold_through_compaction_and_replacement() {
-    use agent_core::{JournalRecord, Message};
+    use radian_core::{JournalRecord, Message};
 
     let records = vec![
         JournalRecord::Message {

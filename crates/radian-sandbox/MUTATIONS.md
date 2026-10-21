@@ -156,7 +156,7 @@ GW-6 证明新测试抓住这个回归。**GW-8 的测试要小心**：若嵌套
 worktree `.radian-worktrees/inherited-sandbox`，分支 `dogfood/inherited-sandbox`。每个变异只改一个
 文件，跑完把保存的原文写回并 `cmp` 确认逐字节一致（副本在 `.radian/mut/`）。只跑应当抓住它的测试
 二进制。本 crate 的变异如下；`radian-tui` 的 `build_sandbox`/PTY、`radian-host` 的 `describe`、
-`agent-cli` 的 `build_sandbox` 各有自己的表（同一轮）。
+`radian-exec` 的 `build_sandbox` 各有自己的表（同一轮）。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -215,7 +215,7 @@ worktree `<worktree>/s0b-gitdir`，分支 `dogfood/s0b-gitdir`。每个变异
 
 变异：从 `policy.rs` 的 `DEFAULT_ALLOW_ENV` 删掉六个 `HERDR_*` 名字；先
 `cargo build -p radian-tui --bin radian`，`cp` 备份 / 还原并 `cmp` 一致。命令：
-`timeout 300 cargo test -p agent-cli --locked --no-fail-fast --test cli the_shell_environment_carries_herdr_and_allow_env`。
+`timeout 300 cargo test -p radian-exec --locked --no-fail-fast --test cli the_shell_environment_carries_herdr_and_allow_env`。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|

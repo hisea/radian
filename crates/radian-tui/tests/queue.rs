@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 
-use agent_core::{InputSource, Message, MessageId};
+use radian_core::{InputSource, Message, MessageId};
 use radian_host::config::TuiFooterConfig;
 use radian_session::{InboxLane, RuntimeEvent};
 use radian_tui::app::{App, Effect, Input, TurnState};

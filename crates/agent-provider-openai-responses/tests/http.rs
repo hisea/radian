@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use agent_core::{
+use radian_core::{
     CancellationToken, ContentPart, Message, MessageMeta, Model, ModelContext, ModelError,
     ModelRequest, ModelResponse, NoopSink, OpaqueJson, StopReason, ToolConcurrency, ToolSpec,
 };

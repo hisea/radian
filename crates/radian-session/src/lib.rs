@@ -1,8 +1,8 @@
-//! Session JSONL v1 storage (ADR 0006): the durable journal seam for `agent-core`.
+//! Session JSONL v1 storage (ADR 0006): the durable journal seam for `radian-core`.
 //!
 //! This crate implements the session side of the JSONL format the ADR pins down:
 //!
-//! - [`SessionJournal`] is a [`agent_core::TranscriptJournal`]: every record the core
+//! - [`SessionJournal`] is a [`radian_core::TranscriptJournal`]: every record the core
 //!   commits is written to one `session_id` file — seven-field envelope, strict `seq` from 0,
 //!   LF-terminated lines, and an fsync at the ADR 0040 sync points (a group of records becomes
 //!   durable together, at a boundary or before an external side effect, not on every append).
@@ -12,7 +12,7 @@
 //!   (§7): unknown optional fields are ignored, unknown non-critical events are skipped and
 //!   reported, unknown critical events refuse the whole file, higher `schema_version` files
 //!   refuse to be written. [`Session::history`] folds the journal into a transcript using
-//!   `agent_core`'s own `replay`/`repair`/`recover` — never a reimplementation.
+//!   `radian_core`'s own `replay`/`repair`/`recover` — never a reimplementation.
 //! - [`Index`] is the **disposable** SQLite cache over the files (ADR 0006 §10): every
 //!   column is re-derivable from the JSONL, a torn tail is never indexed, and the JSONL is
 //!   never written. [`export_json`]/[`export_markdown`] render a session with non-optional
@@ -32,9 +32,9 @@ mod tail;
 pub mod trace;
 mod writer;
 
-/// Re-exported so a reader of [`UncommittedReplacement::end`] need not depend on `agent-core`
+/// Re-exported so a reader of [`UncommittedReplacement::end`] need not depend on `radian-core`
 /// directly for the enum.
-pub use agent_core::ReplacementEnd;
+pub use radian_core::ReplacementEnd;
 pub use error::ReadError;
 pub use export::{
     ExportError, ExportOptions, export_json, export_json_to, export_markdown, export_markdown_to,

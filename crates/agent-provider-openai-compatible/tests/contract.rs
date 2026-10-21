@@ -6,7 +6,7 @@
 
 use std::sync::Mutex;
 
-use agent_core::*;
+use radian_core::*;
 use agent_provider_contract::{FnCall, Reason, Wire};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};

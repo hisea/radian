@@ -5,7 +5,7 @@
 //! the transcript's folded text, never re-expanded. A normal end, a cancel, a running turn
 //! or no turn at all is a "nothing to retry" notice.
 
-use agent_core::Message;
+use radian_core::Message;
 use radian_session::{RuntimeEvent, TurnOutcome};
 use radian_tui::app::{App, Effect, Entry, EntryKind, Input, TurnState};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

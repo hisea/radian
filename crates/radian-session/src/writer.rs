@@ -1,4 +1,4 @@
-//! The write side: a real, fsyncing [`agent_core::TranscriptJournal`] on a JSONL file.
+//! The write side: a real, fsyncing [`radian_core::TranscriptJournal`] on a JSONL file.
 
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_core::{JournalError, JournalRecord, Message, ModelUsage, ToolResult, TranscriptJournal};
+use radian_core::{JournalError, JournalRecord, Message, ModelUsage, ToolResult, TranscriptJournal};
 use fs2::FileExt;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -520,7 +520,7 @@ impl SessionJournal {
     pub fn test_append_message(
         &self,
         index: u64,
-        message: agent_core::Message,
+        message: radian_core::Message,
     ) -> Result<(), WriteError> {
         self.write_line(
             EVT_MESSAGE_APPENDED,
@@ -659,7 +659,7 @@ impl ResumeLock {
             .uncommitted_replacements()
             .iter()
             .rev()
-            .find(|segment| segment.end == agent_core::ReplacementEnd::EndOfFile)
+            .find(|segment| segment.end == radian_core::ReplacementEnd::EndOfFile)
             .map(|segment| segment.revision);
         // Only now that the file is known sound is the torn tail (ADR 0006 §2.2) removed:
         // everything past the committed prefix of the parse we made under this lock.

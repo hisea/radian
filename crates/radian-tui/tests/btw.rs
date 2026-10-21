@@ -240,7 +240,7 @@ fn the_finished_overlay_renders_usage_and_the_tools_note() {
     app.update(Input::SideDone(SideOutcome::Done {
         text: "the file".into(),
         tool_calls_dropped: true,
-        usage: Some(agent_core::ModelUsage {
+        usage: Some(radian_core::ModelUsage {
             input: Some(10),
             output: Some(3),
             ..Default::default()

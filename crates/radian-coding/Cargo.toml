@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "Built-in coding tools (read/write/patch/list + read-only git) with workspace path confinement"
 
 [dependencies]
-agent-core = { path = "../agent-core" }
+radian-core = { path = "../radian-core" }
 # `Prompter::ask` returns a boxed future (ADR 0024 Q1), the same shape as `Approver::decide`.
 futures-util.workspace = true
 # `glob`/`grep`: match a workspace-relative path against the model's glob pattern.
@@ -34,7 +34,7 @@ libc = "0.2"
 
 [dev-dependencies]
 # The `ask_user` journal test needs the journal test double (feature `testing`).
-agent-core = { path = "../agent-core", features = ["testing"] }
+radian-core = { path = "../radian-core", features = ["testing"] }
 # The fd-walk swap test needs the resolve hook (feature `testing`, ADR 0039 decision 2).
 radian-coding = { path = ".", features = ["testing"] }
 

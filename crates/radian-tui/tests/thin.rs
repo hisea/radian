@@ -8,7 +8,7 @@
 //! `classic` footer cut off, so a golden is exactly the drawn content and a row that a later
 //! change moves (e.g. the empty-turn fix) is a one-line edit.
 
-use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+use radian_core::{ContentPart, Message, ToolCall, ToolResult};
 use radian_tui::app::{App, EntryKind, Input};
 use radian_tui::render;
 use radian_tui::theme::Theme;

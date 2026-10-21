@@ -1,4 +1,4 @@
-//! Host plumbing that `agent-cli` and `radian-tui` both need, kept in one place so the two
+//! Host plumbing that `radian-exec` and `radian-tui` both need, kept in one place so the two
 //! hosts cannot drift: `--header` parsing (with `{session_id}` expansion), session-id
 //! generation and validation, the `--mcp-config` file, and the "built-in tools + MCP servers"
 //! provider.

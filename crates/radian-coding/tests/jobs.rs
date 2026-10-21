@@ -10,7 +10,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agent_core::{
+use radian_core::{
     CancellationToken, ContentPart, NoopSink, ToolCall, ToolContext, ToolFailure, ToolOutput,
     ToolProvider, ToolSession,
 };

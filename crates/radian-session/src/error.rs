@@ -72,5 +72,5 @@ pub enum ReadError {
         call_id: String,
     },
     #[error("replaying the journal: {0}")]
-    Replay(#[from] agent_core::ReplayError),
+    Replay(#[from] radian_core::ReplayError),
 }

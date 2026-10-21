@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use agent_core::{NoopSink, TurnOptions};
+use radian_core::{NoopSink, TurnOptions};
 use radian_host::{
     HostBindings, SessionCapability, SessionFacade, SessionId, SessionProjection, SessionSetup,
     build_model, open_session,

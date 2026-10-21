@@ -23,7 +23,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use agent_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
+use radian_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
 use common::{TempDir, text, tools};
 use serde_json::json;
 
@@ -119,12 +119,12 @@ fn two_greps_in_one_batch_overlap() {
         let call_a = grep_call("a", "alpha");
         let call_b = grep_call("b", "beta");
         let cx_a = ToolContext {
-            cancellation: agent_core::CancellationToken::new(),
+            cancellation: radian_core::CancellationToken::new(),
             events: &sink,
             index: 0,
         };
         let cx_b = ToolContext {
-            cancellation: agent_core::CancellationToken::new(),
+            cancellation: radian_core::CancellationToken::new(),
             events: &sink,
             index: 1,
         };
@@ -164,12 +164,12 @@ fn two_globs_in_one_batch_overlap() {
         let call_a = glob_call("a", "*.txt");
         let call_b = glob_call("b", "a.*");
         let cx_a = ToolContext {
-            cancellation: agent_core::CancellationToken::new(),
+            cancellation: radian_core::CancellationToken::new(),
             events: &sink,
             index: 0,
         };
         let cx_b = ToolContext {
-            cancellation: agent_core::CancellationToken::new(),
+            cancellation: radian_core::CancellationToken::new(),
             events: &sink,
             index: 1,
         };
@@ -214,12 +214,12 @@ fn two_reads_in_one_batch_overlap() {
         let call_a = read_call("a", "a.txt");
         let call_b = read_call("b", "b.txt");
         let cx_a = ToolContext {
-            cancellation: agent_core::CancellationToken::new(),
+            cancellation: radian_core::CancellationToken::new(),
             events: &sink,
             index: 0,
         };
         let cx_b = ToolContext {
-            cancellation: agent_core::CancellationToken::new(),
+            cancellation: radian_core::CancellationToken::new(),
             events: &sink,
             index: 1,
         };
@@ -260,12 +260,12 @@ fn two_directory_reads_in_one_batch_overlap() {
         let call_a = read_call("a", "sub1");
         let call_b = read_call("b", "sub2");
         let cx_a = ToolContext {
-            cancellation: agent_core::CancellationToken::new(),
+            cancellation: radian_core::CancellationToken::new(),
             events: &sink,
             index: 0,
         };
         let cx_b = ToolContext {
-            cancellation: agent_core::CancellationToken::new(),
+            cancellation: radian_core::CancellationToken::new(),
             events: &sink,
             index: 1,
         };

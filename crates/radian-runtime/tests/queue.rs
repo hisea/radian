@@ -6,7 +6,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::{InputSource, Message, MessageId, MessageMeta, OpaqueJson};
+use radian_core::{InputSource, Message, MessageId, MessageMeta, OpaqueJson};
 use common::{TempDir, created};
 use radian_runtime::{CancelCause, Inbox, InboxError, Lane};
 use radian_session::{EventData, Session, SessionJournal};
@@ -269,7 +269,7 @@ async fn source_is_required_and_recorded_on_the_message() {
         origin: Some(OpaqueJson::parse(r#"{"parent":{"session_id":"s"}}"#).unwrap()),
     };
     let message = Message::User {
-        content: vec![agent_core::ContentPart::text("from a subagent")],
+        content: vec![radian_core::ContentPart::text("from a subagent")],
         meta,
     };
     inbox.inject(message, InputSource::Subagent).await.unwrap();

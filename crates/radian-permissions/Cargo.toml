@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "Permission layer: ApprovalPolicy + ToolRuleSet as a Hooks implementation (ADR 0012)"
 
 [dependencies]
-agent-core = { path = "../agent-core" }
+radian-core = { path = "../radian-core" }
 radian-sandbox = { path = "../radian-sandbox" }
 radian-session = { path = "../radian-session" }
 futures-util.workspace = true

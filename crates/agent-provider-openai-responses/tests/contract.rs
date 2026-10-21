@@ -10,7 +10,7 @@
 
 use std::sync::Mutex;
 
-use agent_core::*;
+use radian_core::*;
 use agent_provider_contract::{FnCall, Reason, Wire};
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, completed_pausing, created, function_call_added,

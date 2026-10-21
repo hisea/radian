@@ -11,7 +11,7 @@ mod common;
 
 use std::sync::Arc;
 
-use agent_core::{Agent, EventSink, InputSource, TurnOptions};
+use radian_core::{Agent, EventSink, InputSource, TurnOptions};
 use agent_provider_anthropic::testing::{
     MockServer, Reply, block_stop, input_json_delta, message_delta, message_start, message_stop,
     text_delta, text_start, tool_start,

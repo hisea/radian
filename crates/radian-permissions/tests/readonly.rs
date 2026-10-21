@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use agent_core::{Hooks, InputSource, ToolDecision};
+use radian_core::{Hooks, InputSource, ToolDecision};
 use common::{ScriptedApprover, TempDir, call, ctx};
 use radian_permissions::*;
 use serde_json::json;
@@ -14,7 +14,7 @@ use serde_json::json;
 async fn decide(
     hooks: &PermissionHooks,
     command: &str,
-) -> Result<ToolDecision, agent_core::HookError> {
+) -> Result<ToolDecision, radian_core::HookError> {
     let call = call("shell", json!({ "command": command }));
     Hooks::before_tool_call(hooks, &ctx(), &call).await
 }

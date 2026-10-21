@@ -1,4 +1,4 @@
-//! Session listing, search and export, shared by `agent-cli` and `radian-tui` (Phase 4).
+//! Session listing, search and export, shared by `radian-exec` and `radian-tui` (Phase 4).
 //!
 //! The data part lives here so the two hosts cannot drift: which sessions belong to a
 //! workspace, what a one-line summary is, what a search hit looks like, and how a session is

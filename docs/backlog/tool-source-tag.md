@@ -10,5 +10,5 @@
 
 ## 待决
 
-- 注册时给每个工具一个来源标签（内建 / MCP server 名 / skill），`ToolMatcher::Mcp` 改查标签。标签要随工具表传到权限层，`agent-core` 的工具注册接口可能要加一个字段，这是 API 变更，要说明理由。
+- 注册时给每个工具一个来源标签（内建 / MCP server 名 / skill），`ToolMatcher::Mcp` 改查标签。标签要随工具表传到权限层，`radian-core` 的工具注册接口可能要加一个字段，这是 API 变更，要说明理由。
 - 是否同时让面板的 tools 页（`tui-inspector-panel.md`）直接显示这个标签。

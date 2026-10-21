@@ -25,7 +25,7 @@ cargo test --release -p radian-session --test perf_session -- --ignored --nocapt
 cargo test --release -p radian-runtime --test perf_runtime -- --ignored --nocapture
 cargo test --release -p radian-tui     --test perf_render  -- --ignored --nocapture
 cargo test --release -p radian-tui     --test perf_startup -- --ignored --nocapture --test-threads=1
-cargo test --release -p agent-cli      --test perf_agent   -- --ignored --nocapture --test-threads=1
+cargo test --release -p radian-exec      --test perf_agent   -- --ignored --nocapture --test-threads=1
 # debug：把 --release 去掉
 ```
 
@@ -216,10 +216,10 @@ release 构建。
 - `crates/radian-runtime/tests/perf_runtime.rs`
 - `crates/radian-tui/tests/perf_render.rs`（§4 的帧耗时；§7 的 ADR 0023 Step 0 全套基线）
 - `crates/radian-tui/tests/perf_startup.rs`
-- `crates/agent-cli/tests/perf_agent.rs`
+- `crates/radian-exec/tests/perf_agent.rs`
 - `crates/radian-session/tests/perf_long_session.rs`（§6：open+history、RSS、索引重建）
 - `crates/radian-session/tests/common/long_session.rs`（§6 的合成会话生成器，三处共用）
-- `crates/agent-cli/tests/perf_long_resume.rs`（§6：resume 到第一个请求）
+- `crates/radian-exec/tests/perf_long_resume.rs`（§6：resume 到第一个请求）
 
 全部 `#[ignore]`；默认 `cargo test` 不运行它们。生成器只新增一个测试模块，没有新依赖。
 
@@ -274,7 +274,7 @@ cargo test --release -p radian-session --test perf_long_session -- --ignored --n
 ### `radian exec --resume <id> -p x`：启动到第一个请求
 
 ```sh
-cargo test --release -p agent-cli --test perf_long_resume -- --ignored --nocapture --test-threads=1
+cargo test --release -p radian-exec --test perf_long_resume -- --ignored --nocapture --test-threads=1
 ```
 
 mock 是一个裸 TCP listener：接受一次连接、读到请求头（`\r\n\r\n`）即记时（adapter 自带的进程内
@@ -764,7 +764,7 @@ A 修掉 `push_message` 的 O(n²) 后，启动仍把同一份 JSONL 读 4 次�
 | 首帧合计（`perf_tui_resume` p50，同机 load ~300） | 3 574 ms | **2 325 ms** |
 
 1k：70 → 56 ms；10k：556 → 379 ms。目标 50k ≤ 4 s 达成。`RADIAN_TRACE_PHASES` 的打点已收成
-`agent_core::trace`（一个 `OnceLock` 只读一次环境变量），关时每次调用只多一个分支。
+`radian_core::trace`（一个 `OnceLock` 只读一次环境变量），关时每次调用只多一个分支。
 
 **不依赖墙钟的测试与变异**：`radian-session` 的 `testing` 特性给 `Session::open` 计数，
 `crates/radian-host/tests/session.rs` 的 `a_resume_parses_the_journal_once` 断言 resume 恰好解析
@@ -1057,11 +1057,11 @@ bash benchmarks/edit-check-timing.sh [/tmp/edit-check-timing]
 
 | 编辑的文件 | crate | `check -p` 中位 / 最大 | `check --workspace` 中位 / 最大 | `clippy -p` 中位 / 最大 | 稳态重查范围（第 2–5 轮） |
 |---|---|---|---|---|---|
-| `radian-permissions/src/shell.rs`（leaf） | radian-permissions | 0.179 s / 7.990 s | 1.185 s / 10.431 s | 0.250 s / 1.697 s | `-p` 1 个；workspace 4 个（permissions、host、agent-cli、tui） |
-| `radian-coding/src/read.rs`（mid） | radian-coding | 0.294 s / 4.724 s | 1.231 s / 1.290 s | 0.433 s / 1.583 s | `-p` 1 个；workspace 4 个（coding、host、agent-cli、tui） |
-| `radian-host/src/context.rs`（host） | radian-host | 0.448 s / 7.140 s | 1.113 s / 1.140 s | 0.699 s / 3.514 s | `-p` 1 个；workspace 3 个（host、agent-cli、tui） |
+| `radian-permissions/src/shell.rs`（leaf） | radian-permissions | 0.179 s / 7.990 s | 1.185 s / 10.431 s | 0.250 s / 1.697 s | `-p` 1 个；workspace 4 个（permissions、host、radian-exec、tui） |
+| `radian-coding/src/read.rs`（mid） | radian-coding | 0.294 s / 4.724 s | 1.231 s / 1.290 s | 0.433 s / 1.583 s | `-p` 1 个；workspace 4 个（coding、host、radian-exec、tui） |
+| `radian-host/src/context.rs`（host） | radian-host | 0.448 s / 7.140 s | 1.113 s / 1.140 s | 0.699 s / 3.514 s | `-p` 1 个；workspace 3 个（host、radian-exec、tui） |
 | `radian-tui/src/startup.rs`（TUI） | radian-tui | 0.599 s / 1.123 s | 0.560 s / 0.588 s | 0.844 s / 6.109 s | `-p` 1 个；workspace 1 个（tui） |
-| `agent-core/src/turn.rs`（core） | agent-core | 0.242 s / 0.400 s | 1.584 s / 1.632 s | 0.325 s / 0.447 s | `-p` 1 个；workspace 13 个（core 之上全部） |
+| `radian-core/src/turn.rs`（core） | radian-core | 0.242 s / 0.400 s | 1.584 s / 1.632 s | 0.325 s / 0.447 s | `-p` 1 个；workspace 13 个（core 之上全部） |
 
 **负载**：warm 前 1 分钟 load 13.7；各系列开始前 `uptime` 的 1 分钟 load 在
 22.7–47.3 之间（同一台机器上别的 agent 在编译，15 分钟 load 约 23–24）。

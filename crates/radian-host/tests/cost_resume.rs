@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use agent_core::{JournalRecord, Message, TranscriptJournal};
+use radian_core::{JournalRecord, Message, TranscriptJournal};
 use radian_host::{SessionProjection, cost};
 use radian_session::{RuntimeEvent, Session, SessionCreatedData, SessionJournal};
 use serde_json::json;
@@ -101,7 +101,7 @@ async fn usage_session(label: &str) -> (Scratch, std::path::PathBuf) {
     // The first call: 1M input on the cheap route = $0.15.
     journal
         .append(JournalRecord::ModelUsage {
-            usage: agent_core::ModelUsage {
+            usage: radian_core::ModelUsage {
                 input: Some(1_000_000),
                 input_includes_cache: Some(false),
                 ..Default::default()
@@ -120,7 +120,7 @@ async fn usage_session(label: &str) -> (Scratch, std::path::PathBuf) {
     // The second call: 1M input on the expensive route = $3.00.
     journal
         .append(JournalRecord::ModelUsage {
-            usage: agent_core::ModelUsage {
+            usage: radian_core::ModelUsage {
                 input: Some(1_000_000),
                 input_includes_cache: Some(false),
                 ..Default::default()
@@ -133,7 +133,7 @@ async fn usage_session(label: &str) -> (Scratch, std::path::PathBuf) {
         .append(JournalRecord::CompactionUsage {
             revision: 2,
             model: "current".into(),
-            usage: agent_core::ModelUsage {
+            usage: radian_core::ModelUsage {
                 input: Some(100_000),
                 output: Some(0),
                 input_includes_cache: Some(false),
@@ -255,7 +255,7 @@ fn the_snapshot_route_prices_the_calls_before_the_first_switch() {
             .unwrap();
         journal
             .append(JournalRecord::ModelUsage {
-                usage: agent_core::ModelUsage {
+                usage: radian_core::ModelUsage {
                     input: Some(1_000_000),
                     input_includes_cache: Some(false),
                     ..Default::default()
@@ -272,7 +272,7 @@ fn the_snapshot_route_prices_the_calls_before_the_first_switch() {
             .unwrap();
         journal
             .append(JournalRecord::ModelUsage {
-                usage: agent_core::ModelUsage {
+                usage: radian_core::ModelUsage {
                     input: Some(1_000_000),
                     input_includes_cache: Some(false),
                     ..Default::default()
@@ -311,14 +311,14 @@ async fn a_recorded_fee_is_restored_as_it_stands_when_the_catalog_moves() {
     )
     .unwrap();
     // What the writer records: a fixed $0.10 for a 1M-input call (micro-dollars).
-    journal.set_usage_fee(Arc::new(|usage: &agent_core::ModelUsage| {
+    journal.set_usage_fee(Arc::new(|usage: &radian_core::ModelUsage| {
         usage
             .input
             .map(|input| radian_session::UsageFee::new(input / 10, false))
     }));
     journal
         .append(JournalRecord::ModelUsage {
-            usage: agent_core::ModelUsage {
+            usage: radian_core::ModelUsage {
                 input: Some(1_000_000),
                 input_includes_cache: Some(false),
                 ..Default::default()
@@ -389,12 +389,12 @@ async fn a_recorded_incomplete_fee_keeps_the_total_incomplete() {
         ),
     )
     .unwrap();
-    journal.set_usage_fee(Arc::new(|_usage: &agent_core::ModelUsage| {
+    journal.set_usage_fee(Arc::new(|_usage: &radian_core::ModelUsage| {
         Some(radian_session::UsageFee::new(50_000, true))
     }));
     journal
         .append(JournalRecord::ModelUsage {
-            usage: agent_core::ModelUsage {
+            usage: radian_core::ModelUsage {
                 input: Some(1_000_000),
                 input_includes_cache: Some(false),
                 ..Default::default()
@@ -430,7 +430,7 @@ async fn a_resumed_tiered_price_folds_each_call_by_its_own_length() {
     for input in [50_000u64, 150_000] {
         journal
             .append(JournalRecord::ModelUsage {
-                usage: agent_core::ModelUsage {
+                usage: radian_core::ModelUsage {
                     input: Some(input),
                     input_includes_cache: Some(false),
                     ..Default::default()

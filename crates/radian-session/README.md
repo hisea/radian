@@ -1,10 +1,10 @@
 # radian-session
 
-Session JSONL v1 storage (ADR 0006): the durable `agent_core::TranscriptJournal` on disk, the
+Session JSONL v1 storage (ADR 0006): the durable `radian_core::TranscriptJournal` on disk, the
 streaming reader and replay path, the **disposable** SQLite index, and the export renderers.
 
 It owns the file format and its forward-compatibility policy. It does **not** own: the turn
-loop or the transcript's meaning (that is `agent-core`, whose own `replay`/`repair`/`recover`
+loop or the transcript's meaning (that is `radian-core`, whose own `replay`/`repair`/`recover`
 this crate calls rather than reimplements), the inbox/driver (`radian-runtime`), permissions,
 or the shape of the config file (ADR 0008).
 
@@ -50,7 +50,7 @@ expects.
 `events()`, `skipped()` (the `(seq, event)` of unknown non-critical events),
 `recovered_replacements()` (every replacement segment that never reached its declared `len`),
 `committed_bytes()`, `schema_version()`, `session_id()`, `path()`. `journal_records()` maps the
-events back to core records, and `history()` folds them through `agent_core::recover`, so an
+events back to core records, and `history()` folds them through `radian_core::recover`, so an
 unpaired tool call gets the ADR 0002 synthetic result.
 
 `EventData` is the typed body of one accepted line; `SessionEvent` is the envelope plus the

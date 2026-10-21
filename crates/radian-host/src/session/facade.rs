@@ -34,7 +34,7 @@ pub trait SessionFacade: Send + Sync {
     fn compact(
         &self,
         instructions: Option<String>,
-        on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+        on_done: Box<dyn FnOnce(Result<radian_core::CompactionOutcome, String>) + Send>,
     );
 
     /// Like [`SessionFacade::compact`], with the budget the compaction targets (ADR 0026 D7):
@@ -43,7 +43,7 @@ pub trait SessionFacade: Send + Sync {
         &self,
         instructions: Option<String>,
         budget_tokens: Option<u64>,
-        on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+        on_done: Box<dyn FnOnce(Result<radian_core::CompactionOutcome, String>) + Send>,
     );
 
     /// Queues a configuration change for the next turn boundary (ADR 0026 D5). A route never
@@ -105,7 +105,7 @@ pub trait SessionFacade: Send + Sync {
     /// The model-visible tool specs at open time (the inspector's tools page). Old alias
     /// names are still registered here; the inspector strips them the way the model
     /// request does (ADR 0043 decision 3).
-    fn tool_specs(&self) -> Vec<agent_core::ToolSpec>;
+    fn tool_specs(&self) -> Vec<radian_core::ToolSpec>;
 
     /// The MCP server configs this session was opened with (the inspector's mcp page).
     fn mcp_servers(&self) -> Vec<agent_extensions::McpServerConfig>;
@@ -139,7 +139,7 @@ pub trait SessionFacade: Send + Sync {
     /// system prompt the hook chain would build, the committed history, the
     /// tool specs, and `Null` settings. Read-only like [`SessionFacade::context_report`],
     /// so it works mid-turn. `/btw` appends one trailing user message and sends it.
-    fn next_request_shape(&self) -> Result<agent_core::ModelRequest, String>;
+    fn next_request_shape(&self) -> Result<radian_core::ModelRequest, String>;
 
     /// Runs one side question (`/btw`) through the session's current model and
     /// streams it to `sink`: nothing is written to the transcript or journal,

@@ -8,7 +8,7 @@
 
 mod common;
 
-use agent_core::Message;
+use radian_core::Message;
 use common::TempDir;
 use radian_session::{Session, SessionJournal};
 

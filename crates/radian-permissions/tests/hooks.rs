@@ -6,7 +6,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::{HookContext, Hooks, InputSource, ToolCall, ToolDecision};
+use radian_core::{HookContext, Hooks, InputSource, ToolCall, ToolDecision};
 use common::{Gate, ScriptedApprover, TempDir, call, ctx};
 use radian_permissions::*;
 use serde_json::json;
@@ -44,7 +44,7 @@ async fn decide(
     hooks: &PermissionHooks,
     cx: &HookContext,
     call: &ToolCall,
-) -> Result<ToolDecision, agent_core::HookError> {
+) -> Result<ToolDecision, radian_core::HookError> {
     Hooks::before_tool_call(hooks, cx, call).await
 }
 

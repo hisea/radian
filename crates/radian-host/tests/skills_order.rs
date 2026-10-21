@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use agent_core::{CancellationToken, HookContext, Hooks, Message, ModelRequest};
+use radian_core::{CancellationToken, HookContext, Hooks, Message, ModelRequest};
 use radian_host::memory::{InjectionConfig, MemoryHooks, MemoryService, WriteScope};
 use radian_host::{Skill, SkillsHooks, session_hooks};
 use radian_memory::Kind;

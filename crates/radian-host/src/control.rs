@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use agent_core::{AgentEvent, EventSink, InputSource, Message};
+use radian_core::{AgentEvent, EventSink, InputSource, Message};
 use radian_runtime::{CancelCause, RuntimeEvents};
 use radian_session::RuntimeEvent;
 use serde_json::{Map, Value, json};
@@ -423,7 +423,7 @@ impl RuntimeEvents for RuntimeFanout {
 }
 
 /// JSON for one `RuntimeEvent`. Like [`agent_event_json`], it lives host-side because
-/// `radian-session`'s `RuntimeEvent` is not `Serialize` and `agent-core` is not changed.
+/// `radian-session`'s `RuntimeEvent` is not `Serialize` and `radian-core` is not changed.
 fn runtime_event_json(event: &RuntimeEvent) -> Value {
     match event {
         RuntimeEvent::InboxEnqueued {
@@ -545,7 +545,7 @@ fn committed_agent(event: &AgentEvent) -> bool {
     )
 }
 
-/// JSON for one `AgentEvent`. `agent-core` is not touched (no `agent-core` change),
+/// JSON for one `AgentEvent`. `radian-core` is not touched (no `radian-core` change),
 /// so this host-side encoder is the wire form; it is deliberate, not a `Serialize` impl.
 fn agent_event_json(event: &AgentEvent) -> Value {
     let (name, data) = match event {
@@ -679,8 +679,8 @@ fn agent_event_json(event: &AgentEvent) -> Value {
 }
 
 /// A compact, honest form of a budget report (its fields are public but the type is not
-/// `Serialize`; `agent-core` is not changed, ADR 0043).
-fn budget_json(budget: Option<&agent_core::BudgetReport>) -> Value {
+/// `Serialize`; `radian-core` is not changed, ADR 0043).
+fn budget_json(budget: Option<&radian_core::BudgetReport>) -> Value {
     match budget {
         Some(report) => json!({
             "source": report.source,
@@ -695,8 +695,8 @@ fn budget_json(budget: Option<&agent_core::BudgetReport>) -> Value {
 }
 
 /// The `RunStatus` as a stable snake_case label (it is not `Serialize`).
-fn run_status_label(status: &agent_core::RunStatus) -> &'static str {
-    use agent_core::RunStatus;
+fn run_status_label(status: &radian_core::RunStatus) -> &'static str {
+    use radian_core::RunStatus;
     match status {
         RunStatus::Completed => "completed",
         RunStatus::Incomplete(_) => "incomplete",

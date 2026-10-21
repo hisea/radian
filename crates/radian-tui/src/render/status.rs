@@ -122,7 +122,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
     });
     // ADR 0018: over the input budget `B` the request is still sent, but the status bar
     // warns (the existing warning colour).
-    let over_budget = session.budget().is_some_and(agent_core::over_budget);
+    let over_budget = session.budget().is_some_and(radian_core::over_budget);
     segments.push(Segment {
         text: budget_status_text(session.context_window(), session.budget()),
         style: if over_budget {

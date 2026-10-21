@@ -1,5 +1,5 @@
 //! A model adapter for OpenAI-compatible Chat Completions APIs (OpenAI, and the many servers
-//! that copy it), implementing `agent_core::Model` with streaming.
+//! that copy it), implementing `radian_core::Model` with streaming.
 //!
 //! The adapter keeps the mapping honest rather than clever: text and tool calls round-trip
 //! exactly; images and audio go out where the API takes them; resource links, embedded

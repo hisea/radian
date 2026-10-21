@@ -7,7 +7,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use agent_core::{
+use radian_core::{
     AgentEvent, CancellationToken, ContentPart, EventSink, Message, Model, ModelContext,
     ModelError, ModelRequest, ModelResponse, NoopSink,
 };

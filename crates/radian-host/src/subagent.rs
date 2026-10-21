@@ -47,7 +47,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::{
+use radian_core::{
     Message, ModelUsage, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure,
     ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };

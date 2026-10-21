@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent_core::{
+use radian_core::{
     CANCELLATION_MESSAGE, EventSink, Message, Model, ModelContext, ModelError, ModelRequest,
     ModelResponse, RateLimits,
 };

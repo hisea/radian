@@ -54,7 +54,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use agent_core::{CompactionOutcome, ContextBudget, InputSource, Message, MessageId};
+use radian_core::{CompactionOutcome, ContextBudget, InputSource, Message, MessageId};
 use radian_session::{InboxLane, RuntimeEvent, SessionJournal};
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -237,7 +237,7 @@ pub struct ControlRequest {
 // Carrying the rejected message in the error is the decision 1 (ADR 0011 L4): the
 // caller must get the message back to retry, never just an error code. Boxing it only to
 // satisfy a size heuristic would make that contract less direct, exactly as in
-// `agent_core::SteerError::RunFinished(Message)`.
+// `radian_core::SteerError::RunFinished(Message)`.
 #[allow(clippy::result_large_err)]
 impl Inbox {
     /// An in-memory inbox (no durability). Used by the queue semantics tests and by hosts
