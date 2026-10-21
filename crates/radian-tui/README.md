@@ -195,7 +195,7 @@ bare arrow keys belong to the composer.
 | Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running `!` command or the running turn; otherwise do nothing — **Esc never quits a session** (quit with two Ctrl-Cs or `/quit`) |
 | Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
 | Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
-| Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key; ) |
+| Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key) |
 | Ctrl-F (`find` in the transcript, `find_prev` in the find box) | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
@@ -253,7 +253,7 @@ find_next = ["ctrl-g", "shift-enter"]
   value, is warned about and falls back to `lines`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
-- `footer` (ADR 0027 C2, revision 3; presets are TOML since revision 14 decision 2): the status area's rows. `preset` is `deck` (the default,
+- `footer` (ADR 0027 C2; presets are TOML): the status area's rows. `preset` is `deck` (the default,
   three rows: the current provider's `usage` line — dropped when it has no snapshot — then
   `model`/`cwd`/`git_branch`/`worktree` with `context` (`{bar} {percent}%`)/
   `reasoning` on the right, then
@@ -335,14 +335,14 @@ find_next = ["ctrl-g", "shift-enter"]
 | `status` | `{status}` | `status.*` 贡献文本，`keys = ["…"]` 可过滤 |
 | `usage` | `{value}` | **当前 provider** 的用量快照：各窗口的剩余百分比与重置倒计时（ADR 0027）。数据来源在 provider 描述符的 `usage`（`Endpoint`：轮询一个 URL 并解析），组件本身不认识任何 provider；没有来源的 provider 这一行不出现。`tui.usage_period_secs` 0 关闭；旧 id `opencode-go.usage`/`chatgpt.usage` 作为别名保留一个版本，启动时各警告一次。`/usage` 打印同一份快照的**全部**窗口 |
 | `command` item (`[tui.footer.items.<id>] command = "…"`) | `{value}` | the command's first stdout line; JSON `{"text","style","symbol"}` sets the role and symbol (ADR 0027) |
-| `jobs` | `{count}`, `{age}` | 本会话正在跑的后台任务数与最老一个的已运行时长（例 `2 jobs · 18m`；ADR 0027 的 2026-10-17 补记）。数据来自任务的开始/结束事件（`BackgroundJobStarted`/`BackgroundJobSettled`，`JobNotifier` 写 journal 的同时转发到 live runtime-event sink），不轮询 journal 文件；没有运行中的任务时组件为空、不占位。年龄随既有的 footer 刷新（贡献者 tick 重画）更新，不另起计时器。只在 `full` 预设的缺省行里＼�其余三预设不含，用户在 rows 里加 `{jobs}`） |
+| `jobs` | `{count}`, `{age}` | 本会话正在跑的后台任务数与最老一个的已运行时长（例 `2 jobs · 18m`；ADR 0027 的 2026-10-17 补记）。数据来自任务的开始/结束事件（`BackgroundJobStarted`/`BackgroundJobSettled`，`JobNotifier` 写 journal 的同时转发到 live runtime-event sink），不轮询 journal 文件；没有运行中的任务时组件为空、不占位。年龄随既有的 footer 刷新（贡献者 tick 重画）更新，不另起计时器。只在 `full` 预设的缺省行里（其余三预设不含，用户在 rows 里加 `{jobs}`） |
 
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。每行有一个
 `position`（`footer` 默认、或 `above_input`/`below_input` 把它放到输入框上/下一行）。
 旧的 `[tui.widgets]` 块按原语义折成带 `position` 的行，警告一次，保留一个版本。
 
-#### Glyph coverage (ADR 0027 and 6)
+#### Glyph coverage (ADR 0027)
 
 A glyph the font does not have is drawn by a system fallback font with different metrics, so it
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
@@ -353,10 +353,10 @@ brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under `ascii`; `㎭`
 (East-Asian-Wide, off-baseline fallback). The spinner's default
 is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
 (`◜◝◞◟`), the braille (`⠋⠙⠸⠴`), `pulse` itself, the fold pair `◼`/`◻` (ADR 0035's
-2026-10-16 note: the owner chose them knowing four of the six reference fonts lack them), and
+2026-10-16 note: chosen knowing four of the six reference fonts lack them), and
 the context grid's buffer `▨` (spec `tui-context-grid`: three of the six lack it) are the
 **documented exceptions** to this
-rule (ADR 0027/10: the owner picked them after seeing them), so a font without them
+rule (ADR 0027: picked after review), so a font without them
 draws a fallback glyph; `tui.spinner = "quadrant"` switches to the covered set.
 
 Check a glyph with `crates/radian-tui/scripts/check-glyph-coverage.py` (needs `fonttools` in a
@@ -379,7 +379,7 @@ check: its glyphs come from the system emoji font, not the six reference fonts.
 | `~` `✓` `×` | U+007E/2713/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `•` | U+2022 | tool head marker, one-liner (running, empty, or a small tool; ADR 0035's 2026-10-16 note) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `│` | U+2502 | tool block body rail / open frames | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `╭` `╰` | U+256D/70 | open frame corners (ADR 0035/7) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `╭` `╰` | U+256D/70 | open frame corners (ADR 0035) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `…` | U+2026 | truncation | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `·` | U+00B7 | footer separator (ADR 0027) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -413,15 +413,15 @@ Replaced or dropped in the `unicode` tier (they were not in all six fonts):
 | `^` `v` tokens | U+005E/76 | `↑` `↓` |
 | `⟲` auto | U+27F2 | `~` |
 | `⠋⠙⠸⠴` spinner | U+280B… | `▖▘▝▗` |
-| `▸` thinking fold | U+25B8 | `▶` `▼`, then `◼` `◻` |
+| `▸` thinking fold | U+25B8 | `▶` `▼`, then `◼` `◻` (the pair is a documented exception) |
 | `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `✓` `×` |
-| `✗` tool failure | U+2717 | `×` |
+| `✗` tool failure | U+2717 | `×` (U+2717 misses Cascadia Code, Fira Code, Source Code Pro) |
 | `▶` `▼` thinking fold | U+25B6/BC | `◼` `◻` (ADR 0035's 2026-10-16 "折叠标记统一" note; documented exception) |
 | `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
 | `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
 
 Not in the all-six set but kept (they are not tier-gated icons): the `❯` input prompt (the
-owner's choice; both input styles), the ask record's `◉`/`○` markers (the owner's choice after
+choice; both input styles), the ask record's `◉`/`○` markers (the choice after
 the 2026-10-16 check: `◉` misses SF Mono and `○` misses Source Code Pro — accepted) and text
 arrows (`→`, `•` in the question UI — `•` is in all
 six, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
@@ -548,8 +548,7 @@ it from the journal's user messages. It is not persisted on its own.
 
 The **draft** is: on a clean exit (the two-press Ctrl-C quit or `/quit`, SIGTERM/SIGHUP) a non-empty input is written to
 `<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
-once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (owner
-2026-10-14, see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit
+once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit
 saves what was typed. A panic writes nothing (the panic path does no file I/O). `--list`
 and the index only read `*.jsonl`, so a draft is never a session.
 
@@ -581,7 +580,7 @@ the rest is sent as an ordinary message.
 | `/help` | list the commands |
 | `/compact [note]` | summarize the history now and keep the recent part (ADR 0018) |
 | `/fork` | fork this session at its last turn boundary (ADR 0022); idle only, and it does not switch to the child |
-| `/theme <name>` | switch the color theme immediately and write `tui.theme` back to the config file (ADR 0008 revision): a built-in (`dark`/`light`/`mono`) or a `*.json` file in `~/.radian/themes/`. `NO_COLOR` wins, so it does not switch; a read-only config (a newer `schema_version`) applies for the session but is never written |
+| `/theme <name>` | switch the color theme immediately and write `tui.theme` back to the config file (ADR 0008): a built-in (`dark`/`light`/`mono`) or a `*.json` file in `~/.radian/themes/`. `NO_COLOR` wins, so it does not switch; a read-only config (a newer `schema_version`) applies for the session but is never written |
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
@@ -710,7 +709,7 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the budget status segment**: with a small `--context-window`, is the `T / B` projection
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
-- **the footer** (ADR 0027 C2, revision 1): the default is the `full` two rows (identity, then
+- **the footer** (ADR 0027 C2): the default is the `full` two rows (identity, then
   numbers). Are the brand `R`, the hostname, the repo/worktree name and the change counts
   right, and do the numbers row's `speed`/`cost`/`elapsed` read as expected? Does the context
   share/`~` marker read at your width, and does a narrow terminal drop the low priorities
@@ -746,8 +745,7 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   A `!printf x > <outside>` must fail and `!printf x > ./inside` succeed: those are the outer
   sandbox's rules, and radian claims nothing about them (no deny-read list, no `.git` wording, no
   network state). `tests/pty.rs` covers the same path in automation; the feel is yours.
-- **the input area's two styles** (owner UI review; ADR 0035 and the
-  2026-10-16 note): the default is `lines` — a rule above and below with the `❯ ` prompt; is it
+- **the input area's two styles**: the default is `lines` — a rule above and below with the `❯ ` prompt; is it
   comfortable? Compare `input_style = "box"` (the thin half frame). For the `box` frame: does the
   top rule read as a full-width open frame with no label; does the `│ ` rail line up with a code
   block's; do a multi-line input, a wrapped line, a CJK line and a narrow terminal keep the rail
@@ -917,7 +915,7 @@ cargo run -p radian-tui -- --model <model> --base-url <...> --session-dir /tmp/r
 #    is clean (no `%`) and `stty -a` still shows `icanon`.
 ```
 
-### Owner hand test, 2026-10-14 (everything merged tonight)
+### Hand test (everything merged tonight)
 
 pty automation (`vt100` screen model, instant query answers, no glyph metrics) cannot judge
 the items below. Each one says what to do, what to expect, where to look, and what to record
@@ -925,7 +923,7 @@ when it fails. **Record on every failure**: a screenshot, the terminal name and 
 `echo $TERM $COLORTERM`, the font, and the smallest step that reproduces it. Run in a
 throwaway terminal, not your working one.
 
-1. **`/theme` switching and write-back** (`/theme <name>`, ADR 0008 revision + ADR 0029;
+1. **`/theme` switching and write-back** (`/theme <name>`, ADR 0008 + ADR 0029;
    merge `22b2753`, `01177c2`). Put three themes in `~/.radian/themes/`
    (`mkdir -p ~/.radian/themes`; `cp crates/radian-tui/tests/data/themes/{kanagawa-wave,gruvbox-light}.json ~/.radian/themes/`).
    *Steps*: `/theme` + Tab → pick `kanagawa-wave`; `/theme` → `gruvbox-light` (a light
@@ -962,7 +960,7 @@ throwaway terminal, not your working one.
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
    kitty-protocol terminals), and `Ctrl-J` always does; a terminal that cannot report it sends
    instead - record which of the three did what. *Fail*: a newline that also sends.
-3c. **Spinner** (`tui.spinner`; ADR 0027/9/10/13). *Steps*: start a turn (send a
+3c. **Spinner** (`tui.spinner`; ADR 0027). *Steps*: start a turn (send a
    message) with `tui.spinner = "pulse"` (the default), then `"arc"`, then `"quadrant"`, then
    `"braille"`, then `glyphs = "ascii"`. *Expect*: the input rule shows
    `── <spinner>  Working ` (two spaces) while the turn runs, a plain rule when idle; `pulse`
@@ -982,7 +980,7 @@ throwaway terminal, not your working one.
    clean shell prompt. *Fail*: record whether the resize disarmed the quit (the `01177c2` fix)
    and whether the exit line is paste-ready.
 5. **The thin user row and tool block, selection on top** (ADR 0028, ADR 0035
-   revision 6 decision 3/10; supersedes the old banded user block and tool cards). *Steps*:
+   ; supersedes the old banded user block and tool cards). *Steps*:
    send a message that calls a tool; drag-select across the user row, a tool head and a `│ `
    body row; double-click a word, triple-click a message.
    *Expect*: the user row is one plain `❯ <text>` line with **no** background and **no**
@@ -993,7 +991,7 @@ throwaway terminal, not your working one.
    line number reaches the clipboard). *Look*: contrast in `dark`, `light` and `mono` now that
    the transcript is on the terminal background, and whether the selection highlight reads on
    it. *Fail*: record the theme, and which glyph the copy wrongly carried.
-6. **Thinking fold `Ctrl-T` and tool output `Ctrl-O`** (ADR 0028/4).
+6. **Thinking fold `Ctrl-T` and tool output `Ctrl-O`** (ADR 0028).
    *Steps*: with a reasoning model (e.g. `--thinking adaptive`), get a reply with
    reasoning; press `Ctrl-T`; then call a tool with long output and press `Ctrl-O` three times.
    *Expect*: `Ctrl-T` toggles the thinking channel between the folded one-liner
@@ -1055,9 +1053,9 @@ throwaway terminal, not your working one.
     `pbcopy` works on macOS; `off` writes nothing and says so. *Fail*: record herdr's version
     and whether OSC 52 forwarding is enabled — this is the known-open question.
 
-### Owner hand test, 2026-10-12: passed
+### Hand test: passed
 
-The owner ran the slice A and slice B checks above in a real terminal on macOS, against the
+Slice A and slice B checks above were run in a real terminal on macOS, against the
 opencode Zen endpoint (`deepseek-v4.1-flash`) with `--approval always`. The terminal emulator
 was not recorded. **All items passed**:
 
@@ -1068,7 +1066,7 @@ was not recorded. **All items passed**:
 - `--resume` shows the history, the model remembers it, and a session grant does **not**
   carry over the resume (the box asks again).
 
-The owner has usability feedback on the UI that is not recorded yet; it comes later.
+Usability feedback on the UI that is not recorded yet comes later.
 
 Gap found while preparing the test: the TUI's `--header` took a literal value and had no
 `{session_id}` placeholder, unlike `agent-cli`. **Fixed in slice D**: both hosts now use
@@ -1090,7 +1088,7 @@ stderr: stderr now gets the same redacted report as the panic log
 (`pty_a_panic_writes_a_redacted_panic_log` asserts neither the header value nor the key reaches
 the terminal). The cost: `RUST_BACKTRACE` is not honoured.
 
-## The panic path unwinds, with a bounded runtime shutdown (2026-10-12)
+## The panic path unwinds, with a bounded runtime shutdown
 
 Slice A's panic hook restored the terminal and then called `process::exit(101)`, which skips
 every `Drop`. That was safe only while the TUI owned no child processes. Slice B wires the
@@ -1112,7 +1110,7 @@ the pid and the group are gone.
 Durable data was already safe (every append is fsynced, ADR 0001 D3; a torn tail is truncated
 on read, ADR 0006 §3.2) and stays so.
 
-## A panic in the driver task leaves in order (2026-10-12)
+## A panic in the driver task leaves in order
 
 The driver runs as a **spawned** task. A panic inside it is caught by the runtime, not by
 `main`'s `catch_unwind`, so the process keeps running — and the old panic hook restored the
@@ -1214,7 +1212,7 @@ continue it: `... the session file <path> exists; after fixing the problem, cont
 
 ## Not verified
 
-- Real terminal emulators beyond the owner's one macOS pass above (Terminal.app, iTerm2,
+- Real terminal emulators beyond the one macOS pass above (Terminal.app, iTerm2,
   Alacritty, tmux, ssh): layout, frame timing and glyph width are otherwise only checked
   against a `vt100` model.
 - Frame timing under load (the spike measured p95 ≪ 16 ms; this skeleton was not benchmarked).
@@ -1312,7 +1310,7 @@ untrusted projects, ADR 0039 decision 5). This is the same wiring `agent-cli` us
   (ADR 0021 D2/D6). The current memory is injected into the system prompt each turn;
   `memory_search` (allowed) mounts only past the injection budget (ADR 0021 D7), and a
   default-scope `/memory add` that **registers** this workspace as a project (ADR 0021
-  revision 1) is shown as a `Notice` transcript entry — one line naming the new project and
+  ) is shown as a `Notice` transcript entry — one line naming the new project and
   its identity key — because stderr would be drawn over by the fullscreen UI. Tested by
   `pty_the_memory_notice_names_the_project_state_and_the_budget` and
   `pty_a_memory_add_shows_the_created_project_notice`.
@@ -1385,7 +1383,7 @@ A question request is one `Modal::Question`, drawn with the shared panel primiti
 revision 1, ADR 0024 R2): a titled rounded box, a **tab row** (each question's
 `header`, capped at 16 display cells, a `✓` on an answered one, then `Submit`), the current
 question's options (a `❯` cursor, `○`/`◉` for single, multi and `Other` alike — ADR 0028
-revision 5 decision 2: the marker is never bold — a ` (Recommended)`, a `↳`
+: the marker is never bold — a ` (Recommended)`, a `↳`
 description), the `Other` row with inline editing, and the key hints in the bottom border
 (they change with the tab). `alt-h` collapses the panel to one line.
 
@@ -1414,7 +1412,7 @@ description), the `Other` row with inline editing, and the key hints in the bott
 | typing | the focused free-text field (a `text` question, the `Other` row, or a note), with the composer's editing keys |
 
 The transcript also shows the `ask_user` call and result as an **open frame** (ADR 0028
-revision 5 decision 2): `╭─ ask ─…`, the same questions and options in `│ `-railed rows, the
+): `╭─ ask ─…`, the same questions and options in `│ `-railed rows, the
 chosen options marked `◉` (multi included), a `↳` description, and the declined/cancelled
 status inside the same frame. `glyphs = ascii` falls back to `+ - |`, `( )`/`(*)` and `->`.
 
@@ -1486,7 +1484,7 @@ renders as plain text.
 Assistant prose is CommonMark plus tables, strikethrough and task lists
 (`pulldown-cmark`). The renderer, not the source's blank lines, spaces the block-level
 elements: exactly one blank line between a heading, a paragraph, a list, a code block, a
-table, a quote and a rule. A heading keeps its `#` marks with the weak
+table, a quote and a rule. A heading keeps its `#` marks (decision 3) with the weak
 `md_heading_mark` role; the text is `md_heading` (level 1 underlined). The unordered marker
 is `-` and a continuation aligns to the marker's actual width (`10. ` is 4 cells). A task
 list shows `☐`/`☑` instead of the bullet. A quote's bar is `▏`, the rule is at most 40 cells,
@@ -1636,8 +1634,8 @@ drops it.
 
 A compaction summary (a `User` message with a `compaction_summary` origin, ADR 0018) shows as
 one line: `── context compacted (rev 3, 12000 → 4000) ──`. Expanding it (the tool-output fold,
-`Ctrl-O`) shows the model's summary and the user's words Core keeps verbatim (ADR 0018 revision
-6). The revision and the token counts are **live only** — the journaled message does not carry
+`Ctrl-O`) shows the model's summary and the user's words Core keeps verbatim (ADR 0018).
+The revision and the token counts are **live only** — the journaled message does not carry
 them, so a resume replay shows `── context compacted ──` rather than inventing numbers.
 
 `Ctrl-F` matches the **full** content: a folded thinking block, a folded tool body and a folded

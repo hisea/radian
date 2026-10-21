@@ -520,7 +520,7 @@ Base `6d22bf0` · 一次性检出 `/tmp/s1e-mut`（detached，跑完删除）· 
 "移动队首不产生效果"随即失败。S3 是"等待方放弃后 Modal 仍显示"：变异让 `head == None` 时不清
 Modal，三条队列驱动测试失败。S7 说明 session 关闭的 fail-closed 语义没有被队列改造稀释。
 
-## owner UI 验收第一轮（ui-r1，六条）
+## UI 验收第一轮（ui-r1，六条）
 
 Base `613312c` · 一次性 worktree `/tmp/ui-r1-mut` · 独立 `CARGO_TARGET_DIR` ·
 每个变异 `git checkout -- .` 还原、`git status --short` 为空。
@@ -560,7 +560,7 @@ Base `9ee35b4` · 一次性 worktree `/tmp/tui-mut` · 每个变异 `git checkou
 
 7/7 抓住,无等价变异。
 
-## approval-fit：审批框在内容太长时看不到按键提示＼�2026-10-13）
+## approval-fit：审批框在内容太长时看不到按键提示（2026-10-13）
 
 Base `d76df67` · 就地变异，每个变异 `git checkout -- crates/radian-tui/src/render.rs` 还原、
 `git status --short` 只留本片的新测试。
@@ -585,7 +585,7 @@ Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git check
 |---|---|---|
 | L1 | 向导把 key 明文渲染(`wizard.key.clone()` 代替掩码) | `pty.rs::pty_login_custom_walk_saves_without_showing_the_key`(等 15 个掩码列出现的状态门 + 屏幕无明文;**诚实补充**:第一版测试只用 `pump()` 后的单次断言,逐字符 diff 渲染让明文连不成子串,变异"通过"是假通过;加状态门后才真正抓住) |
 /`logout` 的确认与删除由 L6 覆盖(见 agent-cli 表)。
-## ADR 0026 D9：`!` 自动批准键与 `/auto`（2026-10-13，owner 更正：键是 `!`，`Y` 保持 `y`）
+## ADR 0026 D9：`!` 自动批准键与 `/auto`（2026-10-13，键是 `!`，`Y` 保持 `y`）
 
 Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
 `cargo test -p radian-tui --test auto <test>`，变异后 `git checkout --` 还原。
@@ -611,7 +611,7 @@ HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout --
 | SC4 | Modal 上按下不开始选择 | 去掉 `mouse_down` 的 `has_modal` 门 | `a_press_on_a_modal_never_starts_one` |
 | SC5 | `update` 不直接写 stdout | 在 `mouse_up` 里直接 `io::stdout().write_all(osc52(..))` | `purity::app_rs_is_pure`（本片把 `io::stdout`/`io::stderr` 加进禁止表） |
 
-5/5 抓住。**审查补漏（SC6，merge main 之后）**：owner 审查发现 base64 表尾两个字符（索引
+5/5 抓住。**审查补漏（SC6，merge main 之后）**：审查发现 base64 表尾两个字符（索引
 62/63 的 `+`/`/`）没有任何向量覆盖——把表换成 URL-safe 的 `-_` 全部测试仍绿。补 `osc52("~~~")`
 → `fn5+`（`~` = 六个 1，索引 62）与 `osc52("???")` → `Pz8/`（`?` = 六个 1，索引 63）后，同一
 变异在 `clip::tests::osc52_encodes_base64_with_the_clipboard_selection` 被抓住（实测输出
@@ -941,7 +941,7 @@ Base `a6a9cce` · worktree `../radian-pi-flakymem` · 负载进程：24 个 `yes
 
 **流程记录（我的失误）**：第一版 harness 把 20 个 `yes` 和测试循环放在同一个 shell 里，末尾的
 `wait` 把永不退出的 `yes` 也等上了，命令挂了 7 小时 42 分，那些 `yes` 一直占着 CPU（整晚 load
-150–450 有它们一份），最后由 owner 按 `/tmp/flaky-pids.txt` 的 pid 逐个核对后杀掉。**以后起负载
+150–450 有它们一份），最后按 `/tmp/flaky-pids.txt` 的 pid 逐个核对后杀掉。**以后起负载
 进程：记 pid，`wait` 只等测试循环的 pid（或把负载放进 `wait` 范围外的子 shell），跑完立刻按 pid kill。**
 
 ## 手测第三轮（ui-r3：光标、❯、工具输出的 Tab、Shift+Enter）
@@ -1025,7 +1025,7 @@ mutation applied by a patch that asserts its anchor is present, then `cargo test
 
 4/4 caught; no misses. C3's assertion is the copy: `a_copy_of_a_card_has_no_border_characters`
 pins the clipboard directly.
-## footer-s3：opencode-go 用量、deck、逐字段配置（ADR 0027 C3/C4、修订 3，2026-10-16）
+## footer-s3：opencode-go 用量、deck、逐字段配置（ADR 0027 C3/C4，2026-10-16）
 
 Base `6cd0879` · 一次性 worktree `/tmp/radian-mut-f3`（`git worktree add --detach`，独立
 ## bang：输入框的 `!` 与 `!!`（ADR 0033，2026-10-16）
@@ -1047,7 +1047,7 @@ Base `aec64f0` · 一次性 worktree `/tmp/radian-mut-bang`（`git worktree add 
 BANG-E 是"走审批"这一条的最近代理：真正的审批框需要把命令交给模型当工具调用，最便宜的等价变异
 就是把它发成 turn；ptytest `pty_bang_runs_and_enters_the_context` 另有一条断言"屏幕上不出现
 `approve tool call`"，两层一起把"`!` 不走审批"钉住。
-## resize-fix：空闲时也要重新布局＼�2026-10-16）
+## resize-fix：空闲时也要重新布局（2026-10-16）
 
 Base `ea67319` · 一次性 worktree `/tmp/radian-mut-resize`（`git worktree add --detach`，独立
 `CARGO_TARGET_DIR`）· 每条跑完 `git checkout -- .`，`git status --short` 为空。
@@ -1076,7 +1076,7 @@ RESIZE-A 的过程记录：第一轮把 `size_changed()` 的**诊断调用**和�
 诊断那一次把变化吃掉了（trace 里 `changed=Some` 但 `detected` 为 0），改成只调用一次后才由
 `pty_a_bare_resize_re_lays_out` 抓住——变异要真的改变被测行为，不能只加观察。
 
-## completion-menu（可选补全菜单 + 生效思考等级，��
+## completion-menu（可选补全菜单 + 生效思考等级，）
 
 Base `8789877` · 一次性 worktree `/tmp/radian-cm-mut`，每个变异跑完 `cp /tmp/cm-backup` 还原，最后 `git status --short` 为空。
 
@@ -1100,7 +1100,7 @@ Base `f1993bb` · 一次性 worktree `/tmp/radian-esc-mut`，跑完 `git checkou
 
 1/1 抓住。
 
-## trust-Esc＼�2026-10-14）
+## trust-Esc（Esc = 只限本次不信任，2026-10-14）
 
 Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checkout -- .`，`git status --short` 为空。
 
@@ -1110,7 +1110,7 @@ Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checko
 
 1/1 抓住。（早先 ESC-M1「Esc → `TrustHere`」见上一节。）
 
-## ask-ui：问答界面照 omp（ADR 0024/2，2026-10-16）
+## ask-ui：问答界面照 omp（ADR 0024，2026-10-16）
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -1258,7 +1258,7 @@ Base `52265c1` · 一次性 worktree `/tmp/radian-fc-mut`，还原后 `git statu
 | FC-M2 | `ForkDeadline` 超时也执行 fork（生成空子会话） | `pty_a_fork_gives_up_when_the_turn_is_still_being_written` | ✅ |
 
 2/2 抓住。
-## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027/9/10，2026-10-15）
+## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027，2026-10-15）
 
 Base `c0ae44c` · 一次性 worktree `/tmp/radian-sp-mut2`，还原后 `git status --short` 为空。
 
@@ -1307,7 +1307,7 @@ Base `d72d17c`（本片三个提交的最后一块）· 就地变异：改前 `c
   `std::process::exit(128 + signal)`）后 `pty::pty_a_hung_main_loop_still_exits_on_a_signal`
   FAILED（该用例的挂起机制本片改成了 `--slow-draw`，见下），还原后逐字节相同、
   测试重新通过。这证明改用 `--slow-draw` 没有削弱该用例对看门狗的检查。
-## panels-adopt：其余弹出层改用共享面板与列表（ADR 0035/2，2026-10-16）
+## panels-adopt：其余弹出层改用共享面板与列表（ADR 0035，2026-10-16）
 
 Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktree remove --force`）。
 每个变异用 `--no-fail-fast`，还原后 `git status --short` 为空。
@@ -1480,7 +1480,7 @@ Base `19dc0d7`（worktree `.radian-worktrees/pulse`，分支 `dogfood/pulse`）�
 + 空块两侧的行）；`thinking_has_one_blank_line_on_both_sides` 直接压条目来测 thinking 这条规则本身，
 并在注释里写明这一点。
 
-## thin ⓪：新角色与内建取值（ADR 0029/6，ADR 0028 的片 ⓪）
+## thin ⓪：新角色与内建取值（ADR 0029，ADR 0028 的片 ⓪）
 
 Base：本片 HEAD（`oc/thin-roles`）· 就地变异，每个变异后从 `.radian/scratch/theme.rs.new`
 还原并用 `cmp` 确认逐字节相同（`git status --short` 只留本片改动）。测试 `--no-fail-fast`。
@@ -1540,10 +1540,10 @@ Base `origin/main` `6accfe0`（worktree `.radian-worktrees/ask-box`）。每个�
 | ASK4-M3 | 底边提示永远写 `⇥/←/→ question` | `the_hint_row_shows_the_cursor_keys_while_a_field_has_focus` | ✅ |
 
 12/12 抓住。ASK2 的两个变异在同一条用例里：待答一行、答完同一条目成块且只有一个块。ASK4-M1/M3 是
-owner 反馈的两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
+两个按键问题的回归钉：←/→ 切题（无字段时）与底边提示跟随聚焦状态。`check-glyph-coverage.py`
 的结果（☐/☑ 缺 SF Mono / JetBrains Mono Nerd / Cascadia Code）写在 ADR 0024 的「实施补充」里。
 
-## markdown-③：标题不画 `#`、加粗不上色、代码块线框、表格表头与单元格行内样式（ADR 0035/6/7/8、ADR 0028；2026-10-16）
+## markdown-③：标题不画 `#`、加粗不上色、代码块线框、表格表头与单元格行内样式（ADR 0035、ADR 0028；2026-10-16）
 
 Base `origin/main` `28f4703`（worktree `.radian-worktrees/thin-md`，branch `oc/thin-md`）。每个变异就地改完
 `blocks.rs` / `render.rs` 后跑 `cargo test -p radian-tui --locked --no-fail-fast --lib <名字>`
@@ -1596,7 +1596,7 @@ Base `origin/main` `28f4703`（worktree `.radian-worktrees/thin-ask`）。每个
 
 4/4 抓住。面板的「标记不加粗」仍由既有的 `the_ask_panel_marker_is_never_bold` 钉住（ASK3-M1）；
 本片把 `AskGlyphs` 的单选/多选/Other 从 `☐`/`☑` 改成 `○`/`◉` 后，这条用例找的格子也从 `☑` 改成 `◉`。
-## thin ⑥：用户行、默认输入框、压缩线（ADR 0035/9、ADR 0028，2026-10-16）
+## thin ⑥：用户行、默认输入框、压缩线（ADR 0035、ADR 0028，2026-10-16）
 
 Base：本片 HEAD（`oc/thin-user`）· 就地变异，每个变异后从 `.radian/scratch/render.rs.orig` /
 `blocks.rs.orig` 还原并用 `cmp` 确认逐字节相同。`--no-fail-fast`。
@@ -1643,10 +1643,10 @@ Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异：脚本 `.radian/sc
 
 **一处要记录的缺口（review fix 1 已关闭，保留原文）**：状态符号 `✗`（U+2717）不在 ADR 0027 的
 六款参考字体核对集里（那张表用 `×`，`✓` 在表内）。ADR 0028 与原型 `render-screen.py` 都
-写 `✗`，所以 transcript 当时用了它；review 提给 owner 后，owner 在 ADR 0035 的实施补充
+写 `✗`，所以 transcript 当时用了它；review 后，ADR 0035 的实施补充
 （2026-10-16，`5e8eccb`）里定：工具失败用 `×`，thinking 用 `▼`/`▶`——见下一节。
 
-## thin ① review fix 1：字形＼�ADR 0035 实施补充）
+## thin ① review fix 1：字形（ 决定，ADR 0035 实施补充）
 
 Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异，脚本仍是 `.radian/scratch/mutate.py`（每个变异前把
 `render.rs`/`blocks.rs`/`tools.rs`/`footer.rs` 复制到 `.radian/scratch/mut-backup/`，跑命名的测试，再从
@@ -1668,10 +1668,10 @@ Base：本片 HEAD（`dogfood/thin-tools`）· 就地变异，脚本仍是 `.rad
 覆盖检查的三处同步：`scripts/check-glyph-coverage.py` 的 `GLYPHS`、`footer.rs` 的
 `unicode_tier_glyphs_are_all_verified_covered` 的 `VERIFIED_COVERED`、以及 README 里那张脚本输出的表。
 `▼ ▶ • ╭ ╰` 加入，`›` 移出（没有任何一行再画它）；`× ✓ │` 本来就在表里。用 venv 里的 `fonttools 4.67.0`
-跑脚本核对：六款字体（本机都装了）对 `× • │ ╭ ╰ ▼ ▶ ✓` 全是 ✅，与 owner 的结论一致。
-`◉`/`○`（问答标记）**没有**加进任何一个清单——owner 明知它们缺字并接受，README 的「kept」一段记下了这一点。
+跑脚本核对：六款字体（本机都装了）对 `× • │ ╭ ╰ ▼ ▶ ✓` 全是 ✅，与既有结论一致。
+`◉`/`○`（问答标记）**没有**加进任何一个清单——已知它们缺字，接受此缺口，README 的「kept」一段记下了这一点。
 
-## Theme format：TOML 主题、一次性 pi 导入、过渡期（ADR 0029/3/4，2026-10-16）
+## Theme format：TOML 主题、一次性 pi 导入、过渡期（ADR 0029，2026-10-16）
 
 Base：本片 HEAD（`oc/theme-format`；决定 1 = `cff5d35`，决定 4 = `e9f29ef`，决定 3 = 本提交）·
 就地变异，每个变异前把 `file.rs`/`importer.rs`/`toml_file.rs` 复制到 `.radian/scratch/mut-bak/`，
@@ -1933,8 +1933,7 @@ The `input_style = "bar"` reader test (`config::the_tui_input_style_is_carried_a
 covers the host side (the spelling is carried, not skipped).
 
 **Piece 2 dropped.** The task's fourth mutation ("the configured separator ignored with a preset")
-belonged to the `[tui.footer]` separator bug, which the owner dropped ("the owner is redesigning the
-footer") before any code was written; no commit or mutation for it exists.
+belonged to the `[tui.footer]` separator bug, which was dropped ("the footer") before any code was written; no commit or mutation for it exists.
 
 ## ADR 0042: 渲染器换成 grok-build 的 `mermaid.rs`（2026-10-16）
 
@@ -1952,7 +1951,7 @@ Base `aedc23f`。变异在 worktree 内直接改，改前把每个文件复制�
 
 4 条变异，4 条抓住。M4 在 vendored crate 里跑（本 crate 的 `mermaid.rs` 快照测试看不见上游 diff）。
 
-## esc-noquit: `Esc` 不再退出空闲会话＼�
+## esc-noquit: `Esc` 不再退出空闲会话
 
 Base: 本 worktree（`oc/esc-noquit`，分支自 `e2a4436`）。变异在 worktree 内直接改 `src/app.rs`，
 改前 `cp src/app.rs .radian/scratch/esc-noquit/app.rs.orig`，改后 `cp` 还原并 `cmp` 一致
@@ -2378,7 +2377,7 @@ with hostname `testhost`) were rendered from the pristine `525daf0` tree (`git a
 
 | # | Requirement mutated | Mutation | Caught by |
 |---|---|---|---|
-| S5-1 | `deck` has no `jobs` row | `"jobs"` added to `deck.toml`'s numbers row | `--test footer_presets -- full_shows_jobs_while_deck_does_not` ✅ 1 failed (deck with a job no longer equals its no-job golden) |
+| S5-1 | `deck` has no `jobs` row (only `full` includes it) | `"jobs"` added to `deck.toml`'s numbers row | `--test footer_presets -- full_shows_jobs_while_deck_does_not` ✅ 1 failed (deck with a job no longer equals its no-job golden) |
 | S5-2 | a preset's item order is the shipped order | `"model"`/`"cwd"` swapped in `pi.toml`'s first row | `--test footer_presets -- the_four_presets_render_byte_identical` ✅ 1 failed (`screen changed for preset=pi glyphs=unicode width=40`) |
 
 2/2 caught; no misses.

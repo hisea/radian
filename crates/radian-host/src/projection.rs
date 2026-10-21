@@ -100,7 +100,7 @@ struct Facts {
     usage_cache_read: Option<u64>,
     /// The provider-reported cache **write** tokens, for the same reason.
     usage_cache_write: Option<u64>,
-    /// The session's accumulated fee (ADR 0027/12). Each model call is priced at
+    /// The session's accumulated fee (ADR 0027). Each model call is priced at
     /// the rate the route had **when it arrived** (`cost::add_cost`), so a `/model` switch does
     /// not re-price earlier calls. `None` until a call had something to bill: the item hides
     /// rather than showing `$0.00`. An incomplete fee (a non-zero counter with no rate) makes
@@ -223,7 +223,7 @@ impl SessionProjection {
     /// the resume path folds a journal's **old** usage records (written before the fee field
     /// existed, ADR 0007), which have to be re-priced with today's catalog at the
     /// route that was in force **then**, not the route the process starts with (F3, ADR 0027
-    /// revision 12 decision 3). A record that carries its own fee goes through
+    /// ). A record that carries its own fee goes through
     /// [`Self::add_recorded_usage`] instead.
     pub fn add_usage_at(&self, price: Option<&ModelPrice>, usage: &ModelUsage) -> bool {
         self.write(|facts| {
@@ -383,7 +383,7 @@ impl ProjectionRead<'_> {
         self.facts.usage_cache_write
     }
 
-    /// The session's accumulated fee in micro-dollars (ADR 0027/12). `None` when
+    /// The session's accumulated fee in micro-dollars (ADR 0027). `None` when
     /// no call has had anything to bill: the `cost` item hides rather than showing `$0.00`.
     pub fn cost_micros(&self) -> Option<u64> {
         self.facts.cost.map(|cost| cost.micros)

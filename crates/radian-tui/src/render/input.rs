@@ -13,7 +13,7 @@ const MAX_INPUT_ROWS: usize = 10;
 /// The rows the find box needs: its top border, the query, its bottom border (`Borders::ALL`).
 pub(super) const FIND_BOX_HEIGHT: u16 = 3;
 
-/// How the input area is drawn (config `tui.input_style`, owner UI review 2026-10-13).
+/// How the input area is drawn (config `tui.input_style`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputStyle {
     /// A rule above and below, `❯ ` on the first line, continuation lines indented two cells
@@ -39,12 +39,12 @@ impl InputStyle {
 }
 
 /// The input prompt, in the style of pi: the first line starts with `❯ ` and the continuation
-/// lines indent by the same two cells, so the text stays aligned. The owner's 2026-10-14
+/// lines indent by the same two cells, so the text stays aligned.
 /// decision: **both** input styles use `❯`. Its display width (2 cells) is what the layout
 /// reserves — never its byte length (`❯` is three bytes, which used to shift the box cursor).
 pub(super) const INPUT_PROMPT: &str = "❯ ";
 
-/// The `box` style's prompt: the owner's `❯`, colored with the theme's
+/// The `box` style's prompt: the `❯`, colored with the theme's
 /// accent role (`theme.notice_label`). Two cells, like `> `.
 pub(super) const BOX_PROMPT: &str = "❯ ";
 

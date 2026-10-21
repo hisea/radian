@@ -89,8 +89,7 @@ pub use radian_host::projection::TurnState;
 // tests build the expected followups with them, the unit tests cover the round trip.
 pub use loop_mode::{loop_iteration, loop_message};
 
-/// How long the first idle Ctrl-C arms "press again to quit" (ADR 0023 U4, owner
-/// 2026-10-14). A second Ctrl-C inside the window quits; the window closing, or any other
+/// How long the first idle Ctrl-C arms "press again to quit" (ADR 0023 U4). A second Ctrl-C inside the window quits; the window closing, or any other
 /// key, disarms it and the hint disappears.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 
@@ -237,7 +236,7 @@ pub enum Effect {
     /// Ring the terminal bell: one `\x07` on stdout (`tui.bell`). The loop runs it at most
     /// once per frame — bell-class events that share a frame merge into one ring.
     Bell,
-    /// `/theme <name>` (ADR 0008 revision): load the theme and write `tui.theme` back to the
+    /// `/theme <name>` (ADR 0008): load the theme and write `tui.theme` back to the
     /// config file. Both are I/O, so the loop runs them and answers with
     /// [`Input::ThemeReady`].
     Theme { name: String },

@@ -139,10 +139,10 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 与"进程在写终态前崩了"；`TurnFinished { outcome: "failed" }` 本可以表达它。稳定复现是
 `crates/radian-runtime/tests/provider_failure.rs` 里 `#[ignore]` 的
 `a_failed_turn_should_still_write_a_turn_finished`（当前会失败）。要不要让驱动把 `RunError`
-也落成一条终态事件，是 owner 的决定，本切片不改。
+也落成一条终态事件，本切片不改。
 
 其余格子（错误体 2048 字节上限、不解析结构化错误码、取消不单独断言 mock 侧连接关闭）是
-**记录**，不视为问题。要不要把错误码结构化解出来，同样是 owner 的决定。
+**记录**，不视为问题。错误码结构化以后再议。
 
 **重试（ADR 0017，2026-10-15）**：矩阵里标为 provider 的错误（408 / 429 / 5xx）
 现在是 `Unavailable`，与断流、空闲超时、连接失败同属 `is_transient()`；取消仍是

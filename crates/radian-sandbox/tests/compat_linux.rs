@@ -2,7 +2,7 @@
 //! under `workspace-write` with the default sensitive-read denies? Anything incompatible is
 //! recorded, never fixed by widening a rule (ADR 0012 decision 3).
 //!
-//! The owner asked specifically whether a **dependency-bearing** `cargo build` can run in
+//! Whether a **dependency-bearing** `cargo build` can run in
 //! the Linux sandbox (macOS was verified, Linux was not). The last case answers that with a
 //! real project that depends on `itoa` and builds `--offline` from the cargo cache the test
 //! run already populated.

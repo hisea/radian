@@ -38,7 +38,7 @@ use crate::config::{ConfigQueue, ConfigSlot, ModelRoute};
 pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<ContextBudget> + Send + Sync>;
 
 /// A host seam that adds context to a **user** turn before its first model call (ADR 0021
-/// revision 2 decision 3): the memory addition. It is called with the turn's user text and the
+/// ): the memory addition. It is called with the turn's user text and the
 /// transcript **before** the turn's input is committed, and returns the one message the driver
 /// puts in the inbox's `inject` lane — or `None`, which is the common case.
 ///
@@ -158,7 +158,7 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// the configured one.
     turn_budget: Option<ContextBudget>,
     /// Computes the compaction call's request-level settings for a (provider, model) (ADR 0018
-    /// revision 8). The host sets it; without it a switch cannot move the settings.
+    /// ). The host sets it; without it a switch cannot move the settings.
     compaction_settings_for: Option<CompactionSettingsFor>,
     /// The compaction settings the next turn runs under: set when a model change is applied,
     /// `None` keeps the configured value.
@@ -583,7 +583,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                         // `Ok(Step::Continue)`, which is where the core reads it anyway
                         // (`inject_steering` runs at the start of a step); a steer left in the
                         // inbox at the end of a turn opens the next one itself (ADR 0011
-                        // revision 1 decision 2), and every older `inject` in the lane is
+                        // ), and every older `inject` in the lane is
                         // absorbed by that turn's first step.
                         if inbox.cancel_generation() != cancel_generation {
                             cancellation.cancel();
@@ -842,7 +842,7 @@ async fn drain_steering(
 ///
 /// A requeued **steer** keeps `wake = true`, so the loop iteration right after this — before
 /// the driver waits — claims it and opens the next turn with it as its first input (ADR 0011
-/// revision 1 decisions 2 and 3). A requeued `inject` keeps `wake = false` and waits. A
+/// ). A requeued `inject` keeps `wake = false` and waits. A
 /// requeued pending-wake notice keeps its flag, so the next claim opens the next turn with
 /// it (ADR 0011).
 async fn requeue_unadmitted(inbox: &Inbox, claimed: &[InboxEntry], admitted: &HashSet<MessageId>) {
@@ -1004,8 +1004,8 @@ fn lane_of(lane: InboxLane) -> Lane {
 ///    order — this covers "claimed but not admitted" (L3-2) and, because the inbox is
 ///    durable, inputs that were enqueued but never claimed before the restart; each keeps its
 ///    durable `wake` and `pending_wake`, so a pending steering entry opens a turn as soon
-///    as the driver runs (ADR 0011) and a stranded job notice does too
-///    (revision 2). An old journal has neither field: the reader derives `wake` from the lane
+///    as the driver runs (ADR 0011) and a stranded job notice does too. An old journal has
+///    neither field: the reader derives `wake` from the lane
 ///    and defaults `pending_wake` to `false` (ADR 0006 §5.5);
 /// 3. unpaired tool calls go through the core's `repair` (ADR 0002), and the repaired
 ///    messages are written back before the session is reopened (ADR 0002 E9).

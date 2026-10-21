@@ -116,7 +116,7 @@ export PATH="$HOME/.local/bin:$PATH"
 uv tool install harbor==0.24.0
 
 # 3. Export the trial key WITHOUT printing it (never echo/env/set -x it).
-#    The smoke uses the owner's opencode-go key with model deepseek-v4.1-flash.
+#    The smoke uses the opencode-go key with model deepseek-v4.1-flash.
 export RADIAN_BENCH_API_KEY="$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.radian/credentials/auth.json")))["opencode-go"]["key"])')"
 
 # 4. Run 3-5 easy tasks (repeat -i per task, -n 2 at most). Harbor resolves the

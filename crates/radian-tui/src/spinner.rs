@@ -1,4 +1,4 @@
-//! The spinner (ADR 0027/9/10/13): one definition for every running indicator.
+//! The spinner (ADR 0027): one definition for every running indicator.
 //!
 //! The frame is a function of **time**, not of the text length (the old
 //! `SPINNER[text.len() % 4]` turned once per token). `pulse` is the default: a `⏺` that keeps
@@ -61,7 +61,7 @@ impl Kind {
     }
 }
 
-/// One breath of the default pulse (ADR 0027; the owner's 2026-10-16 decision set the
+/// One breath of the default pulse (ADR 0027; the decision set the
 /// period to 2.0 s).
 pub const PULSE_PERIOD: Duration = Duration::from_millis(2_000);
 /// The colours in one breath (revision 13): the sine below is sampled this many times, so the
@@ -286,7 +286,7 @@ mod tests {
             PULSE_ACCENT_STEP,
             "the middle sample is the accent"
         );
-        // The owner's two numbers, pinned; everything else derives from them.
+        // The two numbers, pinned; everything else derives from them.
         assert_eq!(PULSE_PERIOD, Duration::from_millis(2_000));
         assert_eq!(PULSE_STEPS, 16);
         let (up, down) = levels.split_at(usize::from(PULSE_STEPS) / 2 + 1);
@@ -320,7 +320,7 @@ mod tests {
     }
 
     /// ADR 0027: a pulse that cannot interpolate — either end of the
-    /// breath is not RGB, or the glyph set is `ascii` — keeps revision 10's two-colour switch,
+    /// breath is not RGB, or the glyph set is `ascii` — keeps 's two-colour switch,
     /// and its interval is the switch's 500 ms.
     #[test]
     fn a_pulse_that_cannot_interpolate_keeps_the_two_colour_switch() {

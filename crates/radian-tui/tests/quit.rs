@@ -130,8 +130,7 @@ fn esc_never_quits_when_idle_and_empty() {
     );
 }
 
-/// Background events and asynchronous results must not disarm the quit window (review,
-/// 2026-10-14): a resize, a queue change, a clipboard confirmation or a completion answer is
+/// Background events and asynchronous results must not disarm the quit window: a resize, a queue change, a clipboard confirmation or a completion answer is
 /// not the user changing their mind. Before the fix any of these made the second Ctrl-C only
 /// re-arm, which read as "pressing twice sometimes does not quit".
 #[test]

@@ -144,7 +144,7 @@ round-trip 测试里没有"正文含同样 marker"的消息，于是补了
 `--- user message 9 ---` 与 heading 都在正文里的消息，两者随即被抓住（补测在
 `0a1c18b`）。
 
-## 修订 6 补提交：的三处修正
+## 修订 6 补提交： 的三处修正
 
 Base `022afe9` · 一次性检出 `/tmp/vb-mut2`（detached，跑完删除）· `--no-fail-fast`；
 变异后从副本还原。

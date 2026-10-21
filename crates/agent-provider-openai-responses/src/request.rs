@@ -148,7 +148,7 @@ fn input_items(messages: &[Message]) -> Vec<Value> {
     items
 }
 
-/// Replays the reasoning items this adapter stored (ADR 0014 R10; revision 1). The payload is
+/// Replays the reasoning items this adapter stored (ADR 0014 R10). The payload is
 /// the JSON array of `reasoning` output items from the producing response, kept byte-for-byte.
 /// A payload from another provider (e.g. Anthropic `thinking` blocks) or malformed JSON is
 /// ignored rather than misinterpreted: cross-provider histories must stay valid (ADR 0026 D6).
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn the_providers_reasoning_item_is_replayed_verbatim() {
-        // ADR 0014 R10/revision 1: the reasoning output item (id, summary, encrypted_content)
+        // ADR 0014 R10: the reasoning output item (id, summary, encrypted_content)
         // is echoed back unchanged, before the assistant message.
         let item = json!({
             "type": "reasoning",

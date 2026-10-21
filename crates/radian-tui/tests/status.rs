@@ -115,7 +115,6 @@ fn a_narrow_status_bar_keeps_the_key_segments_and_does_not_wrap() {
 }
 
 /// The first idle Ctrl-C arms the quit window; the status bar says so until it is disarmed
-///.
 #[test]
 fn the_status_bar_shows_the_ctrl_c_quit_hint_while_armed() {
     use std::time::Instant;
@@ -162,8 +161,7 @@ fn fg_of(app: &mut App, width: u16, height: u16, needle: &str) -> Option<ratatui
     None
 }
 
-/// `/theme` applies immediately: the same cell renders with the new theme's color (owner
-/// 2026-10-14). ADR 0029 re-picked the built-in palettes, so the assertion is
+/// `/theme` applies immediately: the same cell renders with the new theme's color. ADR 0029 re-picked the built-in palettes, so the assertion is
 /// "the light theme's own model color", not a hard-coded ANSI name.
 #[test]
 fn applying_a_theme_changes_the_rendered_colors() {

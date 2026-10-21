@@ -35,7 +35,7 @@ pub(crate) fn build_body(
 ) -> Result<Value, ModelError> {
     let mut body = Map::new();
     let settings = settings_object(&request.settings)?;
-    // ADR 0018, decision 1: a request-level `thinking` (the summary call's own,
+    // ADR 0018: a request-level `thinking` (the summary call's own,
     // lower reasoning setting) wins over the adapter config. The config still wins over
     // `extra_body` (its own dial), so the guard is on the **request settings**, not on the
     // merged body.
@@ -724,7 +724,7 @@ mod tests {
         assert_eq!(body["thinking"], json!({"type": "adaptive"}));
     }
 
-    /// ADR 0018, decision 1: a request-level `thinking` (the summary call's own,
+    /// ADR 0018: a request-level `thinking` (the summary call's own,
     /// lower reasoning setting) wins over the configured one.
     #[test]
     fn the_request_thinking_wins_over_the_config() {
@@ -886,7 +886,7 @@ mod tests {
 
     /// A non-array `provider_payload` from a foreign turn is a protocol error, not a silent
     /// drop — dropping a real `thinking` block would make the provider reject the request
-    /// (D6: pin today's behavior; a change to "drop and log" is the owner's call).
+    /// (D6: pin today's behavior; a change to "drop and log" is the call).
     #[test]
     fn a_non_array_payload_is_a_protocol_error() {
         let history = vec![

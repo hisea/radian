@@ -14,8 +14,7 @@ pub enum Preset {
     /// the identity row, and the numbers row.
     #[default]
     Deck,
-    /// The revision-1 two-row preset: the identity row and the numbers row (owner
-    /// 2026-10-17: `full` also shows `jobs`, this session's running background jobs).
+    /// The revision-1 two-row preset: the identity row and the numbers row (`full` also shows `jobs`, this session's running background jobs).
     Full,
     /// The earlier two-row preset: model/cwd/branch/context bar/reasoning, then tokens/cost.
     Pi,
@@ -47,7 +46,7 @@ fn preset_source(preset: Preset) -> &'static str {
 }
 
 /// The shipped TOML of a named preset, for `radian footer export <preset>` (ADR 0027
-/// revision 14 decision 2): the exact file bytes, so a user can paste them under
+/// ): the exact file bytes, so a user can paste them under
 /// `[tui.footer]` and get the same footer. `Err` names the four presets.
 pub fn export_preset(name: &str) -> Result<&'static str, String> {
     match Preset::parse(name) {

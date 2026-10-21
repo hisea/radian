@@ -3,7 +3,7 @@
 //! subcommands must refuse, and the TUI's startup refusals must carry the unified exit code
 //! and the `radian:` diagnostics.
 //!
-//! The `agent` binary is gone (ADR 0032 direction), so these tests drive `radian`
+//! The `agent` binary is gone (ADR 0032), so these tests drive `radian`
 //! alone; `cli.rs` carries the migrated headless-command suite.
 
 mod common;
@@ -144,7 +144,7 @@ async fn exec_help_names_the_max_model_calls_default() {
 
 #[tokio::test]
 async fn the_top_level_memory_is_the_same_as_radian_exec_memory() {
-    // The direction: `radian memory …` and `radian exec memory …` are one code path, so
+    // `radian memory …` and `radian exec memory …` are one code path, so
     // their output is identical.
     let env = Env::fresh("exec-memory");
     let (exec_code, exec_out, exec_err) = run(spawn_in(&["exec", "memory", "list"], &env)).await;
@@ -199,7 +199,7 @@ async fn a_tui_startup_refusal_is_a_usage_error() {
 
 #[tokio::test]
 async fn the_missing_credential_hint_names_radian_login() {
-    // ADR 0032 direction: the hint is a user command, so it says `radian login …` (it
+    // ADR 0032: the hint is a user command, so it says `radian login …` (it
     // said `agent login …`). A non-local endpoint with no stored credential refuses startup
     // before any network call - no tty needed.
     let env = Env::fresh("credential-hint");

@@ -904,7 +904,7 @@ impl TranscriptJournal for SessionJournal {
         // lock, so it matches file order even when runtime events are appended concurrently.
         // The fee is computed here too: the route in force is read once, at the moment the
         // core appends the record, so the journal and the live footer agree (ADR 0027
-        // revision 12).
+        // ).
         let fee = usage_of(&record)
             .and_then(|usage| self.usage_fee.get().and_then(|fee_for| fee_for(usage)));
         let rendered = render_record(&record, fee)
@@ -1026,7 +1026,7 @@ struct ContextCompactedData<'a> {
     tokens_after: u64,
     below_target: bool,
     model: &'a str,
-    /// ADR 0018, decision 3: written only for the deterministic fallback; absent for
+    /// ADR 0018: written only for the deterministic fallback; absent for
     /// a model summary (a forward reader defaults it to `false`).
     #[serde(skip_serializing_if = "is_false")]
     deterministic: bool,
@@ -1054,8 +1054,8 @@ fn gate_effect(record: &JournalRecord) -> GateEffect {
     }
 }
 
-/// The usage a journal record carries, or `None` for a record without any (ADR 0027 revision
-/// 12: only the two usage records are priced).
+/// The usage a journal record carries, or `None` for a record without any (ADR 0027:
+/// only the two usage records are priced).
 fn usage_of(record: &JournalRecord) -> Option<&ModelUsage> {
     match record {
         JournalRecord::ModelUsage { usage } | JournalRecord::CompactionUsage { usage, .. } => {

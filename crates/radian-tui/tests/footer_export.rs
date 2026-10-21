@@ -1,5 +1,5 @@
-//! `radian footer export <preset>` prints the preset's TOML exactly (ADR 0027 revision
-//! 14 decision 2), so a user can copy it into their config under `[tui.footer]` and edit it.
+//! `radian footer export <preset>` prints the preset's TOML exactly (ADR 0027),
+//! so a user can copy it into their config under `[tui.footer]` and edit it.
 //! Like `tests/version.rs`, this runs the binary as an ordinary command: no TUI, no session.
 
 use std::process::Command;

@@ -56,14 +56,14 @@ libc = "0.2"
 # returns a `BoxFuture`.
 futures-util.workspace = true
 # `net`/`io-util`: the ChatGPT OAuth login's one-shot loopback callback listener (ADR 0026
-# revision 1 slice ①) is production code, not a test fixture, so these two features are on
+# slice ①) is production code, not a test fixture, so these two features are on
 # unconditionally (the mock-server crates only need them under `testing`).
 # `process`: ADR 0043 decision 1a's `subagent` tool starts a child `radian exec`.
 # `time`: the footer command runner bounds each run (`tokio::time::timeout`) and spaces out
 # its `ETXTBSY` spawn retries (`tokio::time::sleep`).
 tokio = { workspace = true, features = ["net", "io-util", "process", "time"] }
 # The configuration file (ADR 0008) is TOML. `toml` reads it; `toml_edit` is the one place
-# that writes it back, format-preserving (`/theme`, ADR 0008 revision).
+# that writes it back, format-preserving (`/theme`, ADR 0008).
 toml = "0.8"
 toml_edit = "0.22"
 # SHA-256 for the OAuth PKCE challenge (ADR 0026 slice ①); the same crate and

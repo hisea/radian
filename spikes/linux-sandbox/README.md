@@ -153,7 +153,7 @@ bwrap 的实现是 mount 层：先把工作区整体 `--bind`（可写），再�
 
 ## 10. 对计划的影响（ADR 0012 第 2 条）
 
-ADR 0012 决定第 2 条：**Linux 后端在本 spike 通过前禁用；请求沙箱但后端不可用时必须明确失败，绝不自动降级为无沙箱。**
+ADR 0012 **Linux 后端在本 spike 通过前禁用；请求沙箱但后端不可用时必须明确失败，绝不自动降级为无沙箱。**
 
 本 spike 的结论支持**有条件地解除禁用**：
 
@@ -161,7 +161,7 @@ ADR 0012 决定第 2 条：**Linux 后端在本 spike 通过前禁用；请求�
 2. **Landlock 只能作为可选加固层**（例如读约束、网络拒绝），**不能单独作为 Linux 的 `workspace-write` 后端**，因为第 10 条做不到。它适合用在"没有 userns 但内核够新"的环境里做**部分**约束，但要如实说明它不满足 `.git` 只读。
 3. 后端不可用（无 bwrap / userns 被禁）时必须**明确失败**，与本 ADR 一致；不要用 Landlock 冒充完整的 `workspace-write`。
 
-**需要 决定**：是否接受 bwrap 作为 Linux `workspace-write` 的唯一后端（以及 setuid bwrap 是否在允许清单内）。
+**待决**：是否接受 bwrap 作为 Linux `workspace-write` 的唯一后端（以及 setuid bwrap 是否在允许清单内）。
 
 ## 11. 已接受的代价
 

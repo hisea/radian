@@ -1,4 +1,4 @@
-//! The `context` component (ADR 0027; the placeholders are C2/revision 1).
+//! The `context` component (ADR 0027; the placeholders are C2).
 //!
 //! Slice ③ merged `context_bar` into this component (ADR 0027): `{bar}`
 //! is its placeholder, drawn from the item's `width`/`fill`/`empty` parameters; the old

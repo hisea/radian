@@ -152,7 +152,7 @@ pub struct ModelArgs {
     pub reasoning_replay: Option<String>,
     /// Whether a [`Provider::ChatGpt`] route authenticates by the `chatgpt` descriptor's OAuth
     /// (ADR 0026) or by a plain `Authorization: Bearer` from `auth.json` (ADR 0026
-    /// revision 2 decision 4). Ignored for the other two protocols.
+    /// ). Ignored for the other two protocols.
     pub chatgpt_oauth: bool,
 }
 
@@ -378,11 +378,11 @@ pub fn resolve_thinking_ref(
 }
 
 /// The `[compaction] thinking` value that means "do not override the conversation's level"
-/// (ADR 0018, decision 1).
+/// (ADR 0018).
 pub const COMPACTION_THINKING_CURRENT: &str = "current";
 
 /// Builds the request-level settings the **compaction** (summary) call carries, from the
-/// configured `[compaction] thinking` level (ADR 0018, decision 1). Returns
+/// configured `[compaction] thinking` level (ADR 0018). Returns
 /// `(settings, notice)`:
 ///
 /// * `settings` is the object for `agent_core::AgentConfig::compaction_settings` — the wire
@@ -870,7 +870,7 @@ mod compaction_settings_tests {
     }
 
     /// `"current"` means "do not override": the summary call carries no setting and there is
-    /// nothing to say (ADR 0018, decision 1).
+    /// nothing to say (ADR 0018).
     #[test]
     fn current_carries_no_setting() {
         let provider = builtin("opencode-go");

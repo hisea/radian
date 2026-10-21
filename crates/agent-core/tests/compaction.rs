@@ -326,7 +326,7 @@ fn the_shorten_request_carries_only_the_overlong_summary() {
     assert!(!body.contains("Conversation to summarize"), "{body}");
 }
 
-/// ADR 0018, decision 1: the host's request-level compaction setting is copied
+/// ADR 0018: the host's request-level compaction setting is copied
 /// verbatim into the summary request and the shorten-retry request. The pure builders are the
 /// one place both carry it, so both are pinned here.
 #[test]
@@ -928,7 +928,7 @@ fn the_selection_is_the_contiguous_newest_run() {
     );
 }
 
-/// ADR 0018, decision 3: [`select_user_messages_tracked`] returns, next to the list,
+/// ADR 0018: [`select_user_messages_tracked`] returns, next to the list,
 /// how many of the newly summarized user messages that list carries. The deterministic fallback
 /// subtracts that count from the removed prefix to report `N`, so it must count only the new
 /// messages (not the previous list's) and only the carried ones (not the omitted).
@@ -966,7 +966,7 @@ fn the_tracked_count_names_only_carried_new_messages() {
     assert_eq!(carried, 2, "the omitted one is not carried");
 }
 
-// ---------- ADR 0018, decision 3: the deterministic fallback ----------
+// ---------- ADR 0018: the deterministic fallback ----------
 
 /// The truncation keeps the marker **inside** the limit, so a kept tool result never grows past
 /// `TOOL_RESULT_LIMIT_CHARS`; a result that already fits is untouched.

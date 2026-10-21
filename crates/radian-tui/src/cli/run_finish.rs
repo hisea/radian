@@ -1,5 +1,5 @@
 //! How a run builds its first frame: the test hooks, the resumed history, the draft,
-//! the startup block and the trust modal.
+//! the startup block and the trust modal (ADR 0031 T3, ADR 0034 H1).
 //! Split from `cli.rs`'s `run()` (ADR 0043 decision 5): extractions, not pure moves.
 //! No behaviour change: the block, the safety lines and the modal read the same facts
 //! in the same order, and the herdr reporter is built exactly once.
@@ -82,7 +82,7 @@ pub(super) fn build_startup_screen(
             }
         }
     }
-    // the startup information is one collapsible block (wordmark, one
+    // The startup information is one collapsible block (wordmark, one
     // information line, the safety lines that never fold, one Tip) instead of a wall of
     // notices. The full lines are what the notices used to be; the summary keeps each field
     // to a word or two.
@@ -233,7 +233,7 @@ pub(super) fn build_startup_screen(
     app.set_startup(radian_tui::startup::StartupScreen {
         banner,
         banner_narrow: format!("{} radian {}", app.brand_mark(), env!("CARGO_PKG_VERSION")),
-        // decision 2026-10-20: while the project has no trusted decision, the
+        // While the project has no trusted decision, the
         // wordmark carries the `/trust` hint under it; trusted projects show nothing.
         trust_hint: radian_tui::startup::trust_hint(&session.trust()),
         summary,
@@ -322,7 +322,7 @@ pub(super) fn run_loop_and_teardown(
     secrets: &radian_tui::terminal::SharedSecrets,
     has_model: bool,
 ) -> Result<SessionEnd, RunError> {
-    // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
+    // ADR 0008: `/theme` writes to the file this process read, or to the path it
     // would read when there is no file yet (the write creates it).
     let theme_write_path = config
         .source

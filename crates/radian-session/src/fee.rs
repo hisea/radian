@@ -1,5 +1,5 @@
 //! The fee one model call cost, recorded beside its usage (ADR 0027, ADR 0007
-//! revision 2).
+//! ).
 //!
 //! The session total is accumulated **per call, at the price in force when the call ran**
 //! (ADR 0027). A journal written that way used to record only the tokens: a resume

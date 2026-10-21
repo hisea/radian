@@ -108,7 +108,7 @@ fn session_dir_with(
 /// created in.
 ///
 /// The host resolves `root` itself: the TUI applies its two coding-root exceptions (`$HOME`
-/// becomes `$HOME/tmp`, the filesystem root is refused, owner UI review 2026-10-13), while the
+/// becomes `$HOME/tmp`, the filesystem root is refused), while the
 /// CLI — the unattended entry point — does not.
 pub fn session_workspace(root: Option<&Path>) -> Result<String, String> {
     Ok(resolve_workspace(root)?.to_string_lossy().into_owned())

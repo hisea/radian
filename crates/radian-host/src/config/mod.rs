@@ -1,7 +1,7 @@
 //! The configuration file (ADR 0008; its location is ADR 0020's `~/.radian/config/config.toml`).
 //!
 //! Reading is the main job; the reader never rewrites a file it read. The one writer is
-//! [`theme_write::write_theme`] (`/theme`, ADR 0008 revision): it edits **only** `tui.theme`
+//! [`theme_write::write_theme`] (`/theme`, ADR 0008): it edits **only** `tui.theme`
 //! through `toml_edit` and refuses when the result would differ in anything else (ADR 0008
 //! §5.4's "faithful or refused").
 //!
@@ -84,7 +84,7 @@ pub struct PermissionsConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompactionConfig {
     pub auto: Option<bool>,
-    /// `[compaction] thinking` (ADR 0018, decision 1): the reasoning level the
+    /// `[compaction] thinking` (ADR 0018): the reasoning level the
     /// **summary** call runs at, one of the seven unified levels, or `"current"` to use the
     /// conversation's level (no override). `None` means the default, `low`. The host clamps it
     /// against the route's map and converts it to the provider's wire value; the core only
@@ -1045,7 +1045,7 @@ theme = "light"
         assert!(parse_str("schema_version = 1\n[model]\nretries = \"3\"\n").is_err());
     }
 
-    /// ADR 0015 (2026-10-16): `[model] context_window` is a non-negative integer, and `0` means
+    /// ADR 0015: `[model] context_window` is a non-negative integer, and `0` means
     /// **unset** — a valid "off" in the same shape as `retries = 0`, never a zero-token window.
     /// A negative or non-integer value is refused rather than guessed (fail-closed).
     #[test]

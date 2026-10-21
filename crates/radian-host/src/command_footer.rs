@@ -165,7 +165,7 @@ struct CommandOutput {
 }
 
 /// The command items a footer config enables, plus a warning per malformed one (ADR 0027
-/// revision 14 decision 4). Every `command` item from any current configuration source is
+/// ). Every `command` item from any current configuration source is
 /// accepted: v1 has no project-level config layer (ADR 0031). When one is added, a `command`
 /// item must be refused there, and that slice owns the test. The caller spawns one
 /// [`CommandContributor`] per spec.

@@ -361,7 +361,7 @@ pub(super) fn ui_loop(
                 // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
                 // while the app is idle. A timeout with the tty alive loops without drawing. The
                 // spinner shortens it to its own frame interval while one is visible (ADR 0027
-                // revision 13), which is what makes the breath turn at its step; running
+                // ), which is what makes the breath turn at its step; running
                 // background jobs shown in the footer shorten it toward the next age-text
                 // change, never past the hang-up tick (ADR 0023 U2), so the `jobs` age ticks
                 // while idle.

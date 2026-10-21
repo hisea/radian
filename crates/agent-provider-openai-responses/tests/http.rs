@@ -271,7 +271,7 @@ async fn a_429_is_transient_and_carries_the_retry_after() {
 
 #[tokio::test]
 async fn a_used_up_plan_window_is_not_retried_and_names_the_reset() {
-    // The owner's ChatGPT Plus body (2026-10-17), verbatim: the 5-hour window was spent for
+    // The ChatGPT Plus body (2026-10-17), verbatim: the 5-hour window was spent for
     // another 58 minutes, so the three retries ADR 0017 would make cannot succeed.
     let body = json!({"error": {
         "type": "usage_limit_reached",

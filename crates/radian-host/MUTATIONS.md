@@ -567,7 +567,7 @@ Base `1d4f6e9` · 一次性 worktree `/tmp/radian-cf-mut`，还原后 `git statu
 
 5/5 抓住。
 
-## 系统提示词分层与三份角色（ADR 0036/2，切片 ②）
+## 系统提示词分层与三份角色（ADR 0036，切片 ②）
 
 Base `658b882` · 一次性 worktree `/tmp/radian-pl-mut`（detached，跑完删除）。
 
@@ -1045,7 +1045,7 @@ must never reach a journal).
 
 ## ADR 0027 slice ① fix round `footer-s1-fix1`: H10 removed (2026-10-16)
 
-decision A of the fix round `footer-s1-fix1`: **v1 has no project config layer** (ADR 0031;
+**v1 has no project config layer** (ADR 0031;
 `config::resolve_path` chooses only `--config` > `RADIAN_CONFIG` > `~/.radian/config/config.toml`,
 all user-chosen). The provenance seam (`ConfigOrigin`, `classify_origin`, `Config.origin`,
 `load_in_workspace`) and `command_specs`'s `origin` parameter were removed, so the project-level
@@ -1080,7 +1080,7 @@ own (the generic line contains it too, as the backend's name) — so the unit te
 inherited wording.
 ## oauth-redact: a `chatgpt` token refreshed mid-session must be redactable too (2026-10-16)
 
-Owner report: every redaction list is read from `resolved_keys()` at startup, so about an hour
+Every redaction list is read from `resolved_keys()` at startup, so about an hour
 into a session (the first `ensure_fresh` refresh, `model.rs:204`) the list no longer carries the
 access token the session is using. Run: `cargo test -p radian-host --locked --no-fail-fast
 --test oauth_chatgpt a_refresh_registers`. The mutation edits `src/oauth_chatgpt.rs` in place,
@@ -1343,7 +1343,7 @@ the_workspace_system_prompt_unix_socket_sentence_follows_the_backend` (after
 `open.rs`, so the end-to-end workspace-session test is the one that reds this wiring mutation;
 on macOS the same test asserts the sentence stays (seatbelt still restricts).
 
-## ADR 0021 D5/D7 revision: the model loses its write tools; `memory_search` mounts past the budget (2026-10-20)
+## ADR 0021 D5/D7: the model loses its write tools; `memory_search` mounts past the budget (2026-10-20)
 
 Worktree `.radian-worktrees/memory-tools`, branch `pi/memory-tools`. Mutations applied in
 place, each restored from a `cp` in `/tmp/memtools-mut/` and confirmed byte-identical with

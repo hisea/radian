@@ -26,7 +26,7 @@ pub enum ProjectState {
     /// same [`candidate_name`](super::identity::candidate_name) ("同名仓库"); the rule is
     /// deliberately a hint, not a match. (A **write** in the default scope does not fail:
     /// [`MemoryService::project_for_write`] registers a git workspace itself, ADR 0021
-    /// revision 1.)
+    /// .)
     Unlinked {
         identity_key: String,
         candidates: Vec<ProjectId>,

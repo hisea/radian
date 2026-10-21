@@ -1,17 +1,17 @@
 # Phase 0b 可行性验证：TUI inline（ratatui + crossterm）
 
-- 结论：**不通过。inline 不进首发。**（2026-10-12 由 owner 在真实终端人工验证后改判；原先的"通过（有代价待接受）"是 pty 环境下的结论，见下节"改判"。）
+- 结论：**不通过。inline 不进首发。**（2026-10-12 在真实终端人工验证后改判；原先的"通过（有代价待接受）"是 pty 环境下的结论，见下节"改判"。）
   任务单的四条门槛在 pty 驱动下确实全部通过，原型也确实从不进入备用屏；但在真实终端里**拖动窗口改变宽度会让原型崩溃**，并把终端应答泄漏成 shell 的键盘输入。这不是"清屏是否可接受"的取舍问题，而是 inline viewport 的实现方式在真实终端下的硬缺陷。
 - 环境：macOS 27.0.1（arm64）；rustc 1.99.0。
 - 依赖（均先以 `cargo info` 确认在 crates.io 发布）：`ratatui 0.30.2`、`portable-pty 0.9.0`、`vt100 0.16.2`、`serde_json 1.0.154`。`ratatui 0.30.2` 的 MSRV 是 1.88，符合仓库要求。
 - 原型：`spikes/tui-inline/` 是带空 `[workspace]` 的独立 cargo 项目；`tui-inline-app` 是原型，`tui-inline-driver` 只通过 `portable-pty` 驱动它并写证据。**本次没有在 agent 自己的终端面板直接运行 app。**
 
 
-## 改判：真实终端下 resize 崩溃＼�2026-10-12）
+## 改判：真实终端下 resize 崩溃（人工验证）
 
 ### 观察到的现象
 
-owner 在 Terminal.app（macOS 27.0.1）里按本文档"需要 owner 人工验证"一节的步骤执行：
+Terminal.app（macOS 27.0.1）里按本文档"
 
 - **测试一（scrollback 共存）通过**：`PRE-0001`…`PRE-0050` 与原型推上去的 `LINE-0000`…`LINE-0029` 全部留在 scrollback 里，可以向上滚动、可以用终端原生方式选择复制；向上滚动时 inline 区域随之滚出视野——这是 inline 的正确行为（它不占备用屏，滚动就是滚进真实历史）。
 - **测试二（resize）失败**：原型在输出过程中把窗口从宽拖窄时 panic：
@@ -83,13 +83,13 @@ driver 调 `master.resize()`：120×40 → 60×40 → 120×40，并同步更新 
 
 `data/resize.txt` 记录三个标记都按序出现和 60 条流式行完整。最终 stats 的 viewport 是 `[120, 5]`（`data/resize-stats.json`），证明回到 120 列后仍是 5 行 inline 区域。
 
-**已接受代价：**本机此实现的 resize 字节流出现一次 `CSI 2J`，随后重画。`2J` 清可见屏；没有看到 `CSI 3J`，但不应把 vt100 对旧行的处理说成真实终端的处理。任务单要求的“已滚上去的旧行按终端自身语义处理”在 Terminal.app/iTerm2/Alacritty 未验证。它是 owner 是否让 inline 进首发时必须接受或否决的风险。
+**已接受代价：**本机此实现的 resize 字节流出现一次 `CSI 2J`，随后重画。`2J` 清可见屏；没有看到 `CSI 3J`，但不应把 vt100 对旧行的处理说成真实终端的处理。任务单要求的“已滚上去的旧行按终端自身语义处理”在 Terminal.app/iTerm2/Alacritty 未验证。它是决定 inline 是否进首发时必须接受或否决的风险。
 
 ### 3. 选择/复制
 
 自动化只能验证前提，不能替终端模拟器验证鼠标选择或系统剪贴板。此原型不进入备用屏，也不启用鼠标捕获，所以终端原生选择不会被程序劫持；标准 1 已证明内容写入滚动历史路径。`data/selection.txt` 还记录 app 结束后 vt100 的 bracketed paste 状态为 false，且可见内容含 `LINE-0014`。
 
-**需要 owner 人工验证（在自己的终端中执行，非本 spike 自动化的一部分）：**
+****
 
 ```sh
 cd <worktree>/spikes/tui-inline
@@ -159,5 +159,5 @@ driver 的 `data/*.txt` 和 `data/*.json` 是上表证据。测试的临时 stat
 ## 对计划的影响与待决定事项
 
 - 技术上，v5 Phase 4 可以采用 `ratatui` inline viewport：流式 `insert_before`、无备用屏、resize 尺寸重排和三条退出恢复路径均有 pty 证据。
-- **首发建议取决于 owner 对 resize `CSI 2J` 的接受度。**若不可接受“resize 时清可见屏、由终端自行保留已滚上去旧行”的体验，应让 inline 不进首发，保留已通过的全屏模式；若接受，应把上述人工终端矩阵验证列为 Phase 4 前置项，并避免产品代码无意引入 `?1049` 或鼠标捕获。
+- **首发建议取决于对 resize `CSI 2J` 的接受度。**若不可接受“resize 时清可见屏、由终端自行保留已滚上去旧行”的体验，应让 inline 不进首发，保留已通过的全屏模式；若接受，应把上述人工终端矩阵验证列为 Phase 4 前置项，并避免产品代码无意引入 `?1049` 或鼠标捕获。
 - 本 spike 不改变任何现有 crate 或公共 API。

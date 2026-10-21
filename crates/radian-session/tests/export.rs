@@ -207,7 +207,7 @@ fn export_never_modifies_the_session_file() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
-/// ADR 0014, decision 2026-10-12: reasoning is opt-in per export, like the raw payload,
+/// ADR 0014, decision: reasoning is opt-in per export, like the raw payload,
 /// and **both formats agree**. Before this, JSON carried reasoning while Markdown silently
 /// dropped it -- neither by decision.
 #[test]
@@ -241,7 +241,7 @@ fn reasoning_is_omitted_by_default_in_both_formats_and_included_when_opted_in() 
     }
 }
 
-/// ADR 0018, decision 3: a deterministic compaction is marked in the Markdown export
+/// ADR 0018: a deterministic compaction is marked in the Markdown export
 /// (and its flag round-trips in the JSON export).
 #[test]
 fn a_deterministic_compaction_is_noted_in_the_exports() {

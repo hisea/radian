@@ -115,8 +115,8 @@ impl ContributionStore {
         })
     }
 
-    /// Replaces one item's whole contribution, including an optional `symbol` (ADR 0027 revision
-    /// 14 decision 4: a footer `command`'s JSON symbol) and an optional usage snapshot (decision
+    /// Replaces one item's whole contribution, including an optional `symbol` (ADR 0027:
+    /// a footer `command`'s JSON symbol) and an optional usage snapshot (decision
     /// 3). Clears `stale`. Returns whether the **value** changed.
     pub fn write_contribution(&self, contribution: Contribution) -> bool {
         let item = contribution.item.clone();
@@ -212,7 +212,7 @@ pub trait StatusContributor: Send + Sync {
     fn id(&self) -> &'static str;
     /// The item ids it provides (ADR 0027 C2 names them in a footer row or a widget). Owned so a
     /// contributor whose item id comes from configuration (a footer `command` item, ADR 0027
-    /// revision 14 decision 4) can answer without leaking a `&'static str`.
+    /// ) can answer without leaking a `&'static str`.
     fn items(&self) -> Vec<String>;
     /// How often the runner refreshes it.
     fn period(&self) -> Duration;
@@ -384,7 +384,7 @@ pub struct GitContributor {
     dir: PathBuf,
 }
 
-/// One blocking git read (ADR 0027 C3 and revision 1). Each field is `None` when git has no
+/// One blocking git read (ADR 0027 C3). Each field is `None` when git has no
 /// answer (not a repository, or the command failed); the refresh then publishes nothing for it.
 struct GitFacts {
     branch: Option<String>,
@@ -452,7 +452,7 @@ impl GitContributor {
                 .map(|name| name.to_string_lossy().into_owned()),
             _ => None,
         };
-        // ADR 0027 C3 / revision 1: the change counts (modified tracked, untracked) are the
+        // ADR 0027 C3: the change counts (modified tracked, untracked) are the
         // data slots the numbers row fills in slice 2b. `git status --porcelain` in the
         // background task, never at draw time.
         // ADR 0027: `{repo}` is the repository root's directory name. In a linked

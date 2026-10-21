@@ -207,7 +207,7 @@ impl EventSink for Ui {
                 dropped,
                 ..
             } => {
-                // ADR 0018, decision 3: a deterministic fallback says so and names
+                // ADR 0018: a deterministic fallback says so and names
                 // the messages it dropped; a model summary keeps the token line.
                 if deterministic {
                     eprintln!("[compaction] compacted without a summary ({dropped} dropped)");

@@ -149,7 +149,7 @@ impl App {
     }
 
     /// The line `/access` adds when the sandbox is inherited from an outer one (ADR 0016
-    /// revision 2 decision 4). The host passes the startup profile line; nothing else sets it.
+    /// ). The host passes the startup profile line; nothing else sets it.
     pub fn set_sandbox_note(&mut self, note: Option<String>) {
         self.session.sandbox_note = note;
     }

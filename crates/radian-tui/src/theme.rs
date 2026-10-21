@@ -18,7 +18,7 @@ pub use color::{
 };
 pub use file::load;
 
-/// The outcome of `/theme <name>` (ADR 0008 revision): the theme to apply (`None` when the
+/// The outcome of `/theme <name>` (ADR 0008): the theme to apply (`None` when the
 /// switch did not happen — an unknown name or `NO_COLOR`), and the notices to show.
 pub struct Switch {
     pub theme: Option<Theme>,
@@ -166,7 +166,7 @@ pub enum Role {
     Find,
     /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
     Auto,
-    /// The thin transcript's structural lines (ADR 0029 and 6): the
+    /// The thin transcript's structural lines (ADR 0029): the
     /// `│ `/`╭─`/`╰──` rules, the `• `/`●` markers, table rules and the compaction rule. The
     /// weak level, the same value as `dim`.
     Frame,
@@ -180,7 +180,7 @@ pub enum Role {
     StatusOk,
     /// A tool head's warning marker (ADR 0029). pi's `warning`.
     StatusWarn,
-    /// A tool head's `×` (ADR 0029; `✗` was replaced, ). pi's `error`.
+    /// A tool head's `×` (ADR 0029; `✗` was replaced). pi's `error`.
     StatusError,
     /// The `/context` grid's per-category cell colors (spec `tui-context-grid`,
     /// ADR 0035): one role per estimated category, plus the free space and the
@@ -633,7 +633,7 @@ pub struct Theme {
     pub syntax_type: Style,
     pub syntax_operator: Style,
     pub syntax_punctuation: Style,
-    /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 owner
+    /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028
     /// decision: 强调 = 名字、标签).
     pub notice_label: Style,
     /// The rest of a structured notice — pi's `muted` (次). In the built-in themes it stays
@@ -657,7 +657,7 @@ fn style(color: Option<Color>, modifiers: Modifier) -> Style {
     style
 }
 
-/// A built-in role's foreground from one of pi's own color specs (the owner's 2026-10-14
+/// A built-in role's foreground from one of pi's own color specs (the
 /// decision: the built-ins take pi's OKHSL values through the ADR 0029 conversion). Without
 /// truecolor, RGB becomes the nearest 256-color entry, exactly like a theme file's color.
 fn spec(spec: &str, modifiers: Modifier, truecolor: bool) -> Style {
@@ -695,7 +695,7 @@ mod pi_dark {
     pub const TOOL_SUCCESS_BG: &str = "okhsl(158 46% 25%)";
     pub const TOOL_ERROR_BG: &str = "okhsl(19 54% 25%)";
     /// pi's `selectedBg` is the same as `userMessageBg`; Radian lifts it a step so a
-    /// selection over a user block stays visible (the owner's acceptance), a deliberate
+    /// selection over a user block stays visible (the acceptance), a deliberate
     /// deviation from pi's file.
     pub const SELECTION_BG: &str = "okhsl(233 41% 34%)";
 }
@@ -764,7 +764,7 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            // ADR 0029/6: `user` is a foreground role in the accent
+            // ADR 0029: `user` is a foreground role in the accent
             // colour — the `❯ ` marker and the user's words — with no band.
             user: spec(pi::VIOLET, Modifier::empty(), truecolor),
             // ADR 0035: reasoning is upright now (no italic).
@@ -859,7 +859,7 @@ impl Theme {
             diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
             diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
             diff_context: muted,
-            // ADR 0029/6: `diff_hunk` steps down to the weak level (the
+            // ADR 0029: `diff_hunk` steps down to the weak level (the
             // thin design draws `@@`/file headers with `frame`).
             diff_hunk: dim,
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
@@ -882,7 +882,7 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            // ADR 0029/6: `user` is a foreground role in the accent
+            // ADR 0029: `user` is a foreground role in the accent
             // colour — the `❯ ` marker and the user's words — with no band.
             user: spec(pi::VIOLET, Modifier::empty(), truecolor),
             // ADR 0035: reasoning is upright now (no italic).
@@ -977,7 +977,7 @@ impl Theme {
             diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
             diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
             diff_context: muted,
-            // ADR 0029/6: `diff_hunk` steps down to the weak level (the
+            // ADR 0029: `diff_hunk` steps down to the weak level (the
             // thin design draws `@@`/file headers with `frame`).
             diff_hunk: dim,
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
@@ -1078,7 +1078,7 @@ impl Theme {
             md_hr: style(None, Modifier::DIM),
             md_list_bullet: style(None, Modifier::BOLD),
             // `mono` uses no color: the syntax roles are plain, except a comment, which the
-            // owner allows one modifier (italic).
+            // one modifier (italic).
             syntax_comment: style(None, Modifier::ITALIC),
             syntax_keyword: style(None, Modifier::empty()),
             syntax_function: style(None, Modifier::empty()),
@@ -1320,8 +1320,7 @@ mod tests {
         assert_eq!(ThemeName::parse("future"), None);
     }
 
-    /// The built-in dark palette is **pi's**, through the ADR 0029 OKHSL conversion (owner
-    /// decision 2026-10-14, replacing ADR 0029's "dark stays byte-identical"): the three text
+    /// The built-in dark palette is **pi's**, through the ADR 0029 OKHSL conversion (replacing ADR 0029's "dark stays byte-identical"): the three text
     /// levels are pi's brightness gradient (89% / 67% / 56%), pinned here by their RGB
     /// values, and every semantic color sits at the 67% level.
     #[test]
@@ -1462,7 +1461,7 @@ mod tests {
         }
     }
 
-    /// ADR 0029 and 6: one assertion per role whose built-in value
+    /// ADR 0029: one assertion per role whose built-in value
     /// changed, on both built-ins. `frame`/`diff_line_number`/`diff_hunk` are the dim level;
     /// `tool_name` is the keyword colour; the status markers reuse the turn/notice/error
     /// colours; `user` is a foreground role in the accent colour; `md_heading` is the accent

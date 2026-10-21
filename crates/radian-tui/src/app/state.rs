@@ -21,7 +21,7 @@ pub struct CompactionInfo {
     pub revision: Option<u64>,
     pub tokens_before: Option<u64>,
     pub tokens_after: Option<u64>,
-    /// ADR 0018, decision 3: live only — `true` when the summary path failed and the
+    /// ADR 0018: live only — `true` when the summary path failed and the
     /// deterministic fallback committed instead. A resume replay does not carry it.
     pub deterministic: bool,
     /// The messages the deterministic fallback dropped; live only, like the numbers above.
@@ -45,7 +45,7 @@ impl CompactionInfo {
 
     /// The folded one-liner, omitting whatever is not known: `── context compacted (rev 3,
     /// 12000 → 4000) ──`, `── context compacted (rev 3) ──` or `── context compacted ──`. A
-    /// deterministic compaction (ADR 0018, decision 3) says "without a summary".
+    /// deterministic compaction (ADR 0018) says "without a summary".
     pub fn line(&self) -> String {
         let label = if self.deterministic {
             "context compacted without a summary"
@@ -81,7 +81,7 @@ pub enum EntryKind {
     ToolCall,
     ToolResult,
     Notice,
-    /// The startup screen's wordmark (; ADR 0027 §标志: the primary text
+    /// The startup screen's wordmark (ADR 0027 §标志: the primary text
     /// color). It is the first entry in a session.
     Banner,
     /// The startup information's collapsed/expanded lines. Their `label: value` first lines
@@ -151,7 +151,7 @@ pub struct Entry {
     /// duration is their difference.
     pub reasoning_started: Option<Instant>,
     /// When the reasoning entry **ended**: the commit that replaced the live view (ADR 0028
-    /// revision 5 decision 4). Live-only, like [`Entry::reasoning_started`]; a resumed entry
+    /// ). Live-only, like [`Entry::reasoning_started`]; a resumed entry
     /// carries neither.
     pub reasoning_ended: Option<Instant>,
     /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Filled

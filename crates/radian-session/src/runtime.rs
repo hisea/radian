@@ -396,7 +396,7 @@ pub(crate) struct InboxEnqueuedData<'a> {
     pub lane: InboxLane,
     pub source: InputSource,
     /// Whether the input wakes an idle driver and may open the next turn itself (ADR 0011
-    /// revision 1). Written explicitly; an old file has no such field and the reader derives
+    /// ). Written explicitly; an old file has no such field and the reader derives
     /// it from the lane (ADR 0006 §5.5).
     pub wake: bool,
     /// Whether the input is a wake-gate degrade. Written only when `true` (an ordinary

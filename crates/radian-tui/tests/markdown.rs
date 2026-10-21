@@ -688,7 +688,7 @@ fn a_chinese_selection_copies_the_source() {
 
 /// Every laid-out line fits its width in **display columns**, not chars: a Chinese list item,
 /// heading, quote or table at 80/40/20 columns wraps instead of overflowing the right edge
-/// (the truncation the owner saw; the layout already measures display columns).
+/// (the observed truncation; the layout already measures display columns).
 #[test]
 fn every_chinese_line_fits_the_width() {
     let bodies = [
@@ -718,7 +718,7 @@ fn every_chinese_line_fits_the_width() {
     }
 }
 
-/// The owner's truncation report (2026-10-14): a long ordered-list item in a wide window
+/// The truncation report (2026-10-14): a long ordered-list item in a wide window
 /// (~160-200 columns) looked cut at the right edge. This is the message's **structure**
 /// (anonymized): `##` headings, a bullet list with inline code, and long ordered-list items
 /// with bold and inline code. Every line wraps in display columns and the whole text reaches
@@ -755,7 +755,7 @@ fn a_long_ordered_list_item_wraps_in_a_wide_window() {
 
 /// A code block draws an open frame (ADR 0035): a top line titled with
 /// the language, a rail on the code row, and a bottom line, all in the `frame` role (ADR 0029
-/// revision 2).
+/// ).
 #[test]
 fn a_code_block_draws_a_frame() {
     let mut app = App::new("m", "s");

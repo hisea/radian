@@ -65,7 +65,7 @@ pub const SUMMARY_FACTS_ORDER_RULE: &str =
 /// in the summary prompt and the shorten body; the stable substring a test asserts.
 pub const SUMMARY_FACTS_DELETE_OLDEST: &str = "delete the oldest fact first";
 
-/// The fixed part of the summary system prompt (ADR 0018 §摘要, revision 5 / plan B). It asks
+/// The fixed part of the summary system prompt (ADR 0018 §摘要 / plan B). It asks
 /// for the sections by name and forbids inventing anything, because the summary becomes part of
 /// the next request's context. The length ceiling is added by [`summary_system_prompt`], which
 /// depends on the compaction.
@@ -160,7 +160,7 @@ This is a summary of the earlier conversation. Continue the work from it.";
 /// `origin`, never parsed out of the body.
 pub const USER_MESSAGES_HEADING: &str = "\n\n---\nUser messages kept verbatim (oldest first):";
 
-/// The summary length ceiling for an input budget `B`:
+/// The summary length ceiling for an input budget `B` (dogfood9):
 /// `min(K, max(8192, ⌊B/8⌋))` with `K = keep_target(B)`. The old fixed [`DEFAULT_SUMMARY_MAX_TOKENS`]
 /// was too small for a large window: the rolling summary grows with every compaction, and at
 /// 120K (`B = 103616`) the shortening retry still produced 8725 tokens, over 8192, and failed
@@ -537,9 +537,9 @@ fn truncate_chars(text: &str, limit: usize) -> (String, Option<usize>) {
     (text.chars().take(limit).collect(), Some(total - limit))
 }
 
-// ---------- ADR 0018, decision 3: the deterministic fallback ----------
+// ---------- ADR 0018: the deterministic fallback ----------
 
-/// The truncation marker appended to a kept tool result (ADR 0018, decision 3). It is
+/// The truncation marker appended to a kept tool result (ADR 0018). It is
 /// the same shape the summary input writes, so the same cut reads the same either way.
 fn tool_result_truncation_marker(dropped: usize) -> String {
     format!(" … [truncated {dropped} characters]")
@@ -566,7 +566,7 @@ pub fn truncate_tool_result_text(text: &str) -> Option<String> {
 }
 
 /// Truncates every tool result in `kept` that is over [`TOOL_RESULT_LIMIT_CHARS`] (ADR 0018
-/// revision 8, decision 3), in place, and reports how many were cut. A cut result keeps only
+/// ), in place, and reports how many were cut. A cut result keeps only
 /// its textual content: `structured` and non-text parts cannot be cut by character and are
 /// dropped rather than sent whole.
 pub fn truncate_kept_tool_results(kept: &mut [Message]) -> usize {
@@ -585,7 +585,7 @@ pub fn truncate_kept_tool_results(kept: &mut [Message]) -> usize {
     cut
 }
 
-/// The fixed line a deterministic summary carries (ADR 0018, decision 3): what the
+/// The fixed line a deterministic summary carries (ADR 0018): what the
 /// fallback dropped and how many kept tool results it cut. It is not a model summary, and a
 /// reader can tell the two apart by it.
 pub fn deterministic_summary_line(dropped: usize, truncated: usize) -> String {
@@ -595,7 +595,7 @@ pub fn deterministic_summary_line(dropped: usize, truncated: usize) -> String {
     )
 }
 
-/// The deterministic fallback's summary text (ADR 0018, decision 3): the previous
+/// The deterministic fallback's summary text (ADR 0018): the previous
 /// model summary **verbatim** (when there is one) followed by [`deterministic_summary_line`].
 /// The previous summary is kept because the fallback must not throw away what an earlier model
 /// summary established. The verbatim user messages are rendered by [`compacted_history`], not
@@ -828,7 +828,7 @@ pub fn select_user_messages(
 /// [`select_user_messages`] plus how many of `newly_summarized`'s user messages the result
 /// carries verbatim.
 ///
-/// The deterministic fallback (ADR 0018, decision 3) needs the count to report `N`
+/// The deterministic fallback (ADR 0018) needs the count to report `N`
 /// in its fixed line: a user message the list carries is still in the new view, so only the
 /// other summarized messages count as dropped. The second element is that many **carried**
 /// messages out of `newly_summarized`, in the same selection the first element encodes, so the
@@ -870,8 +870,8 @@ pub fn select_user_messages_tracked(
     let mut used = 0u64;
     // From the newest backwards: the newest is always placed, truncated into `U` when it alone
     // is larger. The walk **stops** at the first message that does not fit, so what is kept is
-    // the contiguous newest run and everything older is omitted (ADR 0018, owner
-    // 2026-10-13) — never a newer message plus an older short one with a gap between them.
+    // the contiguous newest run and everything older is omitted (ADR 0018)
+    // — never a newer message plus an older short one with a gap between them.
     for (index, text) in texts[1..].iter().enumerate().rev() {
         let tokens = text_tokens(text);
         let entry = if tokens > u {

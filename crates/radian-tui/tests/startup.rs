@@ -43,7 +43,7 @@ fn with_startup() -> App {
     app
 }
 
-/// decision 2026-10-20: the wordmark carries `untrusted project · /trust to trust
+/// decision: the wordmark carries `untrusted project · /trust to trust
 /// it` under it while the project has no trusted decision, and nothing once it is
 /// trusted. Showing it always (or never) fails this test, so it is the mutation catcher
 /// for both directions.
@@ -235,7 +235,7 @@ fn the_banner_shows_three_rows_or_the_one_line_fallback() {
 }
 
 /// The fallback line's width goes through `unicode-width` (ADR 0027). The unicode brand mark
-/// is one column: revision 4 replaced the East-Asian-Wide `㎭` with `R`.
+/// is one column:  replaced the East-Asian-Wide `㎭` with `R`.
 #[test]
 fn the_banner_fallback_width_uses_unicode_width() {
     use unicode_width::UnicodeWidthStr;

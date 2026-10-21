@@ -244,7 +244,7 @@ fn panel_line(screen: &str, lead: char) -> Option<String> {
 
 // ---------- the box fits: keys always visible, long bodies scroll (approval-fit) ----------
 
-/// A shell call whose command is `lines` lines long: the case the owner hit (a multi-line
+/// A shell call whose command is `lines` lines long: a reported multi-line case (a multi-line
 /// python heredoc in a curl pipe pushed the key line out of the box).
 fn shell_request(command: &str) -> ApprovalRequest {
     ApprovalRequest::new(

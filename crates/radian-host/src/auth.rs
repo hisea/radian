@@ -418,7 +418,7 @@ impl AuthStore {
             },
         )?;
         // The shared atomic write owns the unique temp name, `create_new`, the `0600` mode
-        // and the cleanup.
+        // and the cleanup (`/theme` copied this code).
         let mut bytes = text.into_bytes();
         bytes.push(b'\n');
         crate::atomic_write::write_atomic(

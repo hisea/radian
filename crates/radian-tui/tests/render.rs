@@ -244,7 +244,7 @@ fn the_note_clears_when_the_tools_finish() {
 /// The note must name a tool that is **still running**. `ToolFinished` is emitted in completion
 /// order, "which may differ from the transcript order" (agent-core's own event contract), so the
 /// call the note names can settle while another call of the same batch is still running. A note
-/// naming a settled tool is the same defect as the owner's stuck "tool shell running".
+/// naming a settled tool is the same defect as the stuck "tool shell running".
 #[test]
 fn the_note_names_a_tool_that_is_still_running() {
     let mut app = App::new("m", "s");
@@ -570,7 +570,7 @@ fn description_column(row: &str, label: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(&row[..after_label]) + marker + spaces
 }
 
-/// a completion menu marks the item in effect with ` ✓` right after its name
+/// A completion menu marks the item in effect with ` ✓` right after its name
 /// (never in the description), so every row's description starts in the same column. `/theme`,
 /// `/model` and `/thinking` all draw through the shared list.
 fn assert_menu_marks_current(app: &mut App, labels: &[&str], current: usize) {
@@ -956,7 +956,7 @@ fn the_box_frame_falls_back_to_ascii() {
     );
 }
 
-/// ADR 0035 (replacing revision 3 decision 4 for the user row): no tier draws a
+/// ADR 0035: no tier draws a
 /// user half-cell pad. The `ascii` tier draws its own `> ` marker, and two user rows are
 /// separated by the container's one blank line like any two blocks.
 #[test]
@@ -979,7 +979,7 @@ fn the_ascii_tier_has_no_half_cell_pads() {
 
 // ---------- the thin user row (ADR 0035) ----------
 
-/// ADR 0035/3: the user row is `❯ 文本` in the `user` role, the text
+/// ADR 0035: the user row is `❯ 文本` in the `user` role, the text
 /// from column 3, with no background band, no half-cell padding and no rail. Two user rows sit
 /// on consecutive lines (no pad rows between them).
 #[test]
@@ -1116,7 +1116,7 @@ fn the_compaction_line_starts_at_column_one_in_the_frame_role() {
     );
 }
 
-/// ADR 0035 (replacing revision 3 decision 3): thinking has **one blank line on both
+/// ADR 0035: thinking has **one blank line on both
 /// sides** — folded or expanded, and whether the block below it is the reply or a tool card. The
 /// gap above it stays one line (the container's gap after the user row).
 #[test]
@@ -2672,8 +2672,7 @@ fn the_user_row_has_no_band_at_80_and_120() {
     }
 }
 
-/// A tool block has **no** band, whatever its state (ADR 0028, replacing
-/// revision 4's neutral card background): every cell of the head row and of the body rows sits
+/// A tool block has **no** band, whatever its state (ADR 0028): every cell of the head row and of the body rows sits
 /// on the terminal's own background.
 #[test]
 fn a_tool_block_never_paints_a_band() {
@@ -3189,7 +3188,7 @@ fn ask_panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> St
     ))
 }
 
-/// The chosen option's marker is drawn in its own span and is never bold: the owner's font
+/// The chosen option's marker is drawn in its own span and is never bold: the font
 /// draws a glyph missing from its bold face at a smaller size (ADR 0024 note; the
 /// circle pair of ADR 0028 is used for the same reason).
 #[test]

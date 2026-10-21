@@ -1,6 +1,6 @@
 # 超长兜底三档推进（70% → 50% → 35%）
 
-- 状态：idea＼�先不做）
+- 状态：idea（先不做）
 - 涉及 ADR：0018、0017
 - 来源：原 ADR 0018 §6/§9 及验证要求（`git show 4637077:docs/adr/0018-model-catalog-and-auto-compaction.md`，约 84 行起；当前单档实现见 `crates/agent-core/src/turn.rs:1610-1720` 的 `Gain::Half` 与 `overflow_retried`）
 

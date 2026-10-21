@@ -99,8 +99,7 @@ impl App {
     }
 
     /// The approval box's `!` key (ADR 0026 D9): approve the pending request once **and**
-    /// turn auto on for the rest of the session, in one press, no confirmation (owner's
-    /// correction 2026-10-13: `!` had no meaning before, so it cannot be mistyped into one).
+    /// turn auto on for the rest of the session, in one press, no confirmation (`!` had no meaning before, so it cannot be mistyped into one).
     /// The effects run in order: the answer first, then the switch. The switch stands even
     /// with nothing pending — it is the same switch `/auto on` makes.
     pub(super) fn approval_auto_key(&mut self) -> UpdateResult {

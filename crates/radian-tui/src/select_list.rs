@@ -388,7 +388,7 @@ mod tests {
     }
 
     /// The scrollbar is one column for every row, and a long label leaves the description
-    /// column where it is.
+    /// column where it is (the track followed each row's text).
     #[test]
     fn the_track_and_the_description_column_line_up() {
         let theme = Theme::default();
@@ -429,7 +429,7 @@ mod tests {
         );
     }
 
-    /// the current item is marked ` ✓` right after its label, never in the
+    /// The current item is marked ` ✓` right after its label, never in the
     /// description; the description still starts in the same column on every row.
     #[test]
     fn the_current_item_is_marked_after_its_label() {

@@ -11,7 +11,7 @@ theme is.
 
 ## `kanagawa-wave.json`
 
-Copied verbatim from the owner's repository
+Copied verbatim from the repository
 [hisea/pi-deck](https://github.com/hisea/pi-deck) (`themes/kanagawa-wave.json`, MIT license,
 read 2026-10-13). Its palette comes from
 [kanagawa.nvim](https://github.com/rebelot/kanagawa.nvim) (MIT).

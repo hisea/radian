@@ -224,8 +224,8 @@ mod tests {
         );
     }
 
-    /// `opencode-go` verifies against its usage endpoint, not `<base>/models` (owner report
-    /// 2026-10-20: that path answers 404); every other provider keeps `GET <base>/models`.
+    /// `opencode-go` verifies against its usage endpoint, not `<base>/models` (that path answers 404);
+    /// every other provider keeps `GET <base>/models`.
     /// Pointing `opencode-go` back at `<base>/models` fails this test.
     #[test]
     fn opencode_go_verification_uses_the_usage_endpoint_not_models() {

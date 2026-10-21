@@ -540,7 +540,7 @@ fn the_table_snapshot_keeps_the_header_and_the_cell_text() {
 }
 
 /// ADR 0035 V1's one blank row between blocks, owned by the layout: with a full transcript
-/// (bottom-anchored, the owner's screenshot case) the transcript's last row never touches
+/// (bottom-anchored, the screenshot case) the transcript's last row never touches
 /// the input's top line, in both input styles.
 #[test]
 fn the_transcript_keeps_one_blank_row_above_the_input_in_both_styles() {

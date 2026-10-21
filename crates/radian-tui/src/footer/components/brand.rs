@@ -28,7 +28,7 @@ impl Component for Brand {
     }
 
     fn role(&self, app: &App) -> Option<Role> {
-        // ADR 0027/8: the brand is a bold accent mark. The theme's accent role is
+        // ADR 0027: the brand is a bold accent mark. The theme's accent role is
         // `notice_label`, so the mark follows a theme switch; a configured `tui.brand` keeps
         // this style in every glyph set.
         Some(
@@ -44,7 +44,7 @@ impl Component for Brand {
     }
 
     fn data(&self, app: &App, _item: &Item) -> Option<ItemData> {
-        // ADR 0027/8: `tui.brand` when set, else the brand mark per glyph set.
+        // ADR 0027: `tui.brand` when set, else the brand mark per glyph set.
         Some(ItemData::new("{brand}").value("brand", app.brand_mark()))
     }
 }

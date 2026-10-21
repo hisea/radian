@@ -41,7 +41,7 @@ fn rows(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> Vec<String
 }
 
 /// The status glyphs the transcript's head ends with (ADR 0028): `✓`
-/// when the call succeeded, `×` when it failed (the owner's 2026-10-16 glyph note; U+2717
+/// when the call succeeded, `×` when it failed (the glyph note; U+2717
 /// misses Cascadia Code, Fira Code and Source Code Pro). The `ascii` tier draws `+`/`x`.
 const OK: char = '✓';
 const FAILED: char = '×';
@@ -830,7 +830,7 @@ fn heredoc_app(fold: ToolFold, result: Option<&str>) -> App {
     app
 }
 
-/// ADR 0035's 2026-10-16 "多行命令" note, the owner's option A: a multi-line command follows its
+/// ADR 0035's 2026-10-16 "多行命令" note, option A: a multi-line command follows its
 /// block. The fold marker is on the **first** row only; the command's first line, the
 /// `… (+N lines)` note (N the command's remaining lines, never the output's) and the meta are on
 /// it; the command's other lines are hidden until the block is fully expanded, then they are

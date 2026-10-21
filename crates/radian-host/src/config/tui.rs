@@ -179,11 +179,11 @@ pub struct TuiFooterConfig {
     pub preset: Option<String>,
     /// `separator`: the glyph(s) between items; a row may override it.
     pub separator: Option<String>,
-    /// `separator_style`: the separator's style — a theme role or a color (ADR 0027 revision
-    /// 3). The TUI parses it; the default is the `footer_separator` role.
+    /// `separator_style`: the separator's style — a theme role or a color (ADR 0027).
+    /// The TUI parses it; the default is the `footer_separator` role.
     pub separator_style: Option<String>,
     /// `glyphs`: `"unicode"` (the default), `"nerd"`, `"ascii"` or `"emoji"` (ADR 0027
-    /// revision 14 decision 7). The TUI validates it.
+    /// ). The TUI validates it.
     pub glyphs: Option<String>,
     /// `context_line`: `"off"` (the default) or `"percentage"`. ADR 0027 item 4:
     /// `percentage` fills the gap between a row's left and right groups with the context
@@ -481,7 +481,7 @@ fn parse_footer_item(value: &Value) -> Result<TuiFooterItemConfig, String> {
 
 /// The options of one item table. `id` is known already: from the `item` key in a row, or from
 /// the key of a `[tui.footer.items.<id>]` table. `icon` and `symbol` are the same field
-/// (ADR 0027 C2 used `icon`, revision 3 calls it `symbol`); a known option with the wrong type
+/// (ADR 0027 C2 used `icon`, now calls it `symbol`); a known option with the wrong type
 /// is skipped, not a refusal.
 fn parse_footer_item_table(
     table: &toml::map::Map<String, Value>,

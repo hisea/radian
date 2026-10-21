@@ -270,7 +270,7 @@ pub struct BodyPlan {
 
 /// The body plan for a block, given the entry's full text and the fold settings.
 ///
-/// The three folds (ADR 0028 R4's interpretation, revision 2 decision 5): `expanded` shows
+/// The three folds (ADR 0028 R4's interpretation): `expanded` shows
 /// every row, `errors` (the default) a failed call in full and the last `tool_preview_lines`
 /// rows of a successful one, `collapsed` nothing at all (the head's meta then carries
 /// `· N lines`). A **small** tool ([`ToolRender::compact`]) has no folded body either way: its
@@ -320,7 +320,7 @@ type BodyFn = fn(&ToolCard, &str) -> Vec<BodyLine>;
 pub struct ToolRender {
     head: fn(&ToolCard, &str) -> String,
     body: BodyFn,
-    /// A **small** tool (ADR 0028, kept by revision 5's decision 1):
+    /// A **small** tool (ADR 0028):
     /// `read`, `grep`, `glob` and any other whose body is not worth showing by
     /// default. A successful call draws its head line only; an error or `Ctrl-O` gives it
     /// rows.

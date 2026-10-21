@@ -22,7 +22,7 @@ pub(super) struct SessionHost {
     /// `[tui.colors]` overrides, so a `/theme` switch keeps them (ADR 0029).
     pub(super) theme_colors: Vec<(String, radian_host::config::TuiColorOverride)>,
     /// Where `/theme` writes `tui.theme` back: the file this process read, or the path it
-    /// would read (ADR 0008 revision). `None` when there is no config location at all.
+    /// would read (ADR 0008). `None` when there is no config location at all.
     pub(super) theme_write_path: Option<PathBuf>,
     /// The reader's read-only verdict (a newer `schema_version`): `/theme` applies in the
     /// session but never writes.

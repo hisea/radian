@@ -122,8 +122,8 @@ pub struct EndpointUsage {
     pub build: fn(&UsageArgs) -> Box<dyn UsageFetcher>,
 }
 
-/// The `Endpoint` usage source a provider's descriptor declares, or `None` (ADR 0027 revision
-/// 14 decision 3). The TUI spawns a refresh only for a provider with one; a `Headers`
+/// The `Endpoint` usage source a provider's descriptor declares, or `None` (ADR 0027).
+/// The TUI spawns a refresh only for a provider with one; a `Headers`
 /// provider has no endpoint to poll.
 pub fn usage_endpoint(provider: &str) -> Option<&'static EndpointUsage> {
     match descriptor(provider)?.usage.as_ref()? {
@@ -134,7 +134,7 @@ pub fn usage_endpoint(provider: &str) -> Option<&'static EndpointUsage> {
 
 /// Whether a provider's descriptor declares a usage source: the `usage` footer component's and
 /// `/usage`'s gate. A provider without one draws no row, never a fabricated empty one (ADR 0027
-/// revision 14 decision 3).
+/// ).
 pub fn has_usage_source(provider: &str) -> bool {
     descriptor(provider).is_some_and(|entry| entry.usage.is_some())
 }
@@ -316,7 +316,7 @@ pub struct NamedProvider {
     pub protocol: Protocol,
     pub base_url: String,
     /// The `[providers.<name>]` override for the catalog's reasoning replay (ADR 0014
-    /// revision 1 Q2). `None` falls through to the catalog.
+    ///  Q2). `None` falls through to the catalog.
     pub reasoning_replay: Option<ReasoningReplayOverride>,
 }
 
@@ -422,7 +422,7 @@ impl ProviderRef {
             Self::Named(named) => Ok(named.protocol),
             // The generic descriptor names no built-in models: the user typed the id and the
             // endpoint, so the catalog's `npm` must not dictate its protocol (ADR 0026
-            // revision 2 decision 5's spirit — only a descriptor's own model list is gated).
+            // 's spirit — only a descriptor's own model list is gated).
             Self::BuiltIn(descriptor) if descriptor.id == GENERIC_ID => {
                 Ok(descriptor.protocol_for(model))
             }
@@ -605,7 +605,7 @@ const OPENCODE_GO_OPENAI_BASE: &str = "https://opencode.ai/inference/go/openai/v
 /// would double the `/v1`. Verified by reading that file; not by a live request.
 const OPENCODE_GO_ANTHROPIC_BASE: &str = "https://opencode.ai/inference/go/anthropic";
 /// The URL `opencode-go` lists its models on (ADR 0026 D0): the chat base serves no `/models`
-///; the zen endpoint answers the OpenAI list shape
+/// ; the zen endpoint answers the OpenAI list shape
 /// (`{"object":"list","data":[{"id":…}]}`, lead 2026-10-20).
 const OPENCODE_GO_MODELS_URL: &str = "https://opencode.ai/zen/go/v1/models";
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
@@ -888,7 +888,7 @@ const fn model(id: &'static str, name: &'static str, protocol: Protocol) -> Desc
 /// budgets that **fit the default `--max-tokens` (16384)**: the adapter refuses a budget that
 /// is not `>= 1024` and `< max_tokens`, so a smaller `--max-tokens` makes the higher levels a
 /// startup error (an existing rule, not this map's). These numbers are a proposal — the ADR
-/// names `enabled:<budget>` but gives no per-level budgets — and are marked for the owner.
+/// names `enabled:<budget>` but gives no per-level budgets — and are marked as provisional.
 pub const ANTHROPIC_THINKING: ThinkingMap = &[
     ("off", Some("")),
     ("minimal", Some("enabled:1024")),
@@ -1056,7 +1056,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         login: LoginMethod::ApiKey { extra_fields: &[] },
         thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
-        // D3: the chat base serves no `/models`, so `/login`
+        // D3: the chat base serves no `/models` , so `/login`
         // verifies against the usage endpoint with the footer's own Bearer auth.
         verification_url: Some(crate::opencode_go::USAGE_URL),
         models_url: Some(OPENCODE_GO_MODELS_URL),
@@ -2071,7 +2071,7 @@ mod tests {
 /// array order is load-bearing.
 pub const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/// The default level (ADR 0026 D11, owner pick A, matching pi's `defaultThinkingLevel`).
+/// The default level (ADR 0026 D11).
 pub const DEFAULT_THINKING_LEVEL: &str = "medium";
 
 /// One thinking map: level → wire value; a `None` wire value is pi's `null` — the level is
@@ -2090,7 +2090,7 @@ pub fn supported_wire(map: ThinkingMap, level: &str) -> Option<&'static str> {
         .and_then(|(_, wire)| *wire)
 }
 
-/// Clamps a requested level to the nearest **supported** one (ADR 0026 D11, owner rule): first
+/// Clamps a requested level to the nearest **supported** one (ADR 0026 D11): first
 /// the nearest supported level **up** the rank order, then — when nothing above is supported —
 /// the nearest **down**. `None` when the map is absent (the caller then sends no parameter).
 ///
@@ -2267,7 +2267,7 @@ pub fn parse_thinking_level(raw: &str) -> Result<(&'static str, Option<u32>, boo
 mod thinking_tests {
     use super::*;
 
-    /// The verified deepseek-v4.1-flash map clamps **up** first (ADR 0026 D11, owner rule).
+    /// The verified deepseek-v4.1-flash map clamps **up** first (ADR 0026 D11).
     #[test]
     fn the_clamp_prefers_the_nearest_supported_level_above() {
         let map = thinking_map_for(descriptor("opencode-go").unwrap(), "deepseek-v4.1-flash");

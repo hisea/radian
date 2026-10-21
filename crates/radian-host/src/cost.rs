@@ -103,11 +103,11 @@ pub fn add_cost(
 ///
 /// The TUI's projection starts empty, and its only writer is the live event sink — so before
 /// this, `--resume` showed `tokens` as `-` and hid `cost` until the *next* response arrived,
-/// losing everything the session had already spent (the number the owner most wants to see).
+/// losing everything the session had already spent (the most-watched number).
 ///
 /// Both usage records count: `ModelUsageRecorded` (a conversation request) **and**
 /// `CompactionUsageRecorded` — the summarizer's calls are real money (ADR 0018), and
-/// the projection counts them live through `AgentEvent::CompactionUsage` (revision 7), so a
+/// the projection counts them live through `AgentEvent::CompactionUsage` (), so a
 /// resume must not disagree with the run that produced the file.
 ///
 /// **A record that carries its fee is added as it stands** (ADR 0027):

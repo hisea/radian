@@ -16,7 +16,7 @@ pub(crate) fn build_body(
 ) -> Result<Value, ModelError> {
     let mut body = Map::new();
     let settings = settings_object(&request.settings)?;
-    // ADR 0018, decision 1: a request-level `reasoning_effort` (the summary call's
+    // ADR 0018: a request-level `reasoning_effort` (the summary call's
     // own, lower reasoning setting) wins over the adapter config. The config still wins over
     // `extra_body` (its own dial), so the guard is on the **request settings**.
     let request_effort = settings.contains_key("reasoning_effort");
@@ -668,7 +668,7 @@ mod tests {
 
     /// ADR 0026 D11: `reasoning_effort` rides along only when the route's map gave a wire
     /// value; without one the request is unchanged (byte-for-byte with pre-D11).
-    /// ADR 0018, decision 1: a request-level `reasoning_effort` wins over the config.
+    /// ADR 0018: a request-level `reasoning_effort` wins over the config.
     #[test]
     fn reasoning_effort_is_sent_only_when_set() {
         let mut cfg = config();

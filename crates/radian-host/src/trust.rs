@@ -99,8 +99,8 @@ impl Setup {
     }
 }
 
-/// The six choices the startup prompt offers (ADR 0031 T3 revision by ADR 0043 decision 2;
-/// owner ruling 6, revised 2026-10-20: for a project with no trusted decision the sandbox
+/// The six choices the startup prompt offers (ADR 0031 T3 by ADR 0043 decision 2;
+/// Ruling 6, revised 2026-10-20: for a project with no trusted decision the sandbox
 /// choice comes first and is the default highlight). The order is the display order.
 /// `TrustHereSandbox` trusts this directory **and** remembers `workspace` for it in
 /// `~/.radian/access/access.json`, the same record `/access` writes.

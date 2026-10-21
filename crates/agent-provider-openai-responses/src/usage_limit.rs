@@ -67,7 +67,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The body the owner's ChatGPT Plus turn got on 2026-10-17, verbatim.
+    /// The body the ChatGPT Plus turn got on 2026-10-17, verbatim.
     fn owner_body() -> String {
         json!({
             "error": {

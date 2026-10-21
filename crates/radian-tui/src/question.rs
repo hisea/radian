@@ -1,4 +1,4 @@
-//! The structured-question form (ADR 0024 Q7 and revision 1): the state of one `ask_user`
+//! The structured-question form (ADR 0024 Q7): the state of one `ask_user`
 //! request, as a [`Modal`](crate::app::Modal) over the transcript.
 //!
 //! Pure, like [`App`](crate::app::App): it turns keys into state changes and, at the end, one
@@ -16,7 +16,7 @@ use crate::composer::Composer;
 use crate::keys::Action;
 use crate::panel::Hint;
 
-/// The tab label's display width cap (ADR 0024 R4, revision 2: no scrolling).
+/// The tab label's display width cap (ADR 0024 R4: no scrolling).
 pub const MAX_TAB_WIDTH: usize = 16;
 
 /// One question's in-progress answer.
@@ -230,7 +230,7 @@ impl QuestionForm {
     }
 
     /// The tab labels: each question's `header` truncated to [`MAX_TAB_WIDTH`], a completion
-    /// mark on an answered one, then `Submit` (ADR 0024 R2, revision 2: no
+    /// mark on an answered one, then `Submit` (ADR 0024 R2: no
     /// scrolling — each label is capped and the row is clipped).
     pub fn tab_labels(&self) -> Vec<(String, bool)> {
         let mut tabs: Vec<(String, bool)> = self
@@ -253,7 +253,7 @@ impl QuestionForm {
         tabs
     }
 
-    /// The bottom-border key hints, which change with the current tab (R2/R3; 
+    /// The bottom-border key hints, which change with the current tab (R2/R3:
     /// `space select · ⏎ next`). `Space` is the only select key, so it is advertised on a row it
     /// actually selects; a free-text field (`text`, a chosen `Other`, a note) takes the space as
     /// text and only advertises `⏎ next` (the note's `⏎` saves it).
@@ -274,7 +274,7 @@ impl QuestionForm {
         }
         hints.push(Hint::new("↑/↓", "move"));
         // With a free-text field focused, ←/→ move the text cursor, so the question switch is
-        // `⇥`/`⇤` alone.
+        // `⇥`/`⇤` alone (the hint advertised ←/→ which did not switch).
         if self.note_focused() || self.text_focused() {
             hints.push(Hint::new("⇥/⇤", "question"));
             hints.push(Hint::new("←/→", "cursor"));
@@ -363,7 +363,7 @@ impl QuestionForm {
             }
             // `Enter`: save a note, otherwise **only** confirm and advance to the next question
             // (the last question advances to `Submit`; on `Submit` it submits). It never selects
-            //: a question with nothing chosen still moves on and counts as
+            // a question with nothing chosen still moves on and counts as
             // unanswered, marked in the overview. Reaching `Submit` still blocks a missing
             // required answer.
             Action::FormSubmit => {

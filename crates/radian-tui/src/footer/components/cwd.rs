@@ -1,4 +1,4 @@
-//! The `cwd` component (ADR 0027; `{repo}`/`{worktree}` are revision 1).
+//! The `cwd` component (ADR 0027; `{repo}`/`{worktree}`).
 
 use crate::app::App;
 use crate::footer::{Item, contribution_text};

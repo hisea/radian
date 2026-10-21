@@ -679,7 +679,7 @@ def check_fixture(name, exp):
         if not any(isinstance(mark, bool) for _, mark in got):
             raise Corruption(f"{name}: 期望至少一条带布尔标记的 usage 记录")
     if exp.get("deterministic"):
-        # ADR 0018 决定 3：确定性兜底的 ContextCompacted 带 deterministic:true，
+        # ADR 0018：确定性兜底的 ContextCompacted 带 deterministic:true，
         # 且不写 CompactionUsageRecorded（没有模型调用）。
         compacted = [e for e in events if e["event"] == "ContextCompacted"]
         if len(compacted) != 1 or compacted[0]["data"].get("deterministic") is not True:

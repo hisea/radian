@@ -12,7 +12,7 @@
 //! ignored here, never invented ([`crates/agent-provider-contract/README.md`](../../agent-provider-contract/README.md):
 //! a provider that lacks a concept is declared absent, never fabricated). A window whose
 //! remaining fails to parse still shows while it has a reset, and vice versa (ADR 0027
-//! revision 5: one bad field drops only its own part).
+//! : one bad field drops only its own part).
 
 use std::time::SystemTime;
 

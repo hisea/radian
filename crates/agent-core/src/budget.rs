@@ -139,7 +139,7 @@ impl RequestSize {
 /// The size of the final request (after `before_model_call`): system prompt, messages, tool
 /// specs and settings, with JSON for the structured parts.
 ///
-/// **Revision**: only what a provider actually receives counts. A message's
+/// **Revision **: only what a provider actually receives counts. A message's
 /// `meta` is host-owned and never sent (ADR 0005), so each non-empty `meta` is subtracted here.
 /// Before this, a host that put a large `origin` on a message (ADR 0018's verbatim
 /// user messages) inflated the estimate for content the provider never saw.

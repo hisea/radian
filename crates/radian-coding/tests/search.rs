@@ -759,7 +759,7 @@ async fn grep_default_output_is_byte_identical_to_content_mode() {
     assert_eq!(text(&default), "a.txt:1:alpha\n");
 }
 
-// ---------- context-first byte-cap behavior ----------
+// ---------- context-first byte-cap behavior  ----------
 
 /// Over the byte cap with `context`: every match line survives, context lines are dropped
 /// first, and the note names the dropped context count. The uncapped run fixes the exact

@@ -575,7 +575,7 @@ fn assert_usage_eq(actual: Option<&ModelUsage>, expected: &ModelUsage, what: &st
 pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
     // The hatch must not be usable to opt out of usage altogether: an adapter that declares
     // every field unreported would turn this check into a no-op and pass without parsing
-    // usage at all. A provider that genuinely reports nothing is a decision for the owner,
+    // usage at all. A provider that genuinely reports nothing is a real provider behavior,
     // not something a harness may declare its way into.
     let all = [
         UsageField::Input,

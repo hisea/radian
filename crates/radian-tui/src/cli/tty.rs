@@ -139,7 +139,7 @@ fn crossterm_event() -> Input {
 /// fd and, when the fd is ready, reads it (`mio.rs:95`); a hung-up tty is "ready" (macOS
 /// returns `POLLIN|POLLHUP`), the read returns 0 (EOF), and the inner `loop` (`mio.rs:94-114`)
 /// **never leaves** — the read spins on EOF forever. The `signals` task is not a backstop for
-/// this either: a pty master close sends no SIGHUP (review, 2026-10-14; the closed-master
+/// this either: a pty master close sends no SIGHUP (the closed-master
 /// pty test reproduced a hang whose stack was 424/424 samples inside `event::poll` →
 /// `try_read` → `read`).
 ///
@@ -275,7 +275,7 @@ fn terminal_gone(error: &std::io::Error) -> bool {
 }
 
 /// Advances the spinner's clock and returns the new frame when a spinner is visible and the
-/// frame changed since `last` (ADR 0027/13). The idle tick calls this, so an idle
+/// frame changed since `last` (ADR 0027). The idle tick calls this, so an idle
 /// app still makes no frame and a visible spinner redraws on its interval — the breath's step
 /// (about 125 ms) while it interpolates, the two-colour switch or the rotating frames otherwise.
 pub(super) fn spinner_tick(
@@ -374,7 +374,7 @@ pub(super) fn draw_frame(
     }
     // `draw/end` is the end of the render closure; the gap to `draw/terminal-done` is
     // ratatui's buffer diff plus the write and flush to the terminal (resume-perf-c: the
-    // owner's 1.2 s first-frame gap had no mark here).
+    // 1.2 s first-frame gap had no mark here).
     radian_session::trace::mark("draw/terminal-start");
     let drawn = terminal.draw(|frame| radian_tui::render::draw(frame, app));
     radian_session::trace::mark("draw/terminal-done");
@@ -448,7 +448,7 @@ pub(super) fn spawn_input_thread(tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         exit_trace("input-thread-start");
         // Record the size the app is about to draw at, so a resize that lands before the
-        // first idle poll is still detected (the owner's bare-resize bug).
+        // first idle poll is still detected (the bare-resize bug).
         if let Ok((cols, rows)) = terminal::size() {
             let packed = (u32::from(rows) << 16) | u32::from(cols);
             LAST_SIZE.store(packed, std::sync::atomic::Ordering::SeqCst);

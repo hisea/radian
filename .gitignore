@@ -7,7 +7,7 @@ spikes/*/target/
 # The sandbox gives commands a TMPDIR (and on Linux a HOME) inside the workspace.
 .radian-sandbox/
 
-# Worktrees for pi and radian task agents (ADR 0030 O3; ): one per branch, never committed.
+# Worktrees for pi and radian task agents (ADR 0030 O3;): one per branch, never committed.
 /.radian-worktrees/
 # Radian's per-workspace state, including task progress notes (ADR 0036 D2).
 /.radian/

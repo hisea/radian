@@ -241,7 +241,7 @@ async fn the_four_operations_map_to_the_documented_lanes() {
     assert_eq!(inbox.claim_next_turn().await.unwrap().message.text(), "f");
 }
 
-/// The source is required at the runtime boundary and is
+/// The source is required at the runtime boundary  and is
 /// recorded on the message itself so the transcript and the durable event agree.
 #[tokio::test]
 async fn source_is_required_and_recorded_on_the_message() {

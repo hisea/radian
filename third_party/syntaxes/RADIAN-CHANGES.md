@@ -1,7 +1,6 @@
 # RADIAN-CHANGES for `third_party/syntaxes`
 
-Radian vendors three Sublime syntax files **unchanged** (ADR 0028 R2, owner
-2026-10-14) so the code-block highlighter can recognize TypeScript, TSX and TOML,
+Radian vendors three Sublime syntax files **unchanged** (ADR 0028 R2) so the code-block highlighter can recognize TypeScript, TSX and TOML,
 which `syntect`'s packed default set does not ship. Every file is byte-identical
 to the copy in `bat`'s tree; verified by sha256 at vendoring time. Nothing in this
 directory is modified by Radian.
@@ -44,8 +43,7 @@ directory is modified by Radian.
   `TypeScript-Sublime-Plugin` Apache-2.0 for the grammar they are converted from
   (`TypeScript.LICENSE`). Both licenses are shipped here. This is the one item in
   this directory whose per-file license is attributed from the directory's
-  upstream rather than read from the file itself; the owner accepted that
-  attribution on 2026-10-14.
+  upstream rather than read from the file itself.
 
 ## Not copied
 

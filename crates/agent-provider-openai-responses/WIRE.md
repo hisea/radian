@@ -17,7 +17,7 @@ the items marked *unverified* are the ones no official OpenAI page in this repo 
 - Headers the caller supplies (`pi-catalog/src/wire/codex.ts:12-39`):
   `Authorization` (the OAuth access token), `chatgpt-account-id`, `OpenAI-Beta:
   responses=experimental`, and `originator`.
-  - **Originator**: omp writes its own name `pi`
+  - **Originator (ADR 0026)**: omp writes its own name `pi`
     (`codex.ts:38`); radian writes `radian` and does **not** impersonate the Codex CLI.
   - **Unverified**: the official OpenAI Responses API does not document `chatgpt-account-id`,
     `OpenAI-Beta: responses=experimental` or `originator`; they come from the omp Codex client.
@@ -134,7 +134,7 @@ not enumerated in this repo; the adapter matches the prefixes only.
 ## 7. The plan's used-up usage window (429 `usage_limit_reached`)
 
 A ChatGPT subscription whose plan window is spent answers `429` with an JSON error object
-instead of an event stream. The body the owner's Plus turn received on 2026-10-17 (quoted
+instead of an event stream. The body the Plus turn received on 2026-10-17 (quoted
 verbatim in the slice's brief):
 
 ```json

@@ -881,7 +881,7 @@ fn dbg_gen_sessions() {
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, text.replacen("/work/example", ws, 1)).unwrap();
     }
-    // A "rich" session like the owner's: ~370 assistant messages with a mermaid diagram and
+    // A "rich" session: ~370 assistant messages with a mermaid diagram and
     // TypeScript/Rust code blocks (the first-frame render cost, not line counts).
     let rich = dir.join("rich.jsonl");
     let runtime = tokio::runtime::Runtime::new().unwrap();

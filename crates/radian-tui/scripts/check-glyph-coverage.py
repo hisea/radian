@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Check the unicode-tier glyphs against the six mainstream coding fonts (ADR 0027
-revision 6: Operator Mono left the reference set) and print the coverage table that lives
+: Operator Mono left the reference set) and print the coverage table that lives
 in `crates/radian-tui/README.md`.
 
 Why: a glyph the font does not have is drawn by a system fallback font with different
@@ -78,9 +78,9 @@ GLYPHS = [
     ("✓", "tool status: success"),
     ("×", "tool status: failure"),
     ("•", "tool block head marker, one-liner (ADR 0035's 2026-10-16 note)"),
-    ("│", "tool block body rail / open frames (ADR 0028/2)"),
-    ("╭", "open frame top-left (ADR 0035/7)"),
-    ("╰", "open frame bottom-left (ADR 0035/7)"),
+    ("│", "tool block body rail / open frames (ADR 0028)"),
+    ("╭", "open frame top-left (ADR 0035)"),
+    ("╰", "open frame bottom-left (ADR 0035)"),
     ("◼", "thinking/tool head folded marker (ADR 0035's 2026-10-16 note; documented exception)"),
     ("◻", "thinking/tool head expanded marker (ADR 0035's 2026-10-16 note; documented exception)"),
     ("▨", "context grid compaction buffer (spec tui-context-grid; documented exception)"),

@@ -77,7 +77,7 @@ session file, permissions or sandboxes. It also does not decide what a host moun
 ## Related ADRs
 
 0006 §5 (the events a session records; MCP lifecycle is deliberately **not** recorded in v1,
-decision 2026-10-12) · 0010 K4 (`McpServerLifecycle` is the one runtime event v1 does not
+· 0010 K4 (`McpServerLifecycle` is the one runtime event v1 does not
 write) · 0012 (MCP subprocesses are **not** sandboxed in this build — the startup notice says
 so) · 0013 T1/T3 (an MCP server is a user-configured child process; Radian does not police its
 network access).

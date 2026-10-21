@@ -298,7 +298,7 @@ fn fence_closes(trimmed: &str, marker: char) -> bool {
     run >= 3 && trimmed[run..].trim().is_empty()
 }
 
-/// Where a tool entry sits in a call/result pair (ADR 0028's merge; revision 5 no
+/// Where a tool entry sits in a call/result pair (ADR 0028's merge; no
 /// longer draws a box, so the block is just the call's head row followed by the result's `│ `
 /// rows). The data stays two entries (the journal and the projection are untouched); this only
 /// records the pairing, which the `ask_user` record reads to decide whether to draw its block.
@@ -446,7 +446,7 @@ pub enum MdStyle {
     /// A tool head's status glyph when the call failed (`×`, `status_error`).
     StatusError,
     /// A tool head's running indicator: the live pulse frame, drawn in place of the
-    /// placeholder cell the layout carries (ADR 0027/13).
+    /// placeholder cell the layout carries (ADR 0027).
     StatusRunning,
     /// A quote's `│ ` bar (`mdQuoteBorder`).
     QuoteBar,
@@ -608,7 +608,7 @@ pub fn is_folded(entry: &Entry, modes: DisplayModes) -> bool {
 fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
     // `chars.is_empty()` would also match a **synthesized** line that draws text but has no
     // source characters — the thinking channel's `◻ thinking · …` header or a tool block's
-    // head (ADR 0028/4). `text.is_empty()` is the real "blank line"
+    // head (ADR 0028). `text.is_empty()` is the real "blank line"
     // test; a synthesized line with text is content and must survive.
     let blank = |line: &BodyLine| !line.hint && line.text.is_empty();
     let start = lines
@@ -640,7 +640,7 @@ fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
 /// separation), so it gets the container's one blank line on both sides like every other block.
 ///
 /// Otherwise exactly one line -- the thinking channel included: ADR 0035 replaced
-/// revision 3's "the folded one-liner hugs the block it introduces" with one blank line on both
+/// 's "the folded one-liner hugs the block it introduces" with one blank line on both
 /// sides, because a folded `> thinking (N lines)` against the reply read as one cramped block.
 /// The counting ([`line_count`]'s callers), the drawing
 /// ([`crate::render::visible_lines`]), the selection mapping and the find geometry all call
@@ -704,7 +704,7 @@ pub fn gap_at(entries: &[Entry], index: usize) -> usize {
     block_gap(prev, next)
 }
 
-/// The entries the startup block is made of (ADR 0027 §标志 / the owner's 2026-10-14 startup
+/// The entries the startup block is made of (ADR 0027 §标志 / the startup
 /// screen): one visual block, so the container inserts no gaps between them.
 fn is_startup_block(kind: EntryKind) -> bool {
     matches!(

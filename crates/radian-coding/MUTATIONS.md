@@ -390,7 +390,7 @@ only this slice's own changes at the end). Each mutation run with
 the brief's first rule is "tests fail on the current branch": with `from_env` disabled the
 read-root tests fail on the boundary refusal, not on a missing API.
 
-## orch-s6b（2026-10-16，ADR 0030 O8 / 修订 1 R4）：heavy 门的 host 接线
+## orch-s6b（2026-10-16，ADR 0030 O8 R4）：heavy 门的 host 接线
 
 Base 是 `oc/orch-s6b`。变异就地施加，源文件先复制到 `.radian/scratch/mut/`，改完跑一条命名的测试，
 再从副本还原并用 `diff -q` 确认字节一致（禁用 `git checkout --`）。每条
@@ -485,7 +485,7 @@ Seven dogfood calls failed schema validation on `context` 12-30 against `maximum
 | GC-1 | the schema keeps `"maximum": 10` (the old schema) | caught (rc=101) | `grep_schema_does_not_cap_context_below_the_cut` |
 | GC-2 | the cut is silent (no `[context cut ...]` line) | caught (rc=101) | `grep_caps_the_context_argument` |
 
-## job_output: `mode` names the read
+## job_output: `mode` names the read (choice A)
 
 GPT fills every optional field (`tail_lines: 1`, `from_line: 1`, `max_lines: 300`, ...), which the "at most one read" rule refused six times in one lead session. An optional `mode` (`new` / `tail` / `range` / `pattern`) now names the read and the other reads' fields are ignored; without `mode` the old rule holds. Run: `cargo test -p radian-coding --test job_output_file`.
 

@@ -122,7 +122,7 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
         path,
         cap,
     } = scan;
-    // ADR 0039 decision 2 and revision 1: the base is opened through the root's directory fd
+    // ADR 0039 decision 2: the base is opened through the root's directory fd
     // (no symlink in any component) and the walk descends by fd; only regular files can match.
     // An absolute or `~` base must be under a read-only root, and its results are rendered
     // with that root's prefix so they can be passed to `read` again.

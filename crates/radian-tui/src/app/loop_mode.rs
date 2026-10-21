@@ -460,7 +460,7 @@ impl App {
 
 /// Retags an expanded message as loop iteration `n`, preserving its parts. `Message::user`
 /// carries no attachments here: the expanded form (with attachment parts, ADR 0018
-/// revision 6) keeps them — only the `origin` is added.
+/// ) keeps them — only the `origin` is added.
 fn loop_iteration_message(message: &Message, iteration: u64) -> Option<Message> {
     let origin = OpaqueJson::parse(
         serde_json::json!({ "continuation": "loop", "iteration": iteration }).to_string(),

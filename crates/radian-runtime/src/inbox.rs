@@ -1,5 +1,5 @@
 //! The durable inbox: the four semantic input operations of ADR 0011 (plus the
-//! pending-wake job notice of revision 2).
+//! pending-wake job notice).
 //!
 //! This is the queue half of the runtime. It holds inputs in two lanes and is the only
 //! public way to add work:
@@ -34,11 +34,11 @@
 //!
 //! The queue is bounded. When it is full, `followup`/`steer`/`inject` **refuse** the input
 //! and return [`InboxError::Full`] **carrying the rejected message**, so the host can keep
-//! it and retry. Nothing is ever silently dropped. `cancel` is exempt.
+//! it and retry. Nothing is ever silently dropped. `cancel` is exempt (decision 3).
 //!
 //! # Source is required at this boundary
 //!
-//! ADR 0011 requires `followup`/`steer`/`inject` to take an
+//! ADR 0011  requires `followup`/`steer`/`inject` to take an
 //! explicit [`InputSource`]: the core keeps `source: Option` (ADR 0005 G2, `None` means "the
 //! host did not say"), and the runtime is where "you must say" is enforced. The inbox writes
 //! the source into the message's `meta.source` and into `InboxEnqueued.source`, so the
@@ -131,7 +131,7 @@ pub struct InboxEntry {
     pub id: MessageId,
     pub lane: Lane,
     /// Whether this entry wakes an idle driver and may open the next turn itself (ADR 0011
-    /// revision 1): a `steer` does, an `inject` does not. `followup` entries wake too, but
+    /// ): a `steer` does, an `inject` does not. `followup` entries wake too, but
     /// they are taken by lane priority before this flag is consulted.
     pub wake: bool,
     /// Whether this `next_step` entry opens the next turn when it is still queued at the
@@ -201,7 +201,7 @@ pub struct Inbox {
     /// Number of `cancel` calls (all of them), for observability.
     cancel_calls: AtomicU64,
     /// Increments on the first `cancel` of the current episode; a repeated `cancel` before
-    /// the driver begins the next turn changes nothing.
+    /// the driver begins the next turn changes nothing (decision 3).
     cancel_generation: AtomicU64,
     cancelled: AtomicBool,
     last_cause: std::sync::Mutex<Option<CancelCause>>,
@@ -402,7 +402,7 @@ impl Inbox {
             lane: lane.wire(),
             source,
             // ADR 0011: the entry's waking flag is durable, so a resume
-            // knows which `next_step` entries may open a turn themselves. Revision 2
+            // knows which `next_step` entries may open a turn themselves. It
             // adds the pending wake the same way.
             wake,
             // A wake-gate degrade (ADR 0006 §5.5): written only when true, so an

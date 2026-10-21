@@ -13,7 +13,7 @@
 ## 范围
 
 - 做：按 crate 把 `tests/*.rs` 合成少数几个二进制，先处理 `set_var` 和全局状态；可以配合 nextest（一个测试一个进程，`14-dev-process.md` ⑧）。
-- 不做＼�：`[profile.release]`、LTO、`codegen-units`，等有发布需求再说。
+- 不做：`[profile.release]`、LTO、`codegen-units`，等有发布需求再说。
 - 已经做了：`radian-tui` 的 build script 不再每次生成语法集，改为校验提交的 `assets/syntaxes.packdump`，40.9 s 这项已经没有了。
 
 ## 验收

@@ -164,7 +164,7 @@ impl App {
             // The driver applied the queued change: the status bar's `next:` promise is done.
             self.session.next_model = None;
             self.session.next_thinking = None;
-            // Owner addendum (ADR 0027 slice ①): an applied model switch must follow
+            // an applied model switch must follow
             // through to the footer's `model` item, or it keeps showing the startup model. The
             // session's model facts follow the applied route the way startup leaves them: the
             // model id, the provider from the route, and `model_display = None` so
@@ -413,7 +413,7 @@ impl App {
             } => {
                 self.session.note = None;
                 self.session.compacting = false;
-                // ADR 0018, decision 3: a deterministic fallback says so and names
+                // ADR 0018: a deterministic fallback says so and names
                 // how many messages it dropped; a model summary keeps the token line.
                 let text = if *deterministic {
                     format!("compacted without a summary ({dropped} dropped)")
@@ -527,7 +527,7 @@ impl App {
 
     /// Discards every live (streaming) entry. A committed message replaces them
     /// (`push_message`), and so does a retry: the failed attempt's deltas are live-only
-    /// (ADR 0010/0017 revision 1). The scan runs only when one exists (resume-perf A).
+    /// (ADR 0010/0017). The scan runs only when one exists (resume-perf A).
     fn drop_live(&mut self) {
         if self.session.live_count > 0 {
             let mut scanned = 0u64;
@@ -596,7 +596,7 @@ impl App {
                         info.tokens_after = Some(after);
                         info.deterministic = deterministic;
                         // `dropped` is 0 for a model summary; only a deterministic compaction
-                        // names it (ADR 0018, decision 3).
+                        // names it (ADR 0018).
                         info.dropped = deterministic.then_some(dropped);
                     }
                     let mut entry = Entry::new(EntryKind::Compaction, info.display_text());
@@ -622,7 +622,7 @@ impl App {
                 if !reasoning.is_empty() {
                     let mut entry = Entry::new(EntryKind::Reasoning, reasoning);
                     // The duration measured live, carried onto the committed entry (ADR 0028
-                    // revision 5 decision 4). It rides only here: a resumed message has no
+                    // ). It rides only here: a resumed message has no
                     // clock, so its thinking block shows no duration.
                     if let Some((started, ended)) = reasoning_clock {
                         entry.reasoning_started = Some(started);
@@ -643,15 +643,15 @@ impl App {
                         call.arguments.clone(),
                     );
                     // The call-time head is the tool name and the renderer's title (ADR 0028
-                    // revision 5 decision 1); the meta and the status glyph are the block
+                    // ); the meta and the status glyph are the block
                     // layer's, drawn from the card and the entry's state. The pairing refreshes
                     // the title once the result is in (a title that parses the result text
                     // is terse until then).
                     let mut entry =
                         Entry::new(EntryKind::ToolCall, crate::tools::call_text(&card, ""));
                     entry.tool = Some(Box::new(card));
-                    // A call with no result yet is a whole card of its own (ADR 0028 revision
-                    // 2); the pairing below turns it into the head of the merged card.
+                    // A call with no result yet is a whole card of its own (ADR 0028);
+                    // the pairing below turns it into the head of the merged card.
                     entry.card = crate::blocks::Card::Solo;
                     self.session.entries.push(entry);
                 }
@@ -721,7 +721,7 @@ impl App {
                 match call_index {
                     Some(index) => {
                         // The call heads the merged card and this result closes it (ADR 0028
-                        // revision 2): the drawing merges them, the data stays two entries.
+                        // ): the drawing merges them, the data stays two entries.
                         self.session.entries[index].card = crate::blocks::Card::Head;
                         entry.card = crate::blocks::Card::Tail;
                         self.session.entries.insert(index + 1, entry);
