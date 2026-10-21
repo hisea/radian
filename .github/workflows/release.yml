@@ -324,11 +324,20 @@ jobs:
           # The runner has no git identity: set one for this clone only.
           git -C "$tapdir" config user.name "github-actions[bot]"
           git -C "$tapdir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p "$tapdir/Formula"
           cp "dist/Formula/radian.rb" "$tapdir/Formula/radian.rb"
-          [ "$(cd "$tapdir" && git status --porcelain)" = " M Formula/radian.rb" ] || {
-            echo "release: tap tree touched more than Formula/radian.rb." >&2
-            (cd "$tapdir" && git status --porcelain) >&2
-            exit 1; }
-          (cd "$tapdir" && git add Formula/radian.rb \
-            && git commit -m "radian $VERSION" && git push origin HEAD)
+          git -C "$tapdir" add Formula/radian.rb
+          # The first release adds the file (A), later ones modify it (M); an
+          # unchanged formula (a rerun) has nothing to push. Anything else in
+          # the tap tree is refused.
+          status="$(git -C "$tapdir" status --porcelain)"
+          case "$status" in
+            "") echo "release: Formula/radian.rb unchanged; nothing to push." ;;
+            "A  Formula/radian.rb"|"M  Formula/radian.rb")
+              git -C "$tapdir" commit -m "radian $VERSION"
+              git -C "$tapdir" push origin HEAD ;;
+            *) echo "release: tap tree touched more than Formula/radian.rb." >&2
+               echo "$status" >&2
+               exit 1 ;;
+          esac
           rm -rf "$tapdir"
