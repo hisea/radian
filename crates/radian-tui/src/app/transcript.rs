@@ -102,11 +102,7 @@ impl App {
         // goal tracks its own beside it (which turns are goal-attributed); the arms below
         // read the same event for their own facts.
         super::loop_mode::track_loop_runtime_event(&mut self.session.loop_state, event, self.now);
-        super::goal_mode::track_goal_runtime_event(
-            &mut self.session.goal_mode,
-            event,
-            self.now,
-        );
+        super::goal_mode::track_goal_runtime_event(&mut self.session.goal_mode, event, self.now);
         if let RuntimeEvent::InboxEnqueued {
             lane, message_id, ..
         } = event

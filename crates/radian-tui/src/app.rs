@@ -315,8 +315,14 @@ impl PartialEq for Effect {
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
             (
-                GoalAppend { event: ae, apply: aa },
-                GoalAppend { event: be, apply: bb },
+                GoalAppend {
+                    event: ae,
+                    apply: aa,
+                },
+                GoalAppend {
+                    event: be,
+                    apply: bb,
+                },
             ) => ae == be && aa == bb,
             (
                 LoginVerify {

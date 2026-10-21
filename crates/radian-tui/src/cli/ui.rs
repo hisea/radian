@@ -299,10 +299,12 @@ pub(super) fn ui_loop(
                         // (a running turn ignores the deadline; its end decides instead).
                         // The same wake fires an armed goal `wait` (`goal_deadline_fired`
                         // runs beside the loop's in the one `LoopDeadline` arm).
-                        if (app.loop_deadline().is_some_and(|d| std::time::Instant::now() >= d)
-                            || app.goal_deadline().is_some_and(|d| {
-                                std::time::Instant::now() >= d
-                            }))
+                        if (app
+                            .loop_deadline()
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            || app
+                                .goal_deadline()
+                                .is_some_and(|d| std::time::Instant::now() >= d))
                             && app.update(AppInput::LoopDeadline).dirty
                             && !draw_frame(terminal, app)?
                         {

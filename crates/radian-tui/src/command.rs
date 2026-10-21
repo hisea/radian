@@ -1839,7 +1839,10 @@ mod tests {
     fn goal_parses_show_set_control_and_budget() {
         use std::time::Duration;
 
-        assert!(matches!(parse("/goal", false), Outcome::Goal(GoalCommand::Show)));
+        assert!(matches!(
+            parse("/goal", false),
+            Outcome::Goal(GoalCommand::Show)
+        ));
         match parse("/goal ship the refactor", false) {
             Outcome::Goal(GoalCommand::Set { objective }) => {
                 assert_eq!(objective, "ship the refactor")
@@ -1909,7 +1912,10 @@ mod tests {
             }
         }
         // The objective limit is enforced at parse time.
-        match parse(&format!("/goal {}", "x".repeat(GOAL_OBJECTIVE_LIMIT + 1)), false) {
+        match parse(
+            &format!("/goal {}", "x".repeat(GOAL_OBJECTIVE_LIMIT + 1)),
+            false,
+        ) {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("the limit is"), "{notices:?}")
             }

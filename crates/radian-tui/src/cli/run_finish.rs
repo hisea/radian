@@ -266,7 +266,9 @@ fn goal_resume_hint(session: &radian_host::LocalSession) -> Option<String> {
     if goal.objective.chars().count() > 120 {
         objective.push('…');
     }
-    Some(format!("goal paused: {objective}; /goal resume to continue"))
+    Some(format!(
+        "goal paused: {objective}; /goal resume to continue"
+    ))
 }
 
 /// `run()`'s loop phase: builds the session host, runs the event loop to completion,

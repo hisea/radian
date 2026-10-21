@@ -145,9 +145,7 @@ pub fn fold(events: &[SessionEvent]) -> Option<GoalState> {
                 );
                 // An unset budget on the wire is today's default, not "no cap": old records
                 // predate per-field optionality the same way `wake` did (ADR 0006 §5.5).
-                if fresh.budget.max_turns.is_none()
-                    && fresh.budget.max_duration_secs.is_none()
-                {
+                if fresh.budget.max_turns.is_none() && fresh.budget.max_duration_secs.is_none() {
                     fresh.budget = GoalState::default_budget();
                 }
                 goal = Some(fresh);
@@ -181,8 +179,9 @@ pub fn fold(events: &[SessionEvent]) -> Option<GoalState> {
                 close_span(&mut goal, &mut span_start, ts_secs);
             }
             EventData::GoalPaused {} => {
-                let was_active =
-                    goal.as_ref().is_some_and(|goal| goal.status == GoalStatus::Active);
+                let was_active = goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.status == GoalStatus::Active);
                 if was_active {
                     if let Some(goal) = goal.as_mut() {
                         goal.status = GoalStatus::Paused;
@@ -211,7 +210,9 @@ pub fn fold(events: &[SessionEvent]) -> Option<GoalState> {
                 close_span(&mut goal, &mut span_start, ts_secs);
             }
             EventData::InboxEnqueued {
-                message, message_id, ..
+                message,
+                message_id,
+                ..
             } => {
                 if is_goal_continuation(message) {
                     goal_messages.insert(message_id.0.clone());
@@ -320,8 +321,7 @@ fn parse_ts_secs(ts: &str) -> i64 {
     let Ok(sec) = secs[0].parse::<i64>() else {
         return 0;
     };
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60
-    {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
         return 0;
     }
     days_from_civil(year, month, day) * 86_400 + hour * 3600 + min * 60 + sec
@@ -559,7 +559,10 @@ mod tests {
         ])
         .expect("a goal");
         assert_eq!(goal.turns_used, 1, "only the completed goal turn counts");
-        assert_eq!(goal.tokens_used, 150, "only in-span conversation usage bills");
+        assert_eq!(
+            goal.tokens_used, 150,
+            "only in-span conversation usage bills"
+        );
         assert_eq!(goal.active_secs, 10);
     }
 
@@ -627,7 +630,11 @@ mod tests {
             input_includes_cache: None,
             details: None,
         };
-        assert_eq!(goal_tokens(&base), 150, "unmarked: input at face value plus output");
+        assert_eq!(
+            goal_tokens(&base),
+            150,
+            "unmarked: input at face value plus output"
+        );
         assert_eq!(
             goal_tokens(&agent_core::ModelUsage {
                 total: Some(1000),
@@ -649,7 +656,10 @@ mod tests {
     #[test]
     fn an_unparseable_clock_costs_duration_math_not_the_goal() {
         assert_eq!(parse_ts_secs("not-a-ts"), 0);
-        assert_eq!(parse_ts_secs("2026-10-20T10:00:00Z"), parse_ts_secs("2026-10-20T10:00:00.5Z"));
+        assert_eq!(
+            parse_ts_secs("2026-10-20T10:00:00Z"),
+            parse_ts_secs("2026-10-20T10:00:00.5Z")
+        );
         let goal = fold(&[
             set("garbage", "ship it"),
             event("garbage", EventData::GoalPaused {}),

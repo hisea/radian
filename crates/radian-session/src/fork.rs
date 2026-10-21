@@ -263,14 +263,12 @@ async fn write_child_and_record(
             crate::goal::GoalStatus::Active | crate::goal::GoalStatus::Paused
         )
     {
-        let carried = [
-            RuntimeEvent::GoalSet {
-                objective: goal.objective.clone(),
-                max_turns: goal.budget.max_turns,
-                max_duration_secs: goal.budget.max_duration_secs,
-                max_tokens: goal.budget.max_tokens,
-            },
-        ];
+        let carried = [RuntimeEvent::GoalSet {
+            objective: goal.objective.clone(),
+            max_turns: goal.budget.max_turns,
+            max_duration_secs: goal.budget.max_duration_secs,
+            max_tokens: goal.budget.max_tokens,
+        }];
         for event in carried {
             if let Err(source) = child.append_runtime_event(event).await {
                 drop(child);

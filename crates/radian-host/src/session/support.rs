@@ -43,7 +43,10 @@ pub fn session_hooks(
 ) -> impl Hooks {
     // The order is the promise: the role layers, permissions, commands, memory, skills,
     // goal, then the volatile <session> facts (ADR 0025 S6, ADR 0036 D1, ADR 0045, ADR 0047).
-    ((((((role, permissions), commands), memory), skills), goal), facts)
+    (
+        (((((role, permissions), commands), memory), skills), goal),
+        facts,
+    )
 }
 
 /// The durable audit event for one trust write (ADR 0031 T2).

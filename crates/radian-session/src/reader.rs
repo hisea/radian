@@ -251,10 +251,14 @@ pub enum EventData {
     },
     /// One model-recorded progress note (ADR 0047). Typed for an exact round trip; audit
     /// only, never a transcript record.
-    GoalProgress { note: String },
+    GoalProgress {
+        note: String,
+    },
     /// The model reported the goal done (ADR 0047). Typed for an exact round trip; audit
     /// only, never a transcript record.
-    GoalDone { note: Option<String> },
+    GoalDone {
+        note: Option<String>,
+    },
     /// The goal was paused (ADR 0047). Typed for an exact round trip; audit only, never a
     /// transcript record.
     GoalPaused {},
@@ -266,10 +270,14 @@ pub enum EventData {
     GoalDropped {},
     /// The model deferred the next continuation (ADR 0047). Typed for an exact round trip;
     /// audit only, never a transcript record.
-    GoalWait { secs: u64 },
+    GoalWait {
+        secs: u64,
+    },
     /// A budget cap stopped the goal (ADR 0047). Typed for an exact round trip; audit only,
     /// never a transcript record.
-    GoalBudgetExhausted { kind: String },
+    GoalBudgetExhausted {
+        kind: String,
+    },
     /// A known event this crate does not interpret (`SessionCreated`) or an unknown
     /// non-critical event.
     Other(Value),

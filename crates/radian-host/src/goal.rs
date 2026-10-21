@@ -9,8 +9,8 @@
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
-    Hooks, HookContext, HookError, ModelRequest, ToolCall, ToolConcurrency,
-    ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
+    HookContext, HookError, Hooks, ModelRequest, ToolCall, ToolConcurrency, ToolContext, ToolError,
+    ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use radian_session::{GoalState, GoalStatus, RuntimeEvent, SessionJournal};
 use serde_json::{Value, json};
@@ -113,12 +113,16 @@ impl ToolSession for GoalSession {
                 format!("`{}` is not the goal tool", call.name),
             ));
         }
-        let op = call.arguments.get("op").and_then(Value::as_str).ok_or_else(|| {
-            ToolFailure::new(
-                "invalid_arguments",
-                "`op` is required and must be one of `progress`, `done` or `wait`",
-            )
-        })?;
+        let op = call
+            .arguments
+            .get("op")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ToolFailure::new(
+                    "invalid_arguments",
+                    "`op` is required and must be one of `progress`, `done` or `wait`",
+                )
+            })?;
         let note = match call.arguments.get("note") {
             None | Some(Value::Null) => None,
             Some(Value::String(note)) => Some(note.clone()),
@@ -131,10 +135,9 @@ impl ToolSession for GoalSession {
         };
         let secs = match call.arguments.get("secs") {
             None | Some(Value::Null) => None,
-            Some(Value::Number(secs)) => secs.as_u64().or_else(|| {
-                secs.as_i64()
-                    .and_then(|secs| u64::try_from(secs).ok())
-            }),
+            Some(Value::Number(secs)) => secs
+                .as_u64()
+                .or_else(|| secs.as_i64().and_then(|secs| u64::try_from(secs).ok())),
             Some(_) => {
                 return Err(ToolFailure::new(
                     "invalid_arguments",
@@ -160,7 +163,11 @@ impl ToolSession for GoalSession {
                             format!("the progress note was not recorded: {error}"),
                         )
                     })?;
-                if let Some(goal) = self.state.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
+                if let Some(goal) = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
                 {
                     goal.progress = Some(note.clone());
                 }
@@ -177,14 +184,20 @@ impl ToolSession for GoalSession {
                             format!("the goal was not marked done: {error}"),
                         )
                     })?;
-                if let Some(goal) = self.state.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
+                if let Some(goal) = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
                 {
                     if note.is_some() {
                         goal.progress = note.clone();
                     }
                     goal.status = GoalStatus::Done;
                 }
-                Ok(ToolOutput::text("goal done: no further goal message follows\n"))
+                Ok(ToolOutput::text(
+                    "goal done: no further goal message follows\n",
+                ))
             }
             "wait" => {
                 let Some(secs) = secs.filter(|secs| *secs > 0) else {
@@ -204,7 +217,11 @@ impl ToolSession for GoalSession {
                             format!("the wait was not recorded: {error}"),
                         )
                     })?;
-                if let Some(goal) = self.state.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
+                if let Some(goal) = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
                 {
                     goal.pending_wait_secs = Some(secs);
                 }
@@ -290,7 +307,11 @@ fn budget_turns(goal: &GoalState) -> String {
 
 fn budget_duration(goal: &GoalState) -> String {
     match goal.budget.max_duration_secs {
-        Some(max) => format!("{} / {} active", format_secs(goal.active_secs), format_secs(max)),
+        Some(max) => format!(
+            "{} / {} active",
+            format_secs(goal.active_secs),
+            format_secs(max)
+        ),
         None => format!("{} active (no cap)", format_secs(goal.active_secs)),
     }
 }

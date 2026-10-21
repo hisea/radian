@@ -57,12 +57,12 @@ pub mod wake_gate;
 mod workspace;
 
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
-pub use goal::{GoalHooks, GoalTools, SharedGoal, fresh_share, goal_block};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, OAuthEntry, RADIAN_BASE_URL, ResolvedKey,
     auth_path, has_login, list as list_auth, remove as remove_auth, resolve_key, resolve_note,
     resolved_keys, upsert_api_key as upsert_auth_api_key,
 };
+pub use goal::{GoalHooks, GoalTools, SharedGoal, fresh_share, goal_block};
 /// The machine's hostname (ADR 0027 `host`), read once at startup. `HOSTNAME` is
 /// set by most shells (and by BSD's `login`); the `hostname` command is the portable fallback.
 /// No network, no new dependency, and never called at draw time.

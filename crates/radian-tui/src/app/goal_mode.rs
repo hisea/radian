@@ -14,8 +14,7 @@ use std::time::Duration;
 
 use agent_core::{Message, OpaqueJson};
 use radian_session::{
-    GoalBudget, GoalState, GoalStatus, RuntimeEvent, TurnOutcome, goal_tokens,
-    is_goal_continuation,
+    GoalBudget, GoalState, GoalStatus, RuntimeEvent, TurnOutcome, goal_tokens, is_goal_continuation,
 };
 
 use super::*;
@@ -140,7 +139,11 @@ impl App {
     /// A finished goal (done, exhausted) or no goal leaves the loop alone.
     pub(super) fn goal_blocks_loop(&self) -> bool {
         matches!(
-            self.session.goal_mode.goal().as_ref().map(|goal| goal.status),
+            self.session
+                .goal_mode
+                .goal()
+                .as_ref()
+                .map(|goal| goal.status),
             Some(GoalStatus::Active) | Some(GoalStatus::Paused)
         )
     }
@@ -183,7 +186,12 @@ impl App {
                 })
             }
             GoalCommand::Pause => {
-                let status = self.session.goal_mode.goal().as_ref().map(|goal| goal.status);
+                let status = self
+                    .session
+                    .goal_mode
+                    .goal()
+                    .as_ref()
+                    .map(|goal| goal.status);
                 match status {
                     Some(GoalStatus::Active) => UpdateResult::effect(Effect::GoalAppend {
                         event: RuntimeEvent::GoalPaused {},
@@ -207,7 +215,12 @@ impl App {
                     self.push_notice("goal not resumed: /loop is on (stop it first with /loop)");
                     return UpdateResult::dirty();
                 }
-                let status = self.session.goal_mode.goal().as_ref().map(|goal| goal.status);
+                let status = self
+                    .session
+                    .goal_mode
+                    .goal()
+                    .as_ref()
+                    .map(|goal| goal.status);
                 match status {
                     Some(GoalStatus::Paused) => UpdateResult::effect(Effect::GoalAppend {
                         event: RuntimeEvent::GoalResumed {},
@@ -290,13 +303,14 @@ impl App {
     ) -> UpdateResult {
         let Ok(()) = result else {
             let error = result.unwrap_err();
-            self.push_notice(format!("goal change was not journaled: {error}; nothing changed"));
+            self.push_notice(format!(
+                "goal change was not journaled: {error}; nothing changed"
+            ));
             return UpdateResult::dirty();
         };
         match apply {
             GoalApply::Set { objective, budget } => {
-                *self.session.goal_mode.goal() =
-                    Some(GoalState::fresh(objective.clone(), budget));
+                *self.session.goal_mode.goal() = Some(GoalState::fresh(objective.clone(), budget));
                 self.session.goal_mode.blocked = false;
                 self.session.goal_mode.next_due = None;
                 self.open_goal_stretch();
@@ -565,7 +579,9 @@ impl App {
                 }
                 (true, TurnOutcome::Cancelled) => {
                     self.bank_goal_stretch();
-                    self.pause_goal("goal paused: the turn was cancelled; /goal resume to continue");
+                    self.pause_goal(
+                        "goal paused: the turn was cancelled; /goal resume to continue",
+                    );
                     UpdateResult::dirty()
                 }
                 (true, TurnOutcome::Failed) => {
@@ -584,7 +600,9 @@ impl App {
                 // one pauses it instead of blind-firing into whoever cancelled or broke it.
                 (false, TurnOutcome::Completed) => self.maybe_continue_goal(),
                 (false, TurnOutcome::Cancelled) => {
-                    self.pause_goal("goal paused: the turn was cancelled; /goal resume to continue");
+                    self.pause_goal(
+                        "goal paused: the turn was cancelled; /goal resume to continue",
+                    );
                     UpdateResult::dirty()
                 }
                 (false, TurnOutcome::Failed) => {
@@ -636,8 +654,7 @@ impl App {
         // The stretch totals lock separately: holding the guard above across this call
         // would deadlock the same thread on the shared mutex.
         let (_, secs, tokens) = self.goal_totals();
-        if self.session.goal_mode.awaiting_echo || !self.session.goal_mode.outstanding.is_empty()
-        {
+        if self.session.goal_mode.awaiting_echo || !self.session.goal_mode.outstanding.is_empty() {
             // A send is in flight or queued: it runs next already. The caps re-check at
             // its end (at worst one extra turn, the loop's own rule).
             return UpdateResult::none();
@@ -647,8 +664,10 @@ impl App {
         {
             return self.stop_goal_for_budget(
                 "turns",
-                format!("goal stopped: turn budget exhausted ({turns}/{max} turns); \
-                         /goal budget … raises it or /goal <objective> sets a new goal"),
+                format!(
+                    "goal stopped: turn budget exhausted ({turns}/{max} turns); \
+                         /goal budget … raises it or /goal <objective> sets a new goal"
+                ),
             );
         }
         if let Some(max) = budget.max_duration_secs
@@ -656,10 +675,12 @@ impl App {
         {
             return self.stop_goal_for_budget(
                 "duration",
-                format!("goal stopped: time budget exhausted ({} active of {}); \
+                format!(
+                    "goal stopped: time budget exhausted ({} active of {}); \
                          /goal budget … raises it or /goal <objective> sets a new goal",
                     super::loop_mode::format_loop_duration(Duration::from_secs(secs)),
-                    super::loop_mode::format_loop_duration(Duration::from_secs(max))),
+                    super::loop_mode::format_loop_duration(Duration::from_secs(max))
+                ),
             );
         }
         if let Some(max) = budget.max_tokens
@@ -667,8 +688,10 @@ impl App {
         {
             return self.stop_goal_for_budget(
                 "tokens",
-                format!("goal stopped: token budget exhausted ({tokens}/{max} tokens); \
-                         /goal budget … raises it or /goal <objective> sets a new goal"),
+                format!(
+                    "goal stopped: token budget exhausted ({tokens}/{max} tokens); \
+                         /goal budget … raises it or /goal <objective> sets a new goal"
+                ),
             );
         }
         // A fresh `wait` overrides an armed one (several waits merge — the last one wins,
@@ -751,7 +774,11 @@ impl App {
     pub fn goal_deadline(&self) -> Option<Instant> {
         if self.turn() != TurnState::Running
             && matches!(
-                self.session.goal_mode.goal().as_ref().map(|goal| goal.status),
+                self.session
+                    .goal_mode
+                    .goal()
+                    .as_ref()
+                    .map(|goal| goal.status),
                 Some(GoalStatus::Active)
             )
             && !self.session.goal_mode.awaiting_echo
@@ -768,7 +795,11 @@ impl App {
     pub(super) fn goal_deadline_fired(&mut self) -> UpdateResult {
         if self.turn() == TurnState::Running
             || !matches!(
-                self.session.goal_mode.goal().as_ref().map(|goal| goal.status),
+                self.session
+                    .goal_mode
+                    .goal()
+                    .as_ref()
+                    .map(|goal| goal.status),
                 Some(GoalStatus::Active)
             )
             || self.session.goal_mode.awaiting_echo
@@ -790,11 +821,7 @@ impl App {
 /// Feeds the goal the runtime events it tracks: the `InboxEnqueued`/`InputAdmitted` echo
 /// pair marks which turns are goal-attributed, `TurnStarted` opens the wait. Called from
 /// `apply_runtime_event` before its own arms, beside the loop's tracker.
-pub(super) fn track_goal_runtime_event(
-    mode: &mut GoalMode,
-    event: &RuntimeEvent,
-    now: Instant,
-) {
+pub(super) fn track_goal_runtime_event(mode: &mut GoalMode, event: &RuntimeEvent, now: Instant) {
     match event {
         RuntimeEvent::InboxEnqueued {
             lane,
@@ -853,9 +880,9 @@ fn budget_words(budget: &GoalBudget) -> String {
         parts.push(format!("{max} turns"));
     }
     if let Some(max) = budget.max_duration_secs {
-        parts.push(super::loop_mode::format_loop_duration(
-            Duration::from_secs(max),
-        ));
+        parts.push(super::loop_mode::format_loop_duration(Duration::from_secs(
+            max,
+        )));
     }
     if let Some(max) = budget.max_tokens {
         parts.push(format!("{max} tokens"));
@@ -1020,10 +1047,7 @@ mod tests {
             Effect::GoalAppend { event, apply } => (event.clone(), apply.clone()),
             other => panic!("expected a journal append, got {other:?}"),
         };
-        assert!(
-            matches!(event, RuntimeEvent::GoalSet { .. }),
-            "{event:?}"
-        );
+        assert!(matches!(event, RuntimeEvent::GoalSet { .. }), "{event:?}");
         assert!(
             app.session.goal_mode.goal().is_none(),
             "nothing applied before the append succeeds"
@@ -1034,7 +1058,9 @@ mod tests {
         });
         assert_eq!(shared_status(&app), Some(GoalStatus::Active));
         assert!(
-            notices(&app).iter().any(|n| n.contains("goal set: ship it")),
+            notices(&app)
+                .iter()
+                .any(|n| n.contains("goal set: ship it")),
             "{:?}",
             notices(&app)
         );
@@ -1078,8 +1104,12 @@ mod tests {
         app.set_now(base);
         set_goal(&mut app, "ship it");
         // The model's `progress` call lands in the shared state mid-turn.
-        app.session.goal_mode.goal().as_mut().expect("a goal").progress =
-            Some("half there".into());
+        app.session
+            .goal_mode
+            .goal()
+            .as_mut()
+            .expect("a goal")
+            .progress = Some("half there".into());
 
         let result = run_iteration(
             &mut app,
@@ -1130,9 +1160,7 @@ mod tests {
         let result = finished(&mut app, "t-1", TurnOutcome::Completed);
         assert!(result.effects.is_empty(), "no continuation after done");
         assert!(
-            notices(&app)
-                .iter()
-                .any(|n| n == "goal done: shipped"),
+            notices(&app).iter().any(|n| n == "goal done: shipped"),
             "{:?}",
             notices(&app)
         );
@@ -1146,7 +1174,10 @@ mod tests {
         );
         assert!(result.effects.is_empty());
         assert_eq!(
-            notices(&app).iter().filter(|n| n.contains("goal done")).count(),
+            notices(&app)
+                .iter()
+                .filter(|n| n.contains("goal done"))
+                .count(),
             1
         );
     }
@@ -1209,10 +1240,10 @@ mod tests {
             second.effects
         );
         assert!(
-            !second.effects.iter().any(|effect| matches!(
-                effect,
-                Effect::SendFollowup(_)
-            )),
+            !second
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::SendFollowup(_))),
             "no third turn"
         );
         // herdr reports `blocked` with the goal label until the next turn starts.
@@ -1235,7 +1266,12 @@ mod tests {
         app.set_now(base);
         set_goal(&mut app, "ship it");
         // The tool's write end: an armed wait in the shared state.
-        app.session.goal_mode.goal().as_mut().expect("a goal").pending_wait_secs = Some(600);
+        app.session
+            .goal_mode
+            .goal()
+            .as_mut()
+            .expect("a goal")
+            .pending_wait_secs = Some(600);
 
         let result = run_iteration(
             &mut app,
@@ -1305,7 +1341,10 @@ mod tests {
             goal_message("ship it", None, 1),
             TurnOutcome::Failed,
         );
-        assert!(result.effects.is_empty(), "never re-send into a broken provider");
+        assert!(
+            result.effects.is_empty(),
+            "never re-send into a broken provider"
+        );
         assert_eq!(shared_status(&app), Some(GoalStatus::Paused));
         assert!(
             notices(&app)

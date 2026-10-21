@@ -360,11 +360,10 @@ pub async fn open_session(
     // ADR 0047: the persistent goal. Folded once from the journal at open (a resume parks
     // an active goal as paused); the `goal` tool, the prompt hook and the TUI share the
     // result, and every change is journaled first so the fold always rebuilds it.
-    let goal_share: crate::goal::SharedGoal = Arc::new(Mutex::new(
-        parsed
-            .as_ref()
-            .and_then(|parsed| radian_session::fold_for_resume(parsed.events())),
-    ));
+    let goal_share: crate::goal::SharedGoal =
+        Arc::new(Mutex::new(parsed.as_ref().and_then(|parsed| {
+            radian_session::fold_for_resume(parsed.events())
+        })));
     tools = tools.with_goal(crate::goal::GoalTools::new(
         Arc::clone(&goal_share),
         Arc::clone(&journal),

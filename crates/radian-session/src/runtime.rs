@@ -772,9 +772,7 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             max_duration_secs: *max_duration_secs,
             max_tokens: *max_tokens,
         }),
-        RuntimeEvent::GoalProgress { note } => {
-            RuntimeData::GoalProgress(GoalProgressData { note })
-        }
+        RuntimeEvent::GoalProgress { note } => RuntimeData::GoalProgress(GoalProgressData { note }),
         RuntimeEvent::GoalDone { note } => RuntimeData::GoalDone(GoalDoneData {
             note: note.as_deref(),
         }),
