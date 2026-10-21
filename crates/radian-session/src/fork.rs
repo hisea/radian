@@ -279,18 +279,17 @@ async fn write_child_and_record(
                 });
             }
         }
-        if let Some(note) = goal.progress.clone() {
-            if let Err(source) = child
+        if let Some(note) = goal.progress.clone()
+            && let Err(source) = child
                 .append_runtime_event(RuntimeEvent::GoalProgress { note })
                 .await
-            {
-                drop(child);
-                let _ = std::fs::remove_file(&temp_path);
-                return Err(ForkError::Child {
-                    child_id: request.child_id.clone(),
-                    source,
-                });
-            }
+        {
+            drop(child);
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(ForkError::Child {
+                child_id: request.child_id.clone(),
+                source,
+            });
         }
         if let Err(source) = child
             .append_runtime_event(RuntimeEvent::GoalPaused {})

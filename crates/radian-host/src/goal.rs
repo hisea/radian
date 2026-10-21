@@ -532,11 +532,12 @@ mod tests {
             .execute(&call("done", Some("shipped"), None), cx(&cancel))
             .await
             .unwrap();
-        let state = share.lock().unwrap_or_else(|e| e.into_inner());
-        let goal = state.as_ref().expect("the goal row stays for status");
-        assert_eq!(goal.status, GoalStatus::Done);
-        assert!(goal_block(goal).is_none(), "no block after done");
-        drop(state);
+        {
+            let state = share.lock().unwrap_or_else(|e| e.into_inner());
+            let goal = state.as_ref().expect("the goal row stays for status");
+            assert_eq!(goal.status, GoalStatus::Done);
+            assert!(goal_block(goal).is_none(), "no block after done");
+        }
         let failure = session
             .execute(&call("progress", Some("more"), None), cx(&cancel))
             .await
