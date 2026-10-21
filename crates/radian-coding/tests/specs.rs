@@ -64,8 +64,15 @@ async fn the_read_spec_offers_offset_and_limit() {
     for field in ["path", "max_bytes", "offset", "limit"] {
         assert!(properties.get(field).is_some(), "missing {field}");
     }
-    assert_eq!(properties["offset"]["minimum"], 1);
+    assert!(properties["offset"].get("minimum").is_none());
     assert_eq!(properties["limit"]["minimum"], 1);
+    assert!(
+        properties["offset"]["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("from the end")),
+        "offset names the from-the-end read: {}",
+        properties["offset"]
+    );
     assert!(read.description.contains("offset"), "{}", read.description);
     assert!(
         read.description.contains("Do not increase `max_bytes`"),
