@@ -28,17 +28,17 @@ pub(crate) enum ExportFormat {
 /// variant, not the field that stores it.
 #[derive(clap::Subcommand, Debug)]
 pub enum Command {
-    /// Manage durable memory (ADR 0021 D7).
+    /// Manage durable memory.
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
     },
-    /// Configuration tools (ADR 0008): `radian config --help`.
+    /// Configuration tools: `radian config --help`.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Store an API key for a provider in ~/.radian/credentials/auth.json (ADR 0026 D3).
+    /// Store an API key for a provider in ~/.radian/credentials/auth.json.
     /// The key is not echoed; a verification request (`GET <base>/models`) runs first.
     #[command(
         after_help = "Without a terminal the command refuses; edit                            credentials/auth.json directly instead."
@@ -158,7 +158,7 @@ fn config_command(cli: &Cli, command: ConfigCommand) -> Result<(), OutputError> 
             let targets = resolve_claude_targets(cli, project.as_deref())?;
             if !draft.project_skills.is_empty() {
                 eprintln!(
-                    "[import-claude] project-level files are trust-gate resources (ADR 0031 T1): \
+                    "[import-claude] project-level files need your trust first: \
                      they will be asked about on the next start"
                 );
             }

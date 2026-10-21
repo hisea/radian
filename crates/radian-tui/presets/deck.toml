@@ -1,4 +1,4 @@
-# The `deck` preset (ADR 0027, the default): the current provider's usage
+# The `deck` preset (the default): the current provider's usage
 # line (dropped when it has no snapshot, so it never leaves a blank line), the identity row,
 # then the numbers row.
 #

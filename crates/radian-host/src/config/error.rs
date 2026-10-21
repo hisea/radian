@@ -119,16 +119,16 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::UnknownApproval { path, value } => write!(
                 f,
-                "{}: permissions.approval = {value:?} is not one of on-ask|always|never|auto \
-                 (ADR 0026 D9); refusing rather than guessing",
+                "{}: permissions.approval = {value:?} is not one of on-ask|always|never|auto; \
+                 refusing rather than guessing",
                 path.display()
             ),
             ConfigError::ApiKeyRemoved { path } => write!(
                 f,
-                "{}: `model.api_key` is no longer read (ADR 0026 D2); the API key comes only \
+                "{}: `model.api_key` is no longer read; the API key comes only \
                  from ~/.radian/credentials/auth.json. Add an entry for the provider there, e.g. \
                  {{\"opencode-go\": {{\"type\": \"api_key\", \"key\": \"$MY_KEY\"}}}}, or use the \
-                 `/login` command (next slice)",
+                 `/login` command",
                 path.display()
             ),
             ConfigError::InvalidProviderName { path, name, reason } => {

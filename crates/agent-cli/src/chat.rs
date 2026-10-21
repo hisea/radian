@@ -406,10 +406,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             setup.window.describe(),
             budget.bytes_per_token
         ),
-        None => eprintln!(
-            "[budget] {} (ADR 0018); {compaction}",
-            setup.window.describe()
-        ),
+        None => eprintln!("[budget] {}; {compaction}", setup.window.describe()),
     }
     eprintln!("{}", session.facts().memory_notice);
     // ADR 0024 Q5: this host has no interactive user, so `ask_user` is not registered.

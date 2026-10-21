@@ -3855,6 +3855,10 @@ async fn without_a_window_the_budget_is_off_and_says_so() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("[budget] window unknown"), "{stderr}");
+    assert!(
+        !stderr.contains("ADR"),
+        "the budget line names no ADR: {stderr}"
+    );
     // No budget is invented: `B` is unknown, not a guess (ADR 0018).
     assert!(stderr.contains("B ?"), "{stderr}");
     assert!(stderr.contains("no budget"), "{stderr}");

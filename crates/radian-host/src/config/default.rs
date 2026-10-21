@@ -12,27 +12,27 @@ use std::path::{Path, PathBuf};
 /// `schema_version = 1`; everything else is a comment naming a real key the reader accepts
 /// (`[model]` provider/model, `[permissions]` profile, `[tui]` theme, `[compaction]`
 /// auto/thinking), so the file parses to the default config.
-pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# radian configuration (ADR 0008).
+pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# radian configuration.
 # A fresh install starts from these defaults; uncomment a key to change it.
 # Every key named here is a real key the reader accepts; the file as written
 # parses to the same config as a missing file.
 schema_version = 1
 
-# The model route (ADR 0026). The command line always wins; `/model` switches for the
+# The model route. The command line always wins; `/model` switches for the
 # session, `/login` stores the key in credentials/auth.json (never here).
 # [model]
 # provider = "openai-compatible"
 # model = "m-1"
 
-# The permission tier (ADR 0012/0016): "workspace" or "full".
+# The permission tier: "workspace" or "full".
 # [permissions]
 # profile = "workspace"
 
-# The TUI theme (ADR 0029): "dark", "light", "mono" or a file in ~/.radian/themes/.
+# The TUI theme: "dark", "light", "mono" or a file in ~/.radian/themes/.
 # [tui]
 # theme = "dark"
 
-# Compaction (ADR 0018): whether to compact over the budget, and the summary level.
+# Compaction: whether to compact over the budget, and the summary level.
 # [compaction]
 # auto = true
 # thinking = "low"
@@ -152,6 +152,16 @@ mod tests {
         assert_eq!(parsed.compaction, super::super::CompactionConfig::default());
         assert_eq!(parsed.tui, super::super::TuiConfig::default());
         assert!(parsed.skipped.is_empty(), "{:?}", parsed.skipped);
+    }
+
+    /// The first-start config file is user-facing: the template never names an ADR.
+    /// Mutation: put `(ADR 0008)` back into the header → this fails.
+    #[test]
+    fn the_template_names_no_adr() {
+        assert!(
+            !DEFAULT_CONFIG_TEMPLATE.contains("ADR"),
+            "{DEFAULT_CONFIG_TEMPLATE}"
+        );
     }
 
     /// Every uncommented key the template names is a real key the reader accepts: uncommenting
