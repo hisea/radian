@@ -14,14 +14,13 @@ struct Temp(PathBuf);
 
 impl Temp {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "claude-migrate-{name}-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        // A process-wide counter keeps every call unique, independent of clock
+        // resolution: macOS `SystemTime` has microsecond resolution, so two parallel
+        // tests that use the same name can otherwise get the same directory.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path =
+            std::env::temp_dir().join(format!("claude-migrate-{name}-{n}-{}", std::process::id(),));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
