@@ -41,6 +41,7 @@
 | `tui-context-grid.md` | decided（依赖 tui-context-command） | 0035、0029、0015、0018 | `/context` 网格视图�原型 B）：10×20 格 `◼`/`◻`/`▨`，右侧图例，类别色是主题角色，下面明细 |
 | `tui-loop-continuation.md` | decided | 0011、0005、0037、0027、0023、0017 | 续跑引擎第一、二步：`/loop [--every] [--times] [--for] [prompt]` 轮末重投，`User` 来源 + meta，缺省上限 20 次/1 h，不计唤醒闸门 |
 | `goal-mode.md` | decided（依赖 tui-loop-continuation） | 新 ADR；0018、0036、0011、0005、0043、0037、0034、0006、0022 | `/goal` 持久目标 + `goal {progress\|done\|wait}` 工具 + 预算；目标块确定性注入不进摘要；resume 后 paused；`exec -p --goal` 待决 |
+| `grep-multi-path.md` | decided | 0039、0043、0037 | grep/glob 底层支持多起点；`path` 整串不存在且含空白时按空白拆开、每段都搜并合并（共用上限、去重）；拆了仍不成立就报错并提示一次一个路径；schema 与描述不变 |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
