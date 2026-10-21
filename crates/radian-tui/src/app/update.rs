@@ -274,6 +274,9 @@ impl App {
                 snapshot,
             } => self.inspector_opened(requested, snapshot),
             Input::InspectorRefreshed(snapshot) => self.inspector_refreshed(snapshot),
+            Input::BtwKey(key) => self.btw_key(key),
+            Input::SideDelta(delta) => self.side_delta(delta),
+            Input::SideDone(outcome) => self.side_done(outcome),
             // The `/login` wizard's keys, its verification result, and the save/removal
             // results (ADR 0026 D3).
             Input::LoginKey(key) => {
@@ -494,6 +497,18 @@ impl App {
                 // goes to it, and `Esc` closes it. Typing never falls through to the
                 // composer while it is open.
                 Layer::Overlay(Overlay::Inspector(_)) => Step::Input(Input::InspectorKey(*key)),
+                // The `/btw` overlay owns Esc (cancel a running request, else close)
+                // and the scroll keys; every other key falls through, so the composer
+                // stays usable while the side answer streams — and a second `/btw`
+                // submitted while one runs reaches `run_btw`, which refuses it.
+                Layer::Overlay(Overlay::Btw(_)) => match key.code {
+                    KeyCode::Esc
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown => Step::Input(Input::BtwKey(*key)),
+                    _ => Step::Pass,
+                },
                 Layer::Surface => {
                     if let Some(found) = action {
                         Step::Input(Input::Action(found))

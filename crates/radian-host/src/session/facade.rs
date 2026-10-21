@@ -128,6 +128,22 @@ pub trait SessionFacade: Send + Sync {
     /// or the driver, so it works mid-turn. The history is the journal's
     /// committed view (live deltas excluded).
     fn context_report(&self) -> Vec<String>;
+
+    /// The next formal request's shape (backlog `tui-btw-side-question`): the
+    /// system prompt the hook chain would build, the committed history, the
+    /// tool specs, and `Null` settings. Read-only like [`SessionFacade::context_report`],
+    /// so it works mid-turn. `/btw` appends one trailing user message and sends it.
+    fn next_request_shape(&self) -> Result<agent_core::ModelRequest, String>;
+
+    /// Runs one side question (`/btw`) through the session's current model and
+    /// streams it to `sink`: nothing is written to the transcript or journal,
+    /// no tool runs, no usage is recorded, and a failure never ends a turn.
+    /// The returned handle cancels the request (Esc).
+    fn start_side_question(
+        &self,
+        question: String,
+        sink: std::sync::Arc<dyn crate::btw::SideSink>,
+    ) -> Result<crate::btw::SideCancel, String>;
 }
 
 /// How the driver task ended.

@@ -19,37 +19,39 @@ pub const HELP: &str = "\
                        repeat the prompt every turn until --times/--for (default 20 turns or
                        1h); a bare /loop toggles; --every waits between turns
 /copy [code]          copy the last assistant message (or its last code block)
-/compact [note]       summarize the history now and keep the recent part (ADR 0018)
+/compact [note]       summarize the history now and keep the recent part
 /sessions [query]     list this workspace's recent sessions, or search their text
-/fork                 fork this session at its last turn boundary (ADR 0022)
+/fork                 fork this session at its last turn boundary
 /new                  start a new session here; the old session stays resumable
 /theme <name>         switch the color theme and write it back to the config file
 /model <provider>/<model>
-                      switch the model at the next turn boundary (ADR 0026 D5)
-/thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
-/usage                show the current provider's usage, one line per window (ADR 0027)
-/context              show the next request's estimated size by category (ADR 0015)
-/auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
+                      switch the model at the next turn boundary
+/thinking <level>     set the thinking level (off…max); unsupported levels clamp to what the model supports
+/usage                show the current provider's usage, one line per window
+/context              show the next request's estimated size by category
+/btw [question]       ask about the current context without touching the transcript;
+                      `/btw` alone reopens the last side answer
+/auto on|off          auto-approve tool asks for this session
 /yolo                 alias of /auto
 /access [workspace|full]
-                      show or switch the permission tier (ADR 0038); the switch takes effect
+                      show or switch the permission tier; the switch takes effect
                       at the next tool call, and `full` asks for confirmation
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
                       forget, purge, confirm, export, import, project, relink, split, merge
-/skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
+/skill:<name> [args]  run a skill: read its body into the message
 /skills               list the discovered skills
-/jobs                 open the inspector's jobs page (list) or stop one/all (ADR 0037)
+/jobs                 open the inspector's jobs page (list) or stop one/all
 /tools                open the inspector's tools page
 /mcp                  open the inspector's mcp page
 /hooks                open the inspector's hooks page
 /panel                open the inspector on the last page
-/login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
+/login [provider]     store an API key in credentials/auth.json; custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
 //…                   send a message that starts with `/`
-!<command>            run a shell command in the sandbox (ADR 0033); `!!` keeps its output
+!<command>            run a shell command in the sandbox; `!!` keeps its output
                       out of the model's context
 Ask about radian itself in plain words to read the built in manual";
 
@@ -156,6 +158,10 @@ pub enum Outcome {
     /// category, plus the reported line, the message count and the compactions. Read-only;
     /// the loop reads it from the facade, so it works mid-turn.
     Context,
+    /// `/btw [question]` (backlog `tui-btw-side-question`): a side question answered only
+    /// from the current context, streamed into an overlay. `Some` is the question;
+    /// `None` reopens the last side answer. Parsing only: running it is the loop's job.
+    Btw(Option<String>),
     /// `/login [provider]`: open the credential wizard. `Some(id)` skips the provider
     /// choice (a built-in id or `custom`); `None` starts at the choice.
     Login(Option<String>),
@@ -298,7 +304,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "compact",
-            description: "summarize the history now and keep the recent part (ADR 0018)",
+            description: "summarize the history now and keep the recent part",
             levels: &[free_level],
         },
         Command {
@@ -308,7 +314,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "fork",
-            description: "fork this session at its last turn boundary (ADR 0022)",
+            description: "fork this session at its last turn boundary",
             levels: &[],
         },
         Command {
@@ -323,27 +329,32 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "model",
-            description: "switch the model at the next turn boundary (ADR 0026 D5)",
+            description: "switch the model at the next turn boundary",
             levels: &[model_route_level],
         },
         Command {
             name: "thinking",
-            description: "set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)",
+            description: "set the thinking level (off…max); unsupported levels clamp to what the model supports",
             levels: &[thinking_level_level],
         },
         Command {
             name: "usage",
-            description: "show the current provider's usage, one line per window (ADR 0027)",
+            description: "show the current provider's usage, one line per window",
             levels: &[],
         },
         Command {
             name: "context",
-            description: "show the next request's estimated size by category (ADR 0015)",
+            description: "show the next request's estimated size by category",
             levels: &[],
         },
         Command {
+            name: "btw",
+            description: "ask about the current context without touching the transcript",
+            levels: &[free_level],
+        },
+        Command {
             name: "auto",
-            description: "auto-approve tool asks for this session (ADR 0026 D9)",
+            description: "auto-approve tool asks for this session",
             levels: &[auto_level],
         },
         Command {
@@ -353,7 +364,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "access",
-            description: "show or switch the permission tier (ADR 0038)",
+            description: "show or switch the permission tier",
             levels: &[access_level],
         },
         Command {
@@ -378,7 +389,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "login",
-            description: "store an API key in credentials/auth.json (ADR 0026 D3); custom \
+            description: "store an API key in credentials/auth.json; custom \
                           names a new endpoint",
             levels: &[login_level],
         },
@@ -1081,6 +1092,9 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/usage") => Outcome::Notices(vec!["usage: /usage (no arguments)".to_owned()]),
         Some("/context") if tokens.len() == 1 => Outcome::Context,
         Some("/context") => Outcome::Notices(vec!["usage: /context (no arguments)".to_owned()]),
+        // `/btw [question]`: the question is the raw remainder (quotes survive, like
+        // `/skill:`'s args); empty reopens the last side answer.
+        Some("/btw") => Outcome::Btw(btw_question(line)),
         Some("/model") => match model_switch(&tokens[1..]) {
             Ok(switch) => Outcome::Model(switch),
             Err(usage) => Outcome::Notices(vec![usage]),
@@ -1422,6 +1436,17 @@ fn copy_request(args: &[String]) -> Outcome {
     }
 }
 
+/// `/btw [question]`: the raw remainder of the line, verbatim (so quotes survive). `None`
+/// reopens the last side answer.
+fn btw_question(line: &str) -> Option<String> {
+    let rest = line
+        .trim()
+        .split_once(char::is_whitespace)
+        .map(|(_, rest)| rest.trim().to_owned())
+        .unwrap_or_default();
+    (!rest.is_empty()).then_some(rest)
+}
+
 fn memory_command(args: &[String], memory_enabled: bool) -> Outcome {
     if !memory_enabled {
         return Outcome::Notices(vec![
@@ -1482,6 +1507,42 @@ mod tests {
                 }
                 other => panic!("expected usage for {empty:?}, got {other:?}"),
             }
+        }
+    }
+
+    /// User-facing slash text never names an ADR: the `/help` table, every slash
+    /// command's description, the `/memory --help` text and the `/login` provider
+    /// choices.
+    /// Mutation: put `(ADR 0018)` back into one description → this fails.
+    #[test]
+    fn slash_help_and_descriptions_name_no_adr() {
+        assert!(!HELP.contains("ADR"), "/help names an ADR:\n{HELP}");
+        for command in tree() {
+            assert!(
+                !command.description.contains("ADR"),
+                "/{} names an ADR: {}",
+                command.name,
+                command.description
+            );
+        }
+        // `/memory --help` is clap's rendered error text, shown as-is.
+        let error = radian_host::memory::commands::parse_args(&["--help".to_owned()]).unwrap_err();
+        assert!(
+            !error.to_string().contains("ADR"),
+            "/memory --help names an ADR: {error}"
+        );
+        // The `/login` picker and `radian login`'s numbered list share this text.
+        for (_, description) in radian_host::login_choices() {
+            assert!(
+                !description.contains("ADR"),
+                "a login choice names an ADR: {description}"
+            );
+        }
+        for (_, description) in crate::login::LoginWizard::choices() {
+            assert!(
+                !description.contains("ADR"),
+                "a login choice names an ADR: {description}"
+            );
         }
     }
 
@@ -1831,6 +1892,30 @@ mod tests {
         assert!(HELP.contains("/usage"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "usage"));
         assert!(tree().iter().any(|command| command.name == "context"));
+    }
+
+    /// `/btw [question]` parses to the side question with the raw remainder, verbatim
+    /// (quotes survive); empty reopens the last side answer. It is a command, and it
+    /// is in `/help`.
+    #[test]
+    fn btw_parses_its_question_or_reopens() {
+        match parse("/btw what file was that", false) {
+            Outcome::Btw(Some(question)) => assert_eq!(question, "what file was that"),
+            other => panic!("expected the side question, got {other:?}"),
+        }
+        // The remainder is raw, like `/skill:`'s args: quotes survive shlex.
+        match parse("/btw say \"hi there\"", false) {
+            Outcome::Btw(Some(question)) => assert_eq!(question, "say \"hi there\""),
+            other => panic!("expected the raw question, got {other:?}"),
+        }
+        for line in ["/btw", "/btw   "] {
+            match parse(line, false) {
+                Outcome::Btw(None) => {}
+                other => panic!("{line:?}: expected a reopen, got {other:?}"),
+            }
+        }
+        assert!(HELP.contains("/btw"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "btw"));
     }
 
     /// `/context` takes no argument, is a command, and is in `/help`; anything

@@ -201,6 +201,7 @@ pub(super) fn ui_loop(
             bell_rang: false,
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,
+            side_cancel: None,
             usage_gate,
             chatgpt_usage_gate,
             herdr: herdr.take(),
@@ -221,6 +222,9 @@ pub(super) fn ui_loop(
     // The last spinner frame drawn (ADR 0027): the idle tick redraws only when the
     // frame changes, so the pulse (500 ms) does not draw on every 250 ms wake.
     let mut last_spinner: Option<radian_tui::spinner::Frame> = None;
+    // The last `jobs` age text drawn (ADR 0023 U2): the idle tick redraws only when the text
+    // changes, so a running job does not draw on every wake.
+    let mut last_jobs: Option<String> = None;
     // An effect batch the draw-fairness cap did not finish: declared outside the loop so the
     // rest survives to the next turn (never dropped, order kept).
     let mut effects: Vec<Effect> = Vec::new();
@@ -337,7 +341,11 @@ pub(super) fn ui_loop(
                 // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
                 // while the app is idle. A timeout with the tty alive loops without drawing. The
                 // spinner shortens it to its own frame interval while one is visible (ADR 0027
-                // revision 13), which is what makes the breath turn at its step.
+                // revision 13), which is what makes the breath turn at its step; running
+                // background jobs shown in the footer shorten it toward the next age-text
+                // change, never past the hang-up tick (ADR 0023 U2), so the `jobs` age ticks
+                // while idle.
+                app.set_now(std::time::Instant::now());
                 match rx.recv_timeout(wait_for_an_event(app)) {
                     Ok(event) => Some(event),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -345,9 +353,14 @@ pub(super) fn ui_loop(
                             app.quit = true;
                             break;
                         }
+                        app.set_now(std::time::Instant::now());
                         if spinner_tick(app, &mut last_spinner).is_some()
                             && !draw_frame(terminal, app)?
                         {
+                            app.quit = true;
+                            break;
+                        }
+                        if jobs_tick(app, &mut last_jobs).is_some() && !draw_frame(terminal, app)? {
                             app.quit = true;
                             break;
                         }

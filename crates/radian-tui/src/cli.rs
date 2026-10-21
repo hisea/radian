@@ -73,7 +73,7 @@ struct Cli {
     // The TUI's own setup flags come first: the default mode is the full-screen TUI, and the
     // `--help` groups read in the order the owner asked for (TUI, session, model, mcp,
     // permissions).
-    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
+    /// The configuration file. Overrides `RADIAN_CONFIG` and
     /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
     #[arg(help_heading = "TUI", long, value_name = "FILE")]
     config: Option<PathBuf>,
@@ -117,7 +117,7 @@ struct Cli {
     header: Vec<String>,
 
     /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then `~/.radian/sessions`
-    /// (`$RADIAN_HOME/sessions` when that is set, ADR 0020). The same rule as `agent-cli`.
+    /// (`$RADIAN_HOME/sessions` when that is set). The same rule as `agent-cli`.
     #[arg(help_heading = "Session", long, value_name = "DIR")]
     session_dir: Option<PathBuf>,
 
@@ -148,20 +148,20 @@ struct Cli {
 
     /// A JSON file listing MCP stdio servers to start (`{"servers": [...]}`), the same format
     /// `agent-cli` reads. Under `workspace` their tools ask before running and the
-    /// servers themselves are **not** sandboxed (ADR 0012 option B).
+    /// servers themselves are **not** sandboxed.
     #[arg(help_heading = "MCP", long, value_name = "FILE")]
     mcp_config: Option<String>,
 
-    /// The permission tier (ADR 0016): `workspace` (sandboxed: writes confined to the workspace,
-    /// `shell` sandboxed, network on), or `full` (the default since ADR 0043: explicitly
+    /// The permission tier: `workspace` (sandboxed: writes confined to the workspace,
+    /// `shell` sandboxed, network on), or `full` (the default:
     /// unsandboxed, no built-in prompts). A project's `.radian/config.toml` may narrow it,
     /// and the config file's `permissions.profile` is tried in between.
     #[arg(help_heading = "Permissions", long, value_name = "TIER")]
     profile: Option<String>,
 
-    /// How `ask` is resolved (ADR 0012's ApprovalPolicy): `on-ask` asks when a rule says so,
+    /// How `ask` is resolved: `on-ask` asks when a rule says so,
     /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial,
-    /// `auto` answers every `ask` with "allow" (ADR 0026 D9). Omit to fall back to the
+    /// `auto` answers every `ask` with "allow". Omit to fall back to the
     /// config's `[permissions] approval`, then the session's journaled state, then `on-ask`.
     #[arg(help_heading = "Permissions", long, value_name = "POLICY")]
     approval: Option<String>,
@@ -189,8 +189,8 @@ struct Cli {
     )]
     allow_shell_command: Vec<String>,
 
-    /// The model's context window in tokens (ADR 0015). Omitted, the models.dev catalog is
-    /// consulted for `(provider, model)` (ADR 0018); an explicit value always wins. With
+    /// The model's context window in tokens. Omitted, the models.dev catalog is
+    /// consulted for `(provider, model)`; an explicit value always wins. With
     /// neither, the budget is off and the status bar says so.
     #[arg(help_heading = "Model", long, value_name = "TOKENS")]
     context_window: Option<u64>,
@@ -205,16 +205,16 @@ struct Cli {
     catalog_provider: Option<String>,
 
     /// Turn automatic compaction off. Over the input budget `B` the request is then sent
-    /// unchanged (ADR 0018).
+    /// unchanged.
     #[arg(help_heading = "Model", long)]
     no_auto_compact: bool,
 
     /// Trust this workspace's project resources for **this process only** (never written to
-    /// `trust.json`; ADR 0031 T3).
+    /// `trust.json`).
     #[arg(help_heading = "Permissions", long, conflicts_with = "no_trust")]
     trust: bool,
 
-    /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
+    /// Do not trust this workspace's project resources for this process only.
     #[arg(help_heading = "Permissions", long)]
     no_trust: bool,
 
@@ -266,7 +266,7 @@ struct Cli {
     #[arg(long, hide = true, value_name = "COUNT")]
     flood_facts: Option<u64>,
 
-    /// A non-TUI mode (ADR 0032): `radian exec …` is today's `agent` command, the management
+    /// A non-TUI mode: `radian exec …` is today's `agent` command, the management
     /// commands (`radian memory`/`login`/`config`) run the same library dispatch. Absent: the
     /// full-screen TUI, which is what `radian` has always been.
     #[command(subcommand)]
@@ -289,7 +289,7 @@ struct Cli {
     exit_line_filler: Option<usize>,
 }
 
-/// The subcommands that are not the TUI (ADR 0032). `exec` is today's `agent` command, run
+/// The subcommands that are not the TUI. `exec` is today's `agent` command, run
 /// through the `agent-cli` library so the two entries cannot drift; the management commands
 /// follow in the same shape.
 #[derive(clap::Subcommand, Debug)]
@@ -311,7 +311,7 @@ enum RadianCommand {
         args: Vec<String>,
     },
 
-    /// Store an API key for a provider (ADR 0026 D3). The same code `radian exec login` runs.
+    /// Store an API key for a provider. The same code `radian exec login` runs.
     Login {
         /// A built-in provider id, or `custom` to name a new endpoint. Omitted: a numbered
         /// list is shown.
@@ -322,7 +322,7 @@ enum RadianCommand {
         /// The provider id the key is stored under.
         provider: String,
     },
-    /// Manage durable memory (ADR 0021 D7): the same grammar as `radian exec memory` and the
+    /// Manage durable memory: the same grammar as `radian exec memory` and the
     /// TUI's `/memory`.
     Memory {
         /// The workspace project memory is resolved against, like `radian exec --workspace`.
@@ -331,21 +331,21 @@ enum RadianCommand {
         #[command(subcommand)]
         command: radian_host::memory::commands::MemoryCommand,
     },
-    /// Configuration tools (ADR 0008): `radian config import-pi …`, the same code
+    /// Configuration tools: `radian config import-pi …`, the same code
     /// `radian exec config` runs.
     Config {
         #[command(subcommand)]
         command: agent_cli::ConfigCommand,
     },
 
-    /// Theme tools (ADR 0029): `radian theme import <pi-theme.json>`
+    /// Theme tools: `radian theme import <pi-theme.json>`
     /// converts a pi theme to a Radian TOML theme under `~/.radian/themes/`.
     Theme {
         #[command(subcommand)]
         command: ThemeCommand,
     },
 
-    /// Footer tools (ADR 0027): `radian footer export <preset>`
+    /// Footer tools: `radian footer export <preset>`
     /// prints a built-in preset's TOML exactly, so a user can copy and edit it.
     Footer {
         #[command(subcommand)]
@@ -361,7 +361,7 @@ enum RadianCommand {
         topic: Option<String>,
     },
 
-    /// View another session read-only (ADR 0043): its committed transcript, rendered
+    /// View another session read-only: its committed transcript, rendered
     /// with the same blocks a `--resume` uses. No input reaches the session, no socket is
     /// opened, and nothing is written.
     Attach {
@@ -389,7 +389,7 @@ enum RadianCommand {
     Mcp,
 }
 
-/// The `radian footer` subcommands (ADR 0027).
+/// The `radian footer` subcommands.
 #[derive(clap::Subcommand, Debug)]
 enum FooterCommand {
     /// Print a built-in preset's TOML exactly (`deck`/`full`/`pi`/`classic`): using it as
@@ -402,7 +402,7 @@ enum FooterCommand {
     },
 }
 
-/// The `radian theme` subcommands (ADR 0029).
+/// The `radian theme` subcommands.
 #[derive(clap::Subcommand, Debug)]
 enum ThemeCommand {
     /// Convert a pi theme JSON to a Radian TOML theme under `~/.radian/themes/`.
@@ -1400,6 +1400,27 @@ mod tests {
         let cli =
             Cli::try_parse_from(["radian", "--model", "m", "--max-model-calls", "5"]).unwrap();
         assert_eq!(cli.max_model_calls, 5);
+    }
+
+    /// User-facing `--help` text never names an ADR: render `radian --help` and every
+    /// subcommand's help and assert none contains `ADR`.
+    /// Mutation: put `(ADR 0008)` back into one help string → this fails.
+    #[test]
+    fn help_text_names_no_adr() {
+        use clap::CommandFactory;
+        fn collect(command: &clap::Command, out: &mut Vec<String>) {
+            let mut command = command.clone();
+            out.push(command.render_long_help().to_string());
+            for sub in command.get_subcommands() {
+                collect(sub, out);
+            }
+        }
+        let mut pages = Vec::new();
+        collect(&Cli::command(), &mut pages);
+        assert!(pages.len() > 4, "the tree has a root and subcommands");
+        for page in &pages {
+            assert!(!page.contains("ADR"), "help names an ADR:\n{page}");
+        }
     }
 
     /// The short aliases shorthand") are the long flags: each

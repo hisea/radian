@@ -135,6 +135,10 @@ pub enum EventData {
         /// Whether the input is a wake-gate degrade (ADR 0006 §5.5). Absent in an old
         /// file; the reader defaults it to `false`.
         degraded: bool,
+        /// Whether this `next_step` entry opens the next turn when it is still queued at
+        /// the turn boundary (ADR 0011). Absent in an old file; the reader
+        /// defaults it to `false`.
+        pending_wake: bool,
     },
     InputClaimed {
         message_ids: Vec<MessageId>,
@@ -728,6 +732,7 @@ impl LineScanner {
                     // `next_step` entry waits).
                     wake: d.wake.unwrap_or(d.lane == InboxLane::NextTurn),
                     degraded: d.degraded,
+                    pending_wake: d.pending_wake,
                 }
             }
             "InputClaimed" => {
@@ -1176,6 +1181,10 @@ struct InboxEnqueuedData {
     /// A wake-gate degrade (ADR 0006 §5.5): optional on disk, absent is `false`.
     #[serde(default)]
     degraded: bool,
+    /// A pending wake (ADR 0011 / ADR 0006 §5.5): optional on disk, absent
+    /// is `false`.
+    #[serde(default)]
+    pending_wake: bool,
 }
 
 #[derive(Deserialize)]

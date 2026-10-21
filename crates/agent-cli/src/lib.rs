@@ -75,7 +75,7 @@ pub struct Cli {
     #[arg(long, value_name = "URL")]
     base_url: Option<String>,
 
-    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
+    /// The configuration file. Overrides `RADIAN_CONFIG` and
     /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
@@ -116,7 +116,7 @@ pub struct Cli {
     workspace: Option<String>,
 
     /// Permission profile: `workspace` (sandboxed: writes confined to the workspace,
-    /// `shell` sandboxed, network on), or `full` (the default since ADR 0043: explicitly
+    /// `shell` sandboxed, network on), or `full` (the default: explicitly
     /// unsandboxed). A project's `.radian/config.toml` can narrow the result but never widen it.
     #[arg(long, value_name = "PROFILE")]
     profile: Option<profile::ProfileArg>,
@@ -129,7 +129,7 @@ pub struct Cli {
     #[arg(long = "allow-shell-command", value_name = "PREFIX")]
     allow_shell_command: Vec<String>,
 
-    /// How `ask` is resolved (ADR 0012, ADR 0026 D9): `on-ask` asks when a rule says so,
+    /// How `ask` is resolved: `on-ask` asks when a rule says so,
     /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial,
     /// `auto` answers every `ask` with "allow" — deny rules still deny and the sandbox
     /// still applies; only the question is removed. Omit to fall back to the config's
@@ -137,7 +137,7 @@ pub struct Cli {
     #[arg(long, value_name = "POLICY")]
     approval: Option<String>,
 
-    /// Approve every tool call without asking: shorthand for `--approval auto` (ADR 0026 D9).
+    /// Approve every tool call without asking: shorthand for `--approval auto`.
     #[arg(long)]
     yes: bool,
 
@@ -154,7 +154,7 @@ pub struct Cli {
 
     /// Extra request headers, repeatable: `--header NAME=VALUE`. The value is never
     /// printed; `Authorization` is refused because the key comes only from
-    /// `~/.radian/credentials/auth.json` (ADR 0026 D2).
+    /// `~/.radian/credentials/auth.json`.
     /// A value may contain `{session_id}`, which expands to this process's session id.
     #[arg(long = "header", value_name = "NAME=VALUE")]
     header: Vec<String>,
@@ -195,7 +195,7 @@ pub struct Cli {
     )]
     search: Option<String>,
 
-    /// Fork a session (ADR 0022): create a new session whose initial history is the parent's
+    /// Fork a session: create a new session whose initial history is the parent's
     /// effective history at a turn boundary. Needs no model and reads no key.
     #[arg(
         long,
@@ -208,7 +208,7 @@ pub struct Cli {
     #[arg(long, value_name = "SEQ", requires = "fork")]
     at: Option<u64>,
 
-    /// A mode of its own: `radian memory …` (ADR 0021) or `radian config …` (ADR 0008).
+    /// A mode of its own: `radian memory …` or `radian config …`.
     /// Neither
     /// needs `--model`, reads a key, creates a session file or touches the network. Memory is
     /// shared across sessions and resolved per project (a git repository, shared by its
@@ -228,11 +228,11 @@ pub struct Cli {
     #[arg(long, requires = "out")]
     force: bool,
 
-    /// Include the assistant reasoning in the export. Off by default (ADR 0014).
+    /// Include the assistant reasoning in the export. Off by default.
     #[arg(long, requires = "export")]
     include_reasoning: bool,
 
-    /// Include the raw provider payloads in the export. Off by default (ADR 0013).
+    /// Include the raw provider payloads in the export. Off by default.
     #[arg(long, requires = "export")]
     include_provider_payload: bool,
 
@@ -261,8 +261,8 @@ pub struct Cli {
     turn_timeout_secs: Option<u64>,
 
     /// The model's context window in tokens. Omitted, the models.dev catalog is consulted
-    /// for `(provider, model)` (ADR 0018); an explicit value always wins. With neither, the
-    /// budget is off and no number is guessed (ADR 0018).
+    /// for `(provider, model)`; an explicit value always wins. With neither, the
+    /// budget is off and no number is guessed.
     #[arg(long, value_name = "TOKENS")]
     context_window: Option<u64>,
 
@@ -276,16 +276,16 @@ pub struct Cli {
     catalog_provider: Option<String>,
 
     /// Turn automatic compaction off. Over the input budget `B` the request is then sent
-    /// unchanged (ADR 0018).
+    /// unchanged.
     #[arg(long)]
     no_auto_compact: bool,
 
     /// Trust this workspace's project resources for **this process only** (never written to
-    /// `trust.json`; ADR 0031 T3).
+    /// `trust.json`).
     #[arg(long, conflicts_with = "no_trust")]
     trust: bool,
 
-    /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
+    /// Do not trust this workspace's project resources for this process only.
     #[arg(long)]
     no_trust: bool,
 
@@ -433,7 +433,7 @@ pub async fn run(mut cli: Cli, child_headers: Result<Vec<String>, String>) -> i3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     /// decision 2026-10-17: `radian exec`'s per-turn model call limit defaults to the
     /// value both hosts share (1000), **not** agent-core's own `DEFAULT_MAX_MODEL_CALLS` (32).
@@ -452,5 +452,25 @@ mod tests {
         let explicit =
             Cli::try_parse_from(["radian exec", "--model", "m", "--max-model-calls", "5"]).unwrap();
         assert_eq!(explicit.max_model_calls, 5);
+    }
+
+    /// User-facing `--help` text never names an ADR: render `radian exec --help` and
+    /// every subcommand's help and assert none contains `ADR`.
+    /// Mutation: put `(ADR 0008)` back into one help string → this fails.
+    #[test]
+    fn help_text_names_no_adr() {
+        fn collect(command: &clap::Command, out: &mut Vec<String>) {
+            let mut command = command.clone();
+            out.push(command.render_long_help().to_string());
+            for sub in command.get_subcommands() {
+                collect(sub, out);
+            }
+        }
+        let mut pages = Vec::new();
+        collect(&Cli::command(), &mut pages);
+        assert!(pages.len() > 4, "the tree has a root and subcommands");
+        for page in &pages {
+            assert!(!page.contains("ADR"), "help names an ADR:\n{page}");
+        }
     }
 }

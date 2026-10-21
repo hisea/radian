@@ -1,4 +1,4 @@
-# The `full` preset (ADR 0027): the identity row and the numbers row.
+# The `full` preset: the identity row and the numbers row.
 #
 # `full` includes `jobs` (this session's running background jobs and the
 # oldest one's age; empty while none runs, so it takes no space); the other presets do not.

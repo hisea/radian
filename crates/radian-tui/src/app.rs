@@ -46,6 +46,7 @@ use crate::theme::Theme;
 
 mod approval;
 mod bash;
+mod btw;
 mod commands;
 mod composer;
 mod config;
@@ -107,6 +108,8 @@ pub enum Effect {
     Steer(Message),
     /// Cancel the running turn.
     Cancel,
+    /// Cancel the in-flight `/btw` side question (Esc on its overlay).
+    CancelSideQuestion,
     /// Leave the app.
     Quit,
     /// Answer the pending request `request_id` (ADR 0023 U7). The loop runs it through the
@@ -205,6 +208,12 @@ pub enum Effect {
     /// category. The loop reads it from the facade (journal + stored layers, no inbox, no
     /// driver) and answers with [`Input::SessionDone`], so it works mid-turn.
     Context,
+    /// Ask a side question (`/btw`, backlog `tui-btw-side-question`): the loop sends it
+    /// through the session's current model and streams the answer back as
+    /// [`Input::SideDelta`]/[`Input::SideDone`]. Nothing lands in the transcript.
+    SideQuestion { question: String },
+    /// Cancel the in-flight side question (Esc). The loop drops its cancel handle;
+    /// the late [`Input::SideDone`] is ignored.
     /// `/jobs` (ADR 0037 decision 4): list the running background jobs, or stop one/all. The
     /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
     Jobs(command::JobsRequest),
@@ -261,6 +270,7 @@ impl PartialEq for Effect {
         match (self, other) {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
             (Cancel, Cancel) | (Quit, Quit) => true,
+            (CancelSideQuestion, CancelSideQuestion) => true,
             (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
             (
                 SetAccess {
@@ -352,6 +362,7 @@ impl PartialEq for Effect {
             ) => an == bn && aa == ba && as_ == bs,
             (ListSkills, ListSkills) => true,
             (Jobs(a), Jobs(b)) => a == b,
+            (SideQuestion { question: a }, SideQuestion { question: b }) => a == b,
             (OpenInspector { page: a }, OpenInspector { page: b }) => a == b,
             (RefreshInspector, RefreshInspector) => true,
             (Theme { name: a }, Theme { name: b }) => a == b,
@@ -508,8 +519,9 @@ pub struct SessionView {
     running_tools: Vec<(String, String)>,
     /// This session's running background jobs, in start order (ADR 0027 slice ③
     /// item 5): the footer's `jobs` item reads them. A `BackgroundJobStarted` runtime event
-    /// appends with the loop's clock, its settle removes; the age ticks with the existing
-    /// footer refresh (a contributor tick redraws), so no new timer exists for it.
+    /// appends with the loop's clock, its settle removes; while any runs and the footer shows
+    /// the `jobs` item, the idle loop waits the sooner of the hang-up tick and the next
+    /// age-text change (ADR 0023 U2), so the age ticks with no other timer.
     pub(crate) running_jobs: Vec<RunningJob>,
     /// The `next_turn` inputs this process sent that the runtime has not admitted yet: one
     /// entry per `InboxEnqueued` without a matching `InputAdmitted`, by message id. The
@@ -568,6 +580,13 @@ pub struct SessionView {
     pub bash_running: Option<String>,
     /// A `!`/`!!` command submitted while a turn was running: it starts when the turn ends.
     pub queued_bash: Option<(String, bool)>,
+    /// A `/btw` side question is in flight (backlog `tui-btw-side-question`): the
+    /// overlay streams it. At most one runs at a time; a second `/btw` is refused
+    /// with a notice.
+    pub(crate) btw_in_flight: bool,
+    /// The last finished side answer, for `/btw` alone to reopen. In-memory only;
+    /// the process exit drops it.
+    pub(crate) btw_last: Option<crate::btw::BtwAnswer>,
     /// Whether this session has a shell (`!`) at all: false when no `shell` is mounted.
     pub bash_available: bool,
     /// The exact `Ran \`cmd\`` text we displayed live as a [`EntryKind::Bash`] block for a `!`

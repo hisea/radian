@@ -143,7 +143,7 @@ impl LoginWizard {
         ));
         choices.push((
             CUSTOM.to_owned(),
-            "a custom endpoint: name, protocol, base URL and key (ADR 0026 D10)".to_owned(),
+            "a custom endpoint: name, protocol, base URL and key".to_owned(),
         ));
         choices
     }

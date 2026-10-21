@@ -324,9 +324,11 @@ impl SessionFactsHooks {
         }
     }
 
-    /// The section as it stands now: recomputed when the model route or the thinking level
-    /// changed, byte-identical otherwise (ADR 0036 and 2).
-    fn section(&self) -> String {
+    /// The section as it stands now: recomputed when the model route or the
+    /// thinking level changed, byte-identical otherwise (ADR 0036
+    /// decisions 1 and 2). The side-question shape reads it too, so the formal
+    /// and side requests name the same model.
+    pub(crate) fn section(&self) -> String {
         let key = (self.key_source)();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if key != state.key {

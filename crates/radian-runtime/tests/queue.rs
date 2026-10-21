@@ -383,3 +383,177 @@ async fn a_claimed_turn_is_inflight_before_the_claim_returns() {
         "a plain inject is not a turn-opening claim"
     );
 }
+
+// ---------- 6. pending wake (ADR 0011) ----------
+
+/// `claim_next_turn` order: `next_turn` first, then a waking `next_step` entry, then the
+/// oldest pending-wake `next_step` entry. A plain `inject` never opens a turn.
+/// Mutation: `claim_next_turn` ignores the pending flag → the third claim fails.
+#[tokio::test]
+async fn claim_next_turn_prefers_next_turn_then_wake_then_pending_wake() {
+    let inbox = Inbox::new(8);
+    // Enqueued oldest-first: the claim order must still be lane/flag priority, not FIFO.
+    inbox.inject("plain", InputSource::User).await.unwrap();
+    inbox
+        .inject_pending_wake("notice", InputSource::System)
+        .await
+        .unwrap();
+    inbox.steer("steer", InputSource::User).await.unwrap();
+    inbox.followup("task", InputSource::User).await.unwrap();
+
+    let first = inbox.claim_next_turn().await.unwrap();
+    assert_eq!(first.message.text(), "task");
+    assert!(!first.pending_wake);
+    inbox.turn_ended();
+    let second = inbox.claim_next_turn().await.unwrap();
+    assert_eq!(second.message.text(), "steer");
+    assert!(!second.pending_wake);
+    inbox.turn_ended();
+    let third = inbox.claim_next_turn().await.unwrap();
+    assert_eq!(third.message.text(), "notice");
+    assert!(third.pending_wake, "the stranded notice carries its flag");
+    inbox.turn_ended();
+    assert!(
+        inbox.claim_next_turn().await.is_none(),
+        "a plain inject never opens a turn, even with nothing else queued"
+    );
+}
+
+/// The oldest pending-wake entry wins among pending-wake entries.
+#[tokio::test]
+async fn the_oldest_pending_wake_entry_opens_first() {
+    let inbox = Inbox::new(8);
+    inbox
+        .inject_pending_wake("first", InputSource::System)
+        .await
+        .unwrap();
+    inbox
+        .inject_pending_wake("second", InputSource::System)
+        .await
+        .unwrap();
+    assert_eq!(
+        inbox.claim_next_turn().await.unwrap().message.text(),
+        "first"
+    );
+    inbox.turn_ended();
+    assert_eq!(
+        inbox.claim_next_turn().await.unwrap().message.text(),
+        "second",
+        "the next claim takes the next pending-wake entry"
+    );
+    inbox.turn_ended();
+    assert!(inbox.claim_next_turn().await.is_none());
+}
+
+/// The promotion signal fires exactly once per pending-wake entry claimed to open a
+/// turn: not for a plain `inject`, not for a `steer`, and not when the entry is absorbed
+/// mid-turn through `claim_next_step`.
+#[tokio::test]
+async fn the_pending_wake_callback_fires_only_for_a_promoted_open() {
+    use std::sync::Mutex;
+    let inbox = Inbox::new(8);
+    let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let fired_in = Arc::clone(&fired);
+    inbox.set_pending_wake_callback(Some(Arc::new(move |id: MessageId| {
+        fired_in.lock().unwrap().push(id.0.clone());
+    })));
+
+    let notice = inbox
+        .inject_pending_wake("notice", InputSource::System)
+        .await
+        .unwrap();
+    inbox.inject("plain", InputSource::User).await.unwrap();
+    inbox.steer("steer", InputSource::User).await.unwrap();
+    // The steer opens first (flag priority); the callback stays silent for it.
+    inbox.claim_next_turn().await.unwrap();
+    inbox.turn_ended();
+    assert!(fired.lock().unwrap().is_empty());
+    // The pending-wake notice opens next: exactly one firing, with its id.
+    inbox.claim_next_turn().await.unwrap();
+    inbox.turn_ended();
+    assert_eq!(*fired.lock().unwrap(), vec![notice.0.clone()]);
+    // A pending-wake entry absorbed mid-turn never fires. (`plain` is still queued
+    // ahead of it, so the step lane is drained first.)
+    let absorbed = inbox
+        .inject_pending_wake("absorbed", InputSource::System)
+        .await
+        .unwrap();
+    assert_eq!(
+        inbox.claim_next_step().await.unwrap().message.text(),
+        "plain"
+    );
+    assert_eq!(inbox.claim_next_step().await.unwrap().id, absorbed);
+    assert!(inbox.claim_next_turn().await.is_none());
+    assert_eq!(
+        *fired.lock().unwrap(),
+        vec![notice.0.clone()],
+        "absorbing {absorbed:?} mid-turn fires nothing"
+    );
+}
+
+/// A pending-wake enqueue notifies the driver (like a steer), so an enqueue that lands
+/// after the driver's last claim still wakes the loop to look; a plain `inject` stays
+/// silent.
+#[tokio::test(start_paused = true)]
+async fn a_pending_wake_enqueue_notifies_while_a_plain_inject_stays_silent() {
+    let inbox = Inbox::new(8);
+    inbox.inject("context", InputSource::System).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), inbox.wake_signal())
+            .await
+            .is_err(),
+        "a plain inject must not wake the driver"
+    );
+    inbox
+        .inject_pending_wake("notice", InputSource::System)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), inbox.wake_signal())
+            .await
+            .is_ok(),
+        "a pending-wake notice wakes the driver to look"
+    );
+}
+
+/// A pending-wake inject records its durable mark (`pending_wake: true`); a plain
+/// `inject` records `false` (an ordinary line stays byte-identical to before).
+#[tokio::test]
+async fn a_pending_wake_inject_marks_its_durable_record() {
+    let dir = TempDir::new("pending-wake");
+    let path = dir.file("s.jsonl");
+    let journal = Arc::new(SessionJournal::create(&path, "sid", created()).unwrap());
+    let inbox = Inbox::durable(8, Arc::clone(&journal));
+
+    inbox.inject("plain", InputSource::System).await.unwrap();
+    inbox
+        .inject_pending_wake("notice", InputSource::System)
+        .await
+        .unwrap();
+
+    // Both wait on the no-wake lane.
+    let lanes: Vec<Lane> = inbox
+        .snapshot()
+        .await
+        .iter()
+        .map(|entry| entry.lane)
+        .collect();
+    assert_eq!(lanes, vec![Lane::NextStep, Lane::NextStep]);
+
+    let session = Session::open(&path).unwrap();
+    let marked: Vec<(String, bool)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::InboxEnqueued {
+                message_id,
+                pending_wake,
+                ..
+            } => Some((message_id.0.clone(), *pending_wake)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marked.len(), 2);
+    assert!(!marked[0].1, "a plain inject carries no pending wake");
+    assert!(marked[1].1, "a pending-wake notice is marked");
+}

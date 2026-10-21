@@ -5,7 +5,7 @@
 
 > Radian does not promise compatibility with Pi's file format. Pi may change its settings,
 > models or keybindings at any time; the draft is a best-effort snapshot that you review and
-> edit. Radian's own schema (ADR 0008) is the authority for what a Radian configuration means.
+> edit. Radian's own schema is the authority for what a Radian configuration means.
 
 ## The command
 
@@ -23,7 +23,7 @@ radian config import-pi --from <pi-agent-dir> --write    # save it, refusing to 
   `RADIAN_CONFIG` names, else `~/.radian/config/config.toml`, writes atomically (temporary file
   + rename) with mode `0600` (directory `0700`), validates the draft with the real reader
   before and after the write, and **refuses an existing file** — this version has no faithful
-  write-back, so it never rewrites a configuration it did not create (ADR 0008 §5.4).
+  write-back, so it never rewrites a configuration it did not create.
 
 ## What is read
 

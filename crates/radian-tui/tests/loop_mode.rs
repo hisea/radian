@@ -62,6 +62,7 @@ fn enqueued(app: &mut App, id: &str, message: Message) {
         source: InputSource::User,
         wake: true,
         degraded: false,
+        pending_wake: false,
     }));
 }
 

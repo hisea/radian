@@ -308,7 +308,15 @@ async fn jobs_quiescent(run: &Run) -> bool {
         .job_notifier()
         .map(|notifier| notifier.settled_handled())
         .unwrap_or(0);
-    let wake_pending = run.inbox.snapshot().await.iter().any(|entry| entry.wake);
+    // A waking entry — or a stranded job notice with a pending wake (ADR 0011 revision
+    // 2) — means a turn is about to open, so `-p` must wait for it instead of exiting
+    // while the notice is still queued.
+    let wake_pending = run
+        .inbox
+        .snapshot()
+        .await
+        .iter()
+        .any(|entry| entry.wake || entry.pending_wake);
     // A core turn in flight: only a turn can start a job or absorb a notice. Both the
     // UI's `busy` (set at `TurnStarted`, cleared at the turn's end event) and the
     // inbox in-flight count count: `busy` alone misses the claim-to-`TurnStarted` gap

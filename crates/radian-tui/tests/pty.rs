@@ -10991,6 +10991,23 @@ impl HerdrSocket {
         }
     }
 
+    /// Waits for a `pane.report_metadata` whose `state_labels[key]` is `value`.
+    fn wait_for_label(&self, key: &str, value: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.snapshot().iter().any(|got| {
+                got["method"] == "pane.report_metadata"
+                    && got["params"]["state_labels"][key] == value
+            }) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Waits for any request of `method`.
     fn wait_for_method(&self, method: &str, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
@@ -11500,6 +11517,164 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
         "the command text must never be sent: {all}"
     );
     pty.quit();
+}
+
+/// The jobs item (decided ): a background job keeps an idle session
+/// `working` with the `jobs` label; the followup turn its settle wakes is plain `working`,
+/// then `idle` again. The command text never leaves the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_working_while_a_job_runs() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("herdr-jobs");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            r#"{"command":"sleep 3","background":true}"#,
+        ),
+        text_reply("TURN1-OK"),
+        text_reply("JOB-DONE-OK"),
+    ])
+    .await;
+    let sock = HerdrSocket::start("jobs");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "herdr-jobs",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "auto",
+        ],
+        &env_refs,
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("idle", wait_positive()),
+        "the startup idle report"
+    );
+    pty.send(b"run it in the background\r");
+    assert!(
+        pty.wait_for_screen("TURN1-OK", wait_positive()),
+        "the first turn did not answer:\n{}",
+        pty.screen()
+    );
+    // The turn ended while the job still sleeps: idle-with-jobs is `working` with the label.
+    assert!(
+        sock.wait_for_label("working", "jobs", wait_positive()),
+        "working with the jobs label after the turn ended: {:?}",
+        sock.snapshot()
+    );
+    // The job settles: its notice wakes a followup turn (plain `working`), then `idle`.
+    assert!(
+        pty.wait_for_screen("JOB-DONE-OK", wait_positive()),
+        "the settle never cycled through a turn:\n{}",
+        pty.screen()
+    );
+    let deadline = Instant::now() + wait_positive();
+    let states = loop {
+        let states: Vec<String> = sock
+            .of_method("pane.report_agent")
+            .iter()
+            .map(|value| {
+                value["params"]["state"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        if states == ["idle", "working", "idle", "working", "idle"] {
+            break states;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the full turn cycle: {states:?}; all: {:?}",
+            sock.snapshot()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(states, ["idle", "working", "idle", "working", "idle"]);
+    assert_eq!(
+        sock.of_method("pane.report_metadata")
+            .iter()
+            .filter(|value| value["params"]["state_labels"]["working"] == "jobs")
+            .count(),
+        1,
+        "the jobs label is sent once, never while a turn runs: {:?}",
+        sock.snapshot()
+    );
+    assert!(
+        !serde_json::to_string(&sock.snapshot())
+            .unwrap()
+            .contains("sleep 3"),
+        "the command text must never be sent"
+    );
+    // Leaving idle-with-jobs clears herdr's labels (it keeps them until cleared): one
+    // metadata with `clear_state_labels`, after the jobs label and before the followup
+    // turn's working — otherwise later turns show `working · jobs`.
+    let log = sock.snapshot();
+    let jobs_at = log
+        .iter()
+        .position(|value| {
+            value["method"] == "pane.report_metadata"
+                && value["params"]["state_labels"]["working"] == "jobs"
+        })
+        .expect("the jobs label");
+    let clears: Vec<usize> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| {
+            value["method"] == "pane.report_metadata"
+                && value["params"]["clear_state_labels"].as_bool() == Some(true)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        clears.len(),
+        1,
+        "leaving idle-with-jobs clears once: {log:?}"
+    );
+    let followup_at = {
+        let mut workings = 0;
+        log.iter()
+            .position(|value| {
+                if value["method"] == "pane.report_agent" && value["params"]["state"] == "working" {
+                    workings += 1;
+                    workings == 2
+                } else {
+                    false
+                }
+            })
+            .expect("the followup turn's working")
+    };
+    assert!(
+        jobs_at < clears[0] && clears[0] < followup_at,
+        "label, then clear, then the followup turn's working: {log:?}"
+    );
+    pty.quit();
+    assert!(
+        sock.wait_for_release(wait_positive()),
+        "a normal exit releases: {:?}",
+        sock.snapshot()
+    );
 }
 
 /// Without `HERDR_ENV=1` nothing is sent at all.
@@ -14586,6 +14761,95 @@ async fn pty_loop_resends_until_times_and_footer_shows_it() {
     assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
 }
 
+/// `/btw` asks from the current context: the side answer streams into an overlay
+/// while the transcript keeps only the formal turn, the mock sees the side body
+/// as the formal body plus one trailing message, and the session file never
+/// holds the side question or its answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_btw_side_question_streams_without_touching_the_transcript() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        text_reply("FORMAL-ANSWER-OK"),
+        text_reply("SIDE-ANSWER-OK"),
+    ])
+    .await;
+    let dir = TempDir::new("btw");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "btw",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("FORMAL-ANSWER-OK", wait_positive()),
+        "the formal turn did not answer:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/btw what file was that\r");
+    assert!(
+        pty.wait_for_screen("SIDE-ANSWER-OK", wait_positive()),
+        "the side answer did not stream into the overlay:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "one formal call, one side call");
+    let formal = requests[0].json();
+    let body = requests[1].json();
+    let formal_messages = formal["messages"].as_array().unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len(),
+        formal_messages.len() + 2,
+        "formal history plus its answer plus the trailing side message"
+    );
+    assert_eq!(
+        &messages[..formal_messages.len()],
+        formal_messages.as_slice(),
+        "the formal prefix is byte-identical"
+    );
+    assert!(
+        messages[formal_messages.len()]["content"]
+            .as_str()
+            .unwrap()
+            .contains("FORMAL-ANSWER-OK"),
+        "the committed formal answer is now history: {body}"
+    );
+    assert!(
+        messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("what file was that"),
+        "the trailing message is the side question: {body}"
+    );
+    let journal = std::fs::read_to_string(dir.path().join("btw.jsonl")).unwrap();
+    assert!(
+        !journal.contains("what file was that"),
+        "the side question never entered the session file"
+    );
+    assert!(
+        !journal.contains("SIDE-ANSWER-OK"),
+        "the side answer never entered the session file"
+    );
+}
 /// Bundled manual end to end: the prompt index names `radian://docs/`, the mock model reads
 /// one page through `read`, and the tool result carries the page text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
