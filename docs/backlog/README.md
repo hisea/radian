@@ -33,7 +33,6 @@
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
 | `command-hooks-claude-subset.md` | decided（生态 3/4） | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，用户级 `[hooks]`、项目级 `.radian/hooks.json` 进信任门（目录受信任即加载、不按哈希），工具名只在导入时翻译；吸收总报告第 17 条；编辑后检查是项目级 `PostToolUse`：配了才跑、同步每次、不批处理不延后、不内置不自动启用（本机数据：92% 的编辑消息只有一次编辑、跨轮段平均 1.83） |
-| `bundled-user-docs.md` | decided | 0039 §4、0036、0032、0013 | 一套英文用户文档（`docs/user/`）编进二进制，`read` 认 `radian://docs/<page>.md` 虚拟只读根、不落盘，`<runtime>` 给索引，用户直接问 radian 自己的功能；`radian docs [topic]` 在终端打印同一份＼� |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
 | `tui-btw-side-question.md` | decided（第一档） | 0010、0018、0023、0007、0017 | `/btw <q>` 一次额外请求，与正式请求同前缀、不执行工具、只在覆盖层、不落 transcript/journal；一次一个 |
 | `tui-context-command.md` | decided（第一档） | 0015、0036、0021、0018 | `/context` 按类别打印下一次请求的估算，reported 与 estimated 分开标 |
