@@ -462,8 +462,9 @@ fn start_background(
          read it with `job` (`op: \"read\"` reads the output so far, `op: \"wait\"` waits \
          for the end). `job` reads a bounded incremental ring; use `op: \"read\"` with \
          `tail_lines`, `pattern` or `from_line`/`max_lines` to see the whole file.\n\
-         You will be notified when it finishes. Do not sleep or poll. If you have nothing \
-         else to do, end your reply.\n",
+         You will be notified when it finishes; the notice includes the end of its output. \
+         Do not sleep or poll. Keep working on anything that does not depend on the result. \
+         If you have nothing else to do, end your reply; the notice resumes the task.\n",
         id = info.id,
         output = info.output,
     );
