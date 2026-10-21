@@ -195,11 +195,11 @@ fn spawn_radian_command(exec: bool, args: &[&str], envs: &[(&str, &str)]) -> Chi
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", fresh_session_dir())
         // Tests must not read the user's catalog cache or reach the real models.dev. A fresh
-        // `HOME` isolates the cache; the catalog URL points at a closed local port, so a
-        // lookup fails fast and the window is unknown. A test that wants the catalog
-        // overrides both through `envs`.
+        // `HOME` isolates the cache; the catalog URL is the fast-failing sink
+        // ([`common::fast_catalog_url`]), so a lookup fails fast and the window is unknown.
+        // A test that wants the catalog overrides both through `envs`.
         .env("HOME", fresh_session_dir())
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         // No test may read the user's real config file: pin the whole `~/.radian` root and
         // drop `RADIAN_CONFIG` (either could otherwise point at a real file).
         .env("RADIAN_HOME", &home)
@@ -4114,7 +4114,7 @@ fn spawn_radian_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> 
         .env("RADIAN_SESSION_DIR", session_dir)
         // Isolate the catalog cache, the `~/.radian` root and the network, like `spawn_radian`.
         .env("HOME", fresh_session_dir())
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         .env("RADIAN_HOME", &home)
         .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
@@ -7993,7 +7993,7 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
         .args(["memory", "add", "--global", "a memory record"])
         .env("RADIAN_HOME", home.as_os_str())
         .env("HOME", home.as_os_str())
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -8047,7 +8047,7 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
             .env("RADIAN_HOME", home_arg)
             .env("HOME", home_arg)
             .env("RADIAN_SESSION_DIR", sessions_arg)
-            .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+            .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
             .stdin(Stdio::null())
             .stdout(closed_stdout())
             .stderr(Stdio::piped())
@@ -8754,10 +8754,7 @@ async fn named_providers_keep_separate_keys_and_config_wins_over_auth() {
                 "HOME".into(),
                 fresh_session_dir().to_string_lossy().into_owned(),
             ),
-            (
-                "RADIAN_CATALOG_URL".into(),
-                "http://127.0.0.1:1/api.json".to_string(),
-            ),
+            ("RADIAN_CATALOG_URL".into(), common::fast_catalog_url()),
         ];
         all.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         all
@@ -8898,7 +8895,7 @@ impl PtyChild {
             .env("HOME", home)
             .env("RADIAN_HOME", home)
             .env("RADIAN_SESSION_DIR", fresh_session_dir())
-            .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+            .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
             .env_remove("RADIAN_CONFIG")
             .stdin(unsafe {
                 // SAFETY: slave_fd is a fresh owned fd, moved into the Command.

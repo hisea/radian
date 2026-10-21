@@ -46,7 +46,7 @@ impl Env {
     }
 }
 
-/// Spawns `radian exec <args>` in `env`, plus a catalog URL pointing at a closed port, so
+/// Spawns `radian exec <args>` in `env`, plus [`common::fast_catalog_url`], so
 /// no run reads the user's state or reaches the network.
 fn spawn(args: &[&str], env: &Env) -> Child {
     Command::new(common::radian_bin())
@@ -55,7 +55,7 @@ fn spawn(args: &[&str], env: &Env) -> Child {
         .env("HOME", &env.home)
         .env("RADIAN_HOME", &env.home)
         .env("RADIAN_SESSION_DIR", &env.sessions)
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         .env_remove("RADIAN_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
