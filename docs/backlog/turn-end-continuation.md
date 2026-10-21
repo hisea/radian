@@ -1,7 +1,7 @@
 # 轮末「只说不做」：先改提示词与通知文案，之后再定内建续跑
 
 - 状态：A 部分 decided；B 部分 idea（A 量过之后再定）
-- 涉及 ADR：0036（角色规则清单；完成通知作为消息追加）、0037 决定 5（完成通知的形状、唤醒速率闸门）、0045 §3（`Stop` 续跑路径）、0011（`followup` lane、L2 来源、L5 空闲唤醒）、0021（memory 注入范围）、0034（herdr `blocked`）、0005（宿主消息 meta）、0017（只有 `Completed` 续跑）
+- 涉及 ADR：0036（角色规则清单；完成通知作为消息追加）、0037（自动转后台的缺省阈值；决定 5 完成通知的形状、唤醒速率闸门）、0045 §3（`Stop` 续跑路径）、0011（`followup` lane、L2 来源、L5 空闲唤醒）、0021（memory 注入范围）、0034（herdr `blocked`）、0005（宿主消息 meta）、0017（只有 `Completed` 续跑）
 - 来源：`docs/research/2026-10-21-intent-stop.md`（§3.4 提示词对比、§4 频率、§5 选项、§6 建议）
 
 ## 背景
@@ -16,7 +16,10 @@ radian 独有、且与停顿共现的，是「回合中途结束、等通知唤�
 2. 「不可撤销或工作区外可见的动作先问用户」加例外：任务文本里明确要求的通知、提交等不用再问。两次停顿正好停在「发 herdr 通知」之前。
 3. 完成通知（`job_notify.rs` 的 `completion_message`）：末尾加 `Continue the task; do not end the turn only to report this result.`；修掉尾部为空时 `output: available through job` 与 `Read its output with job.` 之间少一个换行的 bug。
 4. 查 memory 注入范围：lead 会话写入的记忆（lead 角色指令）注入了同一 project 的 worker 会话。决定是按角色还是按会话隔离，或者只是不把 lead 指令写成 project scope。
-5. 不改 `Do not use sleep or polling to wait`，不动模型参数。
+5. `shell` 转后台时的返回文本与通知文本按研究笔记 §3.5 改：返回文本说「先做不依赖结果的事；实在没事再结束回复，完成后会被自动唤醒」（opencode 的形状，只在真的进入等待时才看到）；通知以 `Resume the task using this result. Do not reply to this notice.` 收尾（omp 的形状）。
+6. 不改 `Do not use sleep or polling to wait`，不动模型参数。
+
+待决（涉及 ADR 0037 的自动转后台）：七家里只有 radian 缺省把超过 60 s 的前台命令转后台，别家都要模型显式选 background。这是把模型推进「结束回合等通知」模式的 radian 独有推力（研究笔记 §3.5）。是否把缺省阈值提到 300 s 或与前台上限一致，自动转后台只留给真正长的命令。
 
 备选（不在 A 里做）：把等待写成固定句式 `To wait for a background job, end your reply with exactly: waiting for job <id>.`，只在 B 需要可识别的等待标记时再加。
 
