@@ -1,4 +1,5 @@
-//! The durable inbox: the four semantic input operations of ADR 0011.
+//! The durable inbox: the four semantic input operations of ADR 0011 (plus the
+//! pending-wake job notice of revision 2).
 //!
 //! This is the queue half of the runtime. It holds inputs in two lanes and is the only
 //! public way to add work:
@@ -8,6 +9,9 @@
 //!   core's next safe point allows.
 //! - [`Inbox::inject`] — `next_step`: context that waits for a natural step boundary and
 //!   does **not** wake an idle driver.
+//! - [`Inbox::inject_pending_wake`] — `next_step`: a job completion notice that waits for
+//!   a natural step boundary while a turn runs, and opens the next turn itself when it is
+//!   still queued at the turn boundary (ADR 0011).
 //! - [`Inbox::cancel`] — no lane: cancels in-flight model/tool work, is never queued, is
 //!   not subject to the capacity bound, and is idempotent.
 //!
@@ -20,9 +24,11 @@
 //!
 //! When no turn is running, the driver opens the next turn with the oldest `next_turn`
 //! entry; when that lane is empty, it opens one with the **oldest waking** `next_step` entry
-//! (a `steer`). An `inject` never opens a turn by itself: it waits for a natural step
-//! boundary inside a turn someone else started. [`InboxEntry::wake`] carries that difference,
-//! and it is durable, so a resume restores it.
+//! (a `steer`); when that lane has no waking entry either, it opens one with the oldest
+//! **pending-wake** `next_step` entry (a stranded job notice, ADR 0011). An
+//! `inject` never opens a turn by itself: it waits for a natural step boundary inside a turn
+//! someone else started. [`InboxEntry::wake`] and [`InboxEntry::pending_wake`] carry that
+//! difference, and both are durable, so a resume restores them.
 //!
 //! # Bounded input (ADR 0011 L4, decision 1)
 //!
@@ -128,6 +134,10 @@ pub struct InboxEntry {
     /// revision 1): a `steer` does, an `inject` does not. `followup` entries wake too, but
     /// they are taken by lane priority before this flag is consulted.
     pub wake: bool,
+    /// Whether this `next_step` entry opens the next turn when it is still queued at the
+    /// turn boundary (ADR 0011): a stranded job completion notice does, an
+    /// ordinary `inject` does not. Absorbed mid-turn exactly like an `inject`.
+    pub pending_wake: bool,
     /// The source the caller declared at enqueue time (ADR 0011).
     pub source: InputSource,
     /// The message, with its `meta.id` and `meta.source` set.
@@ -155,12 +165,17 @@ impl State {
     }
 }
 
+/// Fired with the entry id each time a `pending_wake` entry is claimed to open the
+/// next turn (ADR 0011). The host installs its wake-gate counter here.
+pub type PendingWakeCallback = Arc<dyn Fn(MessageId) + Send + Sync>;
+
 /// The bounded, two-lane input queue. Share it with `Arc`: the host enqueues, the driver
 /// claims.
 pub struct Inbox {
     capacity: usize,
     state: Mutex<State>,
-    /// Woken by `followup`, `steer` and `cancel`; **not** by `inject`.
+    /// Woken by `followup`, `steer`, `inject_pending_wake` and `cancel`; **not** by a
+    /// plain `inject`.
     wake: Notify,
     /// How many times the queue changed (every enqueue, claim and requeue). A host that
     /// checks "is there a turn to run" reads it before and after the check: equal means
@@ -198,6 +213,11 @@ pub struct Inbox {
     /// enqueue without reading the journal. Installed by the driver from its own
     /// `set_runtime_events`, so a host sets one listener, not two.
     runtime_events: std::sync::Mutex<Option<Arc<dyn RuntimeEvents>>>,
+    /// Fired (once per entry, without holding the queue lock) when a `pending_wake`
+    /// entry is claimed to open the next turn (ADR 0011). The host counts its
+    /// wake-gate wake here: an entry absorbed mid-turn never fires, so only a turn the
+    /// notice actually opened counts.
+    pending_wake_callback: std::sync::Mutex<Option<PendingWakeCallback>>,
     /// Control requests the driver runs between turns (ADR 0018: `/compact`). Not a lane.
     control: Mutex<VecDeque<ControlRequest>>,
 }
@@ -253,6 +273,7 @@ impl Inbox {
             closed: AtomicBool::new(false),
             journal,
             runtime_events: std::sync::Mutex::new(None),
+            pending_wake_callback: std::sync::Mutex::new(None),
             control: Mutex::new(VecDeque::new()),
         })
     }
@@ -267,13 +288,23 @@ impl Inbox {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
     }
 
+    /// Fires `callback` with the entry id each time a `pending_wake` entry is claimed to
+    /// open the next turn (ADR 0011). The host installs its wake-gate counter
+    /// here. `None` keeps the behavior a host that never installed one had before.
+    pub fn set_pending_wake_callback(&self, callback: Option<PendingWakeCallback>) {
+        *self
+            .pending_wake_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = callback;
+    }
+
     /// `next_turn`: a new task for after the current turn. Wakes an idle driver.
     pub async fn followup(
         &self,
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextTurn, input.into(), source, true, false)
+        self.enqueue(Lane::NextTurn, input.into(), source, true, false, false)
             .await
     }
 
@@ -284,7 +315,7 @@ impl Inbox {
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextStep, input.into(), source, true, false)
+        self.enqueue(Lane::NextStep, input.into(), source, true, false, false)
             .await
     }
 
@@ -295,7 +326,24 @@ impl Inbox {
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextStep, input.into(), source, false, false)
+        self.enqueue(Lane::NextStep, input.into(), source, false, false, false)
+            .await
+    }
+
+    /// `next_step` like [`Inbox::inject`], but a job completion notice that opens the next
+    /// turn when it is still queued at the turn boundary (ADR 0011). Absorbed
+    /// mid-turn exactly like an `inject`; stranded past the turn end it is claimed by
+    /// [`Inbox::claim_next_turn`] instead of waiting for another input to wake the driver.
+    ///
+    /// Like `steer` (and unlike `inject`) it notifies the driver, so an enqueue that lands
+    /// after the driver's last claim still wakes the loop to look: the wake branch only
+    /// checks cancellation, so the entry still waits for the turn boundary.
+    pub async fn inject_pending_wake(
+        &self,
+        input: impl Into<Message>,
+        source: InputSource,
+    ) -> Result<MessageId, InboxError> {
+        self.enqueue(Lane::NextStep, input.into(), source, false, false, true)
             .await
     }
 
@@ -307,7 +355,7 @@ impl Inbox {
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextStep, input.into(), source, false, true)
+        self.enqueue(Lane::NextStep, input.into(), source, false, true, false)
             .await
     }
 
@@ -318,6 +366,7 @@ impl Inbox {
         source: InputSource,
         wake: bool,
         degraded: bool,
+        pending_wake: bool,
     ) -> Result<MessageId, InboxError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(InboxError::Closed { message });
@@ -353,11 +402,15 @@ impl Inbox {
             lane: lane.wire(),
             source,
             // ADR 0011: the entry's waking flag is durable, so a resume
-            // knows which `next_step` entries may open a turn themselves.
+            // knows which `next_step` entries may open a turn themselves. Revision 2
+            // adds the pending wake the same way.
             wake,
             // A wake-gate degrade (ADR 0006 §5.5): written only when true, so an
             // ordinary line is byte-identical to before.
             degraded,
+            // A stranded job notice's pending wake (ADR 0011): written only
+            // when true, like `degraded`.
+            pending_wake,
         };
         if let Some(journal) = &self.journal {
             // Journal first, then memory (ADR 0001 S1): an input that is not durable was
@@ -375,6 +428,7 @@ impl Inbox {
             id: id.clone(),
             lane,
             wake,
+            pending_wake,
             source,
             message,
             seq,
@@ -393,7 +447,10 @@ impl Inbox {
         {
             sink.on_runtime_event(&event);
         }
-        if wake {
+        if wake || pending_wake {
+            // A pending wake notifies like a steer: an enqueue that lands after the
+            // driver's last claim still wakes the loop to look. The wake branch only
+            // checks cancellation, so the entry still waits for the turn boundary.
             self.wake.notify_one();
         }
         Ok(id)
@@ -493,8 +550,8 @@ impl Inbox {
             .collect()
     }
 
-    /// Resolves the next time `followup`/`steer`/`cancel` wakes the driver. `inject` never
-    /// resolves it.
+    /// Resolves the next time `followup`/`steer`/`inject_pending_wake`/`cancel` wakes the
+    /// driver. A plain `inject` never resolves it.
     ///
     /// Single waiter: the driver. Its `Notify` hands one permit to one waiter, so a
     /// second waiter could steal the wake meant for the driver (or vice versa) and
@@ -513,26 +570,53 @@ impl Inbox {
     }
 
     /// Claims the input that opens the next turn (ADR 0011): the
-    /// oldest `next_turn` entry, or, when that lane is empty, the **oldest waking**
-    /// `next_step` entry. A non-waking `next_step` entry (an `inject`) never opens a turn; it
+    /// oldest `next_turn` entry; or, when that lane is empty, the **oldest waking**
+    /// `next_step` entry; or, when that lane has no waking entry either, the **oldest
+    /// pending-wake** `next_step` entry (a stranded job notice, revision 2). A plain
+    /// non-waking `next_step` entry (an `inject`) never opens a turn; it
     /// stays and is absorbed by a turn's first safe point. Every older entry keeps its
     /// relative order: an `inject` pushed before the chosen steer stays in `next_step` in
     /// front of the later entries.
+    ///
+    /// Firing the pending-wake callback (when the third branch claims) happens after the
+    /// queue lock is dropped, like the runtime-events forward: the pop and the in-flight
+    /// count still move together.
     ///
     /// The pop and the in-flight count move together, under the queue lock: when this
     /// returns an entry, [`Inbox::inflight_turns`] already counts it. A host checking
     /// "may I exit" between the pop and the turn's start still sees the claimed turn.
     pub async fn claim_next_turn(&self) -> Option<InboxEntry> {
-        let mut state = self.state.lock().await;
-        if let Some(entry) = state.next_turn.pop_front() {
-            self.version.fetch_add(1, Ordering::SeqCst);
-            self.inflight.fetch_add(1, Ordering::SeqCst);
-            return Some(entry);
+        let entry = {
+            let mut state = self.state.lock().await;
+            if let Some(entry) = state.next_turn.pop_front() {
+                self.version.fetch_add(1, Ordering::SeqCst);
+                self.inflight.fetch_add(1, Ordering::SeqCst);
+                entry
+            } else {
+                // `next_step` order: a waking `steer` first, then the oldest
+                // pending-wake notice (ADR 0011). A plain `inject` never
+                // opens a turn.
+                let index = state
+                    .next_step
+                    .iter()
+                    .position(|entry| entry.wake)
+                    .or_else(|| state.next_step.iter().position(|entry| entry.pending_wake))?;
+                self.version.fetch_add(1, Ordering::SeqCst);
+                self.inflight.fetch_add(1, Ordering::SeqCst);
+                // `position` just found it, so the remove cannot miss.
+                state.next_step.remove(index).expect("claimed entry")
+            }
+        };
+        if entry.pending_wake
+            && let Some(callback) = self
+                .pending_wake_callback
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        {
+            callback(entry.id.clone());
         }
-        let index = state.next_step.iter().position(|entry| entry.wake)?;
-        self.version.fetch_add(1, Ordering::SeqCst);
-        self.inflight.fetch_add(1, Ordering::SeqCst);
-        state.next_step.remove(index)
+        Some(entry)
     }
 
     /// How many turn-opening claims are outstanding (claimed, turn not yet ended).
