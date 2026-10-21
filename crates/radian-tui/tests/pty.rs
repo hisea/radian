@@ -7585,7 +7585,11 @@ fn pty_an_idle_screen_is_not_redrawn() {
 }
 
 /// ADR 0027: a **visible** spinner redraws on its interval (the test above pins
-/// the idle case). `arc` turns every 250 ms, so a ~1.2 s window must show several frames.
+/// the idle case). `arc` turns every 250 ms; the window holds eight turns, so the frame bound
+/// has headroom for a slow runner (the pulse test below needed the same treatment: a fixed
+/// count over a short window fails the moment wakes land late). The glyphs are the steadier
+/// signal: a spinner that redraws without turning shows 1 glyph, while even every second
+/// frame lands on a new one — so the turn itself is checkable, not just the frame count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_a_visible_spinner_redraws_on_its_interval() {
@@ -7611,19 +7615,53 @@ async fn pty_a_visible_spinner_redraws_on_its_interval() {
         pty.screen()
     );
     let start = frame_count(&pty);
-    std::thread::sleep(std::time::Duration::from_millis(1200));
+    std::thread::sleep(std::time::Duration::from_millis(2000));
     let after = frame_count(&pty);
+    let turned = arc_glyphs(&pty.raw());
     pty.quit();
     assert!(
         after >= start + 3,
         "the arc spinner must redraw about every 250 ms: {start} -> {after}"
     );
+    // A stuck spinner redraws the same frame: the glyph never changes. A turning one walks
+    // all four frames, and even a runner that draws every second frame alternates two.
+    assert!(
+        turned.len() >= 2,
+        "the arc spinner must turn, not redraw one frame: {turned:?}"
+    );
+}
+
+/// The distinct `arc` frames (`◜◝◞◟`) that reached the terminal, in the order they first
+/// appear: the turn as the terminal saw it.
+fn arc_glyphs(raw: &[u8]) -> Vec<&'static str> {
+    const FRAMES: [&str; 4] = ["◜", "◝", "◞", "◟"];
+    let text = String::from_utf8_lossy(raw);
+    let mut found: Vec<(usize, &'static str)> = Vec::new();
+    for frame in FRAMES {
+        if let Some(at) = text.find(frame) {
+            found.push((at, frame));
+        }
+    }
+    found.sort();
+    found.into_iter().map(|(_, frame)| frame).collect()
 }
 
 /// ADR 0027: with truecolor the default pulse **breathes** — the `⏺` takes the 16
 /// colours of one sine period — and the loop wakes at the step (~125 ms), not at revision 10's
 /// 500 ms switch. The wire carries each colour as `38;2;R;G;B` in front of the glyph, so the
-/// colours themselves are checkable, not just the frame count.
+/// colours themselves are checkable, not just the frame count — and on a slow runner the
+/// colours are the steadier signal: a late wake skips a sample but still lands on the breath,
+/// while the frame count drops one-for-one (a 2.2 s window bound at 10 failed in CI with 9).
+///
+/// The window is two full breath periods (4 s), so the phase at `Working` does not matter.
+/// Both bounds sit between the slowest healthy pace seen (16 frames in 4 s on the CI runner)
+/// and the fastest broken pace measured locally: a two-colour switch draws 8 frames in 4 s
+/// and shows exactly 2 colours, while a 500 ms waker drew 11–12 frames with 7 colours — so
+/// the frame bound is 13 and the colour bound is 4. A breathing pulse draws ~29 frames and
+/// 9 colours at full rate, and still shows 4 colours when every wake lands on the same parity
+/// (odd-phase sampling gives levels 1/5/11/15) and 5 or more with any jitter. The wake
+/// interval itself is pinned by `the_breath_redraws_once_per_step…` in `cli/tty.rs`, which
+/// walks the loop's own tick with an injected clock; this test pins the visible breathing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_the_pulse_breathes_through_rgb_colours() {
@@ -7655,19 +7693,20 @@ async fn pty_the_pulse_breathes_through_rgb_colours() {
         pty.screen()
     );
     let start = frame_count(&pty);
-    std::thread::sleep(std::time::Duration::from_millis(2200));
+    std::thread::sleep(std::time::Duration::from_millis(4000));
     let after = frame_count(&pty);
     let breathed = dot_colours(&pty.raw());
     pty.quit();
     assert!(
-        after >= start + 10,
-        "the breath must redraw about every 125 ms (a two-colour switch would be 4): {start} -> {after}"
+        after >= start + 13,
+        "the breath must redraw about every 125 ms (a two-colour switch draws 8 in this window): {start} -> {after}"
     );
     // The breath's 16 samples hold 9 distinct colours (the sine's levels 0, 1, 2, 5, 8, 11, 14, 15,
-    // 16), and one sample is missed whenever a wake lands late, so the exact ends need not appear in
-    // a given window: a two-colour switch would show 2 colours, a rotating frame 1.
+    // 16). Even a runner that draws every second sample on the same parity still shows 4 of them
+    // (levels 1/5/11/15), while a two-colour switch shows exactly 2 — so 4 keeps the margin on
+    // the colour side while a late wake can no longer fail the test by itself.
     assert!(
-        breathed.len() >= 6,
+        breathed.len() >= 4,
         "the dot must take the breath's colours: {breathed:?}"
     );
     let theme = radian_tui::theme::Theme::dark();
