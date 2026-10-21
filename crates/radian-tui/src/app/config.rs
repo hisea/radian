@@ -325,9 +325,7 @@ impl App {
             _ if self.session.notice_lost_waiting => {
                 Some(radian_host::herdr::Blocked::JobNoticeLost)
             }
-            _ if self.session.intent_stop_waiting => {
-                Some(radian_host::herdr::Blocked::IntentStop)
-            }
+            _ if self.session.intent_stop_waiting => Some(radian_host::herdr::Blocked::IntentStop),
             _ if self.session.goal_mode.blocked => Some(radian_host::herdr::Blocked::GoalBudget),
             _ if self.session.wake_waiting => Some(radian_host::herdr::Blocked::WakeBudget),
             _ => None,

@@ -2027,9 +2027,11 @@ mod tests {
     async fn waiting_with_a_running_job_does_not_fire() {
         let fixture = plain(&HooksConfig::default());
         let jobs = Arc::new(radian_coding::Jobs::new(fixture._root.dir.join("jobs")));
-        let sandbox =
-            radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::WorkspaceWrite, &fixture._root.ws)
-                .expect("the workspace sandbox probes clean on this machine");
+        let sandbox = radian_sandbox::Sandbox::new(
+            radian_sandbox::SandboxMode::WorkspaceWrite,
+            &fixture._root.ws,
+        )
+        .expect("the workspace sandbox probes clean on this machine");
         let _started = jobs
             .start(&sandbox, &fixture._root.ws, "sleep 60")
             .expect("the job starts");
@@ -2075,7 +2077,10 @@ mod tests {
             .expect("the one continuation opens a turn");
         assert_eq!(entry.source, InputSource::System);
         let text = entry.message.text();
-        assert!(text.contains("hook-reason"), "the hook reason rides: {text}");
+        assert!(
+            text.contains("hook-reason"),
+            "the hook reason rides: {text}"
+        );
         assert!(
             text.contains(intent_stop::INTENT_STOP_TEXT),
             "the validator text joins it: {text}"
@@ -2129,7 +2134,11 @@ mod tests {
             "the cap inject is journal-visible"
         );
         assert_eq!(fixture.hooks.degraded(), 1);
-        assert_eq!(fixture.hooks.consecutive_hits(), 2, "saturated, not cleared");
+        assert_eq!(
+            fixture.hooks.consecutive_hits(),
+            2,
+            "saturated, not cleared"
+        );
         fixture.hooks.reset_wakes();
         fixture.hooks.run_stop_once(&hit).await;
         assert!(
@@ -2212,7 +2221,10 @@ mod tests {
         assert_eq!(fixture.hooks.consecutive_hits(), 1);
         fixture.hooks.on_turn_end(
             &cx(),
-            &completed_outcome(RunStatus::Cancelled(CancelReason::Requested), Some("Now x.")),
+            &completed_outcome(
+                RunStatus::Cancelled(CancelReason::Requested),
+                Some("Now x."),
+            ),
         );
         assert_eq!(fixture.hooks.consecutive_hits(), 0);
         assert_eq!(fixture.hooks.pending_stops(), 0);
@@ -2268,12 +2280,8 @@ mod tests {
         let root = TempRoot::new("stop-stdin");
         let stdin_path = root.dir.join("stdin.json");
         let config = stop_config(&format!("cat > {}", stdin_path.display()));
-        let fixture = layered_with_root(
-            root,
-            &config,
-            &HooksConfig::default(),
-            SandboxSlot::empty(),
-        );
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
         fixture
             .hooks
             .run_stop_once(&completed_text("Now the docs-only ADR updates."))

@@ -9640,11 +9640,7 @@ async fn ordinary_turn_ends_do_not_continue() {
         )
         .await;
         assert_eq!(code, 0, "{end}: {stderr}");
-        assert_eq!(
-            server.requests().len(),
-            1,
-            "no continuation after {end:?}"
-        );
+        assert_eq!(server.requests().len(), 1, "no continuation after {end:?}");
     }
 }
 
