@@ -5117,7 +5117,9 @@ async fn pty_context_prints_estimated_categories_without_a_model_request() {
             "--session-id",
             "context",
         ],
-        30,
+        // Tall enough for the whole notice: the header rows must stay visible
+        // with the startup block above them.
+        40,
         110,
     );
     assert!(
