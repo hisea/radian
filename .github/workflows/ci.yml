@@ -50,7 +50,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.149
+          tool: cargo-nextest@0.9.146
       - name: build the binaries the pty tests run
         run: |
           cargo build -p radian-tui --bin radian --locked
@@ -82,7 +82,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.149
+          tool: cargo-nextest@0.9.146
       - name: build the binaries the pty tests run
         run: |
           cargo build -p agent-extensions --bin mcp-fixture --locked
