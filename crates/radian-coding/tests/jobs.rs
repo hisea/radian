@@ -605,8 +605,16 @@ async fn a_background_timeout_secs_is_ignored() {
         "the acknowledgement must say the field is ignored: {text}"
     );
     assert!(
-        text.contains("notified when it finishes"),
+        text.contains("notified when it finishes; the notice includes the end of its output"),
         "the acknowledgement ends with the notice line: {text}"
+    );
+    assert!(
+        text.contains("Keep working on anything that does not depend on the result"),
+        "the acknowledgement says to keep working: {text}"
+    );
+    assert!(
+        text.contains("end your reply; the notice resumes the task"),
+        "the acknowledgement says the notice resumes the task: {text}"
     );
 
     let leader = wait_for_pid(&root, "leader.pid").await;
