@@ -98,22 +98,23 @@ fn failed(app: &mut App, turn: &str, message: &str) {
 /// One full loop iteration in production order: the echo, the start, the admission, then
 /// the end. Returns what the turn end produced. `now` is the admission instant (the
 /// `--every`/`--for` clocks start there); the end runs at `end_now`.
-fn run_iteration(
-    app: &mut App,
-    id: &str,
-    turn: &str,
-    prompt: &str,
+struct Turn<'a> {
+    id: &'a str,
+    turn: &'a str,
+    prompt: &'a str,
     iteration: u64,
     now: std::time::Instant,
     end_now: std::time::Instant,
     outcome: TurnOutcome,
-) -> Vec<Effect> {
-    app.set_now(now);
-    enqueued(app, id, loop_message(prompt, iteration));
-    started(app, turn);
-    admitted(app, id);
-    app.set_now(end_now);
-    finished(app, turn, outcome)
+}
+
+fn run_iteration(app: &mut App, spec: &Turn) -> Vec<Effect> {
+    app.set_now(spec.now);
+    enqueued(app, spec.id, loop_message(spec.prompt, spec.iteration));
+    started(app, spec.turn);
+    admitted(app, spec.id);
+    app.set_now(spec.end_now);
+    finished(app, spec.turn, spec.outcome)
 }
 
 fn loop_app() -> (App, std::time::Instant) {
@@ -164,13 +165,15 @@ fn loop_resends_the_same_prompt_with_increasing_iterations() {
         let iteration = n as u64 + 1;
         let effects = run_iteration(
             &mut app,
-            &format!("e-{iteration}"),
-            turn,
-            "go",
-            iteration,
-            base,
-            base,
-            TurnOutcome::Completed,
+            &Turn {
+                id: &format!("e-{iteration}"),
+                turn,
+                prompt: "go",
+                iteration,
+                now: base,
+                end_now: base,
+                outcome: TurnOutcome::Completed,
+            },
         );
         if iteration < 3 {
             assert_eq!(
@@ -199,24 +202,28 @@ fn times_two_stops_after_two_turns_with_a_notice() {
     submit(&mut app, "/loop --times 2 go");
     let first = run_iteration(
         &mut app,
-        "e-1",
-        "t-1",
-        "go",
-        1,
-        base,
-        base,
-        TurnOutcome::Completed,
+        &Turn {
+            id: "e-1",
+            turn: "t-1",
+            prompt: "go",
+            iteration: 1,
+            now: base,
+            end_now: base,
+            outcome: TurnOutcome::Completed,
+        },
     );
     assert_eq!(first, vec![Effect::SendFollowup(loop_message("go", 2))]);
     let second = run_iteration(
         &mut app,
-        "e-2",
-        "t-2",
-        "go",
-        2,
-        base,
-        base,
-        TurnOutcome::Completed,
+        &Turn {
+            id: "e-2",
+            turn: "t-2",
+            prompt: "go",
+            iteration: 2,
+            now: base,
+            end_now: base,
+            outcome: TurnOutcome::Completed,
+        },
     );
     assert!(second.is_empty(), "--times 2 stops after two turns");
     assert!(
@@ -243,13 +250,15 @@ fn every_waits_out_the_interval() {
     let five = base + Duration::from_secs(300);
     let effects = run_iteration(
         &mut app,
-        "e-1",
-        "t-1",
-        "go",
-        1,
-        base,
-        minute,
-        TurnOutcome::Completed,
+        &Turn {
+            id: "e-1",
+            turn: "t-1",
+            prompt: "go",
+            iteration: 1,
+            now: base,
+            end_now: minute,
+            outcome: TurnOutcome::Completed,
+        },
     );
     assert!(effects.is_empty(), "one minute in: not due");
     let rendered = screen(&mut app);
@@ -272,13 +281,15 @@ fn every_waits_out_the_interval() {
     let seven = base + Duration::from_secs(7 * 60);
     let effects = run_iteration(
         &mut app,
-        "e-1",
-        "t-1",
-        "go",
-        1,
-        base,
-        seven,
-        TurnOutcome::Completed,
+        &Turn {
+            id: "e-1",
+            turn: "t-1",
+            prompt: "go",
+            iteration: 1,
+            now: base,
+            end_now: seven,
+            outcome: TurnOutcome::Completed,
+        },
     );
     assert_eq!(
         effects,
@@ -296,13 +307,15 @@ fn the_default_cap_stops_at_twenty_turns() {
     for iteration in 1..=20u64 {
         let effects = run_iteration(
             &mut app,
-            &format!("e-{iteration}"),
-            &format!("t-{iteration}"),
-            "go",
-            iteration,
-            base,
-            base,
-            TurnOutcome::Completed,
+            &Turn {
+                id: &format!("e-{iteration}"),
+                turn: &format!("t-{iteration}"),
+                prompt: "go",
+                iteration,
+                now: base,
+                end_now: base,
+                outcome: TurnOutcome::Completed,
+            },
         );
         sends += effects
             .iter()
@@ -327,13 +340,15 @@ fn for_duration_stops_with_a_notice() {
     let hour = base + Duration::from_secs(3600);
     let effects = run_iteration(
         &mut app,
-        "e-1",
-        "t-1",
-        "go",
-        1,
-        base,
-        hour,
-        TurnOutcome::Completed,
+        &Turn {
+            id: "e-1",
+            turn: "t-1",
+            prompt: "go",
+            iteration: 1,
+            now: base,
+            end_now: hour,
+            outcome: TurnOutcome::Completed,
+        },
     );
     assert!(effects.is_empty());
     assert!(

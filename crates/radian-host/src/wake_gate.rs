@@ -103,7 +103,7 @@ mod tests {
     use std::sync::Arc;
 
     use agent_core::{InputSource, Message, OpaqueJson};
-    use radian_runtime::{Inbox, RuntimeEvents};
+    use radian_runtime::Inbox;
     use radian_session::{InboxLane, RuntimeEvent};
 
     /// A loop-tagged message the way the TUI builds it: the `origin` the journal audits
