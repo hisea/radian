@@ -661,7 +661,6 @@ pub async fn open_session(
         context_blocks,
         skills_section,
         skills_count,
-        session_section,
         memory_injection: Arc::clone(&injection),
         context_budget,
         window_context,

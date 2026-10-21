@@ -196,6 +196,10 @@ pub enum Effect {
     /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
     /// [`Input::SessionDone`].
     ListSkills,
+    /// `/context` (backlog `tui-context-command`): the next request's estimated size by
+    /// category. The loop reads it from the facade (journal + stored layers, no inbox, no
+    /// driver) and answers with [`Input::SessionDone`], so it works mid-turn.
+    Context,
     /// `/jobs` (ADR 0037 decision 4): list the running background jobs, or stop one/all. The
     /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
     Jobs(command::JobsRequest),

@@ -842,7 +842,8 @@ mod tests {
             block: system.context_files.clone(),
         }];
         let mut inp = input(&req, &system, &blocks);
-        inp.mcp_server_ids = &["srv".to_owned()];
+        let mcp_ids = ["srv".to_owned()];
+        inp.mcp_server_ids = &mcp_ids;
         inp.skills_section = "\n\n## Skills (ADR 0025)\n- a\n";
         inp.skills_count = 3;
         let breakdown = estimate(&inp);

@@ -5061,8 +5061,7 @@ async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
 /// ADR 0018: `/compact` runs without a model request and shows its result as a notice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
-async fn pty_compact_shows_its_result_without_a_model_request() {
-    let _serial = pty_guard();
+async fn pty_compact_shows_its_result_without_a_model_request() {    let _serial = pty_guard();
     let dir = TempDir::new("compact");
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(
@@ -5093,6 +5092,60 @@ async fn pty_compact_shows_its_result_without_a_model_request() {
     assert!(
         server.requests().is_empty(),
         "a /compact must not reach the model"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/context` prints the next request's estimated categories with the reported
+/// line separate (ADR 0015 C1), without sending a model request. Read-only, so
+/// it works on an idle session with no usage yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_context_prints_estimated_categories_without_a_model_request() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("context");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "context",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"/context\r");
+    assert!(
+        pty.wait_for_screen("context (estimated)", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    // The notice is longer than the frame, so the first rows scroll off: wait
+    // for rows near the end instead.
+    assert!(
+        pty.wait_for_screen("compactions this session: 0", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("reported: none yet", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        server.requests().is_empty(),
+        "a /context must not reach the model"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));

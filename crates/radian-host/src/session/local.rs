@@ -17,7 +17,7 @@ use super::facade::{DriverEnd, SessionFacade};
 use super::ids::{CommandRefused, SessionCapability, SessionCommand, SessionId, UserBashRecord};
 use super::setup_types::{AccessBuilder, SessionFacts, SessionQueue};
 use super::support::trust_event;
-use crate::memory::{MemoryInjection, MemoryService, first_user_text};
+use crate::memory::{MemoryInjection, MemoryService};
 use crate::pending::{Answered, PendingResponse};
 use crate::projection::{ProjectionRead, SessionProjection};
 use crate::skills::{self, Skill};
@@ -90,7 +90,6 @@ pub struct LocalSession {
     pub(super) skills_section: String,
     /// How many listable skills the listing names (ADR 0025 S2).
     pub(super) skills_count: usize,
-    pub(super) session_section: String,
     pub(super) memory_injection: Arc<MemoryInjection>,
     pub(super) context_budget: Option<agent_core::ContextBudget>,
     /// `C` (ADR 0018): the context window size. `None` when unknown.

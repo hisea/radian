@@ -266,6 +266,9 @@ impl App {
             } => self.begin_bash(command, exclude_from_context),
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
+            // `/context`: the loop reads the estimate from the facade; the answer
+            // comes back as `Input::SessionDone`.
+            command::Outcome::Context => UpdateResult::effect(Effect::Context),
             command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
             // The inspector (`/jobs`, `/tools`, `/mcp`, `/hooks`, `/panel`): the loop
             // gathers the snapshot; `update` stays pure. A bare `/jobs` opens the jobs

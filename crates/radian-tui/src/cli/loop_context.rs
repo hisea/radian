@@ -474,6 +474,13 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            // `/context`: read-only (journal + stored layers, no inbox, no driver),
+            // so it works mid-turn and never interrupts it.
+            Effect::Context => {
+                let notices = self.session.context_report();
+                self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
             // ADR 0037 decision 4: `/jobs` lists the running background jobs, or stops
             // one/all. The registry lives in the host, so the loop reads it here and shows
             // notices.
