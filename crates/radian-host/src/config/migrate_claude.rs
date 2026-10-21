@@ -23,13 +23,20 @@
 //! - `<project>/.claude/skills/<name>/SKILL.md` → `<project>/.agents/skills/<name>/SKILL.md`
 //!   (verbatim copy).
 //!
-//! What is reported as **not imported**, with the reason:
-//!
-//! - `<claude-home>/.claude.json` `mcpServers`: not imported (there is no `[mcp]` section
-//!   yet); reported per server.
-//! - `<project>/.claude/settings.json` `hooks`: not imported (project hooks are not loaded
-//!   yet); reported per item.
-//! - `<project>/.mcp.json`: never translated; reported as not read by the runtime.
+//! - `<claude-home>/.claude.json` `mcpServers` → the `config.toml` `[mcp]` section
+//!   (ADR 0008 §8): only stdio entries (`type` missing/`stdio`, no `url`), carrying
+//!   only `command`/`args`/`env`. Remote entries are dropped with one line each, and
+//!   so is every foreign key (`disabled`, `autoApprove`, `timeout`, …). A literal
+//!   secret in `env` is never copied and never shown: under an ordinary name it
+//!   becomes a `${VAR}` expansion with a suggested name (the only reference form
+//!   `[mcp]` values accept); under a sensitive name (`api_key`, `token`, … — any
+//!   string there is refused by the reader) the entry moves to `inherit_env` and
+//!   the report names the variable to set in the shell.
+//! - `<project>/.claude/settings.json` `hooks` → `<project>/.radian/hooks.json`
+//!   (ADR 0045 slice B): the same subset and the same tool-name translation as the
+//!   user `[hooks]` import. Off-subset entries get one report line each.
+//! - `<project>/.mcp.json`: never translated; the runtime reads it when the project
+//!   is trusted (ADR 0031 T1).
 //!
 //! Every other dropped item (`if`, `async`, http hooks, `context: fork`, agents, plugins,
 //! LSP, `.claude/rules`, `CLAUDE.local.md`, memory, sessions) gets one report line each.
@@ -38,8 +45,9 @@
 //!
 //! - **Credential files are never read.** `auth.json` and `.credentials.json` are not
 //!   opened, not even `stat`ed, wherever they might live.
-//! - **No secret value is ever copied or printed.** A literal secret becomes an ADR 0008 §3
-//!   environment reference with a suggested name; the note never shows the value.
+//! - **No secret value is ever copied or printed.** A literal secret becomes a
+//!   `${VAR}` reference (or an `inherit_env` entry under a sensitive name) with a
+//!   suggested name; the note never shows the value.
 //! - **No network, no command execution.** The only inputs are files under the two named
 //!   directories.
 //! - The generated config draft is validated with the real reader ([`super::parse`]) and
@@ -48,10 +56,12 @@
 //!   the configuration is merged into the existing file, format-preserving, through
 //!   [`super::preserve::edit_preserving`] (ADR 0008 §5: comments, order and unknown keys
 //!   survive; `extra_paths` gains only missing entries; `[hooks]` gains only new entries;
-//!   anything that would have to change to land is left alone with one report line naming
+//!   `[mcp]` gains only new servers in the form the file already uses; anything that
+//!   would have to change to land is left alone with one report line naming
 //!   the key). `AGENTS.md` and `SKILL.md` targets are created with `create_new`: an
 //!   existing target is skipped with one report line, and the other targets are still
-//!   written.
+//!   written. An existing project hooks file gains only missing entries; an unreadable
+//!   one is left alone with one report line.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -71,18 +81,41 @@ pub struct ClaudeSkill {
     pub content: String,
 }
 
+/// One translated MCP server: a stdio entry for the `config.toml` `[mcp]` section.
+/// `env` values are exactly as written (a `${VAR}` reference where a literal secret
+/// stood); the loader expands them when the file is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeMcpServer {
+    /// The server id (the `mcpServers` object key).
+    pub id: String,
+    /// The stdio command.
+    pub command: String,
+    /// The stdio args.
+    pub args: Vec<String>,
+    /// The environment entries as written.
+    pub env: BTreeMap<String, String>,
+    /// Names inherited from the process environment (sensitive names the reader
+    /// refuses as strings under `[mcp]`).
+    pub inherit_env: Vec<String>,
+}
+
 /// A drafted Claude import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeDraft {
     /// The TOML text: `schema_version = 1` plus only the keys the Radian reader implements
-    /// (`[skills] extra_paths`, `[hooks]`).
+    /// (`[skills] extra_paths`, `[hooks]`, `[mcp]`).
     pub config_toml: String,
+    /// The `<project>/.radian/hooks.json` text, when the project settings held importable
+    /// hooks (the bare events object, translatable matchers applied).
+    pub project_hooks_json: Option<String>,
     /// The user-level `CLAUDE.md` body, when present (goes to `~/.radian/AGENTS.md` verbatim).
     pub user_agents_md: Option<String>,
     /// Skills from `<claude-home>/commands/*.md` (go to `~/.agents/skills/<name>/SKILL.md`).
     pub user_skills: Vec<ClaudeSkill>,
     /// Skills from `<project>/.claude/commands/*.md` plus `<project>/.claude/skills/*/`.
     pub project_skills: Vec<ClaudeSkill>,
+    /// Stdio servers from `<claude-home>/.claude.json` `mcpServers` (go to `[mcp]`).
+    pub mcp_servers: Vec<ClaudeMcpServer>,
     /// What was mapped, what was skipped and why. Printed to stderr. Lines name keys, never
     /// secret values.
     pub notes: Vec<String>,
@@ -115,6 +148,8 @@ pub struct ClaudeTargets {
     pub user_agents_path: PathBuf,
     /// `<project>/.agents/skills/` (`None` when no `--project` was given).
     pub project_skills_dir: Option<PathBuf>,
+    /// `<project>/.radian/hooks.json` (`None` when no `--project` was given).
+    pub project_hooks_path: Option<PathBuf>,
 }
 
 /// Why the import stopped.
@@ -248,11 +283,41 @@ pub fn import_claude(
     }
 
     let config_toml = draft.render()?;
+    let project_hooks_json = render_project_hooks(&draft.project_hooks);
+    if let Some(text) = &project_hooks_json {
+        // The written file must load through the runtime's project hooks loader.
+        let parsed: Json =
+            serde_json::from_str(text).map_err(|error| ClaudeMigrateError::InvalidDraft {
+                message: format!("project hooks: {error}"),
+            })?;
+        let mut warnings = Vec::new();
+        let loaded = crate::project_hooks::parse_project_value(&parsed, "<draft>", &mut warnings);
+        let mut want = [0usize; 3];
+        for (event, _, _) in &draft.project_hooks {
+            want[match event {
+                HookEvent::Pre => 0,
+                HookEvent::Post => 1,
+                HookEvent::Stop => 2,
+            }] += 1;
+        }
+        let got = [
+            loaded.pre_tool_use.len(),
+            loaded.post_tool_use.len(),
+            loaded.stop.len(),
+        ];
+        if want != got {
+            return Err(ClaudeMigrateError::InvalidDraft {
+                message: "project hooks: the rendered file does not load back".into(),
+            });
+        }
+    }
     let built = ClaudeDraft {
         config_toml,
+        project_hooks_json,
         user_agents_md: draft.user_agents_md,
         user_skills: draft.user_skills,
         project_skills: draft.project_skills,
+        mcp_servers: draft.mcp,
         notes: draft.notes,
         files_read: draft.files_read,
     };
@@ -286,16 +351,20 @@ fn require_dir(dir: &Path) -> Result<(), ClaudeMigrateError> {
 /// - the configuration is merged into the existing file through
 ///   [`super::preserve::edit_preserving`] (ADR 0008 §5): comments, order and unknown keys
 ///   survive byte-for-byte; `extra_paths` gains only entries that are not already listed;
-///   `[hooks]` gains only matcher entries that are not already present; anything the
-///   import would have to change to land is left alone with one report line naming the
-///   key. A file the reader refuses, or one read read-only (a newer `schema_version`),
-///   stops the whole write with an error and nothing is written.
+///   `[hooks]` gains only matcher entries that are not already present; `[mcp]` gains
+///   only servers whose id is not already present, in the form the file already uses;
+///   anything the import would have to change to land is left alone with one report
+///   line naming the key. A file the reader refuses, or one read read-only (a newer
+///   `schema_version`), stops the whole write with an error and nothing is written.
 /// - `AGENTS.md` and every `SKILL.md` target is created with `create_new`: an existing
 ///   file is skipped with one report line (`<path>: exists, not written; the draft is in
 ///   the dry-run output`), and the other targets are still written.
+/// - the project hooks file gains only entries it does not already have (created when
+///   absent); an existing file is never truncated to less than it held, and an
+///   unreadable one is left alone with one report line.
 ///
-/// Project-level skill files are trust-gate resources (ADR 0031 T1); the CLI prints that
-/// notice before calling this.
+/// Project-level skill and hooks files are trust-gate resources (ADR 0031 T1); the CLI
+/// prints that notice before calling this.
 pub fn write_claude_draft(
     draft: &ClaudeDraft,
     targets: &ClaudeTargets,
@@ -314,12 +383,18 @@ pub fn write_claude_draft(
             }
         })?;
     }
+    if let Some(text) = &draft.project_hooks_json {
+        serde_json::from_str::<Json>(text).map_err(|error| ClaudeMigrateError::InvalidDraft {
+            message: format!("project hooks: {error}"),
+        })?;
+    }
 
     let mut report = ClaudeWriteReport::default();
     merge_config(
         &targets.config_path,
         &parsed.skills.extra_paths,
         &parsed.hooks,
+        &draft.mcp_servers,
         &mut report,
     )?;
     if let Some(body) = &draft.user_agents_md {
@@ -334,6 +409,14 @@ pub fn write_claude_draft(
             let path = dir.join(&skill.name).join("SKILL.md");
             write_one(&path, &skill.content, false, &mut report)?;
         }
+    }
+    if let Some(json) = &draft.project_hooks_json {
+        let Some(path) = &targets.project_hooks_path else {
+            return Err(ClaudeMigrateError::InvalidDraft {
+                message: "project hooks: no target path for the project hooks file".into(),
+            });
+        };
+        merge_project_hooks(path, json, &mut report)?;
     }
     // Read back what landed through the same reader: the file on disk must be accepted.
     let text = std::fs::read_to_string(&targets.config_path).map_err(|source| {
@@ -351,7 +434,7 @@ pub fn write_claude_draft(
 }
 
 /// The keys one merge may touch, for the verify error.
-const MERGE_KEYS: &str = "`[skills] extra_paths`/`[hooks]`";
+const MERGE_KEYS: &str = "`[skills] extra_paths`/`[hooks]`/`[mcp]`";
 
 /// One event's imported matcher entries to append.
 struct PlannedHooks {
@@ -367,16 +450,23 @@ type PlannedEntry = (Option<String>, Vec<(String, Option<u64>)>);
 struct PlannedMerge {
     add_paths: Vec<String>,
     add_hooks: Vec<PlannedHooks>,
+    add_mcp: Vec<ClaudeMcpServer>,
     conflicts: Vec<String>,
+    /// The `[mcp]` load the merged file must produce. The real loader ran on the merged
+    /// value, so `${VAR}` expansion and warnings match the post-write parse exactly.
+    /// `None` when no server is added (the baseline load stands).
+    mcp_expected: Option<crate::mcp::McpLoad>,
 }
 
-/// Merges the imported paths and hooks into the configuration at `path` (created when
-/// absent), format-preserving. Additions that are already present are skipped; shapes the
-/// merge cannot extend are left alone with one conflict line each in `report`.
+/// Merges the imported paths, hooks and MCP servers into the configuration at `path`
+/// (created when absent), format-preserving. Additions that are already present are
+/// skipped (an existing server id gets one report line); shapes the merge cannot
+/// extend are left alone with one conflict line each in `report`.
 fn merge_config(
     path: &Path,
     add_paths: &[String],
     add_hooks: &super::HooksConfig,
+    add_mcp: &[ClaudeMcpServer],
     report: &mut ClaudeWriteReport,
 ) -> Result<(), ClaudeMigrateError> {
     let existing = match std::fs::read_to_string(path) {
@@ -401,7 +491,7 @@ fn merge_config(
             });
         }
     }
-    let plan = plan_merge(existing.as_deref(), path, add_paths, add_hooks)?;
+    let plan = plan_merge(existing.as_deref(), path, add_paths, add_hooks, add_mcp)?;
     report.skipped.extend(plan.conflicts);
 
     if let Some(parent) = path
@@ -477,6 +567,51 @@ fn merge_config(
                     });
                 }
             }
+            if !plan.add_mcp.is_empty() {
+                // New servers land in the form the file already uses (`[[mcp.servers]]`
+                // when it has those, else `[mcp.mcpServers.<name>]`), so a both-forms
+                // file is never produced. An inline `servers` list was already a
+                // conflict in the plan, so `servers` here is always extendable.
+                let servers_form = doc
+                    .get("mcp")
+                    .and_then(|mcp| mcp.as_table_like())
+                    .and_then(|mcp| mcp.get("servers"))
+                    .is_some_and(Item::is_array_of_tables);
+                let root = doc.entry("mcp").or_insert(Item::Table(Table::new()));
+                let table = root
+                    .as_table_like_mut()
+                    .ok_or_else(|| PreserveError::Verify {
+                        path: path.to_path_buf(),
+                        keys: MERGE_KEYS,
+                    })?;
+                if servers_form {
+                    let list = table
+                        .entry("servers")
+                        .or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
+                    let tables =
+                        list.as_array_of_tables_mut()
+                            .ok_or_else(|| PreserveError::Verify {
+                                path: path.to_path_buf(),
+                                keys: MERGE_KEYS,
+                            })?;
+                    for server in &plan.add_mcp {
+                        tables.push(mcp_servers_table(server));
+                    }
+                } else {
+                    let outer = table
+                        .entry("mcpServers")
+                        .or_insert(Item::Table(Table::new()));
+                    let inner = outer
+                        .as_table_like_mut()
+                        .ok_or_else(|| PreserveError::Verify {
+                            path: path.to_path_buf(),
+                            keys: MERGE_KEYS,
+                        })?;
+                    for server in &plan.add_mcp {
+                        inner.insert(&server.id, Item::Table(mcp_entry_table(server)));
+                    }
+                }
+            }
             Ok(())
         },
         |expected| {
@@ -502,6 +637,11 @@ fn merge_config(
                     }
                 }
             }
+            // The loader ran on the merged `[mcp]` value while planning, so expansion
+            // and warnings match the post-write parse exactly.
+            if let Some(load) = &plan.mcp_expected {
+                expected.mcp = load.clone();
+            }
         },
     )?;
     Ok(())
@@ -515,11 +655,14 @@ fn plan_merge(
     path: &Path,
     add_paths: &[String],
     add_hooks: &super::HooksConfig,
+    add_mcp: &[ClaudeMcpServer],
 ) -> Result<PlannedMerge, ClaudeMigrateError> {
     let mut plan = PlannedMerge::default();
     let Some(text) = existing else {
         plan.add_paths = add_paths.to_owned();
         plan.add_hooks = planned_hooks(add_hooks);
+        plan.add_mcp = add_mcp.to_owned();
+        plan.mcp_expected = planned_mcp_load(None, path, false, &plan.add_mcp)?;
         return Ok(plan);
     };
     let doc =
@@ -549,58 +692,278 @@ fn plan_merge(
     let hooks = doc.get("hooks");
     if hooks.is_none() {
         plan.add_hooks = planned_hooks(add_hooks);
-        return Ok(plan);
-    }
-    let Some(table) = hooks.and_then(|hooks| hooks.as_table_like()) else {
+    } else if let Some(table) = hooks.and_then(|hooks| hooks.as_table_like()) {
+        for (event, entries) in [
+            ("PreToolUse", &add_hooks.pre_tool_use),
+            ("PostToolUse", &add_hooks.post_tool_use),
+            ("Stop", &add_hooks.stop),
+        ] {
+            let imported: Vec<PlannedEntry> = entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.matcher.clone(),
+                        entry
+                            .hooks
+                            .iter()
+                            .map(|hook| (hook.command.clone(), hook.timeout_secs))
+                            .collect(),
+                    )
+                })
+                .collect();
+            if imported.is_empty() {
+                continue;
+            }
+            let present = match table.get(event) {
+                None => Vec::new(),
+                Some(list) => match existing_hook_entries(list) {
+                    Some(entries) => entries,
+                    None => {
+                        plan.conflicts.push(format!(
+                            "`hooks.{event}`: is not a hook list, left unchanged"
+                        ));
+                        continue;
+                    }
+                },
+            };
+            let mut planned = PlannedHooks {
+                event,
+                entries: Vec::new(),
+            };
+            for entry in imported {
+                if !present.contains(&entry) && !planned.entries.contains(&entry) {
+                    planned.entries.push(entry);
+                }
+            }
+            plan.add_hooks.push(planned);
+        }
+    } else {
         plan.conflicts
             .push("`hooks`: is not a table, hooks left unchanged".to_owned());
-        return Ok(plan);
-    };
-    for (event, entries) in [
-        ("PreToolUse", &add_hooks.pre_tool_use),
-        ("PostToolUse", &add_hooks.post_tool_use),
-        ("Stop", &add_hooks.stop),
-    ] {
-        let imported: Vec<PlannedEntry> = entries
-            .iter()
-            .map(|entry| {
-                (
-                    entry.matcher.clone(),
-                    entry
-                        .hooks
-                        .iter()
-                        .map(|hook| (hook.command.clone(), hook.timeout_secs))
-                        .collect(),
-                )
-            })
-            .collect();
-        if imported.is_empty() {
-            continue;
-        }
-        let present = match table.get(event) {
-            None => Vec::new(),
-            Some(list) => match existing_hook_entries(list) {
-                Some(entries) => entries,
-                None => {
-                    plan.conflicts.push(format!(
-                        "`hooks.{event}`: is not a hook list, left unchanged"
-                    ));
-                    continue;
-                }
-            },
-        };
-        let mut planned = PlannedHooks {
-            event,
-            entries: Vec::new(),
-        };
-        for entry in imported {
-            if !present.contains(&entry) && !planned.entries.contains(&entry) {
-                planned.entries.push(entry);
-            }
-        }
-        plan.add_hooks.push(planned);
     }
+    plan_mcp(&doc, path, text, add_mcp, &mut plan)?;
     Ok(plan)
+}
+
+/// Works out which imported servers the merge may append: a server whose id already
+/// exists is skipped with one report line, and the rest land in the form the file
+/// already uses. Shapes the reader refuses (both `[mcp]` forms at once, or neither)
+/// never reach here: the baseline parse above already failed on them.
+fn plan_mcp(
+    doc: &toml_edit::DocumentMut,
+    path: &Path,
+    existing: &str,
+    add_mcp: &[ClaudeMcpServer],
+    plan: &mut PlannedMerge,
+) -> Result<(), ClaudeMigrateError> {
+    if add_mcp.is_empty() {
+        return Ok(());
+    }
+    let mcp = doc.get("mcp");
+    if mcp.is_none() {
+        plan.add_mcp = add_mcp.to_owned();
+        plan.mcp_expected = planned_mcp_load(Some(existing), path, false, &plan.add_mcp)?;
+        return Ok(());
+    }
+    // New servers land in the form the file already uses. An inline `servers = [...]`
+    // list loads but has no `[[...]]` form to extend: leave it alone with one conflict
+    // line rather than producing a both-forms file.
+    let mcp_table = mcp.and_then(|mcp| mcp.as_table_like());
+    let servers_key = mcp_table.and_then(|table| table.get("servers"));
+    let servers_form = servers_key.is_some_and(Item::is_array_of_tables);
+    if servers_key.is_some() && !servers_form {
+        plan.conflicts.push(
+            "`[mcp]` servers: is not an extendable server list, servers left unchanged".to_owned(),
+        );
+        return Ok(());
+    }
+    let present = existing_mcp_ids(doc, servers_form);
+    for server in add_mcp {
+        if present.contains(&server.id) {
+            plan.conflicts.push(format!(
+                "`[mcp]` server `{}`: already present, left unchanged",
+                server.id
+            ));
+        } else if !plan.add_mcp.iter().any(|added| added.id == server.id) {
+            plan.add_mcp.push(server.clone());
+        }
+    }
+    plan.mcp_expected = planned_mcp_load(Some(existing), path, servers_form, &plan.add_mcp)?;
+    Ok(())
+}
+
+/// The ids one `[mcp]` form already holds.
+fn existing_mcp_ids(doc: &toml_edit::DocumentMut, servers_form: bool) -> Vec<String> {
+    let Some(mcp) = doc.get("mcp").and_then(|mcp| mcp.as_table_like()) else {
+        return Vec::new();
+    };
+    if servers_form {
+        return mcp
+            .get("servers")
+            .and_then(Item::as_array_of_tables)
+            .map(|tables| {
+                tables
+                    .iter()
+                    .filter_map(|table| table.get("id"))
+                    .filter_map(|id| id.as_str())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    mcp.get("mcpServers")
+        .and_then(|servers| servers.as_table_like())
+        .map(|servers| servers.iter().map(|(id, _)| id.to_owned()).collect())
+        .unwrap_or_default()
+}
+
+/// Runs the real MCP loader on the merged `[mcp]` value: the existing section (when
+/// `existing` holds one) plus `add` in `servers_form`. `None` when nothing is added.
+/// The edit closure appends the same servers to the same form, so the verify step
+/// compares against exactly what the post-write parse produces.
+fn planned_mcp_load(
+    existing: Option<&str>,
+    path: &Path,
+    servers_form: bool,
+    add: &[ClaudeMcpServer],
+) -> Result<Option<crate::mcp::McpLoad>, ClaudeMigrateError> {
+    if add.is_empty() {
+        return Ok(None);
+    }
+    let mut merged = match existing {
+        Some(text) => toml::from_str::<Toml>(text)
+            .map_err(|error| ClaudeMigrateError::Parse {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?
+            .get("mcp")
+            .cloned()
+            .unwrap_or_else(|| Toml::Table(toml::map::Map::new())),
+        None => Toml::Table(toml::map::Map::new()),
+    };
+    let Some(table) = merged.as_table_mut() else {
+        // Unreachable: the baseline parse refuses a non-table `[mcp]`.
+        return Err(ClaudeMigrateError::InvalidDraft {
+            message: format!("{}: `[mcp]` is not a table", path.display()),
+        });
+    };
+    for server in add {
+        push_mcp_value(table, servers_form, server);
+    }
+    let origin = format!("{} [mcp]", path.display());
+    crate::mcp::load_mcp_from_toml(&merged, &origin)
+        .map(Some)
+        .map_err(|message| ClaudeMigrateError::InvalidDraft { message })
+}
+
+/// Appends `server` to an `[mcp]` table value in one form: `[[mcp.servers]]` entries
+/// (with `id`) or `[mcp.mcpServers.<name>]` tables.
+fn push_mcp_value(
+    mcp: &mut toml::map::Map<String, Toml>,
+    servers_form: bool,
+    server: &ClaudeMcpServer,
+) {
+    let mut table = toml::map::Map::new();
+    if servers_form {
+        table.insert("id".to_owned(), Toml::String(server.id.clone()));
+    }
+    table.insert("command".to_owned(), Toml::String(server.command.clone()));
+    if !server.args.is_empty() {
+        table.insert(
+            "args".to_owned(),
+            Toml::Array(server.args.iter().cloned().map(Toml::String).collect()),
+        );
+    }
+    if !server.env.is_empty() {
+        let mut env = toml::map::Map::new();
+        for (key, value) in &server.env {
+            env.insert(key.clone(), Toml::String(value.clone()));
+        }
+        table.insert("env".to_owned(), Toml::Table(env));
+    }
+    if !server.inherit_env.is_empty() {
+        table.insert(
+            "inherit_env".to_owned(),
+            Toml::Array(
+                server
+                    .inherit_env
+                    .iter()
+                    .cloned()
+                    .map(Toml::String)
+                    .collect(),
+            ),
+        );
+    }
+    if servers_form {
+        mcp.entry("servers".to_owned())
+            .or_insert_with(|| Toml::Array(Vec::new()))
+            .as_array_mut()
+            .expect("the servers entry stays an array")
+            .push(Toml::Table(table));
+    } else {
+        mcp.entry("mcpServers".to_owned())
+            .or_insert_with(|| Toml::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .expect("the mcpServers entry stays a table")
+            .insert(server.id.clone(), Toml::Table(table));
+    }
+}
+
+/// One imported server as a `[[mcp.servers]]` table (with `id`).
+fn mcp_servers_table(server: &ClaudeMcpServer) -> Table {
+    let mut table = Table::new();
+    table["id"] = value(server.id.as_str());
+    table["command"] = value(server.command.as_str());
+    if !server.args.is_empty() {
+        let mut args = Array::new();
+        for arg in &server.args {
+            args.push(arg.as_str());
+        }
+        table["args"] = Item::Value(toml_edit::Value::Array(args));
+    }
+    if !server.env.is_empty() {
+        let mut env = Table::new();
+        for (key, val) in &server.env {
+            env[key] = value(val.as_str());
+        }
+        table["env"] = Item::Table(env);
+    }
+    if !server.inherit_env.is_empty() {
+        let mut inherit = Array::new();
+        for name in &server.inherit_env {
+            inherit.push(name.as_str());
+        }
+        table["inherit_env"] = Item::Value(toml_edit::Value::Array(inherit));
+    }
+    table
+}
+
+/// One imported server as a `[mcp.mcpServers.<name>]` table (the name is the key).
+fn mcp_entry_table(server: &ClaudeMcpServer) -> Table {
+    let mut table = Table::new();
+    table["command"] = value(server.command.as_str());
+    if !server.args.is_empty() {
+        let mut args = Array::new();
+        for arg in &server.args {
+            args.push(arg.as_str());
+        }
+        table["args"] = Item::Value(toml_edit::Value::Array(args));
+    }
+    if !server.env.is_empty() {
+        let mut env = Table::new();
+        for (key, val) in &server.env {
+            env[key] = value(val.as_str());
+        }
+        table["env"] = Item::Table(env);
+    }
+    if !server.inherit_env.is_empty() {
+        let mut inherit = Array::new();
+        for name in &server.inherit_env {
+            inherit.push(name.as_str());
+        }
+        table["inherit_env"] = Item::Value(toml_edit::Value::Array(inherit));
+    }
+    table
 }
 
 /// The imported hooks in merge-plan shape (every entry is new: there is no file yet).
@@ -781,6 +1144,148 @@ fn write_one(
     Ok(())
 }
 
+/// Merges the imported project hooks (`json_text`, the draft's rendered file) into the
+/// project hooks file at `path` (created when absent). Only entries the file does not
+/// already have are added; nothing that is there is replaced or dropped. A file that
+/// is not valid JSON is left untouched with one report line. The merged text is read
+/// back through the runtime's project hooks loader before anything is reported.
+fn merge_project_hooks(
+    path: &Path,
+    json_text: &str,
+    report: &mut ClaudeWriteReport,
+) -> Result<(), ClaudeMigrateError> {
+    let imported: Json =
+        serde_json::from_str(json_text).expect("the draft renders valid hooks JSON");
+    let Some(imported_top) = imported.as_object() else {
+        return Err(ClaudeMigrateError::InvalidDraft {
+            message: "project hooks: the rendered file is not an object".into(),
+        });
+    };
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(ClaudeMigrateError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let Some(current) = existing else {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        write_private_new(path, json_text)?;
+        report.written.push(path.to_path_buf());
+        crate::project_hooks::load_project_file(path)
+            .map_err(|message| ClaudeMigrateError::InvalidDraft { message })?;
+        return Ok(());
+    };
+    let mut current: Json = match serde_json::from_str(&current) {
+        Ok(value) => value,
+        Err(_) => {
+            report.skipped.push(format!(
+                "`{}`: not valid JSON, left unchanged",
+                path.display()
+            ));
+            return Ok(());
+        }
+    };
+    let Some(top) = current.as_object_mut() else {
+        report.skipped.push(format!(
+            "`{}`: not an object, left unchanged",
+            path.display()
+        ));
+        return Ok(());
+    };
+    // The wrapped `{"hooks": {...}}` shape wins when it is an object, like the loader.
+    let events: &mut serde_json::Map<String, Json> =
+        match top.get_mut("hooks").map(|hooks| hooks.as_object_mut()) {
+            Some(Some(wrapped)) => wrapped,
+            _ => top,
+        };
+    let mut added = 0usize;
+    let mut names: Vec<&String> = imported_top.keys().collect();
+    names.sort();
+    for event in names {
+        let Some(Json::Array(new_entries)) = imported_top.get(event) else {
+            continue;
+        };
+        match events.get_mut(event) {
+            None => {
+                events.insert(event.clone(), Json::Array(new_entries.clone()));
+                added += new_entries.len();
+            }
+            Some(Json::Array(list)) => {
+                for entry in new_entries {
+                    if list.iter().any(|present| same_hook_entry(present, entry)) {
+                        report.skipped.push(format!(
+                            "`{}`: `hooks.{event}` entry already present, not added",
+                            path.display()
+                        ));
+                    } else {
+                        list.push(entry.clone());
+                        added += 1;
+                    }
+                }
+            }
+            Some(_) => {
+                report.skipped.push(format!(
+                    "`{}`: `hooks.{event}` is not a list, left unchanged",
+                    path.display()
+                ));
+            }
+        }
+    }
+    if added == 0 {
+        return Ok(());
+    }
+    let mut text = serde_json::to_string_pretty(&current).expect("merged hooks render as JSON");
+    text.push('\n');
+    std::fs::write(path, &text).map_err(|source| ClaudeMigrateError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    crate::project_hooks::load_project_file(path)
+        .map_err(|message| ClaudeMigrateError::InvalidDraft { message })?;
+    report.written.push(path.to_path_buf());
+    Ok(())
+}
+
+/// Whether two project hook entries carry the same matcher and commands: a missing or
+/// null matcher counts as the match-all both spell. Anything misshapen counts as
+/// different (the existing entry is never touched either way).
+fn same_hook_entry(first: &Json, second: &Json) -> bool {
+    fn canonical(entry: &Json) -> Option<PlannedEntry> {
+        let table = entry.as_object()?;
+        let matcher = match table.get("matcher") {
+            None | Some(Json::Null) => None,
+            Some(Json::String(matcher)) => Some(matcher.clone()),
+            Some(_) => return None,
+        };
+        let hooks = table.get("hooks")?.as_array()?;
+        let mut commands = Vec::new();
+        for hook in hooks {
+            let hook = hook.as_object()?;
+            let command = hook.get("command")?.as_str()?.to_owned();
+            let timeout = match hook.get("timeout") {
+                None | Some(Json::Null) => None,
+                Some(Json::Number(timeout)) => Some(timeout.as_u64()?),
+                Some(_) => return None,
+            };
+            commands.push((command, timeout));
+        }
+        Some((matcher, commands))
+    }
+    match (canonical(first), canonical(second)) {
+        (Some(first), Some(second)) => first == second,
+        _ => false,
+    }
+}
+
 /// Creates `path` with mode `0600` (unix) and writes `text`. `create_new` means an existing
 /// file is never truncated: callers skip existing targets instead of replacing them.
 fn write_private_new(path: &Path, text: &str) -> Result<(), ClaudeMigrateError> {
@@ -928,14 +1433,20 @@ fn map_user_skills_ref(home: &Path, draft: &mut Draft) {
     }
 }
 
-/// `<claude-home>/.claude.json` `mcpServers`: not imported. Literal secrets become env
-/// references with suggested names; values are never shown.
+/// `<claude-home>/.claude.json` `mcpServers` → the `[mcp]` draft entries. Only stdio
+/// servers run (`type` missing/`stdio`, no `url`); each keeps only
+/// `command`/`args`/`env`. Remote servers go with one line each, and so does every
+/// foreign key. A literal secret in `env` is never copied and never shown: under an
+/// ordinary name it becomes a `${VAR}` expansion with a suggested name (the only
+/// reference form `[mcp]` string values accept); under a sensitive name — where the
+/// reader refuses any string — the entry moves to `inherit_env` and the report names
+/// the variable to set in the shell.
 fn map_user_claude_json(home: &Path, draft: &mut Draft) -> Result<(), ClaudeMigrateError> {
     let Some(json) = read_json(home, ".claude.json", draft)? else {
         return Ok(());
     };
     let Some(servers) = json.get("mcpServers").and_then(Json::as_object) else {
-        draft.note("`.claude.json`: no `mcpServers`, nothing to report");
+        draft.note("`.claude.json`: no `mcpServers`, nothing to import");
         return Ok(());
     };
     if servers.is_empty() {
@@ -944,30 +1455,147 @@ fn map_user_claude_json(home: &Path, draft: &mut Draft) -> Result<(), ClaudeMigr
     }
     let mut names: Vec<String> = servers.keys().cloned().collect();
     names.sort();
+    let mut imported = 0usize;
     for name in &names {
-        draft.note(format!(
-            "`.claude.json` server `{name}`: not imported: Radian reads MCP servers from \
-             `--mcp-config` only; copy it to a `mcpServers` file yourself"
-        ));
-        if let Some(Json::Object(entry)) = servers.get(name)
-            && let Some(Json::Object(env)) = entry.get("env")
-        {
-            for (key, value) in env {
-                if let Some(text) = value.as_str()
-                    && !text.is_empty()
-                    && looks_like_secret_value(key, text)
-                {
-                    let suggested = suggested_env(&format!("{name}_{key}"));
-                    draft.note(format!(
-                        "`.claude.json` server `{name}` env `{key}`: a literal value was not \
-                         migrated (its value is never shown); use an environment reference \
-                         instead: `{{ from = \"env\", name = \"{suggested}\" }}`"
-                    ));
-                }
+        let what = format!("`.claude.json` server `{name}`");
+        let Some(entry) = servers.get(name).and_then(Json::as_object) else {
+            draft.note(format!("{what}: not an object, skipped"));
+            continue;
+        };
+        let kind = entry.get("type").and_then(Json::as_str);
+        let has_url = entry.get("url").is_some_and(|url| !url.is_null());
+        if !matches!(kind, None | Some("stdio")) || has_url {
+            let detail = match kind {
+                Some(kind) => format!("type `{kind}`"),
+                None => "has `url`".to_owned(),
+            };
+            draft.note(format!(
+                "{what}: not imported (only stdio servers run; {detail})"
+            ));
+            continue;
+        }
+        for key in entry.keys() {
+            if !matches!(key.as_str(), "command" | "args" | "env" | "type") {
+                draft.note(format!("{what}: key `{key}` has no equivalent, ignored"));
             }
         }
+        let Some(command) = entry.get("command").and_then(Json::as_str) else {
+            draft.note(format!(
+                "{what}: no `command`, skipped (only stdio entries can run)"
+            ));
+            continue;
+        };
+        if command.is_empty() {
+            draft.note(format!("{what}: empty `command`, skipped"));
+            continue;
+        }
+        let mut args: Vec<String> = Vec::new();
+        match entry.get("args") {
+            None => {}
+            Some(Json::Array(items)) => {
+                for item in items {
+                    match item.as_str() {
+                        Some(arg) => args.push(arg.to_owned()),
+                        None => {
+                            draft.note(format!("{what}: an `args` entry is not a string, skipped"))
+                        }
+                    }
+                }
+            }
+            Some(_) => draft.note(format!("{what}: `args` is not an array, skipped")),
+        }
+        let mut env: BTreeMap<String, String> = BTreeMap::new();
+        let mut inherit_env: Vec<String> = Vec::new();
+        match entry.get("env") {
+            None => {}
+            Some(Json::Object(vars)) => {
+                let mut keys: Vec<&String> = vars.keys().collect();
+                keys.sort();
+                for key in keys {
+                    let Some(value) = vars.get(key).and_then(Json::as_str) else {
+                        draft.note(format!("{what} env `{key}`: not a string, skipped"));
+                        continue;
+                    };
+                    if looks_like_secret_value(key, value) {
+                        let suggested = suggested_env(&format!("{name}_{key}"));
+                        if is_sensitive_key(key) {
+                            // The reader refuses any string under a sensitive name, so the
+                            // value cannot stay in `env`: it rides `inherit_env` instead.
+                            push_inherit_env(&mut inherit_env, key);
+                            draft.note(format!(
+                                "{what} env `{key}`: the literal value was not migrated (its \
+                                 value is never shown); set `{key}` in your shell, it is \
+                                 passed through `inherit_env`"
+                            ));
+                        } else {
+                            env.insert(key.clone(), format!("${{{suggested}}}"));
+                            draft.note(format!(
+                                "{what} env `{key}`: the literal value was replaced by \
+                                 `${{{suggested}}}`; set `{suggested}` in your shell (the \
+                                 value is never shown)"
+                            ));
+                        }
+                    } else if is_sensitive_key(key) {
+                        // Even a harmless string is refused under a sensitive name.
+                        push_inherit_env(&mut inherit_env, key);
+                        draft.note(format!(
+                            "{what} env `{key}`: not migrated as a string (sensitive names \
+                             cannot be written under `[mcp]`); set `{key}` in your shell, \
+                             it is passed through `inherit_env`"
+                        ));
+                    } else {
+                        env.insert(key.clone(), value.to_owned());
+                    }
+                }
+            }
+            Some(_) => draft.note(format!("{what}: `env` is not an object, skipped")),
+        }
+        draft.mcp.push(ClaudeMcpServer {
+            id: name.clone(),
+            command: command.to_owned(),
+            args,
+            env,
+            inherit_env,
+        });
+        imported += 1;
+    }
+    if imported == 0 {
+        draft.note("`.claude.json`: no stdio server to import, nothing landed in `[mcp]`");
+    } else {
+        draft.note(format!(
+            "`.claude.json`: imported {imported} stdio server(s) into `[mcp]`; set the \
+             reported environment variables before starting servers that need them"
+        ));
     }
     Ok(())
+}
+
+/// Whether `key` is a sensitive name the configuration reader refuses as a string
+/// (ADR 0008 §3.2 rule 1, mirrored here so the draft never carries an unparsable
+/// `[mcp]` entry).
+fn is_sensitive_key(key: &str) -> bool {
+    const SENSITIVE: [&str; 7] = [
+        "api_key",
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "authorization",
+    ];
+    SENSITIVE.contains(&key.to_ascii_lowercase().as_str())
+}
+
+/// Records a sensitive env name for `inherit_env`. The explicit list replaces the
+/// `mcpServers` `HOME` default, so `HOME` stays first and `npx`/`uvx` servers keep
+/// working.
+fn push_inherit_env(inherit_env: &mut Vec<String>, key: &str) {
+    if inherit_env.is_empty() {
+        inherit_env.push("HOME".to_owned());
+    }
+    if !inherit_env.contains(&key.to_owned()) {
+        inherit_env.push(key.to_owned());
+    }
 }
 
 /// `<claude-home>/settings.json` `hooks` → `[hooks]`. Only the ADR 0045 subset survives;
@@ -980,29 +1608,53 @@ fn map_user_settings(home: &Path, draft: &mut Draft) -> Result<(), ClaudeMigrate
         draft.note("`settings.json`: no `hooks`, nothing to import");
         return Ok(());
     };
+    let (entries, any_command) = collect_hook_entries(hooks, "`settings.json`", draft);
+    draft.hooks.extend(entries);
+    if any_command {
+        draft.note(
+            "hook scripts that read `.tool_input.file_path` must use `.path` instead \
+             (`old_string`→`.old`, `new_string`→`.new`); matchers name Radian tools \
+             (`shell`, `patch`, `write`, `read`, …)",
+        );
+    }
+    Ok(())
+}
+
+/// Maps one Claude `hooks` object (the value of `hooks` in a settings file) to importable
+/// entries. Only the ADR 0045 subset survives (`PreToolUse`/`PostToolUse`/`Stop`, only
+/// `type = "command"`, no `async`/`if`/`http`/`prompt`/`agent`/`context: fork`);
+/// everything else gets one report line each. `label` names the file in those lines
+/// (`` `settings.json` `` or `` `.claude/settings.json` ``). Returns the entries and
+/// whether any command hook survived (for the field-rename hint).
+fn collect_hook_entries(
+    hooks: &serde_json::Map<String, Json>,
+    label: &str,
+    draft: &mut Draft,
+) -> (Vec<HookEntry>, bool) {
+    let mut entries: Vec<HookEntry> = Vec::new();
     let mut any_command = false;
-    for (event, entries) in hooks {
+    for (event, items) in hooks {
         let target = match event.as_str() {
             "PreToolUse" => Some(HookEvent::Pre),
             "PostToolUse" => Some(HookEvent::Post),
             "Stop" => Some(HookEvent::Stop),
             _ => {
                 draft.note(format!(
-                    "`settings.json` hook event `{event}`: not imported (only \
+                    "{label} hook event `{event}`: not imported (only \
                      `PreToolUse`/`PostToolUse`/`Stop` are supported)"
                 ));
                 continue;
             }
         };
         let Some(target) = target else { continue };
-        let Some(items) = entries.as_array() else {
+        let Some(items) = items.as_array() else {
             draft.note(format!(
-                "`settings.json` hook event `{event}`: not an array, skipped"
+                "{label} hook event `{event}`: not an array, skipped"
             ));
             continue;
         };
         for (index, item) in items.iter().enumerate() {
-            let what = format!("`settings.json` `hooks.{event}[{index}]`");
+            let what = format!("{label} `hooks.{event}[{index}]`");
             let Some(entry) = item.as_object() else {
                 draft.note(format!("{what}: not an object, skipped"));
                 continue;
@@ -1050,17 +1702,10 @@ fn map_user_settings(home: &Path, draft: &mut Draft) -> Result<(), ClaudeMigrate
             if commands.is_empty() {
                 continue;
             }
-            draft.hooks.push((target, matcher, commands));
+            entries.push((target, matcher, commands));
         }
     }
-    if any_command {
-        draft.note(
-            "hook scripts that read `.tool_input.file_path` must use `.path` instead \
-             (`old_string`→`.old`, `new_string`→`.new`); matchers name Radian tools \
-             (`shell`, `patch`, `write`, `read`, …)",
-        );
-    }
-    Ok(())
+    (entries, any_command)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1352,54 +1997,60 @@ fn map_project_skills(dir: &Path, draft: &mut Draft) -> Result<(), ClaudeMigrate
     Ok(())
 }
 
-/// `<project>/.mcp.json`: never translated. The runtime does not read it; MCP servers
-/// come from `--mcp-config` only.
+/// `<project>/.mcp.json`: never translated. The runtime reads it when the project is
+/// trusted (ADR 0031 T1).
 fn map_project_mcp_json(dir: &Path, draft: &mut Draft) {
     let path = dir.join(".mcp.json");
     match std::fs::metadata(&path) {
         Ok(_) => {
             draft.note(
-                "`.mcp.json`: not translated: the runtime does not read `.mcp.json`; MCP \
-                 servers come from `--mcp-config` only",
+                "`.mcp.json`: not translated; the runtime reads it when the project is \
+                 trusted (answering the trust question loads it on the next start)",
             );
             // The file is deliberately not opened: its env values may hold secrets, and
-            // there is no target to translate them to yet.
+            // there is no target to translate them to.
         }
         Err(_) => draft.note("`.mcp.json`: not found, nothing to report"),
     }
 }
 
-/// `<project>/.claude/settings.json` hooks: read for the drop report, never translated.
+/// `<project>/.claude/settings.json` hooks → the project hooks draft. The same subset
+/// and the same tool-name translation as the user `[hooks]` import; off-subset entries
+/// get one report line each.
 fn map_project_settings(dir: &Path, draft: &mut Draft) -> Result<(), ClaudeMigrateError> {
     let rel = ".claude/settings.json";
     let Some(json) = read_json(dir, rel, draft)? else {
         return Ok(());
     };
     let Some(hooks) = json.get("hooks").and_then(Json::as_object) else {
-        draft.note("`.claude/settings.json`: no `hooks`, nothing to report");
+        draft.note("`.claude/settings.json`: no `hooks`, nothing to import");
         return Ok(());
     };
-    let mut count = 0usize;
-    for (event, entries) in hooks {
-        let Some(items) = entries.as_array() else {
-            continue;
-        };
-        for (index, item) in items.iter().enumerate() {
-            count += 1;
-            let what = format!("`.claude/settings.json` `hooks.{event}[{index}]`");
-            let reason = item
-                .as_object()
-                .and_then(|entry| entry_drop_reason(entry, "entry"))
-                .unwrap_or_else(|| {
-                    "not imported: Radian does not load project hooks \
-                     (`.radian/hooks.json`)"
-                        .to_owned()
-                });
-            draft.note(format!("{what}: not imported ({reason})"));
-        }
+    if hooks.is_empty() {
+        draft.note("`.claude/settings.json`: `hooks` is empty, nothing to import");
+        return Ok(());
     }
+    let label = "`.claude/settings.json`";
+    let (entries, any_command) = collect_hook_entries(hooks, label, draft);
+    let count = entries.len();
+    draft.project_hooks.extend(entries);
     if count == 0 {
-        draft.note("`.claude/settings.json`: `hooks` is empty, nothing to report");
+        draft.note(format!(
+            "{label}: no portable hook to import, nothing landed in `.radian/hooks.json`"
+        ));
+    } else {
+        draft.note(format!(
+            "{label}: imported {count} hook entr{} as project hooks \
+             (`.radian/hooks.json`)",
+            if count == 1 { "y" } else { "ies" },
+        ));
+    }
+    if any_command {
+        draft.note(
+            "project hook scripts that read `.tool_input.file_path` must use `.path` \
+             instead (`old_string`→`.old`, `new_string`→`.new`); matchers name Radian \
+             tools (`shell`, `patch`, `write`, `read`, …)",
+        );
     }
     Ok(())
 }
@@ -1622,6 +2273,50 @@ fn validate_skill(name: &str, content: &str) -> Result<(), String> {
 
 // ---------- the config draft ----------
 
+/// Renders the imported project hooks as `<workspace>/.radian/hooks.json` text: the bare
+/// events object the runtime loader reads, with the same subset the user `[hooks]`
+/// import keeps. `None` when there is nothing to write.
+fn render_project_hooks(entries: &[HookEntry]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut events = serde_json::Map::new();
+    for (event, matcher, commands) in entries {
+        let key = match event {
+            HookEvent::Pre => "PreToolUse",
+            HookEvent::Post => "PostToolUse",
+            HookEvent::Stop => "Stop",
+        };
+        let mut entry = serde_json::Map::new();
+        if let Some(matcher) = matcher {
+            entry.insert("matcher".to_owned(), Json::String(matcher.clone()));
+        }
+        let hooks: Vec<Json> = commands
+            .iter()
+            .map(|(command, timeout)| {
+                let mut hook = serde_json::Map::new();
+                hook.insert("type".to_owned(), Json::String("command".to_owned()));
+                hook.insert("command".to_owned(), Json::String(command.clone()));
+                if let Some(secs) = timeout {
+                    hook.insert("timeout".to_owned(), Json::Number((*secs).into()));
+                }
+                Json::Object(hook)
+            })
+            .collect();
+        entry.insert("hooks".to_owned(), Json::Array(hooks));
+        events
+            .entry(key.to_owned())
+            .or_insert_with(|| Json::Array(Vec::new()))
+            .as_array_mut()
+            .expect("project hooks events render as arrays")
+            .push(Json::Object(entry));
+    }
+    let mut text =
+        serde_json::to_string_pretty(&Json::Object(events)).expect("hooks render as JSON");
+    text.push('\n');
+    Some(text)
+}
+
 /// One translated hook entry: the event, the optional Radian matcher, and the commands.
 type HookEntry = (HookEvent, Option<String>, Vec<HookCommandDraft>);
 
@@ -1632,6 +2327,8 @@ type HookCommandDraft = (String, Option<u64>);
 struct Draft {
     extra_paths: Vec<String>,
     hooks: Vec<HookEntry>,
+    mcp: Vec<ClaudeMcpServer>,
+    project_hooks: Vec<HookEntry>,
     user_agents_md: Option<String>,
     user_skills: Vec<ClaudeSkill>,
     project_skills: Vec<ClaudeSkill>,
@@ -1694,6 +2391,45 @@ impl Draft {
                     .push(Toml::Table(entry));
             }
             root.insert("hooks".into(), Toml::Table(hooks));
+        }
+        if !self.mcp.is_empty() {
+            let mut servers = toml::map::Map::new();
+            for server in &self.mcp {
+                let mut table = toml::map::Map::new();
+                table.insert("command".into(), Toml::String(server.command.clone()));
+                if !server.args.is_empty() {
+                    table.insert(
+                        "args".into(),
+                        Toml::Array(server.args.iter().cloned().map(Toml::String).collect()),
+                    );
+                }
+                if !server.env.is_empty() {
+                    let mut env = toml::map::Map::new();
+                    for (key, value) in &server.env {
+                        env.insert(key.clone(), Toml::String(value.clone()));
+                    }
+                    table.insert("env".into(), Toml::Table(env));
+                }
+                if !server.inherit_env.is_empty() {
+                    // An explicit list replaces the `mcpServers` `HOME` default, so the
+                    // draft keeps `HOME` first (see `push_inherit_env`).
+                    table.insert(
+                        "inherit_env".into(),
+                        Toml::Array(
+                            server
+                                .inherit_env
+                                .iter()
+                                .cloned()
+                                .map(Toml::String)
+                                .collect(),
+                        ),
+                    );
+                }
+                servers.insert(server.id.clone(), Toml::Table(table));
+            }
+            let mut mcp = toml::map::Map::new();
+            mcp.insert("mcpServers".into(), Toml::Table(servers));
+            root.insert("mcp".into(), Toml::Table(mcp));
         }
         let body = toml::to_string(&Toml::Table(root)).expect("the draft is serializable");
         let text = format!(

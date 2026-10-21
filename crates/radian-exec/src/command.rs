@@ -156,7 +156,7 @@ fn config_command(cli: &Cli, command: ConfigCommand) -> Result<(), OutputError> 
                 return Ok(());
             }
             let targets = resolve_claude_targets(cli, project.as_deref())?;
-            if !draft.project_skills.is_empty() {
+            if !draft.project_skills.is_empty() || draft.project_hooks_json.is_some() {
                 eprintln!(
                     "[import-claude] project-level files need your trust first: \
                      they will be asked about on the next start"
@@ -209,6 +209,13 @@ fn render_claude_stdout(draft: &radian_host::ClaudeDraft) -> String {
             out.push('\n');
         }
     }
+    if let Some(json) = &draft.project_hooks_json {
+        out.push_str("\n# --- project hooks (project: .radian/hooks.json) ---\n");
+        out.push_str(json);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
     out
 }
 
@@ -249,6 +256,7 @@ fn resolve_claude_targets(
         user_skills_dir,
         user_agents_path,
         project_skills_dir: project.map(|dir| dir.join(".agents/skills")),
+        project_hooks_path: project.map(|dir| dir.join(".radian/hooks.json")),
     })
 }
 
