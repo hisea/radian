@@ -2008,8 +2008,10 @@ mod tests {
             assert_eq!(fixture.hooks.consecutive_hits(), 0);
         }
         // The kill switch: a hit text with `[hooks] intent_stop = false` holds too.
-        let mut user = HooksConfig::default();
-        user.intent_stop = Some(false);
+        let user = HooksConfig {
+            intent_stop: Some(false),
+            ..HooksConfig::default()
+        };
         let fixture = layered(&user, &HooksConfig::default());
         fixture
             .hooks
