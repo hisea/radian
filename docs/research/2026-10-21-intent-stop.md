@@ -9,7 +9,7 @@
 - **提示词改不好它。** 两代角色提示词都有「做完再停」的规则（旧版 `Work until the task is done … do not stop at a phase boundary`，新版 `End your turn only when the task is done, when you wait for a background job, or when you need the user`），停顿在两代下都出现。pi 和 opencode 的系统提示词里**没有任何**「继续干」的措辞，却不停顿。
 - **radian 独有、而且和停顿共现的，是「回合中途结束、等通知唤醒」这条路（ADR 0037）**：后台 job、`shell` 描述里的「超过 60 s 自动转后台、完成会通知你」、完成通知以一条 user 角色的消息开启新回合。muse 的 9 次停顿里，4 次发生在通知开启的回合里（模型对通知像对聊天消息一样回一句就停），2 次紧跟在一次合法的等待回合之后，4 次卡在「写报告 / 发 herdr 通知」这最后一步。pi 没有后台执行，同一条 `cargo test` 它同步等了 288 s。
 - **频率**：本机 42 个 muse 会话里 9 次确认停顿（7 个会话），占 muse 纯文本回合结束的 8.7%，占「先说一句再调用工具」那类叙述的 0.7%；pi 的 muse 会话 5 710 条助手消息里 0 次。有人看着时等 1–16 分钟，没人看着时等了 2 小时到一天。
-- **建议**：先改提示词与通知文案（删掉角色里专为此加、却没起作用的 `End your turn only when …`；「工作区外可见要先问」加任务文本的例外；通知以「继续任务」结尾并修少换行；查 lead 记忆漏进 worker），量过之后仍有停顿再在 `Stop` 续跑路径（ADR 0045 §3）上内建保守检测 + 一次 `System` 续跑。backlog：`docs/backlog/turn-end-continuation.md`。
+- **建议**：先改提示词与通知文案（删掉角色里专为此加、却没起作用的 `End your turn only when …`；「工作区外可见要先问」加任务文本的例外；通知以「继续任务」结尾并修少换行；查 lead 记忆漏进 worker），并同时在 `Stop` 续跑路径（ADR 0045 §3）上内建保守检测 + 一次 `System` 续跑（模型判断，连续两次后 `blocked`）；两者是独立切片。backlog：`docs/backlog/turn-end-continuation.md`。
 
 ## 1. 案例
 
@@ -114,6 +114,8 @@ pi 有而 radian 没有的内容里，没有一条和回合有关。pi 不停顿
 2. **opencode 的措辞把「结束回合」写成最后一招**（`Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically.`），而且放在**转后台时的返回文本**里，不在系统提示里：模型只在真的进入等待时才看到。radian 的角色句把它写成三个平级理由之一，且每轮都在。
 3. **通知不要像用户消息。** omp 用 `custom` 角色加 `<system-notice>… Resume your work using the result below.`，Claude Code 用系统提醒。radian 的通知是 user 角色，后面只跟 `Read its output with job.`。角色改不了的话，文本至少改成 `Resume the task using this result. Do not reply to this notice.`。
 
+后台使用的实际数据（本机 radian journal）：shell 调用 6 690 次前台、570 次显式 `background: true`、49 次被自动转后台（muse：1 955 / 227 / 15）。9 次停顿前面的 job 全是显式后台。所以模型已经偏好后台，偏好来自工具描述；取消自动转后台与停顿没有直接关系，真正的暴露面是每一次显式后台之后的回合结束。pi 与 opencode 同步等完（最长 288 s），总用时还比 radian 短 7–8 分钟。
+
 两家已有「只说不做」的对策：omp 的 `features.unexpectedStopDetection`（缺省关）用小模型给纯文本停顿分类（`Classify whether this assistant message is an unexpected stop: it says it will act, continue working, or call a tool, then ends without doing so`），命中就注入一条 developer 消息 `You said you would continue with a tool call or action but stopped. Continue now. Attempt #n/3`，上限 3 次；Claude Code 走提示词：`Before ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done, do that work now with tool calls.` 前者是 §5 (b)/(c) 的形状，后者是 (a) 的形状。
 
 ## 4. 频率：本机全部 radian journal
@@ -186,7 +188,7 @@ muse：9 次 / 42 个会话（7 个会话出事）；另一个模型（GPT lead 
 
 ## 6. 建议
 
-顺序：先提示词，量过之后再决定要不要守卫。
+A（提示词与通知文案）和 B（内建续跑）都做，两个独立切片；B 不等 A 的度量，因为显式后台之后的回合结束是每天都在发生的暴露面（§3.5 的数据）。
 
 1. **第一步，提示词与通知文案**（`docs/backlog/turn-end-continuation.md` A 部分）：
    - **删掉**角色里的 `End your turn only when the task is done, when you wait for a background job, or when you need the user.`。它是 `9aa6fff5` 为这个问题加的，ab6 带着它照样停了 3 次；更早的长版规则（`do not stop at a phase boundary`）在 10-17 也没挡住；pi、opencode 对回合一字不提而 0 次。它唯一的正面作用——告诉模型等 job 时可以结束回合——`shell`、`job` 的描述已经说了（`You will be notified`、`Prefer the notice over wait`）。它的副作用是把「结束回合」变成一个有理由可选的动作。
@@ -198,7 +200,7 @@ muse：9 次 / 42 个会话（7 个会话出事）；另一个模型（GPT lead 
    - 取消自动转后台（ADR 0037 §2）：七家里只有 radian 缺省这样做，它是把模型推进「结束回合等通知」模式的独有推力；后台只留显式 `background: true`。连带要定前台缺省超时（今天与阈值绑在 60 s；建议 300 s，上限 600 s 不变）。
    - 角色正文的内容清单写在 ADR 0036 里，落地时同一分支的 docs-only commit 改 ADR。
 2. **量**：同一任务集 A/B/C 各 3 次，看人工 `Continue` 次数和「无 `waiting for job` 标记的纯文本结束」次数。
-3. **第二步，只在第一步之后还有停顿时做**：`Stop` 路径上的内建续跑（B 部分）。那时再加备选的固定等待句式，检测器只需认「没有标记、没有问句的纯文本结束」，不用再靠动名词规则。
+3. **B，内建续跑**（backlog B 部分）：`Stop` 路径上的保守规则粗筛 + 一条固定措辞的 `System` 续跑，让模型自己判断是继续还是一行说明已完成；每回合一次、连续两次后 herdr `blocked`；计入唤醒闸门；`Stop` stdin 加 `last_assistant_message`，配置可关。
 4. 不动模型参数。
 
 ## 附：方法
