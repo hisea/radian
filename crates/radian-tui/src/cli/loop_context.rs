@@ -485,9 +485,13 @@ impl LoopContext<'_> {
                 Ok(())
             }
             // `/context`: read-only (journal + stored layers, no inbox, no driver),
-            // so it works mid-turn and never interrupts it.
+            // so it works mid-turn and never interrupts it. The plain text is
+            // rendered from the structured report, so it shares the grid's numbers.
             Effect::Context => {
-                let notices = self.session.context_report();
+                let notices = match self.session.context_report() {
+                    Ok(report) => radian_host::context_estimate::notice_lines(&report),
+                    Err(error) => vec![error],
+                };
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
