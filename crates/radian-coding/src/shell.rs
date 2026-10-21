@@ -27,8 +27,7 @@
 //!   bounded so even that cannot hang the tool.
 //! - Output is capped; the model is told how many bytes were discarded.
 
-use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
@@ -45,7 +44,7 @@ use serde_json::json;
 use crate::args;
 use crate::fail;
 use crate::foreground::{ForegroundOutputs, Retention};
-use crate::jobs::{AdoptedHandle, JobCell, Jobs};
+use crate::jobs::Jobs;
 use crate::provider::Limits;
 use crate::workspace::WorkspaceRoot;
 
@@ -87,7 +86,7 @@ pub(crate) fn schema() -> serde_json::Value {
                 "type": "integer",
                 "minimum": 1,
                 "description": "Seconds a foreground command may run, counted from the \
-                                command's start. Default: 60. Maximum: 600. `background: true` \
+                                command's start. Default: 300. Maximum: 600. `background: true` \
                                 ignores this field."
             },
             "cwd": {
@@ -104,7 +103,9 @@ pub(crate) fn schema() -> serde_json::Value {
             "background": {
                 "type": "boolean",
                 "description": "Run in the background and return at once with a job id. A \
-                                background command has no deadline. Default: false. Read the \
+                                background command has no deadline. Default: false. Use for \
+                                servers, watchers and commands expected to run longer than 600 s. \
+                                Run tests and builds in the foreground with timeout_secs. Read the \
                                 job with `job`."
             },
             "outside_sandbox": {
@@ -161,11 +162,9 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
              and list files. Use `grep` and `glob` to search files. Do not use `cat`, \
              `sed`, `ls`, or `find` through `shell`. `grep` and `glob` report \
              truncation. They use less context. They run in parallel. `shell` runs \
-             alone. A timeout or a cancellation kills the whole process group. Without \
-             `timeout_secs`, a command that still runs after the threshold moves to the \
-             background. The default threshold is 60 s. The move keeps the same \
-             process. After the move, the command is never killed for time. The call \
-             returns at once with a job id. You will be notified when the command finishes."
+             alone. A timeout or a cancellation kills the whole process group. A \
+              foreground command never moves to the background on its own: background \
+              happens only with an explicit `background: true`."
         ),
         input_schema: spec_schema(mode),
         // A shell command has side effects and is not safe to overlap with other calls.
@@ -208,17 +207,11 @@ pub async fn run_user_bash(
         limits.default_shell_output_bytes,
         harden_git,
         cancel,
-        // ADR 0037: `!`/`!!` never turn into a background job.
-        None,
         // A user `!` command's output is shown and forgotten; nothing is retained for it.
         None,
     )
     .await
     .map_err(|failure| failure.message)?;
-    // `execute` cannot adopt without an `Adopt` specification.
-    let ExecOutcome::Ran(outcome) = outcome else {
-        unreachable!("a user `!` command never adopts a job");
-    };
     Ok(UserBash {
         stdout: outcome.stdout.render_for(outcome.succeeded()),
         stderr: outcome.stderr.render_for(outcome.succeeded()),
@@ -312,21 +305,6 @@ pub(crate) async fn run(
     let (deadline, clamped) = clamp_timeout(args.timeout_secs, limits);
     let (output_cap, output_clamped) = clamp_output(args.max_output_bytes, limits);
 
-    // ADR 0037: a foreground command still running after `auto_background_after`
-    // is adopted by the job registry in place. The foreground wait is the threshold itself
-    // when the model gave no `timeout_secs` (the threshold is what replaces the default cap:
-    // there is no foreground cap after adoption); with an explicit `timeout_secs` the
-    // deadline is that value **from the command's start**, and adoption only happens when
-    // the threshold falls before it (the job is then killed at the original deadline).
-    let auto = limits
-        .auto_background_after
-        .filter(|after| !after.is_zero());
-    let (wait, adopt_threshold, explicit_deadline) = match auto {
-        Some(after) if args.timeout_secs.is_none() => (after, Some(after), None),
-        Some(after) if after < deadline => (after, Some(after), Some(deadline)),
-        _ => (deadline, None, None),
-    };
-
     // Retain the whole output so a truncated result's discarded middle stays retrievable. `None`
     // when the provider has no caller-supplied private directory (no-hand embedders) or the
     // private root is unusable: the command runs and its result simply has no job id. The file
@@ -340,96 +318,69 @@ pub(crate) async fn run(
         sandbox,
         &cwd,
         &args.command,
-        wait,
+        deadline,
         output_cap,
         harden_git,
         &cx.cancellation,
-        adopt_threshold.map(|_| Adopt {
-            jobs,
-            command: &args.command,
-            explicit_deadline,
-        }),
         // The whole output is teed to a session-private file so a truncated result's discarded
         // middle stays retrievable; nothing is created for a result that needs no handle, and
         // the file is removed again below.
         retention.clone(),
     )
     .await?;
-    match outcome {
-        ExecOutcome::Ran(outcome) => {
-            // The exit status is known only now, so the view (success 1/4:3/4, failure
-            // 1/8:7/8) is picked here; the capture kept the maximum of both.
-            let success = outcome.succeeded();
-            let truncated = outcome.stdout.is_truncated_for(success)
-                || outcome.stderr.is_truncated_for(success);
-            let retained = match (foreground, &retention) {
-                (Some(foreground), Some(retention)) if truncated => {
-                    let state = if outcome.timed_out {
-                        crate::jobs::JobState::TimedOut
-                    } else {
-                        crate::jobs::exit_state(outcome.status)
-                    };
-                    let view = RetainedView {
-                        job_id: retention.id().to_owned(),
-                        retained_bytes: retention.retained(),
-                        total_bytes: retention.total(),
-                        cut: retention.is_cut(),
-                    };
-                    foreground.finish(retention, Some(state));
-                    Some(view)
-                }
-                (Some(foreground), Some(retention)) => {
-                    // No truncation: no entry, no artifact. The file is removed.
-                    foreground.finish(retention, None);
-                    None
-                }
-                _ => None,
-            };
-            // Slice 1 of `sandbox-auto-allow-shell`: when a sandboxed command failed
-            // because of the sandbox, the result carries the fixed marker, classified
-            // in the sandbox layer from errno text and the policy's paths. Only an
-            // enforced sandbox can produce one, and only a failure can carry one —
-            // anything else is an ordinary command failure with no marker.
-            let denied = if !success && sandbox.mode().is_enforced() {
-                let stderr = outcome.stderr.render_for(success);
-                classify_denial(sandbox.policy(), &args.command, &stderr)
+    // The exit status is known only now, so the view (success 1/4:3/4, failure
+    // 1/8:7/8) is picked here; the capture kept the maximum of both.
+    let success = outcome.succeeded();
+    let truncated =
+        outcome.stdout.is_truncated_for(success) || outcome.stderr.is_truncated_for(success);
+    let retained = match (foreground, &retention) {
+        (Some(foreground), Some(retention)) if truncated => {
+            let state = if outcome.timed_out {
+                crate::jobs::JobState::TimedOut
             } else {
-                None
+                crate::jobs::exit_state(outcome.status)
             };
-            Ok(report(
-                &args.command,
-                root.root(),
-                &cwd,
-                sandbox.mode(),
-                explicit_deadline.unwrap_or(wait),
-                clamped,
-                output_cap,
-                output_clamped,
-                &outcome,
-                retained,
-                denied,
-                None,
-            ))
+            let view = RetainedView {
+                job_id: retention.id().to_owned(),
+                retained_bytes: retention.retained(),
+                total_bytes: retention.total(),
+                cut: retention.is_cut(),
+            };
+            foreground.finish(retention, Some(state));
+            Some(view)
         }
-        ExecOutcome::Adopted(info) => {
-            // The job's own output file is the retained output now; the foreground file is
-            // redundant. Drop it (the pre-adoption bytes already reached the job's file).
-            if let (Some(foreground), Some(retention)) = (foreground, &retention) {
-                foreground.finish(retention, None);
-            }
-            Ok(adopted_report(
-                &args.command,
-                root.root(),
-                &cwd,
-                sandbox.mode(),
-                wait,
-                clamped,
-                output_cap,
-                output_clamped,
-                &info,
-            ))
+        (Some(foreground), Some(retention)) => {
+            // No truncation: no entry, no artifact. The file is removed.
+            foreground.finish(retention, None);
+            None
         }
-    }
+        _ => None,
+    };
+    // Slice 1 of `sandbox-auto-allow-shell`: when a sandboxed command failed
+    // because of the sandbox, the result carries the fixed marker, classified
+    // in the sandbox layer from errno text and the policy's paths. Only an
+    // enforced sandbox can produce one, and only a failure can carry one —
+    // anything else is an ordinary command failure with no marker.
+    let denied = if !success && sandbox.mode().is_enforced() {
+        let stderr = outcome.stderr.render_for(success);
+        classify_denial(sandbox.policy(), &args.command, &stderr)
+    } else {
+        None
+    };
+    Ok(report(
+        &args.command,
+        root.root(),
+        &cwd,
+        sandbox.mode(),
+        deadline,
+        clamped,
+        output_cap,
+        output_clamped,
+        &outcome,
+        retained,
+        denied,
+        None,
+    ))
 }
 
 /// Starts `command` as a background job (ADR 0037) and returns the one-line acknowledgement:
@@ -584,9 +535,9 @@ fn unsandboxed_command(
 
 /// Runs one approved `outside_sandbox` call in the foreground, unsandboxed for that
 /// one call. `sandbox` supplies only the environment whitelist and the report's mode
-/// line; the command itself never goes through it. Never adopted to the background
-/// (the caller refused `background: true` already) and never classified: with no
-/// sandbox there is nothing to blame, so no `sandbox denied` marker by construction.
+/// line; the command itself never goes through it. It always runs in the foreground
+/// and is never classified: with no sandbox there is nothing to blame, so no
+/// `sandbox denied` marker by construction.
 #[allow(clippy::too_many_arguments)]
 async fn run_outside_sandbox(
     root: &WorkspaceRoot,
@@ -601,63 +552,27 @@ async fn run_outside_sandbox(
     let (deadline, clamped) = clamp_timeout(args.timeout_secs, limits);
     let (output_cap, output_clamped) = clamp_output(args.max_output_bytes, limits);
     let mut process = unsandboxed_command(sandbox, cwd, &args.command, harden_git)?;
-    let outcome = execute_built(
-        &mut process,
+    let outcome = execute_built(&mut process, deadline, output_cap, &cx.cancellation, None).await?;
+    let success = outcome.succeeded();
+    let truncated =
+        outcome.stdout.is_truncated_for(success) || outcome.stderr.is_truncated_for(success);
+    // An outside call is never retained: the foreground file (if any) is dropped.
+    let _ = truncated;
+    Ok(report(
+        &args.command,
+        root.root(),
+        cwd,
+        sandbox.mode(),
         deadline,
+        clamped,
         output_cap,
-        &cx.cancellation,
+        output_clamped,
+        &outcome,
         None,
         None,
-    )
-    .await?;
-    match outcome {
-        ExecOutcome::Ran(outcome) => {
-            let success = outcome.succeeded();
-            let truncated = outcome.stdout.is_truncated_for(success)
-                || outcome.stderr.is_truncated_for(success);
-            // An outside call is never retained: the foreground file (if any) is dropped.
-            let _ = truncated;
-            Ok(report(
-                &args.command,
-                root.root(),
-                cwd,
-                sandbox.mode(),
-                deadline,
-                clamped,
-                output_cap,
-                output_clamped,
-                &outcome,
-                None,
-                None,
-                Some(reason),
-            ))
-        }
-        // Unreachable: no adoption threshold is passed, so the call runs to its
-        // foreground deadline and is killed there.
-        ExecOutcome::Adopted(_) => Err(fail(
-            "shell_internal",
-            "an outside-sandbox call was adopted to the background",
-        )),
-    }
+        Some(reason),
+    ))
 }
-/// What a foreground [`execute`] produced (ADR 0037): the finished outcome, or the
-/// job the still-running call was adopted into.
-pub(crate) enum ExecOutcome {
-    Ran(Outcome),
-    Adopted(crate::jobs::AdoptInfo),
-}
-
-/// The adoption parameters for a foreground [`execute`] (ADR 0037). Present only
-/// when `auto_background_after` is on and the threshold can be reached before the foreground
-/// deadline; `None` keeps the pre-revision behaviour.
-struct Adopt<'a> {
-    jobs: &'a Jobs,
-    command: &'a str,
-    /// The explicit `timeout_secs` from the command's start, if any: the adopted job is
-    /// killed then, not at the threshold.
-    explicit_deadline: Option<Duration>,
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     sandbox: &Sandbox,
@@ -667,11 +582,10 @@ async fn execute(
     output_cap: usize,
     harden_git: bool,
     cancel: &CancellationToken,
-    adopt: Option<Adopt<'_>>,
     retain: Option<Retention>,
-) -> Result<ExecOutcome, ToolFailure> {
+) -> Result<Outcome, ToolFailure> {
     let mut process = sandboxed_command(sandbox, cwd, command, harden_git)?;
-    execute_built(&mut process, timeout, output_cap, cancel, adopt, retain).await
+    execute_built(&mut process, timeout, output_cap, cancel, retain).await
 }
 
 /// The supervision core both paths share: the sandboxed [`execute`] and the one
@@ -683,9 +597,8 @@ async fn execute_built(
     timeout: Duration,
     output_cap: usize,
     cancel: &CancellationToken,
-    adopt: Option<Adopt<'_>>,
     retain: Option<Retention>,
-) -> Result<ExecOutcome, ToolFailure> {
+) -> Result<Outcome, ToolFailure> {
     let started = Instant::now();
     let mut supervised = Supervised::spawn(&mut *process, output_cap, retain).map_err(|e| {
         fail(
@@ -696,10 +609,8 @@ async fn execute_built(
 
     let mut timed_out = false;
     let mut cancelled = false;
-    let mut slots_full = false;
 
-    // Phase 1: wait for the end, the foreground deadline (the adoption threshold when an
-    // `Adopt` is active), or the turn's cancellation.
+    // Wait for the end, the foreground deadline, or the turn's cancellation.
     let mut timer_fired = false;
     let mut kill = tokio::select! {
         finished = supervised.finished() => !finished,
@@ -714,50 +625,8 @@ async fn execute_built(
     };
 
     if !kill && timer_fired {
-        match adopt {
-            None => {
-                timed_out = true;
-                kill = true;
-            }
-            Some(spec) => {
-                let remaining = spec
-                    .explicit_deadline
-                    .map(|deadline| deadline.saturating_sub(started.elapsed()));
-                match spec
-                    .jobs
-                    .adopt(&supervised, spec.command, started, remaining)
-                {
-                    Ok(info) => return Ok(ExecOutcome::Adopted(info)),
-                    // No free slot (ADR 0037): do not adopt. The call
-                    // keeps running to its foreground deadline and is killed there.
-                    Err(_) => {
-                        slots_full = true;
-                        let rest = remaining.unwrap_or(Duration::ZERO);
-                        if rest.is_zero() {
-                            timed_out = true;
-                            kill = true;
-                        } else {
-                            let mut rest_fired = false;
-                            let rest_kill = tokio::select! {
-                                finished = supervised.finished() => !finished,
-                                () = tokio::time::sleep(rest) => {
-                                    rest_fired = true;
-                                    false
-                                }
-                                () = cancel.cancelled() => {
-                                    cancelled = true;
-                                    true
-                                }
-                            };
-                            if rest_fired {
-                                timed_out = true;
-                            }
-                            kill = rest_kill || rest_fired;
-                        }
-                    }
-                }
-            }
-        }
+        timed_out = true;
+        kill = true;
     }
 
     if kill {
@@ -768,9 +637,8 @@ async fn execute_built(
     let mut outcome = supervised.take_outcome();
     outcome.timed_out = timed_out;
     outcome.cancelled = cancelled;
-    outcome.slots_full = slots_full;
     outcome.duration = started.elapsed();
-    Ok(ExecOutcome::Ran(outcome))
+    Ok(outcome)
 }
 
 // ---------- supervision ----------
@@ -931,90 +799,35 @@ impl Capped {
     fn marker_for(discarded: u64) -> String {
         format!("\n[... {discarded} bytes discarded; showing the start and the end ...]\n")
     }
-
-    /// Writes the retained bytes (head, marker if the middle was dropped, then tail) to `out`.
-    /// Used to seed a job's output file when a foreground command is adopted (ADR 0037
-    /// revision 1). Returns the number of bytes written. The seed is the whole capture
-    /// (up to `9/8` of the budget), not one view: the job file keeps the full history and
-    /// the ring bounds the increment, so extra pre-adoption bytes are never lost here.
-    fn write_to(&self, out: &mut impl Write) -> std::io::Result<u64> {
-        out.write_all(&self.head)?;
-        let mut written = self.head.len() as u64;
-        let discarded = self.capture_discarded();
-        if discarded > 0 {
-            let marker = Self::marker_for(discarded);
-            out.write_all(marker.as_bytes())?;
-            written += marker.len() as u64;
-        }
-        out.write_all(&self.tail)?;
-        Ok(written + self.tail.len() as u64)
-    }
 }
 
-/// One output stream's destination (ADR 0037): the foreground executor's bounded
-/// head+tail capture, until [`StreamSink::promote`] switches it — under this lock, at
-/// adoption — to the job's `.out` file plus the [`JobCell`] ring.
-///
-/// A reader takes the lock once per chunk, and `promote` takes it too, so a promotion is
-/// atomic with respect to one chunk: no byte is lost, and none is written twice.
+/// One output stream's destination: the foreground executor's bounded head+tail
+/// capture, teed to the session's retained-output file while the command runs.
 pub(crate) struct StreamSink {
     capped: Capped,
-    job: Option<JobSink>,
-    /// Tees every chunk to the session's retained-output file until the command is promoted to
-    /// a job (ADR 0037); a truncated result is then recoverable through
-    /// `shell_output`.
+    /// Tees every chunk to the session's retained-output file; a truncated result is then
+    /// recoverable through `job`.
     retain: Option<Retention>,
-}
-
-struct JobSink {
-    file: File,
-    cell: Arc<Mutex<JobCell>>,
 }
 
 impl StreamSink {
     fn new(cap: usize, retain: Option<Retention>) -> Self {
         Self {
             capped: Capped::with_cap(cap),
-            job: None,
             retain,
         }
     }
 
     fn push(&mut self, bytes: &[u8]) {
-        match &mut self.job {
-            None => {
-                self.capped.push(bytes);
-                if let Some(retain) = &self.retain {
-                    retain.push(bytes);
-                }
-            }
-            Some(job) => {
-                let _ = job.file.write_all(bytes);
-                let mut cell = lock(&job.cell);
-                cell.push_ring(bytes);
-            }
+        self.capped.push(bytes);
+        if let Some(retain) = &self.retain {
+            retain.push(bytes);
         }
     }
 
-    /// Flushes the retained pre-adoption output into `file`, then switches to job mode.
-    /// Returns `(bytes written to the file, the rendered pre-adoption output)`. The caller
-    /// holds this sink's lock; the file is written before the sink can accept more bytes.
-    pub(crate) fn promote(&mut self, mut file: File, cell: Arc<Mutex<JobCell>>) -> (u64, String) {
-        self.capped.trim();
-        // Still running: no exit status yet, so the snapshot uses the success split (the same
-        // proportions as before this change). The full capture seeds the job file.
-        let rendered = self.capped.render_for(true);
-        let written = self.capped.write_to(&mut file).unwrap_or(0);
-        self.capped = Capped::default();
-        // The job's own file is the retained output now; stop teeing to the foreground one.
-        self.retain = None;
-        self.job = Some(JobSink { file, cell });
-        (written, rendered)
-    }
-
-    /// Takes the captured head+tail at end of stream. Empty for a stream that was promoted
-    /// (its bytes went to the job instead). Trimmed to the capture caps, so memory stays
-    /// bounded; each inline view trims further to its own split at render time.
+    /// Takes the captured head+tail at end of stream, trimmed to the capture caps, so
+    /// memory stays bounded; each inline view trims further to its own split at render
+    /// time.
     fn take_capped(&mut self) -> Capped {
         let mut capped = std::mem::take(&mut self.capped);
         capped.trim();
@@ -1028,9 +841,6 @@ pub(crate) struct Outcome {
     stderr: Capped,
     timed_out: bool,
     cancelled: bool,
-    /// The call was not adopted because all job slots were busy (ADR 0037
-    /// decision 4).
-    slots_full: bool,
     duration: Duration,
     /// The readers did not reach EOF within the drain grace after the group was killed.
     drain_incomplete: bool,
@@ -1052,7 +862,6 @@ impl Default for Outcome {
             stderr: Capped::default(),
             timed_out: false,
             cancelled: false,
-            slots_full: false,
             duration: Duration::ZERO,
             drain_incomplete: false,
         }
@@ -1064,22 +873,11 @@ impl Default for Outcome {
 /// session id cannot have been reused), then reaps and drains. [`Supervised::kill_tree`] takes
 /// the same lock, so a timeout or cancellation can only signal a session that is still
 /// reserved.
-///
-/// A foreground command adopted by the job registry (ADR 0037) keeps this same
-/// child and this same supervisor: `Jobs::adopt` installs an [`AdoptedHandle`] into
-/// `adopted`, and the supervisor settles the job after it reaps. Nothing is restarted.
 pub(crate) struct Supervised {
     pub(crate) pid: u32,
     pub(crate) reaped: Arc<Mutex<bool>>,
     pub(crate) done: tokio::sync::watch::Receiver<bool>,
     pub(crate) outcome: Arc<Mutex<Option<Outcome>>>,
-    /// The foreground capture of each stream, promotable to a job's file+ring.
-    pub(crate) stdout: Arc<Mutex<StreamSink>>,
-    pub(crate) stderr: Arc<Mutex<StreamSink>>,
-    /// The job this command was adopted into, if any. The supervisor takes it once and
-    /// settles; `Jobs::adopt` takes it too if the supervisor already finished (exactly one of
-    /// the two wins the take).
-    pub(crate) adopted: Arc<Mutex<Option<AdoptedHandle>>>,
     _supervisor: thread::JoinHandle<()>,
 }
 
@@ -1117,8 +915,7 @@ impl Supervised {
         let stderr = child.stderr.take().expect("stderr was piped");
 
         // Each stream gets its own budget: a flooding stdout must not squeeze out the one
-        // stderr line that explains the failure. Each stream also owns a sink so it can be
-        // promoted to a job in place (ADR 0037).
+        // stderr line that explains the failure.
         let stdout_sink = Arc::new(Mutex::new(StreamSink::new(cap, retain.clone())));
         let stderr_sink = Arc::new(Mutex::new(StreamSink::new(cap, retain)));
         let (out_tx, out_rx) = mpsc::channel();
@@ -1140,14 +937,12 @@ impl Supervised {
 
         let reaped = Arc::new(Mutex::new(false));
         let outcome = Arc::new(Mutex::new(None));
-        let adopted: Arc<Mutex<Option<AdoptedHandle>>> = Arc::new(Mutex::new(None));
         let (done_tx, done) = tokio::sync::watch::channel(false);
         let supervisor = thread::Builder::new()
             .name("shell-supervisor".into())
             .spawn({
                 let reaped = Arc::clone(&reaped);
                 let outcome = Arc::clone(&outcome);
-                let adopted = Arc::clone(&adopted);
                 move || {
                     wait_for_exit_without_reaping(pid);
                     let status = {
@@ -1168,14 +963,7 @@ impl Supervised {
                         drain_incomplete: !(out_drained && err_drained),
                         ..Outcome::default()
                     });
-                    // Publish `done` **before** taking the adopted handle: `Jobs::adopt`'s
-                    // fallback only takes the handle when `done` is already set, so exactly
-                    // one side ever settles (ADR 0037).
                     let _ = done_tx.send(true);
-                    let handle = adopted.lock().unwrap_or_else(|e| e.into_inner()).take();
-                    if let Some(handle) = handle {
-                        handle.settle(status);
-                    }
                 }
             })?;
 
@@ -1184,9 +972,6 @@ impl Supervised {
             reaped,
             done,
             outcome,
-            stdout: stdout_sink,
-            stderr: stderr_sink,
-            adopted,
             _supervisor: supervisor,
         })
     }
@@ -1236,8 +1021,7 @@ fn collect(rx: &mpsc::Receiver<Capped>) -> (Capped, bool) {
 /// it goes), so a chatty command neither blocks on a full pipe nor grows this process's
 /// memory with its output.
 ///
-/// The tool itself reads through [`StreamSink`] (so a running command can be adopted in
-/// place); this is the plain capture the reader tests pin.
+/// The tool reads through [`StreamSink`]; this is the plain capture the reader tests pin.
 #[cfg(test)]
 fn read_capped(mut reader: impl Read, cap: usize) -> Capped {
     let mut capped = Capped::with_cap(cap);
@@ -1252,9 +1036,7 @@ fn read_capped(mut reader: impl Read, cap: usize) -> Capped {
     capped
 }
 
-/// Reads a stream to EOF, handing each chunk to the shared sink. The sink decides where the
-/// bytes go (the foreground capture, or the job's file and ring after adoption), so a running
-/// command can be promoted without restarting its readers (ADR 0037).
+/// Reads a stream to EOF, handing each chunk to the shared sink.
 fn read_stream(mut reader: impl Read, sink: Arc<Mutex<StreamSink>>) {
     let mut buf = [0u8; 8192];
     loop {
@@ -1598,19 +1380,13 @@ fn report(
     }
     if outcome.timed_out {
         text.push_str(&format!(
-            "[timed out after {timeout:?}; the whole process group was killed. For a command that \
-             needs longer, use `background: true` (no default timeout) and `job` with \
-             `op: \"wait\"`.\n"
+            "[timed out after {timeout:?}; the whole process group was killed. Re-run with a \
+             larger `timeout_secs` (up to 600) or with `background: true` and read the result \
+             with `job`.\n"
         ));
     }
     if outcome.cancelled {
         text.push_str("[cancelled; the whole process group was killed]\n");
-    }
-    if outcome.slots_full {
-        text.push_str(
-            "[all background job slots were busy, so this call was **not** moved to the \
-             background; it ran to its foreground timeout. Wait for a job with `job` \n             (`op: \"wait\"`), or stop one with `job` (`op: \"kill\"`).]\n",
-        );
     }
     match exit_code {
         Some(code) => text.push_str(&format!("exit code: {code}\n")),
@@ -1689,7 +1465,6 @@ fn report(
             "signal": signal,
             "timed_out": outcome.timed_out,
             "cancelled": outcome.cancelled,
-            "slots_full": outcome.slots_full,
             "timeout_secs": timeout.as_secs(),
             "timeout_clamped": clamped,
             "output_bytes_per_stream": output_cap,
@@ -1719,76 +1494,6 @@ struct RetainedView {
     retained_bytes: u64,
     total_bytes: u64,
     cut: bool,
-}
-
-/// The result of a foreground call that was adopted by the job registry in place (ADR 0037
-/// revision 1): the job id, the `job` hint, and a bounded tail of the output produced
-/// before adoption. The command is **not** restarted, and its output file already holds that
-/// pre-adoption output.
-#[allow(clippy::too_many_arguments)]
-fn adopted_report(
-    command: &str,
-    workspace: &Path,
-    cwd: &Path,
-    mode: SandboxMode,
-    threshold: Duration,
-    clamped: bool,
-    output_cap: usize,
-    output_clamped: bool,
-    info: &crate::jobs::AdoptInfo,
-) -> ToolOutput {
-    let mut text = String::new();
-    text.push_str(&format!("$ {command}\n"));
-    text.push_str(&format!(
-        "[still running after {threshold:?}; moved to the background as job {id} — the same \
-         process, not restarted. Its output is {output}. Read it with `job` (`op: \"read\"`; \
-         `op: \"wait\"` waits for the end). You will be notified when it finishes. Do not \
-         sleep or poll. If you have nothing else to do, end your reply.]\n",
-        id = info.id,
-        output = info.output,
-    ));
-    text.push_str("--- stdout so far ---\n");
-    text.push_str(&info.stdout);
-    if !info.stdout.is_empty() && !info.stdout.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str("--- stderr so far ---\n");
-    text.push_str(&info.stderr);
-    if !info.stderr.is_empty() && !info.stderr.ends_with('\n') {
-        text.push('\n');
-    }
-    if clamped {
-        text.push_str(&format!(
-            "[timeout clamped to the configured maximum of {threshold:?}]\n"
-        ));
-    }
-    if output_clamped {
-        text.push_str(&format!(
-            "[output budget clamped to the configured maximum of {output_cap} bytes per stream]\n"
-        ));
-    }
-
-    let cwd_relative = cwd
-        .strip_prefix(workspace)
-        .ok()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ".".into());
-
-    ToolOutput {
-        content: vec![ContentPart::text(text)],
-        structured: Some(json!({
-            "background": true,
-            "adopted": true,
-            "job_id": info.id,
-            "output": info.output,
-            "command": command,
-            "cwd": cwd_relative,
-            "sandbox_mode": mode.as_str(),
-            "auto_background_secs": threshold.as_secs(),
-            "adopted_bytes": info.adopted_bytes,
-        })),
-    }
 }
 
 #[cfg(unix)]

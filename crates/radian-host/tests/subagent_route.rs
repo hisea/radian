@@ -193,7 +193,6 @@ async fn the_child_runs_the_parents_live_model_route() {
             config_queue: radian_runtime::ConfigQueue::new(),
             budget_for: None,
             price_for: None,
-            shell_auto_background: None,
             servers: Vec::new(),
             mcp_config_path: None,
             system_prompt: None,

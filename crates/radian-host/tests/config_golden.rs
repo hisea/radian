@@ -381,22 +381,27 @@ fn edge_cases() -> Vec<(String, String)> {
             "hooks.bad_timeout",
             "schema_version = 1\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\ntimeout = \"x\"\n",
         ),
-        // ---- shell: a bad value is skipped, a non-table is ignored ----
+        // ---- shell: the section has no live keys; the removed `auto_background_secs`
+        // and any other key warn once and are ignored, a non-table is ignored ----
         (
-            "shell.desktop",
+            "shell.removed_key",
             "schema_version = 1\n[shell]\nauto_background_secs = 30\n",
         ),
         (
-            "shell.off",
+            "shell.removed_key_zero",
             "schema_version = 1\n[shell]\nauto_background_secs = 0\n",
         ),
         (
-            "shell.negative",
+            "shell.removed_key_negative",
             "schema_version = 1\n[shell]\nauto_background_secs = -1\n",
         ),
         (
-            "shell.wrong_type",
+            "shell.removed_key_wrong_type",
             "schema_version = 1\n[shell]\nauto_background_secs = \"x\"\n",
+        ),
+        (
+            "shell.unknown_key",
+            "schema_version = 1\n[shell]\nfuture_key = 1\n",
         ),
         (
             "shell.section_not_a_table",
