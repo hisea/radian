@@ -1,0 +1,95 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# The default GITHUB_TOKEN is enough: this workflow only uploads release
+# assets. macOS signing, notarization and the Homebrew tap are NOT done here;
+# the maintainer runs scripts/release-macos.sh on a Mac after the draft
+# exists (see the comment block at the top of that script).
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: linux ${{ matrix.target }}
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust 1.99.1 plus the musl target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          targets: ${{ matrix.target }}
+
+      # Static musl binaries run on any Linux distro regardless of its glibc,
+      # which is what a release tar needs. zig cc is a full cross toolchain in
+      # one install (no docker, no per-arch sysroot): cargo-zigbuild drives it
+      # as the linker for both musl targets. Everything linked is pure Rust
+      # except rusqlite's bundled C, which zig cc compiles as well; reqwest
+      # uses rustls, so there is no system OpenSSL to find.
+      - name: zig plus cargo-zigbuild
+        run: |
+          python3 -m pip install --quiet ziglang
+          cargo install --locked --quiet cargo-zigbuild
+
+      - name: Build radian and rad
+        run: |
+          cargo zigbuild --locked --release \
+            -p radian-tui --bin radian --bin rad \
+            --target ${{ matrix.target }}
+          test -x target/${{ matrix.target }}/release/radian
+          test -x target/${{ matrix.target }}/release/rad
+
+      - name: Smoke-test the x86_64 binary
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: target/${{ matrix.target }}/release/radian --version
+
+      - name: Package the tarball plus sha256
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          stage="stage-${{ matrix.target }}"
+          mkdir -p "$stage" dist
+          cp target/${{ matrix.target }}/release/radian \
+             target/${{ matrix.target }}/release/rad "$stage/"
+          tarball="dist/radian-${version}-${{ matrix.target }}.tar.gz"
+          tar -czf "$tarball" -C "$stage" radian rad
+          rm -rf "$stage"
+          (cd dist && shasum -a 256 "$(basename "$tarball")" > "$(basename "$tarball").sha256")
+          (cd dist && shasum -a 256 -c "$(basename "$tarball").sha256")
+          tar -tzf "$tarball"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  draft:
+    name: draft the GitHub release
+    needs: [linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls dist
+          (cd dist && shasum -a 256 -c ./*.sha256)
+          gh release create "${GITHUB_REF_NAME}" --draft \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Draft. The maintainer adds the signed macOS packages, then publishes." \
+            dist/*

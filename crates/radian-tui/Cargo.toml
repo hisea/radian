@@ -7,6 +7,11 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Full-screen TUI shell on radian-runtime (Phase 4 / A)"
 
+# `cargo binstall` fetches the release tarballs (`radian-<version>-<target>.tar.gz`,
+# holding `radian` and `rad` at the top level) instead of building from source.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/radian-{ version }-{ target }.tar.gz"
+
 # `radian` is the full-screen TUI and `rad` its alias. Both are thin wrappers around
 # `radian_tui::cli::run_cli`; `rad` has its own one-line `src/rad.rs` (not a second `[[bin]]`
 # on `src/main.rs`) so no source file belongs to two targets, and the command's unit tests are
