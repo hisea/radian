@@ -275,6 +275,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             mcp_config_path: setup.mcp_config.clone(),
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
+            window_context: setup.window.context,
             sandbox,
             tier: profile_arg.preset(),
             profile: permission_profile,

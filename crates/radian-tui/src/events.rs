@@ -39,8 +39,13 @@ pub enum UiEvent {
     TerminalGone,
     /// A signal asked the app to stop.
     Signal(i32),
-    /// The driver task ended.
-    DriverStopped(radian_host::DriverEnd),
+    /// The driver task ended. Tagged with the session it belongs to (ADR 0023 U7's
+    /// `origin` rule): `/new` ends one session and opens the next on the same channel, so
+    /// the old session's end must not read as the new one's.
+    DriverStopped {
+        session_id: String,
+        end: radian_host::DriverEnd,
+    },
 }
 
 /// A terminal event, forwarded by the input thread.

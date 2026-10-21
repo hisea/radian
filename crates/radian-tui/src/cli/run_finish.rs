@@ -4,6 +4,7 @@
 //! No behaviour change: the block, the safety lines and the modal read the same facts
 //! in the same order, and the herdr reporter is built exactly once.
 
+use super::run_resolve::SessionCarry;
 use super::*;
 
 /// `run()`'s startup-screen phase: applies the test hooks, renders the resumed history,
@@ -252,9 +253,11 @@ pub(super) fn build_startup_screen(
     herdr
 }
 
-/// ADR 0047: the startup hint for a paused goal. `None` when no goal waits — a fresh
+/// ADR 0047: the startup hint for a paused goal. `None` when no goal waits: a fresh
 /// session without one, a finished one, or an active one (which cannot happen at startup:
-/// the resume fold parks it).
+/// the resume fold parks it). A `/new` next session opens a fresh journal with no goal
+/// events, so its hint is always `None`: the old goal stays durable in the old journal
+/// only.
 fn goal_resume_hint(session: &radian_host::LocalSession) -> Option<String> {
     let share = session.goal();
     let guard = share.lock().unwrap_or_else(|e| e.into_inner());
@@ -271,10 +274,25 @@ fn goal_resume_hint(session: &radian_host::LocalSession) -> Option<String> {
     ))
 }
 
+/// How one session ended: the ordinary exit with its reason line, or an accepted `/new` —
+/// end this session and open a fresh one in the same terminal, carrying the values in
+/// force. The new session's path returns the terminal guard (never restored) so the
+/// caller keeps the terminal across sessions.
+pub(super) enum SessionEnd {
+    Done(Option<String>),
+    New(SessionNew),
+}
+
+/// An accepted `/new`: the carried values plus the unrestored terminal guard.
+pub(super) struct SessionNew {
+    pub(super) carry: SessionCarry,
+    pub(super) guard: radian_tui::terminal::TtyGuard,
+}
+
 /// `run()`'s loop phase: builds the session host, runs the event loop to completion,
-/// restores the terminal, saves the draft, stops the driver and reports the exit reason.
-/// Takes the open session by value and returns the reason line (`None` for `--list`,
-/// which never reaches here).
+/// then (ordinary exit) restores the terminal, or (`/new`) keeps it for the next session.
+/// Both paths save the draft, stop the driver and report the end: the reason line for an
+/// exit, the carried values for a new session. Takes the open session by value.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_loop_and_teardown(
     cli: &Cli,
@@ -294,13 +312,14 @@ pub(super) fn run_loop_and_teardown(
     bash_sandbox: Option<radian_sandbox::Sandbox>,
     usage_gate: Option<tokio::sync::watch::Sender<bool>>,
     chatgpt_usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    background: Vec<tokio::task::JoinHandle<()>>,
+    queue_wake: tokio::task::JoinHandle<()>,
     herdr: Option<(HerdrReporter, Option<String>)>,
     dir: &Path,
     session_id: &str,
     secrets: &radian_tui::terminal::SharedSecrets,
-    provider: radian_host::Provider,
     has_model: bool,
-) -> Result<Option<String>, RunError> {
+) -> Result<SessionEnd, RunError> {
     // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
     // would read when there is no file yet (the write creates it).
     let theme_write_path = config
@@ -319,8 +338,8 @@ pub(super) fn run_loop_and_teardown(
         secrets: Arc::clone(secrets),
         journal: Arc::clone(session.journal()),
         config_snapshot: serde_json::json!({
-            "provider": provider.as_str(),
-            "model": cli.model,
+            "provider": provider_name,
+            "model": model_name,
         }),
         theme_colors: config.tui.colors.clone(),
         theme_write_path: theme_write_path.clone(),
@@ -357,10 +376,25 @@ pub(super) fn run_loop_and_teardown(
     exit_trace("loop-done");
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
-    guard.restore();
-    exit_trace("restored");
-    // The draft is written on every clean exit (normal quit, Ctrl-C, SIGTERM/SIGHUP). A panic
-    // never reaches here, so the panic path does no file I/O.
+    // `/new` keeps the terminal for the next session; every other exit restores it now,
+    // exactly once, before the teardown below (a `ui_loop` error still restores first,
+    // as before — `Drop` would restore anyway on the way out).
+    let new_session = matches!(&outcome, Ok(LoopEnd::NewSession));
+    if !new_session {
+        guard.restore();
+        exit_trace("restored");
+    }
+    // The old session's background producers and queue forwarder stop here: their ticks
+    // and notices belong to the session that spawned them. A `/new` next session starts
+    // its own; an ordinary exit leaves with the channel draining. (The usage gates'
+    // senders drop with the loop's end, which stills their tasks the same way.)
+    for task in background {
+        task.abort();
+    }
+    queue_wake.abort();
+    // The draft is written on every clean exit (normal quit, Ctrl-C, SIGTERM/SIGHUP, and
+    // `/new` — the draft file is keyed by the ending session, and its resume restores it).
+    // A panic never reaches here, so the panic path does no file I/O.
     let draft = radian_tui::composer::draft_path(dir, session_id);
     if let Err(error) = radian_tui::composer::save_draft(&draft, &app.input.text()) {
         eprintln!("[draft] cannot write {}: {error}", draft.display());
@@ -387,15 +421,61 @@ pub(super) fn run_loop_and_teardown(
             return Err(RunError::Failed(message));
         }
     }
+    // `/new` keeps the terminal: the host ends this session and opens a fresh one in it.
+    // The journal's lock releases when the last `Arc` of this session drops below.
     // A failure in the UI loop is the app's failure too; the terminal is already restored.
-    let signal = outcome?;
+    let end = outcome?;
+    if matches!(end, LoopEnd::NewSession) {
+        exit_trace("new-session");
+        return Ok(SessionEnd::New(SessionNew {
+            carry: carry_from(app, &session, session_id),
+            guard,
+        }));
+    }
+    let signal = match end {
+        LoopEnd::Quit(signal) => signal,
+        // Handled above: the new session leaves through its own path.
+        LoopEnd::NewSession => unreachable!("a `/new` exit keeps the terminal"),
+    };
     let saved = format!(
         "session {session_id} saved; {}",
         resume_command(&program_name(), session_id, cli, workspace_path)
     );
     exit_trace("run-done");
-    Ok(Some(match signal {
+    Ok(SessionEnd::Done(Some(match signal {
         Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
         None => saved,
-    }))
+    })))
+}
+
+/// Reads the values a `/new` carries into the fresh session: the route, thinking level,
+/// tier and auto policy in force — a queued switch (applied at the next turn boundary,
+/// which never comes) wins over the applied one, because it is the user's latest choice.
+fn carry_from(app: &App, session: &radian_host::LocalSession, session_id: &str) -> SessionCarry {
+    let route = app
+        .session
+        .next_model
+        .as_ref()
+        .and_then(|next| next.split_once('/'))
+        .map(|(provider, model)| (provider.to_owned(), model.to_owned()))
+        .or_else(|| session.model_route());
+    let thinking = app
+        .session
+        .next_thinking
+        .clone()
+        .or_else(|| app.session.thinking_level.clone());
+    let tier = app
+        .session
+        .projection
+        .read()
+        .tier()
+        .and_then(|tier| tier.split_whitespace().next())
+        .and_then(|name| radian_tui::profile::parse_tier(name).ok());
+    SessionCarry {
+        route,
+        thinking,
+        tier,
+        auto: app.session.auto,
+        old_session_id: session_id.to_owned(),
+    }
 }

@@ -316,6 +316,8 @@ pub struct LeadSetup {
     /// `--system`/`--system-file`, already read: the fixed layer 1 (ADR 0036).
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
+    /// `C` (ADR 0018): the context window size for `/context`. `None` when unknown.
+    pub window_context: Option<u64>,
     pub sandbox: Option<Sandbox>,
     pub tier: Preset,
     pub profile: Profile,
@@ -363,6 +365,7 @@ impl LeadSetup {
             mcp_config_path: self.mcp_config_path,
             system_prompt: self.system_prompt,
             context_budget: self.context_budget,
+            window_context: self.window_context,
             auto_compact: settings.auto_compact,
             compaction_settings: settings.compaction_settings,
             compaction_settings_for: settings.compaction_settings_for,

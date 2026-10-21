@@ -25,11 +25,13 @@ pub const HELP: &str = "\
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary (ADR 0022)
+/new                  start a new session here; the old session stays resumable
 /theme <name>         switch the color theme and write it back to the config file
 /model <provider>/<model>
                       switch the model at the next turn boundary (ADR 0026 D5)
 /thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
 /usage                show the current provider's usage, one line per window (ADR 0027)
+/context              show the next request's estimated size by category (ADR 0015)
 /auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
 /yolo                 alias of /auto
 /access [workspace|full]
@@ -140,6 +142,10 @@ pub enum Outcome {
     Export(ExportRequest),
     /// `/fork`: the host forks the current (idle) session at its last turn boundary.
     Fork,
+    /// `/new`: leave the loop; the host ends this session and opens a fresh one in the
+    /// same workspace, then the loop runs again. No host work happens here (unlike
+    /// `/fork`), so there is no `SessionOutcome`: setting the flag IS the execution.
+    New,
     /// `/theme <name>` (ADR 0008 revision): switch the theme now and write `tui.theme` back
     /// to the config file. The loop loads the theme (I/O) and does the write-back.
     Theme(String),
@@ -151,6 +157,10 @@ pub enum Outcome {
     /// `/usage` (ADR 0027): the current provider's usage snapshot, every
     /// window of it. The app reads the contribution store, so there is no effect.
     Usage,
+    /// `/context` (backlog `tui-context-command`): the next request's estimated size by
+    /// category, plus the reported line, the message count and the compactions. Read-only;
+    /// the loop reads it from the facade, so it works mid-turn.
+    Context,
     /// `/login [provider]`: open the credential wizard. `Some(id)` skips the provider
     /// choice (a built-in id or `custom`); `None` starts at the choice.
     Login(Option<String>),
@@ -312,6 +322,11 @@ pub fn tree() -> &'static [Command] {
             levels: &[],
         },
         Command {
+            name: "new",
+            description: "start a new session here; the old session stays resumable",
+            levels: &[],
+        },
+        Command {
             name: "theme",
             description: "switch the color theme and write it back to the config file",
             levels: &[theme_level],
@@ -329,6 +344,11 @@ pub fn tree() -> &'static [Command] {
         Command {
             name: "usage",
             description: "show the current provider's usage, one line per window (ADR 0027)",
+            levels: &[],
+        },
+        Command {
+            name: "context",
+            description: "show the next request's estimated size by category (ADR 0015)",
             levels: &[],
         },
         Command {
@@ -1061,6 +1081,8 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
         Some("/fork") => Outcome::Fork,
+        Some("/new") if tokens.len() == 1 => Outcome::New,
+        Some("/new") => Outcome::Notices(vec!["usage: /new (no arguments)".to_owned()]),
         Some("/theme") => theme_name(&tokens[1..]),
         Some("/thinking") => match tokens[1..].first() {
             Some(level) => Outcome::Thinking(level.clone()),
@@ -1068,6 +1090,8 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         },
         Some("/usage") if tokens.len() == 1 => Outcome::Usage,
         Some("/usage") => Outcome::Notices(vec!["usage: /usage (no arguments)".to_owned()]),
+        Some("/context") if tokens.len() == 1 => Outcome::Context,
+        Some("/context") => Outcome::Notices(vec!["usage: /context (no arguments)".to_owned()]),
         Some("/model") => match model_switch(&tokens[1..]) {
             Ok(switch) => Outcome::Model(switch),
             Err(usage) => Outcome::Notices(vec![usage]),
@@ -1729,6 +1753,21 @@ mod tests {
         assert!(tree().iter().any(|command| command.name == "queue"));
     }
 
+    /// `/new` takes no argument; anything after it is a usage notice. It is a command,
+    /// and it is in `/help`.
+    #[test]
+    fn new_takes_no_arguments() {
+        assert!(matches!(parse("/new", false), Outcome::New));
+        match parse("/new now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /new"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/new"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "new"));
+    }
+
     /// `/retry` takes no argument; anything after it is a usage notice. It is a command,
     /// and it is in `/help`.
     #[test]
@@ -2037,6 +2076,22 @@ mod tests {
         }
         assert!(HELP.contains("/usage"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "usage"));
+        assert!(tree().iter().any(|command| command.name == "context"));
+    }
+
+    /// `/context` takes no argument, is a command, and is in `/help`; anything
+    /// after it is a usage notice.
+    #[test]
+    fn context_is_a_command_with_no_arguments() {
+        assert!(matches!(parse("/context", false), Outcome::Context));
+        match parse("/context now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /context"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/context"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "context"));
     }
 
     /// `/usage`'s lines list **every** window, one line each, then the provider's trailing word

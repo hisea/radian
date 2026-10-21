@@ -283,41 +283,65 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
     // root's directory fd; the walk hands back open fds, never paths to re-open. An absolute
     // or `~` base must be under a read-only root, and its results are rendered with that
     // root's prefix so they can be passed to `read` again.
+    // Several whitespace-separated bases in one `path`: each resolved as a lone call
+    // would resolve it, the files merged with duplicates removed and the caps shared
+    // across the whole call. Every walk stays fd-relative (ADR 0039 decision 2); a found
+    // file's open fd is the one scanned, never a path re-opened.
+    let resolved = search::resolve_bases(&root, requested)?;
+    let header = resolved.header;
     let mut files: Vec<(File, String)> = Vec::new();
-    match root.read_base(requested) {
-        Ok(base) => {
-            let prefix = base.prefix.clone();
-            search::walk(&base.dir, &base.relative, base.ancestors, &mut |found| {
-                let rel = found.relative;
-                if let Some(filter) = &file_filter
-                    && !filter.is_match(&rel)
-                {
-                    return true;
+    {
+        let mut seen = std::collections::HashSet::new();
+        for base in resolved.bases {
+            match base {
+                search::SingleBase::Dir(dir_base) => {
+                    let prefix = dir_base.prefix.clone();
+                    search::walk(
+                        &dir_base.dir,
+                        &dir_base.relative,
+                        dir_base.ancestors,
+                        &mut |found| {
+                            let rel = found.relative;
+                            if let Some(filter) = &file_filter
+                                && !filter.is_match(&rel)
+                            {
+                                return true;
+                            }
+                            let display = display_path(prefix.as_deref(), &rel);
+                            if seen.insert(display.clone()) {
+                                files.push((found.file, display));
+                            }
+                            true
+                        },
+                    );
                 }
-                files.push((found.file, display_path(prefix.as_deref(), &rel)));
-                true
-            });
-            files.sort_by(|a, b| a.1.cmp(&b.1));
-        }
-        Err(failure) if failure.code == "not_a_directory" => {
-            // A file base: the pattern is matched against its own root-relative path.
-            let opened = root.open_read(requested)?;
-            if opened.stat.kind != crate::safe_fs::EntryKind::File {
-                return Err(fail(
-                    "not_a_file",
-                    format!("`{requested}` is not a regular file"),
-                ));
+                search::SingleBase::File {
+                    opened,
+                    relative,
+                    prefix,
+                    segment,
+                } => {
+                    // A file base: the pattern is matched against its own root-relative path.
+                    if opened.stat.kind != crate::safe_fs::EntryKind::File {
+                        return Err(fail(
+                            "not_a_file",
+                            format!("`{segment}` is not a regular file"),
+                        ));
+                    }
+                    if file_filter
+                        .as_ref()
+                        .is_none_or(|filter| filter.is_match(&relative))
+                    {
+                        let display = display_path(prefix.as_deref(), &relative);
+                        if seen.insert(display.clone()) {
+                            files.push((opened.file, display));
+                        }
+                    }
+                }
             }
-            let (rel, prefix) = root.read_relative(requested)?;
-            if file_filter
-                .as_ref()
-                .is_none_or(|filter| filter.is_match(&rel))
-            {
-                files.push((opened.file, display_path(prefix.as_deref(), &rel)));
-            }
         }
-        Err(failure) => return Err(failure),
     }
+    files.sort_by(|a, b| a.1.cmp(&b.1));
 
     let mode = match output.as_deref() {
         None | Some("content") => OutputMode::Content,
@@ -604,7 +628,11 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
         "grep suffix {}B exceeds the {BYTE_NOTE_RESERVE}B reserve",
         suffix.len()
     );
-    let mut out = String::with_capacity(body.len() + suffix.len());
+    let mut out =
+        String::with_capacity(header.as_ref().map_or(0, String::len) + body.len() + suffix.len());
+    if let Some(header) = header {
+        out.push_str(&header);
+    }
     out.push_str(&body);
     out.push_str(&suffix);
     if out.len() > byte_cap {

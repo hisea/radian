@@ -136,12 +136,18 @@ impl LoopContext<'_> {
                 app.quit = true;
                 return false;
             }
-            UiEvent::DriverStopped(end) => {
+            UiEvent::DriverStopped { session_id, end } => {
                 // The driver stopped: a fatal error (ADR 0001: the journal may be broken, so
                 // no record is written), a panic, or a graceful close. The session is over.
                 // The TUI leaves `Running`, names the reason in the status bar and refuses
                 // `/fork` (ADR 0022 §1's "idle session" no longer exists). It stays so the
                 // reason is readable; the user quits with the ordinary keys.
+                // An end for another session is not ours: `/new` ends one session and opens
+                // the next on the same channel, and the old session's graceful close lands
+                // here after the new loop started. Ignore it, so it never reads as ours.
+                if session_id != self.session.id().as_str() {
+                    return false;
+                }
                 let reason = match &end {
                     radian_host::DriverEnd::Ok => "the driver stopped".to_string(),
                     radian_host::DriverEnd::Failed(error) => format!("driver failed: {error}"),
@@ -471,6 +477,13 @@ impl LoopContext<'_> {
             // `/skills` (ADR 0025 S3): the discovered skills as notices.
             Effect::ListSkills => {
                 let notices = radian_host::notices(self.session.skills());
+                self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
+            // `/context`: read-only (journal + stored layers, no inbox, no driver),
+            // so it works mid-turn and never interrupts it.
+            Effect::Context => {
+                let notices = self.session.context_report();
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }

@@ -237,7 +237,7 @@ pub(super) fn run_picker_phase(
             .as_mut()
             .expect("the terminal was entered for the picker");
         app.start_picking(picker);
-        let signal = ui_loop(
+        match ui_loop(
             terminal,
             &mut *app,
             rx,
@@ -260,17 +260,25 @@ pub(super) fn run_picker_phase(
             None,
             // The picker phase has no session to report (ADR 0034 H1).
             None,
-        )?;
-        if let Some(signal) = signal {
-            // A signal during the pre-session phase leaves exactly like the session phase —
-            // restore the terminal, exit 128 + signal, print the reason — but there is no
-            // session to name, so no `--resume` hint. No session file has been created.
-            radian_tui::signals::confirm_exit();
-            guard.restore();
-            return Ok(PickDone::Leave(Some(format!(
-                "received {}",
-                radian_tui::signals::name(signal)
-            ))));
+        )? {
+            // `/new` parses only in a session; the picking phase never sets the flag.
+            LoopEnd::NewSession => {
+                unreachable!("the picking phase has no session, so `/new` cannot run there")
+            }
+            LoopEnd::Quit(signal) => {
+                if let Some(signal) = signal {
+                    // A signal during the pre-session phase leaves exactly like the session
+                    // phase — restore the terminal, exit 128 + signal, print the reason —
+                    // but there is no session to name, so no `--resume` hint. No session file
+                    // has been created.
+                    radian_tui::signals::confirm_exit();
+                    guard.restore();
+                    return Ok(PickDone::Leave(Some(format!(
+                        "received {}",
+                        radian_tui::signals::name(signal)
+                    ))));
+                }
+            }
         }
         app.finish_picking();
         let resume = match app.take_picker_outcome() {

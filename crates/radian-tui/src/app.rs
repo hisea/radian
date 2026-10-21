@@ -203,6 +203,10 @@ pub enum Effect {
     /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
     /// [`Input::SessionDone`].
     ListSkills,
+    /// `/context` (backlog `tui-context-command`): the next request's estimated size by
+    /// category. The loop reads it from the facade (journal + stored layers, no inbox, no
+    /// driver) and answers with [`Input::SessionDone`], so it works mid-turn.
+    Context,
     /// `/jobs` (ADR 0037 decision 4): list the running background jobs, or stop one/all. The
     /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
     Jobs(command::JobsRequest),
@@ -652,6 +656,10 @@ pub struct App {
     /// The input composer: text plus a cursor (ADR 0009 Phase 4).
     pub input: Composer,
     pub quit: bool,
+    /// `/new` was accepted: the loop leaves, the host ends this session and opens a fresh
+    /// one in the same terminal. Set with `quit` (the same exit), read by the loop's caller;
+    /// a new session's app starts with it cleared.
+    pub new_session: bool,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
     /// When the first idle Ctrl-C armed "press again to quit": the
