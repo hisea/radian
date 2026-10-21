@@ -10,8 +10,13 @@
 //! `div_ceil`), then the remainder of the division is distributed to the
 //! categories with the largest fractional part. A per-category `div_ceil` would
 //! overcount by up to one token per category.
+//!
+//! The breakdown is a pure data struct the TUI renders (owner addendum
+//! 2026-10-20): the grid round only changes the view. It carries the stacking
+//! numbers (`categories` + `free` + `buffer` = `window`) and the per-item
+//! detail (context files, skills, MCP/built-in tools, memory records).
 
-use agent_core::{ContentPart, Message, ModelRequest};
+use agent_core::{ContentPart, Message, ModelRequest, ToolSpec};
 
 /// One estimated category, in display order.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,12 +27,52 @@ pub struct Category {
     pub share: f64,
 }
 
+/// One context file's contribution (ADR 0036).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDetail {
+    pub path: String,
+    pub tokens: u64,
+}
+
+/// The per-item detail the grid's sections need. Token counts here are
+/// estimates for display; only the top-level categories take part in the
+/// exact stacking sum.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Details {
+    /// One row per context file, in prompt order.
+    pub context_files: Vec<FileDetail>,
+    /// Tokens of the whole `<project_instructions>` section.
+    pub context_files_tokens: u64,
+    /// Listable skills and the tokens of the skills listing.
+    pub skills_count: usize,
+    pub skills_tokens: u64,
+    /// Built-in tool definitions (everything that is not an MCP tool).
+    pub builtin_tools_count: usize,
+    pub builtin_tools_tokens: u64,
+    /// MCP servers and their tools.
+    pub mcp_servers: usize,
+    pub mcp_tools_count: usize,
+    pub mcp_tools_tokens: u64,
+    /// Memory records in the fixed block and the block's tokens.
+    pub memory_records: usize,
+    pub memory_tokens: u64,
+}
+
 /// The breakdown of one next request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Breakdown {
     pub categories: Vec<Category>,
     /// The total estimate `T` (the sum of the categories).
     pub total_tokens: u64,
+    /// `C`: the context window size (ADR 0018). `None` when unknown.
+    pub window: Option<u64>,
+    /// `B`: the auto-compaction threshold (ADR 0018). `None` when unconfigured.
+    pub threshold: Option<u64>,
+    /// `threshold - used` (saturating): the free space before auto-compaction.
+    pub free_tokens: Option<u64>,
+    /// `window - threshold` (saturating): the reserved compaction buffer.
+    pub buffer_tokens: Option<u64>,
+    pub details: Details,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -77,6 +122,11 @@ impl Size {
             non_ascii_chars: self.non_ascii_chars + other.non_ascii_chars,
         }
     }
+
+    fn tokens(&self, bytes_per_token: u64) -> u64 {
+        let bpt = bytes_per_token.max(1);
+        self.ascii.div_ceil(bpt) + self.non_ascii_chars
+    }
 }
 
 /// The system layers split for the estimate.
@@ -89,6 +139,46 @@ pub struct SystemSplit {
     pub context_files: String,
     /// The fixed memory block (ADR 0021).
     pub memory: String,
+}
+
+/// One context file's block, in prompt order: the display path and the exact
+/// `<project_instructions>` block the section concatenates.
+#[derive(Debug, Clone, Default)]
+pub struct ContextBlock {
+    pub path: String,
+    pub block: String,
+}
+
+/// Everything one estimate needs. The grid round only changes the view, so
+/// every number the grid needs is computed here.
+pub struct EstimateInput<'a> {
+    pub request: &'a ModelRequest,
+    pub system: &'a SystemSplit,
+    /// The skills listing section (a substring of `system.base`) and how many
+    /// listable skills it names.
+    pub skills_section: &'a str,
+    pub skills_count: usize,
+    /// The context files' blocks, in prompt order.
+    pub context_blocks: &'a [ContextBlock],
+    /// MCP server ids, to tell MCP tools (`<server>__<tool>`) apart from
+    /// built-in ones (the inspector's rule).
+    pub mcp_server_ids: &'a [String],
+    /// How many memory records the fixed block carries.
+    pub memory_records: usize,
+    pub bytes_per_token: u32,
+    pub count_reasoning: bool,
+    /// `C` (ADR 0018). `None` when the window is unknown.
+    pub window: Option<u64>,
+    /// `B` (ADR 0018). `None` when no budget is configured.
+    pub threshold: Option<u64>,
+}
+
+/// Whether a tool spec is an MCP tool: `server__tool` with a known server id.
+fn is_mcp_tool(name: &str, mcp_server_ids: &[String]) -> bool {
+    match name.split_once("__") {
+        Some((prefix, _)) => mcp_server_ids.iter().any(|id| id == prefix),
+        None => false,
+    }
 }
 
 /// Counts `text` the way `budget` counts a system prompt.
@@ -133,13 +223,8 @@ fn reasoning_fragment_size(reasoning: &[ContentPart]) -> Size {
     let field = serde_json::json!({ "reasoning": reasoning }).to_string();
     let mut size = Size::default();
     if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
-        let mut comma = Size::default();
-        comma.add_str(",");
-        size = comma.plus({
-            let mut inner_size = Size::default();
-            inner_size.add_str(inner);
-            inner_size
-        });
+        size.add_str(",");
+        size.add_str(inner);
     }
     size
 }
@@ -150,20 +235,17 @@ fn reasoning_fragment_size(reasoning: &[ContentPart]) -> Size {
 /// `request.system_prompt` is context files and which is memory, so the three
 /// system categories add up to the prompt byte for byte.
 ///
-/// Returns the categories in display order; the last entry is always the
-/// total. `reasoning` is listed only when `count_reasoning` is on.
-pub fn breakdown(
-    request: &ModelRequest,
-    system: &SystemSplit,
-    bytes_per_token: u32,
-    count_reasoning: bool,
-) -> Breakdown {
-    let bpt = bytes_per_token.max(1) as u64;
+/// Returns the categories in display order; `reasoning` is listed only when
+/// `count_reasoning` is on.
+pub fn estimate(input: &EstimateInput) -> Breakdown {
+    let request = input.request;
+    let bpt = input.bytes_per_token.max(1) as u64;
+    let count_reasoning = input.count_reasoning;
 
     // System: three additive string pieces.
-    let base_size = size_of_str(&system.base);
-    let context_size = size_of_str(&system.context_files);
-    let memory_size = size_of_str(&system.memory);
+    let base_size = size_of_str(&input.system.base);
+    let context_size = size_of_str(&input.system.context_files);
+    let memory_size = size_of_str(&input.system.memory);
     // The request's prompt must be exactly these three concatenated; when it
     // is not (a hook rewrote it), the remainder stays in base so nothing is
     // lost and the sum still matches the request.
@@ -190,8 +272,7 @@ pub fn breakdown(
     // Messages: per-message sizes, split into user / assistant / reasoning /
     // tool results. Array framing (`[` `]` `,`) is attributed to the tool
     // results when there are any, else to assistant text, else to user
-    // messages, else dropped (no messages: framing is `[]` = 2 bytes ≈ 1
-    // token, kept in the total through the whole-array size below).
+    // messages, so the categories sum to the array byte for byte.
     let mut user_size = Size::default();
     let mut assistant_size = Size::default();
     let mut reasoning_size = Size::default();
@@ -312,7 +393,7 @@ pub fn breakdown(
             remainder -= 1;
         }
     }
-    // No fractional parts at all (or empty request): the remainder can only
+    // No fractional parts at all (or an empty request): the remainder can only
     // be the `[]`/`null` framing; put it on the first non-empty category, or
     // base when everything is empty.
     if remainder > 0 {
@@ -323,7 +404,7 @@ pub fn breakdown(
         tokens[target] += remainder as u64;
     }
 
-    let categories = parts
+    let categories: Vec<Category> = parts
         .into_iter()
         .enumerate()
         .map(|(i, (name, _))| Category {
@@ -337,9 +418,110 @@ pub fn breakdown(
         })
         .collect();
 
+    // The stacking numbers: used + free + buffer
+    // is the window. `free` is 0 past the threshold.
+    let (free_tokens, buffer_tokens) = match (input.window, input.threshold) {
+        (Some(window), Some(threshold)) => (
+            Some(threshold.saturating_sub(total_tokens)),
+            Some(window.saturating_sub(threshold)),
+        ),
+        (Some(window), None) => (Some(window.saturating_sub(total_tokens)), Some(0)),
+        (None, Some(threshold)) => (Some(threshold.saturating_sub(total_tokens)), Some(0)),
+        (None, None) => (None, None),
+    };
+
+    // Per-item detail.
+    let context_files: Vec<FileDetail> = {
+        // The blocks concatenate to the section byte for byte; one ceil for
+        // their total, distributed like the categories.
+        let sizes: Vec<Size> = input
+            .context_blocks
+            .iter()
+            .map(|block| size_of_str(&block.block))
+            .collect();
+        let total_ascii: u64 = sizes.iter().map(|s| s.ascii).sum();
+        let total_non: u64 = sizes.iter().map(|s| s.non_ascii_chars).sum();
+        let total = total_ascii.div_ceil(bpt) + total_non;
+        let floors: Vec<u64> = sizes
+            .iter()
+            .map(|s| s.ascii / bpt + s.non_ascii_chars)
+            .collect();
+        let mut rem = total.saturating_sub(floors.iter().sum::<u64>()) as usize;
+        let mut ord: Vec<usize> = (0..sizes.len()).collect();
+        ord.sort_by_key(|&i| std::cmp::Reverse(sizes[i].ascii % bpt));
+        let mut toks = floors;
+        for i in ord {
+            if rem == 0 {
+                break;
+            }
+            if sizes[i].ascii % bpt > 0 {
+                toks[i] += 1;
+                rem -= 1;
+            }
+        }
+        input
+            .context_blocks
+            .iter()
+            .enumerate()
+            .map(|(i, block)| FileDetail {
+                path: block.path.clone(),
+                tokens: toks[i],
+            })
+            .collect()
+    };
+    let context_files_tokens = categories
+        .iter()
+        .find(|c| c.name == "context files")
+        .map(|c| c.tokens)
+        .unwrap_or(0);
+    let memory_tokens = categories
+        .iter()
+        .find(|c| c.name == "memory injection")
+        .map(|c| c.tokens)
+        .unwrap_or(0);
+    let (builtin_tools_count, builtin_tools_tokens, mcp_tools_count, mcp_tools_tokens) = {
+        let mut builtin: Vec<&ToolSpec> = Vec::new();
+        let mut mcp: Vec<&ToolSpec> = Vec::new();
+        for spec in &request.tools {
+            if is_mcp_tool(&spec.name, input.mcp_server_ids) {
+                mcp.push(spec);
+            } else {
+                builtin.push(spec);
+            }
+        }
+        let mut builtin_size = Size::default();
+        builtin_size.add_json(&builtin);
+        let mut mcp_size = Size::default();
+        mcp_size.add_json(&mcp);
+        (
+            builtin.len(),
+            builtin_size.tokens(bpt),
+            mcp.len(),
+            mcp_size.tokens(bpt),
+        )
+    };
+    let details = Details {
+        context_files,
+        context_files_tokens,
+        skills_count: input.skills_count,
+        skills_tokens: size_of_str(input.skills_section).tokens(bpt),
+        builtin_tools_count,
+        builtin_tools_tokens,
+        mcp_servers: input.mcp_server_ids.len(),
+        mcp_tools_count,
+        mcp_tools_tokens,
+        memory_records: input.memory_records,
+        memory_tokens,
+    };
+
     Breakdown {
         categories,
         total_tokens,
+        window: input.window,
+        threshold: input.threshold,
+        free_tokens,
+        buffer_tokens,
+        details,
     }
 }
 
@@ -359,12 +541,11 @@ fn format_tokens(n: u64) -> String {
 }
 
 /// Renders the `/context` notice lines: one per category with tokens and
-/// share, then the total `T / B`, then the reported line, the message count
-/// and the compaction count.
-#[allow(clippy::too_many_arguments)]
+/// share, the free space and the compaction buffer, the total `T / B`
+/// (window), the reported line (ADR 0015 C1), the message count, the
+/// compaction count, and the per-item detail.
 pub fn notice_lines(
     breakdown: &Breakdown,
-    budget: Option<u64>,
     reported: Option<u64>,
     message_count: usize,
     compactions: usize,
@@ -379,13 +560,30 @@ pub fn notice_lines(
             category.share
         ));
     }
-    match budget {
-        Some(b) => out.push(format!(
+    if let Some(free) = breakdown.free_tokens {
+        out.push(format!("  free until auto-compact: {}", format_tokens(free)));
+    }
+    if let Some(buffer) = breakdown.buffer_tokens {
+        out.push(format!("  compaction buffer (reserved): {}", format_tokens(buffer)));
+    }
+    match (breakdown.threshold, breakdown.window) {
+        (Some(threshold), Some(window)) => out.push(format!(
+            "  total: {} / {} (window {})",
+            format_tokens(breakdown.total_tokens),
+            format_tokens(threshold),
+            format_tokens(window)
+        )),
+        (Some(threshold), None) => out.push(format!(
             "  total: {} / {}",
             format_tokens(breakdown.total_tokens),
-            format_tokens(b)
+            format_tokens(threshold)
         )),
-        None => out.push(format!("  total: {}", format_tokens(breakdown.total_tokens))),
+        (None, Some(window)) => out.push(format!(
+            "  total: {} (window {})",
+            format_tokens(breakdown.total_tokens),
+            format_tokens(window)
+        )),
+        (None, None) => out.push(format!("  total: {}", format_tokens(breakdown.total_tokens))),
     }
     match reported {
         Some(input) => out.push(format!("reported: {} (last provider input)", format_tokens(input))),
@@ -393,13 +591,40 @@ pub fn notice_lines(
     }
     out.push(format!("messages: {message_count}"));
     out.push(format!("compactions this session: {compactions}"));
+    let details = &breakdown.details;
+    if !details.context_files.is_empty() {
+        out.push("context files:".to_owned());
+        for file in &details.context_files {
+            out.push(format!("  {}: {}", file.path, format_tokens(file.tokens)));
+        }
+    }
+    if details.skills_count > 0 {
+        out.push(format!(
+            "skills: {} listed, {}",
+            details.skills_count,
+            format_tokens(details.skills_tokens)
+        ));
+    }
+    out.push(format!(
+        "tools: {} built-in ({}) + {} MCP in {} servers ({})",
+        details.builtin_tools_count,
+        format_tokens(details.builtin_tools_tokens),
+        details.mcp_tools_count,
+        details.mcp_servers,
+        format_tokens(details.mcp_tools_tokens),
+    ));
+    out.push(format!(
+        "memory: {} records, {}",
+        details.memory_records,
+        format_tokens(details.memory_tokens)
+    ));
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{ContentPart, MessageMeta, ToolSpec};
+    use agent_core::{MessageMeta, ToolConcurrency};
     use serde_json::json;
 
     fn spec(name: &str) -> ToolSpec {
@@ -407,55 +632,83 @@ mod tests {
             name: name.to_owned(),
             description: format!("does {name}"),
             input_schema: json!({"type": "object"}),
-            concurrency: agent_core::ToolConcurrency::Exclusive,
+            concurrency: ToolConcurrency::Exclusive,
         }
     }
 
-    fn request() -> (ModelRequest, SystemSplit) {
+    fn system() -> SystemSplit {
         let base = "<runtime>rt</runtime>\n\n<role>role</role>\n".to_owned();
         let context_files =
             "<project_instructions path=\"AGENTS.md\">\nbody\n</project_instructions>\n".to_owned();
         let memory = "\n\n## Memory (ADR 0021)\n- [global] (fact): note\n".to_owned();
-        let system_prompt = format!("{base}{context_files}{memory}");
-        let messages = vec![
-            Message::user("hello"),
-            Message::Assistant {
-                content: vec![ContentPart::text("answer")],
-                reasoning: vec![ContentPart::text("because")],
-                tool_calls: vec![],
-                provider_payload: None,
-                interrupted: false,
-                meta: MessageMeta::default(),
-            },
-            Message::Tool {
-                result: agent_core::ToolResult::success("c1", vec![ContentPart::text("output")]),
-                meta: MessageMeta::default(),
-            },
-        ];
-        let request = ModelRequest {
-            system_prompt: Some(system_prompt),
-            messages,
-            tools: vec![spec("read"), spec("write")],
-            settings: serde_json::Value::Null,
-        };
-        let system = SystemSplit {
+        SystemSplit {
             base,
             context_files,
             memory,
-        };
-        (request, system)
+        }
+    }
+
+    fn request(system: &SystemSplit) -> ModelRequest {
+        let system_prompt = format!("{}{}{}", system.base, system.context_files, system.memory);
+        ModelRequest {
+            system_prompt: Some(system_prompt),
+            messages: vec![
+                Message::user("hello"),
+                Message::Assistant {
+                    content: vec![ContentPart::text("answer")],
+                    reasoning: vec![ContentPart::text("because")],
+                    tool_calls: vec![],
+                    provider_payload: None,
+                    interrupted: false,
+                    meta: MessageMeta::default(),
+                },
+                Message::Tool {
+                    result: agent_core::ToolResult::success("c1", vec![ContentPart::text("output")]),
+                    meta: MessageMeta::default(),
+                },
+            ],
+            tools: vec![spec("read"), spec("srv__search")],
+            settings: serde_json::Value::Null,
+        }
+    }
+
+    fn input<'a>(
+        request: &'a ModelRequest,
+        system: &'a SystemSplit,
+        blocks: &'a [ContextBlock],
+    ) -> EstimateInput<'a> {
+        EstimateInput {
+            request,
+            system,
+            skills_section: "",
+            skills_count: 0,
+            context_blocks: blocks,
+            mcp_server_ids: &[],
+            memory_records: 1,
+            bytes_per_token: 4,
+            count_reasoning: false,
+            window: Some(100_000),
+            threshold: Some(90_000),
+        }
     }
 
     #[test]
     fn the_categories_sum_to_the_total() {
+        let system = system();
+        let req = request(&system);
+        let blocks = [ContextBlock {
+            path: "AGENTS.md".to_owned(),
+            block: system.context_files.clone(),
+        }];
         for count_reasoning in [false, true] {
-            let (request, system) = request();
-            let breakdown = breakdown(&request, &system, 4, count_reasoning);
+            let mut inp = input(&req, &system, &blocks);
+            inp.count_reasoning = count_reasoning;
+            let breakdown = estimate(&inp);
             let sum: u64 = breakdown.categories.iter().map(|c| c.tokens).sum();
             assert_eq!(sum, breakdown.total_tokens, "{breakdown:?}");
             assert_eq!(
                 breakdown.total_tokens,
-                total_of(&request, 4, count_reasoning),
+                total_of(&req, 4, count_reasoning),
                 "the total is the estimator's total"
             );
         }
@@ -463,30 +716,35 @@ mod tests {
 
     #[test]
     fn every_message_and_tool_definition_is_counted_once() {
-        let (mut request, system) = request();
-        let full = breakdown(&request, &system, 4, false);
+        let system = system();
+        let mut req = request(&system);
+        let blocks = [ContextBlock {
+            path: "AGENTS.md".to_owned(),
+            block: system.context_files.clone(),
+        }];
+        let full = estimate(&input(&req, &system, &blocks));
         // Dropping a message shrinks the total by exactly its category's
         // contribution: nothing is double-counted, nothing is lost.
         let dropped_user = {
-            let mut without = request.clone();
+            let mut without = req.clone();
             without.messages.remove(0);
-            breakdown(&without, &system, 4, false)
+            estimate(&input(&without, &system, &blocks))
         };
         assert!(
             dropped_user.total_tokens < full.total_tokens,
             "a dropped user message must shrink the total"
         );
         let dropped_tool_result = {
-            let mut without = request.clone();
+            let mut without = req.clone();
             without.messages.pop();
-            breakdown(&without, &system, 4, false)
+            estimate(&input(&without, &system, &blocks))
         };
         assert!(
             dropped_tool_result.total_tokens < full.total_tokens,
             "a dropped tool result must shrink the total"
         );
-        request.tools.pop();
-        let fewer_tools = breakdown(&request, &system, 4, false);
+        req.tools.pop();
+        let fewer_tools = estimate(&input(&req, &system, &blocks));
         assert!(
             fewer_tools.total_tokens < full.total_tokens,
             "a dropped tool definition must shrink the total"
@@ -494,9 +752,9 @@ mod tests {
         // The tool category without tools is just the empty array (`[]`).
         let no_tools = ModelRequest {
             tools: vec![],
-            ..request.clone()
+            ..req.clone()
         };
-        let empty_tools = breakdown(&no_tools, &system, 4, false);
+        let empty_tools = estimate(&input(&no_tools, &system, &blocks));
         let tools = empty_tools
             .categories
             .iter()
@@ -507,13 +765,21 @@ mod tests {
 
     #[test]
     fn reasoning_is_listed_only_when_counted() {
-        let (request, system) = request();
-        let without = breakdown(&request, &system, 4, false);
+        let system = system();
+        let req = request(&system);
+        let blocks = [ContextBlock {
+            path: "AGENTS.md".to_owned(),
+            block: system.context_files.clone(),
+        }];
+        let without_input = input(&req, &system, &blocks);
+        let without = estimate(&without_input);
         assert!(
             without.categories.iter().all(|c| c.name != "reasoning"),
             "{without:?}"
         );
-        let with = breakdown(&request, &system, 4, true);
+        let mut with_input = input(&req, &system, &blocks);
+        with_input.count_reasoning = true;
+        let with = estimate(&with_input);
         let reasoning = with
             .categories
             .iter()
@@ -526,18 +792,74 @@ mod tests {
 
     #[test]
     fn the_notice_marks_reported_and_estimated_apart() {
-        let (request, system) = request();
-        let breakdown = breakdown(&request, &system, 4, false);
-        let lines = notice_lines(&breakdown, Some(100_000), Some(12_000), 3, 1);
+        let system = system();
+        let req = request(&system);
+        let blocks = [ContextBlock {
+            path: "AGENTS.md".to_owned(),
+            block: system.context_files.clone(),
+        }];
+        let breakdown = estimate(&input(&req, &system, &blocks));
+        let lines = notice_lines(&breakdown, Some(12_000), 3, 1);
         assert!(lines.iter().any(|l| l.contains("estimated")), "{lines:?}");
         assert!(
             lines.iter().any(|l| l.contains("reported") && l.contains("12")),
             "{lines:?}"
         );
-        let unreported = notice_lines(&breakdown, Some(100_000), None, 0, 0);
+        let unreported = notice_lines(&breakdown, None, 0, 0);
         assert!(
             unreported.iter().any(|l| l.contains("none yet")),
             "{unreported:?}"
         );
+    }
+
+    /// Owner addendum 2026-10-20: categories + free + buffer sum to the window.
+    #[test]
+    fn categories_plus_free_plus_buffer_sum_to_the_window() {
+        let system = system();
+        let req = request(&system);
+        let blocks = [ContextBlock {
+            path: "AGENTS.md".to_owned(),
+            block: system.context_files.clone(),
+        }];
+        let breakdown = estimate(&input(&req, &system, &blocks));
+        let window = breakdown.window.unwrap();
+        let threshold = breakdown.threshold.unwrap();
+        let free = breakdown.free_tokens.unwrap();
+        let buffer = breakdown.buffer_tokens.unwrap();
+        assert!(breakdown.total_tokens <= threshold);
+        assert_eq!(breakdown.total_tokens + free + buffer, window);
+        assert_eq!(buffer, window - threshold);
+    }
+
+    /// The detail rows name every context file, the skills listing, the MCP
+    /// split and the memory records.
+    #[test]
+    fn the_notice_details_name_files_skills_mcp_and_memory() {
+        let system = system();
+        let req = request(&system);
+        let blocks = [ContextBlock {
+            path: "AGENTS.md".to_owned(),
+            block: system.context_files.clone(),
+        }];
+        let mut inp = input(&req, &system, &blocks);
+        inp.mcp_server_ids = &["srv".to_owned()];
+        inp.skills_section = "\n\n## Skills (ADR 0025)\n- a\n";
+        inp.skills_count = 3;
+        let breakdown = estimate(&inp);
+        assert_eq!(breakdown.details.context_files.len(), 1);
+        assert_eq!(breakdown.details.context_files[0].path, "AGENTS.md");
+        assert_eq!(breakdown.details.mcp_servers, 1);
+        assert_eq!(breakdown.details.mcp_tools_count, 1);
+        assert_eq!(breakdown.details.builtin_tools_count, 1);
+        assert_eq!(breakdown.details.memory_records, 1);
+        let lines = notice_lines(&breakdown, None, 3, 0);
+        let text = lines.join("\n");
+        assert!(text.contains("AGENTS.md"), "{text}");
+        assert!(text.contains("skills: 3 listed"), "{text}");
+        assert!(text.contains("1 MCP in 1 servers"), "{text}");
+        assert!(text.contains("memory: 1 records"), "{text}");
+        assert!(text.contains("free until auto-compact"), "{text}");
+        assert!(text.contains("compaction buffer"), "{text}");
+        assert!(text.contains("window"), "{text}");
     }
 }

@@ -61,6 +61,7 @@ pub async fn open_session(
         mcp_config_path,
         system_prompt,
         context_budget,
+        window_context,
         auto_compact,
         compaction_settings,
         compaction_settings_for,
@@ -417,7 +418,7 @@ pub async fn open_session(
     ));
     let agent_config = AgentConfig {
         system_prompt,
-        context_budget,
+        context_budget: context_budget.clone(),
         auto_compact,
         compaction_settings,
         retries,
@@ -425,7 +426,7 @@ pub async fn open_session(
     };
     let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(
         workspace.clone(),
-        model_name,
+        model_name.clone(),
         Some(Arc::clone(&config_slot)),
     ));
     let agent = Arc::new(
@@ -609,6 +610,30 @@ pub async fn open_session(
         context_line: context.line(&workspace, user_home().as_deref()),
         context_files: context.files.clone(),
     };
+    // The `/context` estimate inputs: the system layers split so the categories
+    // add up (base is everything except the context section and the memory
+    // block, which are counted separately), the per-file blocks, the skills
+    // listing, and the session facts. Read-only; the loop reads them while a
+    // turn runs.
+    let system_base_prefix = crate::prompt::assemble(&runtime_layer, &role_layer, "");
+    let skills_section = skills_hooks.section().to_owned();
+    let skills_count = shared_skills
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+        .count();
+    let session_section = crate::prompt::session_layer(&workspace, &model_name);
+    let system_base = format!("{system_base_prefix}{skills_section}\n{session_section}");
+    let context_blocks = context
+        .blocks
+        .iter()
+        .map(|block| {
+            (
+                block.path.to_string_lossy().into_owned(),
+                block.block.clone(),
+            )
+        })
+        .collect();
+    let context_section = context.section.clone();
     Ok(LocalSession {
         id: session_id,
         config_queue,
@@ -631,6 +656,15 @@ pub async fn open_session(
         job_notifier,
         jobs,
         tool_specs,
+        system_base,
+        context_section,
+        context_blocks,
+        skills_section,
+        skills_count,
+        session_section,
+        memory_injection: Arc::clone(&injection),
+        context_budget,
+        window_context,
         mcp_servers: mcp_server_configs,
         mcp_config_path,
         hooks_config,

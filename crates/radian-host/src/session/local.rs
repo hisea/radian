@@ -17,7 +17,7 @@ use super::facade::{DriverEnd, SessionFacade};
 use super::ids::{CommandRefused, SessionCapability, SessionCommand, SessionId, UserBashRecord};
 use super::setup_types::{AccessBuilder, SessionFacts, SessionQueue};
 use super::support::trust_event;
-use crate::memory::MemoryService;
+use crate::memory::{MemoryInjection, MemoryService, first_user_text};
 use crate::pending::{Answered, PendingResponse};
 use crate::projection::{ProjectionRead, SessionProjection};
 use crate::skills::{self, Skill};
@@ -80,6 +80,21 @@ pub struct LocalSession {
     /// model request strips them (ADR 0043 decision 3), and the inspector applies the same
     /// strip so its list matches the request's set exactly.
     pub(super) tool_specs: Vec<agent_core::ToolSpec>,
+    /// The `/context` estimate inputs (ADR 0015): the system layers split so the
+    /// categories add up, the memory injection for the fixed block, and the
+    /// estimate ruler. Read-only; the loop reads them while a turn runs.
+    pub(super) system_base: String,
+    pub(super) context_section: String,
+    /// One block per context file, in prompt order (concatenated: the section).
+    pub(super) context_blocks: Vec<(String, String)>,
+    pub(super) skills_section: String,
+    /// How many listable skills the listing names (ADR 0025 S2).
+    pub(super) skills_count: usize,
+    pub(super) session_section: String,
+    pub(super) memory_injection: Arc<MemoryInjection>,
+    pub(super) context_budget: Option<agent_core::ContextBudget>,
+    /// `C` (ADR 0018): the context window size. `None` when unknown.
+    pub(super) window_context: Option<u64>,
     /// The MCP server configs this session was opened with (the inspector's mcp page).
     pub(super) mcp_servers: Vec<agent_extensions::McpServerConfig>,
     /// Where the MCP servers came from (`--mcp-config <FILE>`). `None` when no file was
@@ -99,6 +114,85 @@ pub struct LocalSession {
     /// The recovered transcript (resume-perf B): `open_session` already folded it, so the host
     /// does not re-open the journal for its initial view.
     pub history: Vec<Message>,
+}
+
+impl LocalSession {
+    /// The `/context` report (backlog `tui-context-command`): the next request's
+    /// shape split into estimated categories, read from the journal's committed
+    /// view plus the stored system layers. Read-only: it never touches the
+    /// inbox or the driver, so it works mid-turn.
+    fn context_report_inner(&self) -> Vec<String> {
+        use crate::context_estimate::{ContextBlock, EstimateInput, SystemSplit, estimate};
+        use crate::memory::first_user_text;
+
+        // The committed view: history, compactions, and the last reported input
+        // in the current revision. A read failure is a notice, never a turn
+        // failure (the session keeps running).
+        let (history, compactions, reported) = match read_committed(&self.journal_path) {
+            Ok(view) => view,
+            Err(error) => {
+                return vec![format!("context: cannot read the session file: {error}")];
+            }
+        };
+        // The fixed memory block, computed once per process and reused
+        // byte-for-byte afterwards (ADR 0021). A read failure injects
+        // nothing (invariant 2).
+        let fixed = self
+            .memory_injection
+            .fixed(|| first_user_text(&history).unwrap_or_default())
+            .map(|injection| (injection.text, injection.records.len()))
+            .unwrap_or_default();
+        let (memory_text, memory_records) = fixed;
+        let system_prompt =
+            format!("{}{}{}", self.system_base, self.context_section, memory_text);
+        let request = agent_core::ModelRequest {
+            system_prompt: Some(system_prompt),
+            messages: history.clone(),
+            tools: self.tool_specs.clone(),
+            settings: serde_json::Value::Null,
+        };
+        let system = SystemSplit {
+            base: self.system_base.clone(),
+            context_files: self.context_section.clone(),
+            memory: memory_text,
+        };
+        let context_blocks: Vec<ContextBlock> = self
+            .context_blocks
+            .iter()
+            .map(|(path, block)| ContextBlock {
+                path: path.clone(),
+                block: block.clone(),
+            })
+            .collect();
+        let mcp_server_ids: Vec<String> =
+            self.mcp_servers.iter().map(|server| server.id.clone()).collect();
+        let (bytes_per_token, count_reasoning) = match self.context_budget {
+            Some(budget) => (budget.bytes_per_token, budget.count_reasoning),
+            None => (
+                agent_core::DEFAULT_BYTES_PER_TOKEN,
+                false,
+            ),
+        };
+        let threshold = self
+            .projection
+            .read()
+            .context_window()
+            .or(self.context_budget.map(|budget| budget.input_budget_tokens));
+        let breakdown = estimate(&EstimateInput {
+            request: &request,
+            system: &system,
+            skills_section: &self.skills_section,
+            skills_count: self.skills_count,
+            context_blocks: &context_blocks,
+            mcp_server_ids: &mcp_server_ids,
+            memory_records,
+            bytes_per_token,
+            count_reasoning,
+            window: self.window_context,
+            threshold,
+        });
+        crate::context_estimate::notice_lines(&breakdown, reported, history.len(), compactions)
+    }
 }
 
 impl LocalSession {
@@ -502,6 +596,10 @@ impl SessionFacade for LocalSession {
         jobs.tail(id, max).map(|(state, _, tail)| (state, tail))
     }
 
+    fn context_report(&self) -> Vec<String> {
+        self.context_report_inner()
+    }
+
     /// Re-validates the capability, then runs the command. The check is here as well as in the
     /// UI: a facade whose list the UI ignored still refuses.
     fn command(&self, command: SessionCommand) -> Result<(), CommandRefused> {
@@ -595,4 +693,31 @@ impl SessionFacade for LocalSession {
             }
         });
     }
+}
+
+/// The journal's committed view for `/context`: the current history, how many
+/// replacements committed (the compactions this session), and the last
+/// provider-reported input in the current revision (`None` without one — never
+/// 0, ADR 0007). A parse failure is an error the caller renders as a notice.
+fn read_committed(path: &Path) -> Result<(Vec<Message>, usize, Option<u64>), String> {
+    let session =
+        radian_session::Session::open(path).map_err(|error| error.to_string())?;
+    let history = session.history().map_err(|error| error.to_string())?;
+    let mut compactions = 0usize;
+    let mut reported: Option<u64> = None;
+    for event in session.events() {
+        match &event.data {
+            radian_session::EventData::TranscriptReplacementCommitted { .. } => {
+                compactions += 1;
+                reported = None;
+            }
+            radian_session::EventData::ModelUsageRecorded { usage, .. } => {
+                if let Some(total) = usage.prompt_total() {
+                    reported = Some(total);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((history, compactions, reported))
 }
