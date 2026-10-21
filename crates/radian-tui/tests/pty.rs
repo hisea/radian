@@ -6607,6 +6607,79 @@ async fn pty_new_starts_a_fresh_session_carrying_route_tier_and_auto() {
     );
 }
 
+/// `/new` carries the thinking level in force into the new session's **startup** state: the
+/// footer's `reasoning` item shows the carried level from the first frame, before any turn
+/// runs. The new session's `SessionCreated` snapshot carries only `{provider, model,
+/// access}` (`run_open`'s `config_snapshot`; thinking is journaled later as a
+/// `ConfigChanged` backfill straight from the carry, bypassing `resolve_model`), so the
+/// footer is what pins the `resolve_model` carry path: a mutation that drops the carry
+/// there (falling back to the CLI/default level) leaves every backfill assertion green
+/// and must fail this test. The suite default footer (`classic`) has no thinking item, so
+/// this runs the `pi` preset, whose identity row pairs the model with `reasoning`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_carries_thinking_into_the_new_sessions_startup_footer() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-thinking-carry");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    // A short workspace so the footer's cwd item cannot squeeze the reasoning item out.
+    let ws = short_workspace("new-thinking-carry");
+    // No turn ever runs: the server only satisfies session startup, never a request.
+    let anthropic_server = anth::MockServer::start(vec![anth_text_reply("NEVER")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-a",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "first",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-new-thinking"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        "schema_version = 1\n[tui.footer]\npreset = \"pi\"\n",
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    // Queue the switch without running a turn: the carry prefers the queued level over the
+    // applied one. The first Enter accepts the slash completion; the second submits.
+    pty.send(b"/thinking high\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: thinking high", wait_positive()),
+        "the thinking switch did not queue:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"/new\r");
+    // One predicate for both halves (the timing rule): the new session is up (its notice
+    // names the old session) **and** its footer already shows the carried level. The model
+    // name pins the identity row, so a stray `high` anywhere else cannot satisfy this.
+    assert!(
+        pty.wait_until(wait_positive(), |screen| {
+            screen.contains("--resume first")
+                && screen
+                    .lines()
+                    .any(|row| row.contains("claude-a") && row.contains("high"))
+        }),
+        "the new session's footer must show the carried thinking level from startup:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
 /// `/new` while a turn runs is refused with a notice and the session is unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
