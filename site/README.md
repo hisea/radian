@@ -27,4 +27,4 @@ The two numbers are the theme's accent RGB; the script maps it to the page's `va
 
 ## README images
 
-`.github/readme/` holds the README banner and terminal figure, light and dark, rendered from this page by headless Chrome: `python3 -I site/tools/readme-images.py`. The terminal figure stops after the diff, because the rows below it hold invented model and cost data.
+`.github/readme/` holds the README banner and terminal figure, light and dark, rendered from this page by headless Chrome: `python3 -I site/tools/readme-images.py`. The terminal figure drops the rows between the diff and the job notices (the ask box, the summary, the table, the compaction line) and the theme line under the footer. The model name, costs and quota in the footer are invented by the prototype script.

@@ -18,6 +18,19 @@ fonts = "\n".join(re.findall(r'<link rel="stylesheet"[^>]*>', src))
 mark = re.search(r'<svg class="mark-a".*?</svg>', src, re.S).group(0)
 figure = re.search(r'(<div class="term">.*?)\s*<figcaption', src, re.S).group(1)
 
+
+def rows(m: re.Match) -> str:
+    # keep the turn down to the end of the diff, then the notices, the input and the footer
+    lines = m.group(2).split("\n")
+    text = [re.sub(r"<[^>]*>", "", l) for l in lines]
+    diff_end = next(i for i, t in enumerate(text) if t.startswith("│  127"))
+    notices = next(i for i, t in enumerate(text) if "background job bg-2" in t)
+    theme = next(i for i, t in enumerate(text) if t.startswith("theme:"))
+    return m.group(1) + "\n".join(lines[: diff_end + 2] + lines[notices : theme - 1]) + m.group(3)
+
+
+figure = re.sub(r'(<pre class="frame-\w+">)(.*?)(</pre>)', rows, figure, flags=re.S)
+
 BANNER = """<!doctype html><html data-theme="{theme}"><head><meta charset="utf-8">{fonts}
 <style>{style}
 html, body {{ background: transparent !important; }}
@@ -40,7 +53,7 @@ body {{ margin: 0; padding: 0; width: max-content; }}
 </style></head><body>{figure}</body></html>"""
 
 
-def shot(html: str, name: str, size: str, cut: int = 0, rule: str = "") -> None:
+def shot(html: str, name: str, size: str) -> None:
     page = TMP / f"{name}.html"
     page.write_text(html)
     png = OUT / f"{name}.png"
@@ -50,15 +63,9 @@ def shot(html: str, name: str, size: str, cut: int = 0, rule: str = "") -> None:
                     f"--screenshot={png}", page.as_uri()],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
     img = Image.open(png)
-    img = img.crop(img.getchannel("A").getbbox())
-    if cut:
-        # keep the rows down to the end of the diff; the rows below hold invented model and cost data
-        img = img.crop((0, 0, img.width, cut))
-        img.paste(Image.new("RGBA", (img.width, 2), rule), (0, cut - 2))
-    img.save(png, optimize=True)
+    img.crop(img.getchannel("A").getbbox()).save(png, optimize=True)
 
 
 for theme in ("light", "dark"):
     shot(BANNER.format(theme=theme, fonts=fonts, style=style, mark=mark), f"banner-{theme}", "960,260")
-    shot(FRAME.format(theme=theme, fonts=fonts, style=style, figure=figure), f"terminal-{theme}", "1100,1400",
-         cut=1182, rule={"light": "#e2e1e8", "dark": "#25232e"}[theme])
+    shot(FRAME.format(theme=theme, fonts=fonts, style=style, figure=figure), f"terminal-{theme}", "1100,1400")
