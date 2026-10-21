@@ -10,12 +10,17 @@
 # `slow-timeout`: a hung test is sent SIGTERM after `period`, SIGKILL after
 # `terminate-after` more periods, and counts as failed instead of wedging the run.
 # The slowest measured pty test takes ~12 s (queue-during-turn, 6-wide on a 10-core
-# M4); 120 s is 10x that and 2x the tests' own 60 s per-wait deadline, so a loaded
-# gate does not trip it while a real hang is still cut within minutes.
+# M4); the exec suites wait on a 120 s in-test `EXIT_WATCHDOG` before calling a stuck
+# CLI stuck (crates/radian-exec/tests/{cli,exec,exec_jobs,jsonl,subagent}.rs), and
+# the pty suite waits up to 60 s per wait (`WAIT_POSITIVE`). The period must stay above
+# the largest in-test watchdog so a hung CLI fails inside the test first, keeping the
+# child's stderr in the panic message instead of nextest's bare timeout: 180 s gives
+# 60 s of headroom over the 120 s watchdogs while a real hang is still cut within
+# minutes (SIGTERM at 3 min, SIGKILL at 6 min).
 
 [profile.default]
 fail-fast = false
-slow-timeout = { period = "120s", terminate-after = 1 }
+slow-timeout = { period = "180s", terminate-after = 1 }
 
 [test-groups.pty]
 max-threads = 6
