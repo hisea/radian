@@ -358,7 +358,7 @@ for target in $TARGETS; do
         exit 1; }
     codesign --verify --strict "$smoke/radian" "$smoke/rad"
     if [ "$ADHOC" -eq 0 ]; then
-        codesign -dv "$smoke/radian" 2>&1 | grep -q "Authority=Developer ID Application" || {
+        codesign -dvv "$smoke/radian" 2>&1 | grep -q "Authority=Developer ID Application" || {
             echo "release-macos.sh: $target: no Developer ID authority." >&2; exit 1; }
         codesign -dv "$smoke/radian" 2>&1 | grep -q "runtime" || {
             echo "release-macos.sh: $target: no hardened runtime flag." >&2; exit 1; }
