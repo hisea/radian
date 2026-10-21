@@ -7,6 +7,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -473,36 +474,52 @@ impl Running {
     }
 
     /// Waits for the process to exit **without closing its stdin**, so the test shows the
-    /// CLI did not need more input to finish. Bounded by `limit`. On timeout the panic
-    /// carries the stderr seen so far plus `note` — what the test had already done (for
-    /// example whether the second SIGINT was sent) — so a hung CLI still leaves its
-    /// last known state instead of only "did not exit".
+    /// CLI did not need more input to finish. Bounded by `limit`. The drain appends
+    /// each chunk it reads to a shared buffer, so on timeout the panic carries everything
+    /// read so far — including lines the CLI printed *during* the hang — plus `note`
+    /// (what the test had already done, for example whether the second SIGINT was sent).
+    /// A hung CLI still leaves its last known state instead of only "did not exit".
     async fn finish_open(self, limit: Duration, note: &str) -> (i32, String, String) {
         let Self {
             child,
             mut stderr,
-            mut stderr_seen,
+            stderr_seen,
             stdin,
         } = self;
-        // Cloned before the wait: on timeout the future below is dropped with the rest
-        // of the output still in the pipe, so this is everything the CLI had said.
-        let seen_before = stderr_seen.clone();
+        let seen = Arc::new(tokio::sync::Mutex::new(stderr_seen));
+        let drain_seen = Arc::clone(&seen);
         let note = note.to_owned();
         let (output, ()) = timeout(limit, async {
             tokio::join!(child.wait_with_output(), async {
-                let mut rest = String::new();
-                let _ = stderr.read_to_string(&mut rest).await;
-                stderr_seen.push_str(&rest);
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match stderr.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            drain_seen
+                                .lock()
+                                .await
+                                .push_str(&String::from_utf8_lossy(&chunk[..n]));
+                        }
+                    }
+                }
             })
         })
         .await
         .unwrap_or_else(|_| {
+            // The timed future above is dropped before this runs, so the drain is gone
+            // and the lock is free; `try_lock` only guards against a surprise.
+            let seen_so_far = seen
+                .try_lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_else(|_| "<stderr buffer locked>".to_owned());
             panic!(
-                "the CLI did not exit while stdin stayed open within {limit:?} ({note}); stderr so far:\n{seen_before}"
+                "the CLI did not exit while stdin stayed open within {limit:?} ({note}); stderr so far:\n{seen_so_far}"
             )
         });
         let output = output.expect("wait");
         drop(stdin);
+        let stderr_seen = seen.lock().await.clone();
         (
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).into_owned(),
