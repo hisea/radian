@@ -10474,6 +10474,23 @@ impl HerdrSocket {
         }
     }
 
+    /// Waits for a `pane.report_metadata` whose `state_labels[key]` is `value`.
+    fn wait_for_label(&self, key: &str, value: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.snapshot().iter().any(|got| {
+                got["method"] == "pane.report_metadata"
+                    && got["params"]["state_labels"][key] == value
+            }) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Waits for any request of `method`.
     fn wait_for_method(&self, method: &str, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
@@ -10983,6 +11000,122 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
         "the command text must never be sent: {all}"
     );
     pty.quit();
+}
+
+/// The jobs item (decided ): a background job keeps an idle session
+/// `working` with the `jobs` label; the followup turn its settle wakes is plain `working`,
+/// then `idle` again. The command text never leaves the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_working_while_a_job_runs() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("herdr-jobs");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            r#"{"command":"sleep 3","background":true}"#,
+        ),
+        text_reply("TURN1-OK"),
+        text_reply("JOB-DONE-OK"),
+    ])
+    .await;
+    let sock = HerdrSocket::start("jobs");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "herdr-jobs",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "auto",
+        ],
+        &env_refs,
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("idle", wait_positive()),
+        "the startup idle report"
+    );
+    pty.send(b"run it in the background\r");
+    assert!(
+        pty.wait_for_screen("TURN1-OK", wait_positive()),
+        "the first turn did not answer:\n{}",
+        pty.screen()
+    );
+    // The turn ended while the job still sleeps: idle-with-jobs is `working` with the label.
+    assert!(
+        sock.wait_for_label("working", "jobs", wait_positive()),
+        "working with the jobs label after the turn ended: {:?}",
+        sock.snapshot()
+    );
+    // The job settles: its notice wakes a followup turn (plain `working`), then `idle`.
+    assert!(
+        pty.wait_for_screen("JOB-DONE-OK", wait_positive()),
+        "the settle never cycled through a turn:\n{}",
+        pty.screen()
+    );
+    let deadline = Instant::now() + wait_positive();
+    let states = loop {
+        let states: Vec<String> = sock
+            .of_method("pane.report_agent")
+            .iter()
+            .map(|value| {
+                value["params"]["state"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        if states == ["idle", "working", "idle", "working", "idle"] {
+            break states;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the full turn cycle: {states:?}; all: {:?}",
+            sock.snapshot()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(states, ["idle", "working", "idle", "working", "idle"]);
+    assert_eq!(
+        sock.of_method("pane.report_metadata")
+            .iter()
+            .filter(|value| value["params"]["state_labels"]["working"] == "jobs")
+            .count(),
+        1,
+        "the jobs label is sent once, never while a turn runs: {:?}",
+        sock.snapshot()
+    );
+    assert!(
+        !serde_json::to_string(&sock.snapshot())
+            .unwrap()
+            .contains("sleep 3"),
+        "the command text must never be sent"
+    );
+    pty.quit();
+    assert!(
+        sock.wait_for_release(wait_positive()),
+        "a normal exit releases: {:?}",
+        sock.snapshot()
+    );
 }
 
 /// Without `HERDR_ENV=1` nothing is sent at all.
