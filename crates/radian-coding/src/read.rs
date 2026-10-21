@@ -59,8 +59,7 @@ pub(crate) fn spec() -> ToolSpec {
                       its line number and `\": \"`. This prefix is not part of the file. \
                       Remove it before you use the text in `patch`. For a large file, read one \
                       part at a time with `offset` and `limit`. Do not increase `max_bytes` \
-                      to get a later part. To read cargo registry or Rust toolchain sources, \
-                      use an absolute path or a `~` path."
+                      to get a later part."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,

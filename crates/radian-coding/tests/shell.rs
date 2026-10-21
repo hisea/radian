@@ -790,13 +790,14 @@ async fn the_shell_description_points_file_reading_and_searching_at_the_read_onl
     assert!(checked >= 1, "no shell was built to check");
 }
 
-/// Items 6-9: the `shell` description kills the whole *process group* (never "the whole
-/// session", which reads as the agent session); it states the timing numbers the model
-/// otherwise cannot see (no `timeout_secs` → moved to the background at the threshold
-/// and never killed for time; with it → killed at the deadline counted from the start;
-/// `background: true` ignores it; each stream is capped); the `full` tier names no ADR
-/// number and no `--profile` flag; and only `grep`/`glob` are said to run in parallel
-/// (`read` has no blocking pool yet).
+/// Items 6-9 (say-each-fact-once): the `shell` description kills the whole *process group*
+/// (never "the whole session", which reads as the agent session) and states the cross-cutting
+/// timing facts the model otherwise cannot see (no `timeout_secs` → moved to the background at
+/// the threshold and never killed for time; the notice line); the per-parameter numbers live in
+/// the schema fields only — the timeout default/maximum/count-from-start, the 24 KiB
+/// per-stream cap, the background no-deadline rule — never in the description. The `full` tier
+/// names no ADR number and no `--profile` flag; and only `grep`/`glob` are said to run in
+/// parallel (`read` has no blocking pool yet).
 #[tokio::test]
 async fn the_shell_description_states_the_timing_numbers_and_the_process_group() {
     let dir = TempDir::new("shell-spec-numbers");
@@ -813,11 +814,9 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
         "kills the whole process group",
         "never killed for time",
         "default threshold is 60 s",
-        "The default is 60 s",
-        "The maximum is 600 s",
-        "counts from the command's start",
-        "default cap is 24 KiB",
-        "ignores `timeout_secs`",
+        "The move keeps the same process",
+        "returns at once with a job id",
+        "You will be notified when the command finishes",
         "`grep` and `glob` report truncation",
         "They use less context",
         "They run in parallel",
@@ -833,6 +832,16 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
         "they report truncation",
         "(ADR 0043)",
         "--profile workspace",
+        // The per-parameter numbers below live in the schema fields, not the description.
+        "The default is 60 s",
+        "The maximum is 600 s",
+        "counts from the command's start",
+        "default cap is 24 KiB",
+        "ignores `timeout_secs`",
+        "starts the command in the background",
+        "has no deadline",
+        "Do not sleep or poll",
+        "end your reply",
     ] {
         assert!(
             !spec.description.contains(gone),
@@ -840,18 +849,34 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
             spec.description
         );
     }
-    // The schema fields carry the same numbers (the model reads them too).
+    // The schema fields carry the same numbers (the model reads them too). The kill rule
+    // itself lives only in the tool description ("A timeout or a cancellation kills the
+    // whole process group"), never in this field (ADR 0037: each fact once).
     let timeout = &spec.input_schema["properties"]["timeout_secs"]["description"];
     assert!(
-        timeout.as_str().is_some_and(
-            |text| text.contains("Default: 60") && text.contains("whole process group")
-        ),
-        "the `timeout_secs` field must name the default and the process group: {timeout}"
+        timeout
+            .as_str()
+            .is_some_and(|text| text.contains("Default: 60")
+                && text.contains("Maximum: 600")
+                && text.contains("counted from the command's start")
+                && text.contains("ignores")
+                && !text.contains("whole process group")),
+        "the `timeout_secs` field must name the default, the maximum, the start and the \
+         background rule, without repeating the kill rule: {timeout}"
     );
     let budget = &spec.input_schema["properties"]["max_output_bytes"]["description"];
     assert!(
-        budget.as_str().is_some_and(|text| text.contains("24 KiB")),
-        "the `max_output_bytes` field must name the budget: {budget}"
+        budget
+            .as_str()
+            .is_some_and(|text| text.contains("24 KiB") && text.contains("per stream")),
+        "the `max_output_bytes` field must name the per-stream budget: {budget}"
+    );
+    let background = &spec.input_schema["properties"]["background"]["description"];
+    assert!(
+        background
+            .as_str()
+            .is_some_and(|text| text.contains("no deadline")),
+        "the `background` field must say a background command has no deadline: {background}"
     );
 }
 
@@ -1565,7 +1590,9 @@ async fn outside_sandbox_refuses_background() {
 }
 
 /// The `shell` description names `outside_sandbox` in one sentence, in both
-/// `workspace` wordings (`full` has no sandbox to leave).
+/// `workspace` wordings. `full` has no sandbox to leave, so neither its description nor its
+/// schema names the two fields — while `run` still parses with the full schema (see
+/// `outside_sandbox_runs_unsandboxed_for_one_call`).
 #[tokio::test]
 async fn the_shell_description_names_outside_sandbox() {
     let dir = TempDir::new("shell-spec-outside");
@@ -1585,11 +1612,17 @@ async fn the_shell_description_names_outside_sandbox() {
             .iter()
             .find(|spec| spec.name == "shell")
             .expect("shell is advertised with a sandbox");
+        let properties = &spec.input_schema["properties"];
         if spec.description.contains("runs with no sandbox") {
             assert!(
                 !spec.description.contains("outside_sandbox"),
                 "full has no sandbox to leave: {}",
                 spec.description
+            );
+            assert!(
+                properties.get("outside_sandbox").is_none()
+                    && properties.get("outside_sandbox_reason").is_none(),
+                "the full-tier schema must carry neither outside field"
             );
         } else {
             assert!(
@@ -1603,19 +1636,61 @@ async fn the_shell_description_names_outside_sandbox() {
                 "the wording must say the call needs approval: {}",
                 spec.description
             );
+            assert!(
+                properties.get("outside_sandbox").is_some()
+                    && properties.get("outside_sandbox_reason").is_some(),
+                "the workspace schema must carry both fields"
+            );
         }
-        assert!(
-            spec.input_schema["properties"]
-                .get("outside_sandbox")
-                .is_some()
-                && spec.input_schema["properties"]
-                    .get("outside_sandbox_reason")
-                    .is_some(),
-            "the schema must carry both fields"
-        );
         checked += 1;
     }
     assert!(checked >= 1, "no shell was built to check");
+}
+
+/// The `full`-tier shell schema carries no `outside_sandbox`/`outside_sandbox_reason`
+/// property, while **both** `workspace` variants (git-writable or not) carry them.
+#[tokio::test]
+async fn the_full_tier_shell_schema_has_no_outside_fields() {
+    let dir = TempDir::new("shell-schema-tiers");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let full = transparent_tools(&root);
+    let session = full.open_session().await.unwrap();
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "shell")
+        .expect("shell is advertised with a sandbox");
+    let properties = &spec.input_schema["properties"];
+    assert!(
+        properties.get("outside_sandbox").is_none(),
+        "the full-tier schema must not advertise outside_sandbox"
+    );
+    assert!(
+        properties.get("outside_sandbox_reason").is_none(),
+        "the full-tier schema must not advertise outside_sandbox_reason"
+    );
+    for backend in [&GIT_WRITABLE as &dyn SandboxBackend, &GIT_READ_ONLY] {
+        let sandbox =
+            Sandbox::from_backend(backend, SandboxMode::WorkspaceWrite, &root).expect("sandbox");
+        let tools = CodingTools::with_sandbox(&root, sandbox).expect("matching workspaces");
+        let spec = tools
+            .open_session()
+            .await
+            .unwrap()
+            .tool_specs()
+            .iter()
+            .find(|spec| spec.name == "shell")
+            .expect("shell is advertised with a sandbox")
+            .clone();
+        let properties = &spec.input_schema["properties"];
+        assert!(
+            properties.get("outside_sandbox").is_some()
+                && properties.get("outside_sandbox_reason").is_some(),
+            "the {} workspace schema must carry both outside fields",
+            backend.name(),
+        );
+    }
 }
 
 /// Size budget (re-measured 2026-10-20, the fix1 STE rewrite): the serialized `workspace`
