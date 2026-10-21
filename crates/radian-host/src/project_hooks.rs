@@ -28,8 +28,9 @@ pub fn project_path(workspace: &Path) -> PathBuf {
 /// skipped, never run. The same table as the user-level `[hooks]` reader.
 const NON_COMMAND_HANDLER_KEYS: [&str; 5] = ["async", "if", "http", "prompt", "agent"];
 
-/// The three events slice B loads. Anything else is skipped with one warning line.
-const KNOWN_EVENTS: [&str; 3] = ["PreToolUse", "PostToolUse", "Stop"];
+/// The events the project file loads. The same table as the user-level reader: both
+/// come from one constant so the two readers cannot drift apart.
+const KNOWN_EVENTS: &[&str] = crate::config::HOOK_EVENTS;
 
 /// Parses the project hooks file's JSON value into a [`HooksConfig`], collecting one warning
 /// line per skipped entry. Never refuses: outside-the-subset content is skipped and named, so

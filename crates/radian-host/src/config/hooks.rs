@@ -18,6 +18,17 @@ use toml::Value;
 
 use super::Config;
 
+/// The hook events this slice implements. The single source for the match arms below,
+/// the project hooks reader, and the manual's drift test: adding an event means adding
+/// it here first.
+pub const HOOK_EVENTS: &[&str] = &[PRE_TOOL_USE, POST_TOOL_USE, STOP];
+/// The tool-call hook that runs before the tool runs.
+pub const PRE_TOOL_USE: &str = "PreToolUse";
+/// The tool-call hook that runs after the tool runs.
+pub const POST_TOOL_USE: &str = "PostToolUse";
+/// The hook that runs when the model stops.
+pub const STOP: &str = "Stop";
+
 /// The default per-hook timeout, in seconds (Claude's default): how long one hook command
 /// may run before it counts as a hook error (fail closed).
 pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 60;
@@ -106,9 +117,9 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
             continue;
         }
         let list = match event.as_str() {
-            "PreToolUse" => &mut config.hooks.pre_tool_use,
-            "PostToolUse" => &mut config.hooks.post_tool_use,
-            "Stop" => &mut config.hooks.stop,
+            PRE_TOOL_USE => &mut config.hooks.pre_tool_use,
+            POST_TOOL_USE => &mut config.hooks.post_tool_use,
+            STOP => &mut config.hooks.stop,
             _ => {
                 config.skipped.push(format!("hooks.{event}"));
                 continue;
