@@ -870,7 +870,8 @@ pub fn select_user_messages_tracked(
     let mut used = 0u64;
     // From the newest backwards: the newest is always placed, truncated into `U` when it alone
     // is larger. The walk **stops** at the first message that does not fit, so what is kept is
-    // the contiguous newest run and everything older is omitted (ADR 0018) — never a newer message plus an older short one with a gap between them.
+    // the contiguous newest run and everything older is omitted (ADR 0018)
+    // — never a newer message plus an older short one with a gap between them.
     for (index, text) in texts[1..].iter().enumerate().rev() {
         let tokens = text_tokens(text);
         let entry = if tokens > u {

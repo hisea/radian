@@ -2432,7 +2432,7 @@ async fn pty_escape_cancels_a_running_tool_turn() {
     );
 }
 
-// with an empty input and a turn running, Esc must cancel the turn (the
+/// With an empty input and a turn running, Esc must cancel the turn (the
 /// README says so). The dogfood build (2b55c50) did not; this pins the behaviour. The reply
 /// never finishes, so the turn stays running until the cancel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3611,7 +3611,7 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
 
 /// ADR 0027: the startup summary's sandbox word is the **real** sandbox, never `none`. The
 /// bug was searching the `workspace` tier's description text, which does not name the backend,
-/// so macOS showed `workspace · none`.: the summary says the plain words
+/// so macOS showed `workspace · none`. the summary says the plain words
 /// ("macOS sandbox" / "Linux sandbox") and the expanded `profile:` line keeps the exact
 /// backend name.
 ///
@@ -7855,7 +7855,7 @@ fn pty_a_flooding_producer_still_draws_and_answers_keys() {
 // ---------- the mouse wheel (ADR 0023 U2, plan B) ----------
 
 /// The SGR report for one wheel notch: `ESC[<64;x;yM` is up, `ESC[<65;x;yM` is down.
-/// crossterm's `parse_csi` (`b'<'` at:171) dispatches these to `parse_csi_sgr_mouse`
+/// crossterm's `parse_csi` (`b'<'` at :171) dispatches these to `parse_csi_sgr_mouse`
 /// (:718), and `parse_cb` (:776) maps button 4/5 to `ScrollUp`/`ScrollDown` (:789-790).
 fn wheel(up: bool) -> Vec<u8> {
     if up {
@@ -9909,7 +9909,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-// ---------- the default workspace  ----------
+// ---------- the default workspace ----------
 
 /// Without `--workspace` the current directory is the coding root, so the first request carries
 /// the file tools (before this, a session without `--workspace` had none).
@@ -11986,7 +11986,7 @@ async fn pty_herdr_is_silent_when_disabled() {
     pty.quit();
 }
 
-// ---------- Ctrl-C: clear first, then press twice to quit  ----------
+// ---------- Ctrl-C: clear first, then press twice to quit ----------
 
 /// Idle and empty, Ctrl-C asks twice: the first press only shows the hint and never exits;
 /// the second inside the window exits 0 with the copyable resume line.
@@ -12589,7 +12589,7 @@ fn longest_run(screen: &str, ch: char) -> usize {
         .unwrap_or(0)
 }
 
-// changing the window size with **no other input** must re-lay out. The
+/// Changing the window size with **no other input** must re-lay out. The
 /// old bug: crossterm only drains its SIGWINCH pipe while reading stdin, so an idle app stayed
 /// at the old width until a key or wheel arrived ("scroll once and it fixes itself"). The app
 /// now polls `TIOCGWINSZ` on its idle tick.

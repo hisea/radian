@@ -11,7 +11,8 @@
 //! categories with the largest fractional part. A per-category `div_ceil` would
 //! overcount by up to one token per category.
 //!
-//! The breakdown is a pure data struct the TUI renders: the grid round only changes the view. It carries the stacking
+//! The breakdown is a pure data struct the TUI renders:
+//! the grid round only changes the view. It carries the stacking
 //! numbers (`categories` + `free` + `buffer` = `window`) and the per-item
 //! detail (context files, skills, MCP/built-in tools, memory records).
 
@@ -540,7 +541,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         })
         .collect();
 
-    // The stacking numbers (used + free + buffer
+    // The stacking numbers used + free + buffer
     // is the window. `free` is 0 past the threshold.
     let (free_tokens, buffer_tokens) = match (input.window, input.threshold) {
         (Some(window), Some(threshold)) => (

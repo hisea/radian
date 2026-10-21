@@ -577,7 +577,7 @@ fn other_keeps_its_text_while_moving_with_arrows() {
     assert_eq!(answer.answers[0].other.as_deref(), Some("custom"));
 }
 
-// `Enter` only confirms and advances, it never selects; `Space` selects
+/// `Enter` only confirms and advances, it never selects; `Space` selects
 /// without advancing. A question with nothing chosen still moves on.
 #[test]
 fn enter_advances_without_selecting_and_space_selects_without_advancing() {
@@ -613,7 +613,7 @@ fn enter_advances_without_selecting_and_space_selects_without_advancing() {
     assert_eq!(form(&spaced).current, Some(0), "Space does not advance");
 }
 
-// on a `multi` question `Space` toggles and `Enter` only advances (it does
+/// On a `multi` question `Space` toggles and `Enter` only advances (it does
 /// **not** toggle).
 #[test]
 fn a_multi_question_toggles_with_space_and_enter_only_advances() {
@@ -642,7 +642,7 @@ fn a_multi_question_toggles_with_space_and_enter_only_advances() {
     assert_eq!(form(&app).current, Some(1), "Enter advances");
 }
 
-// `Space` on the `Other` row selects it and starts typing at once — the
+/// `Space` on the `Other` row selects it and starts typing at once — the
 /// cursor is visible on that row, the next keys land in its text, a following `Space` is a
 /// space (the field takes the space), and switching to another option and back keeps the text.
 #[test]
@@ -694,7 +694,7 @@ fn space_on_other_starts_typing_and_the_cursor_is_visible() {
     );
 }
 
-// the inline `Other` cursor sits at the composer's cursor, so `←`/`→` move
+/// The inline `Other` cursor sits at the composer's cursor, so `←`/`→` move
 /// it within the typed text.
 #[test]
 fn the_other_cursor_follows_the_text_cursor() {
@@ -715,7 +715,7 @@ fn the_other_cursor_follows_the_text_cursor() {
     );
 }
 
-// `Enter` with nothing chosen still advances; the question counts as
+/// `Enter` with nothing chosen still advances; the question counts as
 /// unanswered and the overview marks it.
 #[test]
 fn an_unanswered_question_is_marked_in_the_overview() {

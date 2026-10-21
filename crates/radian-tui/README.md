@@ -156,7 +156,7 @@ the top rule where a code block's language label goes (`╭─ <spinner> Working
 interrupt ───…`), not bold. `tui.input_style = "bar"` was **removed**: writing it warns once and
 uses `lines`. It is a real composer in both styles (cursor editing, multi-line, history).
 
-The **startup screen**  is the leading block of transcript entries: the
+The **startup screen** is the leading block of transcript entries: the
 wordmark (three rows at the primary `text` level; below its width it drops to one line,
 `<brand> radian <version>` (ADR 0027: `R` unicode, `󰰠` nerd, `rad` ascii), with the width measured by `unicode-width`), one collapsed information
 line, the safety lines in the `warning` kind that are never folded (a workspace boundary that
@@ -194,8 +194,8 @@ bare arrow keys belong to the composer.
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
 | Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running `!` command or the running turn; otherwise do nothing — **Esc never quits a session** (quit with two Ctrl-Cs or `/quit`) |
 | Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
-| Ctrl-P (`toggle_startup`) | fold or unfold the startup information block  |
-| Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key;) |
+| Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
+| Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key) |
 | Ctrl-F (`find` in the transcript, `find_prev` in the find box) | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
@@ -257,7 +257,8 @@ find_next = ["ctrl-g", "shift-enter"]
   three rows: the current provider's `usage` line — dropped when it has no snapshot — then
   `model`/`cwd`/`git_branch`/`worktree` with `context` (`{bar} {percent}%`)/
   `reasoning` on the right, then
-  `tokens`/`cost`/`context` on the right), `full` (revision 1's two rows, plus `jobs` —: only `full` includes it), `pi` (the earlier two
+  `tokens`/`cost`/`context` on the right), `full` (revision 1's two rows, plus `jobs` —
+  only `full` includes it), `pi` (the earlier two
   rows) or `classic` (today's one line, byte-for-byte). Each preset is a TOML file
   (`crates/radian-tui/presets/<name>.toml`) holding the config's `[tui.footer]` section
   verbatim, parsed by the same parser as a user config; `radian footer export <preset>`
@@ -334,7 +335,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `status` | `{status}` | `status.*` 贡献文本，`keys = ["…"]` 可过滤 |
 | `usage` | `{value}` | **当前 provider** 的用量快照：各窗口的剩余百分比与重置倒计时（ADR 0027）。数据来源在 provider 描述符的 `usage`（`Endpoint`：轮询一个 URL 并解析），组件本身不认识任何 provider；没有来源的 provider 这一行不出现。`tui.usage_period_secs` 0 关闭；旧 id `opencode-go.usage`/`chatgpt.usage` 作为别名保留一个版本，启动时各警告一次。`/usage` 打印同一份快照的**全部**窗口 |
 | `command` item (`[tui.footer.items.<id>] command = "…"`) | `{value}` | the command's first stdout line; JSON `{"text","style","symbol"}` sets the role and symbol (ADR 0027) |
-| `jobs` | `{count}`, `{age}` | 本会话正在跑的后台任务数与最老一个的已运行时长（例 `2 jobs · 18m`；ADR 0027 的 2026-10-17 补记）。数据来自任务的开始/结束事件（`BackgroundJobStarted`/`BackgroundJobSettled`，`JobNotifier` 写 journal 的同时转发到 live runtime-event sink），不轮询 journal 文件；没有运行中的任务时组件为空、不占位。年龄随既有的 footer 刷新（贡献者 tick 重画）更新，不另起计时器。只在 `full` 预设的缺省行里（ 定；其余三预设不含，用户在 rows 里加 `{jobs}`） |
+| `jobs` | `{count}`, `{age}` | 本会话正在跑的后台任务数与最老一个的已运行时长（例 `2 jobs · 18m`；ADR 0027 的 2026-10-17 补记）。数据来自任务的开始/结束事件（`BackgroundJobStarted`/`BackgroundJobSettled`，`JobNotifier` 写 journal 的同时转发到 live runtime-event sink），不轮询 journal 文件；没有运行中的任务时组件为空、不占位。年龄随既有的 footer 刷新（贡献者 tick 重画）更新，不另起计时器。只在 `full` 预设的缺省行里（其余三预设不含，用户在 rows 里加 `{jobs}`） |
 
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。每行有一个
@@ -419,12 +420,13 @@ Replaced or dropped in the `unicode` tier (they were not in all six fonts):
 | `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
 | `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
 
-Not in the all-six set but kept (they are not tier-gated icons): the `❯` input prompt (the choice; both input styles), the ask record's `◉`/`○` markers (the choice after
+Not in the all-six set but kept (they are not tier-gated icons): the `❯` input prompt (the
+choice; both input styles), the ask record's `◉`/`○` markers (the choice after
 the 2026-10-16 check: `◉` misses SF Mono and `○` misses Source Code Pro — accepted) and text
 arrows (`→`, `•` in the question UI — `•` is in all
 six, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
 characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all six.
-- `theme`: `dark` and `light` are **pi's own palettes** , read
+- `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
   sits at the 67% level, told apart by hue. `mono` uses no color at all (bold/underline/dim
@@ -740,31 +742,31 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   file-ioctl)(allow file-write* (subpath "<workspace>"))' radian --workspace <workspace>`. It
   must **start** (no refusal), and the expanded startup line and `/access` must read `workspace ·
   sandbox inherited (an outer sandbox confines this process; radian's own rules are not applied)`.
-  A `!printf x > <outside>` must fail and `!printf x >./inside` succeed: those are the outer
+  A `!printf x > <outside>` must fail and `!printf x > ./inside` succeed: those are the outer
   sandbox's rules, and radian claims nothing about them (no deny-read list, no `.git` wording, no
   network state). `tests/pty.rs` covers the same path in automation; the feel is yours.
-- **the input area's two styles** : the default is `lines` — a rule above and below with the `❯ ` prompt; is it
+- **the input area's two styles**: the default is `lines` — a rule above and below with the `❯ ` prompt; is it
   comfortable? Compare `input_style = "box"` (the thin half frame). For the `box` frame: does the
   top rule read as a full-width open frame with no label; does the `│ ` rail line up with a code
   block's; do a multi-line input, a wrapped line, a CJK line and a narrow terminal keep the rail
   and the text column; does the running status (`╭─ ◜ Working · 12s · esc to interrupt ───…`) sit
   where a code block's language label does, look right, and stay **not bold**; does the frame use
   the same glyph set as the transcript (`╭─`/`│ `/`╰──`, `+-`/`| `/`+--` under `ascii`)?
-- **notice and hint readability** : `/help`'s output and the placeholder must be
+- **notice and hint readability**: `/help`'s output and the placeholder must be
   readable on your background. `dark` now uses the terminal's default foreground for notices and
   `Gray` for hints; is that right on your terminal, and is the light palette's hint (dark gray on
   light) readable?
-- **the slash completion's fuzzy order** : type `/` and a few letters — are the
+- **the slash completion's fuzzy order**: type `/` and a few letters — are the
   candidates in the order you expect, and is the description column readable at your width? Is
   the one-key-accepts-it rule (Tab/Enter) comfortable, or does Enter accepting a candidate
   surprise you?
-- **the default workspace** : run `radian` with no `--workspace` from a
+- **the default workspace**: run `radian` with no `--workspace` from a
   project directory — the file tools must be there and the sandbox must confine them there. From
   `$HOME` the startup line must say `workspace: ~/tmp (cwd is $HOME)`, and the filesystem root
   must be refused.
-- **`--resume` without a value** : does the picker list only sessions (no `n`),
+- **`--resume` without a value**: does the picker list only sessions (no `n`),
   and does Esc leave with nothing created?
-- **the exit line** : after Ctrl-C twice (or a SIGTERM), is the printed
+- **the exit line**: after Ctrl-C twice (or a SIGTERM), is the printed
   `resume: radian --resume <id> …` command paste-ready in your shell, with the paths and
   quoting right?
 - **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel,
@@ -913,7 +915,7 @@ cargo run -p radian-tui -- --model <model> --base-url <...> --session-dir /tmp/r
 #    is clean (no `%`) and `stty -a` still shows `icanon`.
 ```
 
-### hand test, 2026-10-14 (everything merged tonight)
+### Hand test (everything merged tonight)
 
 pty automation (`vt100` screen model, instant query answers, no glyph metrics) cannot judge
 the items below. Each one says what to do, what to expect, where to look, and what to record
@@ -1051,7 +1053,7 @@ throwaway terminal, not your working one.
     `pbcopy` works on macOS; `off` writes nothing and says so. *Fail*: record herdr's version
     and whether OSC 52 forwarding is enabled — this is the known-open question.
 
-### hand test, 2026-10-12: passed
+### Hand test: passed
 
 Slice A and slice B checks above were run in a real terminal on macOS, against the
 opencode Zen endpoint (`deepseek-v4.1-flash`) with `--approval always`. The terminal emulator
@@ -1300,7 +1302,8 @@ untrusted projects, ADR 0039 decision 5). This is the same wiring `agent-cli` us
   `ask`, so a compound command is allowed only when every segment is allowed (a user rule or
   the built-in read-only table) and otherwise prompts. Write these at the subcommand level, never at a
   bare program name.
-- Two startup notices state what was chosen and what it means. The meaning line follows ADR 0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
+- Two startup notices state what was chosen and what it means. The meaning line follows ADR
+  0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
   `mach-lookup` open, so the IPC boundary is not tightened.
 - A `[memory]` startup notice names the project state (the linked project id, or "no project
   linked" with the `radian memory project new`/`relink` hint) and the injection budget
@@ -1411,7 +1414,7 @@ description), the `Other` row with inline editing, and the key hints in the bott
 The transcript also shows the `ask_user` call and result as an **open frame** (ADR 0028
 revision 5 decision 2): `╭─ ask ─…`, the same questions and options in `│ `-railed rows, the
 chosen options marked `◉` (multi included), a `↳` description, and the declined/cancelled
-status inside the same frame. `glyphs = ascii` falls back to `+ - |`, `()`/`(*)` and `->`.
+status inside the same frame. `glyphs = ascii` falls back to `+ - |`, `( )`/`(*)` and `->`.
 
 A `required` question with no answer blocks the submit with a notice. The drafts live in the
 form, so moving between questions keeps them. These are the **only** rebindable modal keys; the

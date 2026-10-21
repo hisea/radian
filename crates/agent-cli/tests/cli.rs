@@ -4590,7 +4590,7 @@ async fn no_config_mcp_ignores_the_config_mcp_section() {
     }
 }
 
-// ---------- project.mcp.json (slice B2) ----------
+// ---------- project .mcp.json (slice B2) ----------
 
 /// Writes `<ws>/.mcp.json` pointing one `fx` server at the fixture, in the shared
 /// `mcpServers` form, with `extra_env` merged into the server's `env`.

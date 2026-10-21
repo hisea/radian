@@ -570,7 +570,7 @@ fn description_column(row: &str, label: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(&row[..after_label]) + marker + spaces
 }
 
-// a completion menu marks the item in effect with ` ✓` right after its name
+/// A completion menu marks the item in effect with ` ✓` right after its name
 /// (never in the description), so every row's description starts in the same column. `/theme`,
 /// `/model` and `/thinking` all draw through the shared list.
 fn assert_menu_marks_current(app: &mut App, labels: &[&str], current: usize) {

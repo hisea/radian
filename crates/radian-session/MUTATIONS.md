@@ -34,7 +34,7 @@ So this is an **equivalent mutation under the test environment**, not a test hol
 
 Base: `015ffbb` · one-shot worktree `/tmp/fuzz-mut` (created from HEAD, deleted after) · a
 private `CARGO_TARGET_DIR` so no mutation artifact can leak into the main worktree's build ·
-each mutation run with `cargo test -p radian-session --no-fail-fast`, then `git checkout --.`;
+each mutation run with `cargo test -p radian-session --no-fail-fast`, then `git checkout -- .`;
 `git status --short` empty at the end.
 
 | # | Mutation | Caught by | Result |
@@ -68,7 +68,7 @@ not silent at all. The faithful mutation is the one in the table; it is caught b
 Base: `1953b12` · one-shot worktree `/tmp/sessfix-mut` (created from HEAD, deleted after) · a
 private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast` against
 `cargo test -p radian-session` and `cargo test -p agent-core --features journal-selfcheck`,
-then `git checkout --.`; `git status --short` empty at the end.
+then `git checkout -- .`; `git status --short` empty at the end.
 
 | # | Mutation (each fix reverted) | Caught by | Result |
 |---|---|---|---|
@@ -93,7 +93,7 @@ tightening it was only caught by the `read_fixtures`/`index` tests.
 Base: `d5d936d` · one-shot worktree `/tmp/sessfix2-mut` (created from HEAD, deleted after) · a
 private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast` against
 `cargo test -p radian-session` and `cargo test -p agent-core --features journal-selfcheck`,
-then `git checkout --.`; `git status --short` empty at the end.
+then `git checkout -- .`; `git status --short` empty at the end.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
@@ -107,7 +107,7 @@ marker" is pinned.
 ## Phase 7 privacy: owner-only modes and diagnostic redaction
 
 Base: `90a91a6` · one-shot worktree `/tmp/privacy-mut` (created from HEAD, deleted after) · a
-private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast`, then `git checkout --.`;
+private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast`, then `git checkout -- .`;
 `git status --short` empty at the end. The permission tests live in
 `crates/radian-session/tests/privacy.rs` and `crates/agent-cli/tests/cli.rs`; the redaction
 tests in `crates/agent-cli/tests/cli.rs`.
@@ -129,7 +129,7 @@ chance to differ.
 ## ADR 0019：reader / writer 与唯一状态机
 
 Base: `8858046` · one-shot worktree `/tmp/0019-mut`（detached，跑完删除）· 每个变异 `--no-fail-fast`
-跑完即 `git checkout --.`，结束时 `git status --short` 为空。Core 侧三项（提交、待定段前缀、
+跑完即 `git checkout -- .`，结束时 `git status --short` 为空。Core 侧三项（提交、待定段前缀、
 段内第二个 marker）记在 `crates/agent-core/MUTATIONS-0019.md`。
 
 | # | Mutation | Caught by | Result |
@@ -153,7 +153,7 @@ Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut` · `git checkout --` 还
 ## ADR 0019 收尾：resume 先校验后截尾
 
 Base: `3035930` · one-shot worktree `/tmp/0019b-mut`（detached，跑完删除）· 每个变异 `--no-fail-fast`
-跑完即 `git checkout --.`，结束时 `git status --short` 为空。
+跑完即 `git checkout -- .`，结束时 `git status --short` 为空。
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|

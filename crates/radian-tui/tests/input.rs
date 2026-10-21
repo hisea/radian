@@ -181,7 +181,7 @@ fn ctrl_c_cancels_a_running_turn_and_quits_when_idle_after_a_second_press() {
     );
     assert!(!app.quit);
 
-    // Idle and empty, the first press only arms the 2 s quit window ;
+    // Idle and empty, the first press only arms the 2 s quit window;
     // the second inside it quits.
     app.session.projection.set_turn(TurnState::Idle);
     assert!(

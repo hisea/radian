@@ -139,7 +139,9 @@ fn crossterm_event() -> Input {
 /// fd and, when the fd is ready, reads it (`mio.rs:95`); a hung-up tty is "ready" (macOS
 /// returns `POLLIN|POLLHUP`), the read returns 0 (EOF), and the inner `loop` (`mio.rs:94-114`)
 /// **never leaves** — the read spins on EOF forever. The `signals` task is not a backstop for
-/// this either: a pty master close sends no SIGHUP.
+/// this either: a pty master close sends no SIGHUP (the closed-master
+/// pty test reproduced a hang whose stack was 424/424 samples inside `event::poll` →
+/// `try_read` → `read`).
 ///
 /// Two guards keep it out (both needed; each one's mutation is in the pty test):
 /// 1. **Narrowing**: the idle branch calls `event::poll(0)` only when a previous

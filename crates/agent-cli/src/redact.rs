@@ -67,7 +67,8 @@ mod tests {
     #[test]
     fn the_error_and_export_lists_carry_a_value_registered_after_startup() {
         // `export_secrets` reads `resolved_keys()`, which opens `$RADIAN_HOME/credentials/
-        // auth.json`: point that at a scratch directory so the test can never read the real logins (AGENTS.md) or depend on this machine's.
+        // auth.json`: point that at a scratch directory so the test can never read the
+        // real logins (AGENTS.md) or depend on this machine's.
         let home =
             std::env::temp_dir().join(format!("radian-cli-redaction-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);

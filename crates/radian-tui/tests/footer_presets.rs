@@ -170,7 +170,7 @@ fn the_four_presets_render_byte_identical() {
     }
 }
 
-// `full` includes `jobs`, the other three presets do not. With one
+/// `full` includes `jobs`, the other three presets do not. With one
 /// running background job `full` shows it; `deck` with a running job stays byte-identical to
 /// its no-job golden (no `jobs` row, nothing shown).
 #[test]

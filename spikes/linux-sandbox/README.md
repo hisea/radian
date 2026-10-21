@@ -45,7 +45,7 @@ combo-sandbox      ok=21 mismatch=0     combo-control      ok=21 mismatch=0
 ssh <user>@<linux-host> 'uname -s'          # 必须是 Linux
 ssh <user>@<linux-host> 'mkdir -p /tmp/radian-linux-sandbox'
 scp -r spikes/linux-sandbox/{src,scripts} <user>@<linux-host>:/tmp/radian-linux-sandbox/
-ssh <user>@<linux-host> 'cd /tmp/radian-linux-sandbox &&./scripts/run_all.sh'
+ssh <user>@<linux-host> 'cd /tmp/radian-linux-sandbox && ./scripts/run_all.sh'
 ```
 
 `run_all.sh` 会：编译 `ll_probe`/`llsandbox` → 探测 Landlock → 依次跑 bwrap/Landlock/组合的 sandbox 与 control 矩阵 → 跑变异 → 跑启动开销 → 打印孤儿进程检查。所有结果写到 VM 的 `data/`，本目录的 `data/` 是拉回来的同一份。

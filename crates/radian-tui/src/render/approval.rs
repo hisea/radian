@@ -6,8 +6,10 @@ use super::wrap::wrap;
 
 /// The approval prompt's key line. It is drawn on its **own** row under the body, never part
 /// of the wrapped text, so a long command can never push the keys out of the box. The auto key
-/// is a constant like the line itself: if the key changes, this string and [`crate::app::Input::ApprovalAuto`]'s `KeyCode` are the
-/// only two places (ADR 0026 D9).
+/// is a constant like the line itself: if the key
+/// changes the key, this string and [`crate::app::Input::ApprovalAuto`]'s `KeyCode` are the
+/// only two places (ADR 0026 D9, correction: the key is `!`; `Y` stays
+/// `y` = allow once).
 pub const APPROVAL_KEYS: &str =
     "[y] allow once   [a] always this session   [n] deny   [!] auto for this session";
 

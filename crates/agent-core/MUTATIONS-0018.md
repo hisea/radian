@@ -22,7 +22,7 @@ its own — it is the broad validity net under `units`, `plan` and `compacted_hi
 ## compact-core：自动压缩的编排（ADR 0018 §B）
 
 Base: `0f5d5e2` · 一次性检出 `/tmp/ccore-mutB`（detached，跑完删除）· 每个变异跑完即
-`git checkout --.`，结束时 `git status --short` 为空 · `--no-fail-fast`。
+`git checkout -- .`，结束时 `git status --short` 为空 · `--no-fail-fast`。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -47,7 +47,7 @@ Base `dc307e6` · 一次性检出 `/tmp/covf-mut`（从 HEAD 建，跑完删除�
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p agent-core --test compaction_overflow`、
 `cargo test -p radian-runtime --test compact_control`、`cargo test -p radian-tui --lib`、
 `cargo test -p agent-cli --test cli an_interactive_compact`（都 `--no-fail-fast`），然后
-`git checkout --.`；`git status --short` 为空。
+`git checkout -- .`；`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|

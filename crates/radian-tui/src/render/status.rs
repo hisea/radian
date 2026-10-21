@@ -73,7 +73,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.find,
         });
     }
-    // The first idle Ctrl-C armed "press again to quit" : the hint sits
+    // The first idle Ctrl-C armed "press again to quit": the hint sits
     // high, right after the turn state, because it is a mode the user just entered.
     if app.quit_pending.is_some() {
         segments.push(Segment {

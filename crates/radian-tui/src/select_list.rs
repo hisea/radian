@@ -429,7 +429,7 @@ mod tests {
         );
     }
 
-    // the current item is marked ` ✓` right after its label, never in the
+    /// The current item is marked ` ✓` right after its label, never in the
     /// description; the description still starts in the same column on every row.
     #[test]
     fn the_current_item_is_marked_after_its_label() {

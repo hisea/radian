@@ -633,7 +633,8 @@ pub struct Theme {
     pub syntax_type: Style,
     pub syntax_operator: Style,
     pub syntax_punctuation: Style,
-    /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 decision: 强调 = 名字、标签).
+    /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028
+    /// decision: 强调 = 名字、标签).
     pub notice_label: Style,
     /// The rest of a structured notice — pi's `muted` (次). In the built-in themes it stays
     /// the terminal's default foreground, the ui-r1 readability fix; a theme file's `muted`
@@ -656,7 +657,8 @@ fn style(color: Option<Color>, modifiers: Modifier) -> Style {
     style
 }
 
-/// A built-in role's foreground from one of pi's own color specs (the /// decision: the built-ins take pi's OKHSL values through the ADR 0029 conversion). Without
+/// A built-in role's foreground from one of pi's own color specs (the
+/// decision: the built-ins take pi's OKHSL values through the ADR 0029 conversion). Without
 /// truecolor, RGB becomes the nearest 256-color entry, exactly like a theme file's color.
 fn spec(spec: &str, modifiers: Modifier, truecolor: bool) -> Style {
     let color = crate::theme::color::parse_color_value(spec)
@@ -1075,7 +1077,7 @@ impl Theme {
             md_quote_border: style(None, Modifier::DIM),
             md_hr: style(None, Modifier::DIM),
             md_list_bullet: style(None, Modifier::BOLD),
-            // `mono` uses no color: the syntax roles are plain, except a comment, which allows
+            // `mono` uses no color: the syntax roles are plain, except a comment, which the
             // one modifier (italic).
             syntax_comment: style(None, Modifier::ITALIC),
             syntax_keyword: style(None, Modifier::empty()),

@@ -39,7 +39,8 @@ impl InputStyle {
 }
 
 /// The input prompt, in the style of pi: the first line starts with `❯ ` and the continuation
-/// lines indent by the same two cells, so the text stays aligned. **Both** input styles use `❯`. Its display width (2 cells) is what the layout
+/// lines indent by the same two cells, so the text stays aligned.
+/// decision: **both** input styles use `❯`. Its display width (2 cells) is what the layout
 /// reserves — never its byte length (`❯` is three bytes, which used to shift the box cursor).
 pub(super) const INPUT_PROMPT: &str = "❯ ";
 

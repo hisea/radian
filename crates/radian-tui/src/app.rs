@@ -686,7 +686,7 @@ pub struct App {
     pub new_session: bool,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
-    /// When the first idle Ctrl-C armed "press again to quit" : the
+    /// When the first idle Ctrl-C armed "press again to quit": the
     /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
     /// arrives on [`Input::Cancel`], so `update` never reads the clock.
     pub quit_pending: Option<Instant>,

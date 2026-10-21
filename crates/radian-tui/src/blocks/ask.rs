@@ -394,7 +394,7 @@ mod tests {
             "{declined:?}"
         );
 
-        // The ascii fallback: `+-`/`|`/`+--` and `()`/`(*)`.
+        // The ascii fallback: `+-`/`|`/`+--` and `( )`/`(*)`.
         let ascii = texts(&card, false, crate::footer::Glyphs::Ascii);
         assert!(ascii[0].starts_with("+- ask "), "{ascii:?}");
         assert_eq!(
@@ -538,7 +538,7 @@ mod tests {
     }
 
     /// ADR 0028: single, multi and `Other` share one marker pair - the
-    /// circle `○`/`◉` under unicode, `()`/`(*)` under ascii.
+    /// circle `○`/`◉` under unicode, `( )`/`(*)` under ascii.
     #[test]
     fn the_ask_glyphs_use_one_circle_pair() {
         let g = AskGlyphs::for_glyphs(crate::footer::Glyphs::Unicode);

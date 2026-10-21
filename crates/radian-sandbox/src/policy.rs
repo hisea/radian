@@ -106,7 +106,8 @@ pub const DEFAULT_ALLOW_ENV: &[&str] = &[
     "HERDR_BIN_PATH",
 ];
 
-/// Directories that are readable only if the user names them, by default (ADR 0012 decision 3). Relative to `$HOME`. This list is a default, not a complete credential
+/// Directories that are readable only if the user names them, by default (ADR 0012
+/// decision 3). Relative to `$HOME`. This list is a default, not a complete credential
 /// boundary: the macOS backend leaves `mach-lookup` open, so IPC is not contained (ADR
 /// 0012 P4/P6) and no user-facing text may claim full credential isolation.
 pub const DEFAULT_DENY_READ: &[&str] = &[

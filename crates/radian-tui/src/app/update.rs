@@ -609,7 +609,7 @@ impl App {
                 KeyCode::Up => Some(Input::TrustMove(-1)),
                 KeyCode::Down => Some(Input::TrustMove(1)),
                 KeyCode::Enter => Some(Input::TrustChosen(wizard.selected())),
-                // Esc is "do not trust, this session only" : it must not
+                // Esc is "do not trust, this session only": it must not
                 // write `trust.json`, so the next start asks again. Enter takes the
                 // highlighted default, which is the persistent "do not trust this directory".
                 KeyCode::Esc => Some(Input::TrustChosen(
@@ -725,7 +725,6 @@ impl App {
     }
 
     /// Ctrl-C (the `cancel` action), the one action whose meaning depends on the clock
-    /// :
     /// - a turn is running: cancel it (unchanged);
     /// - idle, the input has text: clear it into the history (the same clearing `Esc` does,
     ///   so `Up` finds it);

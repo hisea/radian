@@ -115,7 +115,6 @@ fn a_narrow_status_bar_keeps_the_key_segments_and_does_not_wrap() {
 }
 
 /// The first idle Ctrl-C arms the quit window; the status bar says so until it is disarmed
-///.
 #[test]
 fn the_status_bar_shows_the_ctrl_c_quit_hint_while_armed() {
     use std::time::Instant;

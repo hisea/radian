@@ -175,7 +175,7 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 | git_readonly | `ReadOnly`（默认，任务 agent 与未点名放宽的宿主）：写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
 | radian_home | `~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、`~/.radian/credentials/auth.json` 与 `~/.radian/trust/trust.json` 读失败；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 5 拒 + 3 可 | 4 拒 + 2 可（`skills_readable`/`trust_unreadable` 待 VM 恢复后补跑） |
-| deny_inside_workspace | 会话目录在工作区**里面**（如 `--session-dir./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
+| deny_inside_workspace | 会话目录在工作区**里面**（如 `--session-dir ./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
 | mcp_stdio | 最小 stdio MCP（initialize / tools/list / tools/call echo）可用 | ✅ | ✅ |
 | signals | 给自己的子进程、孙进程发信号可以；给沙箱外同用户进程发信号被拒 | 2 可 + 1 拒 | 2 可 + 1 拒 |
 
@@ -357,7 +357,7 @@ VM 上只写 `/tmp` 下自建目录，不碰 `~/.ssh` 或任何真实凭据。�
 **环境**：`ssh <user>@<linux-host>`，Arch Linux ARM（aarch64，内核 7.2.6，bwrap 0.12.0，git 2.55.0）。
 第一条命令确认 `uname -s` = Linux。为了跑**真正的测试套件**（而不是交叉编译的驱动），在 VM 里装了
 Rust：下载 `rustup-init`（static.rust-lang.org，aarch64）后用
-`RUSTUP_HOME=/tmp/radian-rust/rustup CARGO_HOME=/tmp/radian-rust/cargo./rustup-init -y --profile
+`RUSTUP_HOME=/tmp/radian-rust/rustup CARGO_HOME=/tmp/radian-rust/cargo ./rustup-init -y --profile
 minimal --default-toolchain 1.88.0 --no-modify-path` 安装，全部落在 `/tmp`，**未动系统文件、未动
 `~/.ssh` 或任何凭据**。仓库用 tar 同步到 `/tmp/radian-linux/src`；因 `/tmp` 是 3.9G tmpfs，构建加
 `CARGO_PROFILE_DEV_DEBUG=0` 只为缩小目标目录。

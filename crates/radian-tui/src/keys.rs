@@ -722,7 +722,7 @@ mod tests {
         assert!(!press.matches(&event(KeyCode::Char('a'), KeyModifiers::CONTROL)));
     }
 
-    // a printable single character bound in the **main** view swallows that
+    /// A printable single character bound in the **main** view swallows that
     /// character for the composer, so startup warns about it. The binding is kept (README allows
     /// it); a Ctrl/Alt/Shift binding, a non-character key, and a character in another layer do
     /// not warn.

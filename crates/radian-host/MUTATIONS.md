@@ -38,7 +38,7 @@ M7 同时被单元测试和两个宿主的用法错误测试抓住；三者都�
 ## ADR 0013 决定 4：诊断目录（2026-10-13）
 
 Base: `f6fda6f` · 一次性检出 `/tmp/diag-mut`（从 HEAD 建，做完删掉）· 独立 `CARGO_TARGET_DIR` ·
-每个变异用 `--no-fail-fast` 跑，然后 `git checkout --.`；`git status --short` 为空。
+每个变异用 `--no-fail-fast` 跑，然后 `git checkout -- .`；`git status --short` 为空。
 清理规则与 TUI 的 panic 写盘测试在 `crates/radian-host/src/diagnostics.rs` 的单元测试与
 `crates/radian-tui/tests/pty.rs`。
 
@@ -86,7 +86,7 @@ M7 里的单元测试 `window_tokens_is_min_of_input_and_context_and_zero_is_unk
 
 Base `5d80946` · 一次性 worktree `/tmp/memsvc-mut`（从 HEAD 建，做完删掉）· **独立 `CARGO_TARGET_DIR`**
 · 每个变异跑 `cargo test -p radian-host memory` 与 `cargo test -p agent-cli --test cli memory`
-（都 `--no-fail-fast`），然后 `git checkout --.`；`git status --short` 为空。
+（都 `--no-fail-fast`），然后 `git checkout -- .`；`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -106,7 +106,7 @@ Base `5d80946` · 一次性 worktree `/tmp/memsvc-mut`（从 HEAD 建，做完�
 
 Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut`（从 HEAD 建，做完删掉）· **独立
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-host --no-fail-fast`（M9 跑
-`-p radian-permissions`），然后 `git checkout --.`；`git status --short` 为空。
+`-p radian-permissions`），然后 `git checkout -- .`；`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -176,7 +176,7 @@ Base `8028d9e` · 一次性 worktree `/tmp/config-mut`（从 HEAD 建，做完�
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-host`、
 `cargo test -p radian-tui --lib --test config`、以及 `cargo test -p agent-cli --test cli` 的
 `config` / `a_plaintext_secret` / `a_lower_schema` 过滤（都 `--no-fail-fast`），然后
-`git checkout --.`；`git status --short` 为空。
+`git checkout -- .`；`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -191,7 +191,7 @@ Base `8028d9e` · 一次性 worktree `/tmp/config-mut`（从 HEAD 建，做完�
 ## Phase 5：Pi 迁移（`config::migrate_pi`）
 
 Base `5aa84b6` · 一次性 worktree `/tmp/pimig-mut` · 独立 `CARGO_TARGET_DIR` ·
-每个变异 `git checkout --.` 还原、`git status --short` 为空。
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -371,7 +371,7 @@ Base `b46f506` · 一次性 worktree `/tmp/radian-pi-mut-b1`，跑完删除。
 ## skills 片 1+2：发现、提示节、`skill` 工具（ADR 0025）
 
 Base `4984e8b` · 在一次性 worktree（`/tmp/radian-pi-skills-mut`，detach）就地变异，每条跑完
-`git checkout --.`，最后 `git status --short` 为空。命令：`cargo test -p radian-host --lib skills`
+`git checkout -- .`，最后 `git status --short` 为空。命令：`cargo test -p radian-host --lib skills`
 （基线 20 passed）。
 
 | # | 变异 | 应体现 | 抓住它的测试 |
@@ -391,7 +391,7 @@ Base `4984e8b` · 在一次性 worktree（`/tmp/radian-pi-skills-mut`，detach�
 
 ## skills 审查第 1 轮 S2/S4/S5 + 片 3（2026-10-14）
 
-Base `c5a84f6` · 一次性 worktree `/tmp/radian-pi-skills-mut3`，每条跑完 `git checkout --.`，最后
+Base `c5a84f6` · 一次性 worktree `/tmp/radian-pi-skills-mut3`，每条跑完 `git checkout -- .`，最后
 `git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -410,7 +410,7 @@ Base `c5a84f6` · 一次性 worktree `/tmp/radian-pi-skills-mut3`，每条跑完
 
 ## skills 片 4：`[skills] extra_paths`（2026-10-14）
 
-Base `beef4d5` · 一次性 worktree `/tmp/radian-pi-skills-mut4`，每条跑完 `git checkout --.`，最后
+Base `beef4d5` · 一次性 worktree `/tmp/radian-pi-skills-mut4`，每条跑完 `git checkout -- .`，最后
 `git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -449,7 +449,7 @@ Base `71a9d1c` · 一次性检出 `/tmp/models-mut`（detached，跑完删除）
 
 ## ADR 0031 片 A：信任记录与决策解析（2026-10-14）
 
-Base `9fef91d` · 一次性 worktree `/tmp/radian-trust-mut`，每条跑完 `git checkout --.`，`git status --short`
+Base `9fef91d` · 一次性 worktree `/tmp/radian-trust-mut`，每条跑完 `git checkout -- .`，`git status --short`
 为空。命令 `cargo test -p radian-host --lib <测试名>`（基线 `trust` 13 passed）。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -463,10 +463,10 @@ Base `9fef91d` · 一次性 worktree `/tmp/radian-trust-mut`，每条跑完 `git
 
 ## ADR 0025 / ADR 0028 R8：内建 skill + diagrams + mermaid_check（2026-10-15）
 
-Base `cf37140` · 一次性 worktree `/tmp/radian-diag-mut`，每条跑完 `git checkout --.`，`git status --short`
+Base `cf37140` · 一次性 worktree `/tmp/radian-diag-mut`，每条跑完 `git checkout -- .`，`git status --short`
 ## ADR 0031 片 B：启动期提问、覆盖、审计（2026-10-14）
 
-Base `b2c9c1c` · 一次性 worktree `/tmp/radian-trustb-mut`，每条跑完 `git checkout --.`，`git status --short`
+Base `b2c9c1c` · 一次性 worktree `/tmp/radian-trustb-mut`，每条跑完 `git checkout -- .`，`git status --short`
 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -485,7 +485,7 @@ decision=Trust"的变异仍打印解法；把条件改成 `!decision && source =
 
 ## ADR 0031 片 B2：信任提问要求终端（2026-10-14）
 
-Base `e9397be` · 一次性 worktree `/tmp/radian-trustb2-mut`，跑完 `git checkout --.`，`git status --short` 为空。
+Base `e9397be` · 一次性 worktree `/tmp/radian-trustb2-mut`，跑完 `git checkout -- .`，`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|

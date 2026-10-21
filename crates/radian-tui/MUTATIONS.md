@@ -61,7 +61,7 @@ files restored after each; `git status --short` empty at the end.
 
 Base: `82f5849` · one-shot worktree `/tmp/tuid-mut` (created from HEAD, deleted after) · a
 private `CARGO_TARGET_DIR` (`/tmp/tuid-mut-target`) so no mutation artifact can leak into the
-main worktree's build · each mutation run with `--no-fail-fast`, then `git checkout --.`;
+main worktree's build · each mutation run with `--no-fail-fast`, then `git checkout -- .`;
 `git status --short` empty at the end. The pty tests spawn the real binary under a pty.
 
 | # | Requirement mutated | Mutation | Caught by |
@@ -150,7 +150,7 @@ Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；变�
 Base `4bf767d` · 一次性 worktree `/tmp/memtui-mut`（从 HEAD 建，做完删掉）· **独立
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-tui --lib`、`cargo test -p radian-tui
 --test command`、`cargo test -p radian-host memory`、`cargo test -p agent-cli --test cli memory_`
-（都 `--no-fail-fast`），然后 `git checkout --.`；`git status --short` 为空。
+（都 `--no-fail-fast`），然后 `git checkout -- .`；`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -186,7 +186,7 @@ Base `0994b19` · 一次性 worktree `/tmp/composer-mut`（从 HEAD 建，做完
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-tui --lib`、
 `cargo test -p radian-tui --test composer --test cursor`、
 `cargo test -p radian-tui --test pty pty_a_draft_is_written`（都 `--no-fail-fast`），然后
-`git checkout --.`；`git status --short` 为空。
+`git checkout -- .`；`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -305,7 +305,7 @@ Base: `45947ad` · 一次性检出 `/tmp/find-mut`（detached，跑完删除）�
 ## find 纳入 Keymap（两个上下文）
 
 Base `f2270e0` · 一次性 worktree `/tmp/config4-mut` · 独立 `CARGO_TARGET_DIR` ·
-`git checkout --.` 还原、`git status --short` 为空。
+`git checkout -- .` 还原、`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -373,7 +373,7 @@ Base `b60099b`（加 `--freeze-draw` 后未提交的工作树，独立构建）�
 ## ADR 0023 Step 1 ①：Action/Effect 与纯 `App::update`
 
 Base `e1d664b` · 一次性 worktree `/tmp/s1a-mut` · 独立 `CARGO_TARGET_DIR` ·
-每个变异 `git checkout --.` 还原、`git status --short` 为空。
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -396,7 +396,7 @@ Base `e1d664b` · 一次性 worktree `/tmp/s1a-mut` · 独立 `CARGO_TARGET_DIR`
 ## ADR 0023 Step 1 ②：事件驱动循环与脏通知
 
 Base `9a62193` · 一次性 worktree `/tmp/s1b-mut` · 独立 `CARGO_TARGET_DIR` ·
-每个变异 `git checkout --.` 还原、`git status --short` 为空。
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -523,7 +523,7 @@ Modal，三条队列驱动测试失败。S7 说明 session 关闭的 fail-closed
 ## UI 验收第一轮（ui-r1，六条）
 
 Base `613312c` · 一次性 worktree `/tmp/ui-r1-mut` · 独立 `CARGO_TARGET_DIR` ·
-每个变异 `git checkout --.` 还原、`git status --short` 为空。
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -545,7 +545,7 @@ Base `613312c` · 一次性 worktree `/tmp/ui-r1-mut` · 独立 `CARGO_TARGET_DI
 
 ## Slice: theme files and per-role overrides (ADR 0029)
 
-Base `9ee35b4` · 一次性 worktree `/tmp/tui-mut` · 每个变异 `git checkout --.` 还原后跑对应测试,
+Base `9ee35b4` · 一次性 worktree `/tmp/tui-mut` · 每个变异 `git checkout -- .` 还原后跑对应测试,
 `git status --short` 为空。变异用 `python3` 补丁 + `assert old in s`(吸取 U3/U4 的教训)。
 
 | # | 变异 | 应体现 | 抓住它的测试 |
@@ -578,7 +578,7 @@ Base `d76df67` · 就地变异，每个变异 `git checkout -- crates/radian-tui
 
 ## Slice: `/login` / `/logout`(ADR 0026 D3/D10)
 
-Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git checkout --.` 还原后跑对应
+Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git checkout -- .` 还原后跑对应
 测试,`git status --short` 为空。编号 L1–L7(与 agent-cli 的 MUTATIONS.md 同一张表)。
 
 | # | 变异 | 抓住它的测试 |
@@ -600,7 +600,7 @@ Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）·
 ## Slice: transcript selection and copy (mouse drag, OSC 52)
 
 Base `c8e1a35→`（本片 HEAD）· 一次性 worktree `/tmp/tui-mut-select`（`git worktree add` 自本片
-HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout --.` 还原、`git status --short`
+HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout -- .` 还原、`git status --short`
 为空。变异脚本带 `assert old in s`（吸取 U3/U4 的教训：no-op patch 是假通过）。
 
 | # | 需求 | 变异 | 抓住它的测试 |
@@ -648,7 +648,7 @@ Base `ba7568d` · 一次性检出 `/tmp/ui2-mut`（detached，跑完删除）· 
 ## Slice: ADR 0028 第 1 片（块模型、按块背景、thinking 折叠、代码块不折行）
 
 Base `82b07de` · 一次性 worktree `/tmp/blocks-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
-每个变异 `python3` 补丁（带 `assert`，no-op 会显式报 PATCH FAILED）、跑对应测试后 `git checkout --.`
+每个变异 `python3` 补丁（带 `assert`，no-op 会显式报 PATCH FAILED）、跑对应测试后 `git checkout -- .`
 还原、`git status --short` 为空。
 
 | # | 需求 | 变异 | 抓住它的测试 | 结果 |
@@ -700,7 +700,7 @@ Base `a13dd6a` · 变异只在一次性 worktree 里做（`git worktree add --de
 ## Slice: ADR 0028 第 2 片 a（工具卡片数据、渲染器注册表、Ctrl-O）
 
 Base `4208170` · 一次性 worktree `/tmp/tools-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
-每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout --.` 还原。
+每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout -- .` 还原。
 
 | # | 需求 | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|---|
@@ -717,7 +717,7 @@ Base `4208170` · 一次性 worktree `/tmp/tools-mut`（`git worktree add` 自�
 ## Slice: ADR 0028 第 2 片 b（其余内建渲染器 + 审查两项）
 
 Base `106a4d6` · 一次性 worktree `/tmp/tools2-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
-每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout --.` 还原。
+每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout -- .` 还原。
 
 | # | 需求 | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|---|
@@ -767,7 +767,7 @@ Base `eac7463` · 变异只在一次性 worktree 里做（`git worktree add --de
 `md3` 的第一/二轮只短路了一处守卫，另一处仍会回退，测试通过——两处都短路后才抓住。
 ## ADR 0013 出网/脱敏复审：TUI 脱敏列表漏掉其它 auth key（2026-10-14）
 
-Base `a9c88c8` · 一次性 worktree `/tmp/radian-pi-priv-mut`，每条跑完 `git checkout --.`，`git status --short` 为空。
+Base `a9c88c8` · 一次性 worktree `/tmp/radian-pi-priv-mut`，每条跑完 `git checkout -- .`，`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -814,7 +814,7 @@ Base `fdfc2cb` · 一次性检出 `/tmp/flaky-mut`（detached，跑完删除）�
 ## Slice: ADR 0028 第 4 片（压缩摘要 R5、搜索自动展开 R6）
 
 Base `26ddda9` · 一次性 worktree `/tmp/s4-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
-每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout --.` 还原。
+每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout -- .` 还原。
 
 | # | 需求 | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|---|
@@ -881,7 +881,7 @@ Base `c2e835f` · 一次性检出 `/tmp/footer-mut3`（detached，跑完删除�
 ## ADR 0028 片 5：代码块语法高亮（2026-10-15）
 
 Base `608c2b7`（键一致性修复后 `0b035d6` 复跑 M4）· 一次性 worktree `/tmp/radian-hl-mut`，每条
-跑完 `git checkout --.`，`git status --short` 为空。
+跑完 `git checkout -- .`，`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -895,7 +895,7 @@ Base `608c2b7`（键一致性修复后 `0b035d6` 复跑 M4）· 一次性 worktr
 
 ## ADR 0028 片 5 审查：H1 懒高亮 + H2 上限 + vendored 语法（2026-10-15）
 
-Base `d7f663d` · 一次性 worktree `/tmp/radian-hl2-mut`，每条跑完 `git checkout --.`，`git status --short`
+Base `d7f663d` · 一次性 worktree `/tmp/radian-hl2-mut`，每条跑完 `git checkout -- .`，`git status --short`
 为空。命令 `cargo test -p radian-tui --test highlight`（基线 13 passed）。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -947,7 +947,7 @@ Base `a6a9cce` · worktree `../radian-pi-flakymem` · 负载进程：24 个 `yes
 ## 手测第三轮（ui-r3：光标、❯、工具输出的 Tab、Shift+Enter）
 
 Base `1a6f211` · 一次性 worktree `/tmp/ui3-mut*`（跑完删除）· 每个变异 `python3` 补丁（带 `assert`）、
-跑对应测试后 `git checkout --.` 还原。
+跑对应测试后 `git checkout -- .` 还原。
 
 | # | 需求 | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|---|
@@ -958,14 +958,14 @@ Base `1a6f211` · 一次性 worktree `/tmp/ui3-mut*`（跑完删除）· 每个�
 
 4/4 抓住。**过程记录（三处假象）**：①I3 第一版只改了 `wrap_char_offsets`，而测试调的是 `wrap`
 （三处宽度规则各一份）→ "没抓住"是补丁没覆盖；②`run_mut` 用 `^error` 判编译失败，而失败测试的输出里
-也有 `error: test failed` 一行 → 把"抓住"误判成编译失败，已改成只匹配 `^test.* FAILED` 与
+也有 `error: test failed` 一行 → 把"抓住"误判成编译失败，已改成只匹配 `^test .* FAILED` 与
 `^error[`/`^error:`；③两次 `cargo test --lib tools a_...` 又给了两个位置参数（只认第一个）→ 空跑。
 ④I3b 的正则忘了源码里是字面 `\t` 两个字符而不是制表符 → 0 处匹配（`assert` 如实报 PATCH FAILED，
 没有当成"抓住"）。
 ## footer-s2：贡献者机制、git 后台刷新、worktree/status 与 [tui.widgets]（ADR 0027 C3，2026-10-16）
 
 Base `f699306` · 一次性 worktree `/tmp/radian-mut-s2`（`git worktree add --detach`），每条跑完
-`git checkout --.`，`git status --short` 为空。命令 `cargo test -p radian-host …` /
+`git checkout -- .`，`git status --short` 为空。命令 `cargo test -p radian-host …` /
 `cargo test -p radian-tui --test footer …`。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -985,7 +985,7 @@ ADR 0023 U2 的协议，不改。
 ## footer-s2c：后台 git 加 `--no-optional-locks`（ADR 0027 C3，2026-10-16）
 
 Base `d483ec9` · 一次性 worktree `/tmp/radian-mut-s2c`（`git worktree add --detach`），每条跑完
-`git checkout --.`，`git status --short` 为空。命令 `cargo test -p radian-host --lib the_background_git`。
+`git checkout -- .`，`git status --short` 为空。命令 `cargo test -p radian-host --lib the_background_git`。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -1031,7 +1031,7 @@ Base `6cd0879` · 一次性 worktree `/tmp/radian-mut-f3`（`git worktree add --
 ## bang：输入框的 `!` 与 `!!`（ADR 0033，2026-10-16）
 
 Base `aec64f0` · 一次性 worktree `/tmp/radian-mut-bang`（`git worktree add --detach`，独立
-`CARGO_TARGET_DIR`，避免 build.rs 的 manifest 路径污染共享 target），每条跑完 `git checkout --.`，
+`CARGO_TARGET_DIR`，避免 build.rs 的 manifest 路径污染共享 target），每条跑完 `git checkout -- .`，
 `git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -1050,7 +1050,7 @@ BANG-E 是"走审批"这一条的最近代理：真正的审批框需要把命�
 ## resize-fix：空闲时也要重新布局（2026-10-16）
 
 Base `ea67319` · 一次性 worktree `/tmp/radian-mut-resize`（`git worktree add --detach`，独立
-`CARGO_TARGET_DIR`）· 每条跑完 `git checkout --.`，`git status --short` 为空。
+`CARGO_TARGET_DIR`）· 每条跑完 `git checkout -- .`，`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -1092,7 +1092,7 @@ Base `8789877` · 一次性 worktree `/tmp/radian-cm-mut`，每个变异跑完 `
 6/6 抓住。
 ## trust-Esc：Esc 不得信任（2026-10-14）
 
-Base `f1993bb` · 一次性 worktree `/tmp/radian-esc-mut`，跑完 `git checkout --.`，`git status --short` 为空。
+Base `f1993bb` · 一次性 worktree `/tmp/radian-esc-mut`，跑完 `git checkout -- .`，`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -1102,7 +1102,7 @@ Base `f1993bb` · 一次性 worktree `/tmp/radian-esc-mut`，跑完 `git checkou
 
 ## trust-Esc（Esc = 只限本次不信任，2026-10-14）
 
-Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checkout --.`，`git status --short` 为空。
+Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checkout -- .`，`git status --short` 为空。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -1143,7 +1143,7 @@ Base `45723f6` · 一次性 worktree `/tmp/radian-glyphs-mut`，每个变异跑�
 | G-M5 | `Glyphs::Unicode.tool_status()` 改回 `⟳ ✔ ✘` | `footer::tests::unicode_tier_glyphs_are_all_verified_covered` | ✅ |
 ## bang-cancel：Ctrl-C 停止运行中的 `!`（ADR 0033，2026-10-16）
 
-Base `3ccd4db` · 一次性 worktree `/tmp/radian-mut-bangcancel` · 跑完 `git checkout --.`。
+Base `3ccd4db` · 一次性 worktree `/tmp/radian-mut-bangcancel` · 跑完 `git checkout -- .`。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -1208,7 +1208,7 @@ IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不�
 
 ## markdown-b：间距与 Markdown 各元素（ADR 0035，2026-10-16）
 
-Base `2ecb02b` · 一次性 worktree `/tmp/radian-mut-mdb` · 每条跑完 `git checkout --.`。
+Base `2ecb02b` · 一次性 worktree `/tmp/radian-mut-mdb` · 每条跑完 `git checkout -- .`。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -1681,7 +1681,7 @@ Base：本片 HEAD（`oc/theme-format`；决定 1 = `cff5d35`，决定 4 = `e9f2
 | # | 需求 | 变异 | 抓住它的测试 |
 |---|---|---|---|
 | TH-M1 | importer 把 pi 键映射到**正确的** Radian 角色 | `file.rs` 的 `fg_source` 把 `Role::User => Some("userMessageText")` 改成 `Some("toolTitle")` | `theme::importer::tests::every_fixture_converts_to_its_committed_golden`（golden 里 `user = "#dcd7ba"` 变成 `tool_call` 的 `#938aa9`） |
-| TH-M2 | `<name>.toml` 优先于 `<name>.json` | `file.rs` 的 `load_file` 把 `.toml` 分支的判据改成 `if false && toml_path.is_file()`（等于永远先读 `.json`） | `theme::file::tests::a_toml_theme_wins_over_a_json_one_and_the_json_fallback_hints`（「the.toml must win」失败） |
+| TH-M2 | `<name>.toml` 优先于 `<name>.json` | `file.rs` 的 `load_file` 把 `.toml` 分支的判据改成 `if false && toml_path.is_file()`（等于永远先读 `.json`） | `theme::file::tests::a_toml_theme_wins_over_a_json_one_and_the_json_fallback_hints`（「the .toml must win」失败） |
 | TH-M3a | 覆盖已有 `<name>.toml` 必须 `--force` | `importer.rs` 的 `write` 把 `if force {` 改成 `if true {`（永远走覆盖分支，不再 `create_new`） | `theme::importer::tests::write_refuses_an_existing_file_without_force` |
 | TH-M3b | 同上，走 `radian theme import` 的整条路 | 同 TH-M3a | `theme_import::import_refuses_to_overwrite_without_force_and_force_wins`（第二次导入退出码 0，期望 1） |
 | TH-M4 | 变量循环只让相关角色退回内建 | `toml_file.rs` 的 `Variables::resolve_var` 把循环的 `return Err(VarError::Cycle(..))` 改成 `return Ok(ColorValue::Default)`（循环不再报错、角色拿到终端默认色） | `theme::toml_file::tests::a_cycle_only_breaks_its_own_roles`（工具行的颜色与警告条数都不符） |
@@ -1954,7 +1954,7 @@ Base `aedc23f`。变异在 worktree 内直接改，改前把每个文件复制�
 ## esc-noquit: `Esc` 不再退出空闲会话
 
 Base: 本 worktree（`oc/esc-noquit`，分支自 `e2a4436`）。变异在 worktree 内直接改 `src/app.rs`，
-改前 `cp src/app.rs.radian/scratch/esc-noquit/app.rs.orig`，改后 `cp` 还原并 `cmp` 一致
+改前 `cp src/app.rs .radian/scratch/esc-noquit/app.rs.orig`，改后 `cp` 还原并 `cmp` 一致
 （`git status --short` 变异后只剩被测文件，还原后为那三个改动文件）。命令：
 `timeout 600 cargo test -p radian-tui --locked --no-fail-fast --test quit <test>`。
 
