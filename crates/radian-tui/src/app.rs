@@ -55,6 +55,7 @@ mod history;
 mod input;
 mod inspector;
 mod layers;
+pub(crate) mod loop_mode;
 mod mouse;
 mod overlay;
 mod send;
@@ -512,6 +513,10 @@ pub struct SessionView {
     /// started since): `/retry` resends the last user message only then. A normal end, a
     /// cancel or a fresh session leaves it false.
     pub(crate) last_turn_failed: bool,
+    /// The `/loop` continuation (steps 1-2): the per-turn repeat state. Process-local;
+    /// quitting the TUI ends it. The turn-end decision lives in `loop_mode` so step 3
+    /// (`goal-mode.md`) can add its input in the same place.
+    pub(crate) loop_state: loop_mode::LoopState,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
     /// reason is readable; the user quits with the ordinary keys.
