@@ -358,7 +358,8 @@ pub(crate) fn file_properties() -> serde_json::Value {
         "tail_lines": {
             "type": "integer",
             "minimum": 1,
-            "description": "Return the last N lines of the output file."
+            "description": "Return the last N lines of the output file. The result names \
+                            the total line count."
         },
         "pattern": {
             "type": "string",

@@ -57,7 +57,7 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "old": {
                 "type": "string",
-                "description": "Text to find. It must occur exactly once. To allow repeated matches, set `replace_all`. Use it with `new`."
+                "description": "Text to find. It must occur exactly once."
             },
             "new": {
                 "type": "string",
@@ -70,7 +70,7 @@ pub(crate) fn schema() -> serde_json::Value {
             "edits": {
                 "type": "array",
                 "minItems": 1,
-                "description": "Several edits to one file. The tool applies them atomically. Every edit is matched in the original file. All ranges must be disjoint. A failed edit writes nothing. Each entry holds `{old, new, replace_all?}`. Use it instead of `old`/`new`.",
+                "description": "Several edits to one file. The tool applies them atomically. Every edit is matched in the original file. All ranges must be disjoint. A failed edit writes nothing.",
                 "items": {
                     "type": "object",
                     "properties": {

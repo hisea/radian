@@ -1189,15 +1189,14 @@ pub(crate) fn job_schema() -> serde_json::Value {
 pub(crate) fn job_spec() -> ToolSpec {
     ToolSpec {
         name: "job".into(),
-        description: "Read or stop one `shell` job. Pass its job id. Plain `read` returns \
-                      the output since your last read. It also returns `[status: ...]`. With \
-                      `tail_lines`, `from_line` and `max_lines`, or `pattern`, the tool reads \
-                      the full file by line. It then names the total line count. `wait` blocks \
-                      until the job ends or `timeout_ms` elapses. `wait` never kills the job. \
-                      `kill` stops the job's whole process group. The tool sends SIGTERM first \
-                      and SIGKILL after 2 s. A finished job is a no-op. This tool is the only \
-                      way to read the output file. A completion notice tells you when a running \
-                      job ends. Prefer the notice over `wait`. Never sleep or poll."
+        description: "Read or stop one `shell` job. Pass its job id. A `read` with no \
+                      range returns the output since your last read, plus `[status: ...]`. \
+                      `wait` blocks until the job ends or `timeout_ms` elapses. `wait` never \
+                      kills the job. `kill` stops the job's whole process group. The tool \
+                      sends SIGTERM first and SIGKILL after 2 s. `kill` on a finished job \
+                      only reports its state. This tool is the only way to read the output \
+                      file. A completion notice tells you when a running job ends. Prefer \
+                      the notice over `wait`."
             .into(),
         input_schema: job_schema(),
         concurrency: ToolConcurrency::Shared,
