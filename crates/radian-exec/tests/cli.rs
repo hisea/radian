@@ -473,14 +473,21 @@ impl Running {
     }
 
     /// Waits for the process to exit **without closing its stdin**, so the test shows the
-    /// CLI did not need more input to finish. Bounded by `limit`.
-    async fn finish_open(self, limit: Duration) -> (i32, String, String) {
+    /// CLI did not need more input to finish. Bounded by `limit`. On timeout the panic
+    /// carries the stderr seen so far plus `note` — what the test had already done (for
+    /// example whether the second SIGINT was sent) — so a hung CLI still leaves its
+    /// last known state instead of only "did not exit".
+    async fn finish_open(self, limit: Duration, note: &str) -> (i32, String, String) {
         let Self {
             child,
             mut stderr,
             mut stderr_seen,
             stdin,
         } = self;
+        // Cloned before the wait: on timeout the future below is dropped with the rest
+        // of the output still in the pipe, so this is everything the CLI had said.
+        let seen_before = stderr_seen.clone();
+        let note = note.to_owned();
         let (output, ()) = timeout(limit, async {
             tokio::join!(child.wait_with_output(), async {
                 let mut rest = String::new();
@@ -489,7 +496,11 @@ impl Running {
             })
         })
         .await
-        .expect("the CLI did not exit while stdin stayed open");
+        .unwrap_or_else(|_| {
+            panic!(
+                "the CLI did not exit while stdin stayed open within {limit:?} ({note}); stderr so far:\n{seen_before}"
+            )
+        });
         let output = output.expect("wait");
         drop(stdin);
         (
@@ -1639,7 +1650,12 @@ async fn one_shot_without_a_terminal_denies_without_waiting() {
         ],
         &[],
     );
-    let (code, _, _) = running.finish_open(EXIT_WATCHDOG).await;
+    let (code, _, _) = running
+        .finish_open(
+            EXIT_WATCHDOG,
+            "no input was written; the denial must not wait for EOF",
+        )
+        .await;
 
     assert_eq!(code, 0);
     let denial = tool_result_content(&server, 1);
@@ -1982,7 +1998,12 @@ async fn second_sigint_exits_130() {
 
     // Keep stdin open while waiting: closing it would race an EOF against the second signal,
     // and this test is about the signal, not about EOF.
-    let (code, _, stderr) = child.finish_open(EXIT_WATCHDOG).await;
+    let (code, _, stderr) = child
+        .finish_open(
+            EXIT_WATCHDOG,
+            "the second SIGINT was already sent after the wind-down marker",
+        )
+        .await;
 
     assert_eq!(code, 130, "{stderr}");
     // The second signal forces the exit; it does not wait out the MCP cancel grace (2s).
@@ -2084,7 +2105,9 @@ async fn typing_exit_leaves_even_though_stdin_is_still_open() {
     let mut running = Running::spawn(&["--model", "m", "--base-url", &server.base_url], &[]);
 
     running.write("hi\n/exit\n").await;
-    let (code, stdout, _) = running.finish_open(EXIT_WATCHDOG).await;
+    let (code, stdout, _) = running
+        .finish_open(EXIT_WATCHDOG, "/exit was written; stdin stayed open")
+        .await;
 
     assert_eq!(code, 0);
     assert_eq!(stdout, "hello\n");
@@ -6430,7 +6453,12 @@ async fn an_interactive_model_error_is_shown_and_the_session_continues() {
     cli.write("second\n").await;
     cli.wait_for_stderr_count("> ", 3).await;
     cli.write("/exit\n").await;
-    let (code, stdout, stderr) = cli.finish_open(Duration::from_secs(5)).await;
+    let (code, stdout, stderr) = cli
+        .finish_open(
+            Duration::from_secs(5),
+            "/exit was written after the recovered turn; stdin stayed open",
+        )
+        .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("SECOND-OK"), "{stdout}");
     assert_eq!(server.requests().len(), 2, "both turns reached the model");
