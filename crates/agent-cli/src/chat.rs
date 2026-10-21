@@ -320,6 +320,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
             hooks_warning: Arc::new(|message: &str| eprintln!("[hooks] {message}")),
             wake_warning: Arc::new(|message: &str| eprintln!("[wake] {message}")),
+            notice_lost_warning: Arc::new(|message: &str| eprintln!("[lost] {message}")),
         },
     )
     .await

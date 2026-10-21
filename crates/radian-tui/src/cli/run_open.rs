@@ -32,6 +32,9 @@ pub(super) struct SessionInputs {
     /// A wake-budget degrade's notice line: one transcript notice per burst, plus the
     /// herdr `wake budget` block while the notices wait.
     pub(super) wake_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    /// A lost job-notice's line: the burst's transcript notice, plus the herdr
+    /// `job notice lost` block while it waits (ADR 0037 decision 5's failure rule).
+    pub(super) notice_lost_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     pub(super) trust_setup: radian_host::trust::Setup,
     /// Where the memory service lives (`None` when no RADIAN_HOME/HOME): the session
     /// shares it with the agent's tools and injection.
@@ -308,6 +311,17 @@ pub(super) fn build_session_inputs(
             )));
         })
     };
+    // A lost job notice (every enqueue attempt failed, ADR 0037 decision 5's failure
+    // rule): its own input, so `update` shows the burst's line and marks the session
+    // notice-lost for herdr (`job notice lost`) until the next turn starts.
+    let notice_lost_warning: Arc<dyn Fn(&str) + Send + Sync> = {
+        let tx = tx.clone();
+        Arc::new(move |message: &str| {
+            let _ = tx.send(UiEvent::Command(AppInput::JobNoticeLost(
+                message.to_owned(),
+            )));
+        })
+    };
     // ADR 0031 T3: resolve project trust before the session exists. The TUI is interactive, so
     // a workspace with resources and no decision asks through a startup modal (pushed after
     // the terminal is entered); the persistent write + audit happen then, once the journal
@@ -360,6 +374,7 @@ pub(super) fn build_session_inputs(
             memory_warning,
             hooks_warning,
             wake_warning,
+            notice_lost_warning,
             trust_setup,
             memory_root,
         },
@@ -402,6 +417,7 @@ pub(super) fn open_session_and_refresh(
         memory_warning,
         hooks_warning,
         wake_warning,
+        notice_lost_warning,
         trust_setup,
         memory_root,
         access_builder,
@@ -502,6 +518,7 @@ pub(super) fn open_session_and_refresh(
                 memory_warning,
                 hooks_warning,
                 wake_warning,
+                notice_lost_warning,
             },
         ))
         .map_err(|error| error.to_string())?;

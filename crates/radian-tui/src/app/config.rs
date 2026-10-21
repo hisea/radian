@@ -98,6 +98,7 @@ impl App {
                 pending_compaction: None,
                 wake_notice: None,
                 wake_waiting: false,
+                notice_lost_waiting: false,
             },
         }
     }
@@ -291,9 +292,10 @@ impl App {
     /// facts the facade owns.
     /// The inputs to the herdr state function (ADR 0034 H2): the turn state, the pending
     /// queue's length, whether the startup trust prompt is waiting, whether degraded
-    /// wake notices wait while idle, and this session's running background-job count (the
-    /// footer's `jobs` item reads the same start/settle pair, so there is no second source).
-    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool, bool, usize) {
+    /// wake notices wait while idle, this session's running background-job count (the
+    /// footer's `jobs` item reads the same start/settle pair, so there is no second source),
+    /// and whether a lost job notice's stop waits while idle.
+    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool, bool, usize, bool) {
         let trust = matches!(self.top_modal(), Some(Modal::Trust(_)));
         (
             self.session.projection.read().turn(),
@@ -301,18 +303,23 @@ impl App {
             trust,
             self.session.wake_waiting,
             self.session.running_jobs.len(),
+            self.session.notice_lost_waiting,
         )
     }
 
     /// What is blocking, for herdr's category-only message (ADR 0034 H2). The approval's tool
-    /// name only - never the command, path or question body. A used-up wake budget reports
-    /// only while no modal claims the block.
+    /// name only - never the command, path or question body. A used-up wake budget or a
+    /// lost job notice reports only while no modal claims the block; the lost notice
+    /// wins when both wait (it owns the burst's one line).
     pub fn herdr_blocked(&self) -> Option<radian_host::herdr::Blocked> {
         match self.top_modal() {
             Some(Modal::Approval(prompt)) => Some(radian_host::herdr::Blocked::Approval(
                 prompt.request.tool.clone(),
             )),
             Some(Modal::Question(_)) => Some(radian_host::herdr::Blocked::Question),
+            _ if self.session.notice_lost_waiting => {
+                Some(radian_host::herdr::Blocked::JobNoticeLost)
+            }
             _ if self.session.wake_waiting => Some(radian_host::herdr::Blocked::WakeBudget),
             _ => None,
         }

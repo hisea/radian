@@ -49,6 +49,7 @@ pub async fn open_session(
         memory_warning,
         hooks_warning,
         wake_warning,
+        notice_lost_warning,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -526,6 +527,7 @@ pub async fn open_session(
             Arc::clone(&turn_running),
             Arc::clone(&runtime_events),
             wake_warning,
+            notice_lost_warning,
         );
         // ADR 0011: a stranded notice that opens the next turn counts one
         // wake. The inbox fires the callback without holding its lock, and the `Weak`

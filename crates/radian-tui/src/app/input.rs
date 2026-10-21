@@ -107,6 +107,11 @@ pub enum Input {
     /// shows a single line per burst (rewriting it with the latest count) and marks the
     /// session as wake-waiting for herdr until the next turn starts.
     WakeBudgetNotice(String),
+    /// A job completion notice was lost (every enqueue attempt failed, ADR 0037 decision
+    /// 5's failure rule): the lost-notice line. `update` shows it as the burst's line and
+    /// marks the session as notice-lost for herdr (`job notice lost`) until the next turn
+    /// starts.
+    JobNoticeLost(String),
     /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
     /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
     /// turn state when the command was submitted.

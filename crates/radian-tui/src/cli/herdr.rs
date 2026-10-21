@@ -32,8 +32,9 @@ pub(super) struct HerdrReporter {
 
 impl HerdrReporter {
     pub(super) fn maybe_report(&mut self, app: &App) {
-        let (turn, pending, trust, wake_waiting, jobs) = app.herdr_state_inputs();
-        let state = radian_host::herdr::state(turn, pending, trust, wake_waiting, jobs);
+        let (turn, pending, trust, wake_waiting, jobs, notice_lost) = app.herdr_state_inputs();
+        let state =
+            radian_host::herdr::state(turn, pending, trust, wake_waiting, jobs, notice_lost);
         let message = (state == radian_host::herdr::State::Blocked)
             .then(|| radian_host::herdr::blocked_message(app.herdr_blocked().as_ref(), trust));
         if self.last.as_ref() != Some(&(state, message.clone())) {

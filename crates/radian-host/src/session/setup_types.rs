@@ -196,6 +196,10 @@ pub struct HostBindings {
     /// A wake-budget degrade's notice line (one per degrade; the TUI shows a single line
     /// per burst and reports `blocked` with the `wake budget` label while they wait).
     pub wake_warning: Arc<dyn Fn(&str) + Send + Sync>,
+    /// A lost job-notice's line (one per settle whose enqueue failed every attempt; the
+    /// TUI shows it as the burst's line and reports `blocked` with the
+    /// `job notice lost` label while it waits, ADR 0037 decision 5's failure rule).
+    pub notice_lost_warning: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).

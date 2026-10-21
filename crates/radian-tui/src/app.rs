@@ -622,6 +622,11 @@ pub struct SessionView {
     /// Degraded wake notices wait while the session is idle: herdr reports `blocked` with
     /// the `wake budget` label until the next turn starts (which clears this).
     pub(crate) wake_waiting: bool,
+    /// A lost job notice's stop waits while the session is idle: herdr reports `blocked`
+    /// with the `job notice lost` label until the next turn starts (which clears this).
+    /// Shares the burst's one notice line with [`wake_waiting`](Self::wake_waiting): the
+    /// latest stop owns it.
+    pub(crate) notice_lost_waiting: bool,
 }
 
 /// The whole TUI's state: the global chrome every session view shares, plus exactly one
