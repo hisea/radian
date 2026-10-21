@@ -397,26 +397,20 @@ render_formula || exit 1
 
 # 7. Outward steps: --publish only.
 if [ "$PUBLISH" -eq 1 ]; then
+    FILES=""
+    for target in $TARGETS; do
+        FILES="$FILES $DIST/radian-$VERSION-$target.tar.gz $DIST/radian-$VERSION-$target.tar.gz.sha256"
+    done
     if gh release view "$TAG" >/dev/null 2>&1; then
-        gh release upload "$TAG" \
-            "$DIST"/radian-"$VERSION"-aarch64-apple-darwin.tar.gz \
-            "$DIST"/radian-"$VERSION"-aarch64-apple-darwin.tar.gz.sha256 \
-            "$DIST"/radian-"$VERSION"-x86_64-apple-darwin.tar.gz \
-            "$DIST"/radian-"$VERSION"-x86_64-apple-darwin.tar.gz.sha256 \
-            --clobber
+        # shellcheck disable=SC2086: FILES is a file list on purpose.
+        gh release upload "$TAG" $FILES --clobber
     else
         if [ "$PRERELEASE" -eq 1 ]; then
-            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES" --prerelease \
-                "$DIST"/radian-"$VERSION"-aarch64-apple-darwin.tar.gz \
-                "$DIST"/radian-"$VERSION"-aarch64-apple-darwin.tar.gz.sha256 \
-                "$DIST"/radian-"$VERSION"-x86_64-apple-darwin.tar.gz \
-                "$DIST"/radian-"$VERSION"-x86_64-apple-darwin.tar.gz.sha256
+            # shellcheck disable=SC2086: FILES is a file list on purpose.
+            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES" --prerelease $FILES
         else
-            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES" \
-                "$DIST"/radian-"$VERSION"-aarch64-apple-darwin.tar.gz \
-                "$DIST"/radian-"$VERSION"-aarch64-apple-darwin.tar.gz.sha256 \
-                "$DIST"/radian-"$VERSION"-x86_64-apple-darwin.tar.gz \
-                "$DIST"/radian-"$VERSION"-x86_64-apple-darwin.tar.gz.sha256
+            # shellcheck disable=SC2086: FILES is a file list on purpose.
+            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES" $FILES
         fi
     fi
     gh release edit "$TAG" --draft=false

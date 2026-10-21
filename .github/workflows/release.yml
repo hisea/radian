@@ -253,6 +253,14 @@ jobs:
               dist/*
           fi
 
+      - name: Refuse an empty release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY="$(gh release view "${GITHUB_REF_NAME}" --json body -q .body)"
+          [ -n "$BODY" ] || {
+            echo "release: published release has empty notes." >&2; exit 1; }
+
       - name: Check every asset anonymously
         env:
           VERSION: ${{ needs.check.outputs.version }}
