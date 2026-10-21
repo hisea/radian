@@ -120,7 +120,7 @@ Approval and structured questions share one arrival-order queue. Elements carry 
 7. Observers only read and only see committed facts.
 8. Input thread keeps `poll(2)` hangup detection and signal fallback. Terminal loss is one `UiEvent`, never a hang.
 
-## No Changes to `agent-core`
+## No Changes to `radian-core`
 
 Each item already depends on Core facts: `EventSink::emit` is synchronous and non-blocking, the full `AgentEvent` set, `ModelTextDelta` and `ModelReasoningDelta` are only events, usage, tool state, and `RunFinished` are all events, `TranscriptAppended` is ordered, ADR 0019 segment rules live in the `radian-session` reader, and approval lives in `radian-permissions` hooks. When implementation finds a required Core change, that need is a new decision under this ADR.
 

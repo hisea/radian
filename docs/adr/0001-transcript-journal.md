@@ -77,4 +77,4 @@ The synchronous `start_turn_with` cannot await the journal, so the input stays i
 
 ## Verification
 
-The named tests in `crates/agent-core/tests/journal.rs` cover D1–D10 and S1–S5. `cargo test -p agent-core --features journal-selfcheck` runs the full replay assertion suite. `cargo tree` shows no new dependencies.
+The named tests in `crates/radian-core/tests/journal.rs` cover D1–D10 and S1–S5. `cargo test -p radian-core --features journal-selfcheck` runs the full replay assertion suite. `cargo tree` shows no new dependencies.

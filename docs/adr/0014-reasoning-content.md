@@ -80,4 +80,4 @@ Parallel to `content`, it is where the adapter hands Core the reasoning of one c
 
 ## Verification
 
-`crates/agent-core/tests/prefix.rs` covers reasoning only, text only, both, neither, fresh accumulation per call, and no independent journal record for reasoning deltas. `message.rs` covers omission when empty and round trips. Both adapters cover `reasoning_is_not_sent_to_the_provider`, catalog `interleaved` parsing and override, pass-back fields and empty strings. Budget tests cover the `count_reasoning` switch. Both provider contracts stay green.
+`crates/radian-core/tests/prefix.rs` covers reasoning only, text only, both, neither, fresh accumulation per call, and no independent journal record for reasoning deltas. `message.rs` covers omission when empty and round trips. Both adapters cover `reasoning_is_not_sent_to_the_provider`, catalog `interleaved` parsing and override, pass-back fields and empty strings. Budget tests cover the `count_reasoning` switch. Both provider contracts stay green.

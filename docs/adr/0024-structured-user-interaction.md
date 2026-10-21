@@ -95,7 +95,7 @@ Unattended runs **do not register** `ask_user`. The test is "a human sits at the
 - **Focus fields and question switching**: with no field focused, `←` and `→` move to the previous or next question. When an `Other` row, a `text` question, or a note is focused, `←` and `→` move the text cursor. `text` questions, notes, and selected `Other` rows treat space as text. An unselected `Other` row still uses space to select it.
 - **Keys**: `↑` and `↓` move. `⏎` **only confirms and advances to the next question, never selects**. After the last question it enters `Submit`. It advances even with zero selections (that question counts as unanswered). `Space` is the **only select key**: single selects, multi toggles, never advances. On `Other` `Space` selects and starts input at once (space in input is a space, `⏎` confirms and advances, `↑` and `↓` keep text on leave). `Tab` and `→`, `Shift-Tab` and `←` switch questions (cursor when a field is focused). `n` writes a note. `esc` declines (asks once to confirm). `alt-h` collapses the panel to one line; press again to restore.
 
-## No Changes to `agent-core`
+## No Changes to `radian-core`
 
 `ToolContext.cancellation`, `ToolOutput.structured`, `ToolConcurrency::Exclusive`, `ToolExecutionStarted` and `Settled`, and per-await `before_tool_call` all already exist. `ask_user` is a normal `ToolSession` member. Core never knows it waits on a human.
 

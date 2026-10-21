@@ -84,4 +84,4 @@ A successful replacement sends only one `AgentEvent::TranscriptReplaced { revisi
 
 ## Verification
 
-`crates/agent-core/tests/replace.rs` covers successful replacement, index reset after markers, "old-revision markers must not repair new history", and `RecoveryRequired` after a journal failure. The `host_message_meta_is_not_sent_to_the_provider` test in `agent-provider-*` pins provider invisibility of meta. `crates/radian-session/tests/replace.rs` covers committed, uncommitted, and aborted segment reads.
+`crates/radian-core/tests/replace.rs` covers successful replacement, index reset after markers, "old-revision markers must not repair new history", and `RecoveryRequired` after a journal failure. The `host_message_meta_is_not_sent_to_the_provider` test in `agent-provider-*` pins provider invisibility of meta. `crates/radian-session/tests/replace.rs` covers committed, uncommitted, and aborted segment reads.

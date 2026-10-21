@@ -61,4 +61,4 @@ Only the cancellation path commits. Text accumulated in flight is lost when SIGK
 
 ## Verification
 
-`crates/agent-core/tests/prefix.rs` covers cancellation with text only, reasoning only, both, neither, fresh accumulation per call, and the `interrupted` check on `final_message`.
+`crates/radian-core/tests/prefix.rs` covers cancellation with text only, reasoning only, both, neither, fresh accumulation per call, and the `interrupted` check on `final_message`.

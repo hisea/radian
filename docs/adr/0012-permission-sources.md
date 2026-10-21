@@ -35,7 +35,7 @@ A `workspace` shell call is `allow` inside the sandbox and `ask` across the boun
 ### P3: What Core provides and does not provide
 
 - **Provides**: `Hooks::before_tool_call` returns `ToolDecision::{ Allow, Deny{reason}, Rewrite{arguments}, Respond(ToolResult) }`. Calls in one batch run one by one in call order. `Rewrite` parameters validate again, but the hook **never reruns**. **Fail-closed**: a `before_tool_call` error rejects that call. Hook order and journal position are: assistant message journals first, then the hook judges, then dispatch runs (ADR 0002 E3).
-- **Does not provide**: permission judgment itself never enters `agent-core`. Core **records no approval decisions** (ADR 0002 E2). Approval audit lives at the runtime layer: `PermissionResolved { request_id, call_id, decision, approver, reason, policy? }`, `critical=false`. It is durable audit, but it carries no state rebuild and never replays across resume.
+- **Does not provide**: permission judgment itself never enters `radian-core`. Core **records no approval decisions** (ADR 0002 E2). Approval audit lives at the runtime layer: `PermissionResolved { request_id, call_id, decision, approver, reason, policy? }`, `critical=false`. It is durable audit, but it carries no state rebuild and never replays across resume.
 - A `ToolDecision::Deny{reason}` result is visible to the model. `Respond(ToolResult)` answers directly with the given result.
 
 ### P4: Real boundary of the macOS sandbox
@@ -71,4 +71,4 @@ MCP service processes never start under the sandbox. They run with the full user
 
 ## Verification
 
-`crates/agent-core/tests/hooks.rs` covers fail-closed, `Rewrite` without rerun, and in-batch order. `radian-permissions` rule tests cover allow, ask, and deny plus only-narrow. `radian-coding` startup-copy tests assert the MCP disclosure and assert no credential-isolation claim. The `radian-sandbox` escape matrix covers the P4 list.
+`crates/radian-core/tests/hooks.rs` covers fail-closed, `Rewrite` without rerun, and in-batch order. `radian-permissions` rule tests cover allow, ask, and deny plus only-narrow. `radian-coding` startup-copy tests assert the MCP disclosure and assert no credential-isolation claim. The `radian-sandbox` escape matrix covers the P4 list.

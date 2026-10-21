@@ -16,7 +16,7 @@ Status: accepted
 7. **No PTY**: it runs through plain pipes. PTY needs the ADR 0016 TIOCSTI constraint first. Sandboxed `TIOCSTI` on a terminal held outside the sandbox must fail. It enters the escape matrix.
 8. **Display**: one transcript block shows it. The first row is `$ cmd`. `!` and `!!` use different colors for in-context versus out-of-context. `/help` and the tip table gain one row.
 
-## No changes to `agent-core`
+## No changes to `radian-core`
 
 Execution lives in host (same path as the `radian-coding` shell tool). A context entry is a normal `User` message (ADR 0005).
 
@@ -27,4 +27,4 @@ Execution lives in host (same path as the `radian-coding` shell tool). A context
 
 ## Verification
 
-`agent-cli`/`radian-tui` tests cover `!`/`!!` parsing, in-context and out-of-context output, sandbox execution, and journal `UserBash`. Fixture `user-bash.jsonl` passes reference validation.
+`radian-exec`/`radian-tui` tests cover `!`/`!!` parsing, in-context and out-of-context output, sandbox execution, and journal `UserBash`. Fixture `user-bash.jsonl` passes reference validation.

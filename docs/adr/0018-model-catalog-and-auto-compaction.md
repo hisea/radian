@@ -113,9 +113,9 @@ The compaction summary only serves continuation of the current session. **It nev
 
 ## Verification
 
-- `agent-core/tests/compaction_flow.rs` covers journal order, rolling summaries, atomic tool units, cancellation, insufficient gain, `below_target` stop, invalid-summary retry, replacement abort, baseline clearing, source-view change, candidate without commit, deterministic fallback, and `NothingFits`.
+- `radian-core/tests/compaction_flow.rs` covers journal order, rolling summaries, atomic tool units, cancellation, insufficient gain, `below_target` stop, invalid-summary retry, replacement abort, baseline clearing, source-view change, candidate without commit, deterministic fallback, and `NothingFits`.
 - `compaction_overflow.rs` covers the current single-tier overflow fallback: unknown window compacts to `T_before/2` and retries once (`an_overflow_with_no_window_compacts_to_half_and_retries_once`), a retry that still overflows fails after one retry (`a_retry_that_still_overflows_fails_after_one_retry`), non-overflow model errors never compact (`a_non_overflow_model_error_does_not_compact`), known window uses `min(T_before, B)` (`a_known_window_uses_min_of_projection_and_budget`), fallback below target means `NothingFits` (`a_fallback_that_cannot_reach_the_target_is_nothing_fits`), active compaction still allows one fallback after it (`the_fallback_is_allowed_once_after_a_proactive_compaction`), plus `compact_now` cases.
 - `compaction.rs` covers summary caps scaling with window, system prompt with cap, shorten requests with only the over-long summary, user verbatim two-layer budgets and `origin` read-back, attachment placeholder lines, old-summary empty-list read-back.
 - `radian-runtime/tests/compact_control.rs` covers run between two turns, mid-turn wait until turn end, cancel without commit, `NothingToCompact`.
-- `agent-cli` and `radian-tui` pty and cli tests cover `/compact`, the startup line, `--no-auto-compact`, and overflow notices.
+- `radian-exec` and `radian-tui` pty and cli tests cover `/compact`, the startup line, `--no-auto-compact`, and overflow notices.
 - Fixtures: `compaction-committed.jsonl`, `compaction-candidate-only.jsonl`, `compaction-verbatim.jsonl`, `compaction-deterministic.jsonl`, with the reference checker in sync.
