@@ -81,6 +81,7 @@ pub async fn open_session(
         skills_allow,
         memory_injection,
         hooks: hooks_config,
+        project_hooks: project_hooks_config,
         trust,
         resume,
         config_snapshot,
@@ -298,11 +299,13 @@ pub async fn open_session(
         Some(approver),
         audit(Arc::clone(&journal)),
     ));
-    // ADR 0045 slice A: the user-level command hooks, chained directly after the
-    // permissions (a hook can only narrow what the rules already allowed). The inbox
-    // carries the Stop continuations; the runtime spawns them off the sync turn-end hook.
+    // ADR 0045 slices A+B: the user-level command hooks layered over the project hooks,
+    // chained directly after the permissions (a hook can only narrow what the rules
+    // already allowed). The inbox carries the Stop continuations; the runtime spawns them
+    // off the sync turn-end hook.
     let command_hooks = Arc::new(crate::CommandHooks::new(
         &hooks_config,
+        &project_hooks_config,
         &workspace,
         session_id.as_str(),
         sandbox_slot.clone(),
@@ -701,6 +704,7 @@ pub async fn open_session(
         mcp_servers: mcp_server_configs,
         mcp_config_path,
         hooks_config,
+        project_hooks_config,
         trust: Mutex::new(trust),
         runtime,
         driver: DriverTask {

@@ -120,8 +120,11 @@ pub struct LocalSession {
     /// given.
     pub(super) mcp_config_path: Option<String>,
     /// The resolved `[hooks]` section (the inspector's hooks page, ADR 0045 slice A).
-    /// User level only today; project hooks are not loaded.
     pub(super) hooks_config: crate::config::HooksConfig,
+    /// The project-level hooks (`<workspace>/.radian/hooks.json`, ADR 0045 slice B),
+    /// empty when untrusted. Stored for the inspector; the runtime layers them before the
+    /// user hooks (piece 2 wires the running).
+    pub(super) project_hooks_config: crate::config::HooksConfig,
     /// The project-trust state (ADR 0031 T3). Interior mutability: the startup prompt resolves
     /// it after `open_session` and the startup line reads it.
     pub(super) trust: Mutex<trust::Setup>,
@@ -710,6 +713,10 @@ impl SessionFacade for LocalSession {
 
     fn hooks_config(&self) -> crate::config::HooksConfig {
         self.hooks_config.clone()
+    }
+
+    fn project_hooks_config(&self) -> crate::config::HooksConfig {
+        self.project_hooks_config.clone()
     }
 
     fn job_tail(&self, id: &str, max: usize) -> Option<(radian_coding::JobState, String)> {

@@ -329,6 +329,9 @@ pub struct LeadSetup {
     /// Only these built-in tools are mounted (`None` mounts every one the host has). The
     /// hidden `--tools` flag of a derived session uses it; an ordinary session passes `None`.
     pub tools_allow: Option<Vec<String>>,
+    /// The project-level hooks (`<workspace>/.radian/hooks.json`, ADR 0045 slice B), loaded
+    /// once trust is resolved (untrusted means empty).
+    pub project_hooks: crate::config::HooksConfig,
     pub memory_root: Option<PathBuf>,
     pub trust: trust::Setup,
     pub resume: bool,
@@ -379,6 +382,7 @@ impl LeadSetup {
             skills_allow: None,
             memory_injection: settings.memory_injection,
             hooks: settings.hooks,
+            project_hooks: self.project_hooks,
             trust: self.trust,
             resume: self.resume,
             config_snapshot: self.config_snapshot,

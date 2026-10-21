@@ -42,6 +42,7 @@ pub mod opencode_go;
 mod output;
 pub mod pending;
 pub mod project;
+pub mod project_hooks;
 pub mod projection;
 pub mod prompt;
 pub mod provider;
@@ -175,6 +176,11 @@ pub use pending::{
     QueuedApprover, QueuedPrompter,
 };
 pub use project::{ProjectConfig, effective as project_effective_tier, narrow as narrow_tier};
+pub use project_hooks::{
+    ProjectHooksPreview, ProjectHooksPreviewEntry, load_project as load_project_hooks,
+    load_project_file as load_project_hooks_file, preview_lines as preview_project_hooks_lines,
+    preview_project as preview_project_hooks, project_path as project_hooks_path,
+};
 pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };

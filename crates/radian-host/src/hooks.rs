@@ -20,6 +20,15 @@
 //!   it degrades to a marked `inject` (no wake) with the wake-budget notice, the same
 //!   degrade as the background-job notifier (ADR 0045 §2).
 //!
+//! Two layers, one chain (ADR 0045 slice B): the project hooks
+//! (`<workspace>/.radian/hooks.json`, loaded only when trusted) run first, then the user's
+//! own `[hooks]` — so the user's hooks see the final arguments a project `updatedInput`
+//! may have rewritten (Core re-validates a rewrite but never re-runs hooks, ADR 0012 P3).
+//! The project layer can never turn a user hook off. Within one event a command string
+//! identical to one already run is skipped (one run even when both layers name it); a deny
+//! from any layer stops the rest; two `Stop` exit-2 verdicts open a single continuation
+//! with the reasons joined in one message, counted as one wake.
+//!
 //! The matcher is Claude's case-sensitive pattern over **Radian** tool names: `*` or a
 //! missing/empty matcher matches every tool, otherwise the pattern is a regular
 //! expression matched against the whole tool name (`^(?:<matcher>)$`, so `Edit|Write`
@@ -105,11 +114,15 @@ pub struct CommandHooks {
     wake: HooksWarning,
 }
 impl CommandHooks {
-    /// Builds the hooks from the resolved `[hooks]` section. Empty when the user configured
+    /// Builds the hooks from the user `[hooks]` section layered over the project hooks
+    /// (`<workspace>/.radian/hooks.json`, empty when untrusted). Each event compiles the
+    /// project entries first, then the user's, so at run time the project layer goes first
+    /// and the user's hooks see the final arguments. Empty when both layers configured
     /// nothing, in which case every method is a no-op.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: &HooksConfig,
+        project: &HooksConfig,
         workspace: &Path,
         session_id: &str,
         sandbox: SandboxSlot,
@@ -119,9 +132,24 @@ impl CommandHooks {
         wake: HooksWarning,
     ) -> Self {
         Self {
-            pre: compile_entries(&config.pre_tool_use, "PreToolUse", &warn),
-            post: compile_entries(&config.post_tool_use, "PostToolUse", &warn),
-            stop: config.stop.clone(),
+            pre: compile_layered(
+                &project.pre_tool_use,
+                &config.pre_tool_use,
+                "PreToolUse",
+                &warn,
+            ),
+            post: compile_layered(
+                &project.post_tool_use,
+                &config.post_tool_use,
+                "PostToolUse",
+                &warn,
+            ),
+            stop: project
+                .stop
+                .iter()
+                .chain(config.stop.iter())
+                .cloned()
+                .collect(),
             workspace: workspace.to_path_buf(),
             session_id: session_id.to_owned(),
             sandbox,
@@ -136,7 +164,7 @@ impl CommandHooks {
         }
     }
 
-    /// Whether the user configured no hook at all.
+    /// Whether no hook at all is configured in either layer.
     pub fn is_empty(&self) -> bool {
         self.pre.is_empty() && self.post.is_empty() && self.stop.is_empty()
     }
@@ -200,13 +228,15 @@ impl CommandHooks {
         }
     }
 
-    /// Runs one `Stop` cycle synchronously: every configured Stop hook in order; the first
-    /// exit 2 opens another turn with its stderr as a `System` followup, unless the
-    /// continuation cap is already reached — then it degrades to a marked `inject` (no
-    /// wake) with the wake-budget notice, so the verdict waits for the next user-woken
-    /// turn instead of being dropped silently. Only [`RunStatus::Completed`] runs the hook:
-    /// a cancelled, failed, or otherwise non-completed turn runs nothing (an exit-2 hook
-    /// after a user interrupt would otherwise open a turn the user just asked to end).
+    /// Runs one `Stop` cycle synchronously: every configured Stop hook in order — the
+    /// project layer first, then the user's (ADR 0045 slice B), each command string once.
+    /// Every exit 2 collects its stderr; after the loop a single continuation opens with
+    /// the reasons joined in one message, counted as one wake. Past the continuation cap
+    /// the verdict degrades to a marked `inject` (no wake) with the wake-budget notice, so
+    /// it waits for the next user-woken turn instead of being dropped silently. Only
+    /// [`RunStatus::Completed`] runs the hooks: a cancelled, failed, or otherwise
+    /// non-completed turn runs nothing (an exit-2 hook after a user interrupt would
+    /// otherwise open a turn the user just asked to end).
     /// [`Hooks::on_turn_end`] spawns this with the outcome's status; tests drive it
     /// directly so there is no timing involved.
     pub async fn run_stop_once(&self, status: &RunStatus) {
@@ -221,47 +251,23 @@ impl CommandHooks {
             "cwd": self.workspace.to_string_lossy(),
             "session_id": self.session_id,
         });
+        let mut reasons = Vec::new();
+        // One run per command string, like the tool-call events (ADR 0045 slice B).
+        let mut seen = std::collections::HashSet::new();
         for entry in &self.stop {
             for hook in &entry.hooks {
+                if !seen.insert(hook.command.clone()) {
+                    continue;
+                }
                 match self.execute(hook, &stdin, "Stop").await {
                     Ok(output) if output.code == Some(0) => {}
                     Ok(output) if output.code == Some(2) => {
                         let reason = short(&output.stderr);
-                        let reason = if reason.trim().is_empty() {
+                        reasons.push(if reason.trim().is_empty() {
                             "the Stop hook exited with code 2".to_owned()
                         } else {
                             reason
-                        };
-                        let text = format!("Stop hook requested another turn:\n{reason}");
-                        // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): past the gate
-                        // the hook still runs, but an exit-2 verdict degrades to a marked
-                        // `inject` (no wake) with the wake-budget notice, the same degrade
-                        // as the background-job notifier (ADR 0045 §2) — a skipped run
-                        // would be silent, a degraded verdict waits visibly.
-                        if self.gate.wake_allowed() {
-                            // The woken turn absorbs the waiting injects, so a wake also
-                            // ends the degrade burst.
-                            if self
-                                .inbox
-                                .followup(Message::user(text), InputSource::System)
-                                .await
-                                .is_ok()
-                            {
-                                self.gate.note_wake();
-                                self.degraded.store(0, Ordering::SeqCst);
-                            }
-                        } else {
-                            if self
-                                .inbox
-                                .inject_degraded(Message::user(text), InputSource::System)
-                                .await
-                                .is_ok()
-                            {
-                                let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
-                                (self.wake)(&crate::job_notify::wake_budget_line(degraded));
-                            }
-                        }
-                        return;
+                        });
                     }
                     Ok(output) => {
                         // Fail closed (ADR 0017): a broken validator never continues the
@@ -281,6 +287,38 @@ impl CommandHooks {
                     }
                 }
             }
+        }
+        if reasons.is_empty() {
+            return;
+        }
+        let text = format!("Stop hook requested another turn:\n{}", reasons.join("\n"));
+        // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): past the gate
+        // the hook still runs, but an exit-2 verdict degrades to a marked
+        // `inject` (no wake) with the wake-budget notice, the same degrade
+        // as the background-job notifier (ADR 0045 §2) — a skipped run
+        // would be silent, a degraded verdict waits visibly.
+        // One continuation for every exit-2 verdict in the cycle, with the
+        // reasons joined above: one wake, one degrade count at most.
+        if self.gate.wake_allowed() {
+            // The woken turn absorbs the waiting injects, so a wake also
+            // ends the degrade burst.
+            if self
+                .inbox
+                .followup(Message::user(text), InputSource::System)
+                .await
+                .is_ok()
+            {
+                self.gate.note_wake();
+                self.degraded.store(0, Ordering::SeqCst);
+            }
+        } else if self
+            .inbox
+            .inject_degraded(Message::user(text), InputSource::System)
+            .await
+            .is_ok()
+        {
+            let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+            (self.wake)(&crate::job_notify::wake_budget_line(degraded));
         }
     }
 
@@ -571,39 +609,49 @@ fn kill_tree(pid: u32) {
     }
 }
 
-/// Compiles one event's entries once at load time. An invalid pattern warns once here
-/// (not per call) and the entry never runs.
-fn compile_entries(
-    entries: &[HookMatcher],
+/// Compiles one event's two layers in run order: the project entries first, then the
+/// user's (ADR 0045 slice B). An invalid pattern warns once here (not per call) and the
+/// entry never runs.
+fn compile_layered(
+    project: &[HookMatcher],
+    user: &[HookMatcher],
     event: &str,
     warn: &HooksWarning,
 ) -> Vec<CompiledEntry> {
-    entries
+    project
         .iter()
+        .chain(user.iter())
         .enumerate()
-        .map(|(index, entry)| {
-            let matcher = match &entry.matcher {
-                None => CompiledMatcher::All,
-                Some(pattern) if pattern.trim().is_empty() || pattern.trim() == "*" => {
-                    CompiledMatcher::All
-                }
-                Some(pattern) => match regex::Regex::new(&format!("^(?:{pattern})$")) {
-                    Ok(regex) => CompiledMatcher::Regex(regex),
-                    Err(error) => {
-                        (warn)(&format!(
-                            "{event}[{index}] matcher {pattern:?} is not a valid regex ({error}); \
-                             the entry will never run"
-                        ));
-                        CompiledMatcher::Never
-                    }
-                },
-            };
-            CompiledEntry {
-                hooks: entry.hooks.clone(),
-                matcher,
-            }
-        })
+        .map(|(index, entry)| compile_entry(entry, event, index, warn))
         .collect()
+}
+
+/// Compiles one `{ matcher, hooks }` entry: the regex is built once at load time, so an
+/// invalid pattern warns once there (not per call) and the entry never runs.
+fn compile_entry(
+    entry: &HookMatcher,
+    event: &str,
+    index: usize,
+    warn: &HooksWarning,
+) -> CompiledEntry {
+    let matcher = match &entry.matcher {
+        None => CompiledMatcher::All,
+        Some(pattern) if pattern.trim().is_empty() || pattern.trim() == "*" => CompiledMatcher::All,
+        Some(pattern) => match regex::Regex::new(&format!("^(?:{pattern})$")) {
+            Ok(regex) => CompiledMatcher::Regex(regex),
+            Err(error) => {
+                (warn)(&format!(
+                    "{event}[{index}] matcher {pattern:?} is not a valid regex ({error}); \
+                     the entry will never run"
+                ));
+                CompiledMatcher::Never
+            }
+        },
+    };
+    CompiledEntry {
+        hooks: entry.hooks.clone(),
+        matcher,
+    }
 }
 
 /// Bounds hook stderr before it enters the transcript.
@@ -627,11 +675,17 @@ impl Hooks for CommandHooks {
         }
         let mut input = call.arguments.clone();
         let mut changed = false;
+        // One run per command string: both layers may name the same hook, and the
+        // second naming is skipped (ADR 0045 slice B).
+        let mut seen = std::collections::HashSet::new();
         for entry in &self.pre {
             if !Self::matches(&entry.matcher, &call.name) {
                 continue;
             }
             for hook in &entry.hooks {
+                if !seen.insert(hook.command.clone()) {
+                    continue;
+                }
                 match self.run_pre_hook(hook, &call.name, &input).await? {
                     PreVerdict::Continue => {}
                     PreVerdict::Updated(next) => {
@@ -659,11 +713,16 @@ impl Hooks for CommandHooks {
         if self.post.is_empty() {
             return Ok(());
         }
+        // One run per command string, like `PreToolUse` (ADR 0045 slice B).
+        let mut seen = std::collections::HashSet::new();
         for entry in &self.post {
             if !Self::matches(&entry.matcher, &call.name) {
                 continue;
             }
             for hook in &entry.hooks {
+                if !seen.insert(hook.command.clone()) {
+                    continue;
+                }
                 let stdin = serde_json::json!({
                     "hook_event_name": "PostToolUse",
                     "tool_name": call.name,
@@ -811,15 +870,35 @@ mod tests {
     }
 
     fn fixture_with(config: &HooksConfig, sandbox: SandboxSlot) -> Fixture {
-        fixture_with_root(TempRoot::new("case"), config, sandbox)
+        layered_with_root(
+            TempRoot::new("case"),
+            config,
+            &HooksConfig::default(),
+            sandbox,
+        )
     }
 
-    fn fixture_with_root(root: TempRoot, config: &HooksConfig, sandbox: SandboxSlot) -> Fixture {
+    fn layered(user: &HooksConfig, project: &HooksConfig) -> Fixture {
+        layered_with_root(
+            TempRoot::new("layered"),
+            user,
+            project,
+            SandboxSlot::empty(),
+        )
+    }
+
+    fn layered_with_root(
+        root: TempRoot,
+        user: &HooksConfig,
+        project: &HooksConfig,
+        sandbox: SandboxSlot,
+    ) -> Fixture {
         let (warn, warnings) = warnings_collector();
         let (wake, wake_notices) = warnings_collector();
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
-            config,
+            user,
+            project,
             &root.ws,
             "test-session",
             sandbox,
@@ -1105,6 +1184,7 @@ mod tests {
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
             &config,
+            &HooksConfig::default(),
             &root.ws,
             "sid-9",
             SandboxSlot::empty(),
@@ -1136,7 +1216,12 @@ mod tests {
         let sandbox =
             radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::WorkspaceWrite, &root.ws)
                 .expect("the workspace sandbox probes clean on this machine");
-        let fixture = fixture_with_root(root, &config, SandboxSlot::with(sandbox));
+        let fixture = layered_with_root(
+            root,
+            &config,
+            &HooksConfig::default(),
+            SandboxSlot::with(sandbox),
+        );
         let error = fixture
             .hooks
             .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
@@ -1161,7 +1246,12 @@ mod tests {
             radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::WorkspaceWrite, &root.ws)
                 .expect("the workspace sandbox probes clean on this machine");
         let ws = root.ws.clone();
-        let fixture = fixture_with_root(root, &config, SandboxSlot::with(sandbox));
+        let fixture = layered_with_root(
+            root,
+            &config,
+            &HooksConfig::default(),
+            SandboxSlot::with(sandbox),
+        );
         let decision = fixture
             .hooks
             .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
@@ -1386,6 +1476,7 @@ mod tests {
         };
         let hooks = CommandHooks::new(
             &config,
+            &HooksConfig::default(),
             &root.ws,
             "test-session",
             SandboxSlot::empty(),
@@ -1424,6 +1515,234 @@ mod tests {
                 "wake budget used up: 1 job notices are waiting — send any message to continue"
                     .to_owned()
             ]
+        );
+    }
+
+    fn stop_config(command: &str) -> HooksConfig {
+        HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![hook(command)],
+            }],
+            ..HooksConfig::default()
+        }
+    }
+
+    /// Slice B: the project layer runs first, so the user's hook receives the arguments the
+    /// project hook rewrote — and the call rewrites to exactly that. Swapping the layer
+    /// order fails this: the user hook would see the original input.
+    #[tokio::test]
+    async fn the_project_layer_runs_first_and_threads_updated_input_into_the_user_hook() {
+        let root = TempRoot::new("layer-order");
+        let marker = root.dir.join("project-ran");
+        let user_stdin = root.dir.join("user-stdin.json");
+        let project = pre_config(
+            "shell",
+            &format!(
+                "echo ran >> {}; printf '%s' '{{\"hookSpecificOutput\":{{\"updatedInput\":{{\"command\":\"from-project\"}}}}}}'",
+                marker.display()
+            ),
+        );
+        let user = pre_config("shell", &format!("cat > {}", user_stdin.display()));
+        let fixture = layered(&user, &project);
+        let decision = fixture
+            .hooks
+            .before_tool_call(
+                &cx(),
+                &call("shell", serde_json::json!({"command": "orig"})),
+            )
+            .await
+            .unwrap();
+        assert!(marker.exists(), "the project hook runs");
+        let stdin: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&user_stdin).unwrap()).unwrap();
+        assert_eq!(
+            stdin["tool_input"],
+            serde_json::json!({"command": "from-project"}),
+            "the user hook sees the project-rewritten arguments: {stdin}"
+        );
+        match decision {
+            ToolDecision::Rewrite { arguments } => {
+                assert_eq!(arguments, serde_json::json!({"command": "from-project"}),)
+            }
+            other => panic!("the rewrite stands: {other:?}"),
+        }
+        let _ = root;
+    }
+
+    /// Slice B: a command string identical in both layers runs once per event. Dropping
+    /// the dedupe runs it twice and fails the count.
+    #[tokio::test]
+    async fn an_identical_command_in_both_layers_runs_once() {
+        let root = TempRoot::new("dedupe");
+        let counter = root.dir.join("runs");
+        let script = format!("echo ran >> {}; exit 0", counter.display());
+        let project = pre_config("shell", &script);
+        let user = pre_config("shell", &script);
+        let fixture = layered(&user, &project);
+        let decision = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap();
+        assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            1,
+            "one run for two identical namings"
+        );
+    }
+
+    /// Slice B: a deny from any layer stops the rest — a project deny never reaches the
+    /// user's hooks. Letting later hooks run after a deny touches the marker and fails.
+    #[tokio::test]
+    async fn a_project_deny_stops_the_user_hooks() {
+        let root = TempRoot::new("deny-stops");
+        let marker = root.dir.join("user-ran");
+        let project = pre_config("shell", "echo denied-by-project >&2; exit 2");
+        let user = pre_config("shell", &format!("touch {}", marker.display()));
+        let fixture = layered(&user, &project);
+        let decision = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap();
+        match decision {
+            ToolDecision::Deny { reason } => assert!(
+                reason.contains("denied-by-project"),
+                "the project reason stands: {reason}"
+            ),
+            other => panic!("the deny stands: {other:?}"),
+        }
+        assert!(
+            !marker.exists(),
+            "a deny stops the later hooks: the user hook must not run"
+        );
+        let _ = root;
+    }
+
+    /// Slice B: two `Stop` exit-2 verdicts open a single continuation with both reasons
+    /// joined in one message, counted as one wake. Opening two turns (or two wakes)
+    /// fails the claim and the count.
+    #[tokio::test]
+    async fn two_stop_exit_2_verdicts_open_one_continuation_with_both_reasons() {
+        let project = stop_config("echo project-reason >&2; exit 2");
+        let user = stop_config("echo user-reason >&2; exit 2");
+        let fixture = layered(&user, &project);
+        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        let entry = fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("the one continuation opens a turn");
+        assert!(
+            entry.message.text().contains("project-reason"),
+            "the project reason rides along: {}",
+            entry.message.text()
+        );
+        assert!(
+            entry.message.text().contains("user-reason"),
+            "the user reason joins it in the same message: {}",
+            entry.message.text()
+        );
+        assert_eq!(fixture.hooks.stop_wakes(), 1, "one wake, not two");
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "no second continuation opens"
+        );
+    }
+
+    /// Slice B: identical `Stop` commands run once: one turn, one wake, one execution.
+    #[tokio::test]
+    async fn an_identical_stop_command_runs_once() {
+        let root = TempRoot::new("stop-dedupe");
+        let counter = root.dir.join("runs");
+        let script = format!(
+            "echo ran >> {}; echo same-reason >&2; exit 2",
+            counter.display()
+        );
+        let project = stop_config(&script);
+        let user = stop_config(&script);
+        let (warn, _) = warnings_collector();
+        let (wake, _) = warnings_collector();
+        let inbox = Inbox::new(64);
+        let hooks = CommandHooks::new(
+            &user,
+            &project,
+            &root.ws,
+            "test-session",
+            SandboxSlot::empty(),
+            &inbox,
+            &tokio::runtime::Handle::current(),
+            warn,
+            wake,
+        );
+        hooks.run_stop_once(&RunStatus::Completed).await;
+        let entry = inbox
+            .claim_next_turn()
+            .await
+            .expect("the one continuation opens a turn");
+        assert_eq!(
+            entry.message.text().matches("same-reason").count(),
+            1,
+            "the reason appears once: {}",
+            entry.message.text()
+        );
+        assert_eq!(hooks.stop_wakes(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            1,
+            "one execution for two identical namings"
+        );
+    }
+
+    /// Slice B (project check-after-edit): without a project `PostToolUse` an edit starts
+    /// no hook — the result passes through untouched.
+    #[tokio::test]
+    async fn without_a_project_post_tool_use_an_edit_starts_no_hook() {
+        let project = HooksConfig {
+            post_tool_use: vec![entry("shell", vec![hook("echo no-edit >&2; exit 2")])],
+            ..HooksConfig::default()
+        };
+        let fixture = layered(&HooksConfig::default(), &project);
+        let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        fixture
+            .hooks
+            .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.text(), "patched");
+    }
+
+    /// Slice B (project check-after-edit): a project `PostToolUse` on an edit runs
+    /// synchronously, once per edit, its feedback riding directly after the edit's result —
+    /// before the user's own feedback. Swapping the layers fails the order.
+    #[tokio::test]
+    async fn a_project_post_tool_use_runs_once_per_edit_with_its_feedback_first() {
+        let project = HooksConfig {
+            post_tool_use: vec![entry("patch", vec![hook("echo project-lint >&2; exit 2")])],
+            ..HooksConfig::default()
+        };
+        let user = HooksConfig {
+            post_tool_use: vec![entry("patch", vec![hook("echo user-lint >&2; exit 2")])],
+            ..HooksConfig::default()
+        };
+        let fixture = layered(&user, &project);
+        let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        fixture
+            .hooks
+            .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
+            .await
+            .unwrap();
+        assert!(result.is_error, "feedback is an error signal");
+        let text = result.text();
+        assert!(text.contains("patched"), "the result stays: {text}");
+        let project_at = text.find("project-lint").expect("project feedback: {text}");
+        let user_at = text.find("user-lint").expect("user feedback: {text}");
+        assert!(
+            project_at < user_at,
+            "the project feedback rides first: {text}"
         );
     }
 }

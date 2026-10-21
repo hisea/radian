@@ -86,6 +86,7 @@ fn command_hooks(
     };
     Arc::new(CommandHooks::new(
         &config,
+        &radian_host::config::HooksConfig::default(),
         ws,
         "test-session",
         radian_sandbox::SandboxSlot::empty(),

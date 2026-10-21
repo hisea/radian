@@ -119,6 +119,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     // neither writes the prompt nor decides tools when unconfigured).
     let commands = Arc::new(radian_host::CommandHooks::new(
         &Default::default(),
+        &Default::default(),
         &ws,
         "test-session",
         radian_sandbox::SandboxSlot::empty(),
