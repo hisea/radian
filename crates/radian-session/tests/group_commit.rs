@@ -19,6 +19,14 @@ fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).unwrap().len()
 }
 
+/// A session id no other test uses. The `fail_next_write` seam is keyed by session id
+/// process-wide, so tests that share an id can consume each other's armed failure.
+fn sid(label: &str) -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!("{label}-{n}")
+}
+
 /// Every sync event makes the whole group written before it durable: after the append,
 /// `durable_len` (the last fsynced length) equals the file length.
 #[tokio::test]
@@ -41,9 +49,10 @@ async fn a_sync_point_makes_every_earlier_record_durable() {
         Sync::ReplacementCommitted,
         Sync::ReplacementAborted,
     ] {
+        let sid = sid("sync");
         let dir = TempDir::new("sync");
         let path = dir.file("s.jsonl");
-        let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+        let journal = SessionJournal::create(&path, &sid, created()).unwrap();
 
         if matches!(case, Sync::SessionCreated) {
             assert_eq!(
@@ -124,9 +133,10 @@ async fn a_sync_point_makes_every_earlier_record_durable() {
 /// group.
 #[tokio::test]
 async fn non_sync_records_ride_the_next_sync_point() {
+    let sid = sid("nonsync");
     let dir = TempDir::new("nonsync");
     let path = dir.file("s.jsonl");
-    let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+    let journal = SessionJournal::create(&path, &sid, created()).unwrap();
     let after_create = journal.durable_len();
     let syncs_after_create = journal.sync_count();
     assert_eq!(after_create, file_len(&path), "SessionCreated is durable");
@@ -232,13 +242,14 @@ async fn non_sync_records_ride_the_next_sync_point() {
 /// (ADR 0006 §15.3; the group-commit change must not move it earlier).
 #[tokio::test]
 async fn a_failed_write_does_not_burn_a_seq() {
+    let sid = sid("seq-fail");
     let dir = TempDir::new("seq-fail");
     let path = dir.file("s.jsonl");
-    let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+    let journal = SessionJournal::create(&path, &sid, created()).unwrap();
     let before = std::fs::read(&path).unwrap();
     let seq = journal.next_seq();
 
-    radian_session::fail_next_write("sid", "ToolExecutionStarted");
+    radian_session::fail_next_write(&sid, "ToolExecutionStarted");
     let error = journal
         .append(JournalRecord::ToolExecutionStarted {
             call_id: "c1".into(),
@@ -263,9 +274,10 @@ async fn a_failed_write_does_not_burn_a_seq() {
 /// then a valid prefix that `resume` reads back.
 #[tokio::test]
 async fn simulate_system_crash_drops_exactly_the_unsynced_bytes() {
+    let sid = sid("sim-crash");
     let dir = TempDir::new("sim-crash");
     let path = dir.file("s.jsonl");
-    let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+    let journal = SessionJournal::create(&path, &sid, created()).unwrap();
     let durable = std::fs::read(&path).unwrap();
 
     journal
@@ -286,7 +298,7 @@ async fn simulate_system_crash_drops_exactly_the_unsynced_bytes() {
     assert_eq!(journal.durable_len(), durable.len() as u64);
     drop(journal);
 
-    let resumed = SessionJournal::resume(&path, "sid").unwrap();
+    let resumed = SessionJournal::resume(&path, &sid).unwrap();
     assert_eq!(resumed.next_seq(), 1, "only SessionCreated survives");
     let session = Session::open(&path).unwrap();
     assert_eq!(session.events().len(), 1, "the message was lost");
@@ -296,9 +308,10 @@ async fn simulate_system_crash_drops_exactly_the_unsynced_bytes() {
 /// best-effort.
 #[tokio::test]
 async fn close_makes_the_pending_group_durable() {
+    let sid = sid("close");
     let dir = TempDir::new("close");
     let path = dir.file("s.jsonl");
-    let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+    let journal = SessionJournal::create(&path, &sid, created()).unwrap();
     journal
         .append(JournalRecord::Message {
             index: 0,
@@ -328,9 +341,10 @@ async fn close_makes_the_pending_group_durable() {
 /// (ADR 0001 D6): the caller ends its turn.
 #[tokio::test]
 async fn a_failed_segment_commit_still_reports_a_journal_error() {
+    let sid = sid("fail-commit");
     let dir = TempDir::new("fail-commit");
     let path = dir.file("s.jsonl");
-    let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+    let journal = SessionJournal::create(&path, &sid, created()).unwrap();
     journal
         .append(JournalRecord::TranscriptReplaced {
             revision: 1,
@@ -338,7 +352,7 @@ async fn a_failed_segment_commit_still_reports_a_journal_error() {
         })
         .await
         .unwrap();
-    radian_session::fail_next_write("sid", "TranscriptReplacementCommitted");
+    radian_session::fail_next_write(&sid, "TranscriptReplacementCommitted");
     let error = journal
         .append(JournalRecord::TranscriptReplacementCommitted {
             revision: 1,

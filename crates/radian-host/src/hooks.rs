@@ -44,22 +44,31 @@ use agent_core::{
     ContentPart, HookContext, HookError, Hooks, InputSource, Message, RunOutcome, RunStatus,
     ToolCall, ToolDecision, ToolResult,
 };
+use radian_coding::Jobs;
 use radian_runtime::Inbox;
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::Notify;
 
 use crate::config::{HookCommand, HookMatcher, HooksConfig};
+use crate::goal::SharedGoal;
+use crate::intent_stop;
 use crate::wake_gate::WakeGate;
+use std::sync::Weak;
 
 /// How many characters of a hook's stderr enter the transcript (deny reasons, PostToolUse
 /// feedback, Stop continuations). Hooks are the user's own commands, but their output is
 /// model context, so it stays bounded.
 pub const REASON_CHAR_LIMIT: usize = 2000;
+
+/// How many validator-fired continuations may follow each other: the third consecutive
+/// intent-only turn end reports `blocked` instead of opening another turn (backlog
+/// `turn-end-continuation.md` §B.3).
+pub const MAX_INTENT_STOP_CONSECUTIVE: u32 = 2;
 
 /// The warning channel: the host routes it the way it routes its other startup/runtime
 /// lines (the CLI prints it, the TUI shows it as a notice).
@@ -109,9 +118,30 @@ pub struct CommandHooks {
     /// Continuations degraded to inject-only since the last wake. A woken turn absorbs
     /// the waiting injects, so a wake ends the burst; a user message resets it at once.
     degraded: Arc<AtomicU32>,
+    /// The built-in intent-stop validator (backlog `turn-end-continuation.md` §B): on when
+    /// `[hooks] intent_stop` is unset or true. It runs even with no `Stop` hook configured.
+    intent_stop: bool,
+    /// The background-job registry, for the "no background job running" rule. `Weak`
+    /// (like the notifier's): a missing or dropped registry reads as no jobs running.
+    /// The host sets it with [`CommandHooks::set_jobs`] when it has a registry.
+    jobs: Arc<std::sync::Mutex<Option<Weak<Jobs>>>>,
+    /// The persistent goal: an `Active` or `Paused` goal owns the turn end (it re-posts
+    /// itself), so the validator stays off while one is set. The host sets it with
+    /// [`CommandHooks::set_goal`].
+    goal: Arc<std::sync::Mutex<Option<SharedGoal>>>,
+    /// The TUI `/loop` mode owns the turn end while armed, so the validator stays off.
+    /// The TUI loop syncs this after every update; `exec` never sets it (it has no loop).
+    loop_active: Arc<AtomicBool>,
+    /// Consecutive validator-fired turn ends. The third consecutive hit reports `blocked`
+    /// instead of continuing. A rule miss, a non-completed turn, or a user message
+    /// ([`CommandHooks::reset_wakes`]) clears it.
+    consecutive: Arc<AtomicU32>,
     warn: HooksWarning,
     /// The wake-budget notice line (routed like `warn`, as its own transcript notice).
     wake: HooksWarning,
+    /// The two-in-a-row cap's notice line (its own transcript notice, so the TUI can mark
+    /// the session `intent stop` for herdr until the next turn starts).
+    intent_stop_warn: HooksWarning,
 }
 impl CommandHooks {
     /// Builds the hooks from the user `[hooks]` section layered over the project hooks
@@ -130,6 +160,7 @@ impl CommandHooks {
         runtime: &tokio::runtime::Handle,
         warn: HooksWarning,
         wake: HooksWarning,
+        intent_stop_warn: HooksWarning,
     ) -> Self {
         Self {
             pre: compile_layered(
@@ -159,8 +190,14 @@ impl CommandHooks {
             degraded: Arc::new(AtomicU32::new(0)),
             pending: Arc::new(AtomicU64::new(0)),
             pending_signal: Arc::new(Notify::new()),
+            intent_stop: config.intent_stop.unwrap_or(true),
+            jobs: Arc::new(std::sync::Mutex::new(None)),
+            goal: Arc::new(std::sync::Mutex::new(None)),
+            loop_active: Arc::new(AtomicBool::new(false)),
+            consecutive: Arc::new(AtomicU32::new(0)),
             warn,
             wake,
+            intent_stop_warn,
         }
     }
 
@@ -171,10 +208,60 @@ impl CommandHooks {
 
     /// A user message arrived: the `Stop` continuation budget starts over (the same reset
     /// the background-job notifier gets, ADR 0037 decision 3). A degraded continuation
-    /// still runs the hook (its exit-2 verdict degrades); only the *wake* is gated.
+    /// still runs the hook (its exit-2 verdict degrades); only the *wake* is gated. The
+    /// validator's consecutive-hit count starts over too.
     pub fn reset_wakes(&self) {
         self.gate.reset_wakes();
         self.degraded.store(0, Ordering::SeqCst);
+        self.consecutive.store(0, Ordering::SeqCst);
+    }
+
+    /// The background-job registry for the "no background job running" rule. The host
+    /// calls this when it has a registry; a missing or dropped registry reads as no
+    /// jobs running.
+    pub fn set_jobs(&self, jobs: Option<&Arc<Jobs>>) {
+        *self
+            .jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = jobs.map(Arc::downgrade);
+    }
+
+    /// The persistent goal for the active-goal suppression (an `Active` or `Paused` goal
+    /// owns the turn end). The host calls this with its shared goal.
+    pub fn set_goal(&self, goal: SharedGoal) {
+        *self
+            .goal
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(goal);
+    }
+
+    /// Whether the TUI `/loop` mode is armed (it owns the turn end while it is). The TUI
+    /// loop syncs this after every update; `exec` never sets it.
+    pub fn set_loop_active(&self, active: bool) {
+        self.loop_active.store(active, Ordering::SeqCst);
+    }
+
+    /// Whether the TUI `/loop` mode is armed (tests).
+    pub fn loop_active(&self) -> bool {
+        self.loop_active.load(Ordering::SeqCst)
+    }
+
+    /// Consecutive validator-fired turn ends (tests): the third consecutive hit reports
+    /// `blocked` instead of continuing.
+    pub fn consecutive_hits(&self) -> u32 {
+        self.consecutive.load(Ordering::SeqCst)
+    }
+
+    /// Background jobs running right now (tests). A missing or dropped registry reads
+    /// as none.
+    pub fn jobs_running(&self) -> usize {
+        self.jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .map(|jobs| jobs.settle_snapshot().0)
+            .unwrap_or(0)
     }
 
     /// `Stop` continuations inside the window right now (tests).
@@ -229,27 +316,34 @@ impl CommandHooks {
     }
 
     /// Runs one `Stop` cycle synchronously: every configured Stop hook in order — the
-    /// project layer first, then the user's (ADR 0045 slice B), each command string once.
-    /// Every exit 2 collects its stderr; after the loop a single continuation opens with
-    /// the reasons joined in one message, counted as one wake. Past the continuation cap
-    /// the verdict degrades to a marked `inject` (no wake) with the wake-budget notice, so
-    /// it waits for the next user-woken turn instead of being dropped silently. Only
-    /// [`RunStatus::Completed`] runs the hooks: a cancelled, failed, or otherwise
-    /// non-completed turn runs nothing (an exit-2 hook after a user interrupt would
-    /// otherwise open a turn the user just asked to end).
-    /// [`Hooks::on_turn_end`] spawns this with the outcome's status; tests drive it
-    /// directly so there is no timing involved.
-    pub async fn run_stop_once(&self, status: &RunStatus) {
-        if !matches!(status, RunStatus::Completed) {
+    /// project layer first, then the user's (ADR 0045 slice B), each command string once —
+    /// plus the built-in intent-stop validator (backlog `turn-end-continuation.md` §B),
+    /// which runs even with no `Stop` hook configured. Every exit 2 collects its stderr;
+    /// after the loop a single continuation opens with the reasons joined in one message,
+    /// counted as one wake. Past the continuation cap the verdict degrades to a marked
+    /// `inject` (no wake) with the wake-budget notice, so it waits for the next
+    /// user-woken turn instead of being dropped silently. Only [`RunStatus::Completed`]
+    /// runs the hooks: a cancelled, failed, or otherwise non-completed turn runs nothing
+    /// (an exit-2 hook after a user interrupt would otherwise open a turn the user just
+    /// asked to end).
+    /// [`Hooks::on_turn_end`] spawns this with the outcome; tests drive it directly so
+    /// there is no timing involved.
+    pub async fn run_stop_once(&self, outcome: &RunOutcome) {
+        if !matches!(outcome.status, RunStatus::Completed) {
             return;
         }
-        if self.stop.is_empty() {
-            return;
-        }
+        // Claude's field name: the last assistant message's text parts joined, so a user
+        // script can run its own detection (backlog §B.6). Empty when the turn has none.
+        let last_message = outcome
+            .final_message
+            .as_ref()
+            .map(Message::text)
+            .unwrap_or_default();
         let stdin = serde_json::json!({
             "hook_event_name": "Stop",
             "cwd": self.workspace.to_string_lossy(),
             "session_id": self.session_id,
+            "last_assistant_message": last_message,
         });
         let mut reasons = Vec::new();
         // One run per command string, like the tool-call events (ADR 0045 slice B).
@@ -288,23 +382,46 @@ impl CommandHooks {
                 }
             }
         }
-        if reasons.is_empty() {
+        // The built-in validator joins the same single continuation (at most one per turn):
+        // its fixed text rides after the hook reasons, and its presence marks the message
+        // with the `intent-stop` origin.
+        let hook_drove = !reasons.is_empty();
+        let validator_drove = self.validator_verdict(outcome).await;
+        if validator_drove {
+            reasons.push(intent_stop::INTENT_STOP_TEXT.to_owned());
+        }
+        if !hook_drove && !validator_drove {
             return;
         }
-        let text = format!("Stop hook requested another turn:\n{}", reasons.join("\n"));
+        let text = if hook_drove {
+            format!("Stop hook requested another turn:\n{}", reasons.join("\n"))
+        } else {
+            reasons.join("\n")
+        };
+        let mut message = Message::user(text);
+        if validator_drove {
+            match &mut message {
+                Message::User { meta, .. }
+                | Message::Assistant { meta, .. }
+                | Message::Tool { meta, .. } => {
+                    meta.origin = Some(intent_stop::intent_stop_origin());
+                }
+            }
+        }
         // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): past the gate
         // the hook still runs, but an exit-2 verdict degrades to a marked
         // `inject` (no wake) with the wake-budget notice, the same degrade
         // as the background-job notifier (ADR 0045 §2) — a skipped run
         // would be silent, a degraded verdict waits visibly.
         // One continuation for every exit-2 verdict in the cycle, with the
-        // reasons joined above: one wake, one degrade count at most.
+        // reasons joined above: one wake, one degrade count at most. The
+        // validator rides this same point: its continuation counts one wake.
         if self.gate.wake_allowed() {
             // The woken turn absorbs the waiting injects, so a wake also
             // ends the degrade burst.
             if self
                 .inbox
-                .followup(Message::user(text), InputSource::System)
+                .followup(message, InputSource::System)
                 .await
                 .is_ok()
             {
@@ -313,13 +430,74 @@ impl CommandHooks {
             }
         } else if self
             .inbox
-            .inject_degraded(Message::user(text), InputSource::System)
+            .inject_degraded(message, InputSource::System)
             .await
             .is_ok()
         {
             let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
             (self.wake)(&crate::job_notify::wake_budget_line(degraded));
         }
+    }
+
+    /// The built-in validator's verdict for this turn end: `true` when its fixed text
+    /// joins the continuation below. A hit with fewer than [`MAX_INTENT_STOP_CONSECUTIVE`]
+    /// consecutive predecessors counts the hit and returns `true`. Anything else — the
+    /// switch off, `/loop` or a goal owning the turn end, a background job running, a
+    /// rule miss — clears the count and returns `false`.
+    ///
+    /// The third consecutive hit takes THE TWO-IN-A-ROW CAP instead: no third
+    /// continuation opens. The verdict degrades to a marked `inject` (journal-visible,
+    /// no wake) and the host reports the stop — the TUI shows one notice line, herdr
+    /// reports `blocked` with the `intent stop` label until the next turn starts, and a
+    /// user message clears it all. The count stays saturated, so further consecutive
+    /// hits re-report (rewriting the same TUI line) instead of opening turns.
+    async fn validator_verdict(&self, outcome: &RunOutcome) -> bool {
+        let hit = self.intent_stop
+            && !self.loop_active.load(Ordering::SeqCst)
+            && !self.goal_active()
+            && self.jobs_running() == 0
+            && outcome
+                .final_message
+                .as_ref()
+                .is_some_and(intent_stop::matches_rule);
+        if !hit {
+            self.consecutive.store(0, Ordering::SeqCst);
+            return false;
+        }
+        if self.consecutive.load(Ordering::SeqCst) >= MAX_INTENT_STOP_CONSECUTIVE {
+            let message = intent_stop::intent_stop_message();
+            if self
+                .inbox
+                .inject_degraded(message, InputSource::System)
+                .await
+                .is_ok()
+            {
+                self.degraded.fetch_add(1, Ordering::SeqCst);
+            }
+            (self.intent_stop_warn)(&intent_stop::intent_stop_cap_line());
+            return false;
+        }
+        self.consecutive.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    /// Whether an `Active` or `Paused` goal owns the turn end (it re-posts itself, so
+    /// the validator stays off). A missing goal reads as none.
+    fn goal_active(&self) -> bool {
+        self.goal
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .is_some_and(|goal| {
+                matches!(
+                    goal.lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .as_ref()
+                        .map(|state| state.status),
+                    Some(radian_session::GoalStatus::Active)
+                        | Some(radian_session::GoalStatus::Paused)
+                )
+            })
     }
 
     /// Runs one hook command with `stdin_json` on its stdin, inside the session sandbox
@@ -763,13 +941,16 @@ impl Hooks for CommandHooks {
         Ok(())
     }
 
-    /// A completed turn runs the Stop hooks once, after `RunFinished`; any other terminal
-    /// status (cancelled, failed, budget, incomplete, refused, poisoned) runs nothing.
-    /// A hook asking for more (exit 2) opens another turn through the inbox. The work
-    /// spawns onto the session runtime so this sync callback never blocks a turn.
+    /// A completed turn runs the Stop hooks once, after `RunFinished`, plus the built-in
+    /// intent-stop validator (which runs even with no `Stop` hook configured); any other
+    /// terminal status (cancelled, failed, budget, incomplete, refused, poisoned) runs
+    /// nothing. A hook asking for more (exit 2) opens another turn through the inbox. The
+    /// work spawns onto the session runtime so this sync callback never blocks a turn.
     fn on_turn_end(&self, _cx: &HookContext, outcome: &RunOutcome) {
-        if self.stop.is_empty() || !matches!(outcome.status, RunStatus::Completed) {
-            // No Stop run will come for this turn: drop the turn-start count.
+        if !matches!(outcome.status, RunStatus::Completed) {
+            // A non-completed turn breaks the validator's chain (like a rule miss), and no
+            // Stop run will come for this turn: drop the turn-start count.
+            self.consecutive.store(0, Ordering::SeqCst);
             // Saturating: sessions that never called `note_turn_started` (only the
             // hosts that read `pending_stops` wire it) must not wrap the counter.
             self.pending
@@ -782,9 +963,9 @@ impl Hooks for CommandHooks {
         }
         // The turn-start count covers the spawned run; it drops when the run ends.
         let this = self.clone();
-        let status = outcome.status.clone();
+        let outcome = outcome.clone();
         self.runtime.spawn(async move {
-            this.run_stop_once(&status).await;
+            this.run_stop_once(&outcome).await;
             // Paired with `note_turn_started`; saturating for the same reason.
             this.pending
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -841,6 +1022,7 @@ mod tests {
         hooks: CommandHooks,
         warnings: Arc<Mutex<Vec<String>>>,
         wake_notices: Arc<Mutex<Vec<String>>>,
+        intent_notices: Arc<Mutex<Vec<String>>>,
         inbox: Arc<Inbox>,
     }
 
@@ -895,6 +1077,7 @@ mod tests {
     ) -> Fixture {
         let (warn, warnings) = warnings_collector();
         let (wake, wake_notices) = warnings_collector();
+        let (intent, intent_notices) = warnings_collector();
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
             user,
@@ -906,12 +1089,14 @@ mod tests {
             &tokio::runtime::Handle::current(),
             warn,
             wake,
+            intent,
         );
         Fixture {
             _root: root,
             hooks,
             warnings,
             wake_notices,
+            intent_notices,
             inbox,
         }
     }
@@ -940,6 +1125,27 @@ mod tests {
             cancellation: CancellationToken::new(),
             model_calls: 0,
         }
+    }
+
+    /// A completed turn whose last assistant message is `text` (or none).
+    fn completed_outcome(status: RunStatus, text: Option<&str>) -> RunOutcome {
+        RunOutcome {
+            status,
+            final_message: text.map(Message::assistant),
+            unapplied_steering: Vec::new(),
+            model_calls: 0,
+        }
+    }
+
+    /// A completed turn with no last assistant message: the validator stays off, so
+    /// hook-only tests keep their old shape.
+    fn completed_quiet() -> RunOutcome {
+        completed_outcome(RunStatus::Completed, None)
+    }
+
+    /// A completed turn ending with `text`.
+    fn completed_text(text: &str) -> RunOutcome {
+        completed_outcome(RunStatus::Completed, Some(text))
     }
 
     fn warned(warnings: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
@@ -1181,6 +1387,7 @@ mod tests {
         let config = pre_config("shell", &format!("cat > {}", stdin_path.display()));
         let (warn, _) = warnings_collector();
         let (wake, _) = warnings_collector();
+        let (intent, _) = warnings_collector();
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
             &config,
@@ -1192,6 +1399,7 @@ mod tests {
             &tokio::runtime::Handle::current(),
             warn,
             wake,
+            intent,
         );
         hooks
             .before_tool_call(&cx(), &call("shell", serde_json::json!({"command": "hi"})))
@@ -1277,7 +1485,7 @@ mod tests {
         };
         let fixture = plain(&config);
         for i in 0..6 {
-            fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+            fixture.hooks.run_stop_once(&completed_quiet()).await;
             let entry = fixture
                 .inbox
                 .claim_next_turn()
@@ -1309,7 +1517,7 @@ mod tests {
         };
         let fixture = plain(&config);
         for i in 0..MAX_WAKES_PER_WINDOW {
-            fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+            fixture.hooks.run_stop_once(&completed_quiet()).await;
             assert!(
                 fixture.inbox.claim_next_turn().await.is_some(),
                 "continuation {i}: still inside the budget"
@@ -1319,7 +1527,7 @@ mod tests {
         assert_eq!(fixture.hooks.stop_wakes(), MAX_WAKES_PER_WINDOW);
         // The 11th run still runs the hook; its exit-2 verdict degrades to a marked
         // inject (no wake) with the wake-budget notice.
-        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
         assert!(
             fixture.inbox.claim_next_turn().await.is_none(),
             "the gated continuation must not open a turn"
@@ -1349,7 +1557,7 @@ mod tests {
         // The window passing alone reopens the gate: no user message needed; the later
         // wake ends the burst.
         tokio::time::advance(WAKE_WINDOW + std::time::Duration::from_secs(1)).await;
-        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
         assert_eq!(fixture.hooks.stop_wakes(), 1);
         assert_eq!(
             fixture.hooks.degraded(),
@@ -1375,13 +1583,13 @@ mod tests {
         };
         let fixture = plain(&config);
         for _ in 0..3 {
-            fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+            fixture.hooks.run_stop_once(&completed_quiet()).await;
         }
         assert_eq!(fixture.hooks.stop_wakes(), 3);
         // A user message restarts the budget.
         fixture.hooks.reset_wakes();
         assert_eq!(fixture.hooks.degraded(), 0);
-        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
         assert_eq!(fixture.hooks.stop_wakes(), 1);
     }
 
@@ -1399,7 +1607,10 @@ mod tests {
         let fixture = plain(&config);
         fixture
             .hooks
-            .run_stop_once(&RunStatus::Cancelled(CancelReason::Requested))
+            .run_stop_once(&completed_outcome(
+                RunStatus::Cancelled(CancelReason::Requested),
+                Some("Now the docs-only ADR updates."),
+            ))
             .await;
         assert_eq!(fixture.hooks.stop_wakes(), 0);
         assert!(
@@ -1419,7 +1630,13 @@ mod tests {
             ..HooksConfig::default()
         };
         let fixture = plain(&config);
-        fixture.hooks.run_stop_once(&RunStatus::Failed).await;
+        fixture
+            .hooks
+            .run_stop_once(&completed_outcome(
+                RunStatus::Failed,
+                Some("Now the docs-only ADR updates."),
+            ))
+            .await;
         assert_eq!(fixture.hooks.stop_wakes(), 0);
         assert!(
             fixture.inbox.claim_next_turn().await.is_none(),
@@ -1438,7 +1655,7 @@ mod tests {
             ..HooksConfig::default()
         };
         let fixture = plain(&config);
-        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
         assert_eq!(fixture.hooks.stop_wakes(), 0);
         assert!(
             fixture.inbox.claim_next_turn().await.is_none(),
@@ -1467,6 +1684,7 @@ mod tests {
         let inbox = Inbox::durable(64, Arc::clone(&journal));
         let (warn, _) = warnings_collector();
         let (wake, wake_notices) = warnings_collector();
+        let (intent, _) = warnings_collector();
         let config = HooksConfig {
             stop: vec![HookMatcher {
                 matcher: None,
@@ -1484,11 +1702,12 @@ mod tests {
             &tokio::runtime::Handle::current(),
             warn,
             wake,
+            intent,
         );
         for _ in 0..MAX_WAKES_PER_WINDOW {
-            hooks.run_stop_once(&RunStatus::Completed).await;
+            hooks.run_stop_once(&completed_quiet()).await;
         }
-        hooks.run_stop_once(&RunStatus::Completed).await;
+        hooks.run_stop_once(&completed_quiet()).await;
         assert_eq!(hooks.stop_wakes(), MAX_WAKES_PER_WINDOW);
         assert_eq!(hooks.degraded(), 1);
 
@@ -1629,7 +1848,7 @@ mod tests {
         let project = stop_config("echo project-reason >&2; exit 2");
         let user = stop_config("echo user-reason >&2; exit 2");
         let fixture = layered(&user, &project);
-        fixture.hooks.run_stop_once(&RunStatus::Completed).await;
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
         let entry = fixture
             .inbox
             .claim_next_turn()
@@ -1665,6 +1884,7 @@ mod tests {
         let user = stop_config(&script);
         let (warn, _) = warnings_collector();
         let (wake, _) = warnings_collector();
+        let (intent, _) = warnings_collector();
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
             &user,
@@ -1676,8 +1896,9 @@ mod tests {
             &tokio::runtime::Handle::current(),
             warn,
             wake,
+            intent,
         );
-        hooks.run_stop_once(&RunStatus::Completed).await;
+        hooks.run_stop_once(&completed_quiet()).await;
         let entry = inbox
             .claim_next_turn()
             .await
@@ -1744,5 +1965,360 @@ mod tests {
             project_at < user_at,
             "the project feedback rides first: {text}"
         );
+    }
+
+    /// The built-in validator fires with no hook configured at all: one `System`
+    /// followup carrying the fixed text and the `intent-stop` origin, counted as one
+    /// wake. Keeping the old early return (no Stop hook means no run) leaves the inbox
+    /// empty and fails this.
+    #[tokio::test]
+    async fn intent_stop_fires_with_no_hook_configured() {
+        let fixture = plain(&HooksConfig::default());
+        fixture
+            .hooks
+            .run_stop_once(&completed_text("Now the docs-only ADR updates."))
+            .await;
+        let entry = fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("the validator opens a turn");
+        assert_eq!(entry.source, InputSource::System);
+        assert_eq!(entry.message.text(), intent_stop::INTENT_STOP_TEXT);
+        assert!(
+            intent_stop::is_intent_stop_continuation(&entry.message),
+            "validator-driven followups carry the origin"
+        );
+        assert_eq!(fixture.hooks.stop_wakes(), 1, "one wake");
+        assert_eq!(fixture.hooks.consecutive_hits(), 1);
+    }
+
+    /// Ordinary ends hold the validator: a done report, a question, a long report whose
+    /// last sentence matches, and a hit text with the switch off. Removing the rule
+    /// (always firing) opens a turn for each and fails this.
+    #[tokio::test]
+    async fn ordinary_text_does_not_fire() {
+        for text in [
+            "Done.",
+            "Is it done?",
+            &format!("{}\n\nNext: the reviewer decides.", "x".repeat(300)),
+        ] {
+            let fixture = plain(&HooksConfig::default());
+            fixture.hooks.run_stop_once(&completed_text(text)).await;
+            assert!(
+                fixture.inbox.claim_next_turn().await.is_none(),
+                "no continuation for {text:?}"
+            );
+            assert_eq!(fixture.hooks.stop_wakes(), 0);
+            assert_eq!(fixture.hooks.consecutive_hits(), 0);
+        }
+        // The kill switch: a hit text with `[hooks] intent_stop = false` holds too.
+        let user = HooksConfig {
+            intent_stop: Some(false),
+            ..HooksConfig::default()
+        };
+        let fixture = layered(&user, &HooksConfig::default());
+        fixture
+            .hooks
+            .run_stop_once(&completed_text("Now the docs-only ADR updates."))
+            .await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "the switch turns the validator off"
+        );
+    }
+
+    /// A waiting text holds while a background job runs (the model may be legitimately
+    /// waiting on it), and fires once the registry is gone.
+    #[tokio::test]
+    async fn waiting_with_a_running_job_does_not_fire() {
+        let fixture = plain(&HooksConfig::default());
+        let jobs = Arc::new(radian_coding::Jobs::new(fixture._root.dir.join("jobs")));
+        let sandbox = radian_sandbox::Sandbox::new(
+            radian_sandbox::SandboxMode::WorkspaceWrite,
+            &fixture._root.ws,
+        )
+        .expect("the workspace sandbox probes clean on this machine");
+        let _started = jobs
+            .start(&sandbox, &fixture._root.ws, "sleep 60")
+            .expect("the job starts");
+        fixture.hooks.set_jobs(Some(&jobs));
+        assert_eq!(fixture.hooks.jobs_running(), 1);
+        fixture
+            .hooks
+            .run_stop_once(&completed_text("Waiting for the completion notice."))
+            .await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "a running job suppresses the validator"
+        );
+        assert_eq!(fixture.hooks.stop_wakes(), 0);
+        assert_eq!(fixture.hooks.consecutive_hits(), 0);
+        jobs.kill_all();
+        drop(jobs);
+        fixture
+            .hooks
+            .run_stop_once(&completed_text("Waiting for the completion notice."))
+            .await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "with no job the same text fires"
+        );
+    }
+
+    /// A hook exit-2 and a validator hit join one continuation: one `followup`, one
+    /// wake, the hook reasons first and the fixed text last, marked with the origin.
+    /// Splitting the validator into its own followup opens two turns and fails this.
+    #[tokio::test]
+    async fn hook_and_validator_verdicts_join_one_continuation() {
+        let config = stop_config("echo hook-reason >&2; exit 2");
+        let fixture = plain(&config);
+        fixture
+            .hooks
+            .run_stop_once(&completed_text("Now the docs-only ADR updates."))
+            .await;
+        let entry = fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("the one continuation opens a turn");
+        assert_eq!(entry.source, InputSource::System);
+        let text = entry.message.text();
+        assert!(
+            text.contains("hook-reason"),
+            "the hook reason rides: {text}"
+        );
+        assert!(
+            text.contains(intent_stop::INTENT_STOP_TEXT),
+            "the validator text joins it: {text}"
+        );
+        assert!(
+            intent_stop::is_intent_stop_continuation(&entry.message),
+            "the joint message carries the origin"
+        );
+        assert_eq!(fixture.hooks.stop_wakes(), 1, "one wake, not two");
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "at most one continuation per turn"
+        );
+        assert_eq!(fixture.hooks.consecutive_hits(), 1);
+    }
+
+    /// Two continuations in a row, then the third consecutive hit reports `blocked`
+    /// instead of continuing: no turn opens, one cap line fires, the verdict injects
+    /// degraded (journal-visible, no wake), and the count stays saturated. A user
+    /// message (`reset_wakes`) clears the chain. Dropping the cap opens the third turn
+    /// and fails this.
+    #[tokio::test]
+    async fn third_consecutive_hit_reports_blocked_instead_of_continuing() {
+        let fixture = plain(&HooksConfig::default());
+        let hit = completed_text("Now the docs-only ADR updates.");
+        for round in 0..2 {
+            fixture.hooks.run_stop_once(&hit).await;
+            assert!(
+                fixture.inbox.claim_next_turn().await.is_some(),
+                "round {round}: the continuation opens a turn"
+            );
+        }
+        assert_eq!(fixture.hooks.consecutive_hits(), 2);
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "the third hit opens no turn"
+        );
+        assert_eq!(
+            warned(&fixture.intent_notices),
+            vec![intent_stop::intent_stop_cap_line()],
+            "exactly one cap notice"
+        );
+        let step = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("the cap verdict injects degraded");
+        assert!(
+            intent_stop::is_intent_stop_continuation(&step.message),
+            "the cap inject is journal-visible"
+        );
+        assert_eq!(fixture.hooks.degraded(), 1);
+        assert_eq!(
+            fixture.hooks.consecutive_hits(),
+            2,
+            "saturated, not cleared"
+        );
+        fixture.hooks.reset_wakes();
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "a user message clears the chain"
+        );
+    }
+
+    /// A rule miss between two hits breaks the chain: the hit after the miss counts
+    /// from zero, so the run below caps only at its own third consecutive hit.
+    #[tokio::test]
+    async fn a_rule_miss_breaks_the_chain() {
+        let fixture = plain(&HooksConfig::default());
+        let hit = completed_text("Now the docs-only ADR updates.");
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(fixture.inbox.claim_next_turn().await.is_some());
+        fixture.hooks.run_stop_once(&completed_text("Done.")).await;
+        assert!(fixture.inbox.claim_next_turn().await.is_none());
+        assert_eq!(fixture.hooks.consecutive_hits(), 0);
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(fixture.inbox.claim_next_turn().await.is_some());
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(fixture.inbox.claim_next_turn().await.is_some());
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "the third consecutive hit after the miss caps"
+        );
+        assert_eq!(warned(&fixture.intent_notices).len(), 1);
+    }
+
+    /// While `/loop` is armed the turn end belongs to the loop: a hit text opens
+    /// nothing and counts nothing; disarmed, the same hit fires. Removing the loop
+    /// check fires the armed case and fails this.
+    #[tokio::test]
+    async fn intent_stop_stays_off_while_loop_is_armed() {
+        let fixture = plain(&HooksConfig::default());
+        let hit = completed_text("Now the docs-only ADR updates.");
+        fixture.hooks.set_loop_active(true);
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "an armed loop owns the turn end"
+        );
+        assert_eq!(fixture.hooks.consecutive_hits(), 0);
+        fixture.hooks.set_loop_active(false);
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "disarmed, the same hit fires"
+        );
+    }
+
+    /// An `Active` or `Paused` goal owns the turn end (it re-posts itself): a hit text
+    /// opens nothing; a `Done` goal leaves the validator alone. Removing the goal
+    /// check fires the active case and fails this.
+    #[tokio::test]
+    async fn intent_stop_stays_off_while_a_goal_owns_the_turn_end() {
+        use radian_session::{GoalState, GoalStatus};
+
+        let fixture = plain(&HooksConfig::default());
+        let hit = completed_text("Now the docs-only ADR updates.");
+        let share: crate::goal::SharedGoal = Arc::new(std::sync::Mutex::new(Some(
+            GoalState::fresh("o".into(), GoalState::default_budget()),
+        )));
+        fixture.hooks.set_goal(Arc::clone(&share));
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "an active goal owns the turn end"
+        );
+        assert_eq!(fixture.hooks.consecutive_hits(), 0);
+        share.lock().unwrap().as_mut().expect("a goal").status = GoalStatus::Paused;
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "a paused goal still owns the turn end"
+        );
+        share.lock().unwrap().as_mut().expect("a goal").status = GoalStatus::Done;
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "a done goal leaves the validator alone"
+        );
+    }
+
+    /// A non-completed turn breaks the validator's chain through `on_turn_end` (like a
+    /// rule miss), and no Stop run comes for it: the pending count drops synchronously.
+    #[tokio::test]
+    async fn a_cancelled_turn_breaks_the_chain_with_no_stop_run() {
+        let fixture = plain(&HooksConfig::default());
+        let hit = completed_text("Now the docs-only ADR updates.");
+        fixture.hooks.note_turn_started();
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(fixture.inbox.claim_next_turn().await.is_some());
+        assert_eq!(fixture.hooks.consecutive_hits(), 1);
+        fixture.hooks.on_turn_end(
+            &cx(),
+            &completed_outcome(
+                RunStatus::Cancelled(CancelReason::Requested),
+                Some("Now x."),
+            ),
+        );
+        assert_eq!(fixture.hooks.consecutive_hits(), 0);
+        assert_eq!(fixture.hooks.pending_stops(), 0);
+    }
+
+    /// The validator's continuation counts against the wake gate: with the window full
+    /// of hook-driven wakes, a hit degrades to a marked inject with the wake-budget
+    /// notice instead of opening a turn. Not counting the gate opens the turn and fails
+    /// this.
+    #[tokio::test]
+    async fn the_wake_gate_counts_validator_continuations() {
+        tokio::time::pause();
+        let config = stop_config("echo keep-going >&2; exit 2");
+        let fixture = plain(&config);
+        for _ in 0..MAX_WAKES_PER_WINDOW {
+            fixture.hooks.run_stop_once(&completed_quiet()).await;
+            assert!(fixture.inbox.claim_next_turn().await.is_some());
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        }
+        assert_eq!(fixture.hooks.stop_wakes(), MAX_WAKES_PER_WINDOW);
+        fixture
+            .hooks
+            .run_stop_once(&completed_text("Now the docs-only ADR updates."))
+            .await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "past the gate the validator degrades like a hook"
+        );
+        let step = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("the gated verdict injects");
+        assert!(step.message.text().contains(intent_stop::INTENT_STOP_TEXT));
+        assert!(
+            intent_stop::is_intent_stop_continuation(&step.message),
+            "the degraded message keeps the origin"
+        );
+        assert_eq!(fixture.hooks.degraded(), 1);
+        assert_eq!(
+            warned(&fixture.wake_notices).len(),
+            1,
+            "the gate fires its own notice, not the cap line"
+        );
+        assert!(warned(&fixture.intent_notices).is_empty());
+        assert_eq!(fixture.hooks.consecutive_hits(), 1, "the hit still counts");
+    }
+
+    /// `Stop` stdin carries `last_assistant_message` (Claude's field name): the joined
+    /// text parts, or empty when the turn has none.
+    #[tokio::test]
+    async fn stop_stdin_carries_last_assistant_message() {
+        let root = TempRoot::new("stop-stdin");
+        let stdin_path = root.dir.join("stdin.json");
+        let config = stop_config(&format!("cat > {}", stdin_path.display()));
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        fixture
+            .hooks
+            .run_stop_once(&completed_text("Now the docs-only ADR updates."))
+            .await;
+        let stdin: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&stdin_path).unwrap()).unwrap();
+        assert_eq!(stdin["hook_event_name"], "Stop");
+        assert_eq!(
+            stdin["last_assistant_message"],
+            "Now the docs-only ADR updates."
+        );
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
+        let stdin: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&stdin_path).unwrap()).unwrap();
+        assert_eq!(stdin["last_assistant_message"], "");
     }
 }

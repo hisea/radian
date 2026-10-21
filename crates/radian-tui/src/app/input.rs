@@ -126,6 +126,10 @@ pub enum Input {
     /// marks the session as notice-lost for herdr (`job notice lost`) until the next turn
     /// starts.
     JobNoticeLost(String),
+    /// The intent-stop validator capped (backlog `turn-end-continuation.md` §B.3): the
+    /// cap line. `update` shows it as the burst's line and marks the session for
+    /// herdr's `intent stop` label until the next turn starts.
+    IntentStopBlocked(String),
     /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
     /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
     /// turn state when the command was submitted.

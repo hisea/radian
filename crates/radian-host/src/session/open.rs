@@ -50,6 +50,7 @@ pub async fn open_session(
         hooks_warning,
         wake_warning,
         notice_lost_warning,
+        intent_stop_warning,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -93,7 +94,6 @@ pub async fn open_session(
         config_queue,
         budget_for,
         price_for,
-        shell_auto_background,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
@@ -270,7 +270,6 @@ pub async fn open_session(
         coding_root.as_deref(),
         sandbox_slot.clone(),
         &jobs_dir,
-        shell_auto_background,
         harden_git,
     )?;
     // ADR 0037 §6: a resumed session clears its jobs directory. The registry is built empty
@@ -315,6 +314,7 @@ pub async fn open_session(
         &runtime,
         hooks_warning,
         Arc::clone(&wake_warning),
+        intent_stop_warning,
     ));
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
@@ -557,6 +557,13 @@ pub async fn open_session(
         notifier.spawn(&runtime);
         notifier
     });
+
+    // Backlog `turn-end-continuation.md` §B: the built-in validator's context. The jobs
+    // registry answers "no background job running", the shared goal suppresses the
+    // validator while a goal owns the turn end, and the TUI loop syncs `/loop` the same
+    // way (exec has no loop, so nothing sets it there).
+    command_hooks.set_jobs(jobs.as_ref());
+    command_hooks.set_goal(Arc::clone(&goal_share));
 
     // ADR 0037 decision 6: a start with no settle after a crash is reported once as unknown
     // and never re-run. Injected (no wake), so the model sees it on the next turn.

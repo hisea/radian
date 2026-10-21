@@ -58,6 +58,11 @@ pub struct HooksConfig {
     pub pre_tool_use: Vec<HookMatcher>,
     pub post_tool_use: Vec<HookMatcher>,
     pub stop: Vec<HookMatcher>,
+    /// `[hooks] intent_stop`: the built-in intent-stop validator on the `Stop` path
+    /// (backlog `turn-end-continuation.md` §B). `None` means the default, **on**; the
+    /// host reads `unwrap_or(true)`. `false` turns the validator off (user `Stop`
+    /// hooks still run).
+    pub intent_stop: Option<bool>,
 }
 
 impl HooksConfig {
@@ -90,6 +95,16 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
         return Ok(());
     };
     for (event, entries) in table {
+        // `[hooks] intent_stop` (backlog `turn-end-continuation.md` §B.6): the
+        // built-in validator's kill switch. A boolean is carried; anything else is
+        // skipped and named (the `tui.*` rule: a bad limit never refuses startup).
+        if event.as_str() == "intent_stop" {
+            match entries {
+                Value::Boolean(on) => config.hooks.intent_stop = Some(*on),
+                _ => config.skipped.push("hooks.intent_stop".into()),
+            }
+            continue;
+        }
         let list = match event.as_str() {
             "PreToolUse" => &mut config.hooks.pre_tool_use,
             "PostToolUse" => &mut config.hooks.post_tool_use,
@@ -214,6 +229,25 @@ mod tests {
         );
         assert_eq!(config.hooks.stop.len(), 1);
         assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+    }
+
+    /// `[hooks] intent_stop` (backlog `turn-end-continuation.md` §B.6): a boolean is
+    /// carried (`None` when absent, the default on); anything else is skipped, never
+    /// refused.
+    #[test]
+    fn the_intent_stop_kill_switch_is_carried_and_a_bad_value_is_skipped() {
+        let config = parse_str("schema_version = 1\n[hooks]\nintent_stop = false\n");
+        assert_eq!(config.hooks.intent_stop, Some(false));
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+        let config = parse_str("schema_version = 1\n");
+        assert_eq!(config.hooks.intent_stop, None);
+        let config = parse_str("schema_version = 1\n[hooks]\nintent_stop = \"off\"\n");
+        assert_eq!(config.hooks.intent_stop, None);
+        assert!(
+            config.skipped.contains(&"hooks.intent_stop".to_string()),
+            "{:?}",
+            config.skipped
+        );
     }
 
     /// Outside the subset never refuses: an unknown event, a non-command type, and the

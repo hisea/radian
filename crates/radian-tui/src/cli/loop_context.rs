@@ -27,6 +27,11 @@ pub(super) struct LoopContext<'a> {
     /// The UI's one handle on the session (ADR 0023 U5): commands go through it, and it
     /// re-validates the capability the UI declared.
     pub(super) session: &'a Arc<dyn radian_host::SessionFacade>,
+    /// The session's Stop hooks (backlog `turn-end-continuation.md` §B.5): the loop
+    /// syncs `/loop` into them after every update, so the host's intent-stop validator
+    /// stays off while `/loop` owns the turn end. `None` has no session (never set in
+    /// the session phase).
+    pub(super) command_hooks: Option<Arc<radian_host::CommandHooks>>,
     pub(super) memory: &'a Option<MemoryService>,
     pub(super) host: &'a SessionHost,
     pub(super) tx: &'a Sender<UiEvent>,
@@ -174,6 +179,11 @@ impl LoopContext<'_> {
         // app (the footer's `reasoning` item is the same value).
         if let Some(level) = app.session.thinking_level.clone() {
             self.current_thinking = level;
+        }
+        // `/loop` owns the turn end while armed (or paused): the host's intent-stop
+        // validator must not fire then. Sync after every update — one atomic store.
+        if let Some(hooks) = &self.command_hooks {
+            hooks.set_loop_active(app.loop_active());
         }
         effects.extend(result.effects);
         result.dirty
@@ -974,5 +984,243 @@ impl radian_host::btw::SideSink for SideSink {
 
     fn done(&self, outcome: radian_host::btw::SideOutcome) {
         let _ = self.tx.send(UiEvent::Command(AppInput::SideDone(outcome)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// A facade that is never called: the loop-ownership sync reads the app and the
+    /// hooks handle, never the session. Every method panics, so a future wiring that
+    /// touches the facade fails loudly here instead of silently passing.
+    struct NeverFacade;
+
+    impl radian_host::SessionFacade for NeverFacade {
+        fn id(&self) -> &radian_host::SessionId {
+            todo!()
+        }
+        fn capabilities(&self) -> &[radian_host::SessionCapability] {
+            todo!()
+        }
+        fn projection(&self) -> radian_host::ProjectionRead<'_> {
+            todo!()
+        }
+        fn command(
+            &self,
+            _command: radian_host::SessionCommand,
+        ) -> Result<(), radian_host::CommandRefused> {
+            todo!()
+        }
+        fn pending(&self) -> &radian_host::SessionQueue {
+            todo!()
+        }
+        fn answer(
+            &self,
+            _request_id: u64,
+            _response: radian_host::pending::PendingResponse,
+        ) -> Result<(), radian_host::CommandRefused> {
+            todo!()
+        }
+        fn compact(
+            &self,
+            _instructions: Option<String>,
+            _on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+        ) {
+            todo!()
+        }
+        fn compact_with_budget(
+            &self,
+            _instructions: Option<String>,
+            _budget_tokens: Option<u64>,
+            _on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+        ) {
+            todo!()
+        }
+        fn queue_config(&self, _change: serde_json::Value) {
+            todo!()
+        }
+        fn model_route(&self) -> Option<(String, String)> {
+            todo!()
+        }
+        fn budget_for_route(&self, _provider: &str, _model: &str) -> Option<u64> {
+            todo!()
+        }
+        fn set_approval(
+            &self,
+            _policy: radian_permissions::ApprovalPolicy,
+        ) -> Result<(), radian_host::CommandRefused> {
+            todo!()
+        }
+        fn set_access(
+            &self,
+            _tier: radian_permissions::Preset,
+        ) -> Result<(), radian_host::CommandRefused> {
+            todo!()
+        }
+        fn skills(&self) -> &[radian_host::skills::Skill] {
+            todo!()
+        }
+        fn expand_skill(&self, _name: &str, _args: &str) -> Result<String, String> {
+            todo!()
+        }
+        fn trust(&self) -> radian_host::trust::Setup {
+            todo!()
+        }
+        fn record_trust(
+            &self,
+            _choice: radian_host::trust::Choice,
+        ) -> Result<radian_host::trust::Setup, String> {
+            todo!()
+        }
+        fn record_user_bash(&self, _record: &radian_host::UserBashRecord) {
+            todo!()
+        }
+        fn jobs(&self) -> Vec<radian_coding::JobSummary> {
+            todo!()
+        }
+        fn kill_job(&self, _id: &str) -> Result<(), String> {
+            todo!()
+        }
+        fn kill_all_jobs(&self) {
+            todo!()
+        }
+        fn tool_specs(&self) -> Vec<agent_core::ToolSpec> {
+            todo!()
+        }
+        fn mcp_servers(&self) -> Vec<agent_extensions::McpServerConfig> {
+            todo!()
+        }
+        fn mcp_config_path(&self) -> Option<String> {
+            todo!()
+        }
+        fn hooks_config(&self) -> radian_host::config::HooksConfig {
+            todo!()
+        }
+        fn project_hooks_config(&self) -> radian_host::config::HooksConfig {
+            todo!()
+        }
+        fn job_tail(&self, _id: &str, _max: usize) -> Option<(radian_coding::JobState, String)> {
+            todo!()
+        }
+        fn context_report(&self) -> Result<radian_host::context_estimate::ContextReport, String> {
+            todo!()
+        }
+        fn next_request_shape(&self) -> Result<agent_core::ModelRequest, String> {
+            todo!()
+        }
+        fn start_side_question(
+            &self,
+            _question: String,
+            _sink: Arc<dyn radian_host::btw::SideSink>,
+        ) -> Result<radian_host::btw::SideCancel, String> {
+            todo!()
+        }
+    }
+
+    fn key_enter() -> crate::events::InputEvent {
+        crate::events::InputEvent::Key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ))
+    }
+
+    /// The loop syncs its armed state into the session hooks on every handled event:
+    /// `/loop go` arms (so the host suppresses the validator on the loop-owned turn
+    /// end), a bare `/loop` stops it again. Dropping the sync leaves the flag down
+    /// while the mode is on and fails the armed assertion.
+    #[test]
+    fn the_loop_syncs_its_armed_state_into_the_session_hooks() {
+        let dir = std::env::temp_dir().join(format!("radian-loop-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let inbox = Arc::new(radian_runtime::Inbox::new(64));
+        let hooks = Arc::new(radian_host::CommandHooks::new(
+            &Default::default(),
+            &Default::default(),
+            &ws,
+            "sid",
+            radian_sandbox::SandboxSlot::empty(),
+            &inbox,
+            rt.handle(),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+        ));
+        let journal = Arc::new(
+            radian_session::SessionJournal::create(
+                dir.join("s.jsonl"),
+                "sid",
+                radian_session::SessionCreatedData::new("/work/example", serde_json::json!({})),
+            )
+            .unwrap(),
+        );
+        let host = SessionHost {
+            dir: dir.clone(),
+            workspace: ws.to_string_lossy().into_owned(),
+            session_id: "sid".to_owned(),
+            secrets: Arc::new(std::sync::RwLock::new(Vec::new())),
+            journal,
+            config_snapshot: serde_json::json!({}),
+            theme_colors: Vec::new(),
+            theme_write_path: None,
+            config_read_only: false,
+            started_without_model: false,
+        };
+        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade);
+        let queue = radian_host::SessionQueue::new();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new("m", "s");
+        let mut ctx = LoopContext {
+            startup_route: ("p".to_owned(), "m".to_owned()),
+            route_price: Arc::new(|_: &str, _: &str| None),
+            config_providers: Default::default(),
+            current_thinking: String::new(),
+            current_theme: None,
+            thinking_max_tokens: 0,
+            workspace: &ws,
+            runtime: &rt,
+            session: &facade,
+            memory: &None,
+            host: &host,
+            tx: &tx,
+            queue: &queue,
+            signal: None,
+            clipboard: app.clipboard,
+            bell_rang: false,
+            herdr: None,
+            bash_sandbox: None,
+            bash_cancel: None,
+            side_cancel: None,
+            usage_gate: None,
+            chatgpt_usage_gate: None,
+            model_writeback_done: false,
+            command_hooks: Some(Arc::clone(&hooks)),
+        };
+        assert!(!hooks.loop_active());
+        let mut effects = Vec::new();
+        // `/loop go` arms the mode...
+        app.input = "/loop go".into();
+        ctx.handle(UiEvent::Input(key_enter()), &mut app, &mut effects);
+        assert!(app.loop_active());
+        assert!(
+            hooks.loop_active(),
+            "the armed mode reaches the session hooks"
+        );
+        // ...and a bare `/loop` stops it again.
+        app.input = "/loop".into();
+        ctx.handle(UiEvent::Input(key_enter()), &mut app, &mut effects);
+        assert!(!app.loop_active());
+        assert!(
+            !hooks.loop_active(),
+            "the stopped mode reaches the session hooks"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
