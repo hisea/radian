@@ -21,7 +21,7 @@ const ERROR_BODY_BYTES: usize = 2048;
 /// (`anthropic-ratelimit-requests-limit`, `anthropic-ratelimit-tokens-remaining`,
 /// `anthropic-ratelimit-requests-reset`, …). Kept raw on the response for the host's
 /// `Headers` usage source (ADR 0027 slice ④); the exact names the host parses
-/// are recorded in `docs/providers/anthropic-wire-notes.md`.
+/// are recorded in `crates/agent-provider-anthropic/WIRE.md`.
 const RATE_LIMIT_PREFIX: &str = "anthropic-ratelimit-";
 
 /// A model reached over the Anthropic Messages API, streamed, authenticated with an API key.

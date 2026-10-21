@@ -1186,7 +1186,7 @@ Base `3c1c579` · 一次性 worktree `/tmp/radian-sl-mut`（detached，跑完删
 4/4 抓住。
 ## startup-speed（摘要行说 "macOS sandbox" / "Linux sandbox"，2026-10-15）
 
-工作区 `<home>/Code/radian-dogfood-ss`，分支 `dogfood/startup-speed`。
+工作区 `<worktree>`，分支 `dogfood/startup-speed`。
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|

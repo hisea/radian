@@ -25,7 +25,7 @@ const ERROR_BODY_BYTES: usize = 2048;
 /// (`x-ratelimit-limit-requests`, `x-ratelimit-remaining-tokens`, `x-ratelimit-reset-requests`,
 /// …). Kept raw on the response for the host's `Headers` usage source (ADR 0027
 /// slice ④); the exact names the host parses are recorded in
-/// `docs/providers/openai-compatible-wire-notes.md`.
+/// `crates/agent-provider-openai-compatible/WIRE.md`.
 const RATE_LIMIT_PREFIX: &str = "x-ratelimit-";
 
 /// A model reached over an OpenAI-compatible Chat Completions API, streamed.

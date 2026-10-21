@@ -7,7 +7,7 @@
 //! 1. `seccomp_data.arch` must be the native arch (`AUDIT_ARCH_X86_64` on x86_64,
 //!    `AUDIT_ARCH_AARCH64` on aarch64, picked at compile time): on x86_64 a 32-bit process
 //!    could otherwise reach `socketcall` through `int 0x80`. Cost: 32-bit binaries cannot
-//!    run in the sandbox (see `docs/sandbox.md`).
+//!    run in the sandbox (see `crates/radian-sandbox/LIMITS.md`).
 //! 2. On x86_64, `seccomp_data.nr & 0x40000000` (the x32 ABI bit) is denied: an x32 process
 //!    has its own syscall numbers under that bit.
 //! 3. `nr == SYS_socket` with `args[0] == AF_UNIX` (low 32 bits) is denied with `EPERM`.

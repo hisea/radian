@@ -232,7 +232,7 @@ fn backspace_edits_the_query_and_recomputes() {
 /// Correctness on a 50,000-entry transcript: the search finds the one match and reports it.
 /// **No wall clock here** — timing is the ignored benchmark below (the repo's rule: every
 /// timing assertion lives in an `#[ignore]`d benchmark, `perf_render.rs` and
-/// `docs/perf-baseline.md` §7 explain why an absolute bound is load-sensitive).
+/// `benchmarks/perf-baseline.md` §7 explain why an absolute bound is load-sensitive).
 #[test]
 fn a_search_over_fifty_thousand_entries_finds_the_needle() {
     let mut app = fifty_thousand_entries();
@@ -265,7 +265,7 @@ fn fifty_thousand_entries() -> App {
 /// The performance benchmark (decision 6): one search over 50,000 entries is well under the
 /// debug bound. **`#[ignore]`d**, like every timing assertion in this repo: the debug numbers
 /// are load-sensitive (observed 2.59 s under load average 200+), so it is run deliberately
-/// with `--ignored` (`docs/perf-baseline.md` §7). It also prints the 5k calibration, so a
+/// with `--ignored` (`benchmarks/perf-baseline.md` §7). It also prints the 5k calibration, so a
 /// pathological regression is visible in the ratio as well as the absolute bound.
 #[test]
 #[ignore = "wall-clock benchmark, not an assertion in the default run; --ignored --nocapture"]

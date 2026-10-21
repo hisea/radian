@@ -421,7 +421,8 @@ impl JobNotifier {
     }
 
     /// The one System message a settle sends: id, state, duration and the tail of
-    /// the output (up to [`NOTIFY_INLINE_BYTES`]).
+    /// the output (up to [`NOTIFY_INLINE_BYTES`]). Every message ends with the
+    /// continue line, including the one without the registry block.
     fn completion_message(
         &self,
         id: &str,
@@ -445,9 +446,14 @@ impl JobNotifier {
                 if !tail.ends_with('\n') {
                     text.push('\n');
                 }
+            } else {
+                text.push('\n');
             }
-            text.push_str("Read its output with job.");
+            text.push_str("Read its output with job.\n");
+        } else {
+            text.push('\n');
         }
+        text.push_str("Resume the task using this result. Do not reply to this notice.");
         text
     }
 }
@@ -506,11 +512,147 @@ fn human_duration(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn the_duration_reads_in_seconds() {
         assert_eq!(human_duration(350), "350ms");
         assert_eq!(human_duration(1200), "1.2s");
         assert_eq!(human_duration(125_000), "2m5s");
+    }
+
+    /// The last line of every completion message.
+    const CONTINUE_LINE: &str = "Resume the task using this result. Do not reply to this notice.";
+
+    fn test_notifier(jobs: Arc<Jobs>, dir: &std::path::Path) -> Arc<JobNotifier> {
+        let journal = Arc::new(
+            SessionJournal::create(
+                dir.join("s.jsonl"),
+                "sid",
+                radian_session::SessionCreatedData::new(
+                    "/work/example",
+                    serde_json::json!({"provider": "example", "model": "m-1"}),
+                ),
+            )
+            .unwrap(),
+        );
+        JobNotifier::new(
+            jobs,
+            Inbox::new(64),
+            journal,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(|_: &RuntimeEvent| {}),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+        )
+    }
+
+    fn scratch(label: &str) -> std::path::PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "radian-notify-msg-{}-{label}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn full_access(ws: &std::path::Path) -> radian_sandbox::Sandbox {
+        let policy =
+            radian_sandbox::SandboxPolicy::new(radian_sandbox::SandboxMode::FullAccess, ws)
+                .expect("full-access policy");
+        radian_sandbox::Sandbox::from_policy(policy).expect("full-access needs no backend")
+    }
+
+    /// Runs `command` as a background job and waits for its settle, so the
+    /// completion message sees the final tail.
+    async fn run_to_settle(
+        jobs: &Arc<Jobs>,
+        sandbox: &radian_sandbox::Sandbox,
+        ws: &std::path::Path,
+        command: &str,
+    ) -> String {
+        let mut events = jobs.subscribe();
+        let info = jobs.start(sandbox, ws, command).expect("start the job");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
+                Ok(Ok(JobEvent::Settled { id, .. })) if id == info.id => return id,
+                Ok(Ok(_)) => continue,
+                other => panic!("no settle for {command}: {other:?}"),
+            }
+        }
+    }
+
+    /// Every completion message ends with the continue line, including the one
+    /// without the registry block (an unknown id).
+    #[tokio::test]
+    async fn every_completion_message_ends_with_the_continue_line() {
+        let dir = scratch("continue");
+        let jobs = Arc::new(Jobs::new(dir.join("jobs")));
+        let notifier = test_notifier(jobs, &dir);
+        let text =
+            notifier.completion_message("no-such-job", &radian_coding::JobState::Exited(0), 1200);
+        assert!(text.ends_with(CONTINUE_LINE), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An empty tail keeps `output:` and the read hint on separate lines.
+    #[tokio::test]
+    async fn an_empty_tail_keeps_output_and_the_read_hint_on_separate_lines() {
+        let dir = scratch("empty-tail");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let jobs = Arc::new(Jobs::new(dir.join("jobs")));
+        let sandbox = full_access(&ws);
+        let id = run_to_settle(&jobs, &sandbox, &ws, "true").await;
+        let notifier = test_notifier(Arc::clone(&jobs), &dir);
+        let text = notifier.completion_message(&id, &radian_coding::JobState::Exited(0), 1);
+        assert!(text.ends_with(CONTINUE_LINE), "{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.iter().any(|line| line.starts_with("output: ")),
+            "{text}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.trim() == "Read its output with job."),
+            "{text}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("output:") && line.contains("Read its output")),
+            "output and the read hint share a line: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A non-empty tail keeps its layout; only the continue line is appended.
+    #[tokio::test]
+    async fn a_non_empty_tail_keeps_its_layout_with_the_continue_line_appended() {
+        let dir = scratch("full-tail");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let jobs = Arc::new(Jobs::new(dir.join("jobs")));
+        let sandbox = full_access(&ws);
+        let id = run_to_settle(&jobs, &sandbox, &ws, "echo hi").await;
+        let notifier = test_notifier(Arc::clone(&jobs), &dir);
+        let text = notifier.completion_message(&id, &radian_coding::JobState::Exited(0), 1);
+        let without_continue = text
+            .strip_suffix(&format!("\n{CONTINUE_LINE}"))
+            .unwrap_or_else(|| panic!("ends with the continue line: {text}"));
+        assert!(
+            without_continue.ends_with("Read its output with job."),
+            "{text}"
+        );
+        assert!(
+            without_continue.contains("\nthe last part of its output:\n"),
+            "{text}"
+        );
+        assert!(without_continue.contains("hi"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

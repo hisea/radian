@@ -2449,13 +2449,17 @@ fn exported_presets_name_no_adr() {
     }
 }
 
-/// The user-facing docs never name an ADR: the root `README.md`, `docs/sandbox.md` and
-/// `docs/pi-migration.md` (crate READMEs and developer docs keep theirs).
+/// The user-facing docs never name an ADR: the root `README.md`, `crates/radian-sandbox/LIMITS.md` and
+/// `docs/user/pi-migration.md` (crate READMEs and developer docs keep theirs).
 /// Mutation: put `(ADR 0008)` back into one doc → this fails.
 #[test]
 fn user_docs_name_no_adr() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for doc in ["README.md", "docs/sandbox.md", "docs/pi-migration.md"] {
+    for doc in [
+        "README.md",
+        "crates/radian-sandbox/LIMITS.md",
+        "docs/user/pi-migration.md",
+    ] {
         let text = std::fs::read_to_string(root.join(doc)).expect("a user-facing doc exists");
         assert!(!text.contains("ADR"), "{doc} names an ADR");
     }

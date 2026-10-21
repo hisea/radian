@@ -30,6 +30,10 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/permissions.md"),
     ),
     (
+        "pi-migration.md",
+        include_str!("../../../docs/user/pi-migration.md"),
+    ),
+    (
         "providers.md",
         include_str!("../../../docs/user/providers.md"),
     ),

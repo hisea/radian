@@ -7,5 +7,5 @@
 (allow mach-lookup)
 (allow sysctl-read)
 (allow file-write-data (literal "/dev/null"))
-(allow file-write* (subpath "/private<tmpdir>/radian-spike-sb-61190-0/ws"))
-(deny file-write* (subpath "/private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git"))
+(allow file-write* (subpath "<scratch>/radian-spike-sb-61190-0/ws"))
+(deny file-write* (subpath "<scratch>/radian-spike-sb-61190-0/ws/proj/.git"))

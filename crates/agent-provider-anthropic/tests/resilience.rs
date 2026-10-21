@@ -1,5 +1,5 @@
 //! The provider network-failure matrix (Phase 7): what the adapter does **today**, recorded
-//! rather than changed. The summary table lives in `docs/provider-contract.md`.
+//! rather than changed. The summary table lives in `crates/agent-provider-contract/README.md`.
 //!
 //! Every test drives the adapter's public `Model::complete` against the mock server. Timing
 //! tests assert the *result* (an error of a given kind), never a duration; the only clock is

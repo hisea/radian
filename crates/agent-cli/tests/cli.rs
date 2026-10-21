@@ -370,7 +370,11 @@ impl Drop for ScratchDir {
 }
 
 fn scratch(name: &str) -> ScratchDir {
-    let dir = std::env::temp_dir().join(format!("agent-cli-{name}-{}", std::process::id()));
+    // A process-wide counter keeps every call unique: two parallel tests must never
+    // share a directory, and `remove_dir_all` below would delete a running test's files.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("agent-cli-{name}-{n}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     ScratchDir(dir)
