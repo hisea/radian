@@ -1,4 +1,5 @@
-//! Loading the `--mcp-config` server config file into [`McpServerConfig`]s.
+//! Loading MCP server configs into [`McpServerConfig`]s: the `--mcp-config` file, the
+//! user's `[mcp]` section, and the project `.mcp.json`.
 //!
 //! Two JSON forms are accepted, and both normalise to the one internal
 //! [`McpServerConfig`]:
@@ -23,12 +24,51 @@
 //! empty and gives one warning line. A `${VAR:-default}` uses the default when the
 //! variable is unset **or empty** (shell `:-`); a set-but-empty `${VAR}` expands to empty
 //! with no warning.
+//!
+//! The project `.mcp.json` (`Scope::Project`) blanks [`CREDENTIAL_VARS`] wherever they are
+//! referenced — `command`, `args`, `env` values and `inherit_env` — with one warning per
+//! reference, so a trusted project file cannot carry the user's shell credentials into its
+//! servers. User entries (`Scope::User`) expand as today.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_extensions::McpServerConfig;
 use serde::Deserialize;
+
+/// Credential variables blanked in project `.mcp.json` entries (
+/// revised round 1: the table protects the user's shell keys from project servers,
+/// built-in or not): each built-in provider's customary key variable, plus the common
+/// third-party provider keys. A fixed table, never a `*_API_KEY` pattern; synced when a
+/// built-in provider is added. The exact list was meant to come from models.dev's
+/// per-provider `env`, but the bundled snapshot carries none (unverified), so these names
+/// come from this code base and its docs. Radian's own keys are never in process env
+/// (ADR 0026 D2 reads `auth.json`); this table only stops a project file from inheriting
+/// the user's shell keys. `chatgpt` is OAuth-only and has no key variable.
+pub const CREDENTIAL_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENCODE_API_KEY",
+    "OPENCODE_GO_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "XAI_API_KEY",
+    "MISTRAL_API_KEY",
+];
+
+/// Which source an entry is loaded from. User sources (`--mcp-config`, `[mcp]`) expand
+/// `${VAR}` against the process environment as today; project entries (`.mcp.json`)
+/// additionally blank [`CREDENTIAL_VARS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoadScope {
+    #[default]
+    User,
+    Project,
+}
 
 /// What loading one `--mcp-config` file produced: the servers to start, and the warning
 /// lines the host prints once at startup (`[mcp] …` on the CLI, the startup log in the
@@ -103,7 +143,7 @@ pub fn load_mcp_config(path: &str) -> Result<McpLoad, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("--mcp-config {path}: {e}"))?;
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("--mcp-config {path}: not valid MCP config JSON: {e}"))?;
-    load_json_value(&parsed, &format!("--mcp-config {path}"))
+    load_json_value(&parsed, &format!("--mcp-config {path}"), LoadScope::User)
 }
 
 /// Loads the `[mcp]` section of the user's `config.toml`: the same two forms as
@@ -115,24 +155,328 @@ pub fn load_mcp_config(path: &str) -> Result<McpLoad, String> {
 pub fn load_mcp_from_toml(mcp: &toml::Value, origin: &str) -> Result<McpLoad, String> {
     let json = serde_json::to_value(mcp)
         .map_err(|e| format!("{origin}: [mcp] is not valid MCP config: {e}"))?;
-    load_json_value(&json, origin)
+    load_json_value(&json, origin, LoadScope::User)
+}
+
+/// The project file: `<workspace>/.mcp.json`.
+pub fn project_path(workspace: &Path) -> PathBuf {
+    workspace.join(".mcp.json")
+}
+
+/// Loads the project `.mcp.json` at `path` in [`LoadScope::Project`]: `${VAR}` expands as
+/// usual, except [`CREDENTIAL_VARS`] expand to empty. `origin` names the file in errors
+/// (`<path>`), like `--mcp-config <path>` does for the flag's file.
+pub fn load_project_file(path: &Path) -> Result<McpLoad, String> {
+    let origin = path.display().to_string();
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{origin}: {e}"))?;
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{origin}: not valid MCP config JSON: {e}"))?;
+    load_json_value(&parsed, &origin, LoadScope::Project)
+}
+
+/// Loads `<workspace>/.mcp.json` for a session that may start its servers (ADR 0031 T1:
+/// only when the directory is trusted), and reports what the host prints as `[mcp] …`.
+///
+/// - No file: nothing loads, no lines.
+/// - `ignore_implicit` (`--no-config-mcp`, the `explore` child's flag): nothing loads; one
+///   line says the file was skipped.
+/// - Untrusted: no process starts; one line says so, in the shape of ADR 0031 T3's
+///   non-interactive line.
+/// - Trusted but unreadable: nothing loads; one warning line (a project file must not break
+///   startup, like `<workspace>/.radian/config.toml`).
+/// - Trusted and readable: the servers plus one loaded line and the loader's warnings.
+pub fn load_project(
+    workspace: &Path,
+    trusted: bool,
+    ignore_implicit: bool,
+) -> (McpLoad, Vec<String>) {
+    let path = project_path(workspace);
+    if !path.is_file() {
+        return (McpLoad::default(), Vec::new());
+    }
+    let origin = path.display().to_string();
+    if ignore_implicit {
+        return (
+            McpLoad::default(),
+            vec![format!(
+                "project .mcp.json skipped (--no-config-mcp): {origin}"
+            )],
+        );
+    }
+    if !trusted {
+        return (
+            McpLoad::default(),
+            vec![format!(
+                "project .mcp.json not loaded (untrusted): pass --trust to load {origin}, \
+                 or run radian interactively"
+            )],
+        );
+    }
+    match load_project_file(&path) {
+        Ok(load) => {
+            let mut lines = vec![format!(
+                "project .mcp.json: loaded {} server{} from {origin}",
+                load.servers.len(),
+                if load.servers.len() == 1 { "" } else { "s" },
+            )];
+            lines.extend(load.warnings.iter().cloned());
+            (load, lines)
+        }
+        Err(error) => (
+            McpLoad::default(),
+            vec![format!(
+                "project .mcp.json cannot be read ({error}); skipped"
+            )],
+        ),
+    }
+}
+
+/// One project entry as written, for the trust question (ADR 0031 T3): the name, the
+/// `command` + `args` **before** `${VAR}` expansion, and the `env` **key names only** —
+/// never values. `skipped` names why a remote entry will not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectPreviewEntry {
+    pub name: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env_keys: Vec<String>,
+    pub skipped: Option<String>,
+}
+
+/// The trust question's view of `<workspace>/.mcp.json`. `None` when there is no file;
+/// `error` when the file exists but cannot be read or parsed (the loader's message, which
+/// names the problem, never a value).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectPreview {
+    pub entries: Vec<ProjectPreviewEntry>,
+    pub error: Option<String>,
+}
+
+/// Renders a [`ProjectPreview`] as trust-question lines, shared by the `radian exec`
+/// prompt and the TUI modal: one line per server (the name, the `command` + `args` as
+/// written, the `env` key names only — never values), remote entries marked skipped, and
+/// the read/parse error when the file cannot be used.
+pub fn preview_lines(preview: &ProjectPreview) -> Vec<String> {
+    if let Some(error) = &preview.error {
+        return vec![format!("project .mcp.json: {error}")];
+    }
+    if preview.entries.is_empty() {
+        return vec!["project .mcp.json: no servers to load".to_owned()];
+    }
+    let runnable = preview
+        .entries
+        .iter()
+        .filter(|entry| entry.skipped.is_none())
+        .count();
+    let mut lines = vec![format!(
+        "project .mcp.json: {} server{} to load once trusted:",
+        runnable,
+        if runnable == 1 { "" } else { "s" },
+    )];
+    for entry in &preview.entries {
+        lines.push(preview_entry_line(entry));
+    }
+    lines
+}
+
+/// One trust-question line for a project entry. Values never appear: the command and
+/// args are as written (before `${VAR}` expansion) and only env key names are named.
+fn preview_entry_line(entry: &ProjectPreviewEntry) -> String {
+    if let Some(detail) = &entry.skipped {
+        return format!("mcp: {} skipped ({detail})", entry.name);
+    }
+    let mut command = entry
+        .command
+        .clone()
+        .unwrap_or_else(|| "(no command)".to_owned());
+    for arg in &entry.args {
+        command.push(' ');
+        command.push_str(arg);
+    }
+    if entry.env_keys.is_empty() {
+        format!("mcp: {} `{command}`", entry.name)
+    } else {
+        format!(
+            "mcp: {} `{command}` env: {}",
+            entry.name,
+            entry.env_keys.join(", ")
+        )
+    }
+}
+
+/// Reads the raw entries of `<workspace>/.mcp.json` for the trust question. The loader runs
+/// first purely as the structural check, so the preview lists exactly what a trusted load
+/// would start (plus the skipped remote entries, which the loader drops with a warning).
+/// Values are never carried: commands and args as written, env key names only.
+pub fn preview_project(workspace: &Path) -> Option<ProjectPreview> {
+    let path = project_path(workspace);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some(ProjectPreview {
+                entries: Vec::new(),
+                error: Some(format!("{}: {error}", path.display())),
+            });
+        }
+    };
+    let origin = path.display().to_string();
+    let parsed: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Some(ProjectPreview {
+                entries: Vec::new(),
+                error: Some(format!("{origin}: not valid MCP config JSON: {error}")),
+            });
+        }
+    };
+    // The structural check: both/neither forms, duplicate ids, a stdio entry without a
+    // command. Its message is the preview's error, so the question and the load agree.
+    if let Err(error) = load_json_value(&parsed, &origin, LoadScope::Project) {
+        return Some(ProjectPreview {
+            entries: Vec::new(),
+            error: Some(error),
+        });
+    }
+    // The load succeeded, so the shapes below are known; anything unexpected here is
+    // simply left out (the load is the authority, not the preview).
+    let mut entries = Vec::new();
+    let top = parsed.as_object().expect("the load succeeded on an object");
+    if let Some(servers) = top.get("servers").and_then(|value| value.as_array()) {
+        for entry in servers {
+            entries.push(ProjectPreviewEntry {
+                name: entry
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                command: entry
+                    .get("command")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
+                args: raw_args(entry.get("args")),
+                env_keys: raw_env_keys(entry.get("env")),
+                skipped: None,
+            });
+        }
+    }
+    if let Some(servers) = top.get("mcpServers").and_then(|value| value.as_object()) {
+        for (name, raw) in servers {
+            let kind = raw.get("type").and_then(|value| value.as_str());
+            let has_url = raw.get("url").is_some_and(|url| !url.is_null());
+            entries.push(ProjectPreviewEntry {
+                name: name.clone(),
+                command: raw
+                    .get("command")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
+                args: raw_args(raw.get("args")),
+                env_keys: raw_env_keys(raw.get("env")),
+                skipped: remote_reason(kind, has_url)
+                    .map(|detail| format!("Radian supports only stdio; skipped ({detail})",)),
+            });
+        }
+    }
+    Some(ProjectPreview {
+        entries,
+        error: None,
+    })
+}
+
+/// `args` as written (non-string items are left out; the load is the authority).
+fn raw_args(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|value| value.as_array())
+        .map(|args| {
+            args.iter()
+                .filter_map(|arg| arg.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `env` key names only — never values.
+fn raw_env_keys(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|value| value.as_object())
+        .map(|env| env.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Merges the `[mcp]` servers with the `--mcp-config` file's: the command line wins. A
 /// colliding id keeps the config's position with the file's entry, plus one warning
 /// naming the id (printed as `[mcp] …` like every other MCP warning).
 pub fn merge_mcp(config: McpLoad, file: McpLoad) -> McpLoad {
-    let mut warnings = config.warnings;
+    merge_named(config, "[mcp]", file, "--mcp-config")
+}
+
+/// Merges the project `.mcp.json` under the user's own sources: `[mcp]` and `--mcp-config`
+/// both win a collision with a project entry, with one warning naming the id and the
+/// winning side. The user's sources keep their own precedence (the command line over the
+/// config file, with [`merge_mcp`]'s wording), so a project file can never shadow what the
+/// user wrote themselves.
+pub fn merge_project_mcp(project: McpLoad, config: McpLoad, file: McpLoad) -> McpLoad {
+    let mut warnings = project.warnings;
+    warnings.extend(config.warnings);
     warnings.extend(file.warnings);
-    let mut servers = config.servers;
+    let mut servers = project.servers;
+    // Where each id came from, for the collision line. `&'static` because the only
+    // sources are the three spellings below.
+    let mut source: BTreeMap<String, &'static str> = BTreeMap::new();
+    for server in &servers {
+        source.insert(server.id.clone(), ".mcp.json");
+    }
+    for server in config.servers {
+        if let Some(previous) = source.get(server.id.as_str()) {
+            warnings.push(format!(
+                "server `{}` is set in both {previous} and [mcp]; using [mcp]",
+                server.id
+            ));
+            let pos = servers
+                .iter()
+                .position(|existing| existing.id == server.id)
+                .expect("the source map and the servers agree");
+            servers[pos] = server;
+        } else {
+            source.insert(server.id.clone(), "[mcp]");
+            servers.push(server);
+        }
+    }
+    for server in file.servers {
+        if let Some(previous) = source.get(server.id.as_str()) {
+            warnings.push(format!(
+                "server `{}` is set in both {previous} and --mcp-config; using --mcp-config",
+                server.id
+            ));
+            let pos = servers
+                .iter()
+                .position(|existing| existing.id == server.id)
+                .expect("the source map and the servers agree");
+            servers[pos] = server;
+        } else {
+            source.insert(server.id.clone(), "--mcp-config");
+            servers.push(server);
+        }
+    }
+    McpLoad { servers, warnings }
+}
+
+/// Merges two loads with the overlay winning: a colliding id keeps the base's position
+/// with the overlay's entry, plus one warning naming the id and both sides.
+fn merge_named(base: McpLoad, base_label: &str, overlay: McpLoad, overlay_label: &str) -> McpLoad {
+    let mut warnings = base.warnings;
+    warnings.extend(overlay.warnings);
+    let mut servers = base.servers;
     let mut index: BTreeMap<String, usize> = BTreeMap::new();
     for (pos, server) in servers.iter().enumerate() {
         index.insert(server.id.clone(), pos);
     }
-    for server in file.servers {
+    for server in overlay.servers {
         if let Some(&pos) = index.get(server.id.as_str()) {
             warnings.push(format!(
-                "server `{}` is set in both [mcp] and --mcp-config; using --mcp-config",
+                "server `{}` is set in both {base_label} and {overlay_label}; \
+                 using {overlay_label}",
                 server.id
             ));
             servers[pos] = server;
@@ -144,10 +488,15 @@ pub fn merge_mcp(config: McpLoad, file: McpLoad) -> McpLoad {
     McpLoad { servers, warnings }
 }
 
-/// The shared normaliser behind [`load_mcp_config`] and [`load_mcp_from_toml`]: `origin`
-/// is `--mcp-config <path>` for a file, `<path> [mcp]` for the config section, so both
-/// spellings fail with the same words.
-fn load_json_value(parsed: &serde_json::Value, origin: &str) -> Result<McpLoad, String> {
+/// The shared normaliser behind [`load_mcp_config`], [`load_mcp_from_toml`] and
+/// [`load_project_file`]: `origin` is `--mcp-config <path>` for a file, `<path> [mcp]` for
+/// the config section, and `<path>` for the project file, so all spellings fail with the
+/// same words. `scope` decides whether [`CREDENTIAL_VARS`] are blanked.
+fn load_json_value(
+    parsed: &serde_json::Value,
+    origin: &str,
+    scope: LoadScope,
+) -> Result<McpLoad, String> {
     let top = parsed
         .as_object()
         .ok_or_else(|| format!("{origin}: expected an object at the top level"))?;
@@ -181,6 +530,7 @@ fn load_json_value(parsed: &serde_json::Value, origin: &str) -> Result<McpLoad, 
                 entry.call_timeout_secs,
                 entry.shutdown_timeout_secs,
                 &mut load.warnings,
+                scope,
             ));
         }
         return Ok(load);
@@ -198,7 +548,7 @@ fn load_json_value(parsed: &serde_json::Value, origin: &str) -> Result<McpLoad, 
                      and must be unique"
                 ));
             }
-            if let Some(config) = build_foreign(origin, name, raw, &mut load.warnings)? {
+            if let Some(config) = build_foreign(origin, name, raw, &mut load.warnings, scope)? {
                 load.servers.push(config);
             }
         }
@@ -209,7 +559,8 @@ fn load_json_value(parsed: &serde_json::Value, origin: &str) -> Result<McpLoad, 
     ))
 }
 
-/// A `servers` entry, with `${VAR}` expansion applied.
+/// A `servers` entry, with `${VAR}` expansion applied. In [`LoadScope::Project`],
+/// [`CREDENTIAL_VARS`] expand to empty and are dropped from `inherit_env`.
 #[allow(clippy::too_many_arguments)]
 fn build_config(
     id: String,
@@ -221,15 +572,29 @@ fn build_config(
     call_timeout_secs: Option<u64>,
     shutdown_timeout_secs: Option<u64>,
     warnings: &mut Vec<String>,
+    scope: LoadScope,
 ) -> McpServerConfig {
-    let command = expand_env(&command, &id, warnings);
+    let command = expand_env(&command, &id, warnings, scope);
     let args: Vec<String> = args
         .iter()
-        .map(|arg| expand_env(arg, &id, warnings))
+        .map(|arg| expand_env(arg, &id, warnings, scope))
         .collect();
     let env: BTreeMap<String, String> = env
         .into_iter()
-        .map(|(key, value)| (key, expand_env(&value, &id, warnings)))
+        .map(|(key, value)| (key, expand_env(&value, &id, warnings, scope)))
+        .collect();
+    let inherit_env: Vec<String> = inherit_env
+        .into_iter()
+        .filter(|name| {
+            if scope == LoadScope::Project && CREDENTIAL_VARS.contains(&name.as_str()) {
+                warnings.push(format!(
+                    "server `{id}`: credential variable `{name}` is not inherited by \
+                     project servers; removed from inherit_env"
+                ));
+                return false;
+            }
+            true
+        })
         .collect();
     let mut config = McpServerConfig::new(id, command);
     for arg in args {
@@ -256,16 +621,11 @@ fn build_foreign(
     name: &str,
     raw: &serde_json::Value,
     warnings: &mut Vec<String>,
+    scope: LoadScope,
 ) -> Result<Option<McpServerConfig>, String> {
     let entry: ForeignEntry = serde_json::from_value(raw.clone())
         .map_err(|e| format!("{origin}: server `{name}` is not a valid entry: {e}"))?;
-    let is_remote = !matches!(entry.r#type.as_deref(), None | Some("stdio")) || entry.url.is_some();
-    if is_remote {
-        let detail = match (&entry.r#type, &entry.url) {
-            (Some(kind), _) => format!("type `{kind}`"),
-            (None, Some(_)) => "has `url`".to_owned(),
-            (None, None) => unreachable!("is_remote implies a type or a url"),
-        };
+    if let Some(detail) = remote_reason(entry.r#type.as_deref(), entry.url.is_some()) {
         warnings.push(format!(
             "Radian supports only stdio; skipped `{name}` ({detail})"
         ));
@@ -296,13 +656,30 @@ fn build_foreign(
         entry.call_timeout_secs,
         entry.shutdown_timeout_secs,
         warnings,
+        scope,
     )))
+}
+
+/// Why a `mcpServers` entry will not start: `Some(detail)` for a remote entry (`type`
+/// other than `stdio`, or a `url`), `None` for a stdio entry. Shared by the loader (which
+/// skips with a warning) and the trust-question preview (which lists the skip).
+fn remote_reason(kind: Option<&str>, has_url: bool) -> Option<String> {
+    if matches!(kind, None | Some("stdio")) && !has_url {
+        return None;
+    }
+    Some(match kind {
+        Some(kind) => format!("type `{kind}`"),
+        None => "has `url`".to_owned(),
+    })
 }
 
 /// Expands `${VAR}` and `${VAR:-default}` with Claude Code's semantics: an unset variable
 /// with no default expands to empty and gives one warning line. A default containing `$`
 /// is used literally (one pass, no recursion); an unterminated `${` is kept literally.
-fn expand_env(raw: &str, server: &str, warnings: &mut Vec<String>) -> String {
+/// In [`LoadScope::Project`], [`CREDENTIAL_VARS`] expand to empty with their own warning,
+/// even when set (and even with a default): a project file never receives the user's
+/// shell credentials.
+fn expand_env(raw: &str, server: &str, warnings: &mut Vec<String>, scope: LoadScope) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(start) = rest.find("${") {
@@ -323,6 +700,13 @@ fn expand_env(raw: &str, server: &str, warnings: &mut Vec<String>) -> String {
             out.push_str("${");
             out.push_str(inner);
             out.push('}');
+            continue;
+        }
+        if scope == LoadScope::Project && CREDENTIAL_VARS.contains(&name) {
+            warnings.push(format!(
+                "server `{server}`: credential variable `{name}` is not passed to \
+                 project servers; expanding to empty"
+            ));
             continue;
         }
         match std::env::var(name) {
@@ -722,5 +1106,338 @@ mod tests {
         let error = load_mcp_from_toml(&both, "test-config [mcp]").unwrap_err();
         assert!(error.contains("cannot be combined"), "{error}");
         assert!(error.starts_with("test-config [mcp]:"), "{error}");
+    }
+
+    /// B2: a project entry blanks [`CREDENTIAL_VARS`] in `command`, `args` and `env`
+    /// values — even when set — with one warning per reference; the same entry as a user
+    /// source expands them as today. The mutation (project entries expand credentials)
+    /// fails this test.
+    #[test]
+    fn project_entries_blank_credential_variables_but_user_entries_expand_them() {
+        unsafe {
+            std::env::set_var("RADIAN_MCP_B2_KEY", "from-env");
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-b2-live");
+            // Round 1: a common third-party provider key is in the table too.
+            std::env::set_var("DEEPSEEK_API_KEY", "sk-b2-deepseek");
+        }
+        let dir = temp_dir("credential-blank");
+        let text = r#"{"mcpServers":{"a":{
+            "command": "run ${ANTHROPIC_API_KEY}",
+            "args": ["${RADIAN_MCP_B2_KEY}", "${ANTHROPIC_API_KEY:-dflt}"],
+            "env": {"TOKEN": "${ANTHROPIC_API_KEY}", "OTHER": "${RADIAN_MCP_B2_KEY}",
+                "ENGINE": "${DEEPSEEK_API_KEY}"}}}}"#;
+        let user_path = write(&dir, "user.json", text);
+        let user = load_mcp_config(user_path.to_str().unwrap()).unwrap();
+        assert!(user.warnings.is_empty(), "{:?}", user.warnings);
+        let server = &user.servers[0];
+        assert_eq!(
+            server.command,
+            std::path::PathBuf::from("run sk-b2-live"),
+            "user entries keep today's expansion"
+        );
+        let env: BTreeMap<String, String> = server
+            .env
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(env["TOKEN"], "sk-b2-live");
+        assert_eq!(env["OTHER"], "from-env");
+        assert_eq!(env["ENGINE"], "sk-b2-deepseek");
+
+        let project_path = write(&dir, ".mcp.json", text);
+        let project = load_project_file(&project_path).unwrap();
+        let server = &project.servers[0];
+        assert_eq!(
+            server.command,
+            std::path::PathBuf::from("run "),
+            "project entries blank the credential even when it is set"
+        );
+        assert_eq!(
+            server.args,
+            vec![
+                std::ffi::OsString::from("from-env"),
+                std::ffi::OsString::from(""),
+            ],
+            "a plain variable still expands; a credential with a default is still blank"
+        );
+        let env: BTreeMap<String, String> = server
+            .env
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(env["TOKEN"], "");
+        assert_eq!(env["OTHER"], "from-env");
+        assert_eq!(env["ENGINE"], "", "third-party keys blank too");
+        // One warning per credential reference: command, one arg, two env values.
+        let blanked: Vec<&String> = project
+            .warnings
+            .iter()
+            .filter(|w| w.contains("credential variable"))
+            .collect();
+        assert_eq!(blanked.len(), 4, "{:?}", project.warnings);
+        assert!(
+            blanked.iter().any(|w| w.contains("`ANTHROPIC_API_KEY`"))
+                && blanked.iter().any(|w| w.contains("`DEEPSEEK_API_KEY`")),
+            "{:?}",
+            project.warnings
+        );
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("DEEPSEEK_API_KEY");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B2: `inherit_env` cannot smuggle a credential into a project server: the name is
+    /// dropped with a warning, while a user entry keeps it exactly.
+    #[test]
+    fn project_inherit_env_drops_credential_variables() {
+        let dir = temp_dir("credential-inherit");
+        let text = r#"{"mcpServers":{"a":{"command":"true",
+            "inherit_env":["HOME","OPENAI_API_KEY"]}}}"#;
+        let user_path = write(&dir, "user.json", text);
+        let user = load_mcp_config(user_path.to_str().unwrap()).unwrap();
+        assert!(user.warnings.is_empty(), "{:?}", user.warnings);
+        assert_eq!(
+            user.servers[0].inherit_env,
+            vec![
+                std::ffi::OsString::from("HOME"),
+                std::ffi::OsString::from("OPENAI_API_KEY"),
+            ]
+        );
+        let project_path = write(&dir, ".mcp.json", text);
+        let project = load_project_file(&project_path).unwrap();
+        assert_eq!(
+            project.servers[0].inherit_env,
+            vec![std::ffi::OsString::from("HOME")],
+            "the credential must not reach the child environment"
+        );
+        assert_eq!(project.warnings.len(), 1, "{:?}", project.warnings);
+        assert!(
+            project.warnings[0].contains("`OPENAI_API_KEY`")
+                && project.warnings[0].contains("inherit"),
+            "{:?}",
+            project.warnings
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B2: `load_project` gates on trust. Untrusted: no servers, one line in ADR 0031 T3's
+    /// shape. Trusted: the servers plus the loaded line. The mutation (untrusted loads too)
+    /// fails the untrusted assertion; a malformed project file warns and loads nothing
+    /// instead of breaking startup.
+    #[test]
+    fn load_project_gates_on_trust_and_never_breaks_startup() {
+        let dir = temp_dir("project-gate");
+        // No file: nothing loads, no lines.
+        let (load, lines) = load_project(&dir, false, false);
+        assert!(load.servers.is_empty());
+        assert!(lines.is_empty(), "{lines:?}");
+
+        write(
+            &dir,
+            ".mcp.json",
+            r#"{"mcpServers":{"a":{"command":"true"}}}"#,
+        );
+        // Untrusted: no process may start; the line says so and names `--trust`.
+        let (load, lines) = load_project(&dir, false, false);
+        assert!(load.servers.is_empty(), "untrusted must start nothing");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("not loaded (untrusted)") && lines[0].contains("--trust"),
+            "{lines:?}"
+        );
+        // `--no-config-mcp` (the `explore` child): skipped even when trusted.
+        let (load, lines) = load_project(&dir, true, true);
+        assert!(load.servers.is_empty());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("--no-config-mcp"), "{lines:?}");
+        // Trusted: the server plus the loaded line.
+        let (load, lines) = load_project(&dir, true, false);
+        assert_eq!(load.servers.len(), 1);
+        assert_eq!(load.servers[0].id, "a");
+        assert!(
+            lines.iter().any(|line| line.contains("loaded 1 server")),
+            "{lines:?}"
+        );
+        // Malformed while trusted: a warning, no servers, no error.
+        write(&dir, ".mcp.json", "{not json");
+        let (load, lines) = load_project(&dir, true, false);
+        assert!(load.servers.is_empty());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("skipped"), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B2: the preview carries names, commands and args as written (no expansion) and env
+    /// key names only — never values — and marks remote entries as skipped.
+    #[test]
+    fn the_preview_lists_raw_entries_and_marks_skips() {
+        unsafe {
+            std::env::set_var("RADIAN_MCP_B2_PREVIEW", "expanded-would-be-wrong");
+        }
+        let dir = temp_dir("preview");
+        assert_eq!(preview_project(&dir), None, "no file means no preview");
+        write(
+            &dir,
+            ".mcp.json",
+            r#"{"mcpServers":{
+                "fs": {"command": "npx", "args": ["-y", "${RADIAN_MCP_B2_PREVIEW}"],
+                    "env": {"SECRET": "sekret-value", "PLAIN": "x"}},
+                "web": {"type": "http", "url": "https://example.com/mcp"}}}"#,
+        );
+        let preview = preview_project(&dir).expect("the file exists");
+        assert!(preview.error.is_none(), "{:?}", preview.error);
+        assert_eq!(preview.entries.len(), 2);
+        let fs = preview
+            .entries
+            .iter()
+            .find(|entry| entry.name == "fs")
+            .expect("the stdio entry");
+        assert_eq!(fs.command.as_deref(), Some("npx"));
+        assert!(
+            fs.args
+                .iter()
+                .any(|arg| arg.contains("${RADIAN_MCP_B2_PREVIEW}")),
+            "args are as written, before expansion: {:?}",
+            fs.args
+        );
+        assert_eq!(fs.env_keys, vec!["PLAIN".to_owned(), "SECRET".to_owned()]);
+        assert_eq!(fs.skipped, None);
+        let rendered = format!("{preview:?}");
+        assert!(
+            !rendered.contains("sekret-value") && !rendered.contains("expanded-would-be-wrong"),
+            "values never leak into the preview: {rendered}"
+        );
+        let web = preview
+            .entries
+            .iter()
+            .find(|entry| entry.name == "web")
+            .expect("the remote entry");
+        let skipped = web.skipped.as_deref().expect("remote entries are marked");
+        assert!(skipped.contains("stdio"), "{skipped}");
+        // The shared question lines: the header counts the runnable server, entries show
+        // commands as written with env key names only, skips are marked, values never leak.
+        let lines = preview_lines(&preview);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("1 server to load once trusted")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(
+                |line| line.contains("mcp: fs `npx -y ${RADIAN_MCP_B2_PREVIEW}`")
+                    && line.contains("env: PLAIN, SECRET")
+            ),
+            "as written, keys only: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("mcp: web skipped") && line.contains("stdio")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("sekret-value")),
+            "values never leak: {lines:?}"
+        );
+        // A broken file previews as an error, not entries.
+        write(&dir, ".mcp.json", "{not json");
+        let preview = preview_project(&dir).expect("the file exists");
+        assert!(preview.entries.is_empty());
+        assert!(preview.error.is_some(), "{preview:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B2: the project file loses every collision: `[mcp]` wins over `.mcp.json`, and
+    /// `--mcp-config` wins over both, each with one warning naming the id and the winner.
+    /// Without a project file the merge keeps [`merge_mcp`]'s exact wording.
+    #[test]
+    fn the_project_file_loses_every_collision() {
+        let project = McpLoad {
+            servers: vec![
+                server("shared", "from-project"),
+                server("only-project", "true"),
+            ],
+            warnings: vec!["project warning".to_owned()],
+        };
+        let config = McpLoad {
+            servers: vec![
+                server("shared", "from-config"),
+                server("only-config", "true"),
+            ],
+            warnings: Vec::new(),
+        };
+        let file = McpLoad {
+            servers: vec![server("only-config", "from-file")],
+            warnings: Vec::new(),
+        };
+        let merged = merge_project_mcp(project, config, file);
+        let ids: Vec<&str> = merged.servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["shared", "only-project", "only-config"]);
+        assert_eq!(
+            merged.servers[0].command,
+            std::path::PathBuf::from("from-config"),
+            "the user's own config wins over the project file"
+        );
+        assert_eq!(
+            merged.servers[2].command,
+            std::path::PathBuf::from("from-file"),
+            "the command line wins over everything"
+        );
+        let collisions: Vec<&String> = merged
+            .warnings
+            .iter()
+            .filter(|w| w.contains("is set in both"))
+            .collect();
+        assert_eq!(collisions.len(), 2, "{:?}", merged.warnings);
+        assert!(
+            collisions[0].contains("`shared`")
+                && collisions[0].contains(".mcp.json")
+                && collisions[0].contains("[mcp]"),
+            "{:?}",
+            merged.warnings
+        );
+        assert!(
+            collisions[1].contains("`only-config`")
+                && collisions[1].contains("[mcp]")
+                && collisions[1].contains("--mcp-config"),
+            "{:?}",
+            merged.warnings
+        );
+        // Without a project file the config/file wording is exactly `merge_mcp`'s.
+        let merged = merge_project_mcp(
+            McpLoad::default(),
+            McpLoad {
+                servers: vec![server("a", "from-config")],
+                warnings: Vec::new(),
+            },
+            McpLoad {
+                servers: vec![server("a", "from-file")],
+                warnings: Vec::new(),
+            },
+        );
+        assert_eq!(
+            merged.servers[0].command,
+            std::path::PathBuf::from("from-file")
+        );
+        assert!(
+            merged.warnings.iter().any(
+                |w| w == "server `a` is set in both [mcp] and --mcp-config; using --mcp-config"
+            ),
+            "{:?}",
+            merged.warnings
+        );
     }
 }

@@ -253,12 +253,15 @@ pub(super) fn ui_loop(
                 .session
                 .pending_fork
                 .map(|deadline| deadline.saturating_duration_since(now));
-            let wait_remaining = match (quit_remaining, fork_remaining) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            // A `/loop --every` wait ends at the next iteration's due time (the turn-end
+            // decision still re-checks; the deadline only wakes an idle loop).
+            let loop_remaining = app
+                .loop_deadline()
+                .map(|deadline| deadline.saturating_duration_since(now));
+            let wait_remaining = [quit_remaining, fork_remaining, loop_remaining]
+                .into_iter()
+                .flatten()
+                .min();
             let first = if app.is_selecting() || wait_remaining.is_some() {
                 // The nearer of the deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
                 let timeout = match (app.is_selecting(), wait_remaining) {
@@ -286,6 +289,17 @@ pub(super) fn ui_loop(
                             .pending_fork
                             .is_some_and(|d| std::time::Instant::now() >= d)
                             && app.update(AppInput::ForkDeadline).dirty
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        // A `/loop --every` wait ended while idle: send the next iteration
+                        // (a running turn ignores the deadline; its end decides instead).
+                        if app
+                            .loop_deadline()
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            && app.update(AppInput::LoopDeadline).dirty
                             && !draw_frame(terminal, app)?
                         {
                             app.quit = true;

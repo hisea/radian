@@ -13,15 +13,26 @@ use super::ui::LineHub;
 /// approval: a numbered list, Enter takes the default (trust this directory and use the
 /// sandbox for this project). A non-empty unrecognized answer is the fail-safe
 /// `UntrustHere`, never a trust.
+///
+/// Slice B2: `preview` lists the project `.mcp.json` servers that trust would load — one
+/// line each (the name, the `command` + `args` as written, the `env` key names only, never
+/// values), with remote entries marked skipped. `None` means there is no project file and
+/// nothing is printed.
 pub(crate) async fn trust_prompt(
     lines: &LineHub,
     workspace: &std::path::Path,
+    preview: Option<&radian_host::ProjectPreview>,
 ) -> Option<radian_host::trust::Choice> {
     use radian_host::trust::Choice;
     eprintln!(
         "project resources found in {}: trust them?",
         workspace.display()
     );
+    if let Some(preview) = preview {
+        for line in radian_host::preview_lines(preview) {
+            eprintln!("  {line}");
+        }
+    }
     for (index, choice) in Choice::ALL.iter().enumerate() {
         let label = choice
             .label(workspace)

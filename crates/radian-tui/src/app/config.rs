@@ -69,6 +69,7 @@ impl App {
                 running_jobs: Vec::new(),
                 queued: HashSet::new(),
                 last_turn_failed: false,
+                loop_state: loop_mode::LoopState::default(),
                 session_ended: None,
                 turn_committed: true,
                 pending_fork: None,

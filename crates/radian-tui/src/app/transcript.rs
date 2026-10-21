@@ -98,6 +98,9 @@ impl App {
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     pub(super) fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
+        // The loop tracks its own echo pair first (which turns are loop-attributed); the
+        // arms below read the same event for their own facts.
+        super::loop_mode::track_loop_runtime_event(&mut self.session.loop_state, event, self.now);
         if let RuntimeEvent::InboxEnqueued {
             lane, message_id, ..
         } = event
@@ -125,6 +128,11 @@ impl App {
                 Some(_) => UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork)),
                 None => UpdateResult::none(),
             };
+            // The `/loop` turn-end decision (the one place step 3 extends): a finished loop
+            // turn re-sends, waits for `--every`, or stops with a notice.
+            let loop_result = self.loop_turn_finished(*outcome);
+            result.dirty |= loop_result.dirty;
+            result.effects.extend(loop_result.effects);
             // A completed or failed turn rings the bell in every mode but `off`: the user
             // may be looking at another window. A cancel needs no ring — the user pressed
             // the key themselves.
@@ -201,6 +209,11 @@ impl App {
             // `/retry` resends the last user message, but only while this flag stands: the
             // next turn's start clears it.
             self.session.last_turn_failed = true;
+            // The loop pauses instead of retrying into a broken provider (its prompt is
+            // kept, so `/retry` resumes it).
+            if self.session.loop_state.active {
+                self.pause_loop_failed();
+            }
             // ADR 0018's fallback: a recognizable context overflow gets one extra line, since
             // automatic compaction did not keep the request inside the window. The host only
             // has the text, so the prefix is what identifies it.
