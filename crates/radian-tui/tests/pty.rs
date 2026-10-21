@@ -1540,6 +1540,98 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     pty.quit();
 }
 
+/// Slice B2: the startup trust modal lists the project `.mcp.json` servers — names, the
+/// `command` + `args` as written, the `env` key names only (never values) — and marks
+/// remote entries skipped. The workspace holds only the `.mcp.json` (no skill), proving
+/// the file alone triggers the modal. The test untrusts (no server ever starts) and
+/// journals, like the skill-modal test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_trust_modal_lists_the_project_mcp_servers() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("TRUST-MCP-OK")]).await;
+    let dir = TempDir::new("trust-mcp-session");
+    let home = TempDir::new("trust-mcp-home");
+    let ws = TempDir::new("trust-mcp-ws");
+    std::fs::write(
+        ws.path().join(".mcp.json"),
+        r#"{"mcpServers":{
+            "fs": {"command": "npx", "args": ["-y", "${MCP_B2_PTY_BIN}"],
+                "env": {"FIXTURE_LOG": "/tmp/b2.log", "SEKRET": "sekret-value"}},
+            "web": {"type": "http", "url": "https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-mcp",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("project trust", wait_positive()),
+        "the trust modal is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen(
+            "project .mcp.json: 1 server to load once trusted",
+            wait_positive()
+        ),
+        "the preview header is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("mcp: fs `npx -y ${MCP_B2_PTY_BIN}`", wait_positive()),
+        "the command as written is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("FIXTURE_LOG, SEKRET", wait_positive()),
+        "the env key names are missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("mcp: web skipped", wait_positive()),
+        "the skipped remote entry is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("sekret-value"),
+        "values never leak into the modal:\n{}",
+        pty.screen()
+    );
+    // Down four rows from the sandbox default to "do not trust this directory", Enter.
+    for _ in 0..4 {
+        pty.send(b"\x1b[B"); // Down
+    }
+    pty.send(b"\r");
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: not loaded", wait_positive()),
+        "the trust state was not shown:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let canonical = std::fs::canonicalize(ws.path()).unwrap();
+    let trust = std::fs::read_to_string(home.path().join("trust/trust.json")).unwrap();
+    assert!(
+        trust.contains(&canonical.to_string_lossy().to_string()) && trust.contains("false"),
+        "{trust}"
+    );
+}
+
 /// decision 2026-10-20: a project with no trusted decision shows
 /// `untrusted project · /trust to trust it` under the wordmark (no modal when there
 /// are no project resources); a trusted project shows no hint.

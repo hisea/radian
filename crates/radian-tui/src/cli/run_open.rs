@@ -125,18 +125,17 @@ pub(super) fn build_session_inputs(
     // The MCP servers come from the user's `[mcp]` section and from `--mcp-config`
     // together (ADR 0008 §8): the file is read and validated here, before any server
     // process starts and before a session file exists, so a bad file leaves nothing
-    // behind (dogfooding D2). A collision keeps the file's entry with one warning
-    // naming the id. The MCP provider itself, the memory service and the coding tools
-    // are built by `radian_host::open_session` (ADR 0023 U5).
-    let file_loaded = match &cli.mcp_config {
+    // behind (dogfooding D2). They merge with the project `.mcp.json` below, after trust
+    // is resolved (the project file needs the decision). The MCP provider itself, the
+    // memory service and the coding tools are built by `radian_host::open_session`
+    // (ADR 0023 U5).
+    let mcp_file = match &cli.mcp_config {
         Some(path) => load_mcp_config(path)?,
         None => radian_host::McpLoad::default(),
     };
-    let merged = radian_host::merge_mcp(config.mcp.clone(), file_loaded);
-    for warning in &merged.warnings {
-        startup_log.line(format!("[mcp] {warning}"));
-    }
-    let servers = merged.servers;
+    // The TUI has no `--no-config-mcp` (only `radian exec` does, for the `explore`
+    // child): the config section always loads here.
+    let mcp_user = config.mcp.clone();
     // ADR 0026 D9: `--approval` and `--yes` (its shorthand) are the command line's choice.
     // When they are silent, the config's `[permissions] approval` and the journal's last
     // in-session switch decide; `radian_host::resolve_startup` owns that precedence, the
@@ -319,6 +318,19 @@ pub(super) fn build_session_inputs(
     // The status line is in the startup block either way (`trust::status_line` is pushed there
     // once the session exists): inside the alternate screen the block is where it shows.
     startup_log.print_before_screen(&radian_host::trust::status_line(&trust_setup));
+    // Slice B2: the project `.mcp.json` joins the user's sources now that trust is resolved
+    // — trusted (or `--trust`) loads it, untrusted starts no process. The user's own
+    // precedence stands (the command line over `[mcp]`, both over the project file).
+    let (project, project_lines) = radian_host::load_project(
+        workspace_path,
+        trust_setup.resolved.decision.as_bool(),
+        false,
+    );
+    let merged = radian_host::merge_project_mcp(project, mcp_user, mcp_file);
+    for line in project_lines.iter().chain(merged.warnings.iter()) {
+        startup_log.line(format!("[mcp] {line}"));
+    }
+    let servers = merged.servers;
     Ok((
         SessionInputs {
             sandbox,
