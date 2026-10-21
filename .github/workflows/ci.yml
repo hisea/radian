@@ -1,18 +1,14 @@
-# CI for main. While the repository is private, the hosted minutes are limited, and every
-# push to main has already passed the full Verify in the gate. So the Linux check runs once a
-# day (skipped when main did not change) and on demand; macOS runs only on demand.
-# When the repository is public, add `push: { branches: [main] }` and `pull_request:` below.
+# CI for main and pull requests. The repository is public, so GitHub-hosted standard runners
+# (Linux and macOS) cost no minutes. A new push to the same ref cancels the run in progress.
 name: ci
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
-    inputs:
-      macos:
-        description: "Also run the macOS sandbox and pty tests"
-        type: boolean
-        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -71,7 +67,7 @@ jobs:
 
   macos:
     needs: changed
-    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    if: needs.changed.outputs.run == 'true'
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
