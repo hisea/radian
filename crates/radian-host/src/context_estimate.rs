@@ -653,7 +653,10 @@ pub fn total_of(request: &ModelRequest, bytes_per_token: u32, count_reasoning: b
     agent_core::budget::estimate_tokens_with(request, bytes_per_token, count_reasoning)
 }
 
-fn format_tokens(n: u64) -> String {
+/// Rounds tokens for display, the same rule the plain-text notices use so the
+/// grid and the fallback cannot disagree: below 1000 raw, below 10000 one
+/// decimal K, else whole K.
+pub fn format_tokens(n: u64) -> String {
     if n < 1000 {
         format!("{n}")
     } else if n < 10_000 {

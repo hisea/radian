@@ -98,6 +98,11 @@ pub enum EntryKind {
     /// A compaction summary (ADR 0028 R5): one line when folded, the summary and the user's
     /// verbatim words when expanded.
     Compaction,
+    /// The `/context` grid view (spec `tui-context-grid`): the estimated
+    /// categories as a 10 × 20 grid with a legend and detail rows, laid out by
+    /// [`crate::blocks::context_lines`]. Same surface as the notices it
+    /// replaces (the transcript).
+    Context,
     /// A user's `!`/`!!` command and its output (ADR 0033). The renderer colors `!` (goes to
     /// the model's context) and `!!` (does not) differently; the first line is `$ cmd`.
     Bash {
@@ -121,6 +126,9 @@ pub struct Entry {
     /// and (no producer yet) the duration. `None` for every non-tool entry, and for a tool
     /// entry whose message carried nothing to model.
     pub tool: Option<Box<crate::tools::ToolCard>>,
+    /// The `/context` grid's structured data (spec `tui-context-grid`).
+    /// `None` for every other entry.
+    pub context: Option<crate::blocks::ContextView>,
     /// A compaction summary's data (ADR 0028 R5). `None` for every other entry.
     pub compaction: Option<Box<CompactionInfo>>,
     /// Where this tool entry sits in a merged card (ADR 0028). Derived from the
@@ -180,6 +188,7 @@ impl Entry {
             is_error: false,
             result: None,
             tool: None,
+            context: None,
             compaction: None,
             card: crate::blocks::Card::None,
             error_code: None,
@@ -350,6 +359,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::ModelChecked { .. }
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
+        | Input::ContextReady { .. }
         | Input::WakeBudgetNotice(_)
         | Input::TrustResolved(_)
         | Input::AccessApplied { .. }

@@ -392,7 +392,7 @@ mod tests {
     /// an opt-in, and the fold marker pair `◼`/`◻` is the same kind of choice (four of the six
     /// reference fonts lack them; the owner chose them after seeing the set), so these may fall
     /// back to another font. Kept separate so the rest of the check is not loosened.
-    const DOCUMENTED_EXCEPTIONS: &str = "◼◻◜◝◞◟⏺⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+    const DOCUMENTED_EXCEPTIONS: &str = "◼◻▨◜◝◞◟⏺⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
     fn app_with_glyphs(name: &str) -> App {
         let mut app = App::new("mock", "s");

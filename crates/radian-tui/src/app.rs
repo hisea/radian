@@ -204,10 +204,11 @@ pub enum Effect {
     /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
     /// [`Input::SessionDone`].
     ListSkills,
-    /// `/context` (backlog `tui-context-command`): the next request's estimated size by
-    /// category. The loop reads it from the facade (journal + stored layers, no inbox, no
-    /// driver) and answers with [`Input::SessionDone`], so it works mid-turn.
-    Context,
+    /// `/context [all]` (backlog `tui-context-command`, grid spec
+    /// `tui-context-grid`): the next request's estimated size by category. The
+    /// loop reads it from the facade (journal + stored layers, no inbox, no
+    /// driver) and answers with [`Input::ContextReady`], so it works mid-turn.
+    Context { all: bool },
     /// Ask a side question (`/btw`, backlog `tui-btw-side-question`): the loop sends it
     /// through the session's current model and streams the answer back as
     /// [`Input::SideDelta`]/[`Input::SideDone`]. Nothing lands in the transcript.

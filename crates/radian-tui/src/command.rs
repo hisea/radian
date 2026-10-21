@@ -28,7 +28,7 @@ pub const HELP: &str = "\
                       switch the model at the next turn boundary (ADR 0026 D5)
 /thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
 /usage                show the current provider's usage, one line per window (ADR 0027)
-/context              show the next request's estimated size by category (ADR 0015)
+/context [all]        show the next request's estimated size by category (ADR 0015)
 /btw [question]       ask about the current context without touching the transcript;
                       `/btw` alone reopens the last side answer
 /auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
@@ -153,10 +153,12 @@ pub enum Outcome {
     /// `/usage` (ADR 0027): the current provider's usage snapshot, every
     /// window of it. The app reads the contribution store, so there is no effect.
     Usage,
-    /// `/context` (backlog `tui-context-command`): the next request's estimated size by
-    /// category, plus the reported line, the message count and the compactions. Read-only;
-    /// the loop reads it from the facade, so it works mid-turn.
-    Context,
+    /// `/context [all]` (backlog `tui-context-command`, grid spec
+    /// `tui-context-grid`): the next request's estimated size by category, plus
+    /// the reported line, the message count and the compactions. `all` lists
+    /// every context file. Read-only; the loop reads it from the facade, so it
+    /// works mid-turn.
+    Context { all: bool },
     /// `/btw [question]` (backlog `tui-btw-side-question`): a side question answered only
     /// from the current context, streamed into an overlay. `Some` is the question;
     /// `None` reopens the last side answer. Parsing only: running it is the loop's job.
@@ -1089,8 +1091,11 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         },
         Some("/usage") if tokens.len() == 1 => Outcome::Usage,
         Some("/usage") => Outcome::Notices(vec!["usage: /usage (no arguments)".to_owned()]),
-        Some("/context") if tokens.len() == 1 => Outcome::Context,
-        Some("/context") => Outcome::Notices(vec!["usage: /context (no arguments)".to_owned()]),
+        Some("/context") if tokens.len() == 1 => Outcome::Context { all: false },
+        Some("/context") if tokens.len() == 2 && tokens[1] == "all" => {
+            Outcome::Context { all: true }
+        }
+        Some("/context") => Outcome::Notices(vec!["usage: /context [all]".to_owned()]),
         // `/btw [question]`: the question is the raw remainder (quotes survive, like
         // `/skill:`'s args); empty reopens the last side answer.
         Some("/btw") => Outcome::Btw(btw_question(line)),
@@ -1881,18 +1886,27 @@ mod tests {
         assert!(tree().iter().any(|command| command.name == "btw"));
     }
 
-    /// `/context` takes no argument, is a command, and is in `/help`; anything
-    /// after it is a usage notice.
+    /// `/context [all]` takes no argument or `all`; anything else is a usage
+    /// notice. It is a command, and it is in `/help`.
     #[test]
-    fn context_is_a_command_with_no_arguments() {
-        assert!(matches!(parse("/context", false), Outcome::Context));
-        match parse("/context now", false) {
-            Outcome::Notices(notices) => {
-                assert!(notices[0].contains("usage: /context"), "{notices:?}")
+    fn context_is_a_command_with_an_optional_all() {
+        assert!(matches!(
+            parse("/context", false),
+            Outcome::Context { all: false }
+        ));
+        assert!(matches!(
+            parse("/context all", false),
+            Outcome::Context { all: true }
+        ));
+        for line in ["/context now", "/context all now"] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /context [all]"), "{notices:?}")
+                }
+                other => panic!("expected a usage notice, got {other:?}"),
             }
-            other => panic!("expected a usage notice, got {other:?}"),
         }
-        assert!(HELP.contains("/context"), "{HELP}");
+        assert!(HELP.contains("/context [all]"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "context"));
     }
 

@@ -157,6 +157,14 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            // `/context [all]` (grid spec `tui-context-grid`): one grid entry
+            // from the structured report; a read failure is one notice.
+            Input::ContextReady { report, all } => {
+                self.session
+                    .entries
+                    .push(crate::blocks::context_entry(&report, all));
+                UpdateResult::dirty()
+            }
             Input::WakeBudgetNotice(text) => self.wake_budget_notice(text),
             Input::TrustMove(delta) => {
                 if let Some(Modal::Trust(wizard)) =

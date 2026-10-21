@@ -5221,7 +5221,7 @@ async fn pty_compact_shows_its_result_without_a_model_request() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// `/context` prints the next request's estimated categories with the reported
+/// `/context` draws the grid view (spec `tui-context-grid`) with the reported
 /// line separate (ADR 0015 C1), without sending a model request. Read-only, so
 /// it works on an idle session with no usage yet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5236,14 +5236,16 @@ async fn pty_context_prints_estimated_categories_without_a_model_request() {
             "mock",
             "--base-url",
             &server.base_url,
+            "--context-window",
+            "200000",
             "--session-dir",
             dir.path().to_str().unwrap(),
             "--session-id",
             "context",
         ],
-        // Tall enough for the whole notice: the header rows must stay visible
+        // Tall enough for the whole grid: the legend rows must stay visible
         // with the startup block above them.
-        40,
+        60,
         110,
     );
     assert!(
@@ -5253,19 +5255,24 @@ async fn pty_context_prints_estimated_categories_without_a_model_request() {
     );
     pty.send(b"/context\r");
     assert!(
-        pty.wait_for_screen("context (estimated)", wait_positive()),
+        pty.wait_for_screen("estimated by category", wait_positive()),
         "{}",
         pty.screen()
     );
-    // The notice is longer than the frame, so the first rows scroll off: wait
+    // The grid is longer than the frame, so the first rows scroll off: wait
     // for rows near the end instead.
     assert!(
-        pty.wait_for_screen("compactions this session: 0", wait_positive()),
+        pty.wait_for_screen("0 compactions this session", wait_positive()),
         "{}",
         pty.screen()
     );
     assert!(
         pty.wait_for_screen("reported: none yet", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("compaction buffer", wait_positive()),
         "{}",
         pty.screen()
     );

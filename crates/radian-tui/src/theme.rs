@@ -182,6 +182,22 @@ pub enum Role {
     StatusWarn,
     /// A tool head's `×` (ADR 0029; `✗` was replaced, ). pi's `error`.
     StatusError,
+    /// The `/context` grid's per-category cell colors (spec `tui-context-grid`,
+    /// ADR 0035): one role per estimated category, plus the free space and the
+    /// compaction buffer. Missing roles fall back to the built-in defaults
+    /// below (ADR 0029 decision 4).
+    CtxSystem,
+    CtxFiles,
+    CtxMemory,
+    CtxTools,
+    CtxSkills,
+    CtxMcp,
+    CtxUser,
+    CtxAssistant,
+    CtxReasoning,
+    CtxResults,
+    CtxFree,
+    CtxBuffer,
     Selection,
     ToolPendingBg,
     ToolSuccessBg,
@@ -225,7 +241,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 69] = [
+    pub const ALL: [Role; 81] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -262,6 +278,18 @@ impl Role {
         Role::StatusOk,
         Role::StatusWarn,
         Role::StatusError,
+        Role::CtxSystem,
+        Role::CtxFiles,
+        Role::CtxMemory,
+        Role::CtxTools,
+        Role::CtxSkills,
+        Role::CtxMcp,
+        Role::CtxUser,
+        Role::CtxAssistant,
+        Role::CtxReasoning,
+        Role::CtxResults,
+        Role::CtxFree,
+        Role::CtxBuffer,
         Role::Selection,
         Role::ToolPendingBg,
         Role::ToolSuccessBg,
@@ -336,6 +364,18 @@ impl Role {
             Role::StatusOk => "status_ok",
             Role::StatusWarn => "status_warn",
             Role::StatusError => "status_error",
+            Role::CtxSystem => "ctx_system",
+            Role::CtxFiles => "ctx_files",
+            Role::CtxMemory => "ctx_memory",
+            Role::CtxTools => "ctx_tools",
+            Role::CtxSkills => "ctx_skills",
+            Role::CtxMcp => "ctx_mcp",
+            Role::CtxUser => "ctx_user",
+            Role::CtxAssistant => "ctx_assistant",
+            Role::CtxReasoning => "ctx_reasoning",
+            Role::CtxResults => "ctx_results",
+            Role::CtxFree => "ctx_free",
+            Role::CtxBuffer => "ctx_buffer",
             Role::Selection => "selection",
             Role::ToolPendingBg => "tool_pending_bg",
             Role::ToolSuccessBg => "tool_success_bg",
@@ -416,6 +456,18 @@ impl Role {
             Role::StatusOk => &mut theme.status_ok,
             Role::StatusWarn => &mut theme.status_warn,
             Role::StatusError => &mut theme.status_error,
+            Role::CtxSystem => &mut theme.ctx_system,
+            Role::CtxFiles => &mut theme.ctx_files,
+            Role::CtxMemory => &mut theme.ctx_memory,
+            Role::CtxTools => &mut theme.ctx_tools,
+            Role::CtxSkills => &mut theme.ctx_skills,
+            Role::CtxMcp => &mut theme.ctx_mcp,
+            Role::CtxUser => &mut theme.ctx_user,
+            Role::CtxAssistant => &mut theme.ctx_assistant,
+            Role::CtxReasoning => &mut theme.ctx_reasoning,
+            Role::CtxResults => &mut theme.ctx_results,
+            Role::CtxFree => &mut theme.ctx_free,
+            Role::CtxBuffer => &mut theme.ctx_buffer,
             Role::Selection => &mut theme.selection,
             Role::ToolPendingBg => &mut theme.tool_pending_bg,
             Role::ToolSuccessBg => &mut theme.tool_success_bg,
@@ -509,6 +561,22 @@ pub struct Theme {
     pub status_warn: Style,
     /// A tool head's `×`, ADR 0029.
     pub status_error: Style,
+    /// The `/context` grid's per-category cell colors (spec `tui-context-grid`):
+    /// system prompt, context files, memory, built-in tool definitions, skills,
+    /// MCP tools, user messages, assistant text, reasoning, tool results, free
+    /// space and the compaction buffer.
+    pub ctx_system: Style,
+    pub ctx_files: Style,
+    pub ctx_memory: Style,
+    pub ctx_tools: Style,
+    pub ctx_skills: Style,
+    pub ctx_mcp: Style,
+    pub ctx_user: Style,
+    pub ctx_assistant: Style,
+    pub ctx_reasoning: Style,
+    pub ctx_results: Style,
+    pub ctx_free: Style,
+    pub ctx_buffer: Style,
     /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
     pub selection: Style,
     /// A tool card's background by state (running / success / failure). pi's role map:
@@ -770,6 +838,23 @@ impl Theme {
             status_ok: spec(pi::GREEN, Modifier::empty(), truecolor),
             status_warn: spec(pi::YELLOW, Modifier::empty(), truecolor),
             status_error: spec(pi::RED, Modifier::empty(), truecolor),
+            // The `/context` grid's category colors (spec `tui-context-grid`): system
+            // prompt = muted, tool definitions = dim, context files = gold, memory =
+            // red-orange, skills = yellow, MCP = green, user = accent, assistant =
+            // blue, tool results = cyan, reasoning = the thinking channel, free =
+            // the frame line color, buffer = yellow.
+            ctx_system: muted,
+            ctx_files: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
+            ctx_memory: spec(pi::RED, Modifier::empty(), truecolor),
+            ctx_tools: dim,
+            ctx_skills: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            ctx_mcp: spec(pi::GREEN, Modifier::empty(), truecolor),
+            ctx_user: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            ctx_assistant: spec(pi::BLUE, Modifier::empty(), truecolor),
+            ctx_reasoning: spec(pi::THINKING, Modifier::empty(), truecolor),
+            ctx_results: spec(pi::SYNTAX_VARIABLE, Modifier::empty(), truecolor),
+            ctx_free: dim,
+            ctx_buffer: spec(pi::YELLOW, Modifier::empty(), truecolor),
             // The unified-diff lines: pi's own toolDiff* roles.
             diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
             diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
@@ -871,6 +956,23 @@ impl Theme {
             status_ok: spec(pi::GREEN, Modifier::empty(), truecolor),
             status_warn: spec(pi::YELLOW, Modifier::empty(), truecolor),
             status_error: spec(pi::RED, Modifier::empty(), truecolor),
+            // The `/context` grid's category colors (spec `tui-context-grid`): system
+            // prompt = muted, tool definitions = dim, context files = gold, memory =
+            // red-orange, skills = yellow, MCP = green, user = accent, assistant =
+            // blue, tool results = cyan, reasoning = the thinking channel, free =
+            // the frame line color, buffer = yellow.
+            ctx_system: muted,
+            ctx_files: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
+            ctx_memory: spec(pi::RED, Modifier::empty(), truecolor),
+            ctx_tools: dim,
+            ctx_skills: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            ctx_mcp: spec(pi::GREEN, Modifier::empty(), truecolor),
+            ctx_user: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            ctx_assistant: spec(pi::BLUE, Modifier::empty(), truecolor),
+            ctx_reasoning: spec(pi::THINKING, Modifier::empty(), truecolor),
+            ctx_results: spec(pi::SYNTAX_VARIABLE, Modifier::empty(), truecolor),
+            ctx_free: dim,
+            ctx_buffer: spec(pi::YELLOW, Modifier::empty(), truecolor),
             // The unified-diff lines: pi's own toolDiff* roles.
             diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
             diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
@@ -930,6 +1032,20 @@ impl Theme {
             status_ok: style(None, Modifier::empty()),
             status_warn: style(None, Modifier::BOLD),
             status_error: style(None, Modifier::BOLD | Modifier::UNDERLINED),
+            // `mono` uses no color: the grid's glyph shapes (`#`/`-`/`=`) carry the
+            // categories, so the roles stay plain.
+            ctx_system: style(None, Modifier::empty()),
+            ctx_files: style(None, Modifier::empty()),
+            ctx_memory: style(None, Modifier::empty()),
+            ctx_tools: style(None, Modifier::empty()),
+            ctx_skills: style(None, Modifier::empty()),
+            ctx_mcp: style(None, Modifier::empty()),
+            ctx_user: style(None, Modifier::empty()),
+            ctx_assistant: style(None, Modifier::empty()),
+            ctx_reasoning: style(None, Modifier::empty()),
+            ctx_results: style(None, Modifier::empty()),
+            ctx_free: style(None, Modifier::empty()),
+            ctx_buffer: style(None, Modifier::empty()),
             // No color at all: a selection is the reversed video, as the terminal itself
             // would draw it, and the tool states are told apart by modifiers.
             selection: style(None, Modifier::REVERSED),
@@ -1008,7 +1124,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 43] {
+    pub fn styles(&self) -> [Style; 55] {
         [
             self.reasoning,
             self.interrupted,
@@ -1046,6 +1162,18 @@ impl Theme {
             self.status_ok,
             self.status_warn,
             self.status_error,
+            self.ctx_system,
+            self.ctx_files,
+            self.ctx_memory,
+            self.ctx_tools,
+            self.ctx_skills,
+            self.ctx_mcp,
+            self.ctx_user,
+            self.ctx_assistant,
+            self.ctx_reasoning,
+            self.ctx_results,
+            self.ctx_free,
+            self.ctx_buffer,
             self.diff_added,
             self.diff_removed,
             self.diff_context,

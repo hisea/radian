@@ -484,15 +484,18 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
-            // `/context`: read-only (journal + stored layers, no inbox, no driver),
-            // so it works mid-turn and never interrupts it. The plain text is
-            // rendered from the structured report, so it shares the grid's numbers.
-            Effect::Context => {
-                let notices = match self.session.context_report() {
-                    Ok(report) => radian_host::context_estimate::notice_lines(&report),
-                    Err(error) => vec![error],
-                };
-                self.send(AppInput::SessionDone(notices));
+            // `/context [all]`: read-only (journal + stored layers, no inbox,
+            // no driver), so it works mid-turn and never interrupts it. The
+            // grid entry renders from the structured report; a read failure is
+            // one notice.
+            Effect::Context { all } => {
+                match self.session.context_report() {
+                    Ok(report) => self.send(AppInput::ContextReady {
+                        report: Box::new(report),
+                        all,
+                    }),
+                    Err(error) => self.send(AppInput::SessionDone(vec![error])),
+                }
                 Ok(())
             }
             // `/btw`: the side question runs through the session's current model and

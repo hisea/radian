@@ -103,6 +103,14 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// A `/context [all]` estimate arrived (grid spec `tui-context-grid`): the
+    /// structured report (boxed: the grid's numbers would otherwise bloat every
+    /// `Input`) and whether every context file lists. `update` pushes one grid
+    /// entry from it.
+    ContextReady {
+        report: Box<radian_host::context_estimate::ContextReport>,
+        all: bool,
+    },
     /// A wake-gate degrade fired (one per degrade): the wake-budget notice line. `update`
     /// shows a single line per burst (rewriting it with the latest count) and marks the
     /// session as wake-waiting for herdr until the next turn starts.
