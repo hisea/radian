@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Host plumbing shared by radian-exec and radian-tui: headers, session ids, MCP config and the combined tool provider"
 publish = false
 
@@ -14,30 +15,30 @@ publish = false
 testing = []
 
 [dependencies]
-radian-core = { path = "../radian-core" }
+radian-core = { version = "0.1.0", path = "../radian-core" }
 # The shared `radian memory` / `/memory` command definitions (ADR 0021 D7): one clap grammar so
 # the two hosts cannot drift.
 clap = { version = "4", features = ["derive"] }
-agent-extensions = { path = "../agent-extensions" }
-agent-provider-anthropic = { path = "../agent-provider-anthropic" }
-agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
+agent-extensions = { version = "0.1.0", path = "../agent-extensions" }
+agent-provider-anthropic = { version = "0.1.0", path = "../agent-provider-anthropic" }
+agent-provider-openai-compatible = { version = "0.1.0", path = "../agent-provider-openai-compatible" }
 # The `chatgpt` descriptor's wire protocol (ADR 0026 slice 3); already in the
 # workspace since slice 2.
-agent-provider-openai-responses = { path = "../agent-provider-openai-responses" }
-radian-coding = { path = "../radian-coding" }
+agent-provider-openai-responses = { version = "0.1.0", path = "../agent-provider-openai-responses" }
+radian-coding = { version = "0.1.0", path = "../radian-coding" }
 # `QueuedApprover` implements `radian_permissions::Approver` (ADR 0023 U7); the trait lives
 # with the approval layer.
-radian-permissions = { path = "../radian-permissions" }
+radian-permissions = { version = "0.1.0", path = "../radian-permissions" }
 # The session facade (`open_session`) owns the inbox and the driver (ADR 0023 U5).
-radian-runtime = { path = "../radian-runtime" }
+radian-runtime = { version = "0.1.0", path = "../radian-runtime" }
 # The memory service (ADR 0021 D2/D8) sits on the storage layer.
-radian-memory = { path = "../radian-memory" }
-radian-sandbox = { path = "../radian-sandbox" }
+radian-memory = { version = "0.1.0", path = "../radian-memory" }
+radian-sandbox = { version = "0.1.0", path = "../radian-sandbox" }
 # Real display width for short model-brand labels (CJK and fullwidth characters are 2 cells);
 # `config` measures a brand before padding it.
 unicode-width = "0.2.2"
 # Reused for the owner-only file/directory creation (ADR 0013) in `diagnostics`.
-radian-session = { path = "../radian-session" }
+radian-session = { version = "0.1.0", path = "../radian-session" }
 # The journal timestamps are RFC3339 strings; the stall check (ADR 0006 §2) parses them. The
 # same `chrono` the session writer already uses to format them, so no new crate enters the tree.
 chrono = "0.4"

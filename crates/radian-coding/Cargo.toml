@@ -4,10 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Built-in coding tools (read/write/patch/list + read-only git) with workspace path confinement"
 
 [dependencies]
-radian-core = { path = "../radian-core" }
+radian-core = { version = "0.1.0", path = "../radian-core" }
 # `Prompter::ask` returns a boxed future (ADR 0024 Q1), the same shape as `Approver::decide`.
 futures-util.workspace = true
 # `glob`/`grep`: match a workspace-relative path against the model's glob pattern.
@@ -17,7 +18,7 @@ ignore = "0.4"
 # `grep`: compile the search pattern, so an invalid regex is a named tool error.
 regex = "1"
 # `shell` runs only through this crate's backends; it is never invoked without one.
-radian-sandbox = { path = "../radian-sandbox" }
+radian-sandbox = { version = "0.1.0", path = "../radian-sandbox" }
 serde.workspace = true
 serde_json.workspace = true
 unicode-width = "0.2.2"

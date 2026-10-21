@@ -23,6 +23,7 @@ members = [
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/hisea/radian"
 
 [workspace.dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

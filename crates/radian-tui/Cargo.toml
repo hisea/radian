@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Full-screen TUI shell on radian-runtime (Phase 4 / A)"
 
 # `radian` is the full-screen TUI and `rad` its alias. Both are thin wrappers around
@@ -21,22 +22,22 @@ path = "src/rad.rs"
 [dependencies]
 # The `radian exec` subcommand and the top-level management commands (ADR 0032 slice 1): the
 # `agent` command as a library, so both entries run the same parser and dispatch.
-radian-exec = { path = "../radian-exec" }
-radian-core = { path = "../radian-core" }
-agent-extensions = { path = "../agent-extensions" }
-agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
+radian-exec = { version = "0.1.0", path = "../radian-exec" }
+radian-core = { version = "0.1.0", path = "../radian-core" }
+agent-extensions = { version = "0.1.0", path = "../agent-extensions" }
+agent-provider-openai-compatible = { version = "0.1.0", path = "../agent-provider-openai-compatible" }
 futures-util.workspace = true
-radian-coding = { path = "../radian-coding" }
-radian-host = { path = "../radian-host" }
-radian-permissions = { path = "../radian-permissions" }
-radian-runtime = { path = "../radian-runtime" }
-radian-sandbox = { path = "../radian-sandbox" }
-radian-session = { path = "../radian-session" }
+radian-coding = { version = "0.1.0", path = "../radian-coding" }
+radian-host = { version = "0.1.0", path = "../radian-host" }
+radian-permissions = { version = "0.1.0", path = "../radian-permissions" }
+radian-runtime = { version = "0.1.0", path = "../radian-runtime" }
+radian-sandbox = { version = "0.1.0", path = "../radian-sandbox" }
+radian-session = { version = "0.1.0", path = "../radian-session" }
 clap = { version = "4", features = ["derive"] }
 # The vendored Mermaid renderer (ADR 0042): the transcript draws a closed ```mermaid block
 # as Unicode box drawing. `radian-tui` depends on the crate directly (ADR 0042 supplement:
 # there is no `radian-host` entry point any more, and radian-host stays ratatui-free).
-grok-mermaid = { path = "../../third_party/grok-mermaid" }
+grok-mermaid = { version = "0.0.0", path = "../../third_party/grok-mermaid" }
 # Assistant-text Markdown (ADR 0028 R2): CommonMark + tables, no syntax highlighting (slice 5).
 # `default-features = false` drops the HTML renderer and the SIMD scanner: this crate only
 # walks the event stream, and the build stays dependency-light on the 1.99.1 MSRV.

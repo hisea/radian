@@ -4,11 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Runtime layer: the durable inbox and the per-session driver (ADR 0011)"
 
 [dependencies]
-radian-core = { path = "../radian-core" }
-radian-session = { path = "../radian-session" }
+radian-core = { version = "0.1.0", path = "../radian-core" }
+radian-session = { version = "0.1.0", path = "../radian-session" }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
