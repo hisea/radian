@@ -25,10 +25,23 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/configuration.md"),
     ),
     (
+        "context-files.md",
+        include_str!("../../../docs/user/context-files.md"),
+    ),
+    (
         "environment.md",
         include_str!("../../../docs/user/environment.md"),
     ),
+    (
+        "extensions.md",
+        include_str!("../../../docs/user/extensions.md"),
+    ),
+    ("hooks.md", include_str!("../../../docs/user/hooks.md")),
     ("index.md", include_str!("../../../docs/user/index.md")),
+    (
+        "keybindings.md",
+        include_str!("../../../docs/user/keybindings.md"),
+    ),
     ("mcp.md", include_str!("../../../docs/user/mcp.md")),
     ("memory.md", include_str!("../../../docs/user/memory.md")),
     (

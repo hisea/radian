@@ -259,6 +259,95 @@ const FIND_DEFAULT_KEYS: &[(&str, &[&str])] = &[
     ("find_close", &["esc"]),
 ];
 
+/// Every rebindable action and its built-in keys, in one place for the manual's drift
+/// test. This is the same three tables [`Keymap::builtin`] is built from, so the test
+/// cannot drift from the behavior: adding or removing a binding here changes the keymap
+/// itself. Each entry is the action's config name and its default key strings.
+pub fn builtin_keys() -> Vec<(&'static str, Vec<&'static str>)> {
+    let mut out: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+    for table in [DEFAULT_KEYS, FIND_DEFAULT_KEYS, FORM_DEFAULT_KEYS] {
+        for (name, keys) in table {
+            match out.iter_mut().find(|(action, _)| *action == *name) {
+                Some((_, bound)) => bound.extend(keys.iter().copied()),
+                None => out.push((name, keys.to_vec())),
+            }
+        }
+    }
+    out
+}
+
+/// The keys handled before or outside the keymap, and so not rebindable. The manual's
+/// drift test pins this list to the manual: unlike [`builtin_keys`], this table is
+/// descriptive — changing behavior in `app/update.rs`, the picker, the inspector, the
+/// `btw` overlay or the login wizard means updating it here too. Each entry names where
+/// the key works and the key itself.
+pub const FIXED_KEYS: &[(&str, &str)] = &[
+    ("approval allow once", "y"),
+    ("approval allow for session", "a"),
+    ("approval deny", "n"),
+    ("approval deny", "esc"),
+    ("approval auto-approve and allow once", "!"),
+    ("approval body scroll line", "up"),
+    ("approval body scroll line", "down"),
+    ("approval body scroll page", "pageup"),
+    ("approval body scroll page", "pagedown"),
+    ("memory confirm yes", "y"),
+    ("memory confirm no", "n"),
+    ("memory confirm no", "esc"),
+    ("logout confirm yes", "y"),
+    ("logout confirm no", "n"),
+    ("logout confirm no", "esc"),
+    ("trust move", "up"),
+    ("trust move", "down"),
+    ("trust choose highlighted", "enter"),
+    ("trust this session only", "esc"),
+    ("access switch move", "up"),
+    ("access switch move", "down"),
+    ("access switch choose highlighted", "enter"),
+    ("access switch cancel", "esc"),
+    ("login type", "char"),
+    ("login delete", "backspace"),
+    ("login confirm step", "enter"),
+    ("login back", "esc"),
+    ("login move", "up"),
+    ("login move", "down"),
+    ("login save anyway on failed verify", "y"),
+    ("session picker move", "up"),
+    ("session picker move", "down"),
+    ("session picker move page", "pageup"),
+    ("session picker move page", "pagedown"),
+    ("session picker select", "enter"),
+    ("session picker new session", "n"),
+    ("session picker close", "esc"),
+    ("session picker close", "ctrl-c"),
+    ("session picker full-text search", "tab"),
+    ("session picker full-text search", "ctrl-s"),
+    ("inspector move", "up"),
+    ("inspector move", "down"),
+    ("inspector move page", "pageup"),
+    ("inspector move page", "pagedown"),
+    ("inspector change page", "left"),
+    ("inspector change page", "right"),
+    ("inspector change page", "tab"),
+    ("inspector change page", "shift-tab"),
+    ("inspector detail toggle", "enter"),
+    ("inspector arm kill on jobs page", "k"),
+    ("inspector confirm kill", "y"),
+    ("inspector cancel kill", "n"),
+    ("inspector close", "esc"),
+    ("side answer scroll", "up"),
+    ("side answer scroll", "down"),
+    ("side answer scroll page", "pageup"),
+    ("side answer scroll page", "pagedown"),
+    ("side answer close", "esc"),
+    ("question form help toggle", "alt-h"),
+    ("question form previous question", "left"),
+    ("question form next question", "right"),
+    ("question form open note for current question", "n"),
+    ("mouse wheel scroll transcript", "wheel"),
+    ("quit", "ctrl-c ctrl-c"),
+];
+
 /// One key and its modifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyPress {
