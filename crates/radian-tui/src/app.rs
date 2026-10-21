@@ -55,6 +55,7 @@ mod history;
 mod input;
 mod inspector;
 mod layers;
+pub(crate) mod loop_mode;
 mod mouse;
 mod overlay;
 mod send;
@@ -80,6 +81,10 @@ use state::{bash_context_text, bash_entry, bash_entry_from_context, is_user_inpu
 // (`radian-host`) and `App` only reads it. Re-exported here so the existing `app::TurnState`
 // path keeps working.
 pub use radian_host::projection::TurnState;
+
+// The `/loop` message tags (the `origin` the journal audits, ADR 0005): the integration
+// tests build the expected followups with them, the unit tests cover the round trip.
+pub use loop_mode::{loop_iteration, loop_message};
 
 /// How long the first idle Ctrl-C arms "press again to quit" (ADR 0023 U4, owner
 /// 2026-10-14). A second Ctrl-C inside the window quits; the window closing, or any other
@@ -512,6 +517,10 @@ pub struct SessionView {
     /// started since): `/retry` resends the last user message only then. A normal end, a
     /// cancel or a fresh session leaves it false.
     pub(crate) last_turn_failed: bool,
+    /// The `/loop` continuation (steps 1-2): the per-turn repeat state. Process-local;
+    /// quitting the TUI ends it. The turn-end decision lives in `loop_mode` so step 3
+    /// (`goal-mode.md`) can add its input in the same place.
+    pub(crate) loop_state: loop_mode::LoopState,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
     /// reason is readable; the user quits with the ordinary keys.

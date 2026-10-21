@@ -512,7 +512,7 @@ fn typing_filters_the_slash_menu_and_resets_the_highlight() {
 #[test]
 fn escaping_the_trust_modal_untrusts_this_session_only() {
     let mut app = App::new("m", "s");
-    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"), None);
     assert!(app.has_modal());
     let effects = app.on_key(key(KeyCode::Esc)).effects;
     assert_eq!(
@@ -531,7 +531,7 @@ fn escaping_the_trust_modal_untrusts_this_session_only() {
     // Enter takes the highlighted default: the sandbox choice (trust this directory and
     // remember `workspace` for the project). It is persistent, unlike Esc.
     let mut app = App::new("m", "s");
-    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"), None);
     assert_eq!(
         app.on_key(key(KeyCode::Enter)).effects,
         vec![Effect::SetTrust {

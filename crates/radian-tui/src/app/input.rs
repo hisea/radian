@@ -24,6 +24,9 @@ pub enum Input {
     QuitDeadline,
     /// The deadline of a `/fork` waiting for the turn boundary to reach the journal.
     ForkDeadline,
+    /// The deadline of a `/loop --every` wait: the next iteration is due while idle.
+    /// The turn-end decision re-checks everything, so a stale deadline is harmless.
+    LoopDeadline,
     /// A printable character typed into the focused text field.
     Char(char),
     /// The find box's backspace (not keymap-driven).
@@ -255,4 +258,8 @@ pub enum PendingSend {
 pub(super) struct PendingExpand {
     pub(super) kind: PendingSend,
     pub(super) text: String,
+    /// This send carries the loop prompt: tag it and record it when the expansion lands.
+    /// Set at submit time (a `/loop` inline prompt, or a message typed while the loop is
+    /// armed or paused); re-checked against the live loop state on arrival.
+    pub(super) loop_capture: bool,
 }

@@ -102,9 +102,10 @@ pub struct Cli {
     #[arg(long)]
     mcp_config: Option<String>,
 
-    /// Hidden: ignore the config file's `[mcp]` servers. The `explore` subagent child
-    /// mounts exactly the three read-only tools, so it starts no MCP server from either
-    /// source (it also gets no `--mcp-config`).
+    /// Hidden: ignore the config file's `[mcp]` servers and the workspace's `.mcp.json`.
+    /// The `explore` subagent child mounts exactly the three read-only tools, so it starts
+    /// no MCP server from any implicit source (it also gets no `--mcp-config`). An explicit
+    /// `--mcp-config` still loads: the flag only mutes the implicit sources.
     #[arg(long = "no-config-mcp", hide = true)]
     no_config_mcp: bool,
 

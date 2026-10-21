@@ -57,6 +57,10 @@ impl App {
             command::Outcome::Queue(text) => self.begin_queue(text),
             // `/retry`: resend the last user message, but only after a model-error turn.
             command::Outcome::Retry => self.retry(),
+            // `/loop`: toggle the per-turn repeat, or arm/enable it with limits and an
+            // optional prompt. The loop's own inline prompt goes through `@` expansion
+            // like `/queue`.
+            command::Outcome::Loop(command) => self.loop_command(command),
             command::Outcome::Memory(command) => UpdateResult::effect(Effect::RunMemoryCommand {
                 command,
                 confirmed: false,
