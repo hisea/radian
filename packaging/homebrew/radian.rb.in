@@ -4,7 +4,7 @@ class Radian < Formula
   desc "Coding agent in one Rust binary (full-screen TUI plus headless exec)"
   homepage "https://github.com/hisea/radian"
   version "@VERSION@"
-  license all_of: ["MIT", "Apache-2.0"]
+  license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do

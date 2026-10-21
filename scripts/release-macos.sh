@@ -18,7 +18,9 @@
 #                          an ad-hoc signature (refused with --publish).
 #   RADIAN_NOTARY_PROFILE  notarytool keychain profile. Store it once with:
 #                          xcrun notarytool store-credentials RADIAN \
-#                            --apple-id <addr> --team-id <id> --password <app-pw>
+#                            --apple-id <addr> --team-id <id>
+#                          (without --password: notarytool then asks for it,
+#                          keeping it out of shell history).
 #                          then export RADIAN_NOTARY_PROFILE=RADIAN.
 #                          Unneeded with --skip-notarize (test only).
 #

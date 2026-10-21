@@ -22,7 +22,7 @@ jobs:
           - aarch64-unknown-linux-musl
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Rust 1.99.1 plus the musl target
         uses: dtolnay/rust-toolchain@master
@@ -67,7 +67,7 @@ jobs:
           (cd dist && shasum -a 256 -c "$(basename "$tarball").sha256")
           tar -tzf "$tarball"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: dist/
@@ -78,7 +78,7 @@ jobs:
     needs: [linux]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
