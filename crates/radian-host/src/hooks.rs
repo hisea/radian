@@ -241,6 +241,11 @@ impl CommandHooks {
         self.loop_active.store(active, Ordering::SeqCst);
     }
 
+    /// Whether the TUI `/loop` mode is armed (tests).
+    pub fn loop_active(&self) -> bool {
+        self.loop_active.load(Ordering::SeqCst)
+    }
+
     /// Consecutive validator-fired turn ends (tests): the third consecutive hit reports
     /// `blocked` instead of continuing.
     pub fn consecutive_hits(&self) -> u32 {
@@ -2172,13 +2177,11 @@ mod tests {
         assert_eq!(warned(&fixture.intent_notices).len(), 1);
     }
 
-    /// Loop, goal and jobs suppressions: while `/loop` is armed, while an `Active` or
-    /// `Paused` goal owns the turn end, the validator stays off; a `Done` goal leaves
-    /// it alone.
+    /// While `/loop` is armed the turn end belongs to the loop: a hit text opens
+    /// nothing and counts nothing; disarmed, the same hit fires. Removing the loop
+    /// check fires the armed case and fails this.
     #[tokio::test]
-    async fn loop_or_goal_suppression_holds_the_validator() {
-        use radian_session::{GoalState, GoalStatus};
-
+    async fn intent_stop_stays_off_while_loop_is_armed() {
         let fixture = plain(&HooksConfig::default());
         let hit = completed_text("Now the docs-only ADR updates.");
         fixture.hooks.set_loop_active(true);
@@ -2187,7 +2190,24 @@ mod tests {
             fixture.inbox.claim_next_turn().await.is_none(),
             "an armed loop owns the turn end"
         );
+        assert_eq!(fixture.hooks.consecutive_hits(), 0);
         fixture.hooks.set_loop_active(false);
+        fixture.hooks.run_stop_once(&hit).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "disarmed, the same hit fires"
+        );
+    }
+
+    /// An `Active` or `Paused` goal owns the turn end (it re-posts itself): a hit text
+    /// opens nothing; a `Done` goal leaves the validator alone. Removing the goal
+    /// check fires the active case and fails this.
+    #[tokio::test]
+    async fn intent_stop_stays_off_while_a_goal_owns_the_turn_end() {
+        use radian_session::{GoalState, GoalStatus};
+
+        let fixture = plain(&HooksConfig::default());
+        let hit = completed_text("Now the docs-only ADR updates.");
         let share: crate::goal::SharedGoal = Arc::new(std::sync::Mutex::new(Some(
             GoalState::fresh("o".into(), GoalState::default_budget()),
         )));
@@ -2197,6 +2217,7 @@ mod tests {
             fixture.inbox.claim_next_turn().await.is_none(),
             "an active goal owns the turn end"
         );
+        assert_eq!(fixture.hooks.consecutive_hits(), 0);
         share.lock().unwrap().as_mut().expect("a goal").status = GoalStatus::Paused;
         fixture.hooks.run_stop_once(&hit).await;
         assert!(
