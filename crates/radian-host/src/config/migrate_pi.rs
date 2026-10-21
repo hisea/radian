@@ -114,7 +114,7 @@ pub fn import_pi(dir: &Path) -> Result<PiDraft, PiMigrateError> {
     // The credential file is deliberately never opened — not even to check whether it exists.
     draft.note(
         "credentials are not migrated: `auth.json` is never read. Add an entry to \
-         `~/.radian/credentials/auth.json` yourself (ADR 0026 D2).",
+         `~/.radian/credentials/auth.json` yourself.",
     );
 
     let settings = read_json(dir, "settings.json", &mut draft)?;

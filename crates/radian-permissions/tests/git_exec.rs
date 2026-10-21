@@ -33,8 +33,8 @@ fn repo(dir: &TempDir) -> Profile {
     Profile::workspace_write(dir.path()).unwrap()
 }
 
-/// ADR 0038: `write .git/hooks/pre-commit` is denied in the `workspace` tier, with a reason
-/// that names the ADR and says the entry can run code.
+/// `write .git/hooks/pre-commit` is denied in the `workspace` tier, with a reason
+/// that says the entry can run code outside the sandbox.
 #[test]
 fn workspace_write_denies_write_to_git_hooks() {
     let dir = TempDir::new("git-hooks");
@@ -42,17 +42,25 @@ fn workspace_write_denies_write_to_git_hooks() {
     let out = decide(&profile, "write", ".git/hooks/pre-commit");
     assert_eq!(out.action, Action::Deny);
     let reason = out.reason.expect("a deny names why");
-    assert!(reason.contains("0038"), "reason names ADR 0038: {reason}");
+    assert!(
+        reason.contains(".git")
+            && reason.contains("read-only")
+            && reason.contains("workspace tier"),
+        "reason says what is read-only and where: {reason}"
+    );
 }
 
-/// ADR 0038: `patch .git/config` is denied in the `workspace` tier.
+/// `patch .git/config` is denied in the `workspace` tier.
 #[test]
 fn workspace_write_denies_patch_to_git_config() {
     let dir = TempDir::new("git-config");
     let profile = repo(&dir);
     let out = decide(&profile, "patch", ".git/config");
     assert_eq!(out.action, Action::Deny);
-    assert!(out.reason.is_some_and(|r| r.contains("0038")));
+    assert!(
+        out.reason
+            .is_some_and(|r| r.contains("read-only") && r.contains(".git"))
+    );
 }
 
 /// ADR 0038: the per-worktree config is an executable entry too.

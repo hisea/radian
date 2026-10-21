@@ -366,7 +366,7 @@ fn always_allowed() -> Vec<Rule> {
 /// design (it allows everything). A worktree pointer file is denied whole: rewriting it
 /// repoints git at a gitdir the model controls.
 fn git_exec_denies(workspace: &Path) -> Vec<Rule> {
-    const REASON: &str = "denied by ADR 0038: .git entries git can execute (config, hooks) are read-only in the workspace tier; writing them would run code outside the sandbox";
+    const REASON: &str = "denied: in the workspace tier, .git entries git can execute (config, hooks) are read-only; writing them would run code outside the sandbox";
     let mut rules = Vec::new();
     for git_path in radian_sandbox::discover_git_metadata(workspace) {
         for tool in ["write", "patch"] {

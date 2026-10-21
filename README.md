@@ -9,27 +9,27 @@ the runtime does is journalled to a
 per-session JSONL file, so a session can be resumed by either host.
 
 The design of record is `docs/minimal-headless-rust-agent-runtime-design.md`. Decisions that
-constrain the code are ADRs under `docs/adr/` (see the index at the end of this file). Read
+constrain the code live under `docs/adr/` (see the index at the end of this file). Read
 `AGENTS.md` before you change code.
 
 ## Crates
 
 | Crate | What it is | Detailed docs |
 |---|---|---|
-| `agent-core` | The runtime itself: turn loop (`Agent`/`AgentSession`/`ActiveRun`), messages, tools, hooks, steering, the journal seam, events, context budget estimation. | `crates/agent-core/README.md`, ADR 0001–0007, 0010, 0014, 0015 |
+| `agent-core` | The runtime itself: turn loop (`Agent`/`AgentSession`/`ActiveRun`), messages, tools, hooks, steering, the journal seam, events, context budget estimation. | `crates/agent-core/README.md` |
 | `agent-extensions` | MCP stdio servers exposed as `agent-core` tools, under stable `server__tool` aliases. | `crates/agent-extensions/README.md` |
 | `agent-provider-contract` | Adapter-neutral contract suite: the semantics every `Model` implementation must satisfy, independent of wire format. | `docs/provider-contract.md` |
 | `agent-provider-openai-compatible` | Model adapter for OpenAI-compatible Chat Completions (`/chat/completions`), streaming. | `crates/agent-provider-openai-compatible/README.md`, `docs/provider-contract.md` |
 | `agent-provider-anthropic` | Model adapter for the Anthropic Messages API (`/v1/messages`), streaming, API-key auth, extended thinking. | `crates/agent-provider-anthropic/README.md`, `docs/providers/anthropic-wire-notes.md` |
-| `radian-session` | Session JSONL v1 storage: the durable `TranscriptJournal` seam, the reader/replay path, the disposable SQLite index and the export renderers. | `crates/radian-session/README.md`, ADR 0006 |
-| `radian-runtime` | The layer above the turn loop: a durable, bounded inbox (`followup`/`steer`/`inject`/`cancel`) and the per-session driver. | `crates/radian-runtime/README.md`, ADR 0011 |
-| `radian-permissions` | The permission layer: `ApprovalPolicy` + `ToolRuleSet` as one `Hooks` implementation; decides allow / ask / deny. It does not enforce anything. | `crates/radian-permissions/README.md`, ADR 0012 |
-| `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `docs/sandbox.md`, ADR 0012, ADR 0016 |
+| `radian-session` | Session JSONL v1 storage: the durable `TranscriptJournal` seam, the reader/replay path, the disposable SQLite index and the export renderers. | `crates/radian-session/README.md` |
+| `radian-runtime` | The layer above the turn loop: a durable, bounded inbox (`followup`/`steer`/`inject`/`cancel`) and the per-session driver. | `crates/radian-runtime/README.md` |
+| `radian-permissions` | The permission layer: `ApprovalPolicy` + `ToolRuleSet` as one `Hooks` implementation; decides allow / ask / deny. It does not enforce anything. | `crates/radian-permissions/README.md` |
+| `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `docs/sandbox.md` |
 | `radian-coding` | Built-in coding tools — `read` (files and directories), `write`, `patch` (single or atomic multi-edit), `glob`, `grep`, when the host supplies a workspace; `shell` and the `job` tool additionally require a sandbox. The model runs git through `shell` (hardened via `GIT_CONFIG_*` in untrusted projects). A truncated foreground result registers under a normal job id; retention additionally requires a session-private output directory. Workspace path confinement applies throughout. | `crates/radian-coding/README.md` |
-| `radian-memory` | The memory storage layer (ADR 0021 M1): Global/Project scope logs with replay, the source rules (an agent cannot touch a user record), Forget/Purge, the `projects.jsonl` registry and the Markdown import/export view. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md`, ADR 0021 |
+| `radian-memory` | The memory storage layer: Global/Project scope logs with replay, the source rules (an agent cannot touch a user record), Forget/Purge, the `projects.jsonl` registry and the Markdown import/export view. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md` |
 | `radian-host` | Host plumbing shared by the TUI and the headless command so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, and the memory layer (`MemoryService`, project identity, the agent memory tools, injection, and the shared `radian memory` / `/memory` commands). | `crates/radian-host/README.md` |
 | `agent-cli` | The library behind `radian exec`: the line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `radian memory` commands. | `crates/agent-cli/README.md` |
-| `radian-tui` | The `radian` binary: a full-screen TUI (ADR 0009: full screen only, no inline mode) over `radian-runtime`, with a slash-command layer (`/help`, `/memory …`, `/access`, `/jobs`) and its own transcript scrolling. | `crates/radian-tui/README.md`, ADR 0009 |
+| `radian-tui` | The `radian` binary: a full-screen TUI (full screen only, no inline mode) over `radian-runtime`, with a slash-command layer (`/help`, `/memory …`, `/access`, `/jobs`) and its own transcript scrolling. | `crates/radian-tui/README.md` |
 
 Two more binaries exist but are not part of the product surface: `agent-extensions`'s
 `mcp-fixture` (a hand-written MCP server for its tests) and `radian-sandbox`'s `sandbox-escape`
@@ -37,14 +37,14 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
 
 ## Status (2026-10-13)
 
-- **The `~/.radian/` layout (ADR 0020)** is implemented: `config/` and `cache/` are readable
+- **The `~/.radian/` layout** is implemented: `config/` and `cache/` are readable
   by the sandbox; `sessions/` and `memory/` are denied. `RADIAN_HOME` overrides the
   root. (`--session-dir` / `RADIAN_SESSION_DIR` still override only the sessions directory.)
-- **Memory M1 (ADR 0021)** is implemented: the `radian memory` CLI commands, the TUI `/memory`
+- **Memory** is implemented: the `radian memory` CLI commands, the TUI `/memory`
   slash command (same commands), the agent's `memory_search` tool (search by keyword, or read
   records by id; mounted only past the injection budget), and deterministic injection
   with the `MemoryInjected` audit event.
-- **The configuration file (ADR 0008)** is implemented read-only: `--config`/`RADIAN_CONFIG`/
+- **The configuration file** is implemented read-only: `--config`/`RADIAN_CONFIG`/
   `~/.radian/config/config.toml`, with `model.*`, `permissions.profile` and `compaction.auto`
   wired as defaults (the command line wins). It never contains a secret value.
 - **Pi configuration migration (Phase 5)** is implemented: `radian config import-pi --from
@@ -52,12 +52,12 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
   reads only the directory you name, never `auth.json`, never a secret value, and writes
   nothing without `--write` (which refuses an existing file). Radian does **not** promise
   compatibility with Pi's file format: see [`docs/pi-migration.md`](docs/pi-migration.md).
-- **Session fork (ADR 0022)** is implemented: `radian exec --fork <parent> [--at <seq>]
+- **Session fork** is implemented: `radian exec --fork <parent> [--at <seq>]
   [--session-id <child>]` and the TUI `/fork`. The fork point is a parent turn boundary; the
   child materializes the parent's effective history there (a committed compaction in effect, an
   uncommitted replacement dropped), is written before the parent records it, and can resume or
   fork again.
-- **Automatic compaction (ADR 0018)** is implemented: the proactive budget path, the
+- **Automatic compaction** is implemented: the proactive budget path, the
   provider-overflow fallback (compact to half and retry once), and a manual `/compact` in both
   hosts. `--no-auto-compact` turns off the proactive path only; the overflow fallback still
   runs. The model catalog and the context-budget projection are its inputs.
@@ -77,7 +77,7 @@ cargo build --workspace --locked --release
 ```
 
 The binary lands in `target/debug/` (or `target/release/`) as `radian` (with a `rad` alias);
-`radian exec` is its headless command (ADR 0032: the `agent` binary is gone).
+`radian exec` is its headless command (the `agent` binary is gone).
 The full verification suite an agent must run before calling a change done is in `AGENTS.md`.
 
 ## Run
@@ -87,7 +87,7 @@ Both hosts read the API key **only** from an environment variable — never from
 `$ANTHROPIC_API_KEY` for `anthropic`; `--api-key-env` names a different one. A session is one
 `<session-dir>/<session-id>.jsonl` file; the session directory defaults to
 `--session-dir`, else `$RADIAN_SESSION_DIR`, else `~/.radian/sessions` (`$RADIAN_HOME/sessions`
-when `RADIAN_HOME` is set, ADR 0020). The same `~/.radian/` root also holds `config/`,
+when `RADIAN_HOME` is set). The same `~/.radian/` root also holds `config/`,
 `cache/` and `memory/`; the sandbox denies read on `sessions/` and `memory/`.
 
 ### `radian exec` (line prompt)
@@ -135,7 +135,7 @@ Run this only in a real terminal: it enters the alternate screen and raw mode, a
 over the screen. `--model` is required even for `--list`.
 
 ```sh
-# The key comes only from ~/.radian/credentials/auth.json (ADR 0026 D2), e.g.
+# The key comes only from ~/.radian/credentials/auth.json, e.g.
 #   {"openai-compatible": {"type": "api_key", "key": "$OPENAI_API_KEY"}}
 
 ./target/debug/radian \
@@ -169,7 +169,7 @@ context-budget wording are in `crates/radian-tui/README.md`.
 The common flags in full: `-m`/`--model`, `-w`/`--workspace`, `-r`/`--resume`, `-l`/`--list`
 and `-y`/`--yes` (`-V` is `--version`).
 
-## Configuration file (ADR 0008)
+## Configuration file
 
 Both hosts read `~/.radian/config/config.toml` (`$RADIAN_HOME/config/config.toml`) unless
 `--config FILE` or `RADIAN_CONFIG` names another path. A missing file is an empty configuration
@@ -208,15 +208,15 @@ theme = "dark"               # dark | light | mono; NO_COLOR forces mono
 - An unknown `permissions` value is refused (fail-closed); an unknown `tui.*` value and any
   unknown field is ignored with a warning. Startup prints `[config] <path|none>` and the
   ignored keys (never values).
-- The file is **sandbox-readable** (ADR 0020), which is exactly why it holds references, never
+- The file is **sandbox-readable**, which is exactly why it holds references, never
   keys.
 
 ## Permission tiers
 
-`--profile` picks all three layers of ADR 0012 at once: the sandbox (the enforcement boundary),
+`--profile` picks all three layers at once: the sandbox (the enforcement boundary),
 the rule set (allow / ask / deny) and what the host mounts. The names the binaries accept are
-`workspace` and `full` (ADR 0016, ADR 0043); the old `workspace-write` and `full-access` remain
-accepted as aliases but are not listed in `--help`. **`full` is the default** (ADR 0043): the
+`workspace` and `full`; the old `workspace-write` and `full-access` remain
+accepted as aliases but are not listed in `--help`. **`full` is the default**: the
 neighbouring harnesses run unsandboxed by default, and a sandbox is one flag away
 (`--profile workspace`). A project can turn it on for itself in
 `<workspace>/.radian/config.toml` (`[permissions] profile = "workspace"`); that
@@ -225,20 +225,19 @@ declaration can only **narrow**, never widen.
 | Tier | Sandbox | Shell | MCP | Built-in files |
 |---|---|---|---|---|
 | `workspace` | enforced: macOS seatbelt or Linux bubblewrap, probed at startup | offered, **inside** the sandbox | asks | `write`/`patch` allowed only when the resolved path stays under the workspace |
-| `full` | none — the default (ADR 0043) | offered, **not** sandboxed, no prompts | allowed | `write`/`patch` as `workspace` |
+| `full` | none — the default | offered, **not** sandboxed, no prompts | allowed | `write`/`patch` as `workspace` |
 
 - **A failed probe refuses to run.** If the backend is missing or its probe fails, the host
   exits with an error instead of falling back to an unsandboxed run. There is no degrade path
-  (ADR 0012, decision 2). Try `RADIAN_SANDBOX_PROBE_FAIL=1` to exercise it; it can only
+ . Try `RADIAN_SANDBOX_PROBE_FAIL=1` to exercise it; it can only
   cause a refusal.
 - **Without `--workspace`** no write or execute tool exists at all: the built-in tools are only
   mounted with a workspace, and `shell` additionally needs a sandbox.
 - **Under `workspace`**, writes are confined to the workspace, `.git` stays writable except the
   entries git can execute (`config`, `config.worktree`, `hooks/`, submodule and worktree
-  equivalents — ADR 0038), sensitive directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser profiles, …) are
+  equivalents), sensitive directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser profiles, …) are
   not readable by default, and the network is on (outbound and local-loopback
-  connect/bind/listen) with the pty devices available, so a project's own tests can run
-  (ADR 0016). This is **not** a claim of credential isolation: the macOS backend leaves
+  connect/bind/listen) with the pty devices available, so a project's own tests can run. This is **not** a claim of credential isolation: the macOS backend leaves
   `mach-lookup` open, so the IPC boundary is not tightened. MCP server processes are started
   outside the sandbox in this build, and the startup notice says so.
 - **`--yes` is not "allow everything".** It swaps the approver for one that answers "allow
@@ -257,7 +256,7 @@ declaration can only **narrow**, never widen.
   otherwise it still asks.
   Write these at the subcommand level, never at a bare program name.
 
-Common exit codes (ADR 0032 A3, unified, plus ADR 0044's turn-outcome codes for `radian exec`): 0 success (the turn completed), 1 this turn/run failed, 2 a usage, setup
+Common exit codes (unified, plus the turn-outcome codes for `radian exec`): 0 success (the turn completed), 1 this turn/run failed, 2 a usage, setup
 or startup refusal (clap's own errors, a bad config, an unknown keybinding, a refused startup,
 a failed sandbox probe), 3 the budget ran out (`BudgetExceeded`, deadline exceeded), 4 the answer
 was unfinished (`Incomplete`, `Refused`), 101 the app panicked, 143 on SIGTERM (128 + 15), and
@@ -271,7 +270,7 @@ silently on a broken pipe.
 | What | Where |
 |---|---|
 | Design of record | `docs/minimal-headless-rust-agent-runtime-design.md` |
-| Decisions (read before changing code) | `docs/adr/` — 0001 journal ordering · 0002 tool markers and recovery · 0003 interrupted prefix · 0004 hot config slots · 0005 message identity and transcript replacement · 0006 session JSONL v1 · 0007 usage · 0008 config schema and migration · 0009 fullscreen-only TUI · 0010 durable vs live events · 0011 inbox semantics · 0012 permission sources · 0013 no telemetry · 0014 reasoning · 0015 context budget estimation · 0016 tiers, network and devices · 0017 turn errors and retries · 0018 catalog and auto compaction · 0019 replacement commit · 0020 the `~/.radian/` layout · 0021 memory · 0022 fork · 0023 TUI architecture · 0024 `ask_user` · 0025 skills · 0026 providers and model switching · 0027 footer and chrome · 0028 transcript content · 0029 theme files · 0031 project trust · 0032 one binary · 0033 `!`/`!!` · 0034 herdr · 0035 visual language · 0036 system prompt · 0037 background commands · 0038 access and `.git` writes · 0039 host file access · 0040 group commit · 0042 Mermaid · 0043 single-session radian |
+| Decisions (read before changing code) | `docs/adr/` |
 | Sandbox backends: what they really enforce | `docs/sandbox.md` (spikes: `docs/spikes/macos-sandbox.md`, `docs/spikes/linux-sandbox.md`) |
 | Provider contract and its escape hatches | `docs/provider-contract.md`, wire notes in `docs/providers/anthropic-wire-notes.md` |
 | Session format fixtures and their checkers | `docs/schema/` (`check-fixtures.sh`, `check-config-fixtures.sh`, `fixtures/`, `config/`) |

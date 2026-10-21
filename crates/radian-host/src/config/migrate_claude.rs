@@ -228,7 +228,7 @@ pub fn import_claude(
     // exist. Saved credentials are never migrated.
     draft.note(
         "credentials are not migrated: `auth.json` and `.credentials.json` are never read. \
-         Add entries to `~/.radian/credentials/auth.json` yourself (ADR 0026 D2).",
+         Add entries to `~/.radian/credentials/auth.json` yourself.",
     );
 
     if let Some(home) = claude_home {
@@ -920,7 +920,7 @@ fn map_user_skills_ref(home: &Path, draft: &mut Draft) {
             draft.extra_paths.push(dir.display().to_string());
             draft.note(format!(
                 "`skills/`: not copied; `[skills] extra_paths` points at `{}` (only read \
-                 because it is listed, ADR 0025 S1)",
+                 because it is listed)",
                 dir.display()
             ));
         }
@@ -960,7 +960,7 @@ fn map_user_claude_json(home: &Path, draft: &mut Draft) -> Result<(), ClaudeMigr
                     let suggested = suggested_env(&format!("{name}_{key}"));
                     draft.note(format!(
                         "`.claude.json` server `{name}` env `{key}`: a literal value was not \
-                         migrated (its value is never shown); use an ADR 0008 §3 reference \
+                         migrated (its value is never shown); use an environment reference \
                          instead: `{{ from = \"env\", name = \"{suggested}\" }}`"
                     ));
                 }
