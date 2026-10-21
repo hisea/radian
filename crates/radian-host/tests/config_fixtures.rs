@@ -120,6 +120,24 @@ fn model_retries_is_carried() {
     );
 }
 
+/// `shell-auto-background.toml`: the removed `[shell] auto_background_secs` is accepted
+/// but warned once and ignored, never an error.
+#[test]
+fn the_removed_shell_key_warns_once_and_is_ignored() {
+    let (path, text) = fixture("shell-auto-background.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(
+        config
+            .skipped
+            .iter()
+            .filter(|key| key.as_str() == "shell.auto_background_secs")
+            .count(),
+        1,
+        "{:?}",
+        config.skipped
+    );
+}
+
 /// `v1-unknown-fields.toml` is accepted *and* the unknown fields are reported (ignored, not
 /// lost — the reader never writes, so §5.4's write-back rule cannot be violated).
 #[test]

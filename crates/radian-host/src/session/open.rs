@@ -94,7 +94,6 @@ pub async fn open_session(
         config_queue,
         budget_for,
         price_for,
-        shell_auto_background,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
@@ -271,7 +270,6 @@ pub async fn open_session(
         coding_root.as_deref(),
         sandbox_slot.clone(),
         &jobs_dir,
-        shell_auto_background,
         harden_git,
     )?;
     // ADR 0037 §6: a resumed session clears its jobs directory. The registry is built empty

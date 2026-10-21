@@ -48,8 +48,7 @@ use crate::fail;
 pub use crate::output::SweepSummary;
 use crate::provider::Limits;
 use crate::shell::{
-    Supervised, lock_bool, own_session, sandboxed_command, signal_session,
-    wait_for_exit_without_reaping,
+    lock_bool, own_session, sandboxed_command, signal_session, wait_for_exit_without_reaping,
 };
 
 /// How many background jobs may run at once in one session (ADR 0037 decision 7). A job costs
@@ -105,9 +104,7 @@ pub enum JobState {
     Signaled(i32),
     /// Stopping a job (or a session-end cleanup) stopped it.
     Killed,
-    /// Its deadline elapsed (the adopted-job stop below). Only an adopted foreground call's
-    /// `timeout_secs` sets one now (ADR 0037; revision 2 for explicit
-    /// background jobs).
+    /// Its deadline elapsed. Only a foreground call's `timeout_secs` sets one now.
     TimedOut,
 }
 
@@ -133,7 +130,6 @@ impl JobState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Termination {
     Killed,
-    TimedOut,
 }
 
 /// One job's shared state, written by the supervisor and read by the tools.
@@ -145,7 +141,7 @@ pub(crate) struct JobCell {
     /// `true` for a retained foreground result (ADR 0037 decision 3a): a settled entry the
     /// model reads like any job, evicted with the foreground bounds, never counted as running.
     retained: bool,
-    /// Set by a `job` kill/the timeout before the session is signalled, so the supervisor can
+    /// Set by a `job` kill before the session is signalled, so the supervisor can
     /// label the settle. `None` means the leader exited on its own.
     termination: Option<Termination>,
     ring: Ring,
@@ -165,14 +161,6 @@ pub(crate) struct JobCell {
     reaped: Arc<Mutex<bool>>,
     /// Flipped to `true` when the job settles; a `job` wait awaits it.
     settled: tokio::sync::watch::Sender<bool>,
-}
-
-impl JobCell {
-    /// Appends post-adoption bytes to the job's output ring. Used by a promoted
-    /// foreground stream (ADR 0037); the ring itself stays private to this module.
-    pub(crate) fn push_ring(&mut self, bytes: &[u8]) {
-        self.ring.push(bytes);
-    }
 }
 
 /// A job as shown in a listing (the host's job list, the TUI footer).
@@ -404,155 +392,6 @@ impl Jobs {
         Ok(StartInfo {
             id,
             output: OUTPUT_HINT.to_owned(),
-        })
-    }
-
-    /// Adopts a **foreground** command that is still running (ADR 0037): the same
-    /// child and the same supervisor become a job, in place. `supervised`'s two stream sinks
-    /// are promoted to the job's `.out` file and ring; the supervisor (owned by
-    /// `crate::shell`) settles the job once it reaps. Nothing is restarted.
-    ///
-    /// `remaining_timeout` is the explicit `timeout_secs` still to run, measured from the
-    /// command's start; the job is killed like a `job` kill and settles as timed out then.
-    /// `None` means no deadline after adoption.
-    ///
-    /// Returns [`AdoptInfo`] with the job id and the pre-adoption output. When all
-    /// [`MAX_RUNNING_JOBS`] slots are busy this is a `too_many_jobs` error and **nothing** is
-    /// changed (decision 4): the caller runs the command to its foreground timeout.
-    pub(crate) fn adopt(
-        &self,
-        supervised: &Supervised,
-        command: &str,
-        started: Instant,
-        remaining_timeout: Option<Duration>,
-    ) -> Result<AdoptInfo, ToolFailure> {
-        let mut state = self.lock_state();
-        let running = state
-            .jobs
-            .values()
-            .filter(|cell| lock(cell).state.is_running())
-            .count();
-        if running >= MAX_RUNNING_JOBS {
-            return Err(fail(
-                "too_many_jobs",
-                format!(
-                    "this session already has {running} background jobs running (the limit is \
-                     {MAX_RUNNING_JOBS}), so this foreground command was not moved to the \
-                     background; it runs to its foreground timeout. Read one with `job` \
-                     (`op: \"wait\"`) or stop one with `job` (`op: \"kill\"`)."
-                ),
-            ));
-        }
-
-        crate::output::ensure_private_dir(&self.inner.dir).map_err(|e| {
-            fail(
-                "jobs_dir",
-                format!(
-                    "could not create the jobs directory {}: {e}",
-                    self.inner.dir.display()
-                ),
-            )
-        })?;
-        let id = next_job_id();
-        let output = self.output_path(&id);
-        let file = crate::output::open_output_file(&output).map_err(|e| {
-            fail(
-                "jobs_output",
-                format!("could not create {}: {e}", output.display()),
-            )
-        })?;
-        let file_err = file.try_clone().map_err(|e| {
-            fail(
-                "jobs_output",
-                format!("could not duplicate the output file: {e}"),
-            )
-        })?;
-
-        let (settled, _) = tokio::sync::watch::channel(false);
-        let cell = Arc::new(Mutex::new(JobCell {
-            command: first_line(command),
-            started,
-            state: JobState::Running,
-            retained: false,
-            termination: None,
-            ring: Ring::default(),
-            read_offset: 0,
-            output: output.clone(),
-            sid: supervised.pid,
-            // The **same** reaped flag as the foreground supervisor, so a `job` kill or
-            // `kill_all` signals under the exact lock the reaping holds (the one kill path).
-            reaped: Arc::clone(&supervised.reaped),
-            waiters: 0,
-            settled,
-        }));
-
-        // Promote both sinks while holding both locks: no reader can push, so the retained
-        // pre-adoption bytes reach the file exactly once and the ring origin is exact.
-        // `read_offset` starts at the adoption point, so the tail already in the tool result
-        // is not repeated.
-        let (adopted_bytes, stdout, stderr) = {
-            let mut out = lock(&supervised.stdout);
-            let mut err = lock(&supervised.stderr);
-            let (out_bytes, stdout) = out.promote(file, Arc::clone(&cell));
-            let (err_bytes, stderr) = err.promote(file_err, Arc::clone(&cell));
-            let at = out_bytes + err_bytes;
-            {
-                let mut cell = lock(&cell);
-                cell.ring.set_origin(at);
-                cell.read_offset = at;
-            }
-            (at, stdout, stderr)
-        };
-
-        // Register and publish `Started` before the supervisor can settle (ADR 0039 decision
-        // 6's ordering rule), then install the settle handle.
-        state.order.push(id.clone());
-        state.jobs.insert(id.clone(), Arc::clone(&cell));
-        drop(state);
-        let _ = self.inner.events.send(JobEvent::Started {
-            id: id.clone(),
-            command: first_line(command),
-            output: OUTPUT_HINT.to_owned(),
-        });
-        *supervised.adopted.lock().unwrap_or_else(|e| e.into_inner()) = Some(AdoptedHandle {
-            cell: Arc::clone(&cell),
-            inner: Arc::clone(&self.inner),
-            id: id.clone(),
-        });
-        // The process may have exited exactly at the threshold: the supervisor then sent
-        // `done` and found no handle, so settle here (exactly one take wins).
-        if *supervised.done.borrow() {
-            let handle = supervised
-                .adopted
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
-            if let Some(handle) = handle {
-                let status = supervised
-                    .outcome
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .and_then(|outcome| outcome.status);
-                handle.settle(status);
-            }
-        }
-
-        // The explicit `timeout_secs` keeps counting from the command's start (decision 3).
-        if let Some(remaining) = remaining_timeout {
-            let timer_cell = Arc::clone(&cell);
-            thread::spawn(move || {
-                thread::sleep(remaining);
-                terminate(&timer_cell, Termination::TimedOut);
-            });
-        }
-
-        Ok(AdoptInfo {
-            id,
-            output: OUTPUT_HINT.to_owned(),
-            stdout,
-            stderr,
-            adopted_bytes,
         })
     }
 
@@ -831,37 +670,6 @@ pub struct StartInfo {
     pub output: String,
 }
 
-/// What adopting a running foreground command returns (ADR 0037). The `stdout`
-/// and `stderr` are the bounded rendered tail of the output produced **before** adoption; the
-/// same bytes are already at the start of the job's output file.
-#[derive(Debug)]
-pub(crate) struct AdoptInfo {
-    pub id: String,
-    /// [`OUTPUT_HINT`].
-    pub output: String,
-    pub stdout: String,
-    pub stderr: String,
-    /// Bytes of pre-adoption output written to the job's file (the ring origin).
-    pub adopted_bytes: u64,
-}
-
-/// The settle handle a foreground supervisor takes once it reaps (ADR 0037). It
-/// owns the job cell and the registry so the supervisor can settle without knowing the
-/// registry.
-pub(crate) struct AdoptedHandle {
-    cell: Arc<Mutex<JobCell>>,
-    inner: Arc<JobsInner>,
-    id: String,
-}
-
-impl AdoptedHandle {
-    /// Settles the adopted job with the leader's exit status. Called exactly once, by whichever
-    /// of the supervisor and [`Jobs::adopt`] wins the take.
-    pub(crate) fn settle(self, status: Option<ExitStatus>) {
-        settle(&self.inner, &self.cell, self.id, status);
-    }
-}
-
 /// What a `job` read or wait returns.
 pub(crate) struct OutputResult {
     pub state: JobState,
@@ -908,15 +716,6 @@ impl Ring {
             start,
             total,
         }
-    }
-
-    /// A ring whose absolute origin is `at` (ADR 0037): bytes before `at` live in
-    /// the job's output file, not the ring, and a cursor at `at` begins the post-adoption
-    /// increments.
-    fn set_origin(&mut self, at: u64) {
-        self.buf.clear();
-        self.start = at;
-        self.total = at;
     }
 
     fn push(&mut self, bytes: &[u8]) {
@@ -1011,8 +810,7 @@ fn supervise(
 }
 
 /// Records a job's settle from the leader's exit status and publishes one [`JobEvent::Settled`]
-/// (ADR 0037 decisions 2 and 4). Shared by a background job's own supervisor and the
-/// foreground supervisor of an adopted job (ADR 0037).
+/// (ADR 0037 decisions 2 and 4).
 fn settle(inner: &JobsInner, cell: &Arc<Mutex<JobCell>>, id: String, status: Option<ExitStatus>) {
     // Read-only under the cell lock: nothing flips yet, so this section commutes with the
     // snapshot below.
@@ -1020,7 +818,6 @@ fn settle(inner: &JobsInner, cell: &Arc<Mutex<JobCell>>, id: String, status: Opt
         let cell = lock(cell);
         let state = match cell.termination {
             Some(Termination::Killed) => JobState::Killed,
-            Some(Termination::TimedOut) => JobState::TimedOut,
             None => exit_state(status),
         };
         let duration_ms = cell.started.elapsed().as_millis() as u64;
@@ -1195,8 +992,7 @@ pub(crate) fn job_spec() -> ToolSpec {
                       kills the job. `kill` stops the job's whole process group. The tool \
                       sends SIGTERM first and SIGKILL after 2 s. `kill` on a finished job \
                       only reports its state. This tool is the only way to read the output \
-                      file. A completion notice tells you when a running job ends. Prefer \
-                      the notice over `wait`."
+                      file. A completion notice arrives when the job ends."
             .into(),
         input_schema: job_schema(),
         concurrency: ToolConcurrency::Shared,
@@ -1427,7 +1223,7 @@ mod tests {
         assert_eq!(first_line(&"x".repeat(200)).chars().count(), 120);
     }
 
-    /// A job cell as `start`/`adopt` build it, for the settle test below.
+    /// A job cell as `start` builds it, for the settle test below.
     fn test_cell() -> Arc<Mutex<JobCell>> {
         let (settled, _) = tokio::sync::watch::channel(false);
         Arc::new(Mutex::new(JobCell {
@@ -1565,8 +1361,8 @@ mod tests {
     }
 
     /// The root cause of a wait on a settled job sleeping to its timeout: tokio's `send` returns
-    /// `Err` **without storing** the value when the channel has no receiver, and `start`/`adopt`
-    /// drop the receiver from `watch::channel(false)` at once. A settle with no waiter must store
+    /// `Err` **without storing** the value when the channel has no receiver, and `start`
+    /// drops the receiver from `watch::channel(false)` at once. A settle with no waiter must store
     /// `true` anyway (`send_replace`), so a reader that subscribes afterwards sees it.
     #[test]
     fn a_settle_with_no_waiter_still_stores_the_watched_value() {

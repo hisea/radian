@@ -25,7 +25,7 @@
 | `tui-widgets.toml` | ADR 0027 C3：`[tui.widgets]` 的 `above_input`/`below_input` 在输入框上/下放一行贡献者条目（条目 id）。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `providers.toml` | ADR 0026 D10:`[providers.<名字>]` 具名 provider(`kind` + `base_url`),`model.provider = "<名字>"` 选用。ADR 0014 Q2:同名表下 `reasoning_replay` 可覆盖目录的推理回传字段(字段名串,或 `false` 关掉)。 | **接受**，0 拒绝；名字非法/与内建重名是另一个拒绝场景（读取器报 `providers.<name>` 错误）。 | §2 / ADR 0026 D10 / ADR 0014 Q2 |
 | `model-retries.toml` | ADR 0017:`[model] retries = 3` 是暂时性模型错误在一次模型调用内部(提交前)的重试上限;默认 3,`0` 关闭。非负整数,负数/非整数拒绝。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0017 |
-| `shell-auto-background.toml` | ADR 0037:`[shell] auto_background_secs` 是前台 `shell` 调用转后台的阈值(缺省 60,`0` 关闭)。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0037 |
+| `shell-auto-background.toml` | Removed `[shell] auto_background_secs` (the old auto-background threshold): background is explicit `background: true` only. | **接受** (the old key warns once and is ignored, never an error);无明文密钥样字符串。 | §2 / ADR 0037 |
 | `model-smol.toml` | ADR 0043 §1:`[model.smol]` 的 `provider`/`model` 是便宜模型槽(与 `[model]` 路由键同义;今天只有 `explore` 子会话读它,未设置时跟父,`general` 永远跟父;半设警告并忽略)。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0043 §1 |
 | `mcp-servers.toml` | ADR 0008 §8:`[mcp]` 用自有形式(`[[mcp.servers]]`,与 `--mcp-config` 的 `{"servers": [...]}` 同形);与 `--mcp-config` 合并,同 id 时命令行胜出并警告一行。 | **接受**,0 拒绝;无明文密钥样字符串。 | §8 |
 | `mcp-mcp-servers.toml` | ADR 0008 §8:`[mcp]` 用共享形式(`[mcp.mcpServers.<name>]`,与 `--mcp-config` 的 `{"mcpServers": {...}}` 同形);远端条目只警告不启动;`mcpServers` 条目缺省 `inherit_env = ["HOME"]`。 | **接受**,0 拒绝;无明文密钥样字符串。 | §8 |

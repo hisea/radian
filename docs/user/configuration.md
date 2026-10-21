@@ -35,7 +35,7 @@ Set `[skills]` `builtin` to false to turn off built in skills.
 Set `[skills]` `disabled` to turn off single skills by name.
 Set `[skills]` `extra_paths` to add more skill directories.
 Set `[memory.injection]` `additions` to control follow up memory notes.
-Set `[shell]` `auto_background_secs` to control when a foreground command moves to the background.
+The `[shell]` section has no live keys: an old `auto_background_secs` warns once and is ignored.
 Set `[control]` `enabled` to false to turn off the local control socket.
 Set `[integrations]` `herdr` to false to turn off status reports.
 Set `[compaction]` `thinking` to choose the summary call level.

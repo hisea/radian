@@ -791,10 +791,11 @@ async fn the_shell_description_points_file_reading_and_searching_at_the_read_onl
 }
 
 /// Items 6-9 (say-each-fact-once): the `shell` description kills the whole *process group*
-/// (never "the whole session", which reads as the agent session) and states the cross-cutting
-/// timing facts the model otherwise cannot see (no `timeout_secs` → moved to the background at
-/// the threshold and never killed for time; the notice line); the per-parameter numbers live in
-/// the schema fields only — the timeout default/maximum/count-from-start, the 24 KiB
+/// (never "the whole session", which reads as the agent session) and states the one
+/// cross-cutting rule the model otherwise cannot see (a foreground command never moves to
+/// the background on its own: only an explicit `background: true` does); the per-parameter
+/// numbers live in the schema fields only — the timeout default/maximum/count-from-start,
+/// the 24 KiB per-stream cap, the background no-deadline rule — never in the description.
 /// per-stream cap, the background no-deadline rule — never in the description. The `full` tier
 /// names no ADR number and no `--profile` flag; and only `grep`/`glob` are said to run in
 /// parallel (`read` has no blocking pool yet).
@@ -812,11 +813,8 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
         .expect("shell is advertised with a sandbox");
     for wanted in [
         "kills the whole process group",
-        "never killed for time",
-        "default threshold is 60 s",
-        "The move keeps the same process",
-        "returns at once with a job id",
-        "You will be notified when the command finishes",
+        "never moves to the background on its own",
+        "only with an explicit `background: true`",
         "`grep` and `glob` report truncation",
         "They use less context",
         "They run in parallel",
@@ -833,7 +831,7 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
         "(ADR 0043)",
         "--profile workspace",
         // The per-parameter numbers below live in the schema fields, not the description.
-        "The default is 60 s",
+        "The default is 300 s",
         "The maximum is 600 s",
         "counts from the command's start",
         "default cap is 24 KiB",
@@ -842,6 +840,11 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
         "has no deadline",
         "Do not sleep or poll",
         "end your reply",
+        // No auto-background: none of the old move wording may remain.
+        "The default threshold is",
+        "The move keeps the same process",
+        "returns at once with a job id",
+        "You will be notified",
     ] {
         assert!(
             !spec.description.contains(gone),
@@ -856,7 +859,7 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
     assert!(
         timeout
             .as_str()
-            .is_some_and(|text| text.contains("Default: 60")
+            .is_some_and(|text| text.contains("Default: 300")
                 && text.contains("Maximum: 600")
                 && text.contains("counted from the command's start")
                 && text.contains("ignores")
@@ -875,8 +878,12 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
     assert!(
         background
             .as_str()
-            .is_some_and(|text| text.contains("no deadline")),
-        "the `background` field must say a background command has no deadline: {background}"
+            .is_some_and(|text| text.contains("no deadline")
+                && text.contains(
+                    "Use for servers, watchers and commands expected to run longer than 600 s."
+                )
+                && text.contains("Run tests and builds in the foreground with timeout_secs.")),
+        "the `background` field must say a background command has no deadline and when to use it: {background}"
     );
 }
 

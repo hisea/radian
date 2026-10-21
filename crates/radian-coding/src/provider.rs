@@ -56,12 +56,6 @@ pub struct Limits {
     pub default_shell_timeout: Duration,
     /// Hard cap on a model-supplied `timeout_secs`.
     pub max_shell_timeout: Duration,
-    /// ADR 0037: a **foreground** `shell` call still running after this long is
-    /// adopted by the job registry in place (same process group, never restarted), and the
-    /// call returns at once with the job id. `None` disables adoption (only the foreground
-    /// cap applies, as before). `Some(ZERO)` is treated as off. A host sets it from
-    /// `[shell] auto_background_secs`.
-    pub auto_background_after: Option<Duration>,
     /// The bytes of a **foreground** command's output retained after its
     /// model-facing view was truncated. The head+tail in the result is bounded by
     /// `default_shell_output_bytes`/`max_shell_output_bytes`; this is the larger private file
@@ -101,9 +95,8 @@ impl Default for Limits {
             default_shell_output_bytes: 24 << 10,
             // The model may ask for more, up to `read`'s own hard cap.
             max_shell_output_bytes: 1 << 20,
-            default_shell_timeout: Duration::from_secs(60),
+            default_shell_timeout: Duration::from_secs(300),
             max_shell_timeout: Duration::from_secs(600),
-            auto_background_after: Some(Duration::from_secs(60)),
             // The model-facing view keeps a bounded head+tail (24 KiB per stream by default,
             // split 1/4 : 3/4 on success and 1/8 : 7/8 on failure); the retained file is larger
             // the retained file is larger so the discarded middle can be recovered, but still

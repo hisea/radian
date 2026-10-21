@@ -109,7 +109,6 @@ async fn open_inner(label: &str, scratch: &Path, resume: bool) -> Arc<LocalSessi
             config_queue: radian_runtime::ConfigQueue::new(),
             budget_for: None,
             price_for: None,
-            shell_auto_background: None,
             servers: Vec::new(),
             mcp_config_path: None,
             system_prompt: None,

@@ -6,7 +6,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use agent_core::Hooks;
 use radian_coding::CodingTools;
@@ -101,7 +100,6 @@ pub(super) fn build_coding_tools(
     workspace: Option<&Path>,
     sandbox: SandboxSlot,
     jobs_dir: &Path,
-    shell_auto_background: Option<Duration>,
     harden_git: bool,
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
     match workspace {
@@ -119,12 +117,6 @@ pub(super) fn build_coding_tools(
                     SessionError::Message(format!("--workspace {}: {error}", dir.display()))
                 })?
             };
-            // ADR 0037: the adoption threshold comes from `[shell]`; the host
-            // resolved the default already, so `None` here means off.
-            let tools = tools.with_limits(radian_coding::Limits {
-                auto_background_after: shell_auto_background,
-                ..radian_coding::Limits::default()
-            });
             // ADR 0039 decision 1: the jobs directory is the **session's own** directory, in
             // the sessions dir the sandbox already denies reading. It is created 0700 with the
             // same helper the sessions dir uses, before the registry can write anything, and
@@ -234,8 +226,7 @@ mod tests {
         let jobs_dir = root.join("sessions/sid.jobs");
 
         let slot = SandboxSlot::from_option(Some(full_access(&ws)));
-        let (_coding, jobs) =
-            build_coding_tools(Some(&ws), slot, &jobs_dir, None, false).expect("tools");
+        let (_coding, jobs) = build_coding_tools(Some(&ws), slot, &jobs_dir, false).expect("tools");
         let jobs = jobs.expect("a registry");
 
         assert_eq!(
