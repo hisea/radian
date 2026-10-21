@@ -269,6 +269,9 @@ impl App {
             // `/context`: the loop reads the estimate from the facade; the answer
             // comes back as `Input::SessionDone`.
             command::Outcome::Context => UpdateResult::effect(Effect::Context),
+            // `/btw [question]`: ask from the current context, or reopen the last
+            // side answer. Pure: the loop sends the request and streams it back.
+            command::Outcome::Btw(question) => self.run_btw(question),
             command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
             // The inspector (`/jobs`, `/tools`, `/mcp`, `/hooks`, `/panel`): the loop
             // gathers the snapshot; `update` stays pure. A bare `/jobs` opens the jobs

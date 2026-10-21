@@ -49,6 +49,10 @@ pub(super) struct LoopContext<'a> {
     pub(super) bash_sandbox: Option<radian_sandbox::Sandbox>,
     /// The running `!` command's cancellation token (Esc, ADR 0033).
     pub(super) bash_cancel: Option<agent_core::CancellationToken>,
+    /// The in-flight `/btw` side question's cancel handle (Esc on its overlay).
+    /// `None` when no side question runs; the app's own flag is the authority
+    /// for refusals, this only stops the request.
+    pub(super) side_cancel: Option<radian_host::btw::SideCancel>,
     /// The opencode-go usage gate (ADR 0027): the UI flips it when `/model`
     /// switches the current provider. `None` when there is no key or the period is off.
     pub(super) usage_gate: Option<tokio::sync::watch::Sender<bool>>,
@@ -481,6 +485,31 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            // `/btw`: the side question runs through the session's current model and
+            // streams back as deltas + one outcome. Nothing lands in the transcript,
+            // journal, session totals or turn state, so it works mid-turn.
+            Effect::SideQuestion { question } => {
+                let sink = Arc::new(SideSink {
+                    tx: self.tx.clone(),
+                });
+                match self.session.start_side_question(question, sink) {
+                    Ok(cancel) => {
+                        self.side_cancel = Some(cancel);
+                    }
+                    // The shape could not be built (the journal is unreadable): the
+                    // overlay is already open, so the failure shows there.
+                    Err(error) => self.send(AppInput::SideDone(
+                        radian_host::btw::SideOutcome::Failed(error),
+                    )),
+                }
+                Ok(())
+            }
+            Effect::CancelSideQuestion => {
+                if let Some(cancel) = self.side_cancel.take() {
+                    cancel.cancel();
+                }
+                Ok(())
+            }
             // ADR 0037 decision 4: `/jobs` lists the running background jobs, or stops
             // one/all. The registry lives in the host, so the loop reads it here and shows
             // notices.
@@ -901,5 +930,25 @@ impl LoopContext<'_> {
             hooks: radian_tui::inspector::hook_entries(&session.hooks_config()),
             mcp_config_path: session.mcp_config_path(),
         }
+    }
+}
+
+/// Forwards a side question's streamed text and final outcome to the UI thread
+/// as [`AppInput`]s. Deltas and the outcome travel the same fact channel as
+/// every other host result (ADR 0023 U2); the app appends or finishes the
+/// overlay, and drops anything for a request that is no longer running.
+struct SideSink {
+    tx: Sender<UiEvent>,
+}
+
+impl radian_host::btw::SideSink for SideSink {
+    fn delta(&self, text: &str) {
+        let _ = self
+            .tx
+            .send(UiEvent::Command(AppInput::SideDelta(text.to_owned())));
+    }
+
+    fn done(&self, outcome: radian_host::btw::SideOutcome) {
+        let _ = self.tx.send(UiEvent::Command(AppInput::SideDone(outcome)));
     }
 }

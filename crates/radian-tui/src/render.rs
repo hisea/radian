@@ -226,6 +226,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(inspector) = app.inspector() {
         crate::inspector::draw(frame, chunks[0], inspector, &app.theme, app.footer_glyphs());
     }
+    // The `/btw` side-question overlay draws over the transcript the same way: the
+    // streaming answer, never above a modal.
+    if let Some(overlay) = app.btw() {
+        crate::btw::draw(frame, chunks[0], overlay, &app.theme, app.footer_glyphs());
+    }
 
     if !completion.is_empty() {
         frame.render_widget(Paragraph::new(completion), chunks[1]);

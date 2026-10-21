@@ -133,6 +133,17 @@ pub enum Input {
     /// The open inspector's snapshot was reloaded (the result of
     /// [`Effect::RefreshInspector`]).
     InspectorRefreshed(crate::inspector::InspectorSnapshot),
+    /// One key for the `/btw` overlay: Esc cancels a running request or closes the
+    /// overlay, arrows/PgUp/PgDn scroll the answer.
+    BtwKey(KeyEvent),
+    /// Streamed text of the in-flight side question (the result of
+    /// [`Effect::SideQuestion`]). Appended to the open overlay; dropped when the
+    /// request is no longer running.
+    SideDelta(String),
+    /// The in-flight side question finished (the result of [`Effect::SideQuestion`]):
+    /// the answer, the failure, or the cancellation. A late outcome for a request
+    /// that is no longer running is ignored.
+    SideDone(radian_host::btw::SideOutcome),
     /// One key inside the `/login` wizard (ADR 0026 D3). Hardcoded keys, like the approval.
     LoginKey(LoginKey),
     /// The `/login` verification request finished (D3). `name` is the provider the wizard is

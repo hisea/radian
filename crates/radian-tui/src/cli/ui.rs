@@ -193,6 +193,7 @@ pub(super) fn ui_loop(
             bell_rang: false,
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,
+            side_cancel: None,
             usage_gate,
             chatgpt_usage_gate,
             herdr: herdr.take(),

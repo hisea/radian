@@ -276,4 +276,23 @@ impl App {
     pub(super) fn inspector_close(&mut self) {
         self.remove_overlay(|overlay| matches!(overlay, Overlay::Inspector(_)));
     }
+
+    /// The `/btw` side-question overlay, if it is up.
+    pub fn btw(&self) -> Option<&crate::btw::BtwOverlay> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Btw(overlay)) => Some(overlay),
+            _ => None,
+        })
+    }
+
+    pub(super) fn btw_mut(&mut self) -> Option<&mut crate::btw::BtwOverlay> {
+        self.layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Btw(overlay)) => Some(overlay),
+            _ => None,
+        })
+    }
+
+    pub(super) fn btw_close(&mut self) {
+        self.remove_overlay(|overlay| matches!(overlay, Overlay::Btw(_)));
+    }
 }

@@ -84,6 +84,21 @@ pub struct LocalSession {
     /// categories add up, the memory injection for the fixed block, and the
     /// estimate ruler. Read-only; the loop reads them while a turn runs.
     pub(super) system_base: String,
+    /// The exact `RoleHooks` base (layers 0a, 1 and 2) the next formal request
+    /// carries. The side-question shape rebuilds the prompt from it (plus the
+    /// memory block, the skills section and the cached `<session>` facts) so
+    /// the bytes match what the driver would send.
+    pub(super) role_base: String,
+    /// The cached `<session>` facts hook, shared with the hook chain: the side
+    /// shape reads the same cached section the next formal request gets (after
+    /// a `/model` switch both name the new model).
+    pub(super) facts_hooks: Arc<crate::prompt::SessionFactsHooks>,
+    /// The driver's switchable model, shared: the side request runs through the
+    /// same route, thinking level and credentials as the next formal one.
+    pub(super) side_model: Arc<crate::model::SwitchableModel>,
+    /// Resolves a route's catalog prices from the warm local cache (the overlay
+    /// fee line only; `None` hides the fee, never invents one).
+    pub(super) price_for: Option<crate::cost::RoutePrice>,
     pub(super) context_section: String,
     /// One block per context file, in prompt order (concatenated: the section).
     pub(super) context_blocks: Vec<(String, String)>,
@@ -116,6 +131,79 @@ pub struct LocalSession {
 }
 
 impl LocalSession {
+    /// The next formal request's shape (backlog `tui-btw-side-question`): the
+    /// system prompt the hook chain would build (role base, fixed memory block,
+    /// skills section, cached `<session>` facts — in hook order), the journal's
+    /// committed history, the open-time tool specs, and `Null` settings (the
+    /// route and thinking travel in the model client, not the body).
+    ///
+    /// Read-only: it never touches the inbox or the driver, never runs hooks
+    /// (the memory hook would journal a second `MemoryInjected`), and works
+    /// mid-turn. `/context` renders through it; `/btw` appends one trailing
+    /// user message and sends it.
+    pub fn next_request_shape(&self) -> Result<agent_core::ModelRequest, String> {
+        use crate::memory::first_user_text;
+
+        let (history, _, _) = read_committed(&self.journal_path)?;
+        // The fixed memory block, computed once per process and reused
+        // byte-for-byte afterwards (ADR 0021). A read failure injects
+        // nothing (invariant 2).
+        let memory_text = self
+            .memory_injection
+            .fixed(|| first_user_text(&history).unwrap_or_default())
+            .map(|injection| injection.text)
+            .unwrap_or_default();
+        // Hook order: role base, memory, skills, then `\n` + the cached session
+        // facts (`SessionFactsHooks::before_model_call`).
+        let mut system_prompt = format!("{}{}{}", self.role_base, memory_text, self.skills_section);
+        let session = self.facts_hooks.section();
+        if !session.is_empty() {
+            system_prompt.push('\n');
+            system_prompt.push_str(&session);
+        }
+        Ok(agent_core::ModelRequest {
+            system_prompt: Some(system_prompt),
+            messages: history,
+            tools: self.tool_specs.clone(),
+            settings: serde_json::Value::Null,
+        })
+    }
+
+    /// Runs one side question (`/btw`): the shape plus the trailing side message
+    /// through the session's current model, streamed to `sink`. Nothing lands in
+    /// the transcript or the journal, no tool runs, no usage is recorded, and a
+    /// failure never ends a turn — every outcome goes to the sink (the overlay).
+    pub fn start_side_question(
+        &self,
+        question: String,
+        sink: Arc<dyn crate::btw::SideSink>,
+    ) -> Result<crate::btw::SideCancel, String> {
+        let mut request = self.next_request_shape()?;
+        request
+            .messages
+            .push(crate::btw::side_user_message(&question));
+        let cancel = agent_core::CancellationToken::new();
+        let token = cancel.clone();
+        let model = Arc::clone(&self.side_model);
+        let price_for = self.price_for.clone();
+        let route = self.model_route();
+        self.runtime.spawn(async move {
+            let mut outcome = crate::btw::complete_side(&model, request, &token, &sink).await;
+            if let crate::btw::SideOutcome::Done {
+                usage, fee_micros, ..
+            } = &mut outcome
+            {
+                *fee_micros = usage.as_ref().and_then(|usage| {
+                    let (provider, model) = route.as_ref()?;
+                    let price = price_for.as_ref()?(provider, model)?;
+                    crate::cost::cost_micros(&price, usage).map(|fee| fee.micros)
+                });
+            }
+            sink.done(outcome);
+        });
+        Ok(crate::btw::SideCancel::new(cancel))
+    }
+
     /// The `/context` report (backlog `tui-context-command`): the next request's
     /// shape split into estimated categories, read from the journal's committed
     /// view plus the stored system layers. Read-only: it never touches the
@@ -133,25 +221,20 @@ impl LocalSession {
                 return vec![format!("context: cannot read the session file: {error}")];
             }
         };
-        // The fixed memory block, computed once per process and reused
-        // byte-for-byte afterwards (ADR 0021). A read failure injects
-        // nothing (invariant 2).
-        let fixed = self
+        let request = match self.next_request_shape() {
+            Ok(request) => request,
+            Err(error) => {
+                return vec![format!("context: cannot read the session file: {error}")];
+            }
+        };
+        // The fixed block's text and record count, for the estimate's split and
+        // memory row. Cached after the first call, so this is the same block the
+        // shape above carries.
+        let (memory_text, memory_records) = self
             .memory_injection
             .fixed(|| first_user_text(&history).unwrap_or_default())
             .map(|injection| (injection.text, injection.records.len()))
             .unwrap_or_default();
-        let (memory_text, memory_records) = fixed;
-        let system_prompt = format!(
-            "{}{}{}",
-            self.system_base, self.context_section, memory_text
-        );
-        let request = agent_core::ModelRequest {
-            system_prompt: Some(system_prompt),
-            messages: history.clone(),
-            tools: self.tool_specs.clone(),
-            settings: serde_json::Value::Null,
-        };
         let system = SystemSplit {
             base: self.system_base.clone(),
             context_files: self.context_section.clone(),
@@ -599,6 +682,18 @@ impl SessionFacade for LocalSession {
 
     fn context_report(&self) -> Vec<String> {
         self.context_report_inner()
+    }
+
+    fn next_request_shape(&self) -> Result<agent_core::ModelRequest, String> {
+        LocalSession::next_request_shape(self)
+    }
+
+    fn start_side_question(
+        &self,
+        question: String,
+        sink: std::sync::Arc<dyn crate::btw::SideSink>,
+    ) -> Result<crate::btw::SideCancel, String> {
+        LocalSession::start_side_question(self, question, sink)
     }
 
     /// Re-validates the capability, then runs the command. The check is here as well as in the
