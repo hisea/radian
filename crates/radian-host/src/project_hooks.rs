@@ -45,13 +45,13 @@ pub fn parse_project_value(
 ) -> HooksConfig {
     let mut config = HooksConfig::default();
     let Some(top) = parsed.as_object() else {
-        warnings.push(format!("{origin}: expected an object at the top level; skipped"));
+        warnings.push(format!(
+            "{origin}: expected an object at the top level; skipped"
+        ));
         return config;
     };
     let events = match top.get("hooks") {
-        Some(wrapped) if wrapped.is_object() => {
-            wrapped.as_object().expect("checked as an object")
-        }
+        Some(wrapped) if wrapped.is_object() => wrapped.as_object().expect("checked as an object"),
         _ => top,
     };
     for (event, entries) in events {
@@ -145,8 +145,8 @@ fn parse_command(hook: &serde_json::Value) -> Option<HookCommand> {
 pub fn load_project_file(path: &Path) -> Result<(HooksConfig, Vec<String>), String> {
     let origin = path.display().to_string();
     let text = std::fs::read_to_string(path).map_err(|e| format!("{origin}: {e}"))?;
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("{origin}: not valid hooks JSON: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{origin}: not valid hooks JSON: {e}"))?;
     let mut warnings = Vec::new();
     let config = parse_project_value(&parsed, &origin, &mut warnings);
     Ok((config, warnings))
@@ -484,9 +484,9 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("PreToolUse") && line.contains("shell") && line.contains("make check")),
+            lines.iter().any(|line| line.contains("PreToolUse")
+                && line.contains("shell")
+                && line.contains("make check")),
             "event, matcher, command: {lines:?}"
         );
         assert!(

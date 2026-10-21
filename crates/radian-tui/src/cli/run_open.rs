@@ -345,10 +345,8 @@ pub(super) fn build_session_inputs(
     let servers = merged.servers;
     // Slice B (hooks): the project `.radian/hooks.json` loads now that trust is resolved —
     // trusted (or `--trust`) loads it, untrusted loads nothing.
-    let (project_hooks, project_hooks_lines) = radian_host::load_project_hooks(
-        workspace_path,
-        trust_setup.resolved.decision.as_bool(),
-    );
+    let (project_hooks, project_hooks_lines) =
+        radian_host::load_project_hooks(workspace_path, trust_setup.resolved.decision.as_bool());
     for line in &project_hooks_lines {
         startup_log.line(format!("[hooks] {line}"));
     }

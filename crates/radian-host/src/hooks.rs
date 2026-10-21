@@ -132,7 +132,12 @@ impl CommandHooks {
         wake: HooksWarning,
     ) -> Self {
         Self {
-            pre: compile_layered(&project.pre_tool_use, &config.pre_tool_use, "PreToolUse", &warn),
+            pre: compile_layered(
+                &project.pre_tool_use,
+                &config.pre_tool_use,
+                "PreToolUse",
+                &warn,
+            ),
             post: compile_layered(
                 &project.post_tool_use,
                 &config.post_tool_use,
@@ -286,38 +291,35 @@ impl CommandHooks {
         if reasons.is_empty() {
             return;
         }
-        let text = format!(
-            "Stop hook requested another turn:\n{}",
-            reasons.join("\n")
-        );
-                        // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): past the gate
-                        // the hook still runs, but an exit-2 verdict degrades to a marked
-                        // `inject` (no wake) with the wake-budget notice, the same degrade
-                        // as the background-job notifier (ADR 0045 §2) — a skipped run
-                        // would be silent, a degraded verdict waits visibly.
-                        // One continuation for every exit-2 verdict in the cycle, with the
-                        // reasons joined above: one wake, one degrade count at most.
-                        if self.gate.wake_allowed() {
-                            // The woken turn absorbs the waiting injects, so a wake also
-                            // ends the degrade burst.
-                            if self
-                                .inbox
-                                .followup(Message::user(text), InputSource::System)
-                                .await
-                                .is_ok()
-                            {
-                                self.gate.note_wake();
-                                self.degraded.store(0, Ordering::SeqCst);
-                            }
-                        } else if self
-                            .inbox
-                            .inject_degraded(Message::user(text), InputSource::System)
-                            .await
-                            .is_ok()
-                        {
-                            let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
-                            (self.wake)(&crate::job_notify::wake_budget_line(degraded));
-                        }
+        let text = format!("Stop hook requested another turn:\n{}", reasons.join("\n"));
+        // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): past the gate
+        // the hook still runs, but an exit-2 verdict degrades to a marked
+        // `inject` (no wake) with the wake-budget notice, the same degrade
+        // as the background-job notifier (ADR 0045 §2) — a skipped run
+        // would be silent, a degraded verdict waits visibly.
+        // One continuation for every exit-2 verdict in the cycle, with the
+        // reasons joined above: one wake, one degrade count at most.
+        if self.gate.wake_allowed() {
+            // The woken turn absorbs the waiting injects, so a wake also
+            // ends the degrade burst.
+            if self
+                .inbox
+                .followup(Message::user(text), InputSource::System)
+                .await
+                .is_ok()
+            {
+                self.gate.note_wake();
+                self.degraded.store(0, Ordering::SeqCst);
+            }
+        } else if self
+            .inbox
+            .inject_degraded(Message::user(text), InputSource::System)
+            .await
+            .is_ok()
+        {
+            let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+            (self.wake)(&crate::job_notify::wake_budget_line(degraded));
+        }
     }
 
     /// Runs one hook command with `stdin_json` on its stdin, inside the session sandbox
@@ -634,9 +636,7 @@ fn compile_entry(
 ) -> CompiledEntry {
     let matcher = match &entry.matcher {
         None => CompiledMatcher::All,
-        Some(pattern) if pattern.trim().is_empty() || pattern.trim() == "*" => {
-            CompiledMatcher::All
-        }
+        Some(pattern) if pattern.trim().is_empty() || pattern.trim() == "*" => CompiledMatcher::All,
         Some(pattern) => match regex::Regex::new(&format!("^(?:{pattern})$")) {
             Ok(regex) => CompiledMatcher::Regex(regex),
             Err(error) => {
@@ -870,7 +870,12 @@ mod tests {
     }
 
     fn fixture_with(config: &HooksConfig, sandbox: SandboxSlot) -> Fixture {
-        layered_with_root(TempRoot::new("case"), config, &HooksConfig::default(), sandbox)
+        layered_with_root(
+            TempRoot::new("case"),
+            config,
+            &HooksConfig::default(),
+            sandbox,
+        )
     }
 
     fn layered(user: &HooksConfig, project: &HooksConfig) -> Fixture {
@@ -1211,7 +1216,12 @@ mod tests {
         let sandbox =
             radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::WorkspaceWrite, &root.ws)
                 .expect("the workspace sandbox probes clean on this machine");
-        let fixture = layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::with(sandbox));
+        let fixture = layered_with_root(
+            root,
+            &config,
+            &HooksConfig::default(),
+            SandboxSlot::with(sandbox),
+        );
         let error = fixture
             .hooks
             .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
@@ -1236,7 +1246,12 @@ mod tests {
             radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::WorkspaceWrite, &root.ws)
                 .expect("the workspace sandbox probes clean on this machine");
         let ws = root.ws.clone();
-        let fixture = layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::with(sandbox));
+        let fixture = layered_with_root(
+            root,
+            &config,
+            &HooksConfig::default(),
+            SandboxSlot::with(sandbox),
+        );
         let decision = fixture
             .hooks
             .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
@@ -1528,14 +1543,14 @@ mod tests {
                 marker.display()
             ),
         );
-        let user = pre_config(
-            "shell",
-            &format!("cat > {}", user_stdin.display()),
-        );
+        let user = pre_config("shell", &format!("cat > {}", user_stdin.display()));
         let fixture = layered(&user, &project);
         let decision = fixture
             .hooks
-            .before_tool_call(&cx(), &call("shell", serde_json::json!({"command": "orig"})))
+            .before_tool_call(
+                &cx(),
+                &call("shell", serde_json::json!({"command": "orig"})),
+            )
             .await
             .unwrap();
         assert!(marker.exists(), "the project hook runs");
@@ -1547,10 +1562,9 @@ mod tests {
             "the user hook sees the project-rewritten arguments: {stdin}"
         );
         match decision {
-            ToolDecision::Rewrite { arguments } => assert_eq!(
-                arguments,
-                serde_json::json!({"command": "from-project"}),
-            ),
+            ToolDecision::Rewrite { arguments } => {
+                assert_eq!(arguments, serde_json::json!({"command": "from-project"}),)
+            }
             other => panic!("the rewrite stands: {other:?}"),
         }
         let _ = root;
@@ -1643,7 +1657,10 @@ mod tests {
     async fn an_identical_stop_command_runs_once() {
         let root = TempRoot::new("stop-dedupe");
         let counter = root.dir.join("runs");
-        let script = format!("echo ran >> {}; echo same-reason >&2; exit 2", counter.display());
+        let script = format!(
+            "echo ran >> {}; echo same-reason >&2; exit 2",
+            counter.display()
+        );
         let project = stop_config(&script);
         let user = stop_config(&script);
         let (warn, _) = warnings_collector();

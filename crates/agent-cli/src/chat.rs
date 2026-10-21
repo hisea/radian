@@ -187,8 +187,13 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         // Slice B (hooks): it also lists the project hooks that trust would load.
         let preview = radian_host::preview_project(&workspace_path);
         let hooks_preview = radian_host::preview_project_hooks(&workspace_path);
-        if let Some(choice) =
-            trust_prompt(&lines, &workspace_path, preview.as_ref(), hooks_preview.as_ref()).await
+        if let Some(choice) = trust_prompt(
+            &lines,
+            &workspace_path,
+            preview.as_ref(),
+            hooks_preview.as_ref(),
+        )
+        .await
         {
             trust_setup.resolved =
                 radian_host::trust::resolved_for(choice, &workspace_path).map_err(SetupError)?;
@@ -229,10 +234,8 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     // Slice B (hooks): the project `.radian/hooks.json` loads now that trust is resolved —
     // trusted (or `--trust`) loads it, untrusted loads nothing. The `[hooks] …` lines print
     // here, before any session file exists.
-    let (project_hooks, project_hooks_lines) = radian_host::load_project_hooks(
-        &workspace_path,
-        trust_setup.resolved.decision.as_bool(),
-    );
+    let (project_hooks, project_hooks_lines) =
+        radian_host::load_project_hooks(&workspace_path, trust_setup.resolved.decision.as_bool());
     for line in &project_hooks_lines {
         eprintln!("[hooks] {line}");
     }

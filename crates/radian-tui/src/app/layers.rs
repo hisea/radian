@@ -69,7 +69,9 @@ impl App {
         mcp: Option<radian_host::ProjectPreview>,
         hooks: Option<radian_host::ProjectHooksPreview>,
     ) {
-        self.push_modal(Modal::Trust(Box::new(TrustWizard::new(workspace, mcp, hooks))));
+        self.push_modal(Modal::Trust(Box::new(TrustWizard::new(
+            workspace, mcp, hooks,
+        ))));
     }
 
     /// Removes the topmost overlay matching `pick`. Returns it, or `None` when absent.
