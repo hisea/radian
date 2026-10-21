@@ -1090,3 +1090,61 @@ async fn the_job_description_is_neutral_about_waiting() {
         spec.description
     );
 }
+
+// ---------- 11. the one-step-foreground hint (ADR 0037 decision 4) ----------
+
+/// An ended fast background job's first `wait` carries the one-step hint just before the
+/// status row; the next `read` does not repeat it, and a still-running job never gets it.
+#[tokio::test]
+async fn an_ended_background_job_carries_the_one_step_hint_once() {
+    let dir = TempDir::new("jobs-hint");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+
+    // Still running: no end yet, no hint.
+    let (run_id, _) = start(&session, "sleep 600", None).await;
+    let running = output_text(
+        &exec(&session, "job", json!({"id": run_id, "op": "read"}))
+            .await
+            .unwrap(),
+    );
+    assert!(running.contains("[status: running]"), "{running}");
+    assert!(
+        !running.contains("this job ended after"),
+        "a running job has no end to report: {running}"
+    );
+
+    // Ended within the foreground default: the first `wait` carries the hint before the
+    // status row.
+    let (id, _) = start(&session, "echo done", None).await;
+    let done = output_text(
+        &exec(
+            &session,
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(done.contains("[status: exited 0]"), "{done}");
+    let hint = done
+        .find("this job ended after")
+        .expect("the one-step hint: {done}");
+    let status = done.find("[status:").expect("a status row: {done}");
+    assert!(hint < status, "the hint goes before the status: {done}");
+
+    // The second read of the same ended job does not repeat it.
+    let again = output_text(
+        &exec(&session, "job", json!({"id": id, "op": "read"}))
+            .await
+            .unwrap(),
+    );
+    assert!(
+        !again.contains("this job ended after"),
+        "one line per task: {again}"
+    );
+
+    session.shutdown_jobs();
+}

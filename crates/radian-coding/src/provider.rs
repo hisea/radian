@@ -69,6 +69,15 @@ pub struct Limits {
     pub max_foreground_items: usize,
 }
 
+impl Limits {
+    /// `shell`'s timeout when the model does not give one (ADR 0037 decision 2): the same
+    /// bound the one-step-foreground hint in `job` results measures against (ADR 0037
+    /// decision 4).
+    pub const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(300);
+    /// Hard cap on a model-supplied `timeout_secs` (ADR 0037 decision 2).
+    pub const MAX_SHELL_TIMEOUT: Duration = Duration::from_secs(600);
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -95,8 +104,8 @@ impl Default for Limits {
             default_shell_output_bytes: 24 << 10,
             // The model may ask for more, up to `read`'s own hard cap.
             max_shell_output_bytes: 1 << 20,
-            default_shell_timeout: Duration::from_secs(300),
-            max_shell_timeout: Duration::from_secs(600),
+            default_shell_timeout: Self::DEFAULT_SHELL_TIMEOUT,
+            max_shell_timeout: Self::MAX_SHELL_TIMEOUT,
             // The model-facing view keeps a bounded head+tail (24 KiB per stream by default,
             // split 1/4 : 3/4 on success and 1/8 : 7/8 on failure); the retained file is larger
             // the retained file is larger so the discarded middle can be recovered, but still
