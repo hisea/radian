@@ -1,7 +1,7 @@
 # 轮末「只说不做」：先改提示词与通知文案，之后再定内建续跑
 
 - 状态：A 部分 decided；B 部分 idea（A 量过之后再定）
-- 涉及 ADR：0036（角色规则清单；完成通知作为消息追加）、0037（自动转后台的缺省阈值；决定 5 完成通知的形状、唤醒速率闸门）、0045 §3（`Stop` 续跑路径）、0011（`followup` lane、L2 来源、L5 空闲唤醒）、0021（memory 注入范围）、0034（herdr `blocked`）、0005（宿主消息 meta）、0017（只有 `Completed` 续跑）
+- 涉及 ADR：0036（角色规则清单；完成通知作为消息追加）、0037（§2 自动转后台删除、前台缺省超时；决定 5 完成通知的形状、唤醒速率闸门）、0008（`[shell] auto_background_secs` 从 schema 删除）、0045 §3（`Stop` 续跑路径）、0011（`followup` lane、L2 来源、L5 空闲唤醒）、0021（memory 注入范围）、0034（herdr `blocked`）、0005（宿主消息 meta）、0017（只有 `Completed` 续跑）
 - 来源：`docs/research/2026-10-21-intent-stop.md`（§3.4 提示词对比、§4 频率、§5 选项、§6 建议）
 
 ## 背景
@@ -19,13 +19,16 @@ radian 独有、且与停顿共现的，是「回合中途结束、等通知唤�
 5. `shell` 转后台时的返回文本与通知文本按研究笔记 §3.5 改：返回文本说「先做不依赖结果的事；实在没事再结束回复，完成后会被自动唤醒」（opencode 的形状，只在真的进入等待时才看到）；通知以 `Resume the task using this result. Do not reply to this notice.` 收尾（omp 的形状）。
 6. 不改 `Do not use sleep or polling to wait`，不动模型参数。
 
-待决（涉及 ADR 0037 的自动转后台）：七家里只有 radian 缺省把超过 60 s 的前台命令转后台，别家都要模型显式选 background。这是把模型推进「结束回合等通知」模式的 radian 独有推力（研究笔记 §3.5）。是否把缺省阈值提到 300 s 或与前台上限一致，自动转后台只留给真正长的命令。
+7. **取消自动转后台**（ADR 0037 §2 整节删除；该 ADR 改为「后台只有显式 `background: true` 一条路」）。七家里只有 radian 缺省把超过 60 s 的前台命令转后台，别家都要模型显式选 background；这是把模型推进「结束回合等通知」模式的 radian 独有推力（研究笔记 §3.5）。`shell` 描述里删掉「Without `timeout_secs`, a command that still runs after the threshold moves to the background …」整段，只留 `background: true` 的说明；`[shell] auto_background_secs` 配置项删除（ADR 0008 schema 与 config fixture 同步，旧配置里出现时警告一行并忽略）；`radian-coding` 里自动转后台的测试删除。
+   - 连带待决：前台缺省超时今天也是 60 s（ADR 0037 §2 把两者绑在一起）。没有自动转后台后，没写 `timeout_secs` 的 `cargo test` 会在 60 s 被杀。建议缺省提到 300 s（Claude Code 缺省 120 s、上限 600 s；ab6 的四 crate 测试 274 s，pi 同步等了 288 s），上限 600 s 不变。
+
 
 备选（不在 A 里做）：把等待写成固定句式 `To wait for a background job, end your reply with exactly: waiting for job <id>.`，只在 B 需要可识别的等待标记时再加。
 
 ### A 的验收
 
 - `prompt.rs` 的角色关键句测试更新；ADR 0036 清单与 `default.md` 一致。
+- `shell` 单测：前台命令超过旧阈值不再转后台，到前台缺省超时按超时结束；`background: true` 照旧；`auto_background_secs` 出现在配置里时警告并忽略；config fixture 通过。
 - `job_notify` 单测：通知末尾是那句「继续任务」；尾部为空时三行之间都有换行。
 - 同一任务集 A/B/C 各 3 次：人工 `Continue` 次数（ab6 metrics 已有这列）与「纯文本中途结束」次数，改前改后对比。
 
