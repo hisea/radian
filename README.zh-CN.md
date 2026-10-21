@@ -65,6 +65,32 @@ radian 是一个编码 agent，一个 Rust 二进制；仓库里也包含它所�
 - **会话分叉**已实现：`radian exec --fork <parent> [--at <seq>] [--session-id <child>]` 和 TUI 的 `/fork`。分叉点是父会话的轮次边界；子会话在那里物化父会话的有效历史（已提交的压缩生效，未提交的替换丢弃），先于父会话的记录写入，可以恢复，也可以再分叉。
 - **自动压缩**已实现：主动预算路径、provider 溢出回退（压缩到一半并重试一次），以及两种模式下的手动 `/compact`。`--no-auto-compact` 只关闭主动路径，溢出回退仍然运行。模型目录和上下文预算预测是它的输入。
 
+## 安装
+
+用 Homebrew、release 压缩包或 Cargo 从源码安装当前版本。
+
+```sh
+brew install hisea/tap/radian
+```
+
+这个 tap 只链接 `radian`：homebrew-core 里已经有一个 `rad` formula，所以这里不链接自带的 `rad` 别名。macOS 的包经过签名和 notarization。
+
+或者从[发布页](https://github.com/hisea/radian/releases)下载 `radian-<version>-<target>.tar.gz`，用同名的 `.sha256` 校验后，解开里面的 `radian`（和 `rad`）：
+
+```sh
+shasum -a 256 -c radian-<version>-<target>.tar.gz.sha256
+tar -xzf radian-<version>-<target>.tar.gz
+./radian --version
+```
+
+或者从源码构建（会同时装上 `radian` 和 `rad`）：
+
+```sh
+cargo install --git https://github.com/hisea/radian radian-tui
+```
+
+在 Linux 上，`workspace` 档位用 `bubblewrap` 跑沙箱；先把它装好（Debian/Ubuntu 上比如 `sudo apt install bubblewrap`）。
+
 ## 构建
 
 工作区的最低 Rust 版本是 **Rust 1.99.1**。调试构建：
