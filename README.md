@@ -1,17 +1,39 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/banner-dark.png">
+    <img src=".github/readme/banner-light.png" alt="radian" width="640">
+  </picture>
+</p>
+
+<p align="center"><b>English</b> | <a href="README.zh-CN.md">简体中文</a></p>
+
+<p align="center">
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-5b3fd0" alt="license: MIT / Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/rust-1.99.1%2B-5b3fd0" alt="rust 1.99.1+">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-5b3fd0" alt="platform: macOS | Linux">
+  <img src="https://img.shields.io/badge/status-pre--release-8f8d9c" alt="status: pre-release">
+</p>
+
 # radian
 
-`radian` is a minimal, headless, embeddable Rust agent runtime, plus the coding agent built on
-top of it. The core (`agent-core`) runs a turn loop over an injected model, tools and hooks; the
-`radian-*` crates add durable sessions, a permission layer, an OS sandbox, built-in coding
-tools, durable memory and the host plumbing, and two hosts ship as binaries: the line-prompt CLI
-`radian` (its headless command is `radian exec`) and the full-screen TUI `radian`. Everything
-the runtime does is journalled to a
-per-session JSONL file, so a session can be resumed by either host.
+radian is a coding agent in one Rust binary, and the agent runtime it is built on.
 
-The design of record is `ARCHITECTURE.md`. Decisions that
-constrain the code live under `docs/adr/` (see the index at the end of this file). Read
-`AGENTS.md` before you change code. How to contribute is in [CONTRIBUTING.md](CONTRIBUTING.md).
-To report a security problem, see [SECURITY.md](SECURITY.md).
+- `radian` opens a full-screen terminal UI. `rad` is an alias.
+- `radian exec` runs headless. `radian exec -p "<task>"` runs one task and exits. `--output jsonl` prints each step as one JSON line, and the exit code tells how the turn ended.
+- Each session is one JSONL journal file. Both modes can resume a session, fork it at a turn boundary, or watch it read-only with `radian attach`.
+- The sandbox is off by default. `--profile workspace` turns it on (macOS seatbelt or Linux bubblewrap). A project can save the setting for itself, and the setting can only narrow access.
+- Providers: OpenAI-compatible Chat Completions and the Anthropic Messages API. Tools: built-in file, search, shell and job tools, MCP stdio servers, skills, memory, and a one-shot `subagent`.
+- Inside [herdr](https://github.com/ogulcancelik/herdr), radian reports its state (working, idle, blocked) by itself.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/terminal-dark.png">
+    <img src=".github/readme/terminal-light.png" alt="the radian TUI at 120 columns: a thinking block, a shell call, a read and a patch with its diff" width="820">
+  </picture>
+  <br><sub>radian at 120 columns, rendered by the TUI prototype script (<code>research/2026-10-16-render-prototype/</code>).</sub>
+</p>
+
+New users start with [`docs/user/quickstart.md`](docs/user/quickstart.md). The design is in [`ARCHITECTURE.md`](ARCHITECTURE.md), and the decisions that constrain the code are in [`docs/adr/`](docs/adr/). Read [`AGENTS.md`](AGENTS.md) before you change code. How to contribute is in [CONTRIBUTING.md](CONTRIBUTING.md). To report a security problem, see [SECURITY.md](SECURITY.md).
 
 ## Crates
 
@@ -229,8 +251,7 @@ declaration can only **narrow**, never widen.
 | `full` | none — the default | offered, **not** sandboxed, no prompts | allowed | `write`/`patch` as `workspace` |
 
 - **A failed probe refuses to run.** If the backend is missing or its probe fails, the host
-  exits with an error instead of falling back to an unsandboxed run. There is no degrade path
-  (decision 2). Try `RADIAN_SANDBOX_PROBE_FAIL=1` to exercise it; it can only
+  exits with an error instead of falling back to an unsandboxed run. There is no degrade path. Try `RADIAN_SANDBOX_PROBE_FAIL=1` to exercise it; it can only
   cause a refusal.
 - **Without `--workspace`** no write or execute tool exists at all: the built-in tools are only
   mounted with a workspace, and `shell` additionally needs a sandbox.
@@ -261,9 +282,8 @@ Common exit codes (unified, plus the turn-outcome codes for `radian exec`): 0 su
 or startup refusal (clap's own errors, a bad config, an unknown keybinding, a refused startup,
 a failed sandbox probe), 3 the budget ran out (`BudgetExceeded`, deadline exceeded), 4 the answer
 was unfinished (`Incomplete`, `Refused`), 101 the app panicked, 143 on SIGTERM (128 + 15), and
-130 for a requested cancellation or a forced exit after a second Ctrl-C. `radian exec` and the TUI share the codes;
-`radian`'s TUI used to return 1 for a startup refusal and now returns 2, which is the one
-behavior change. `radian exec --list | head` (and every print-and-exit mode) still exits 0
+130 for a requested cancellation or a forced exit after a second Ctrl-C. `radian exec` and the TUI share the codes.
+`radian exec --list | head` (and every print-and-exit mode) still exits 0
 silently on a broken pipe.
 
 ## Docs
@@ -280,7 +300,7 @@ Start with `docs/user/` for the user manual; `docs/adr/` holds the decisions; `A
 | Dogfooding findings (radian run on radian) | `research/2026-10-12-radian-tui-dogfooding.md`, `research/2026-10-12-opencode-zen-dogfooding.md` |
 | Performance baseline and its reproduction commands | `benchmarks/perf-baseline.md` |
 | Spike reports (sandbox, TUI, OAuth) | `spikes/` |
-| Agent instructions (verify suite, delegation) | `AGENTS.md` |
+| Agent instructions (verify suite) | `AGENTS.md` |
 
 ## License
 
