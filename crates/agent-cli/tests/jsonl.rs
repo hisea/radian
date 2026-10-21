@@ -250,33 +250,155 @@ async fn jsonl_stdout_is_durable_lines_plus_live_plus_result() {
             "turns": 1,
             "usage": {"input": 10, "output": 4},
             "cost": Value::Null,
+            "run_turns": 1,
+            "run_usage": {"input": 10, "output": 4},
+            "run_cost": Value::Null,
             "text": "hello jsonl",
         }),
         "the Result line carries the run and the session totals"
     );
-    // ... and its field set is the checked-in fixture's field set.
-    let fixture: Value = serde_json::from_str(
-        &std::fs::read_to_string(repo_root().join("docs/schema/fixtures/exec-result.jsonl"))
-            .unwrap(),
-    )
-    .unwrap();
-    let mut result_keys: Vec<&str> = result
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    let mut fixture_keys: Vec<&str> = fixture
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    result_keys.sort_unstable();
-    fixture_keys.sort_unstable();
+    // ... and its field set is the checked-in fixture's field set (each fixture line).
+    let fixture_text =
+        std::fs::read_to_string(repo_root().join("docs/schema/fixtures/exec-result.jsonl"))
+            .unwrap();
+    for (i, line) in fixture_text.lines().enumerate() {
+        let fixture: Value = serde_json::from_str(line).unwrap();
+        let mut result_keys: Vec<&str> = result
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut fixture_keys: Vec<&str> = fixture
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        result_keys.sort_unstable();
+        fixture_keys.sort_unstable();
+        assert_eq!(
+            result_keys, fixture_keys,
+            "the Result line matches its fixture line {i}"
+        );
+    }
+}
+
+/// Runs one `-p` turn with `--output jsonl` on a resumed session and splits stdout the
+/// same way as [`run_jsonl`].
+async fn run_jsonl_resume(
+    server_base_url: &str,
+    env: &Env,
+    session_id: &str,
+    prompt: &str,
+) -> (i32, Vec<String>, Vec<Value>, Value, String) {
+    let args = vec![
+        "--model",
+        "m",
+        "--base-url",
+        server_base_url,
+        "--resume",
+        session_id,
+        "--output",
+        "jsonl",
+        "-p",
+        prompt,
+    ];
+    let (code, out, err) = feed(spawn(&args, env), "").await;
+    let mut lines: Vec<String> = out.lines().map(str::to_owned).collect();
+    assert!(
+        !lines.is_empty(),
+        "jsonl stdout must end with a Result line"
+    );
+    let result: Value = serde_json::from_str(lines.pop().unwrap().as_str())
+        .expect("the last stdout line is the Result record");
     assert_eq!(
-        result_keys, fixture_keys,
-        "the Result line matches its fixture"
+        result.get("type"),
+        Some(&Value::String("Result".to_owned())),
+        "the last line is the Result record: {result}"
+    );
+    let mut durable = Vec::new();
+    let mut live = Vec::new();
+    for line in &lines {
+        let value: Value =
+            serde_json::from_str(line).expect("every stdout line is one JSON object");
+        if value.get("live") == Some(&Value::Bool(true)) {
+            live.push(value);
+        } else {
+            durable.push(line.clone());
+        }
+    }
+    (code, durable, live, result, err)
+}
+
+/// A resumed run reports session totals across both turns but `run_*` only for this
+/// process. Mutations: `run_*` folded over the whole file, `run_*` copied from the
+/// session totals, or the tee boundary off by one line → the run half equals the
+/// session half (or misses a turn) and this fails.
+#[tokio::test]
+async fn resume_run_usage_counts_only_this_process() {
+    let server = MockServer::start(vec![
+        text_reply_with_usage("first", 10, 4),
+        text_reply_with_usage("second", 5, 2),
+    ])
+    .await;
+    let env = Env::fresh("resume-run");
+    let (code, _, _, first_result, err) =
+        run_jsonl(&server.base_url, &env, "rsess", &[], "first", "").await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(first_result.get("turns"), Some(&json!(1)));
+    assert_eq!(first_result.get("run_turns"), Some(&json!(1)));
+
+    let (code, _, _, result, err) =
+        run_jsonl_resume(&server.base_url, &env, "rsess", "second").await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        result.get("turns"),
+        Some(&json!(2)),
+        "session covers both turns"
+    );
+    assert_eq!(
+        result.get("run_turns"),
+        Some(&json!(1)),
+        "this process ran one turn: {result}"
+    );
+    assert_eq!(
+        result.get("usage"),
+        Some(&json!({"input": 15, "output": 6})),
+        "session usage covers both turns: {result}"
+    );
+    assert_eq!(
+        result.get("run_usage"),
+        Some(&json!({"input": 5, "output": 2})),
+        "run usage is only the second turn: {result}"
+    );
+    // No catalog price in tests: no fee record, so both costs are null.
+    assert_eq!(result.get("cost"), Some(&Value::Null));
+    assert_eq!(result.get("run_cost"), Some(&Value::Null));
+    assert_eq!(result.get("text"), Some(&json!("second")));
+}
+
+/// Without `--resume` the two groups are byte-identical in the `Result` line.
+#[tokio::test]
+async fn no_resume_run_groups_equal_session_groups() {
+    let server = MockServer::start(vec![text_reply_with_usage("hello", 10, 4)]).await;
+    let env = Env::fresh("no-resume-equal");
+    let (code, _, _, result, err) = run_jsonl(&server.base_url, &env, "equal", &[], "hi", "").await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        result.get("run_turns"),
+        result.get("turns"),
+        "run_turns equals turns without a resume: {result}"
+    );
+    assert_eq!(
+        result.get("run_usage"),
+        result.get("usage"),
+        "run_usage equals usage without a resume: {result}"
+    );
+    assert_eq!(
+        result.get("run_cost"),
+        result.get("cost"),
+        "run_cost equals cost without a resume: {result}"
     );
 }
 

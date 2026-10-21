@@ -422,7 +422,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     // the prefix is read from the file (the lines written before the tee, e.g.
     // `SessionCreated`), and the printer owns stdout from here on. Because install and every
     // write take the same lock, no line is missed or printed twice.
-    let jsonl_printer = if jsonl_mode {
+    let (jsonl_printer, jsonl_prefix_len) = if jsonl_mode {
         let tx = jsonl_tx
             .clone()
             .expect("the jsonl channel exists in jsonl mode");
@@ -438,12 +438,15 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             .split_inclusive(|byte: &u8| *byte == b'\n')
             .map(|line| line.to_vec())
             .collect::<Vec<_>>();
-        Some(jsonl::spawn_printer(
-            prefix,
-            jsonl_rx.expect("the jsonl channel exists in jsonl mode"),
-        ))
+        (
+            Some(jsonl::spawn_printer(
+                prefix,
+                jsonl_rx.expect("the jsonl channel exists in jsonl mode"),
+            )),
+            prefix_len as u64,
+        )
     } else {
-        None
+        (None, 0)
     };
     // What the `Result` record reports. Read before the drops below: the projection lives
     // with the session.
@@ -489,7 +492,14 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         drop(jsonl_tx);
         let _ = printer.await;
         let summary = jsonl::summarize_journal(&jsonl_journal_path);
-        let line = jsonl::result_line(&jsonl_session_id, &done.end, &summary, jsonl_cost_estimated);
+        let run_summary = jsonl::summarize_journal_from(&jsonl_journal_path, jsonl_prefix_len);
+        let line = jsonl::result_line(
+            &jsonl_session_id,
+            &done.end,
+            &summary,
+            &run_summary,
+            jsonl_cost_estimated,
+        );
         let _ = std::io::Write::write_all(&mut std::io::stdout().lock(), &line);
     }
     Ok(done.code)

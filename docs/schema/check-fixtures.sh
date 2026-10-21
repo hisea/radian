@@ -824,10 +824,11 @@ def check_fixture(name, exp):
 
 
 # `radian exec --output jsonl` 的 closing `Result` 记录（ADR 0044 §2）：它不是 journal 行，
-# 没有信封七字段，单独校验。`exec-result.jsonl` 恰好一行，以 LF 结尾。
+# 没有信封七字段，单独校验。`exec-result.jsonl` 恰好两行，以 LF 结尾：一行无 resume
+#（`run_*` 与累计组字节相同），一行有 resume（`run_*` 只是本次运行）。
 RESULT_FIELDS = {
     "type", "session_id", "outcome", "exit_code", "stop_reason",
-    "turns", "usage", "cost", "text",
+    "turns", "usage", "cost", "run_turns", "run_usage", "run_cost", "text",
 }
 RESULT_OUTCOMES = {
     "completed", "refused", "budget_exceeded", "failed",
@@ -840,67 +841,105 @@ RESULT_STOP_REASONS = {
 RESULT_USAGE_KEYS = {"input", "output", "cache_read", "cache_write"}
 
 
-def check_result_fixture(name):
-    raw = open(f"fixtures/{name}", "rb").read()
-    if not raw.endswith(b"\n"):
-        raise Corruption(f"{name}: 文件不以 LF 结尾")
-    lines = [l for l in raw.split(b"\n") if l != b""]
-    if len(lines) != 1:
-        raise Corruption(f"{name}: 期望恰好一行 Result 记录，得到 {len(lines)} 行")
-    try:
-        ev = json.loads(lines[0])
-    except json.JSONDecodeError as e:
-        raise Corruption(f"{name}: JSON 解析失败: {e}") from None
+def check_one_result(ev, label):
     if not isinstance(ev, dict) or set(ev) != RESULT_FIELDS:
         raise Corruption(
-            f"{name}: 字段集合不是 Result 的九个字段: "
+            f"{label}: 字段集合不是 Result 的十二个字段: "
             f"{sorted(ev) if isinstance(ev, dict) else type(ev)}"
         )
     if ev["type"] != "Result":
-        raise Corruption(f"{name}: type {ev['type']!r} != 'Result'")
+        raise Corruption(f"{label}: type {ev['type']!r} != 'Result'")
     if not isinstance(ev["session_id"], str) or not ev["session_id"]:
-        raise Corruption(f"{name}: session_id 必须是非空字符串")
+        raise Corruption(f"{label}: session_id 必须是非空字符串")
     if ev["outcome"] not in RESULT_OUTCOMES:
-        raise Corruption(f"{name}: outcome {ev['outcome']!r} 不在 ADR 0044 §2 的集合")
+        raise Corruption(f"{label}: outcome {ev['outcome']!r} 不在 ADR 0044 §2 的集合")
     if not isinstance(ev["exit_code"], int) or isinstance(ev["exit_code"], bool):
-        raise Corruption(f"{name}: exit_code 不是整数")
+        raise Corruption(f"{label}: exit_code 不是整数")
     reason = ev["stop_reason"]
     if not isinstance(reason, str) or not (
         reason in RESULT_STOP_REASONS
         or (reason.startswith("unknown:") and len(reason) > len("unknown:"))
     ):
-        raise Corruption(f"{name}: stop_reason {reason!r} 不在 ADR 0044 §2 的集合")
+        raise Corruption(f"{label}: stop_reason {reason!r} 不在 ADR 0044 §2 的集合")
     if (
         not isinstance(ev["turns"], int)
         or isinstance(ev["turns"], bool)
         or ev["turns"] < 0
     ):
-        raise Corruption(f"{name}: turns 不是非负整数")
-    usage = ev["usage"]
-    if not isinstance(usage, dict):
-        raise Corruption(f"{name}: usage 不是对象")
-    unknown = set(usage) - RESULT_USAGE_KEYS
-    if unknown:
-        raise Corruption(f"{name}: usage 有未知字段 {sorted(unknown)}")
-    for key, value in usage.items():
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise Corruption(f"{name}: usage.{key} 不是非负整数")
-    cost = ev["cost"]
-    if cost is not None:
-        if not isinstance(cost, dict) or set(cost) != {"micros", "incomplete", "estimated"}:
-            raise Corruption(f"{name}: cost 不是 null 也不是完整的费用对象")
-        if (
-            not isinstance(cost["micros"], int)
-            or isinstance(cost["micros"], bool)
-            or cost["micros"] < 0
-        ):
-            raise Corruption(f"{name}: cost.micros 不是非负整数")
-        for key in ("incomplete", "estimated"):
-            if not isinstance(cost[key], bool):
-                raise Corruption(f"{name}: cost.{key} 不是布尔值")
+        raise Corruption(f"{label}: turns 不是非负整数")
+    if (
+        not isinstance(ev["run_turns"], int)
+        or isinstance(ev["run_turns"], bool)
+        or ev["run_turns"] < 0
+    ):
+        raise Corruption(f"{label}: run_turns 不是非负整数")
+    if ev["run_turns"] > ev["turns"]:
+        raise Corruption(f"{label}: run_turns {ev['run_turns']} > turns {ev['turns']}")
+    for key in ("usage", "run_usage"):
+        usage = ev[key]
+        if not isinstance(usage, dict):
+            raise Corruption(f"{label}: {key} 不是对象")
+        unknown = set(usage) - RESULT_USAGE_KEYS
+        if unknown:
+            raise Corruption(f"{label}: {key} 有未知字段 {sorted(unknown)}")
+        for field, value in usage.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise Corruption(f"{label}: {key}.{field} 不是非负整数")
+    for key in ("cost", "run_cost"):
+        cost = ev[key]
+        if cost is not None:
+            if not isinstance(cost, dict) or set(cost) != {"micros", "incomplete", "estimated"}:
+                raise Corruption(f"{label}: {key} 不是 null 也不是完整的费用对象")
+            if (
+                not isinstance(cost["micros"], int)
+                or isinstance(cost["micros"], bool)
+                or cost["micros"] < 0
+            ):
+                raise Corruption(f"{label}: {key}.micros 不是非负整数")
+            for field in ("incomplete", "estimated"):
+                if not isinstance(cost[field], bool):
+                    raise Corruption(f"{label}: {key}.{field} 不是布尔值")
     if not isinstance(ev["text"], str):
-        raise Corruption(f"{name}: text 不是字符串")
-    return f"PASS {name}: Result 记录形状正确"
+        raise Corruption(f"{label}: text 不是字符串")
+    return ev
+
+
+def check_result_fixture(name):
+    raw = open(f"fixtures/{name}", "rb").read()
+    if not raw.endswith(b"\n"):
+        raise Corruption(f"{name}: 文件不以 LF 结尾")
+    lines = [l for l in raw.split(b"\n") if l != b""]
+    if len(lines) != 2:
+        raise Corruption(f"{name}: 期望恰好两行 Result 记录（无 resume + 有 resume），得到 {len(lines)} 行")
+    try:
+        first = json.loads(lines[0])
+        second = json.loads(lines[1])
+    except json.JSONDecodeError as e:
+        raise Corruption(f"{name}: JSON 解析失败: {e}") from None
+    check_one_result(first, f"{name} line 1")
+    check_one_result(second, f"{name} line 2")
+    # 第一行无 resume：两组字节相同（`run_*` 与累计组相等）。
+    if not (
+        first["run_turns"] == first["turns"]
+        and first["run_usage"] == first["usage"]
+        and first["run_cost"] == first["cost"]
+    ):
+        raise Corruption(f"{name} line 1: 无 resume 时 run_* 必须与累计组相同")
+    # 第二行有 resume：`run_*` 只是本次运行，小于累计。
+    if not (second["run_turns"] < second["turns"]):
+        raise Corruption(f"{name} line 2: 有 resume 时 run_turns 必须小于 turns")
+    for field in RESULT_USAGE_KEYS:
+        if field in second["run_usage"] and field in second["usage"]:
+            if not second["run_usage"][field] <= second["usage"][field]:
+                raise Corruption(f"{name} line 2: run_usage.{field} 必须 <= usage.{field}")
+    if second["cost"] is not None and second["run_cost"] is not None:
+        if not second["run_cost"]["micros"] < second["cost"]["micros"]:
+            raise Corruption(f"{name} line 2: run_cost.micros 必须小于 cost.micros")
+        if second["cost"].get("estimated") is not True:
+            raise Corruption(f"{name} line 2: 有 resume 且含旧记录时 cost.estimated 必须为 true")
+        if second["run_cost"].get("estimated") is not False:
+            raise Corruption(f"{name} line 2: run_cost.estimated 必须为 false（本轮费用是现算的）")
+    return f"PASS {name}: Result 记录形状正确（无 resume + 有 resume 各一行）"
 
 
 RESULT_FIXTURES = ["exec-result.jsonl"]
