@@ -80,6 +80,7 @@ pub async fn open_session(
         skills_allow,
         memory_injection,
         hooks: hooks_config,
+        project_hooks: project_hooks_config,
         trust,
         resume,
         config_snapshot,
@@ -687,6 +688,7 @@ pub async fn open_session(
         mcp_servers: mcp_server_configs,
         mcp_config_path,
         hooks_config,
+        project_hooks_config,
         trust: Mutex::new(trust),
         runtime,
         driver: DriverTask {

@@ -16,8 +16,9 @@
 //!   today that list is a project skill (`<dir>/.agents/skills/<x>/SKILL.md` for any directory
 //!   from the workspace up to the repository root), the project declaration
 //!   `<workspace>/.radian/config.toml` (ADR 0043 decision 1), and the project MCP file
-//!   `<workspace>/.mcp.json` (ADR 0031 T1, slice B2). A bare `.radian/` does not
-//!   trigger (T1).
+//!   `<workspace>/.mcp.json` (ADR 0031 T1, slice B2) and the project hooks file
+//!   `<workspace>/.radian/hooks.json` (ADR 0031 T1, the hooks slice B). A bare `.radian/`
+//!   does not trigger (T1).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -423,7 +424,8 @@ pub fn untrusted_notice(workspace: &Path) -> String {
 
 /// Whether `workspace` holds a resource from T1's list. The list (ADR 0031 T1, shrunk by ADR
 /// 0043 decision 1 to the project's own skills and its project-level configuration, extended
-/// by slice B2 with the project MCP file):
+/// by slice B2 with the project MCP file, extended by the hooks slice B with the project
+/// hooks file):
 ///
 /// - a project-level skill: `<dir>/.agents/skills/<x>/SKILL.md` for any directory from the
 ///   workspace up to and including the repository root (the same roots skill discovery scans
@@ -441,6 +443,7 @@ pub fn has_project_resources(workspace: &Path) -> bool {
         .any(|root| crate::skills::has_skill_file(root))
         || crate::project::path(workspace).is_file()
         || crate::mcp::project_path(workspace).is_file()
+        || crate::project_hooks::project_path(workspace).is_file()
 }
 
 /// The canonical form of `path`: symlinks resolved, `.`/`..` removed. Falls back to the path
@@ -705,7 +708,25 @@ mod tests {
         assert!(!has_project_resources(&ws));
     }
 
-    /// The trigger searches from the workspace up to the repository root: a skill at the root
+    /// Slice B (hooks): the project hooks file is a project resource by itself: a workspace
+    /// with only `.radian/hooks.json` (no skill, no project config, no `.mcp.json`) triggers,
+    /// and removing it stops the trigger. The mutation (the `.radian/hooks.json` check is
+    /// dropped) fails the first assertion.
+    #[test]
+    fn the_project_hooks_file_triggers_by_itself() {
+        let root = Scratch::new("trigger-hooks");
+        let ws = root.root.join("ws");
+        std::fs::create_dir_all(ws.join(".radian")).unwrap();
+        assert!(!has_project_resources(&ws));
+        std::fs::write(
+            ws.join(".radian/hooks.json"),
+            r#"{"PreToolUse": [{"matcher": "shell", "hooks": [{"type": "command", "command": "true"}]}]}"#,
+        )
+        .unwrap();
+        assert!(has_project_resources(&ws));
+        std::fs::remove_file(ws.join(".radian/hooks.json")).unwrap();
+        assert!(!has_project_resources(&ws));
+    }
     /// counts for a workspace below it, one above the root does not.
     #[test]
     fn the_trigger_searches_up_to_the_repository_root() {

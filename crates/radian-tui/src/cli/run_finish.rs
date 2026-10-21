@@ -237,10 +237,12 @@ pub(super) fn build_startup_screen(
     // ADR 0031 T3: ask once, after the terminal is up and the startup screen is built, when
     // the workspace has project resources and no saved decision. Until it is answered the
     // session is untrusted (nothing project-provided is loaded). Slice B2: the modal lists
-    // the project `.mcp.json` servers that trust would load.
+    // the project `.mcp.json` servers that trust would load. Slice B (hooks): the modal
+    // also lists the project `.radian/hooks.json` hooks that trust would load.
     if session.trust().needs_ask {
         let mcp = radian_host::preview_project(&session.trust().workspace);
-        app.push_trust_modal(session.trust().workspace.clone(), mcp);
+        let hooks = radian_host::preview_project_hooks(&session.trust().workspace);
+        app.push_trust_modal(session.trust().workspace.clone(), mcp, hooks);
     }
     herdr
 }

@@ -16,12 +16,14 @@ use super::ui::LineHub;
 ///
 /// Slice B2: `preview` lists the project `.mcp.json` servers that trust would load — one
 /// line each (the name, the `command` + `args` as written, the `env` key names only, never
-/// values), with remote entries marked skipped. `None` means there is no project file and
-/// nothing is printed.
+/// values), with remote entries marked skipped. Slice B (hooks): `hooks_preview` lists the
+/// project `.radian/hooks.json` hooks that trust would load — one line each (the event, the
+/// matcher, the command). Each `None` means there is no project file and nothing is printed.
 pub(crate) async fn trust_prompt(
     lines: &LineHub,
     workspace: &std::path::Path,
     preview: Option<&radian_host::ProjectPreview>,
+    hooks_preview: Option<&radian_host::ProjectHooksPreview>,
 ) -> Option<radian_host::trust::Choice> {
     use radian_host::trust::Choice;
     eprintln!(
@@ -30,6 +32,11 @@ pub(crate) async fn trust_prompt(
     );
     if let Some(preview) = preview {
         for line in radian_host::preview_lines(preview) {
+            eprintln!("  {line}");
+        }
+    }
+    if let Some(hooks_preview) = hooks_preview {
+        for line in radian_host::preview_project_hooks_lines(hooks_preview) {
             eprintln!("  {line}");
         }
     }

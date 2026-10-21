@@ -184,8 +184,12 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     let mut trust_choice = None;
     if trust_setup.needs_ask {
         // Slice B2: the question lists the project servers that trust would load.
+        // Slice B (hooks): it also lists the project hooks that trust would load.
         let preview = radian_host::preview_project(&workspace_path);
-        if let Some(choice) = trust_prompt(&lines, &workspace_path, preview.as_ref()).await {
+        let hooks_preview = radian_host::preview_project_hooks(&workspace_path);
+        if let Some(choice) =
+            trust_prompt(&lines, &workspace_path, preview.as_ref(), hooks_preview.as_ref()).await
+        {
             trust_setup.resolved =
                 radian_host::trust::resolved_for(choice, &workspace_path).map_err(SetupError)?;
             trust_setup.needs_ask = false;
@@ -221,6 +225,17 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         eprintln!("[mcp] {warning}");
     }
     let servers = merged.servers;
+
+    // Slice B (hooks): the project `.radian/hooks.json` loads now that trust is resolved —
+    // trusted (or `--trust`) loads it, untrusted loads nothing. The `[hooks] …` lines print
+    // here, before any session file exists.
+    let (project_hooks, project_hooks_lines) = radian_host::load_project_hooks(
+        &workspace_path,
+        trust_setup.resolved.decision.as_bool(),
+    );
+    for line in &project_hooks_lines {
+        eprintln!("[hooks] {line}");
+    }
 
     // ADR 0043 decision 1a: the child `radian exec` this session may start. The model, the
     // provider and the (generic-provider) endpoint are the parent's resolved ones; the key is
@@ -283,6 +298,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             parent,
             subagent: Some(subagent_parts),
             tools_allow,
+            project_hooks,
             memory_root,
             trust: trust_setup,
             resume: cli.resume.is_some(),

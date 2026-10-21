@@ -104,6 +104,7 @@ async fn open(label: &str, base_url: &str, scratch: &Path) -> Arc<LocalSession> 
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             hooks: Default::default(),
+            project_hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),

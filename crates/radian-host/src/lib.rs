@@ -41,6 +41,7 @@ pub mod opencode_go;
 mod output;
 pub mod pending;
 pub mod project;
+pub mod project_hooks;
 pub mod projection;
 pub mod prompt;
 pub mod provider;
@@ -146,6 +147,11 @@ pub use mcp::{
     CREDENTIAL_VARS, LoadScope, McpLoad, ProjectPreview, ProjectPreviewEntry, load_mcp_config,
     load_mcp_from_toml, load_project, load_project_file, merge_mcp, merge_project_mcp,
     preview_lines, preview_project, project_path,
+};
+pub use project_hooks::{
+    ProjectHooksPreview, ProjectHooksPreviewEntry, load_project as load_project_hooks,
+    load_project_file as load_project_hooks_file, preview_lines as preview_project_hooks_lines,
+    preview_project as preview_project_hooks, project_path as project_hooks_path,
 };
 pub use model::{
     COMPACTION_THINKING_CURRENT, ChatGptModel, DEFAULT_MAX_MODEL_CALLS, DEFAULT_MAX_TOKENS,
