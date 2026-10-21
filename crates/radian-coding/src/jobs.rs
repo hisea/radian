@@ -474,12 +474,17 @@ impl Jobs {
     }
 
     /// The one-step-foreground hint's seconds (ADR 0037 decision 4): the settle-recorded
-    /// run time, in whole seconds, only for an ended explicit-background job whose run fits
-    /// the foreground default timeout, only once per task. A retained 3a foreground entry
-    /// never gets it, and neither does a job that ran past the default (background was the
-    /// right call for those).
+    /// run time, in whole seconds, only for an explicit-background job that ended by
+    /// itself (`Exited` or `Signaled`) within the foreground default timeout, only once per
+    /// task. A stopped job (`Killed`, or `TimedOut` if one ever settles that way) gets no
+    /// line: nothing about a stopped command says a foreground call would have returned
+    /// it. A retained 3a foreground entry never gets it, and neither does a job that ran
+    /// past the default (background was the right call for those).
     fn foreground_hint_secs(cell: &mut JobCell) -> Option<u64> {
         if cell.state.is_running() || cell.retained || cell.hint_shown {
+            return None;
+        }
+        if !matches!(cell.state, JobState::Exited(_) | JobState::Signaled(_)) {
             return None;
         }
         let duration = cell.duration?;
@@ -1377,6 +1382,28 @@ mod tests {
         let text = rendered(&test_cell());
         assert!(text.contains("[status: running]"), "{text}");
         assert!(!text.contains("this job ended after"), "{text}");
+    }
+
+    /// A background job stopped with `job kill` (or a session-end cleanup) settles as
+    /// `killed`, which is not "ended by itself": no hint, however fast it was.
+    #[test]
+    fn a_killed_job_gets_no_hint() {
+        let cell = ended_cell(false, Some(Duration::from_secs(20)), Instant::now());
+        lock(&cell).state = JobState::Killed;
+        let text = rendered(&cell);
+        assert!(!text.contains("this job ended after"), "{text}");
+        assert!(text.contains("[status: killed]"), "{text}");
+    }
+
+    /// `TimedOut` is likewise excluded, so the rule stays "ended by itself" even if a
+    /// background job ever settles that way.
+    #[test]
+    fn a_timed_out_job_gets_no_hint() {
+        let cell = ended_cell(false, Some(Duration::from_secs(20)), Instant::now());
+        lock(&cell).state = JobState::TimedOut;
+        let text = rendered(&cell);
+        assert!(!text.contains("this job ended after"), "{text}");
+        assert!(text.contains("[status: timed out]"), "{text}");
     }
 
     /// The line reports the settle-recorded run time, not `started.elapsed()` at read time:

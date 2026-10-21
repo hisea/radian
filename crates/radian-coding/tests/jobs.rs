@@ -1148,3 +1148,35 @@ async fn an_ended_background_job_carries_the_one_step_hint_once() {
 
     session.shutdown_jobs();
 }
+
+/// A background job stopped with `job kill` settles as killed, which is not "ended by
+/// itself": the next `wait` carries the status but no one-step hint.
+#[tokio::test]
+async fn a_killed_background_job_gets_no_hint() {
+    let dir = TempDir::new("jobs-hint-killed");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+
+    let (id, _) = start(&session, "sleep 600", None).await;
+    exec(&session, "job", json!({"id": id, "op": "kill"}))
+        .await
+        .unwrap();
+    let done = output_text(
+        &exec(
+            &session,
+            "job",
+            json!({"id": id, "op": "wait", "timeout_ms": 10_000}),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(done.contains("[status: killed]"), "{done}");
+    assert!(
+        !done.contains("this job ended after"),
+        "a stopped job is not \"ended by itself\": {done}"
+    );
+
+    session.shutdown_jobs();
+}
