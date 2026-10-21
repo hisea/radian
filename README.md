@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset=".github/readme/banner-dark.png">
-    <img src=".github/readme/banner-light.png" alt="radian" width="640">
+    <img src=".github/readme/banner-light.png" alt="radian" width="480">
   </picture>
 </p>
 
@@ -28,7 +28,7 @@ radian is a coding agent in one Rust binary, and the agent runtime it is built o
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset=".github/readme/terminal-dark.png">
-    <img src=".github/readme/terminal-light.png" alt="the radian TUI at 120 columns: a thinking block, a shell call, a read, a patch with its diff, job notices, the input and the footer" width="615">
+    <img src=".github/readme/terminal-light.png" alt="the radian TUI at 120 columns: a thinking block, a shell call, a read, a patch with its diff, job notices, the input and the footer" width="820">
   </picture>
   <br><sub>radian at 120 columns, rendered by the TUI prototype script (<code>research/2026-10-16-render-prototype/</code>).</sub>
 </p>
