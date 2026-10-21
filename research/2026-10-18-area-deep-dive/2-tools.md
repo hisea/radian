@@ -103,12 +103,12 @@ Radian 的工具层在**安全和报错质量**上领先（每个参数错误一
 ## 5. Radian 的劣势和缺口
 
 1. **定义最重**：17 个工具 5.0k token，`shell`+`job_*` 就占 6.8 KB。ADR 0043 已经从 32 个砍到 17 个，但每个描述都写得很长。
-2. **没有 multi-edit**：一个文件改 N 处就要 N 次 `patch` 调用、N 轮模型往返。journal 实测：`t4` 有 70 次 patch、64 次 read（`docs/research/2026-10-15-tool-concurrency-measurement.md` §3），而 93% 的回复只调一个工具（同文 §1）。pi 和 Codex 都能一次改多处。
+2. **没有 multi-edit**：一个文件改 N 处就要 N 次 `patch` 调用、N 轮模型往返。journal 实测：`t4` 有 70 次 patch、64 次 read（`research/2026-10-15-tool-concurrency-measurement.md` §3），而 93% 的回复只调一个工具（同文 §1）。pi 和 Codex 都能一次改多处。
 3. **匹配不容忍缩进偏差**：第 3 层只忽略行尾空白（`patch.rs:442` 起）。Codex 的第三档能容忍（前一份总报告已提，这里不重复理由）。
 4. **歧义报错只给次数，不给位置**：`patch_ambiguous` 只说“出现 N 次”（`patch.rs:104-115`）。模型只能再读一遍，或者盲目加上下文。
 5. **编辑后没有诊断**：改完要再跑一次 `shell cargo check`，又是一轮往返。Claude Code 和 omp 都会自动反馈。
 6. **shell 被截断的中间部分直接丢掉，不落盘**：64 KiB/流，最多约 32k token，一次就塞进上下文；想看被丢的部分只能**重跑命令**（描述原话：“a truncated run can be repeated”，`provider.rs:80-82`）。重跑构建或测试正是最耗时的部分。pi、opencode、Claude Code、omp 都把全文存到文件。而且 Radian 的上限比别家大：pi/opencode 50 KB，Claude Code 30k 字符，Codex 10k token。
-7. **grep 缺 files_with_matches/count 模式，也没有总字节上限**：最坏情况是 200 条匹配 × 8 KiB/行（`grep.rs:22`），再加上下文 30 行，会远超 64 KiB。“哪些文件里有它”这种问题只能拿到全部匹配行。Claude Code 默认就是 `files_with_matches`。另外，测量用的三个会话 479 次工具调用里 `grep` 一次都没出现（`docs/research/2026-10-15-tool-concurrency-measurement.md` 的合计表），模型可能是在 `shell` 里直接跑 `rg`（推断，没有逐条核对 shell 命令）。
+7. **grep 缺 files_with_matches/count 模式，也没有总字节上限**：最坏情况是 200 条匹配 × 8 KiB/行（`grep.rs:22`），再加上下文 30 行，会远超 64 KiB。“哪些文件里有它”这种问题只能拿到全部匹配行。Claude Code 默认就是 `files_with_matches`。另外，测量用的三个会话 479 次工具调用里 `grep` 一次都没出现（`research/2026-10-15-tool-concurrency-measurement.md` 的合计表），模型可能是在 `shell` 里直接跑 `rg`（推断，没有逐条核对 shell 命令）。
 8. **没有按需加载**：MCP 工具 schema 全部进入每次请求。Codex、Claude Code、omp、opencode 都有延迟加载或搜索机制。
 9. **subagent 能力窄**：不能选模型（ADR 0043 1a 第 2 条说的“explore 可配更便宜的模型”只在用户级配置里，模型不能按任务选）；没有后台；不能续接，追问只能重开一个子会话、重新读一遍。
 10. **等待时间**：不给超时的命令要阻塞 120 s 才转后台（omp 60 s，Codex 10 s）。实测 shell 的 p90 是 72 s，最长的都卡在 600 s 上限（measurement §3）。另外，工具描述说 read/grep “run in parallel”，但它们的 `async fn` 里全是同步 IO（radian-coding 里没有 `spawn_blocking`），而 Core 在同一个任务里用 `FuturesUnordered` 轮询（`rad/agent-core/src/turn.rs:2159`）。所以同一批里的几个 Shared 文件工具**很可能是串行执行的**（推断，未测）。按实测每个约 10 ms，影响很小，但在大仓库上跑 grep 时会更明显。
@@ -191,7 +191,7 @@ Radian 的工具层在**安全和报错质量**上领先（每个参数错误一
 ### P8. MCP 按需加载（收益看用户，成本中）
 - **做什么**：MCP 工具总定义超过阈值（例如 10 KB）时不进入请求，只在 `<runtime>` 里列出服务器名和一句话说明，再给一个 `tool_search{query}`：BM25 搜到后，把匹配工具的 schema 加到**下一次**请求。
 - **为什么**：Codex、Claude Code、omp、opencode 都有。接了几个 MCP 服务器以后，定义往往比内建工具还大。
-- **难点**：工具列表变化会破坏前缀缓存。Codex 把新工具加在末尾，pi 文档也提到“追加而不是改声明，以保住缓存”（`docs/research/2026-10-14-system-prompts.md` 第 86 行引用）。agent-core 的 `ToolSession::tool_specs()` 今天在会话里是固定的（ADR 0036 决定 3），所以要动 Core 的公共 API。
+- **难点**：工具列表变化会破坏前缀缓存。Codex 把新工具加在末尾，pi 文档也提到“追加而不是改声明，以保住缓存”（`research/2026-10-14-system-prompts.md` 第 86 行引用）。agent-core 的 `ToolSession::tool_specs()` 今天在会话里是固定的（ADR 0036 决定 3），所以要动 Core 的公共 API。
 - **ADR**：需要新 ADR（或 0036 修订）。
 - **验证**：带一个有 50 个工具的 MCP 测试服务器，看请求体大小和缓存命中。
 

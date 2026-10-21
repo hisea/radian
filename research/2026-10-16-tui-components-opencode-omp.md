@@ -8,7 +8,7 @@
   (1) the component model, (2) a component inventory with radian's equivalent and a
   recommendation, (3) what radian has today and the ranked gaps, (4) open questions.
   **It changes no code.**
-- Companion: `docs/research/2026-10-16-dsh-tui-study.md` (the dsh-TUI study). Read its
+- Companion: `research/2026-10-16-dsh-tui-study.md` (the dsh-TUI study). Read its
   sections 3 and 5 first; this document does not repeat them, and uses the **same table
   shape** (`component (file:line) | what it does | radian equivalent | recommend`) so the
   three can be read together. Where a row here duplicates one there, it says so.
@@ -436,7 +436,7 @@ primitive kit.** The reusable primitives for radian come from dsh and omp, not o
 
 The installed packages are **17.3.8** (`pca/package.json:3`,
 `tui/package.json:3`). The radian ADRs and the earlier omp research were written against
-**18.10.4** (`docs/research/2026-10-14-omp-blocks.md:11-30`), which mid-research replaced the
+**18.10.4** (`research/2026-10-14-omp-blocks.md:11-30`), which mid-research replaced the
 installed 17.3.8. The two differ structurally:
 
 - 18.10.4 moved the chat components into `pi-tui`: chat blocks in `tui/src/chat/`, the shell
@@ -501,7 +501,7 @@ mounts a `TUI` and pushes `Container`s onto it.
 
 ### 3.3 The two-layer transcript model (the key abstraction)
 
-`docs/research/2026-10-14-omp-blocks.md` §4 already established this against 18.10.4; the
+`research/2026-10-14-omp-blocks.md` §4 already established this against 18.10.4; the
 17.3.8 classes are structurally identical and I re-confirmed them:
 
 - **Lifecycle layer — `ChatBlock`**: `abstract class ChatBlock extends Container`
@@ -583,7 +583,7 @@ mounts a `TUI` and pushes `Container`s onto it.
 - `Input` (`tui/src/components/input.ts:27`) is the single-line input. `SelectList`
   (`select-list.ts:86`) hosts a `ScrollView`. **There is no composer-shape registry in
   17.3.8** — the 8-shape `composer/registry.ts` (incl. `rail`, the `bar` model) is an
-  18.10.4 addition cited by `docs/research/2026-10-14-omp-design-blocks.md` §4.1. In 17.3.8
+  18.10.4 addition cited by `research/2026-10-14-omp-design-blocks.md` §4.1. In 17.3.8
   the editor shape is mobile via `CustomEditor`.
 - **Keymap**: `keys.ts` parses (`parseKey:563`, `matchesKey:550`, Kitty support `:372`);
   `keybindings.ts` holds `TUI_KEYBINDINGS` defaults (`:57`) and `KeybindingsManager.matches`
@@ -611,7 +611,7 @@ mounts a `TUI` and pushes `Container`s onto it.
   `getSymbolTheme:90`, `getMarkdownTheme:145`, `getSelectListTheme:202`, `getEditorTheme:227`,
   `getSettingsListTheme:246` (`pca/src/modes/theme/tui-adapters.ts`).
 - Symbols: `SymbolPreset = "unicode"|"nerd"|"ascii"` (`symbols.ts:5`), the 270-key table
-  (`docs/research/2026-10-14-omp-design.md` §1.2). Shimmer: `shimmerText:303` (`shimmer.ts`).
+  (`research/2026-10-14-omp-design.md` §1.2). Shimmer: `shimmerText:303` (`shimmer.ts`).
 - **99 bundled theme JSONs** under `pca/src/modes/theme/defaults/` (`ls | wc -l` = 99), plus
   `dark.json`/`light.json`; schema in `theme/schema.ts` + `theme/theme-schema.json`.
 - The `bar`/`rail` composer's status attachment, and the composer-shape registry, are 18.10.4
@@ -669,7 +669,7 @@ radian's ADR 0027 C3 model.)*
 
 Columns are the dsh-study shape. `tui/` = `@oh-my-pi/pi-tui/src` 17.3.8; `pca/` =
 `@oh-my-pi/pi-coding-agent/src` 17.3.8. Rows already covered by
-`docs/research/2026-10-14-omp-design*.md` say so and are cited, not re-derived.
+`research/2026-10-14-omp-design*.md` say so and are cited, not re-derived.
 
 ### 4.1 Input / composer (dsh §5.1)
 
@@ -714,7 +714,7 @@ Columns are the dsh-study shape. `tui/` = `@oh-my-pi/pi-tui/src` 17.3.8; `pca/` 
 
 | omp component (file:line) | What it does | radian equivalent | Recommend |
 |---|---|---|---|
-| `tui/src/components/markdown.ts:1482` `Markdown` | marked-based renderer with a streaming lex cache | `markdown.rs` (pulldown-cmark) + `highlight.rs` | **yes** — covered; `docs/research/2026-10-14-omp-design-markdown.md` §2 is the element-by-element basis |
+| `tui/src/components/markdown.ts:1482` `Markdown` | marked-based renderer with a streaming lex cache | `markdown.rs` (pulldown-cmark) + `highlight.rs` | **yes** — covered; `research/2026-10-14-omp-design-markdown.md` §2 is the element-by-element basis |
 | `pca/src/modes/markdown-prose.ts:1` `maskNonProse` | masks code/markup so magic-keyword matching never fires in prose | `none` | **later** — relevant only if radian adds magic keywords |
 | `pca/src/tui/width-aware-text.ts`, `tui/src/utils.ts:297` `visibleWidth` | width-aware layout + cached visible width | `blocks.rs` `unicode-width`; CJK handled | **yes** — covered (ADR 0028 R9) |
 | `tui/src/latex-block.ts:1437`, `latex-to-unicode.ts:1783` | LaTeX math (block + inline) | `none` | **no** — 3,663 lines; ADR 0035 decided "show as source" for V1 |
@@ -830,7 +830,7 @@ Columns are the dsh-study shape. `tui/` = `@oh-my-pi/pi-tui/src` 17.3.8; `pca/` 
 
 ## 5. What radian already has, and the gaps that matter most
 
-The earlier `docs/research/2026-10-14-omp-design.md` §9 said several ADR 0028/0035 items were
+The earlier `research/2026-10-14-omp-design.md` §9 said several ADR 0028/0035 items were
 **not implemented on `main` at `af49086`**. **That is stale for this worktree (`19bbd0b`).**
 Re-checked directly here:
 
@@ -1006,8 +1006,8 @@ and `ToolCard` are 18.10.4-only.
   `pca/src/extensibility/extensions/types.ts`.
 - **radian**: the `crates/radian-tui/src` modules and `crates/radian-tui/README.md`; ADRs
   0023, 0024, 0027, 0028, 0029, 0030, 0033, 0035; and the four
-  `docs/research/2026-10-14-omp-*.md` documents plus
-  `docs/research/2026-10-16-dsh-tui-study.md`.
+  `research/2026-10-14-omp-*.md` documents plus
+  `research/2026-10-16-dsh-tui-study.md`.
 - **Version note (load-bearing):** the earlier omp research and the radian ADRs describe
   **18.10.4**; the installed packages are **17.3.8** and differ structurally (`chrome/`,
   `tui/src/chat/`, `tui/src/render/`, the composer-shape registry, and the `ToolCard`

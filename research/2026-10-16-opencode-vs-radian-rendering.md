@@ -5,7 +5,7 @@
 - **opencode** 2.0.30（anomalyco/opencode，commit f40dc43，`packages/tui/src/`），TUI 由 **OpenTUI v0.5.17** 绘制（`packages/tui/package.json` 走 catalog，根 `package.json:57` 锁 `0.5.17`；本文的 OpenTUI 行号按 tag `v0.5.17`）。
 - **dsh-TUI**＠截图；源码 `ccch1mneyyy/dsh-TUI` 0.15.0，commit 6e9f07d，Ink/chalk 实现；本机装的 `@deepseek-ai/dsh` 0.2.0-rc.2 不含这套终端界面）。owner 的定位：**只作参考，radian 要有自己统一的一套，有自己的特色**。
 - **radian**：origin/main 5836485（已含 ADR 0028、ADR 0035/5、ADR 0024）。「radian 今天」一列的渲染文本是**按代码复原**的，不是 TestBackend 的无头输出（时间所限，见文末「未做」）。
-- **原型**：`docs/research/2026-10-16-render-prototype/render-prototype.sh`，在终端里打印「今天 → 提案」两段，每个有争议的点是一个开关（`--help`）。owner 的口味（2026-10-15 晚）：「简洁、干净、留白一致、有点文艺范」，所以原型默认是 **`--style thin`**（dsh 式：无底色、第一列标记、细线），`--style band` 是 opencode 式（底色卡片、`▌` 竖条）。
+- **原型**：`research/2026-10-16-render-prototype/render-prototype.sh`，在终端里打印「今天 → 提案」两段，每个有争议的点是一个开关（`--help`）。owner 的口味（2026-10-15 晚）：「简洁、干净、留白一致、有点文艺范」，所以原型默认是 **`--style thin`**（dsh 式：无底色、第一列标记、细线），`--style band` 是 opencode 式（底色卡片、`▌` 竖条）。
 
 ## 一、助手 Markdown
 

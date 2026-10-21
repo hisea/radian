@@ -68,7 +68,7 @@ Radian 的骨架本身就快：单个 Rust 二进制，单进程，不需要 dae
 2. **不开 auto 时，`general` subagent 实际上跑不了 shell。** 子进程只在父会话是 auto 时才拿到 `--yes`，否则它的 `ask` 一律按拒绝处理（`subagent.rs:15-17,398-400`；ADR 0043 1a.7）。加上缺省 `full + OnAsk`，`general` 碰到 shell 就会被拒。子进程还会拿到父会话的 `--mcp-config`（`subagent.rs:390-393`），推断每次调用都要重新起一遍 MCP server，这部分开销没有测过。`explore` 也不能单独配一个更便宜的模型（gap-analysis #9b 已经提过，这里不展开）。
 3. **`radian exec` 没有机器可读的事件流。** `-p` 的 stdout 只有模型文本（ADR 0032 A3），要拿结构化信息只能自己读 journal 或连控制 socket。Codex（`--json`）、pi（`--mode json|rpc`）、Claude Code（`--output-format json`）都有这个能力。没有它，评测框架（gap-analysis 优先级 #1，Harbor/Terminal-Bench）和 herdr 脚本都得各自去解析 journal。
 4. **用户层面没有任何 hook。** `Hooks` trait 只能用 Rust 在编译期实现，配置文件里没有 hook 这一节（`docs/schema/config/` 下的 31 个 fixture 都没有）。gap-analysis 里的"编辑后自动 lint"（#3b/#4），在 Claude Code 里是一个 `PostToolUse` command hook 的事，在 Radian 里要改源码、重新编译。
-5. **复杂度的代价主要出在流程上，不在代码行数。** 现在有 43 个 ADR，共 7282 行，光 ADR 0006 就有 461 行。测试代码（约 12.4 万行，含内联测试）比产品代码多。Verify 一次 6–7 分钟，冷构建 111 s，其中 `radian-tui` 的 build script 单独占 40.9 s，链接出来的测试二进制有 162 个、共 2.36 GiB（`docs/research/2026-10-15-build-timings.md` §1）。这些成本每次迭代都要付。另外，TUI 和 host 两个 crate 合计约 7.4 万行（src 含内联测试），而 `agent-core` 只有 6.7 千行，复杂度集中在外围。
+5. **复杂度的代价主要出在流程上，不在代码行数。** 现在有 43 个 ADR，共 7282 行，光 ADR 0006 就有 461 行。测试代码（约 12.4 万行，含内联测试）比产品代码多。Verify 一次 6–7 分钟，冷构建 111 s，其中 `radian-tui` 的 build script 单独占 40.9 s，链接出来的测试二进制有 162 个、共 2.36 GiB（`research/2026-10-15-build-timings.md` §1）。这些成本每次迭代都要付。另外，TUI 和 host 两个 crate 合计约 7.4 万行（src 含内联测试），而 `agent-core` 只有 6.7 千行，复杂度集中在外围。
 6. **release 构建没有调优。** 没有 `[profile.release]`（`Cargo.toml:40-44` 只配了 dev），没开 LTO，也没设 `codegen-units`；二进制体积和冷启动可能还有余量（未测）。
 
 ## 6. 改进方案（按收益/成本排序）
@@ -96,7 +96,7 @@ Radian 的骨架本身就快：单个 Rust 二进制，单进程，不需要 dae
 - **ADR。** 新 ADR；涉及 0031 和 0012（hook 进程是否进沙箱）。**验证：** 一个用 fixture 脚本做的集成测试；变异测试：hook 失败时不附加输出，测试应该失败。
 
 ### ⑤ 降低迭代成本：Verify 和构建（收益中，成本低）
-- 采纳 `docs/research/2026-10-15-build-timings.md` 里的选项：合并集成测试二进制（144 个链接产物是最大的一项）；`radian-tui` 的 build script 用了 40.9 s，查一下它在做什么，看能不能缓存；设 `[profile.release]`，用 thin LTO 加 `codegen-units`，并量一下体积和启动时间。这些都不碰 ADR，只改构建配置。
+- 采纳 `research/2026-10-15-build-timings.md` 里的选项：合并集成测试二进制（144 个链接产物是最大的一项）；`radian-tui` 的 build script 用了 40.9 s，查一下它在做什么，看能不能缓存；设 `[profile.release]`，用 thin LTO 加 `codegen-units`，并量一下体积和启动时间。这些都不碰 ADR，只改构建配置。
 - **为什么。** 6–7 分钟的 Verify 乘以每天的迭代次数，是"迭代速度"里最大的一项可控成本。
 
 ### ⑥ 不值得做的
@@ -104,7 +104,7 @@ Radian 的骨架本身就快：单个 Rust 二进制，单进程，不需要 dae
 - **主存储换成 SQLite。** 读 JSONL 每个事件 1.2 µs，一轮只有 2–3 次 fsync，而且索引已经是可重建的 SQLite。换掉会动 ADR 0006、0001、0040 和整套 `journal-selfcheck`，换不来什么。
 - **pi 那样同文件的树状分支。** 已经有 fork（ADR 0022）。这项对完成任务的速度没有影响。
 - **把 subagent 改成进程内运行。** 子进程启动约 32–55 ms，相对于一次模型调用（秒级）可以忽略；进程隔离和独立 journal 更值钱。真正要测的是 MCP 重起（见 ②）。
-- **CodeMode（opencode、pi）。** 实测 93% 的模型回复只调用一个工具（`docs/research/2026-10-15-tool-concurrency-measurement.md`），程序化组合多个工具的空间很小，可以以后再看。
+- **CodeMode（opencode、pi）。** 实测 93% 的模型回复只调用一个工具（`research/2026-10-15-tool-concurrency-measurement.md`），程序化组合多个工具的空间很小，可以以后再看。
 - **再拆或再合并 crate。** 15 个 crate 的边界清楚，大文件也已经拆过。继续拆的收益是负的（会增加测试二进制和链接时间，见 ⑤）。
 
 ### 关于"复杂度是否已经超出 pi 式极简"的判断

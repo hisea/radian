@@ -28,8 +28,8 @@ Orca 的正确定位是**独立于 Radian Core 的确定性任务编排与交付
 ### 1.1 项目原始文档
 
 - [Backlog：`docs/backlog/orca.md`](https://github.com/hisea/radian/blob/main/docs/backlog/orca.md)
-- [设计：`docs/research/2026-10-20-orca-v0-design.md`](https://github.com/hisea/radian/blob/main/docs/research/2026-10-20-orca-v0-design.md)
-- [竞品调查：`docs/research/2026-10-20-orca-competitors.md`](https://github.com/hisea/radian/blob/main/docs/research/2026-10-20-orca-competitors.md)
+- [设计：`research/2026-10-20-orca-v0-design.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-orca-v0-design.md)
+- [竞品调查：`research/2026-10-20-orca-competitors.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-orca-competitors.md)
 
 ### 1.2 对照的 Radian 契约
 
@@ -543,7 +543,7 @@ Gate 尽量不依赖某个唯一调度器；将来由 Orca Runner、Sortie 或 C
 - [ ] 明确无人值守 worker 必须显式 `--profile workspace`。
 - [ ] 新增 SSH 中断、远端结果未知、固定 SHA 失效与 merge 前检查的验收条款。
 
-### `docs/research/2026-10-20-orca-v0-design.md`
+### `research/2026-10-20-orca-v0-design.md`
 
 - [ ] 将“进程单写者”改为“事务串行化 + 状态版本”，明确 lock scope/durability。
 - [ ] 定义 `reconciling`，删除“按 PID 可直接接管”承诺。
@@ -557,7 +557,7 @@ Gate 尽量不依赖某个唯一调度器；将来由 Orca Runner、Sortie 或 C
 - [ ] 用 per-attempt 增量计费，不重复累计 `Result.cost`。
 - [ ] 定义 `run` 排空与 pending human/CI/retry 的关系。
 
-### `docs/research/2026-10-20-orca-competitors.md`
+### `research/2026-10-20-orca-competitors.md`
 
 - [ ] 更新 Sortie 源码仓库状态、至少 v1.28.1 的版本事实与 Apache-2.0 许可证。
 - [ ] 增补 Stage Chains、Self-Review、CI/Review Feedback；指出 v1 reviewer 默认同 session。
@@ -589,8 +589,8 @@ Gate 尽量不依赖某个唯一调度器；将来由 Orca Runner、Sortie 或 C
 ### Radian
 
 1. [`docs/backlog/orca.md`](https://github.com/hisea/radian/blob/main/docs/backlog/orca.md)
-2. [`docs/research/2026-10-20-orca-v0-design.md`](https://github.com/hisea/radian/blob/main/docs/research/2026-10-20-orca-v0-design.md)
-3. [`docs/research/2026-10-20-orca-competitors.md`](https://github.com/hisea/radian/blob/main/docs/research/2026-10-20-orca-competitors.md)
+2. [`research/2026-10-20-orca-v0-design.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-orca-v0-design.md)
+3. [`research/2026-10-20-orca-competitors.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-orca-competitors.md)
 4. [ADR 0043](https://github.com/hisea/radian/blob/main/docs/adr/0043-single-session-radian.md) · [ADR 0044](https://github.com/hisea/radian/blob/main/docs/adr/0044-exec-jsonl-output.md) · [ADR 0032](https://github.com/hisea/radian/blob/main/docs/adr/0032-one-binary.md) · [ADR 0022](https://github.com/hisea/radian/blob/main/docs/adr/0022-session-fork.md)
 5. [Radian Host Control Protocol](https://github.com/hisea/radian/blob/main/crates/radian-host/CONTROL.md)
 6. [Result 增量用量 backlog](https://github.com/hisea/radian/blob/main/docs/backlog/exec-result-run-usage.md)

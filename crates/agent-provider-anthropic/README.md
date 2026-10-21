@@ -5,7 +5,7 @@ A model adapter for the Anthropic Messages API (`POST /v1/messages`), implementi
 `Anthropic::new(config)` builds it; `AnthropicConfig` holds the knobs.
 
 It does **not** implement subscription OAuth — Anthropic's policy forbids routing consumer
-subscriptions through third-party tools, and `docs/spikes/oauth.md` records the spike. It also
+subscriptions through third-party tools, and `spikes/oauth/README.md` records the spike. It also
 does not own: the turn loop, tools, hooks or the transcript (`agent-core`); where the key comes
 from (the library never reads the environment); retries; and server-side tools
 (`server_tool_use`, `web_search_tool_result`, …) — those are ignored, never turned into a
@@ -194,4 +194,4 @@ not report) · 0010 (deltas are live projections) · 0013 (T1/T4: no telemetry, 
 R10 (extended thinking belongs to `provider_payload`, **not** to `reasoning` — the record of the
 first slice that deliberately did not implement it, and of the follow-up that did). The contract
 and its two escape hatches are documented in `crates/agent-provider-contract/README.md`; the wire evidence is
-`crates/agent-provider-anthropic/WIRE.md`; the OAuth decision is `docs/spikes/oauth.md`.
+`crates/agent-provider-anthropic/WIRE.md`; the OAuth decision is `spikes/oauth/README.md`.

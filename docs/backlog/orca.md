@@ -7,9 +7,9 @@
   出码是 worker 回传契约；`completed` 不等于任务完成；`cost` 为会话累计）、0038（`workspace` 沙箱内 git 可写 refs/index/objects、只有 config/hooks 只读；linked worktree 共享
   common dir；单机 v0 仍用 worktree，靠包装器检测并安全失败）、0020（push 凭据的禁读清单，同一 OS 用户下是否遮住待验证）、0024（`human` 闸门是结构化交互的宿主外映射）、0013
   （`orca serve` 只在 loopback/ssh 转发）、0037（stall 超时按无输出计）、0022（返工 `--resume`，不 fork）
-- 设计全文：`docs/research/2026-10-20-orca-v0-design.md`（修订版）
-- 外部审核：`docs/research/2026-10-20-orca-v0-review-and-competitor-analysis.md`（第一轮）；第二轮复审由 owner 转达，结论记在设计稿"修订记录"
-- 对手调查：`docs/research/2026-10-20-orca-competitors.md`
+- 设计全文：`research/2026-10-20-orca-v0-design.md`（修订版）
+- 外部审核：`research/2026-10-20-orca-v0-review-and-competitor-analysis.md`（第一轮）；第二轮复审由 owner 转达，结论记在设计稿"修订记录"
+- 对手调查：`research/2026-10-20-orca-competitors.md`
 
 ## 决定＼�
 

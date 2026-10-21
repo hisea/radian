@@ -1,7 +1,7 @@
 # 深挖 3：Context（上下文管理）—— Radian 与五个对手
 
 日期：2026-10-18 · 代码版本：Radian `356df1e`；Codex `8c07694`（2026-10-18）；opencode `63c1a27`（2026-10-17）；pi-mono `482c138`（2026-10-18）；omp 18.12.1 npm 包；Claude Code 只看官方文档（每条注明）。
-复用：系统提示词的组成、各家的第 0 层事实、易变事实放最后这几点，见 `docs/research/2026-10-14-system-prompts.md`（下称「提示词调研」）。本文不重复这些，只补**新版本的变化、数字，以及压缩和缓存**。
+复用：系统提示词的组成、各家的第 0 层事实、易变事实放最后这几点，见 `research/2026-10-14-system-prompts.md`（下称「提示词调研」）。本文不重复这些，只补**新版本的变化、数字，以及压缩和缓存**。
 
 出处前缀：`rad/` = `<repo>`；`codex/`、`oc/`（= `opencode/packages/core/src`）、`pi/`（= `pi-mono/packages`）、`omp/`（= `npm-_oh-my-pi_pi-coding-agent/package/src`）、`omp-core/`（= `npm-_oh-my-pi_pi-agent-core/package/src`）都在 `scratchpad/comp/` 下。
 
@@ -81,7 +81,7 @@ Radian 的**前缀稳定性**是六家里最严格的：0a/1/2/3 层在一个进
 
 ## 5. Radian 的劣势和缺口
 
-1. **TTL 太短，长等待之后缓存必然过期。** adapter 只发 `{"type":"ephemeral"}`，注释还写着"Anthropic 目前只支持 5 分钟"（`request.rs:27-29`）。这句已经过时：CC 和 pi 都在用 1h（[prompt-caching](https://code.claude.com/docs/en/prompt-caching)；`pi/ai/src/api/openai-completions.ts:1087`）。Radian 实测 `job_output` 5 次调用的中位是 361 s、最长 600 s，`shell` 最长 600 s（`rad/docs/research/2026-10-15-tool-concurrency-measurement.md:150,164`）。一次 361 s 的等待超过 300 s TTL，等完后的请求就要把整个上下文按全价重新写一遍缓存（Anthropic 的写入价是 1.25 倍）。这一条是从 TTL 机制推出来的，journal 里还没有测过。
+1. **TTL 太短，长等待之后缓存必然过期。** adapter 只发 `{"type":"ephemeral"}`，注释还写着"Anthropic 目前只支持 5 分钟"（`request.rs:27-29`）。这句已经过时：CC 和 pi 都在用 1h（[prompt-caching](https://code.claude.com/docs/en/prompt-caching)；`pi/ai/src/api/openai-completions.ts:1087`）。Radian 实测 `job_output` 5 次调用的中位是 361 s、最长 600 s，`shell` 最长 600 s（`rad/research/2026-10-15-tool-concurrency-measurement.md:150,164`）。一次 361 s 的等待超过 300 s TTL，等完后的请求就要把整个上下文按全价重新写一遍缓存（Anthropic 的写入价是 1.25 倍）。这一条是从 TTL 机制推出来的，journal 里还没有测过。
 2. **OpenAI 路由不发 `prompt_cache_key`**，Codex、pi、opencode 都发了。总报告已经列过，这里不再展开，只补一点：子 agent 应该用 `父 id:来源` 这样的 key（Codex `client.rs:651-654`）。
 3. **压缩请求读不到缓存。** 摘要请求换了 system，`messages` 只有一条纯文本的 user 消息，不带工具（`compaction.rs:356-385`）。所以要摘要的那部分历史全部按未缓存价计费，prefill 也要从头算，而 CC、opencode、Codex 都能读到缓存。代价的估算（推断）：Radian 把工具结果截到 2 000 字符，纯文本可能只有原历史的 30–60%，但按 1 倍价计费；共享前缀的做法按 0.1 倍价读整段历史，花费大约是 Radian 的 1/3 到 1/6，首 token 也更快。
 4. **没有轻量档。** 一过 `B` 就是整段摘要（ADR 0018:37）。omp 和 Anthropic API 都先清旧工具输出，这样能推迟甚至避免摘要。总报告提过这一点；本文补上具体参数和缓存护栏，见 §6.4。

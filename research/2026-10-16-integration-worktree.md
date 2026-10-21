@@ -14,7 +14,7 @@
   comes from an ADR, not from code. `(unverified)` marks a claim this note did not check.
 - Decision ids `O1`–`O13`, `R1`–`R10` are ADR 0030's; file names are ADR 0030's.
 - Slice numbers are the implementation plan's
-  (`docs/research/2026-10-15-adr-0030-implementation-plan.md`), not ADR 0030's table.
+  (`research/2026-10-15-adr-0030-implementation-plan.md`), not ADR 0030's table.
 
 ### A premise in the step's brief that is **not** true of the code today
 
@@ -30,7 +30,7 @@ control-port event (slice 9 defined it)"). It does not. Verified on this branch:
   (`crates/radian-host/src/lead_tools.rs:32`).
 - `before_merge` appears only in ADRs and the plan, never in code
   (`docs/adr/0030-orchestration-primitives.md:97`;
-  `docs/research/2026-10-15-adr-0030-implementation-plan.md:437`).
+  `research/2026-10-15-adr-0030-implementation-plan.md:437`).
 - Slice 9's own plan entry confirms it is unbuilt: "Slice 9 — Project orchestration config, trust,
   snapshot, sandboxed verify" (`…implementation-plan.md:418-453`).
 

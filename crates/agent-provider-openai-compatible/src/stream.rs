@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn the_dogfooded_usage_shape_keeps_completion_tokens_details() {
-        // The real shape from `docs/findings/2026-10-12-opencode-zen-dogfooding.md`
+        // The real shape from `research/2026-10-12-opencode-zen-dogfooding.md`
         // (key already removed). 30 of the 40 completion tokens are reasoning tokens, and
         // losing them under-reports the bill.
         let response = assemble(

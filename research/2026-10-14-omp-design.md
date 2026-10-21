@@ -8,11 +8,11 @@
 
 | 篇 | 文件 | 内容 |
 |---|---|---|
-| 主篇（本文） | `docs/research/2026-10-14-omp-design.md` | §0 出处与版本、§1 设计系统（主题角色、符号表、间距与宽度常量）、§9 与 Radian 逐条对照与建议、§10 未核实与待决定 |
-| 分篇 1 | `docs/research/2026-10-14-omp-design-markdown.md` | §2 Markdown：渲染器、解析器、逐元素（标题/段落/粗斜删/行内代码/链接/分隔线/引用/列表/任务列表/代码块与围栏/表格/diff/数学/图片/HTML）的前后空行、缩进、字形、颜色角色、超宽处理；表格列宽算法与 CJK |
-| 分篇 2 | `docs/research/2026-10-14-omp-design-blocks.md` | §3 transcript 每种块；§4 输入框（editor/composer）；§5 状态与反馈（spinner、状态行、计时、通知、审批框）；§6 footer / 状态栏；§7 选择器与面板；§8 窄终端与 resize |
+| 主篇（本文） | `research/2026-10-14-omp-design.md` | §0 出处与版本、§1 设计系统（主题角色、符号表、间距与宽度常量）、§9 与 Radian 逐条对照与建议、§10 未核实与待决定 |
+| 分篇 1 | `research/2026-10-14-omp-design-markdown.md` | §2 Markdown：渲染器、解析器、逐元素（标题/段落/粗斜删/行内代码/链接/分隔线/引用/列表/任务列表/代码块与围栏/表格/diff/数学/图片/HTML）的前后空行、缩进、字形、颜色角色、超宽处理；表格列宽算法与 CJK |
+| 分篇 2 | `research/2026-10-14-omp-design-blocks.md` | §3 transcript 每种块；§4 输入框（editor/composer）；§5 状态与反馈（spinner、状态行、计时、通知、审批框）；§6 footer / 状态栏；§7 选择器与面板；§8 窄终端与 resize |
 
-**与 `docs/research/2026-10-14-omp-blocks.md` 的关系**：那一篇已经覆盖的块与容器结论（`ChatBlock` 生命周期抽象、`ToolCard` 统一块、容器管块间距的 `isPlainBlank`/`trimBlankEdges`、调用/结果配对、折叠与预览、`!` 命令）**本文不重做**，只引用；本文补的是它没有覆盖的三块：**设计系统常量表**、**Markdown 逐元素**、**输入框 / footer / 面板 / 窄终端**。凡引用那一篇的地方写作「见 blocks 篇 §x」。
+**与 `research/2026-10-14-omp-blocks.md` 的关系**：那一篇已经覆盖的块与容器结论（`ChatBlock` 生命周期抽象、`ToolCard` 统一块、容器管块间距的 `isPlainBlank`/`trimBlankEdges`、调用/结果配对、折叠与预览、`!` 命令）**本文不重做**，只引用；本文补的是它没有覆盖的三块：**设计系统常量表**、**Markdown 逐元素**、**输入框 / footer / 面板 / 窄终端**。凡引用那一篇的地方写作「见 blocks 篇 §x」。
 
 ## 0. 出处与版本
 
@@ -200,7 +200,7 @@ omp 的主题是**一个 JSON 文件**，schema 在 `tui/src/theme/theme-schema.
 | ADR | 原文 | 问题 | 建议 |
 |---|---|---|---|
 | **0035 背景段** | 「晚给了 omp 的一组截图（…），并提出两条总要求」 | 无问题 | — |
-| **0035 背景段** | 「`docs/research/2026-10-14-omp-blocks.md` 读过 omp 18.10.4 的块与容器源码…但没有覆盖 Markdown 各元素与输入框的细节」 | 准确 | — |
+| **0035 背景段** | 「`research/2026-10-14-omp-blocks.md` 读过 omp 18.10.4 的块与容器源码…但没有覆盖 Markdown 各元素与输入框的细节」 | 准确 | — |
 | **0035 V2 标题行** | 「`#` 号保留并弱一级（显示层级，决定 3）；文字强调色、加粗；一级标题加下划线；上下各 1 行空白」 | **与 omp 不同**：omp 的 1/2 级**不显示 `#`**（`components/markdown.ts:3379-3382`），3 级以下才显示（`:3384`）；omp 的 1 级是 `bold+underline`、2 级是 `bold`、3+ 级是 `bold` + `#` 前缀 | **保留 owner 的决定**（更可读），但在 ADR 里**注明与 omp 的差异**；并**补一个 `md_heading_mark`（dim）角色**给 `#` 号（现在 `blocks.rs:1487` 把 `#` 与标题文字同色）。 |
 | **0035 V2 列表行** | 「无序 `-`、有序 `1.`，标记用强调色；嵌套每层缩进 2 格」 | **与 omp 一致**（omp 的无序标记字面量就是 `- `，`components/markdown.ts:3848`），**与 Radian 现状不一致**（Radian 是 `• `，`blocks.rs:1498`） | 照 ADR 0035 改成 `-`。**补一句**：续行要按标记实际宽度对齐（omp `:3848-3851`；Radian 现在固定 2 格，`10. ` 会错位）。 |
 | **0035 V2 任务列表行** | 「任务列表 `☐`/`☑`」 | **omp 的 Markdown 不渲染任务列表**（checkbox token 无 case，见 §9.2 第 8 条）；`☐`/`☑` 在 omp 里只用于 `todo` 工具与 ask 面板 | **注明这是 Radian 自己的设计**（不是照搬），并说明要开 `ENABLE_TASKLISTS` + 加 `MdStyle` 档 + ascii 退回 `[ ]`/`[x]`。 |

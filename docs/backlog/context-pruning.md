@@ -2,7 +2,7 @@
 
 - 状态：idea＼�只在 `compaction-threshold.md` 的 A/B 拿不到足够收益时才做）
 - 涉及 ADR：新 ADR（清理是一种 transcript 替换：与 0019 的提交、0036 的缓存前提、0018 的阈值如何配合）
-- 来源：`docs/research/2026-10-18-area-deep-dive/3-context.md` §6.4；要求先量数据
+- 来源：`research/2026-10-18-area-deep-dive/3-context.md` §6.4；要求先量数据
 
 ## 背景（已量，本机 158 个会话、2026-10-20）
 

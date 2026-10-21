@@ -5,7 +5,7 @@
 //!
 //! The lower half pins the eight research samples (ADR 0042's acceptance): six render at 80
 //! columns, two are `TooWide`, and `long labels` fits at 120. The expected bytes are the
-//! `grok-build mermaid.rs` section of `docs/research/2026-10-16-mermaid-renderer-candidates/`
+//! `grok-build mermaid.rs` section of `research/2026-10-16-mermaid-renderer-candidates/`
 //! `outputs.txt` — the output of the very file vendored under `third_party/grok-mermaid/`.
 
 use radian_tui::app::{App, EntryKind};

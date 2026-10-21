@@ -70,12 +70,12 @@ Radian 的 journal 已经比五家里任何一家的会话文件都更适合做�
 
 ## 4. Radian 的优势
 
-1. **journal 本身就是一份完整的 trajectory**。每行都有 `seq`、UTC 微秒 `ts`、`event` 和 `critical`（ADR 0006 §3）。`ToolExecutionStarted` 和 `ToolExecutionSettled` 夹住了每个工具的实际执行时间（§5.3/5.4）。`TurnFinished.outcome` 的终态枚举很完整，包括 `incomplete/max_tokens`、`budget_exceeded`、`cancelled/deadline_exceeded`（§5.6）。`scripts/measure-tool-concurrency.py` 已经证明：只靠 journal 就能算出模型、工具和其他时间的占比（工具 65.5%，模型 24.6%，见 `docs/research/2026-10-15-tool-concurrency-measurement.md` §5）。
+1. **journal 本身就是一份完整的 trajectory**。每行都有 `seq`、UTC 微秒 `ts`、`event` 和 `critical`（ADR 0006 §3）。`ToolExecutionStarted` 和 `ToolExecutionSettled` 夹住了每个工具的实际执行时间（§5.3/5.4）。`TurnFinished.outcome` 的终态枚举很完整，包括 `incomplete/max_tokens`、`budget_exceeded`、`cancelled/deadline_exceeded`（§5.6）。`scripts/measure-tool-concurrency.py` 已经证明：只靠 journal 就能算出模型、工具和其他时间的占比（工具 65.5%，模型 24.6%，见 `research/2026-10-15-tool-concurrency-measurement.md` §5）。
 2. **费用口径比对手更严**。每次调用按**当时的价格**记 `fee.micros`，价格表缺项时标 `incomplete`（`radian-session/src/fee.rs:1-31`、ADR 0007）。缓存命中只按缓存价计一次（ADR 0007：`uncached_input()` 和 `prompt_total()`）。pi 和 Claude Code 给的都是“估算”。Radian 换模型或价格表更新之后，旧会话的成本也不会变。
 3. **“没报就是 None”** 和 pi 评测的“缺失就是不可用”一致（ADR 0007 J1），聚合时不会把缺失当成 0。
 4. **零遥测，而且做得彻底**（ADR 0013 决定 1：路径根本不存在）。评测完全在本地进行，不和隐私承诺冲突。
 5. 已有确定性的回放核对（`journal-selfcheck`）和两套 provider 契约测试，回归测试的底子比 Codex 以外的几家都好。
-6. **dogfood 记录已经在用 journal 计数**，例如 D25：“479 次工具调用，7 次压缩，前 239 次调用零编辑”（`docs/findings/2026-10-12-radian-tui-dogfooding.md`）。这些就是现成的任务和行为指标。
+6. **dogfood 记录已经在用 journal 计数**，例如 D25：“479 次工具调用，7 次压缩，前 239 次调用零编辑”（`research/2026-10-12-radian-tui-dogfooding.md`）。这些就是现成的任务和行为指标。
 
 ## 5. Radian 的劣势和缺口
 

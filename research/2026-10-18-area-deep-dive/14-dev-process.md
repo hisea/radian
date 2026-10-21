@@ -53,7 +53,7 @@ Radian 的工程纪律在六家里最严：每个决定都有 ADR，每个新测
 2. **测试质量有证据，不只是数量多。** 新测试必须先在坏代码上失败一次，再做变异检查，结果记账：23 个 `MUTATIONS*.md` 共 6512 行，约 1495 条"抓住"、26 条"没抓住"，并且用 `.gitattributes` 的 union 合并驱动避免冲突。五家对手都没有看得到的类似机制。
 3. **契约测试，加上 journal 自检。** provider 契约套件规定了两个"逃生口"，并且明令"Never invent a wire value"（`AGENTS.md:40-42`）；`journal-selfcheck` 让测试里的每次 transcript 写入都和 journal 重放结果对一遍。这是 Rust 运行时这一层的硬保证。
 4. **用 agent 开发 agent，而且是有组织的。** 有 worktree 和分支规则、brief 模板、"先写盘再继续"的规则、review 时的变异检查（`AGENTS.md` "Rules for delegating to pi"）。历史里有 147 个 `pi/` 合并和 45 个 `dogfood/` 合并，Radian 用自己开发自己（提交里有 "done by radian exec … reviewed by p1"）。产出量是 2190 个提交，集中在 2026-10-12 到 10-17 这 6 天，平均每天约 365 个。
-5. **构建配置已经调过一次。** `debug = "line-tables-only"`、依赖不带调试信息＼�，和 Codex 的 dev profile 做法一致。构建耗时有一份测量报告（`docs/research/2026-10-15-build-timings.md`）。
+5. **构建配置已经调过一次。** `debug = "line-tables-only"`、依赖不带调试信息＼�，和 Codex 的 dev profile 做法一致。构建耗时有一份测量报告（`research/2026-10-15-build-timings.md`）。
 6. **产品代码的大文件已经拆开。** 修改最频繁的 `radian-tui/src/app.rs`（156 次提交）已经拆成 `app/*.rs`；footer 也按纯移动拆过（1851 行拆到 931 行）。产品代码里最大的文件是 2363 行，Codex、omp、pi 都有超过 7000 行的单个文件。
 
 ## 5. Radian 的劣势和缺口
@@ -64,7 +64,7 @@ Radian 的工程纪律在六家里最严：每个决定都有 ADR，每个新测
 4. **flaky 和负载绑在一起。** pty 的等待上限从 10–20 s 提到 60 s，理由是"the gate runs this suite at load average 70-200 beside several cargo builds"（`pty.rs:209-213`）。并发靠进程内的 `PTY_SLOTS` 互斥锁限制（`pty.rs:250-255`），review 时容易 flaky 的测试要跑 5 遍。41 个提交和 flaky 有关，46 个提交只是修 `cargo fmt` 或 clippy。根因是多个 agent 在同一台机器上并行构建，而且每个 worktree 都有自己的 7 GiB `target/`，依赖要各编一遍（build-timings §机器）。
 5. **ADR 体量大，重写规则没有执行完。** AGENTS.md 规定第三次修订就要重写＼�；目前带"修订历史"表的只有 6 篇（0024、0027、0028、0035、0036、0042）。ADR 0018 有 60 KB，还挂着独立的"修订 8""修订 9"两节，没有变更表。0030 已经搁置，却仍有 92 KB，是最大的一篇。全部 ADR 约 50.7 万字符；粗估相当于 25 万 token 左右（推断，CJK 14.5 万字按每字约 1 token，其余按每 3.5 字符 1 token）。一个改压缩逻辑的 agent，光读 0018 就要花约 2–3 万 token。
 6. **索引过期，入口也不一致。** `README.md` 的 ADR 索引只写到 0021（`README.md:268`），"Status" 一节还停在 2026-10-13。AGENTS.md 的 ADR 清单漏了 0041（已否决的"去掉终端 mermaid"）。0026 的状态行写着"提议，大部分已裁决"，AGENTS.md 却把它的修订 2 列为现行决定。AGENTS.md 有 11.6 KB，每个会话都会加载，其中 pi 委托规则 5.2 KB，ADR 列表那一段 3.6 KB；大多数会话两样都用不上。
-7. **文档语言没有约定。** ADR 43 篇全是中文；crate README 14 篇是英文；AGENTS.md、README、提交信息是英文；设计文档、`sandbox.md`、`perf-baseline.md` 中文占 23–26%（字符比例），属于中英混写；`docs/research` 中文 10 篇、英文 6 篇；`MUTATIONS.md` 同一个文件里中英文小节交替出现。仓库里找不到任何语言规则（在 AGENTS.md、README、ADR 0036 里 grep "中文/Chinese/English" 都没有结果）。一旦开源，或者引入不读中文的贡献者，"决策"这一层他们读不了。
+7. **文档语言没有约定。** ADR 43 篇全是中文；crate README 14 篇是英文；AGENTS.md、README、提交信息是英文；设计文档、`sandbox.md`、`perf-baseline.md` 中文占 23–26%（字符比例），属于中英混写；`research/` 中文 10 篇、英文 6 篇；`MUTATIONS.md` 同一个文件里中英文小节交替出现。仓库里找不到任何语言规则（在 AGENTS.md、README、ADR 0036 里 grep "中文/Chinese/English" 都没有结果）。一旦开源，或者引入不读中文的贡献者，"决策"这一层他们读不了。
 8. **没有发版，也没有版本概念。** 没有 tag、release、CHANGELOG，crate 一律 `0.1.0`，安装方式只有 `cargo build`（`README.md:70-80`）。对手近 30 天发了 8 到 54 个版本。没有版本，就没有"某个 bug 从哪一版开始"这种问题可问，用户和可信度都无从谈起。
 9. **测试代码里的热点。** `radian-tui/tests/pty.rs` 有 12869 行、172 个测试，是全仓库**修改最频繁的文件**（190 次非合并提交）；`agent-cli/tests/cli.rs` 有 8368 行，96 次提交。它们是并行分支合并冲突的主要来源，例如提交"the two tests the merge brought in … use the branch's one pos…"。产品代码里的热点是 `radian-host/src/lib.rs`（120 次）和 `radian-tui/src/main.rs`（163 次）。
 10. **小的不一致（推断）。** `radian-runtime` 也定义了 `journal-selfcheck` 这个 feature（`radian-runtime/Cargo.toml:22`），但 Verify 只用它跑 `agent-core`（`AGENTS.md:19`）；AGENTS.md 说 selfcheck"check every transcript write"，但 runtime 层的会话没有在这个模式下跑过。

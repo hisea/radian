@@ -2,7 +2,7 @@
 
 - 状态：idea
 - 涉及 ADR：0021、0013、0031
-- 来源：的决定（A：模型不写记忆）；`docs/research/2026-10-18-area-deep-dive/9-long-tasks-memory.md` §6.5
+- 来源：的决定（A：模型不写记忆）；`research/2026-10-18-area-deep-dive/9-long-tasks-memory.md` §6.5
 
 ## 背景
 

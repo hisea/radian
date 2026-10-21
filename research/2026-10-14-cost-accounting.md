@@ -86,7 +86,7 @@ fixture/测试证据：`stream.rs:803-823`（`message_start` 给 `input_tokens: 
 
 fixture/测试证据：
 `stream.rs:601-631`（`usage_maps_openai_and_anthropic_field_names`）：`prompt_tokens: 11`、`completion_tokens: 4`、`total_tokens: 15`、`prompt_tokens_details.cached_tokens: 3` → **`input Some(11)`、`output Some(4)`、`total Some(15)`、`cache_read Some(3)`**。也就是说 `input`（11）里**已经包含了** `cache_read`（3），这正是 OpenAI 的语义（`cached_tokens` 是 `prompt_tokens` 的一个明细，`total = prompt + completion`）。
-`stream.rs:633-668`（`the_dogfooded_usage_shape_keeps_completion_tokens_details`）用的是我们自己 dogfood 到的真实形状：`prompt_tokens: 31`、`completion_tokens: 40`、`total_tokens: 71`、`cached_tokens: 0`、`completion_tokens_details.reasoning_tokens: 30` → `input Some(31)`、`output Some(40)`、`total Some(71)`、`cache_read Some(0)`。真实端点的字段集见 `docs/findings/2026-10-12-opencode-zen-dogfooding.md:17`。
+`stream.rs:633-668`（`the_dogfooded_usage_shape_keeps_completion_tokens_details`）用的是我们自己 dogfood 到的真实形状：`prompt_tokens: 31`、`completion_tokens: 40`、`total_tokens: 71`、`cached_tokens: 0`、`completion_tokens_details.reasoning_tokens: 30` → `input Some(31)`、`output Some(40)`、`total Some(71)`、`cache_read Some(0)`。真实端点的字段集见 `research/2026-10-12-opencode-zen-dogfooding.md:17`。
 
 ### 2.2 结论：**不一致**，而且不一致不止在"两家之间"
 
@@ -102,7 +102,7 @@ fixture/测试证据：
 
 **实践影响**（今天）：
 - opencode-go 走 OpenAI 兼容协议那条路（`/zen/go/v1`，deepseek/gpt/grok/qwen…）→ **费用高估（F1）**，预算基线正确。
-- Anthropic 协议那条路（`api.anthropic.com` 与 opencode-go 的 `/zen/go`）→ 费用公式正确，预算基线**低估**（如果真有缓存命中）。之所以今天还不是问题：本 adapter**没有实现** `cache_control`，radian 永远不会主动创建缓存断点（`crates/agent-provider-anthropic/WIRE.md:179`），所以 `cache_read`/`cache_write` 在实践中是 0/缺失。反过来，opencode-go 的 OpenAI 兼容路径**会**有缓存命中：那个端点要求每个会话一个稳定的 `x-opencode-session`，用途之一就是 prompt 缓存（`docs/findings/2026-10-12-opencode-zen-dogfooding.md:22`；该文档 `:72` 注明"缓存效果未验证"，但字段 `prompt_tokens_details.cached_tokens` 已在真实响应里出现过）。
+- Anthropic 协议那条路（`api.anthropic.com` 与 opencode-go 的 `/zen/go`）→ 费用公式正确，预算基线**低估**（如果真有缓存命中）。之所以今天还不是问题：本 adapter**没有实现** `cache_control`，radian 永远不会主动创建缓存断点（`crates/agent-provider-anthropic/WIRE.md:179`），所以 `cache_read`/`cache_write` 在实践中是 0/缺失。反过来，opencode-go 的 OpenAI 兼容路径**会**有缓存命中：那个端点要求每个会话一个稳定的 `x-opencode-session`，用途之一就是 prompt 缓存（`research/2026-10-12-opencode-zen-dogfooding.md:22`；该文档 `:72` 注明"缓存效果未验证"，但字段 `prompt_tokens_details.cached_tokens` 已在真实响应里出现过）。
 
 ---
 
@@ -157,7 +157,7 @@ completion_tokens: 2000
 
 **结论：今天的实现不漏、不重复，但这种"正确"是隐式假设，没有文档也没有测试钉住。**
 
-- **OpenAI 兼容**：`completion_tokens` **包含** `completion_tokens_details.reasoning_tokens`。仓库内的实证：`docs/findings/2026-10-12-opencode-zen-dogfooding.md:17`（真实响应的字段集）与 `:57`（"本次实测里 `completion_tokens: 40` 中有 **30 是推理 token**，占 75%"）。归一化时 `output ← completion_tokens`（`stream.rs:276`），reasoning 明细原样进 `details`（`stream.rs:251-267`），**没有**再加一遍（`stream.rs:633-668` 的断言：`output Some(40)`，`details.completion_tokens_details.reasoning_tokens: 30`）。费用公式对 `output` 只加一次 → 与 OpenAI 的计费口径（reasoning 按 output 价）一致。
+- **OpenAI 兼容**：`completion_tokens` **包含** `completion_tokens_details.reasoning_tokens`。仓库内的实证：`research/2026-10-12-opencode-zen-dogfooding.md:17`（真实响应的字段集）与 `:57`（"本次实测里 `completion_tokens: 40` 中有 **30 是推理 token**，占 75%"）。归一化时 `output ← completion_tokens`（`stream.rs:276`），reasoning 明细原样进 `details`（`stream.rs:251-267`），**没有**再加一遍（`stream.rs:633-668` 的断言：`output Some(40)`，`details.completion_tokens_details.reasoning_tokens: 30`）。费用公式对 `output` 只加一次 → 与 OpenAI 的计费口径（reasoning 按 output 价）一致。
 - **Anthropic**：`output ← output_tokens`（`stream.rs:66-68`），`output_tokens_details.thinking_tokens` 只原样进 `details`（`stream.rs:75-80`，测试 `stream.rs:841-854`、`tests/http.rs:852-864`），没有另行计费。Anthropic 的 `output_tokens` 含思考 token（扩展思考按 output 价计费，`thinking_tokens` 是它的明细）——这与我们的归一化相容，但**仓库里没有任何断言或文档**说明这一点，`model.rs:54-72` 的字段注释也只说"provider-reported"。
 - 所以：**不重复、不漏**；风险是"如果哪天把 `thinking_tokens` 也加进 `output`（或反过来从 `output` 里减掉），费用会静默错掉"。建议在 `ModelUsage.output` 的注释里写清"含 reasoning，**不要**再叠加 `details` 里的推理计数"，并加一条契约断言。
 - 顺带：`speed`（tok/s）用的也是含 reasoning 的 `output`（`timing.rs` 的 `TurnTimer`，`footer.rs:733-740`）。若 owner 想要"可见文本速率"，那是另一种口径，需要明确——ADR 0027 只说"模型自报的 output token"，所以现在是对的。

@@ -2,7 +2,7 @@
 
 日期：2026-10-14 · 调研者：agent · 状态：只读调研
 
-本文是 `docs/research/2026-10-14-omp-design.md` 的分篇 1，覆盖 **§2 Markdown**。出处写法见主篇 §0（`tui/` = `@oh-my-pi/pi-tui@18.10.4`，`pca/` = `pi-coding-agent`，`utils/` = `pi-utils`）。推断都标明「推断」。
+本文是 `research/2026-10-14-omp-design.md` 的分篇 1，覆盖 **§2 Markdown**。出处写法见主篇 §0（`tui/` = `@oh-my-pi/pi-tui@18.10.4`，`pca/` = `pi-coding-agent`，`utils/` = `pi-utils`）。推断都标明「推断」。
 
 ---
 

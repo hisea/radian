@@ -39,7 +39,7 @@ a host that names the configured endpoint in an error redacts it the same way (A
 - `delta.reasoning_content` — the field the dogfooded reasoning model actually sends while
   `content` stays `""` — becomes `ModelResponse.reasoning` and a
   `AgentEvent::ModelReasoningDelta`, never a text delta. It is not in OpenAI's own docs: the
-  field name was verified on one endpoint only (`docs/findings/2026-10-12-opencode-zen-dogfooding.md`),
+  field name was verified on one endpoint only (`research/2026-10-12-opencode-zen-dogfooding.md`),
   so another provider may use another name.
 - A tool call's `arguments` that were not valid JSON are sent back exactly as received; a
   repeated or missing provider call id is renamed/made up so the history stays unique.

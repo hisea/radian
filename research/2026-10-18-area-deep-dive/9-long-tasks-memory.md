@@ -83,13 +83,13 @@ Radian 在“中断后不坏”这件事上做得最扎实：journal 可以确�
    | dogfood10 D25 | 前 239 次调用、4 次压缩没有编辑；每份摘要的 `Next step` 都写着“按规则 4 把 X 节写进指南” | 第 239 次调用时 owner steer，第 244 次出现第一个 patch，之后按节落盘 |
    | dogfood11 D26 | 小任务，前 45 次调用（约 23 分钟）没有编辑 | owner steer 后 6 分钟做完 |
 
-   出处：`rad/docs/findings/2026-10-12-radian-tui-dogfooding.md:35-37`。findings 的结论原话是：“The ‘verify everything before writing’ habit is unchanged by any mechanism tried so far … only a new user message moves it.” 摘要写对了（修订 5、6）并没有改变行为（D25）。
+   出处：`rad/research/2026-10-12-radian-tui-dogfooding.md:35-37`。findings 的结论原话是：“The ‘verify everything before writing’ habit is unchanged by any mechanism tried so far … only a new user message moves it.” 摘要写对了（修订 5、6）并没有改变行为（D25）。
 2. **轮结束就停，不会自己接着干，也不会自己停。** D25 做完清理（第 459 次调用）后没有结束这一轮，反而开始读别的分支，直到第二条 steer。D26 中间 owner 重启过一次，靠发“continue”接上。Radian 没有目标状态，也没有完成判定，只有提示词里的 Stopping 一节（`rad/crates/radian-host/prompts/default.md:36-38`）。
 3. **没有持久化的计划。** 进度只靠模型写的 `Progress`/`Pending` 小节带过压缩，每次滚动压缩都会再转述一遍，D24 的第一个归因就是这个。CC、Codex、omp 都有 todo/plan 工具；omp 还在结束时和中途提醒，压缩后再补一次。
 4. **resume 不续跑**：被打断的轮要人来说“continue”。opencode 会自动续跑并要求“不要重复已完成的工作”；Codex 和 CC 在有 active goal 时会恢复目标。
 5. **没有文件回滚。** 模型想“试一下再退回”只能自己用 `git checkout`/`git stash`，人想撤销模型的改动也只能用 git。`Rewound` 还没决定（ADR 0022）。对效率的影响是间接的：不敢大胆试，或者回退时多花几轮（推断）。
 6. **开局摸索没有人引导。** ADR 0036 的背景记录了 dogfood 2026-10-14 开头 28 分钟都在摸索项目（`rad/docs/adr/0036-…md:13`）。根因是当时 AGENTS.md 没被读到，现在已经修了，但“摸索把主上下文填满”这个问题本身还在（D25 里关于指南的工具输出约占全部工具输出的一半）。`explore` subagent 有了，提示词里却一个字也没提。
-7. **记忆基本是空的（推断）。** `memory_save` 默认 ask，工具描述只说 scope 怎么选，没说**什么时候**该存（`memory/tools.rs:476-487`）；也没有任何自动抽取（ADR 0021:127）。CC 把“用户纠正过的、能节省用户按键的东西”当作首要的记忆来源（Codex 的抽取提示 `:115-123` 也是这样）。Radian 有存储，但缺了写入的那一侧。（本机读不到 `~/.radian/memory/`，实际记录数没有核实。）使用数据：测量用的三个会话一共 479 次工具调用，memory 工具一次都没有出现（`rad/docs/research/2026-10-15-tool-concurrency-measurement.md` 的合计表）。样本只有三个会话，但方向和上面的推断一致。`memory_search` 也很少有机会用：会话开始时已经自动注入了最多约 2 000 tok 的记忆段。
+7. **记忆基本是空的（推断）。** `memory_save` 默认 ask，工具描述只说 scope 怎么选，没说**什么时候**该存（`memory/tools.rs:476-487`）；也没有任何自动抽取（ADR 0021:127）。CC 把“用户纠正过的、能节省用户按键的东西”当作首要的记忆来源（Codex 的抽取提示 `:115-123` 也是这样）。Radian 有存储，但缺了写入的那一侧。（本机读不到 `~/.radian/memory/`，实际记录数没有核实。）使用数据：测量用的三个会话一共 479 次工具调用，memory 工具一次都没有出现（`rad/research/2026-10-15-tool-concurrency-measurement.md` 的合计表）。样本只有三个会话，但方向和上面的推断一致。`memory_search` 也很少有机会用：会话开始时已经自动注入了最多约 2 000 tok 的记忆段。
 8. **没有 token 或费用预算**：只能按模型调用次数限制，到顶就是硬停。Codex、omp 的 goal 和 CC 的 `--max-budget-usd` 都能按 token 或美元收口。
 
 ---

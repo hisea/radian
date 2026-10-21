@@ -268,16 +268,18 @@ silently on a broken pipe.
 
 ## Docs
 
+Start with `docs/user/` for the user manual; `docs/adr/` holds the decisions; `ARCHITECTURE.md` is the design of record; `research/` is the lab notebook.
+
 | What | Where |
 |---|---|
 | Design of record | `ARCHITECTURE.md` |
 | Decisions (read before changing code) | `docs/adr/` |
-| Sandbox backends: what they really enforce | `crates/radian-sandbox/LIMITS.md` (spikes: `docs/spikes/macos-sandbox.md`, `docs/spikes/linux-sandbox.md`) |
+| Sandbox backends: what they really enforce | `crates/radian-sandbox/LIMITS.md` (spikes: `spikes/macos-sandbox/README.md`, `spikes/linux-sandbox/README.md`) |
 | Provider contract and its escape hatches | `crates/agent-provider-contract/README.md`, wire notes in `crates/agent-provider-anthropic/WIRE.md` |
 | Session format fixtures and their checkers | `docs/schema/` (`check-fixtures.sh`, `check-config-fixtures.sh`, `fixtures/`, `config/`) |
-| Dogfooding findings (radian run on radian) | `docs/findings/2026-10-12-radian-tui-dogfooding.md`, `docs/findings/2026-10-12-opencode-zen-dogfooding.md` |
+| Dogfooding findings (radian run on radian) | `research/2026-10-12-radian-tui-dogfooding.md`, `research/2026-10-12-opencode-zen-dogfooding.md` |
 | Performance baseline and its reproduction commands | `benchmarks/perf-baseline.md` |
-| Spike reports (sandbox, TUI, OAuth) | `docs/spikes/` |
+| Spike reports (sandbox, TUI, OAuth) | `spikes/` |
 | Agent instructions (verify suite, delegation) | `AGENTS.md` |
 
 ## License

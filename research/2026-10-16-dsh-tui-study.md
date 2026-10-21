@@ -660,8 +660,8 @@ front-end appears; premature sharing would freeze an interface before it is used
   `screens/{AgentTranscriptScene,SessionSupervisor,StatusLine,Chat,SessionTree,Settings,
   Launchpad,Onboarding,TrajectoryScene}.tsx`.
 - **radian files read:** ADRs 0023, 0027, 0028, 0029, 0030, 0035, 0037, 0013, 0007, 0021, 0024,
-  0026, 0029; `docs/research/2026-10-15-adr-0030-implementation-plan.md`;
-  `docs/research/2026-10-14-omp-design.md`; `crates/radian-tui/README.md`;
+  0026, 0029; `research/2026-10-15-adr-0030-implementation-plan.md`;
+  `research/2026-10-14-omp-design.md`; `crates/radian-tui/README.md`;
   `crates/radian-tui/src/{panel,select_list,render,app,footer,tools,markdown,highlight,composer,
   find,clip,command,mention,question,picker,projection,spinner,startup,theme,timing,select,
   events,keys,blocks,workspace,login,profile,signals,terminal,lib}.rs`.

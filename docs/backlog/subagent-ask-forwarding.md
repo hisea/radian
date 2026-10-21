@@ -2,7 +2,7 @@
 
 - 状态：idea
 - 涉及 ADR：0043（1a.7、§7）、0010、0024
-- 来源：`docs/research/2026-10-18-area-deep-dive/4-architecture.md` §6 ②；评估
+- 来源：`research/2026-10-18-area-deep-dive/4-architecture.md` §6 ②；评估
 
 ## 背景
 

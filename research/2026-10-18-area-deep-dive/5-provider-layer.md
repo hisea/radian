@@ -72,7 +72,7 @@ Radian 的 provider 层正确性好（三个 adapter 都过契约套件，用量
 
 ## 4. Radian 的优势
 
-1. **用量口径对**：`input_includes_cache` 由 adapter 自己声明，缓存 token 只按缓存价计一次。每次调用按当时 route 的价格计价，费用不全时标 `≥`（`cost.rs:1-19`；ADR 0007）。很多实现在这里多算或少算（见 `docs/research/2026-10-14-cost-accounting.md` 的 F1）。
+1. **用量口径对**：`input_includes_cache` 由 adapter 自己声明，缓存 token 只按缓存价计一次。每次调用按当时 route 的价格计价，费用不全时标 `≥`（`cost.rs:1-19`；ADR 0007）。很多实现在这里多算或少算（见 `research/2026-10-14-cost-accounting.md` 的 F1）。
 2. **前缀天然稳定**：系统提示在进程内只组装一次（ADR 0036）；会话中途的变化都追加成消息，工具定义不撤；Anthropic 默认打断点。Claude Code 文档列出的多种失效原因，Radian 在架构上已经避开了一大半。
 3. **重试有上限、可中断**：总等待 ≤60 s；backoff 期间取消立即生效（`turn.rs:236-318`）。不会像 opencode 那样把 `retry-after` 放到 15 分钟。
 4. **压缩摘要已降档**：默认 `low`（ADR 0018），比沿用对话档位省输出 token。

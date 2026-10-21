@@ -6,7 +6,7 @@
 
 ## 与 macOS 结论的结构对齐
 
-本文件与 `docs/spikes/macos-sandbox.md` 逐节对齐，便于两个平台对比决定权限档位。差异表见 §7。
+本文件与 `spikes/macos-sandbox/README.md` 逐节对齐，便于两个平台对比决定权限档位。差异表见 §7。
 
 ## 1. 结果总表（10 条标准）
 

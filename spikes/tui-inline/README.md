@@ -46,7 +46,7 @@ owner 在 Terminal.app（macOS 27.0.1）里按本文档"需要 owner 人工验�
 - 计划 v5 Phase 4 的「inline 仅在其 spike 满足正确性/可用性门槛时进入首发」据此落地为：**不进首发**。Phase 4 只做全屏。
 - 全屏模式的 scrollback、选择复制、搜索、长 transcript 滚动，都必须由我们自己实现（计划 Phase 5 的 "transcript virtualization" 正是这件事），不能指望终端原生能力。
 - 本原型与全部证据保留在仓库里：它回答了"inline 能否进首发"，答案是不能，重做时不必从零再验。
-- **给 Phase 4 的一条小记**：全屏 spike（`docs/spikes/tui-fullscreen.md`）退出时没有补一个换行，真实 shell 下会显示 zsh 的 `%` 标记（pty 测不出，手测看到）。实现时退出前补换行。
+- **给 Phase 4 的一条小记**：全屏 spike（`spikes/tui-fullscreen/README.md`）退出时没有补一个换行，真实 shell 下会显示 zsh 的 `%` 标记（pty 测不出，手测看到）。实现时退出前补换行。
 
 ## 实现边界
 
