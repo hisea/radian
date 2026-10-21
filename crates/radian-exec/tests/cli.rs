@@ -8943,10 +8943,13 @@ async fn config_import_claude_drafts_and_writes() {
     assert!(stderr.contains("[import-claude]"), "{stderr}");
     assert!(stderr.contains("`async`"), "{stderr}");
     assert!(
-        stderr.contains("reads MCP servers from `--mcp-config` only"),
+        stderr.contains("imported 1 stdio server(s) into `[mcp]`"),
         "{stderr}"
     );
-    assert!(stderr.contains("does not load project hooks"), "{stderr}");
+    assert!(
+        stderr.contains("imported 1 hook entry as project hooks"),
+        "{stderr}"
+    );
     assert!(stderr.contains("nothing was written"), "{stderr}");
 
     // `--write`: the config is merged (a comment and an unrelated key survive), the
@@ -8984,6 +8987,8 @@ async fn config_import_claude_drafts_and_writes() {
     assert!(text.contains("# keep me"), "{text}");
     assert!(text.contains("model = \"m-1\""), "{text}");
     assert!(text.contains("echo pre"), "{text}");
+    assert!(text.contains("secret-srv"), "{text}");
+    assert!(!text.contains("sk-test-please-ignore"), "{text}");
     assert!(
         out.join(".agents/skills/review/SKILL.md").exists(),
         "{stderr}"
@@ -8997,6 +9002,11 @@ async fn config_import_claude_drafts_and_writes() {
         proj.join(".agents/skills/team/SKILL.md").exists(),
         "{stderr}"
     );
+    // Project hooks translated (`Bash`→`shell`) into the runtime's project hooks file.
+    let hooks_text = std::fs::read_to_string(proj.join(".radian/hooks.json")).unwrap();
+    assert!(hooks_text.contains("\"shell\""), "{hooks_text}");
+    assert!(!hooks_text.contains("Bash"), "{hooks_text}");
+    assert!(hooks_text.contains("echo proj"), "{hooks_text}");
 
     // A second `--write` merges again: nothing is duplicated, existing files are skipped
     // with one line each, and the exit is still 0.

@@ -254,6 +254,7 @@ fn the_typical_fixtures_map_commands_hooks_and_agents_md() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: Some(scratch.path().join("project-skills")),
+        project_hooks_path: Some(scratch.path().join("project-hooks.json")),
     };
     let report = write_claude_draft(&draft, &targets).unwrap();
     assert!(!report.written.is_empty());
@@ -286,7 +287,8 @@ fn the_typical_fixtures_map_commands_hooks_and_agents_md() {
 }
 
 /// The report names every non-portable item: dropped hook keys, unknown events, agents,
-/// plugins, LSP, rules, local files, memory/sessions, and the two not-imported notices.
+/// plugins, LSP, rules, local files, memory/sessions, the never-translated `.mcp.json`
+/// notice — alongside the new import lines for `[mcp]` servers and project hooks.
 #[test]
 fn the_drop_report_names_every_non_portable_item() {
     let home = Temp::new("drops-home");
@@ -309,8 +311,9 @@ fn the_drop_report_names_every_non_portable_item() {
         "CLAUDE.local.md",
         "memory",
         "sessions",
-        "reads MCP servers from `--mcp-config` only",
-        "does not load project hooks",
+        "imported 2 stdio server(s) into `[mcp]`",
+        "imported 1 hook entry as project hooks",
+        "not translated; the runtime reads it",
         "`.mcp.json`",
     ] {
         assert!(
@@ -358,11 +361,12 @@ fn credential_files_are_never_read() {
     readable(home.path());
 }
 
-/// A plaintext secret is never copied: the draft and the report carry only an ADR 0008 §3
-/// environment reference with a suggested name. A mutation that copies the literal fails
-/// this test.
+/// A plaintext secret under a sensitive name is never copied: the draft carries no
+/// value, only an `inherit_env` entry (no string may stand under such a name), and
+/// the report names the variable to set in the shell. A mutation that copies the
+/// literal fails this test.
 #[test]
-fn a_literal_secret_is_never_shown_and_becomes_a_reference() {
+fn a_literal_secret_under_a_sensitive_name_is_never_shown_and_rides_inherit_env() {
     let home = Temp::new("secret-home");
     user_home(home.path());
 
@@ -379,12 +383,71 @@ fn a_literal_secret_is_never_shown_and_becomes_a_reference() {
         );
     }
     assert!(
-        draft
-            .notes
-            .iter()
-            .any(|note| note.contains("SECRET_SRV_API_KEY") && note.contains("from = \"env\"")),
+        draft.notes.iter().any(|note| note.contains("inherit_env")
+            && note.contains("`API_KEY`")
+            && note.contains("value is never shown")),
+        "the note must name inherit_env and the variable: {:?}",
+        draft.notes
+    );
+    // The written entry carries the name only, never a value.
+    assert!(
+        draft.config_toml.contains("API_KEY"),
+        "the name rides inherit_env: {}",
+        draft.config_toml
+    );
+    let server = draft
+        .mcp_servers
+        .iter()
+        .find(|server| server.id == "secret-srv")
+        .expect("secret-srv must be imported");
+    assert!(
+        server.env.is_empty(),
+        "no value may land in env: {server:?}"
+    );
+    assert!(
+        server.inherit_env.contains(&"API_KEY".to_owned()),
+        "{server:?}"
+    );
+    readable(home.path());
+}
+
+/// A plaintext secret under an ordinary name becomes a `${VAR}` expansion with a
+/// suggested name: the literal appears neither in the draft nor in any note. A
+/// mutation that writes the literal value instead of the reference fails this test.
+#[test]
+fn a_literal_secret_under_an_ordinary_name_becomes_a_reference() {
+    let home = Temp::new("secret-ref-home");
+    write(
+        home.path(),
+        ".claude.json",
+        &format!(
+            r#"{{"mcpServers": {{"svc": {{"command": "serve", "env": {{"MY_KEY": "{SECRET}"}}}}}}}}"#
+        ),
+    );
+
+    let draft = import_claude(Some(home.path()), None).unwrap();
+    assert!(
+        !draft.config_toml.contains(SECRET),
+        "the literal must not be in the draft: {}",
+        draft.config_toml
+    );
+    for note in &draft.notes {
+        assert!(
+            !note.contains(SECRET),
+            "the literal value must not be in a note: {note}"
+        );
+    }
+    assert!(
+        draft.notes.iter().any(|note| note.contains("SVC_MY_KEY")
+            && note.contains("${SVC_MY_KEY}")
+            && note.contains("value is never shown")),
         "the note must suggest an env reference: {:?}",
         draft.notes
+    );
+    assert!(
+        draft.config_toml.contains("${SVC_MY_KEY}"),
+        "the draft carries the reference: {}",
+        draft.config_toml
     );
     readable(home.path());
 }
@@ -406,6 +469,7 @@ fn existing_config_is_merged_preserving_everything() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: Some(scratch.path().join("project-skills")),
+        project_hooks_path: Some(scratch.path().join("project-hooks.json")),
     };
     let original = "# my configuration\n\
         schema_version = 1\n\
@@ -473,6 +537,7 @@ fn a_second_import_adds_nothing() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: Some(scratch.path().join("project-skills")),
+        project_hooks_path: Some(scratch.path().join("project-hooks.json")),
     };
     let first = write_claude_draft(&draft, &targets).unwrap();
     assert!(!first.written.is_empty());
@@ -508,6 +573,7 @@ fn an_inline_skills_table_merges() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: None,
+        project_hooks_path: None,
     };
     let original = "schema_version = 1\n# keep me\nskills = { extra_paths = [\"/a\"] }\n";
     std::fs::write(&targets.config_path, original).unwrap();
@@ -553,6 +619,7 @@ fn an_inline_hooks_list_merges() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: None,
+        project_hooks_path: None,
     };
     let original = "schema_version = 1\n[hooks]\n\
         PreToolUse = [{ matcher = \"shell\", hooks = [{ type = \"command\", \
@@ -602,6 +669,7 @@ fn a_top_level_inline_hooks_table_merges() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: None,
+        project_hooks_path: None,
     };
     let original = "schema_version = 1\nhooks = { PreToolUse = [] }\n";
     std::fs::write(&targets.config_path, original).unwrap();
@@ -652,6 +720,7 @@ fn a_non_table_hooks_value_is_a_conflict_not_an_error() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: None,
+        project_hooks_path: None,
     };
     let original = "schema_version = 1\nhooks = \"not-a-table\"\n";
     std::fs::write(&targets.config_path, original).unwrap();
@@ -686,6 +755,7 @@ fn existing_files_are_skipped_and_other_targets_still_written() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: Some(scratch.path().join("project-skills")),
+        project_hooks_path: Some(scratch.path().join("project-hooks.json")),
     };
     let agents_path = targets.user_agents_path.clone();
     let review_path = targets.user_skills_dir.join("review").join("SKILL.md");
@@ -745,6 +815,7 @@ fn a_read_only_config_writes_nothing() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: Some(scratch.path().join("project-skills")),
+        project_hooks_path: Some(scratch.path().join("project-hooks.json")),
     };
     let original = "schema_version = 99\n";
     std::fs::write(&targets.config_path, original).unwrap();
@@ -795,6 +866,7 @@ fn an_invalid_draft_is_never_written() {
         user_skills_dir: scratch.path().join("user-skills"),
         user_agents_path: scratch.path().join("AGENTS.md"),
         project_skills_dir: None,
+        project_hooks_path: None,
     };
     let error = write_claude_draft(&draft, &targets).unwrap_err();
     assert!(
@@ -810,11 +882,372 @@ impl ClaudeDraftForTest {
     fn empty() -> radian_host::ClaudeDraft {
         radian_host::ClaudeDraft {
             config_toml: String::new(),
+            project_hooks_json: None,
             user_agents_md: None,
             user_skills: Vec::new(),
             project_skills: Vec::new(),
+            mcp_servers: Vec::new(),
             notes: Vec::new(),
             files_read: Vec::new(),
         }
     }
+}
+
+/// A user `.claude.json` with one stdio server, one `sse` server, one server carrying
+/// foreign keys and one server with a literal secret in `env`: the merged `config.toml`
+/// parses, the MCP loader returns exactly the stdio servers with the right
+/// command/args/env, the literal appears neither in the written file nor in the draft
+/// nor in any note, and the report names each dropped item. A mutation that writes the
+/// literal secret value instead of the reference fails this test.
+#[test]
+fn user_mcp_servers_translate_with_drops_reported_and_secrets_referenced() {
+    unsafe {
+        std::env::set_var("SVC_SVC_KEY", "from-test-env");
+    }
+    let home = Temp::new("mcp-mixed-home");
+    write(
+        home.path(),
+        ".claude.json",
+        &format!(
+            r#"{{
+  "mcpServers": {{
+    "files": {{ "command": "npx", "args": ["-y", "server"], "env": {{ "WITH_DEFAULT": "x" }} }},
+    "web": {{ "type": "sse", "url": "https://example.com/sse" }},
+    "legacy": {{ "command": "old", "disabled": true, "autoApprove": ["x"], "timeout": 30 }},
+    "svc": {{ "command": "serve", "env": {{ "SVC_KEY": "{SECRET}" }} }}
+  }}
+}}"#
+        ),
+    );
+
+    let draft = import_claude(Some(home.path()), None).unwrap();
+    let report = draft.notes.join("\n");
+    for needle in [
+        "server `web`",
+        "type `sse`",
+        "`disabled`",
+        "`autoApprove`",
+        "`timeout`",
+        "SVC_KEY",
+        "SVC_SVC_KEY",
+        "value is never shown",
+    ] {
+        assert!(
+            report.contains(needle),
+            "the report must name `{needle}`:\n{report}"
+        );
+    }
+    assert!(!draft.config_toml.contains(SECRET), "{}", draft.config_toml);
+    for note in &draft.notes {
+        assert!(!note.contains(SECRET), "{note}");
+    }
+
+    let scratch = Temp::new("mcp-mixed-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: None,
+        project_hooks_path: None,
+    };
+    let write_report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(write_report.skipped.is_empty(), "{write_report:?}");
+    let after = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert!(!after.contains(SECRET), "{after}");
+    let config = radian_host::parse_config(&targets.config_path, &after).unwrap();
+    assert!(config.skipped.is_empty(), "{config:?}");
+    let ids: Vec<&str> = config
+        .mcp
+        .servers
+        .iter()
+        .map(|server| server.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["files", "legacy", "svc"], "{ids:?}");
+    let files = &config.mcp.servers[0];
+    assert_eq!(files.command, std::path::PathBuf::from("npx"));
+    assert_eq!(
+        files.args,
+        vec![
+            std::ffi::OsString::from("-y"),
+            std::ffi::OsString::from("server"),
+        ]
+    );
+    let env: std::collections::BTreeMap<String, String> = files
+        .env
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(env.get("WITH_DEFAULT").map(String::as_str), Some("x"));
+    let legacy = &config.mcp.servers[1];
+    assert_eq!(legacy.command, std::path::PathBuf::from("old"));
+    // The secret reference expands at load: the loader sees the shell value.
+    let svc = &config.mcp.servers[2];
+    let env: std::collections::BTreeMap<String, String> = svc
+        .env
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        env.get("SVC_KEY").map(String::as_str),
+        Some("from-test-env"),
+        "{env:?}"
+    );
+    unsafe {
+        std::env::remove_var("SVC_SVC_KEY");
+    }
+    readable(home.path());
+}
+
+/// An existing `config.toml` that already uses `[[mcp.servers]]` gains new servers in
+/// that same form, and the file still loads: no both-forms file is produced. A mutation
+/// that always writes `mcpServers` regardless of the existing form fails this test.
+#[test]
+fn new_servers_follow_the_existing_servers_form() {
+    let home = Temp::new("mcp-form-home");
+    write(
+        home.path(),
+        ".claude.json",
+        r#"{"mcpServers": {"fresh": {"command": "fresh-cmd", "args": ["a"]}}}"#,
+    );
+    let draft = import_claude(Some(home.path()), None).unwrap();
+    assert_eq!(draft.mcp_servers.len(), 1);
+
+    let scratch = Temp::new("mcp-form-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: None,
+        project_hooks_path: None,
+    };
+    let original = "schema_version = 1\n[[mcp.servers]]\nid = \"keep\"\ncommand = \"keep-cmd\"\n";
+    std::fs::write(&targets.config_path, original).unwrap();
+
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(report.skipped.is_empty(), "{report:?}");
+    let after = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert!(after.contains("id = \"keep\""), "{after}");
+    assert!(after.contains("id = \"fresh\""), "{after}");
+    assert!(
+        !after.contains("mcpServers"),
+        "no both-forms file may be produced: {after}"
+    );
+    let config = radian_host::parse_config(&targets.config_path, &after).unwrap();
+    assert!(config.skipped.is_empty(), "{config:?}");
+    let ids: Vec<&str> = config
+        .mcp
+        .servers
+        .iter()
+        .map(|server| server.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["keep", "fresh"], "{ids:?}");
+    readable(home.path());
+}
+
+/// An existing server id is skipped and reported, and the existing entry stays
+/// byte-for-byte unchanged while a new server still lands.
+#[test]
+fn an_existing_server_id_is_skipped_and_reported() {
+    let home = Temp::new("mcp-dup-home");
+    write(
+        home.path(),
+        ".claude.json",
+        r#"{"mcpServers": {
+            "dup": {"command": "other"},
+            "fresh": {"command": "fresh-cmd"}}}"#,
+    );
+    let draft = import_claude(Some(home.path()), None).unwrap();
+
+    let scratch = Temp::new("mcp-dup-scratch");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: None,
+        project_hooks_path: None,
+    };
+    let original = "schema_version = 1\n[[mcp.servers]]\nid = \"dup\"\ncommand = \"mine\"\n";
+    std::fs::write(&targets.config_path, original).unwrap();
+
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|line| line.contains("`dup`") && line.contains("already present")),
+        "{report:?}"
+    );
+    let after = std::fs::read_to_string(&targets.config_path).unwrap();
+    assert!(
+        after.contains("id = \"dup\"\ncommand = \"mine\""),
+        "{after}"
+    );
+    assert!(!after.contains("other"), "{after}");
+    assert!(after.contains("id = \"fresh\""), "{after}");
+    let config = radian_host::parse_config(&targets.config_path, &after).unwrap();
+    let dup = config
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.id == "dup")
+        .expect("the existing server");
+    assert_eq!(dup.command, std::path::PathBuf::from("mine"));
+    readable(home.path());
+}
+
+/// A project `.claude/settings.json` with hooks in and out of the subset: the written
+/// `.radian/hooks.json` loads through the project hooks loader, `Bash` matchers became
+/// `shell`, and the off-subset entries are reported. A mutation that skips the
+/// tool-name translation for project hooks fails this test.
+#[test]
+fn project_hooks_translate_with_drops_reported() {
+    let proj = Temp::new("proj-hooks-proj");
+    write(
+        proj.path(),
+        ".claude/settings.json",
+        r#"{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo proj-pre" }] },
+      { "matcher": "Edit|Write", "hooks": [{ "type": "command", "command": "echo edit" }] },
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo async", "async": true }] }
+    ],
+    "SessionStart": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo hi" }] }
+    ]
+  }
+}"#,
+    );
+
+    let draft = import_claude(None, Some(proj.path())).unwrap();
+    let report = draft.notes.join("\n");
+    assert!(report.contains("imported 2 hook entries"), "{report}");
+    assert!(report.contains("`async`"), "{report}");
+    assert!(report.contains("SessionStart"), "{report}");
+    let json = draft
+        .project_hooks_json
+        .as_deref()
+        .expect("importable project hooks render a file");
+    assert!(!json.contains("echo async"), "{json}");
+    assert!(!json.contains("echo hi"), "{json}");
+
+    let hooks_path = proj.path().join(".radian/hooks.json");
+    let targets = ClaudeTargets {
+        config_path: proj.path().join("config.toml"),
+        user_skills_dir: proj.path().join("user-skills"),
+        user_agents_path: proj.path().join("AGENTS.md"),
+        project_skills_dir: None,
+        project_hooks_path: Some(hooks_path.clone()),
+    };
+    let write_report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(write_report.skipped.is_empty(), "{write_report:?}");
+    assert!(hooks_path.is_file());
+    let (loaded, warnings) =
+        radian_host::load_project_hooks_file(&hooks_path).expect("the written file loads");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let matchers: Vec<Option<String>> = loaded
+        .pre_tool_use
+        .iter()
+        .map(|entry| entry.matcher.clone())
+        .collect();
+    assert!(matchers.contains(&Some("shell".to_owned())), "{matchers:?}");
+    assert!(
+        matchers.contains(&Some("patch|write".to_owned())),
+        "{matchers:?}"
+    );
+    let commands: Vec<&str> = loaded
+        .pre_tool_use
+        .iter()
+        .flat_map(|entry| entry.hooks.iter())
+        .map(|hook| hook.command.as_str())
+        .collect();
+    assert!(commands.contains(&"echo proj-pre"), "{commands:?}");
+    assert!(commands.contains(&"echo edit"), "{commands:?}");
+}
+
+/// An existing `.radian/hooks.json` gains only missing entries (nothing it holds is
+/// replaced or dropped); a fully-imported file is left byte-identical with one report
+/// line; an invalid one is left untouched with one report line. A mutation that
+/// overwrites an existing `.radian/hooks.json` fails this test.
+#[test]
+fn an_existing_project_hooks_file_only_gains_missing_entries() {
+    let proj = Temp::new("proj-hooks-merge");
+    write(
+        proj.path(),
+        ".claude/settings.json",
+        r#"{"hooks": {
+            "PreToolUse": [
+              { "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo new" }] }
+            ]}}"#,
+    );
+    let draft = import_claude(None, Some(proj.path())).unwrap();
+    assert!(draft.project_hooks_json.is_some());
+
+    let hooks_path = proj.path().join(".radian/hooks.json");
+    std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
+    let keep_only = "{\n  \"PreToolUse\": [\n    {\n      \"matcher\": \"read\",\n      \
+        \"hooks\": [\n        {\n          \"type\": \"command\",\n          \
+        \"command\": \"echo keep\"\n        }\n      ]\n    }\n  ]\n}\n";
+    std::fs::write(&hooks_path, keep_only).unwrap();
+    let targets = ClaudeTargets {
+        config_path: proj.path().join("config.toml"),
+        user_skills_dir: proj.path().join("user-skills"),
+        user_agents_path: proj.path().join("AGENTS.md"),
+        project_skills_dir: None,
+        project_hooks_path: Some(hooks_path.clone()),
+    };
+
+    // The missing entry is added alongside what is there.
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert!(
+        report.written.contains(&hooks_path),
+        "the merged file counts as written: {report:?}"
+    );
+    let after = std::fs::read_to_string(&hooks_path).unwrap();
+    assert!(after.contains("echo keep"), "{after}");
+    assert!(after.contains("echo new"), "{after}");
+    let (loaded, _) = radian_host::load_project_hooks_file(&hooks_path).unwrap();
+    assert_eq!(loaded.pre_tool_use.len(), 2);
+
+    // A second run adds nothing: the file is byte-identical, with one report line.
+    let before = std::fs::read(&hooks_path).unwrap();
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|line| line.contains("already present")),
+        "{report:?}"
+    );
+    assert_eq!(std::fs::read(&hooks_path).unwrap(), before);
+    assert_eq!(
+        std::fs::read_to_string(&hooks_path)
+            .unwrap()
+            .matches("echo new")
+            .count(),
+        1
+    );
+
+    // An invalid file is left untouched.
+    std::fs::write(&hooks_path, "{not json").unwrap();
+    let report = write_claude_draft(&draft, &targets).unwrap();
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|line| line.contains("not valid JSON")),
+        "{report:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), "{not json");
 }
