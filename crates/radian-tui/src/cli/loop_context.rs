@@ -27,6 +27,11 @@ pub(super) struct LoopContext<'a> {
     /// The UI's one handle on the session (ADR 0023 U5): commands go through it, and it
     /// re-validates the capability the UI declared.
     pub(super) session: &'a Arc<dyn radian_host::SessionFacade>,
+    /// The session's Stop hooks (backlog `turn-end-continuation.md` §B.5): the loop
+    /// syncs `/loop` into them after every update, so the host's intent-stop validator
+    /// stays off while `/loop` owns the turn end. `None` has no session (never set in
+    /// the session phase).
+    pub(super) command_hooks: Option<Arc<radian_host::CommandHooks>>,
     pub(super) memory: &'a Option<MemoryService>,
     pub(super) host: &'a SessionHost,
     pub(super) tx: &'a Sender<UiEvent>,
@@ -174,6 +179,11 @@ impl LoopContext<'_> {
         // app (the footer's `reasoning` item is the same value).
         if let Some(level) = app.session.thinking_level.clone() {
             self.current_thinking = level;
+        }
+        // `/loop` owns the turn end while armed (or paused): the host's intent-stop
+        // validator must not fire then. Sync after every update — one atomic store.
+        if let Some(hooks) = &self.command_hooks {
+            hooks.set_loop_active(app.loop_active());
         }
         effects.extend(result.effects);
         result.dirty

@@ -100,6 +100,7 @@ impl App {
                 wake_notice: None,
                 wake_waiting: false,
                 notice_lost_waiting: false,
+                intent_stop_waiting: false,
             },
         }
     }
@@ -293,10 +294,10 @@ impl App {
     /// facts the facade owns.
     /// The inputs to the herdr state function (ADR 0034 H2): the turn state, the pending
     /// queue's length, whether the startup trust prompt is waiting, whether an idle
-    /// block waits — a used-up wake budget, a `/goal` budget stop, or a lost job
-    /// notice's stop, all folded into the one bit so the jobs rule treats them the
-    /// same — and this session's running background-job count (the footer's `jobs`
-    /// item reads the same start/settle pair, so there is no second source).
+    /// block waits — a used-up wake budget, a `/goal` budget stop, a lost job
+    /// notice's stop, or the intent-stop cap, all folded into the one bit so the jobs
+    /// rule treats them the same — and this session's running background-job count (the
+    /// footer's `jobs` item reads the same start/settle pair, so there is no second source).
     pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool, bool, usize) {
         let trust = matches!(self.top_modal(), Some(Modal::Trust(_)));
         (
@@ -305,15 +306,16 @@ impl App {
             trust,
             self.session.wake_waiting
                 || self.session.goal_mode.blocked
-                || self.session.notice_lost_waiting,
+                || self.session.notice_lost_waiting
+                || self.session.intent_stop_waiting,
             self.session.running_jobs.len(),
         )
     }
 
     /// What is blocking, for herdr's category-only message (ADR 0034 H2). The approval's tool
     /// name only - never the command, path or question body. A lost job notice's stop
-    /// reports first, then a `/goal` budget stop, then a used-up wake budget; all three
-    /// report only while no modal claims the block.
+    /// reports first, then the intent-stop cap, then a `/goal` budget stop, then a used-up
+    /// wake budget; all four report only while no modal claims the block.
     pub fn herdr_blocked(&self) -> Option<radian_host::herdr::Blocked> {
         match self.top_modal() {
             Some(Modal::Approval(prompt)) => Some(radian_host::herdr::Blocked::Approval(
@@ -322,6 +324,9 @@ impl App {
             Some(Modal::Question(_)) => Some(radian_host::herdr::Blocked::Question),
             _ if self.session.notice_lost_waiting => {
                 Some(radian_host::herdr::Blocked::JobNoticeLost)
+            }
+            _ if self.session.intent_stop_waiting => {
+                Some(radian_host::herdr::Blocked::IntentStop)
             }
             _ if self.session.goal_mode.blocked => Some(radian_host::herdr::Blocked::GoalBudget),
             _ if self.session.wake_waiting => Some(radian_host::herdr::Blocked::WakeBudget),

@@ -147,6 +147,11 @@ fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
     assert_eq!(config.hooks.post_tool_use.len(), 1);
     assert_eq!(config.hooks.stop.len(), 1);
     assert_eq!(config.hooks.stop[0].hooks[0].timeout_secs, Some(30));
+    assert_eq!(
+        config.hooks.intent_stop,
+        Some(false),
+        "the fixture pins the kill switch off"
+    );
     for key in [
         "hooks.PostToolUse[1]",
         "hooks.PreToolUse[1]",

@@ -122,13 +122,19 @@ pub enum Blocked {
     /// gone; the session is idle until a user message wakes it. The job id, command
     /// and error text never leave the process — only the category.
     JobNoticeLost,
+    /// The intent-stop validator stopped after two continuations in a row ended the
+    /// same way (backlog `turn-end-continuation.md` §B.3); the session is idle until a
+    /// user message wakes it. The last message's text never leaves the process — only
+    /// the category.
+    IntentStop,
 }
 
 /// The pure state function (ADR H2): trust and pending `blocked` wins over `working`; a
 /// running turn reads `working`; background jobs keep an idle session `working` too — even
 /// past an idle block, whose waiting notices wait for a turn that may never come, so herdr
 /// does not read idle while jobs still run; an idle block — a used-up wake budget, a `/goal`
-/// budget stop, or a lost job notice (the TUI folds all three into the one bit) — blocks
+/// budget stop, a lost job notice, or the intent-stop cap (the TUI folds all four into
+/// the one bit) — blocks
 /// only while idle and jobless — a started turn reads `working` again, so the report is back
 /// to normal on the next turn start.
 ///
@@ -166,6 +172,7 @@ pub fn blocked_message(blocked: Option<&Blocked>, trust_modal: bool) -> String {
         Some(Blocked::WakeBudget) => "wake budget".to_owned(),
         Some(Blocked::GoalBudget) => "goal budget".to_owned(),
         Some(Blocked::JobNoticeLost) => "job notice lost".to_owned(),
+        Some(Blocked::IntentStop) => "intent stop".to_owned(),
         None => "blocked".to_owned(),
     }
 }
@@ -339,6 +346,7 @@ pub fn blocked_label(blocked: Option<&Blocked>, trust_modal: bool) -> Option<Str
         Some(Blocked::WakeBudget) => Some("wake budget".to_owned()),
         Some(Blocked::GoalBudget) => Some("goal budget".to_owned()),
         Some(Blocked::JobNoticeLost) => Some("job notice lost".to_owned()),
+        Some(Blocked::IntentStop) => Some("intent stop".to_owned()),
         None => None,
     }
 }
@@ -758,6 +766,10 @@ mod tests {
         assert_eq!(
             blocked_message(Some(&Blocked::JobNoticeLost), false),
             "job notice lost"
+        );
+        assert_eq!(
+            blocked_message(Some(&Blocked::IntentStop), false),
+            "intent stop"
         );
     }
 
@@ -1199,6 +1211,10 @@ mod tests {
         assert_eq!(
             blocked_label(Some(&Blocked::JobNoticeLost), false),
             Some("job notice lost".to_owned())
+        );
+        assert_eq!(
+            blocked_label(Some(&Blocked::IntentStop), false),
+            Some("intent stop".to_owned())
         );
         assert_eq!(blocked_label(None, true), Some("trust".to_owned()));
         assert_eq!(blocked_label(None, false), None);

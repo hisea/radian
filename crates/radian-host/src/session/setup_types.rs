@@ -204,6 +204,10 @@ pub struct HostBindings {
     /// TUI shows it as the burst's line and reports `blocked` with the
     /// `job notice lost` label while it waits, ADR 0037 decision 5's failure rule).
     pub notice_lost_warning: Arc<dyn Fn(&str) + Send + Sync>,
+    /// The intent-stop cap's notice line (one per cap report; the TUI shows it as its
+    /// own line and reports `blocked` with the `intent stop` label until the next turn
+    /// starts, backlog `turn-end-continuation.md` §B.3).
+    pub intent_stop_warning: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
