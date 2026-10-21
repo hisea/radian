@@ -63,10 +63,6 @@ pub struct SessionSetup {
     /// call ran under, which the host can only resolve offline. `None` means no price is
     /// resolved, so a resumed session's tokens are restored but its fee stays hidden.
     pub price_for: Option<RoutePrice>,
-    /// The resolved `[shell] auto_background_secs` (ADR 0037): a **foreground**
-    /// `shell` call still running after this is adopted by the job registry in place. `None`
-    /// disables adoption (the config's `0`, or a host that does not set it).
-    pub shell_auto_background: Option<Duration>,
     pub servers: Vec<McpServerConfig>,
     /// Where the MCP servers came from (`--mcp-config <FILE>`), for the inspector's mcp
     /// page. `None` when no file was given; the servers are then empty too.

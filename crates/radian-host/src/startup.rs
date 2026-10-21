@@ -208,9 +208,6 @@ pub struct SessionSettings {
     /// revision 8, ADR 0026 D7). `None` means a switch cannot move the settings (they stay at
     /// the startup value); both hosts have one.
     pub compaction_settings_for: Option<CompactionSettingsFor>,
-    /// `[shell] auto_background_secs` (ADR 0037): a **foreground** `shell` call still
-    /// running after this is adopted by the job registry in place. `None` disables adoption.
-    pub shell_auto_background: Option<Duration>,
     /// `[model.smol]` (ADR 0008 §1, ADR 0043 §1): the cheap route slot. `None` follows
     /// the parent, exactly as `general` always does; today only `explore` reads it.
     pub smol_route: Option<ModelRoute>,
@@ -265,7 +262,6 @@ impl SessionSettings {
                 .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
             compaction_settings,
             compaction_settings_for: Some(compaction_settings_for),
-            shell_auto_background: config.shell.auto_background_after(),
             smol_route: config
                 .model
                 .smol
@@ -360,7 +356,6 @@ impl LeadSetup {
             config_queue: ConfigQueue::new(),
             budget_for: self.budget_for,
             price_for: self.price_for,
-            shell_auto_background: settings.shell_auto_background,
             servers: self.servers,
             mcp_config_path: self.mcp_config_path,
             system_prompt: self.system_prompt,
