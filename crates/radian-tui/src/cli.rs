@@ -74,7 +74,7 @@ struct Cli {
     // `--help` groups read in the order (TUI, session, model, mcp,
     // permissions).
     /// The configuration file. Overrides `RADIAN_CONFIG` and
-    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
+    /// `~/.radian/config/config.toml`. Read-only: radian never writes it.
     #[arg(help_heading = "TUI", long, value_name = "FILE")]
     config: Option<PathBuf>,
 
@@ -86,6 +86,7 @@ struct Cli {
     workspace: Option<PathBuf>,
 
     #[arg(help_heading = "TUI", long)]
+    /// System prompt text.
     system: Option<String>,
 
     /// The model name sent to the API — a bare name, never `<provider>/<model>`; choose the
@@ -93,7 +94,7 @@ struct Cli {
     #[arg(help_heading = "Model", long, short = 'm')]
     model: Option<String>,
 
-    /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
+    /// Provider wire protocol: `openai-compatible` (the default) or `anthropic`.
     #[arg(help_heading = "Model", long, value_name = "PROVIDER")]
     provider: Option<String>,
 
@@ -102,13 +103,14 @@ struct Cli {
     #[arg(help_heading = "Model", long, value_name = "URL")]
     base_url: Option<String>,
 
-    /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
+    /// `max_tokens` for anthropic (the Messages API requires it). Refused for
     /// openai-compatible. Defaults to 16384.
     #[arg(help_heading = "Model", long, value_name = "N")]
     max_tokens: Option<u32>,
 
-    /// Extended thinking for anthropic: `off` (default), `adaptive`, or `enabled:<budget>`.
-    /// Ignored for openai-compatible.
+    /// Thinking level: one of `off|minimal|low|medium|high|xhigh|max` (default `medium`),
+    /// clamped to what the route supports. The legacy `adaptive` and `enabled:<budget>`
+    /// spellings still work with a warning.
     #[arg(help_heading = "Model", long, value_name = "MODE")]
     thinking: Option<String>,
 
@@ -117,7 +119,7 @@ struct Cli {
     header: Vec<String>,
 
     /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then `~/.radian/sessions`
-    /// (`$RADIAN_HOME/sessions` when that is set). The same rule as `radian-exec`.
+    /// (`$RADIAN_HOME/sessions` when that is set). The same rule as `radian exec`.
     #[arg(help_heading = "Session", long, value_name = "DIR")]
     session_dir: Option<PathBuf>,
 
@@ -140,14 +142,14 @@ struct Cli {
     #[arg(help_heading = "Session", long, short = 'l')]
     list: bool,
 
-    /// Show a full-screen picker for this workspace's sessions before opening one (Phase 4):
+    /// Show a full-screen picker for this workspace's sessions before opening one:
     /// Up/Down select, type to filter, Tab full-text search, Enter resume, n new, Esc quit.
     /// Conflicts with `--resume`/`--session-id`; it does not create a session file.
     #[arg(help_heading = "Session", long, conflicts_with_all = ["resume", "session_id"])]
     pick: bool,
 
     /// A JSON file listing MCP stdio servers to start (`{"servers": [...]}`), the same format
-    /// `radian-exec` reads. Under `workspace` their tools ask before running and the
+    /// `radian exec` reads. Under `workspace` their tools ask before running and the
     /// servers themselves are **not** sandboxed.
     #[arg(help_heading = "MCP", long, value_name = "FILE")]
     mcp_config: Option<String>,
@@ -266,9 +268,9 @@ struct Cli {
     #[arg(long, hide = true, value_name = "COUNT")]
     flood_facts: Option<u64>,
 
-    /// A non-TUI mode: `radian exec …` is today's `agent` command, the management
-    /// commands (`radian memory`/`login`/`config`) run the same library dispatch. Absent: the
-    /// full-screen TUI, which is what `radian` has always been.
+    /// A non-TUI mode: `radian exec` runs one turn or an interactive line session, and the
+    /// management commands (`radian memory`/`login`/`config`) run the same library dispatch.
+    /// Absent: the full-screen TUI.
     #[command(subcommand)]
     command: Option<RadianCommand>,
 
@@ -289,12 +291,12 @@ struct Cli {
     exit_line_filler: Option<usize>,
 }
 
-/// The subcommands that are not the TUI. `exec` is today's `agent` command, run
+/// The subcommands that are not the TUI. `exec` runs one turn or an interactive line session
 /// through the `radian-exec` library so the two entries cannot drift; the management commands
 /// follow in the same shape.
 #[derive(clap::Subcommand, Debug)]
 enum RadianCommand {
-    /// Run one turn or an interactive line session: today's `agent` command, unchanged.
+    /// Run one turn or an interactive line session.
     /// `radian exec -p "…"` prints only the model's text; `radian exec` is the line REPL.
     ///
     /// The `agent` parser owns this mode's flags, help and usage errors (`radian exec --help`
@@ -302,7 +304,7 @@ enum RadianCommand {
     /// own help for this variant is off and everything after `exec` is passed through.
     #[command(disable_help_flag = true, disable_version_flag = true)]
     Exec {
-        /// Everything `agent` accepts, passed through unchanged.
+        /// Everything `radian exec` accepts, passed through unchanged.
         #[arg(
             trailing_var_arg = true,
             allow_hyphen_values = true,
@@ -381,11 +383,11 @@ enum RadianCommand {
         session_dir: Option<PathBuf>,
     },
 
-    /// Reserved; not implemented. Would serve a session over a local endpoint; it refuses with
-    /// a usage-class exit code.
+    /// Serve a session over a local endpoint. Not available in this build: the command exits 2
+    /// without serving anything.
     Serve,
-    /// Reserved; not implemented. Would serve the session's tools over MCP; it refuses with a
-    /// usage-class exit code.
+    /// Serve the session's tools over MCP. Not available in this build: the command exits 2
+    /// without serving anything.
     Mcp,
 }
 
@@ -1564,6 +1566,43 @@ mod tests {
                 &route_price
             ),
             None
+        );
+    }
+
+    /// Every long option of every `radian` subcommand appears in `docs/user/cli.md`.
+    /// Mutation: delete one `--flag` row from cli.md → this fails naming it.
+    /// Why the clap tree is the source that cannot drift: it is the parser itself, so a
+    /// renamed or added flag fails here without any list to update. Hidden flags are test
+    /// seams, not user surface, so they are not required.
+    #[test]
+    fn every_long_option_appears_in_cli_md() {
+        use clap::CommandFactory;
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cli_md = std::fs::read_to_string(manifest.join("../../docs/user/cli.md"))
+            .expect("cli.md exists");
+        fn collect(command: &clap::Command, out: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if arg.is_hide_set() {
+                    continue;
+                }
+                if let Some(long) = arg.get_long() {
+                    out.push(format!("--{long}"));
+                }
+            }
+            for sub in command.get_subcommands() {
+                collect(sub, out);
+            }
+        }
+        let mut options = Vec::new();
+        collect(&Cli::command(), &mut options);
+        assert!(!options.is_empty(), "the tree has options");
+        let missing: Vec<_> = options
+            .iter()
+            .filter(|option| !cli_md.contains(option.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these long options are missing from docs/user/cli.md: {missing:?}"
         );
     }
 }
