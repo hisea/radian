@@ -30,7 +30,7 @@ pub struct HostTools {
     ask: Option<AskTools>,
     /// `skill` (ADR 0025 S3). Read-only, so it is mounted whenever skills were discovered.
     skills: Option<SkillTools>,
-    /// `subagent` (ADR 0043 decision 1a). Mounted only in a parent session; `open_session`
+    /// `subagent` (ADR 0043 decision 2). Mounted only in a parent session; `open_session`
     /// never passes it for a session whose `parent` relation is `"subagent"` (depth 1).
     subagent: Option<SubagentTools>,
     mcp: McpToolProvider,
@@ -115,7 +115,7 @@ impl HostTools {
         self
     }
 
-    /// Mounts `subagent` (ADR 0043 decision 1a). A child session never receives this: the
+    /// Mounts `subagent` (ADR 0043 decision 2). A child session never receives this: the
     /// caller (`open_session`) drops the launch parts when the session's `parent` relation is
     /// `"subagent"`, which is the depth-1 rule.
     pub fn with_subagent(mut self, subagent: SubagentTools) -> Self {

@@ -16,7 +16,7 @@ use crate::composer::Composer;
 use crate::keys::Action;
 use crate::panel::Hint;
 
-/// The tab label's display width cap (ADR 0024 R4: no scrolling).
+/// The tab label's display width cap (ADR 0024 Q2: no scrolling).
 pub const MAX_TAB_WIDTH: usize = 16;
 
 /// One question's in-progress answer.
@@ -30,7 +30,7 @@ pub struct FormAnswer {
     pub other: bool,
     /// The free text: a `text` answer, or the `Other` text.
     pub text: Composer,
-    /// The optional note (ADR 0024 R4).
+    /// The optional note (ADR 0024 Q2).
     pub note: Composer,
 }
 
@@ -230,7 +230,7 @@ impl QuestionForm {
     }
 
     /// The tab labels: each question's `header` truncated to [`MAX_TAB_WIDTH`], a completion
-    /// mark on an answered one, then `Submit` (ADR 0024 R2: no
+    /// mark on an answered one, then `Submit` (ADR 0024 Q7: no
     /// scrolling — each label is capped and the row is clipped).
     pub fn tab_labels(&self) -> Vec<(String, bool)> {
         let mut tabs: Vec<(String, bool)> = self

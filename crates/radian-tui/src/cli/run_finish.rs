@@ -95,7 +95,7 @@ pub(super) fn build_startup_screen(
             radian_tui::workspace::display_coding_root(workspace_root, home.as_deref())
         )
     });
-    // The context window (ADR 0018) and the loaded context files (ADR 0036 C2) are separate
+    // The context window (ADR 0018) and the loaded context files (ADR 0036) are separate
     // lines; `context:` is the files, matching the ADR's wording.
     let context_line = format!("context window: {}", window.describe());
     let session_line = match resume {

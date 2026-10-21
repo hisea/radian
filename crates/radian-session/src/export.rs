@@ -1,7 +1,7 @@
 //! JSON and Markdown export of a session (ADR 0013 T4 / decision 3).
 //!
 //! Two opt-in switches, both per export and both off by default:
-//! [`ExportOptions::include_provider_payload`] (raw provider payloads, ADR 0013 decision 3)
+//! [`ExportOptions::include_provider_payload`] (raw provider payloads, ADR 0013 T3)
 //! and [`ExportOptions::include_reasoning`] (a reasoning model's thinking, ADR 0014: it is
 //! model-internal, can be long, and can echo whatever the user pasted). **Redaction has no
 //! switch.** Known
@@ -28,7 +28,7 @@ pub enum ExportError {
 
 /// Options for one export.
 ///
-/// `include_provider_payload` (ADR 0013 decision 3) and `include_reasoning` (ADR 0014) both
+/// `include_provider_payload` (ADR 0013 T3) and `include_reasoning` (ADR 0014) both
 /// default to `false`. `secrets` is a list of always-redacted strings; there is deliberately
 /// no "disable redaction" flag, and opting in to either kind of content never turns it off.
 #[derive(Debug, Clone, Default)]

@@ -526,7 +526,7 @@ fn a_large_host_meta_does_not_change_the_request_estimate() {
     assert_eq!(message_tokens(&with_meta), message_tokens(&plain));
 }
 
-/// ADR 0014 Q4: the assistant `reasoning` field is only sent when the model requires
+/// ADR 0014 R6: the assistant `reasoning` field is only sent when the model requires
 /// replay, so the estimator counts it only when the budget's `count_reasoning` is on. Off (the
 /// default), a history with reasoning and the same history without it estimate the same; on,
 /// the reasoning adds to the estimate.

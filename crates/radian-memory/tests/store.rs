@@ -1,4 +1,4 @@
-//! ADR 0021 M1 #2/#3/#8 (store): the source rules, key/revision conflicts, confirm, and scope
+//! ADR 0021 #2/#3/#8 (store): the source rules, key/revision conflicts, confirm, and scope
 //! isolation.
 
 mod common;

@@ -2,7 +2,7 @@
 //!
 //! A real session file is written with the writer (all event kinds: transcript messages, a
 //! tool call, usage, permission and runtime events), then mutated with a fixed-seed
-//! xorshift generator. Every case asserts the same contract (ADR 0006 §3.2/§7/§10):
+//! xorshift generator. Every case asserts the same contract (ADR 0006 §2.2/§7/§10):
 //!
 //! - the read never panics;
 //! - it either succeeds (and, where the mutation can only lose a suffix or add skippable

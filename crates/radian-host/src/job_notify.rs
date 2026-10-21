@@ -156,7 +156,7 @@ impl JobNotifier {
     /// Spawns the subscriber on `runtime`. It ends when the registry is dropped (a session
     /// end), which closes the channel.
     ///
-    /// The subscription is taken **before** the task is spawned (ADR 0039 decision 6): an event
+    /// The subscription is taken **before** the task is spawned (ADR 0037 decision 6): an event
     /// sent between `spawn` returning and the task first running would otherwise be lost, and
     /// the first job of a session is exactly such an event.
     pub fn spawn(self: &Arc<Self>, runtime: &tokio::runtime::Handle) {

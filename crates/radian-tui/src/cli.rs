@@ -65,7 +65,7 @@ use ui::*;
     name = "radian",
     version,
     about = "Full-screen TUI for the radian agent runtime",
-    // ADR 0032 A6: the joined surface is longer than either binary's, so the commands and
+    // ADR 0032 A1: the joined surface is longer than either binary's, so the commands and
     // the flags are grouped.
     subcommand_help_heading = "Commands"
 )]

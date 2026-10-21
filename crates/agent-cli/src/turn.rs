@@ -1,5 +1,5 @@
 //! The input loops (`one_shot`, `interactive_loop`): route terminal lines into the
-//! inbox, run manual `/compact`, and shut the driver down (ADR 0011, ADR 0012 decision 5,
+//! inbox, run manual `/compact`, and shut the driver down (ADR 0011, ADR 0011 L2,
 //! ADR 0018).
 //!
 //! Split from `lib.rs` by pure move (ADR 0043 decision 5): no behaviour change.
@@ -33,7 +33,7 @@ pub(crate) struct LoopDone {
 /// Both the permission layer's current-turn source and the inbox enqueue use the same value,
 /// so they cannot disagree. `reset` is true for the input that starts a turn: it resets the
 /// effective source, and then every accepted input reports itself. The effective source only
-/// ever **lowers** (ADR 0012 decision 5), so a mid-turn non-human input takes the turn's
+/// ever **lowers** (ADR 0011 L2), so a mid-turn non-human input takes the turn's
 /// rights down and a later human input cannot raise them back. All CLI inputs are terminal
 /// input today, so this never lowers yet — but the path is wired, and this is the only place
 /// to change.
@@ -58,7 +58,7 @@ pub(crate) struct Run {
 
 /// Enqueues one terminal input and sets the turn source to match. This is the only call site
 /// of [`set_turn_source`].
-// Carrying the rejected message is the runtime's contract (ADR 0011 decision 1); the
+// Carrying the rejected message is the runtime's contract (ADR 0011 L4); the
 // error is large because the message is, exactly as in `agent_core::SteerError`.
 #[allow(clippy::result_large_err)]
 async fn enqueue_input(
@@ -450,7 +450,7 @@ fn compact_request(line: &str) -> Option<Option<String>> {
 
 /// Runs a manual `/compact` between turns (ADR 0018) and prints the result. Ctrl-C cancels the
 /// in-flight summarizer; nothing is committed then. Returns the signal that asked this process
-/// to stop, if one arrived while the summarizer ran (SIGTERM, ADR 0043 decision 1a fix round 1 B).
+/// to stop, if one arrived while the summarizer ran (SIGTERM, ADR 0043 decision 2 fix round 1 B).
 async fn run_compact(run: &mut Run, instructions: Option<String>) -> Option<i32> {
     let mut compact = Box::pin(run.inbox.compact(instructions));
     let mut stop = None;

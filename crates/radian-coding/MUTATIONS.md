@@ -307,7 +307,7 @@ Base `e19e6cf`（worktree `.radian-worktrees/mode-cmd`）· 变异就地改完�
 
 SJ5（supervisor 在 `Started` 之前 spawn）见下方「决定 6」小节。
 
-## ADR 0039 决定 6：先登记并发 `Started`，supervisor 之后才 spawn（2026-10-16）
+## ADR 0037 decision 6：先登记并发 `Started`，supervisor 之后才 spawn（2026-10-16）
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
@@ -390,7 +390,7 @@ only this slice's own changes at the end). Each mutation run with
 the brief's first rule is "tests fail on the current branch": with `from_env` disabled the
 read-root tests fail on the boundary refusal, not on a missing API.
 
-## orch-s6b（2026-10-16，ADR 0030 O8 R4）：heavy 门的 host 接线
+## orch-s6b（2026-10-16，ADR 0043）：heavy 门的 host 接线
 
 Base 是 `oc/orch-s6b`。变异就地施加，源文件先复制到 `.radian/scratch/mut/`，改完跑一条命名的测试，
 再从副本还原并用 `diff -q` 确认字节一致（禁用 `git checkout --`）。每条

@@ -312,7 +312,7 @@ async fn every_question_limit_is_an_invalid_arguments_failure() {
                 "id": "q", "prompt": "Pick one", "kind": "text", "extra": true
             })]),
         ),
-        // ADR 0024 R4.
+        // ADR 0024 Q2.
         (
             "a 17-cell header",
             args(vec![json!({
@@ -388,7 +388,7 @@ async fn a_nine_cjk_header_passes_the_schema_but_fails_the_width_check() {
     assert_eq!(code(&failure), "invalid_arguments", "{failure:?}");
 }
 
-/// ADR 0024 R4: a note over the limit is `invalid_answer`, and the header defaults
+/// ADR 0024 Q2: a note over the limit is `invalid_answer`, and the header defaults
 /// to the id.
 #[tokio::test]
 async fn a_note_over_the_limit_is_rejected_and_the_header_defaults_to_the_id() {

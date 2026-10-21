@@ -1,4 +1,4 @@
-//! `subagent` (ADR 0043 decision 1a): a blocking, one-shot child `radian exec`.
+//! `subagent` (ADR 0043 decision 2): a blocking, one-shot child `radian exec`.
 //!
 //! One tool, two built-in kinds: `explore` mounts only the three read-only tools
 //! (`read glob grep`) and `general` mounts the child's ordinary headless set. The child is
@@ -62,7 +62,7 @@ use serde_json::json;
 pub const MAX_CONCLUSION_CHARS: usize = 4000;
 
 /// How long a stopping child gets to run its own cleanup after SIGTERM before its whole session
-/// is SIGKILLed (ADR 0043 decision 1a, fix round 1 B). A few seconds: the child's cancellation
+/// is SIGKILLed (ADR 0043 decision 2, fix round 1 B). A few seconds: the child's cancellation
 /// kills its `shell` commands in milliseconds, and the rest is its session close. Shorter than
 /// the core's `DEFAULT_TOOL_CANCEL_GRACE` (5 s), which is the bound on the call's own future —
 /// the tool must reach its SIGKILL before the core drops it.
@@ -450,7 +450,7 @@ impl SubagentSession {
     }
 }
 
-/// Stops the child the two-step way (ADR 0043 decision 1a, fix round 1 B), in the cancellation
+/// Stops the child the two-step way (ADR 0043 decision 2, fix round 1 B), in the cancellation
 /// branch: [`radian_coding::stop_leader`] (SIGTERM to the child alone), then — only if it has not
 /// exited within [`CHILD_STOP_GRACE`] — [`radian_coding::kill_session`] as the SIGKILL fallback.
 ///

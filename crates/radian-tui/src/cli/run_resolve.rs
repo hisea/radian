@@ -502,7 +502,7 @@ pub(super) fn resolve_window_and_route(
     if let Some(notice) = compaction_notice {
         startup_log.line(format!("radian: [compaction] {notice}"));
     }
-    // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
+    // ADR 0014 R5: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay =
         radian_host::resolve_reasoning_replay(&resolved.provider_ref, &resolved.model_name);
@@ -561,7 +561,7 @@ pub(super) fn resolve_window_and_route(
                 model: switch_model.to_owned(),
                 ..query.clone()
             });
-            // ADR 0014 Q4: the estimate counts reasoning exactly when the route
+            // ADR 0014 R6: the estimate counts reasoning exactly when the route
             // replays it, so the projection matches the request actually sent.
             window.budget.map(|tokens| {
                 ContextBudget::new(tokens).with_reasoning(radian_host::route_replays_reasoning(

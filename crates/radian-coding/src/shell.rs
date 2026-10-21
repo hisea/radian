@@ -1139,7 +1139,7 @@ const SIGTERM: i32 = libc::SIGTERM;
 const SIGTERM: i32 = 15;
 
 /// Asks the **leader** `pid` — a session leader this process spawned — to stop gracefully:
-/// SIGTERM to that pid alone, never to its whole session (ADR 0043 decision 1a, fix round 1 B).
+/// SIGTERM to that pid alone, never to its whole session (ADR 0043 decision 2, fix round 1 B).
 ///
 /// The child handles it: `radian exec` cancels its turn and then shuts its session down, which
 /// kills the whole session of every background job it started and stops its MCP servers

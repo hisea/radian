@@ -266,7 +266,7 @@ fn probe_failure_injected() -> bool {
 }
 
 /// The two startup lines: what was chosen, and what it actually means. The wording follows
-/// ADR 0012 decision 4 and must **not** claim credential isolation: the macOS backend
+/// ADR 0012 P4 and must **not** claim credential isolation: the macOS backend
 /// leaves `mach-lookup` open, so IPC is not contained.
 pub fn describe(tier: Tier, sandbox: Option<&Sandbox>) -> (String, String) {
     // The shared text lives in `radian-host` (dogfooding D5); this host keeps only its

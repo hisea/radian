@@ -1,4 +1,4 @@
-//! ADR 0043 decision 1a (gap 2): the child runs the parent's **live** model route, not the one
+//! ADR 0043 decision 2 (gap 2): the child runs the parent's **live** model route, not the one
 //! the session started with.
 //!
 //! The child is a stub shell script that records the argv the tool built; the parent is a real

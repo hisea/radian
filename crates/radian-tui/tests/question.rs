@@ -412,7 +412,7 @@ fn the_builtin_form_keys_are_the_ads() {
     );
 }
 
-// ---- ADR 0024 R2/R3: the panel, the tabs, the hints and the new keys ----
+// ---- ADR 0024 Q7/R3: the panel, the tabs, the hints and the new keys ----
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;

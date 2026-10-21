@@ -1108,7 +1108,7 @@ a child in its own process group is running when the panic fires, and the test a
 the pid and the group are gone.
 
 Durable data was already safe (every append is fsynced, ADR 0001 D3; a torn tail is truncated
-on read, ADR 0006 §3.2) and stays so.
+on read, ADR 0006 §2.2) and stays so.
 
 ## A panic in the driver task leaves in order
 
@@ -1153,7 +1153,7 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 Every line is a single `eprintln!` and therefore ends in `\n`; `TtyGuard::restore` also writes
 `\r\n` after leaving the alternate screen, so the shell never prints its "no newline" `%`.
 
-A panic is also appended to the **diagnostics directory** (ADR 0013 decision 4; the path is
+A panic is also appended to the **diagnostics directory** (ADR 0013 T4; the path is
 ADR 0020), named `<session-id>-<unix-millis>.panic.log` (a `radian_session::now_utc()`
 timestamp, the thread name, the panic text), with header values and the API key replaced by
 `<redacted>`. It is `~/.radian/cache/diagnostics` (`$RADIAN_HOME/cache/diagnostics`). The
@@ -1195,7 +1195,7 @@ the session directory untouched and the same `--session-id` can be retried:
    `full` suggestion;
 4. model configuration (`--base-url`, key policy);
 5. tier parsing, permission rules, sandbox probe (a failed probe refuses, never downgrades,
-   ADR 0012 decision 2);
+   ADR 0012 P5);
 6. `--mcp-config` file read and validation;
 7. built-in tool construction;
 8. **only now** `open_journal` creates (or resumes) the session file.
@@ -1227,7 +1227,7 @@ by one is resumable by the other:
 
 - `--session-dir DIR`, else `RADIAN_SESSION_DIR`, else `~/.radian/sessions`
   (`$RADIAN_HOME/sessions` when `RADIAN_HOME` is set; ADR 0020). Never a cache or temp path: a
-  session is a durable record (ADR 0013 decision 4); the sandbox denies read on it and on
+  session is a durable record (ADR 0013 T4); the sandbox denies read on it and on
   `~/.radian/memory` (ADR 0020).
 - The session file is `<session-dir>/<session-id>.jsonl`; `--session-id VALUE` names it, and
   a generated `time-pid` id is used when neither `--session-id` nor `--resume` is given.
@@ -1289,7 +1289,7 @@ untrusted projects, ADR 0039 decision 5). This is the same wiring `agent-cli` us
 
 - The sandbox is built **before** the tools: `workspace` and `full` call
   `radian_sandbox::Sandbox::new`, and a missing backend or a failed probe is an **error**, never
-  a fallback to an unsandboxed run (ADR 0012 decision 2). The app then exits 2 without
+  a fallback to an unsandboxed run (ADR 0012 P5). The app then exits 2 without
   entering the terminal. `RADIAN_SANDBOX_PROBE_FAIL=1` is a test seam that can only cause a
   refusal. The one other path is ADR 0016: in the `workspace` tier, when the kernel
   says this process is already confined by an outer sandbox (`sandbox_check`), the outer sandbox
@@ -1380,7 +1380,7 @@ says `ask_user: off (no interactive user)`. The tool is fixed `allow` in every t
 Q6): it writes nothing and runs nothing, and the answer is data, not a permission.
 
 A question request is one `Modal::Question`, drawn with the shared panel primitive (ADR 0035
-revision 1, ADR 0024 R2): a titled rounded box, a **tab row** (each question's
+revision 1, ADR 0024 Q7): a titled rounded box, a **tab row** (each question's
 `header`, capped at 16 display cells, a `✓` on an answered one, then `Submit`), the current
 question's options (a `❯` cursor, `○`/`◉` for single, multi and `Other` alike — ADR 0028
 : the marker is never bold — a ` (Recommended)`, a `↳`

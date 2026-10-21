@@ -282,7 +282,7 @@ pub(super) fn question_height(
     (rows as u16).clamp(5, MAX_QUESTION_ROWS)
 }
 
-/// The `ask_user` panel (ADR 0024 R2): the shared [`crate::panel::Panel`] with the
+/// The `ask_user` panel (ADR 0024 Q7): the shared [`crate::panel::Panel`] with the
 /// tab row, the current question's options (or its text field), the `Submit` list, and the
 /// key hints in the bottom border. Pure, so the layout is testable without a terminal.
 pub fn question_panel(
@@ -453,7 +453,7 @@ pub fn question_panel(
     panel.lines(width, theme, glyphs)
 }
 
-/// The tab row (ADR 0024 R2): one tab per question plus `Submit`, the current one
+/// The tab row (ADR 0024 Q7): one tab per question plus `Submit`, the current one
 /// reversed. Each label is capped at [`crate::question::MAX_TAB_WIDTH`] and the row is clipped
 /// (revision 2: no horizontal scrolling).
 fn tab_row(form: &QuestionForm, width: usize, theme: &Theme) -> Line<'static> {

@@ -1,5 +1,5 @@
 //! The storage errors. `Corrupt`/`UnknownCritical`/`BadSeq` name the 1-based line, like
-//! `radian-session` (ADR 0006 §3.2/§7).
+//! `radian-session` (ADR 0006 §2.2/§7).
 
 use std::path::PathBuf;
 

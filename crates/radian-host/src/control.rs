@@ -354,7 +354,7 @@ impl ControlServer {
             return failure(id.clone(), "the session has closed");
         };
         // The source the port fixed is what both the permission layer and the durable record
-        // see (ADR 0012 decision 5). A signed-out source can never be raised back.
+        // see (ADR 0011 L2). A signed-out source can never be raised back.
         hooks.set_turn_source(Some(source));
         hooks.observe_input_source(source);
         let message = Message::user(text);

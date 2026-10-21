@@ -142,7 +142,7 @@ Base: `8858046` · one-shot worktree `/tmp/0019-mut`（detached，跑完删除�
 Core 的状态机而不是第二套规则。只读打开不写盘这一条没有做人工变异：`a_crash_mid_replacement_recovers_the_old_history`
 在 `Session::open` 前后比较文件字节，且 `resume_*` 用例在 resume 前比较字节；这里只记录未变异。
 
-## ADR 0021 M1 第三片：`MemoryInjected`（2026-10-13）
+## ADR 0021 第三片：`MemoryInjected`（2026-10-13）
 
 Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut` · `git checkout --` 还原。
 
@@ -244,7 +244,7 @@ after); the mutation was restored with `git checkout --`, `git status --short` e
 |---|---|---|---|
 | RF1-FB | write the child directly to the final path and keep it on failure (no temp/rename) | caught (rc=101) | `fork::tests::a_failed_child_leaves_nothing_behind` (the half child existed) |
 
-## ADR 0030 slice 1：`ForkParent.relation`、`TaskSpawned`/`TaskFinished`、`PermissionResolved.policy`
+## ADR 0006：`ForkParent.relation`、`TaskSpawned`/`TaskFinished`、`PermissionResolved.policy`
 
 Base: `a4a00bf` · 在本任务工作树内逐条施加，改前把 `writer.rs`/`runtime.rs` 复制到
 `/tmp/orch-s1-mut-backup/`，改后 `cp` 还原（本任务禁 `git checkout --`）；每条跑完后
@@ -294,7 +294,7 @@ Base: `d2d0f7f` · worktree `.radian-worktrees/group-commit` · `writer.rs` 先 
 |---|---|---|---|
 | OA-1 | `reader.rs`：未知事件不论 `critical` 一律 `Err(UnknownCritical)`（不再 `skipped.push`） | ✅ 2 failed（`UnknownCritical { line: 4, event: "TaskSpawned" }`） | `an_old_lead_journal_with_task_events_still_opens_and_replays`、`the_resume_path_opens_the_old_journal_and_appends` |
 
-## 会话存活探测 `session_is_live`（ADR 0043 D14 的 attach 用）
+## 会话存活探测 `session_is_live`（ADR 0043 decision 7 的 attach 用）
 
 读侧探测：`File::open` + **共享** flock 立即释放；持有独占锁的 writer 在时得 `EWOULDBLOCK`
 （活），否则不是（死）。只用共享锁，所以两个读者同时探测互不干扰，也绝不阻塞 writer。变异在

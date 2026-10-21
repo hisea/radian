@@ -3060,7 +3060,7 @@ async fn a_failed_sandbox_probe_refuses_instead_of_degrading() {
 }
 
 /// 10: the startup text states the real limits and never claims credential isolation
-/// (ADR 0012 decision 4). `--profile workspace` names the tier whose facts sentence carries
+/// (ADR 0012 P4). `--profile workspace` names the tier whose facts sentence carries
 /// the limits.
 #[tokio::test]
 async fn the_startup_text_does_not_claim_credential_isolation() {
@@ -3121,7 +3121,7 @@ async fn the_startup_text_does_not_claim_credential_isolation() {
     );
 }
 
-/// ADR 0036 C2: `agent` reads the workspace's `AGENTS.md` and names it on the startup line.
+/// ADR 0036: `agent` reads the workspace's `AGENTS.md` and names it on the startup line.
 #[tokio::test]
 async fn the_context_file_is_reported_on_the_startup_line() {
     let dir = scratch("context-line");
@@ -6337,7 +6337,7 @@ async fn a_base_url_with_credentials_is_redacted_in_errors() {
 }
 
 /// A search snippet is session content and can carry a model-echoed key; `--search` redacts
-/// the known secrets exactly like `--export` (ADR 0013 decision 3).
+/// the known secrets exactly like `--export` (ADR 0013 T3).
 #[tokio::test]
 async fn search_redacts_the_key_from_a_snippet() {
     let dir = scratch("search-redact");
@@ -8217,7 +8217,7 @@ async fn a_config_file_supplies_the_model_and_the_cli_overrides_it() {
 }
 
 /// A `schema_version` below the supported one is refused at startup, before any session file
-/// exists (ADR 0008 §5.3: no v0→v1 path, and the file is never rewritten).
+/// exists (ADR 0008 §4: no v0→v1 path, and the file is never rewritten).
 #[tokio::test]
 async fn a_lower_schema_version_refuses_to_start_without_creating_a_session() {
     let dir = scratch("config-lower");
@@ -8795,7 +8795,7 @@ async fn config_import_pi_never_reads_auth_json() {
 }
 
 /// Acceptance 4: `--write` creates the file owner-only and refuses to overwrite an existing
-/// one (ADR 0008 §5.4: this version has no faithful write-back).
+/// one (ADR 0008 §4: this version has no faithful write-back).
 #[cfg(unix)]
 #[tokio::test]
 async fn config_import_pi_write_creates_the_file_and_refuses_to_overwrite() {

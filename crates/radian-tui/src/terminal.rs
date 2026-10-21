@@ -377,7 +377,7 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
             thread,
             redacted.replace('\n', " ")
         );
-        // The diagnostics directory (ADR 0013 decision 4): owner-only, cleaned before the
+        // The diagnostics directory (ADR 0013 T4): owner-only, cleaned before the
         // write, and a failure is one line rather than a fault.
         if let Err(error) = radian_host::append(&path, &line) {
             eprintln!("[diagnostics] cannot write {}: {error}", path.display());

@@ -4,7 +4,7 @@
 //! The two hosts keep only the two phrases that are honestly different: `agent` calls the
 //! confined subject "commands and built-in tools" and can talk about MCP, `radian-tui` calls
 //! it "shell and the built-in tools". Everything else — including the sentence that must not
-//! be weakened, "MCP servers are NOT sandboxed" (ADR 0012 decision 4) — is here once.
+//! be weakened, "MCP servers are NOT sandboxed" (ADR 0012 P6) — is here once.
 
 use radian_sandbox::{Sandbox, SandboxMode};
 
@@ -39,7 +39,7 @@ const INHERITED_FACTS: &str = "this session runs inside an outer sandbox that ra
                                sandbox's";
 
 /// The two startup lines: what was chosen, and what it actually means. The wording follows
-/// ADR 0012 decision 4 and must **not** claim credential isolation.
+/// ADR 0012 P4 and must **not** claim credential isolation.
 pub fn describe(
     mode: SandboxMode,
     sandbox: Option<&Sandbox>,

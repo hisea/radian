@@ -131,7 +131,7 @@ pub enum EventData {
     },
     // Runtime events (ADR 0006 §5.5–§5.7). They are typed so a round trip is exact, and
     // they are deliberately **not** mapped to `JournalRecord`: they are not transcript
-    // records, and `replay`/`repair` must keep ignoring them (ADR 0006 §12).
+    // records, and `replay`/`repair` must keep ignoring them (ADR 0006 §10).
     InboxEnqueued {
         message: Message,
         message_id: MessageId,
@@ -319,7 +319,7 @@ pub struct UncommittedReplacement {
 }
 
 /// What a full scan learned about the file. `committed_bytes` is the size of the committed
-/// prefix: everything after the last LF is a torn tail and is not counted (ADR 0006 §3.2).
+/// prefix: everything after the last LF is a torn tail and is not counted (ADR 0006 §2.2).
 #[derive(Debug, Clone)]
 pub(crate) struct ScanSummary {
     pub(crate) session_id: String,
@@ -378,7 +378,7 @@ where
                     message: format!("line exceeds the {MAX_LINE_BYTES}-byte cap"),
                 }));
             }
-            // No LF means no commit: the trailing bytes are a torn tail (ADR 0006 §3.2)
+            // No LF means no commit: the trailing bytes are a torn tail (ADR 0006 §2.2)
             // and are dropped without being parsed or counted. `committed_bytes` keeps the
             // end of the previous complete line.
             break;
@@ -1003,7 +1003,7 @@ impl Session {
     }
 
     /// The size of the committed prefix: every byte through the last LF. Bytes after it are
-    /// a torn tail (ADR 0006 §3.2) and are not part of the session.
+    /// a torn tail (ADR 0006 §2.2) and are not part of the session.
     pub fn committed_bytes(&self) -> u64 {
         self.committed_bytes
     }
@@ -1018,7 +1018,7 @@ impl Session {
         &self.events
     }
 
-    /// `(seq, event)` of every unknown non-critical event that was skipped (ADR 0006 §7b).
+    /// `(seq, event)` of every unknown non-critical event that was skipped (ADR 0006 §6).
     pub fn skipped(&self) -> &[(u64, String)] {
         &self.skipped
     }
@@ -1063,7 +1063,7 @@ impl Session {
 }
 
 /// One parsed event as a core record, or `None` for a runtime event: `replay`/`repair`/
-/// `recover` must never see those (ADR 0006 §12).
+/// `recover` must never see those (ADR 0006 §10).
 fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
     match &event.data {
         EventData::MessageAppended { index, message } => Some(JournalRecord::Message {
@@ -1139,7 +1139,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
             deterministic: *deterministic,
         }),
         // Runtime events are not transcript records: `replay`/`repair`/`recover`
-        // must never see them (ADR 0006 §12).
+        // must never see them (ADR 0006 §10).
         EventData::InboxEnqueued { .. }
         | EventData::InputClaimed { .. }
         | EventData::InputAdmitted { .. }

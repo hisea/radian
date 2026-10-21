@@ -1,6 +1,6 @@
 //! Linux compatibility round, mirroring `compat_macos.rs`: what do ordinary commands need
 //! under `workspace-write` with the default sensitive-read denies? Anything incompatible is
-//! recorded, never fixed by widening a rule (ADR 0012 decision 3).
+//! recorded, never fixed by widening a rule (ADR 0012 P4).
 //!
 //! Whether a **dependency-bearing** `cargo build` can run in
 //! the Linux sandbox (macOS was verified, Linux was not). The last case answers that with a

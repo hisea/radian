@@ -240,7 +240,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         eprintln!("[hooks] {line}");
     }
 
-    // ADR 0043 decision 1a: the child `radian exec` this session may start. The model, the
+    // ADR 0043 decision 2: the child `radian exec` this session may start. The model, the
     // provider and the (generic-provider) endpoint are the parent's resolved ones; the key is
     // not passed — the child reads the same `auth.json`. `--config` is forwarded only when it
     // was explicit, and a child is told to trust the workspace only when the parent does.
@@ -257,7 +257,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         mcp_config: cli.mcp_config.clone(),
         trust: trust_setup.resolved.decision.as_bool(),
     };
-    // ADR 0043 decision 1a point 1 and 6: `--parent` is the lineage record; the seq is 0
+    // ADR 0043 decision 2 point 1 and 6: `--parent` is the lineage record; the seq is 0
     // because the tool runs inside a turn, not at a turn boundary.
     let parent = cli
         .parent
@@ -414,10 +414,10 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     });
 
     // The startup lines, in the order this host has always printed them. The facts come from
-    // the session; the wording is the host's (ADR 0012 decision 4).
+    // the session; the wording is the host's (ADR 0012).
     eprintln!("[profile] {}", session.facts().profile_line);
     eprintln!("[sandbox] {}", session.facts().sandbox_facts);
-    // ADR 0036 C2: the loaded context files (paths and sizes), or `none`.
+    // ADR 0036: the loaded context files (paths and sizes), or `none`.
     eprintln!("[context] {}", session.facts().context_line);
     // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen, and
     // the warnings say when a config value was ignored or a restore refused.

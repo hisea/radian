@@ -36,9 +36,9 @@ pub const MAX_LABEL_CHARS: usize = 80;
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
 /// Longest id (a question's or an option's), in characters.
 pub const MAX_ID_CHARS: usize = 32;
-/// Longest question `header`, in **display** cells (ADR 0024 R4): the tab label.
+/// Longest question `header`, in **display** cells (ADR 0024 Q2): the tab label.
 pub const MAX_HEADER_WIDTH: usize = 16;
-/// Longest answer `note`, in characters (ADR 0024 R4).
+/// Longest answer `note`, in characters (ADR 0024 Q2).
 pub const MAX_NOTE_CHARS: usize = 500;
 
 /// The three question shapes.
@@ -61,7 +61,7 @@ pub struct QuestionOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// The option the model recommends (ADR 0024 R4): shown as ` (Recommended)`.
+    /// The option the model recommends (ADR 0024 Q2): shown as ` (Recommended)`.
     /// A `single` question may carry at most one.
     #[serde(default, skip_serializing_if = "is_false")]
     pub recommended: bool,
@@ -76,7 +76,7 @@ fn is_false(value: &bool) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct Question {
     pub id: String,
-    /// The short name for the tab label (ADR 0024 R4): at most
+    /// The short name for the tab label (ADR 0024 Q2): at most
     /// [`MAX_HEADER_WIDTH`] display cells; the `id` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
@@ -190,7 +190,7 @@ impl QuestionRequest {
                     check_chars(description, MAX_DESCRIPTION_CHARS, "description")?;
                 }
             }
-            // ADR 0024 R4: a single-choice question may recommend at most one option.
+            // ADR 0024 Q2: a single-choice question may recommend at most one option.
             let recommended = question
                 .options
                 .iter()
@@ -260,7 +260,7 @@ pub struct QuestionReply {
     /// The free text the user typed in `Other`, when `allow_other` was set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub other: Option<String>,
-    /// An optional free-text note the user attached (ADR 0024 R4): at most
+    /// An optional free-text note the user attached (ADR 0024 Q2): at most
     /// [`MAX_NOTE_CHARS`] characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -316,7 +316,7 @@ pub trait Prompter: Send + Sync {
 
 /// The model-facing spec. Only advertised when a [`Prompter`] is injected.
 ///
-/// The `description` states when to ask (ADR 0024 decision 2, ADR 0036 "look before you
+/// The `description` states when to ask (ADR 0024 Q2, ADR 0036 "look before you
 /// ask"); the limits live in `input_schema` and in [`QuestionRequest::validate`], never in
 /// prose twice.
 pub(crate) fn spec() -> ToolSpec {

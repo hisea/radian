@@ -161,7 +161,7 @@ impl PermissionHooks {
     /// Reports the source of an input that was just **admitted** into the current turn — the
     /// input that started it, and every `steer`/`inject` admitted while it runs.
     ///
-    /// The turn's effective source only ever **lowers** (ADR 0012 decision 5): a non-human
+    /// The turn's effective source only ever **lowers** (ADR 0011 L2): a non-human
     /// input admitted mid-turn takes the turn's rights down to non-human, and a later `User`
     /// input cannot raise it back. Use [`PermissionHooks::set_turn_source`] at the start of a
     /// turn to reset.

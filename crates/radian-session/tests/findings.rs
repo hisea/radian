@@ -65,7 +65,7 @@ fn a_marker_whose_call_id_never_appeared_is_refused() {
     );
 }
 
-/// ADR 0006 §3.2-3: a line that fails to parse is corruption, and the append path must refuse
+/// ADR 0006 §2.2-3: a line that fails to parse is corruption, and the append path must refuse
 /// it too ("拒绝打开（或拒绝追加）"). `Session::open` refused an interior empty line but
 /// `SessionJournal::resume` skipped empty lines while scanning and then appended after them,
 /// producing a file the reader would refuse forever. `scan_lines` now parses every

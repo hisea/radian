@@ -50,7 +50,7 @@ pub(super) fn startup_preamble(
             }
         };
     }
-    // ADR 0013 decision 4: diagnostics live in the user cache directory, and cleanup runs at
+    // ADR 0013 T4: diagnostics live in the user cache directory, and cleanup runs at
     // startup. A failure is one line, never a fault.
     radian_host::clean_startup();
     let dir = session_dir(cli)?;

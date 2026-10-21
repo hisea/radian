@@ -58,7 +58,7 @@ pub const RADIAN_CONFIG_ENV: &str = "RADIAN_CONFIG";
 /// The file name inside `~/.radian/config/`.
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 
-/// Keys whose bare (string) value is a plaintext secret (ADR 0008 §4.2 rule 1).
+/// Keys whose bare (string) value is a plaintext secret (ADR 0008 §3.2 rule 1).
 const SENSITIVE_KEYS: [&str; 7] = [
     "api_key",
     "apikey",
@@ -69,7 +69,7 @@ const SENSITIVE_KEYS: [&str; 7] = [
     "authorization",
 ];
 
-/// The obvious secret prefixes (ADR 0008 §4.2 rule 2, matching the reference checker).
+/// The obvious secret prefixes (ADR 0008 §3.2 rule 2, matching the reference checker).
 const SECRET_PREFIXES: [&str; 6] = ["sk-", "sk_", "xoxb-", "ghp_", "AKIA", "Bearer "];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -378,7 +378,7 @@ fn parse_permissions(
                         // know; read-only mode ignores it instead of refusing the file.
                         config.skipped.push("permissions.approval".into());
                     } else {
-                        // Fail-closed (ADR 0008 §5.1): a `permissions` value this build does
+                        // Fail-closed (ADR 0008 §6): a `permissions` value this build does
                         // not know is refused, never guessed at.
                         return Err(ConfigError::UnknownApproval {
                             path: path.to_path_buf(),
@@ -700,7 +700,7 @@ fn check_no_plaintext(
     Ok(())
 }
 
-/// The heuristic of ADR 0008 §4.2 rule 2, byte-for-byte the reference checker's.
+/// The heuristic of ADR 0008 §3.2 rule 2, byte-for-byte the reference checker's.
 fn looks_like_secret(text: &str) -> bool {
     if SECRET_PREFIXES
         .iter()
@@ -1517,7 +1517,7 @@ theme = "light"
         }
     }
 
-    /// ADR 0014 Q2: `[providers.<id>] reasoning_replay` overrides the catalog — a
+    /// ADR 0014 R5: `[providers.<id>] reasoning_replay` overrides the catalog — a
     /// non-empty field name, or `false` to switch replay off. `true` names no field and is
     /// refused rather than guessed.
     #[test]

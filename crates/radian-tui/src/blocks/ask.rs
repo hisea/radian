@@ -1,4 +1,4 @@
-//! The `ask_user` record (ADR 0028, ADR 0024 R1): the open
+//! The `ask_user` record (ADR 0028, ADR 0024 Q7): the open
 //! frame - `╭─ ask …` top, `│ ` body rows, `╰──` tail - drawn from the call's arguments and the
 //! result's structured answers. `blocks/mod.rs` owns the block model and the line counts.
 
@@ -117,7 +117,7 @@ pub(super) fn ask_pending_line(
 /// The `ask_user` record as an open frame (ADR 0028): the request from
 /// the call's `arguments`, the answers from the result's `structured`. Three states:
 /// unanswered (the call, no structured result), answered, and declined/cancelled (an error
-/// result). The content is the ADR 0024 R1 structure (prompt, options, `↳`
+/// result). The content is the ADR 0024 Q7 structure (prompt, options, `↳`
 /// description, answer/note, status); only the frame is the open one.
 pub(super) fn ask_block(
     card: &tools::ToolCard,

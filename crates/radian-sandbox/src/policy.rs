@@ -70,7 +70,7 @@ pub struct SandboxPolicy {
     pub read_only: Vec<PathBuf>,
     /// How [`SandboxPolicy::read_only`] is enforced (ADR 0038). `ReadOnly` by default.
     pub git_access: GitAccess,
-    /// Paths that must not be readable (ADR 0012 decision 3). Missing paths are
+    /// Paths that must not be readable (ADR 0012 P4). Missing paths are
     /// dropped at build time; a backend never widens them.
     pub deny_read: Vec<PathBuf>,
     /// Unix sockets the sandbox may connect to (ADR 0016), canonical. When the

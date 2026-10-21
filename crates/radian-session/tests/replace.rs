@@ -272,7 +272,7 @@ async fn resume_aborts_a_pending_segment_and_the_next_append_is_normal() {
 }
 
 /// `resume` writes the abort once. A second `resume` sees the closed segment and adds
-/// nothing (ADR 0019 §7).
+/// nothing (ADR 0019).
 #[tokio::test]
 async fn resume_does_not_repeat_the_abort() {
     let dir = TempDir::new("replace-resume-idempotent");
@@ -656,9 +656,9 @@ fn an_uncommitted_segment_is_absent_from_export_and_index() {
     );
 }
 
-// ---------- resume validates before touching the file (ADR 0019 §7) ----------
+// ---------- resume validates before touching the file (ADR 0019) ----------
 
-/// ADR 0019 §7: a corrupt file is refused by `resume` and left byte-for-byte untouched,
+/// ADR 0019: a corrupt file is refused by `resume` and left byte-for-byte untouched,
 /// including when it also ends in a torn tail: validation happens before the truncation.
 #[test]
 fn resume_refuses_a_corrupt_file_without_touching_it() {
@@ -752,7 +752,7 @@ fn resume_refuses_a_corrupt_file_without_touching_it() {
     }
 }
 
-/// ADR 0019 §7: if writing the abort fails, `resume` returns the error and appends nothing
+/// ADR 0019: if writing the abort fails, `resume` returns the error and appends nothing
 /// else. With no torn tail the file is byte-for-byte unchanged. The failure is injected at
 /// the `Aborted` line via the `testing` feature, so the check is deterministic.
 #[cfg(feature = "testing")]

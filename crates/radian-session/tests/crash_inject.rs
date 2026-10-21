@@ -6,7 +6,7 @@
 //! written and the process died". Reopening with `resume` must:
 //!
 //! - drop the torn tail exactly (a valid JSON line without a final LF is still torn: no LF,
-//!   no commit, ADR 0006 §3.2);
+//!   no commit, ADR 0006 §2.2);
 //! - continue `seq` after the last committed line, so the next append cannot be spliced onto
 //!   the half line;
 //! - leave a transcript that follows the ADR 0001/0002 recovery rules.

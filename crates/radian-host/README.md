@@ -88,7 +88,7 @@ resets the budget. A settle is not notified when the model already has it (a `jo
 `BackgroundJobStarted` with no settle is injected once as unknown and never re-run. The registry
 also kills every running group on `close()` and on drop (the panic path, `killpg` only).
 
-### Subagent (ADR 0043 decision 1a)
+### Subagent (ADR 0043 decision 2)
 
 `subagent { agent?, task }` runs one task in a **fresh, blocking child `radian exec`** — the
 current executable, so there is only one binary (ADR 0032) — and returns its last assistant text
@@ -256,7 +256,7 @@ line's skipped list.
 chosen, and what it actually means. The two hosts keep only the phrases that are honestly
 different, in `Wording`: `CLI_WORDING` ("commands and built-in tools")
 and `TUI_WORDING` ("shell and the built-in tools"). Everything else — including the sentence
-that must **not** be weakened, "MCP servers are NOT sandboxed" (ADR 0012 decision 4) — is
+that must **not** be weakened, "MCP servers are NOT sandboxed" (ADR 0012 P6) — is
 written once here.
 
 `sandbox_word(mode, backend)` is the TUI startup summary's word for the sandbox (ADR 0027). For

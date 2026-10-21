@@ -1,4 +1,4 @@
-//! The **switch** path carries the reasoning replay (ADR 0014 Q1/Q2): a `/model`
+//! The **switch** path carries the reasoning replay (ADR 0014 R4/Q2): a `/model`
 //! switch builds its model arguments with `RouteContext::args_for`, so that one call must
 //! resolve `reasoning_replay` from the catalog's `interleaved` field or a `[providers.<name>]`
 //! override exactly as the startup path does. Replacing that resolution with `None` used to
@@ -6,7 +6,7 @@
 //!
 //! The resolver the hosts' budget closures call (`route_replays_reasoning`) is asserted next
 //! to it, so the two paths cannot drift: the estimate counts reasoning exactly when the request
-//! carries it (ADR 0014 Q4).
+//! carries it (ADR 0014 R6).
 //!
 //! `RADIAN_HOME` is process-wide, so this binary deliberately holds exactly one test: nothing
 //! else in it can race the environment.

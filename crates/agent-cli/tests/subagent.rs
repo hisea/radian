@@ -1,4 +1,4 @@
-//! ADR 0043 decision 1a: the `subagent` tool — a blocking, one-shot child `radian exec`.
+//! ADR 0043 decision 2: the `subagent` tool — a blocking, one-shot child `radian exec`.
 //!
 //! Every test drives the real binary against the mock provider: the parent is `radian exec`
 //! and each child is the same binary started by the tool. The assertions are on facts the

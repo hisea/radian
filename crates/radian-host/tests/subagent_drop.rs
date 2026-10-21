@@ -1,4 +1,4 @@
-//! ADR 0043 decision 1a (gap 3): dropping the call's future kills the child's **whole
+//! ADR 0043 decision 2 (gap 3): dropping the call's future kills the child's **whole
 //! session**, not just its leader.
 //!
 //! This is the SIGKILL **fallback** half of the two-step stop (fix round 1 B, the graceful half

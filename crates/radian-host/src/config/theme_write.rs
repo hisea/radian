@@ -2,7 +2,7 @@
 //!
 //! The first place a program writes the configuration file. It changes **only** `tui.theme`
 //! through the shared [`super::preserve`] helper, so every other byte — comments, blank lines,
-//! key order, unknown fields (ADR 0008 §5.4) — is preserved.
+//! key order, unknown fields (ADR 0008 §4) — is preserved.
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +13,7 @@ use super::preserve::{PreserveError, edit_preserving};
 /// Why the write-back did not happen. Every variant leaves the file untouched.
 #[derive(Debug, thiserror::Error)]
 pub enum ThemeWriteError {
-    /// The file was read read-only (a `schema_version` newer than this build, ADR 0008 §5.2):
+    /// The file was read read-only (a `schema_version` newer than this build, ADR 0008 §4):
     /// the theme applies for this session but the file is never written.
     #[error(
         "{path}: the configuration file is newer than the supported v{supported}; \
@@ -50,7 +50,7 @@ impl From<PreserveError> for ThemeWriteError {
 
 /// Writes `tui.theme = theme` into the configuration at `path` (created when absent).
 ///
-/// `read_only` is the reading process's verdict (ADR 0008 §5.2: a `schema_version` newer
+/// `read_only` is the reading process's verdict (ADR 0008 §4: a `schema_version` newer
 /// than this build); it alone refuses the write. The post-write verification compares
 /// against a fresh parse of the file's own text, so no other caller state is needed.
 /// Returns the path on success.
@@ -109,7 +109,7 @@ mod tests {
         }
     }
 
-    /// The format-preservation promise (ADR 0008 §5.4): comments, blank lines, key order and
+    /// The format-preservation promise (ADR 0008 §4): comments, blank lines, key order and
     /// unknown fields survive; only the `theme` line changes.
     #[test]
     fn write_theme_changes_only_the_theme_line() {

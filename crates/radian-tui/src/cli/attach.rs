@@ -1,4 +1,4 @@
-//! `radian attach [session] [--follow]` (ADR 0043 decision 8): the read-only view of another
+//! `radian attach [session] [--follow]` (ADR 0043 decision 7): the read-only view of another
 //! session's committed facts. It reads the journal file and nothing else - no socket, no token,
 //! no write - with the poll interval that serves both the input and the tail. Without a
 //! `session` it first shows this workspace's picker (the `--pick` rows, without the "new
@@ -203,7 +203,7 @@ fn run_view(
             Input::Event(Event::Key(key)) => match view.on_key(&key) {
                 radian_tui::attach::AttachKey::Quit => return None,
                 radian_tui::attach::AttachKey::Redraw => dirty = true,
-                // Swallowed: no input event, no command, no write (ADR 0043 D14).
+                // Swallowed: no input event, no command, no write (ADR 0043 decision 7).
                 radian_tui::attach::AttachKey::Ignored => {}
             },
             // A resize re-lays the transcript out on the next draw.

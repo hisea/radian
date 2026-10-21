@@ -1,4 +1,4 @@
-//! `radian-memory`: the ADR 0021 M1 memory storage layer.
+//! `radian-memory`: the ADR 0021 memory storage layer.
 //!
 //! It is deliberately host-free: the caller passes the root directory (the host will pass
 //! `~/.radian/memory/`), and the crate never reads `HOME`. It provides:
@@ -11,7 +11,7 @@
 //! - [`export`]/[`parse`] — the Markdown view.
 //!
 //! The log mechanics (single-writer flock, per-append fsync, torn-tail truncation, the
-//! critical/unknown-event policy) mirror `radian-session` (ADR 0006 §3.2/§7) without
+//! critical/unknown-event policy) mirror `radian-session` (ADR 0006 §2.2/§7) without
 //! depending on it: the event schema and replay here are the memory's own (ADR 0021 D3).
 
 mod error;

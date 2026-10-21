@@ -1,4 +1,4 @@
-//! ADR 0006 §15-1: the envelope, sequential `seq`, LF line endings, and byte-exact
+//! ADR 0006-1: the envelope, sequential `seq`, LF line endings, and byte-exact
 //! `OpaqueJson` round trips through the file.
 
 mod common;

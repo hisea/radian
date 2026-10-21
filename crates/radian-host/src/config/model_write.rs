@@ -15,7 +15,7 @@ use super::preserve::{PreserveError, edit_preserving};
 /// Why the model write-back did not happen. Every variant leaves the file untouched.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelWriteError {
-    /// The file was read read-only (a `schema_version` newer than this build, ADR 0008 §5.2):
+    /// The file was read read-only (a `schema_version` newer than this build, ADR 0008 §4):
     /// the model applies for this session but the file is never written.
     #[error(
         "{path}: the configuration file is newer than the supported v{supported}; \
@@ -55,7 +55,7 @@ impl From<PreserveError> for ModelWriteError {
 /// Writes `[model] provider` and `[model] model` into the configuration at `path` (created
 /// when absent, `[model]` created when absent).
 ///
-/// `read_only` is the reading process's verdict (ADR 0008 §5.2); it alone refuses the write.
+/// `read_only` is the reading process's verdict (ADR 0008 §4); it alone refuses the write.
 /// Returns the path on success.
 pub fn write_model_route(
     path: &Path,

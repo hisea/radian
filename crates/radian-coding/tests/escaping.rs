@@ -280,7 +280,7 @@ async fn read_lists_entries_sorted_with_kinds() {
 }
 
 /// `read` on a directory omits the workspace-local worktree root (one full checkout per
-/// worktree; ADR 0043 O7).
+/// worktree; ADR 0043 decision 1).
 #[tokio::test]
 async fn read_omits_the_radian_worktrees_directory() {
     let dir = TempDir::new("read-worktrees");

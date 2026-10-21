@@ -18,7 +18,7 @@
 结论：9 个变异全部被抓住，没有等价变异或测试漏洞。PM8 的失败是测试里的看门狗超时（2s）而不是挂死；
 PM9 在第一次跑时输出为空（变异脚本本身写坏导致编译失败），改成一个合法变异后复现了失败。
 
-## ADR 0021 M1 第三片：记忆工具的权限（2026-10-13）
+## ADR 0021 第三片：记忆工具的权限（2026-10-13）
 
 Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut` · 独立 `CARGO_TARGET_DIR` ·
 `cargo test -p radian-permissions`，变异后 `git checkout --` 还原。
@@ -60,7 +60,7 @@ Base `cf37140` · 一次性 worktree `/tmp/radian-diag-mut`。
 
 1/1 抓住。
 
-## ADR 0030 slice 1：`PermissionResolved.policy` 穿过 `runtime_event`
+## ADR 0006 §5.6：`PermissionResolved.policy` 穿过 `runtime_event`
 
 Base: `a4a00bf` · 改前把 `src/hooks.rs` 复制到 `/tmp/orch-s1-mut-backup/`，改后 `cp` 还原
 （本任务禁 `git checkout --`）；`git status --short` 结束后为空。
@@ -69,10 +69,10 @@ Base: `a4a00bf` · 改前把 `src/hooks.rs` 复制到 `/tmp/orch-s1-mut-backup/`
 |---|---|---|---|
 | PM-O1 | `runtime_event` 传 `None` 而不是 `event.policy.clone()` | `hooks::runtime_event_threads_the_optional_policy_name` | ✅ failed |
 
-1/1 抓住。审计层的 `record` 现在恒为 `policy: None`（还没有策略命令生产者，ADR 0030 切片 ②），
+1/1 抓住。审计层的 `record` 现在恒为 `policy: None`（还没有策略命令生产者，ADR 0006 §5.6），
 所以这条变异只改 `runtime_event` 的映射，测的就是「字段穿过这一层」这一件事。
 
-## ADR 0030 切片 5：task 硬禁止清单（2026-10-16）
+## ADR 0043：task 硬禁止清单（2026-10-16）
 
 Base `63fafba` · 工作树 `.radian-worktrees/orch-s5`。改前把 `src/profile.rs` 复制到
 `.radian/scratch/mut-backup/`，改后 `cp` 还原并以 `cmp` 证明一致（本任务禁 `git checkout --`）。

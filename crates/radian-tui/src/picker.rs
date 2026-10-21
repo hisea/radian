@@ -52,7 +52,7 @@ pub struct Picker {
     hits: Vec<SearchRow>,
     /// Values redacted from a search snippet before it is shown (the API key and header
     /// values). Empty at startup, where the process has not read them yet; the in-session
-    /// overlay sets them (ADR 0013 decision 3).
+    /// overlay sets them (ADR 0013 T3).
     secrets: Vec<String>,
     /// Whether the picker has the keyboard. An in-session overlay opens **unfocused** so the
     /// composer keeps the keys until the user navigates into it (ADR 0023 U4).

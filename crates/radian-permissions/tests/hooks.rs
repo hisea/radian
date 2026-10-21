@@ -314,7 +314,7 @@ async fn each_decision_emits_exactly_one_permission_resolved() {
     }
 }
 
-/// Test 12: the effective turn source only ever lowers (ADR 0012 decision 5). A user turn
+/// Test 12: the effective turn source only ever lowers (ADR 0011 L2). A user turn
 /// that later admits a non-human input loses the grant and can no longer turn `ask` into
 /// `allow`; a later human input cannot raise it back; the next turn's reset restores it.
 #[tokio::test]

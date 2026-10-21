@@ -422,7 +422,7 @@ impl App {
         // actions come from the `form` layer, and everything else that can edit text goes to
         // the focused field. A key the form does not want is swallowed, never passed down.
         if let Some(Modal::Question(form)) = self.top_modal() {
-            // `alt-h` collapses the panel (ADR 0024 R3): it is the form's own key,
+            // `alt-h` collapses the panel (ADR 0024 Q7): it is the form's own key,
             // not a rebindable `form` action.
             if key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::ALT) {
                 return Some(Input::Form(FormKey::Hide));

@@ -1,5 +1,5 @@
 //! The append-only JSONL log: one JSONL file per scope, with the same mechanics as
-//! `radian-session` (ADR 0006 §3.2/§7) but its own event schema (ADR 0021 D3).
+//! `radian-session` (ADR 0006 §2.2/§7) but its own event schema (ADR 0021 D3).
 //!
 //! - a single-writer `flock` for the file's lifetime;
 //! - every append is `write` + `flush` + `fsync` before it returns;
@@ -262,7 +262,7 @@ fn scan(
             break;
         }
         if !line.ends_with(b"\n") {
-            // No LF: the trailing bytes are a torn tail and are not committed (ADR 0006 §3.2).
+            // No LF: the trailing bytes are a torn tail and are not committed (ADR 0006 §2.2).
             break;
         }
         lineno += 1;

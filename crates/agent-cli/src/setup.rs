@@ -54,7 +54,7 @@ pub(crate) struct Setup {
     /// and never written to the session file.
     pub(crate) secrets: Vec<String>,
     /// The command-line `--header NAME=VALUE` arguments, unexpanded, for the `subagent` child
-    /// (ADR 0043 decision 1a): they are secrets, so the tool passes them in the child's
+    /// (ADR 0043 decision 2): they are secrets, so the tool passes them in the child's
     /// environment, never its argv.
     pub(crate) headers: Vec<String>,
     /// The resolved model name (CLI or config), for the session's config snapshot.
@@ -353,7 +353,7 @@ pub(crate) async fn setup(
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
     header_args.extend(cli.header.iter().cloned());
-    // ADR 0043 decision 1a: a subagent child cannot see the parent's `--header` (argv is
+    // ADR 0043 decision 2: a subagent child cannot see the parent's `--header` (argv is
     // world-readable), so the tool passes them through the environment. `run_blocking` already
     // took them out of this process's environment (fix round 1 A), so the values are here and
     // nowhere else; they are still unresolved, so `{session_id}` expands to **this** process's
@@ -410,7 +410,7 @@ pub(crate) async fn setup(
     if let Some(notice) = compaction_notice {
         eprintln!("[compaction] {notice}");
     }
-    // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
+    // ADR 0014 R5: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
     let replays_reasoning = reasoning_replay.is_some();
@@ -474,7 +474,7 @@ pub(crate) async fn setup(
                 model: switch_model.to_owned(),
                 ..query.clone()
             });
-            // ADR 0014 Q4: the estimate counts reasoning exactly when the route
+            // ADR 0014 R6: the estimate counts reasoning exactly when the route
             // replays it, so the projection matches the request actually sent.
             window.budget.map(|tokens| {
                 ContextBudget::new(tokens).with_reasoning(radian_host::route_replays_reasoning(

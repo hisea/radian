@@ -11,12 +11,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// The built-in role prompt (ADR 0036 D2). Layer 1 for every session; `--system`
+/// The built-in role prompt (ADR 0036). Layer 1 for every session; `--system`
 /// replaces it.
 pub const DEFAULT_ROLE: &str = include_str!("../prompts/default.md");
 
 /// Layer 0a: the runtime facts the host generates from what it actually mounted. Never
-/// overridable (ADR 0036 D1).
+/// overridable (ADR 0036).
 pub struct Runtime<'a> {
     /// The tier name (`workspace` / `full`).
     pub tier: &'a str,
@@ -99,7 +99,7 @@ pub fn runtime_layer(runtime: &Runtime) -> String {
     out
 }
 
-/// Layer 0b: the volatile session facts (ADR 0036 D1), last so the static prefix
+/// Layer 0b: the volatile session facts (ADR 0036), last so the static prefix
 /// stays cacheable. The date is the local date, without a time.
 pub fn session_layer(cwd: &Path, model: &str) -> String {
     let mut out = String::from("<session>\n");
@@ -271,7 +271,7 @@ impl SessionKey {
 /// slot (ADR 0026 D5); a caller that has another source (including a test) supplies its own.
 pub type SessionKeySource = Arc<dyn Fn() -> SessionKey + Send + Sync>;
 
-/// The hook that appends layer 0b (`<session>`) **after** skills and memory (ADR 0036 D1), so
+/// The hook that appends layer 0b (`<session>`) **after** skills and memory (ADR 0036), so
 /// the static prefix stays cacheable.
 ///
 /// The section is computed when the hook is built and then reused **byte for byte**, except

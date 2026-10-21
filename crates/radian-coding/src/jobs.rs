@@ -369,7 +369,7 @@ impl Jobs {
             });
         }
 
-        // ADR 0039 decision 6: register the job and publish `Started` **before** the supervisor
+        // ADR 0037 decision 6: register the job and publish `Started` **before** the supervisor
         // can publish a `Settled`. An instant command's leader can be reaped the moment the
         // supervisor starts, so starting it any earlier lets `Settled` overtake `Started` in
         // the journal. The readers are already running, so nothing is lost by the wait.

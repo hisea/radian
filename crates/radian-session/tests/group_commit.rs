@@ -239,7 +239,7 @@ async fn non_sync_records_ride_the_next_sync_point() {
 }
 
 /// A failed write does not burn a `seq`: the counter advances only after the write succeeds
-/// (ADR 0006 §15.3; the group-commit change must not move it earlier).
+/// (ADR 0006 §10; the group-commit change must not move it earlier).
 #[tokio::test]
 async fn a_failed_write_does_not_burn_a_seq() {
     let sid = sid("seq-fail");

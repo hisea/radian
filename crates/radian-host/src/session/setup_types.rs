@@ -98,7 +98,7 @@ pub struct SessionSetup {
     /// parent is also the depth-1 marker: `open_session` never mounts `subagent` in that
     /// session.
     pub parent: Option<ForkParent>,
-    /// The `subagent` tool's launch parameters (ADR 0043 decision 1a). `None` for a host that
+    /// The `subagent` tool's launch parameters (ADR 0043 decision 2). `None` for a host that
     /// cannot start a child. Ignored, so the tool is not mounted, when [`SessionSetup::parent`]
     /// says this session is itself a subagent child.
     pub subagent: Option<SubagentParts>,
@@ -144,7 +144,7 @@ pub struct SessionSetup {
     pub turn_options: TurnOptions,
     /// A per-turn timeout (the CLI's `--turn-timeout-secs`).
     pub turn_timeout: Option<Duration>,
-    /// The host's startup wording (ADR 0012 decision 4).
+    /// The host's startup wording (ADR 0012).
     pub wording: Wording,
     /// What the facade declares it can do (ADR 0023 U5). A host grants all five; a test can
     /// grant fewer, and the facade then refuses the commands it cannot serve.
@@ -226,7 +226,7 @@ pub struct SessionFacts {
     pub mcp_open: Option<(usize, usize)>,
     /// Whether `ask_user` is advertised (ADR 0024 Q5), for the host's startup line.
     pub ask_user: bool,
-    /// The startup line for the loaded context files (ADR 0036 C2): `AGENTS.md (12.3 KB), …`
+    /// The startup line for the loaded context files (ADR 0036): `AGENTS.md (12.3 KB), …`
     /// or `none`.
     pub context_line: String,
     /// The context files that were loaded, in prompt order.

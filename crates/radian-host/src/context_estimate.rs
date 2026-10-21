@@ -293,7 +293,7 @@ fn size_of_str(text: &str) -> Size {
 
 /// The JSON contribution of one message, minus host `meta` (ADR 0005, like
 /// `budget::request_size_with`). When `count_reasoning` is false an
-/// assistant's `reasoning` field is subtracted too (ADR 0014 Q4).
+/// assistant's `reasoning` field is subtracted too (ADR 0014 R6).
 fn message_size(message: &Message, count_reasoning: bool) -> Size {
     let mut size = Size::default();
     size.add_json(message);

@@ -1,4 +1,4 @@
-//! ADR 0043 decision 1a (gap 1): the parent's `--header` values reach the child, and never
+//! ADR 0043 decision 2 (gap 1): the parent's `--header` values reach the child, and never
 //! through its argv.
 //!
 //! The child here is a stub shell script rather than a `radian` binary: the two facts this test

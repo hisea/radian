@@ -47,7 +47,7 @@ pub enum ConfigError {
         path: PathBuf,
         value: String,
     },
-    /// `[permissions] approval` has a value this build does not know (ADR 0008 §5.1:
+    /// `[permissions] approval` has a value this build does not know (ADR 0008 §6:
     /// `permissions` is fail-closed). Refused, never guessed at.
     UnknownApproval {
         path: PathBuf,

@@ -1,4 +1,4 @@
-//! Reasoning replay resolution (ADR 0014 Q2): for a built-in provider the catalog's
+//! Reasoning replay resolution (ADR 0014 R5): for a built-in provider the catalog's
 //! `interleaved` field decides, and a `[providers.<id>]` declaration overrides it.
 //!
 //! `RADIAN_HOME` is process-wide, so this binary deliberately holds exactly one test: nothing

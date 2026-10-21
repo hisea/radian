@@ -528,7 +528,7 @@ async fn orphan_jobs_reports_a_start_without_a_settle() {
     );
 }
 
-// ---------- ADR 0039 decision 6: no lost first event, no Settled before its Started ----------
+// ---------- ADR 0037 decision 6: no lost first event, no Settled before its Started ----------
 
 fn full_access(ws: &Path) -> Sandbox {
     let policy = SandboxPolicy::new(SandboxMode::FullAccess, ws).expect("full-access policy");
@@ -551,7 +551,7 @@ async fn await_delivery(inbox: &Inbox) {
 
 /// The first job's `Started` and `Settled` both reach the journal. Subscribing **inside** the
 /// spawned task would lose them: the job starts between `spawn` returning and the task running
-/// (ADR 0039 decision 6).
+/// (ADR 0037 decision 6).
 #[tokio::test]
 async fn the_first_job_events_are_not_lost() {
     let dir = scratch("first-events");
@@ -591,7 +591,7 @@ async fn the_first_job_events_are_not_lost() {
 
 /// A burst of instant jobs: every `Settled` in the journal is preceded by its `Started`. The
 /// supervisor is started only after the job is registered and `Started` is published, so an
-/// instant leader cannot settle first (ADR 0039 decision 6).
+/// instant leader cannot settle first (ADR 0037 decision 6).
 #[tokio::test]
 async fn a_burst_of_instant_jobs_keeps_every_settle_behind_its_start() {
     let dir = scratch("burst-order");

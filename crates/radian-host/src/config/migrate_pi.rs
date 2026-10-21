@@ -16,7 +16,7 @@
 //!   without showing it); a `!command` value is listed and **never executed**.
 //! - **No network, no command execution.** The only inputs are files in the given directory.
 //! - The draft is validated with the real reader ([`super::parse`]) before it is printed or
-//!   written, and [`write_draft`] refuses an existing target (ADR 0008 §5.4: this version has
+//!   written, and [`write_draft`] refuses an existing target (ADR 0008 §4: this version has
 //!   no faithful write-back).
 
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ pub enum PiMigrateError {
     Parse { path: PathBuf, message: String },
     /// The generated draft is not accepted by the reader: an internal error, never written.
     InvalidDraft { message: String },
-    /// `--write` target already exists; this version never overwrites (ADR 0008 §5.4).
+    /// `--write` target already exists; this version never overwrites (ADR 0008 §4).
     TargetExists { path: PathBuf },
     /// The write itself failed.
     Write {

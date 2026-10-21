@@ -1,5 +1,5 @@
 //! The **switched** route's budget counts reasoning exactly when that route replays it
-//! (ADR 0014 Q4). `route_replays_reasoning` is the function both hosts' `budget_for`
+//! (ADR 0014 R6). `route_replays_reasoning` is the function both hosts' `budget_for`
 //! closures call (`crates/radian-tui/src/main.rs`, `crates/agent-cli/src/lib.rs`); this test
 //! builds the budget the same way the closure does, which is the level reachable without a
 //! terminal. Forcing that resolver to `false` used to leave every `radian-host` and

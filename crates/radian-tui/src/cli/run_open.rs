@@ -68,7 +68,7 @@ pub(super) fn build_session_inputs(
     startup_log: &mut StartupLog,
 ) -> Result<(SessionInputs, Option<radian_host::SocketGuard>), RunError> {
     // The permission tier and the sandbox. For an enforced tier a probe failure is an error
-    // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
+    // here, never a fallback to an unsandboxed run (ADR 0012 P5). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
     // The tier and its source were resolved above (ADR 0038 decision 3).
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and

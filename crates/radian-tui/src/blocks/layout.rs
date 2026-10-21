@@ -426,7 +426,7 @@ fn layout_unstripped(
             lines
         }
         (EntryKind::ToolCall, _) => {
-            // ADR 0024 R1: an `ask_user` call is the question record, with no
+            // ADR 0024 Q7: an `ask_user` call is the question record, with no
             // answers yet (the result entry carries them).
             match entry.tool.as_deref() {
                 // ADR 0024 rules 1-2 / ADR 0028: a pending ask
@@ -473,7 +473,7 @@ fn layout_unstripped(
         }
         (EntryKind::ToolResult, _) => {
             let card = entry.tool.as_deref();
-            // ADR 0024 R1: the result of `ask_user` is the same block, now with the
+            // ADR 0024 Q7: the result of `ask_user` is the same block, now with the
             // answers (or the declined/cancelled status).
             if let Some(card) = card
                 && card.name == "ask_user"

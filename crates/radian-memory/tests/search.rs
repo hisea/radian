@@ -1,4 +1,4 @@
-//! ADR 0021 M1 #9 (search): the order is total and deterministic — scope, then trust, then
+//! ADR 0021 #9 (search): the order is total and deterministic — scope, then trust, then
 //! match score, then `updated_at`, then `id`.
 
 mod common;

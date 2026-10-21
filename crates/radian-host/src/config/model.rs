@@ -1,5 +1,5 @@
 //! The `[model]` section and `[providers.<name>]` (ADR 0008 §2, ADR 0026 D2/D10,
-//! ADR 0014 Q2, ADR 0015, ADR 0017): the wired model route.
+//! ADR 0014 R5, ADR 0015, ADR 0017): the wired model route.
 //!
 //! Split from `config/mod.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 //! Every field is `None` when the file did not set it; the host then keeps its own
@@ -95,7 +95,7 @@ pub(super) fn parse_providers(
                         "a string",
                     ));
                 }
-                // ADR 0014 Q2: a field name overrides the catalog, `false` turns
+                // ADR 0014 R5: a field name overrides the catalog, `false` turns
                 // replay off. `true` names no field, so it is refused rather than guessed.
                 ("reasoning_replay", Value::String(field)) if !field.is_empty() => {
                     decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Field(

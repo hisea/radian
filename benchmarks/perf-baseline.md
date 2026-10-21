@@ -80,7 +80,7 @@ debug 慢路径。沙箱探针约 25 ms，占启动的四分之一左右。
 release 与 debug 几乎一样。这不是模型或 HTTP 的开销，而是 **JSONL 的同步 fsync**：本仓库
 一次 `append`（write + flush + fsync）中位 **4.0 ms**（见 §3），而一轮会写十几条记录
 （`InputClaimed`/`TurnStarted`/`MessageAppended`/`TurnFinished`/…）。~56 ms / ~4 ms ≈ 14 次
-fsync，与 ADR 0006 §15.2 的估算一致。这与机器负载无关（fsync 等磁盘）。
+fsync，与 ADR 0006 §10 的估算一致。这与机器负载无关（fsync 等磁盘）。
 
 ### 组提交之后（2026-10-16，ADR 0040）
 
@@ -119,7 +119,7 @@ append 的 fsync 是 latency 的主要来源，**读**不是。debug 的 10k 数
 **2026-10-16（ADR 0040 组提交）**：只有同步点（`SessionCreated`、`ToolExecutionStarted`、
 `TurnFinished`/`TurnFailed`、替换提交/中止、`TaskSpawned`）fsync；第一行的非同步点
 `append` 因此从约 4 ms 降到上表的约 0.03 ms。一次同步点的 append 仍付一次 fsync（约
-4 ms，ADR 0006 §15.2 的测量），而一个回合只发生 2–3 次（见 §2 末）。
+4 ms，ADR 0006 §10 的测量），而一个回合只发生 2–3 次（见 §2 末）。
 
 ## 4. TUI 渲染（下表为虚拟化之前；之后见本节末）
 
@@ -190,7 +190,7 @@ release 构建。
 
 1. **回合延迟由 fsync 主导**：进程内、模型与工具都立即返回时，一轮仍要 ~56 ms（release），
    工具往返 ~84 ms；`append` 本身 4.0 ms。交互式可用，但成批工具（每批十几条 append）
-   会把延迟累加到几百毫秒。这是 ADR 0006 §15.2 已知代价的独立复核，量级一致。
+   会把延迟累加到几百毫秒。这是 ADR 0006 §10 已知代价的独立复核，量级一致。
    **ADR 0040 之后（组提交，2026-10-16）**：同一测量为一轮 **16.7 ms**、工具往返 **26.1 ms**
    （release），一轮只 fsync 2–3 次；见 §2 末。非同步点 `append` 不再 fsync（§3）。
 2. **TUI 每帧重渲染全部 transcript**：release 下约 11.5k 条目、debug 下约 1.5k 条目即
