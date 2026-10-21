@@ -11778,6 +11778,15 @@ async fn pty_herdr_reports_blocked_without_the_command_text() {
 /// The jobs item (decided): a background job keeps an idle session
 /// `working` with the `jobs` label; the followup turn its settle wakes is plain `working`,
 /// then `idle` again. The command text never leaves the process.
+///
+/// The middle `idle` may never reach the socket. The state only queues on change (ADR 0034
+/// H2, `maybe_report`) and the send thread keeps one latest value per method (H4, the slot
+/// in `crates/radian-host/src/herdr.rs`), so the `idle` between the settle and the woken
+/// turn starting is overwritten when the woken turn starts before the sender sends it —
+/// and when the settle and the woken turn start land in the same UI frame, the transient
+/// is never queued at all and the woken turn's `working` is suppressed with it (the last
+/// queued state is still `working`). The test accepts the full five, the four without
+/// the transient `idle`, and the coalesced three.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_herdr_reports_working_while_a_job_runs() {
@@ -11857,8 +11866,39 @@ async fn pty_herdr_reports_working_while_a_job_runs() {
                     .to_owned()
             })
             .collect();
-        if states == ["idle", "working", "idle", "working", "idle"] {
-            break states;
+        let full = states == ["idle", "working", "idle", "working", "idle"];
+        // The transient `idle` was overwritten in the latest-value slot before it was sent.
+        let collapsed = states == ["idle", "working", "working", "idle"];
+        // The settle and the woken turn start shared one frame (or the sender coalesced
+        // the three rapid reports): the woken turn's `working` never reached the socket
+        // either. Only the screen proves the woken turn ran, so the short form needs
+        // JOB-DONE-OK before it counts — and the mid-flight prefix (the final `idle`
+        // still unsent) is told apart by the quiescence check below.
+        let coalesced =
+            states == ["idle", "working", "idle"] && pty.screen().contains("JOB-DONE-OK");
+        if (full || collapsed || coalesced) && Instant::now() < deadline {
+            // Nothing may follow the final `idle`: quiesce, then the report list must be
+            // unchanged. A mid-flight prefix that grew meanwhile keeps waiting instead.
+            std::thread::sleep(Duration::from_secs(2));
+            let again: Vec<String> = sock
+                .of_method("pane.report_agent")
+                .iter()
+                .map(|value| {
+                    value["params"]["state"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect();
+            if again == states {
+                break states;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reports kept arriving after the final idle: {again:?}; all: {:?}",
+                sock.snapshot()
+            );
+            continue;
         }
         assert!(
             Instant::now() < deadline,
@@ -11867,7 +11907,13 @@ async fn pty_herdr_reports_working_while_a_job_runs() {
         );
         std::thread::sleep(Duration::from_millis(50));
     };
-    assert_eq!(states, ["idle", "working", "idle", "working", "idle"]);
+    assert_eq!(states[0], "idle", "the startup idle first: {states:?}");
+    assert_eq!(states[1], "working", "the first turn's working: {states:?}");
+    assert_eq!(
+        states.last(),
+        Some(&"idle".to_owned()),
+        "the final state is idle: {states:?}"
+    );
     assert_eq!(
         sock.of_method("pane.report_metadata")
             .iter()
@@ -11910,21 +11956,33 @@ async fn pty_herdr_reports_working_while_a_job_runs() {
     );
     let followup_at = {
         let mut workings = 0;
-        log.iter()
-            .position(|value| {
-                if value["method"] == "pane.report_agent" && value["params"]["state"] == "working" {
-                    workings += 1;
-                    workings == 2
-                } else {
-                    false
-                }
-            })
-            .expect("the followup turn's working")
+        log.iter().position(|value| {
+            if value["method"] == "pane.report_agent" && value["params"]["state"] == "working" {
+                workings += 1;
+                workings == 2
+            } else {
+                false
+            }
+        })
     };
     assert!(
-        jobs_at < clears[0] && clears[0] < followup_at,
-        "label, then clear, then the followup turn's working: {log:?}"
+        jobs_at < clears[0],
+        "the jobs label comes before its clear: {log:?}"
     );
+    if let Some(followup_at) = followup_at {
+        assert!(
+            clears[0] < followup_at,
+            "the clear comes before the followup turn's working: {log:?}"
+        );
+    } else {
+        // The woken turn's `working` never reached the socket, so only the coalesced
+        // short form explains the wire: the clear is still ordered after the label.
+        assert_eq!(
+            states,
+            ["idle", "working", "idle"],
+            "no followup working on the wire: {states:?}; {log:?}"
+        );
+    }
     pty.quit();
     assert!(
         sock.wait_for_release(wait_positive()),
