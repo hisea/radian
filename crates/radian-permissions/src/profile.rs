@@ -345,9 +345,11 @@ fn read_only() -> Vec<Rule> {
 /// through the ordinary hook path. `subagent` (ADR 0043 decision 1a) is here for a different
 /// reason: the tool itself writes no file and runs no workspace command; it starts a child
 /// session whose own tier and approval decide everything it may do. A parent prompt would only
-/// add a second gate that a headless parent cannot answer.
+/// add a second gate that a headless parent cannot answer. `goal` (ADR 0047) is here for the
+/// first reason: it only advances the session's own goal state and journals it — no workspace
+/// file, no command — so prompting for it would only stall the continuation it serves.
 fn always_allowed() -> Vec<Rule> {
-    ["ask_user", "skill", "subagent"]
+    ["ask_user", "skill", "subagent", "goal"]
         .into_iter()
         .map(|name| {
             Rule::new(
@@ -484,6 +486,21 @@ mod tests {
         ] {
             let tier = profile.preset.as_str();
             assert_eq!(action(&profile, "ask_user"), Action::Allow, "{tier}");
+        }
+    }
+
+    /// ADR 0047: `goal` only advances the session's own goal state, so every tier allows it
+    /// and it never prompts. Removing the rule would make it fall through to the default
+    /// `ask` and stall the continuation it serves.
+    #[test]
+    fn goal_is_allowed_in_every_tier() {
+        let ws = TestDir::new("goal");
+        for profile in [
+            Profile::workspace_write(&ws).unwrap(),
+            Profile::full_access(&ws).unwrap(),
+        ] {
+            let tier = profile.preset.as_str();
+            assert_eq!(action(&profile, "goal"), Action::Allow, "{tier}");
         }
     }
 

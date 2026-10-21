@@ -30,7 +30,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 27] = [
+pub(crate) const KNOWN_EVENTS: [&str; 36] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -58,6 +58,15 @@ pub(crate) const KNOWN_EVENTS: [&str; 27] = [
     "UserBash",
     "BackgroundJobStarted",
     "BackgroundJobSettled",
+    "GoalSet",
+    "GoalBudgetSet",
+    "GoalProgress",
+    "GoalDone",
+    "GoalPaused",
+    "GoalResumed",
+    "GoalDropped",
+    "GoalWait",
+    "GoalBudgetExhausted",
 ];
 
 /// The parsed body of one known event. Events this slice does not interpret (for example
@@ -228,6 +237,50 @@ pub enum EventData {
         job_id: String,
         state: String,
         duration_ms: u64,
+    },
+    /// The persistent goal was set or replaced (ADR 0047). Typed for an exact round trip;
+    /// audit only, never a transcript record. The goal fold's state source.
+    GoalSet {
+        objective: String,
+        max_turns: Option<u64>,
+        max_duration_secs: Option<u64>,
+        max_tokens: Option<u64>,
+    },
+    /// The goal's budget limits were changed (ADR 0047). Typed for an exact round trip;
+    /// audit only, never a transcript record.
+    GoalBudgetSet {
+        max_turns: Option<u64>,
+        max_duration_secs: Option<u64>,
+        max_tokens: Option<u64>,
+    },
+    /// One model-recorded progress note (ADR 0047). Typed for an exact round trip; audit
+    /// only, never a transcript record.
+    GoalProgress {
+        note: String,
+    },
+    /// The model reported the goal done (ADR 0047). Typed for an exact round trip; audit
+    /// only, never a transcript record.
+    GoalDone {
+        note: Option<String>,
+    },
+    /// The goal was paused (ADR 0047). Typed for an exact round trip; audit only, never a
+    /// transcript record.
+    GoalPaused {},
+    /// The goal was resumed (ADR 0047). Typed for an exact round trip; audit only, never a
+    /// transcript record.
+    GoalResumed {},
+    /// The goal was dropped (ADR 0047). Typed for an exact round trip; audit only, never a
+    /// transcript record.
+    GoalDropped {},
+    /// The model deferred the next continuation (ADR 0047). Typed for an exact round trip;
+    /// audit only, never a transcript record.
+    GoalWait {
+        secs: u64,
+    },
+    /// A budget cap stopped the goal (ADR 0047). Typed for an exact round trip; audit only,
+    /// never a transcript record.
+    GoalBudgetExhausted {
+        kind: String,
     },
     /// A known event this crate does not interpret (`SessionCreated`) or an unknown
     /// non-critical event.
@@ -720,6 +773,42 @@ impl LineScanner {
                     duration_ms: d.duration_ms,
                 }
             }
+            "GoalSet" => {
+                let d: GoalSetData = data_of(raw, self.lineno, path)?;
+                EventData::GoalSet {
+                    objective: d.objective,
+                    max_turns: d.max_turns,
+                    max_duration_secs: d.max_duration_secs,
+                    max_tokens: d.max_tokens,
+                }
+            }
+            "GoalBudgetSet" => {
+                let d: GoalBudgetSetData = data_of(raw, self.lineno, path)?;
+                EventData::GoalBudgetSet {
+                    max_turns: d.max_turns,
+                    max_duration_secs: d.max_duration_secs,
+                    max_tokens: d.max_tokens,
+                }
+            }
+            "GoalProgress" => {
+                let d: GoalProgressData = data_of(raw, self.lineno, path)?;
+                EventData::GoalProgress { note: d.note }
+            }
+            "GoalDone" => {
+                let d: GoalDoneData = data_of(raw, self.lineno, path)?;
+                EventData::GoalDone { note: d.note }
+            }
+            "GoalPaused" => EventData::GoalPaused {},
+            "GoalResumed" => EventData::GoalResumed {},
+            "GoalDropped" => EventData::GoalDropped {},
+            "GoalWait" => {
+                let d: GoalWaitData = data_of(raw, self.lineno, path)?;
+                EventData::GoalWait { secs: d.secs }
+            }
+            "GoalBudgetExhausted" => {
+                let d: GoalBudgetExhaustedData = data_of(raw, self.lineno, path)?;
+                EventData::GoalBudgetExhausted { kind: d.kind }
+            }
             "InboxEnqueued" => {
                 let d: InboxEnqueuedData = data_of(raw, self.lineno, path)?;
                 EventData::InboxEnqueued {
@@ -1066,6 +1155,15 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::UserBash { .. }
         | EventData::BackgroundJobStarted { .. }
         | EventData::BackgroundJobSettled { .. }
+        | EventData::GoalSet { .. }
+        | EventData::GoalBudgetSet { .. }
+        | EventData::GoalProgress { .. }
+        | EventData::GoalDone { .. }
+        | EventData::GoalPaused {}
+        | EventData::GoalResumed {}
+        | EventData::GoalDropped {}
+        | EventData::GoalWait { .. }
+        | EventData::GoalBudgetExhausted { .. }
         | EventData::Other(_) => None,
     }
 }
@@ -1287,6 +1385,48 @@ struct BackgroundJobSettledData {
     job_id: String,
     state: String,
     duration_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct GoalSetData {
+    objective: String,
+    #[serde(default)]
+    max_turns: Option<u64>,
+    #[serde(default)]
+    max_duration_secs: Option<u64>,
+    #[serde(default)]
+    max_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GoalBudgetSetData {
+    #[serde(default)]
+    max_turns: Option<u64>,
+    #[serde(default)]
+    max_duration_secs: Option<u64>,
+    #[serde(default)]
+    max_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GoalProgressData {
+    note: String,
+}
+
+#[derive(Deserialize)]
+struct GoalDoneData {
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GoalWaitData {
+    secs: u64,
+}
+
+#[derive(Deserialize)]
+struct GoalBudgetExhaustedData {
+    kind: String,
 }
 
 /// Feeds one record to the shared replacement state machine, mapping a rejection to the

@@ -18,6 +18,9 @@ pub const HELP: &str = "\
 /loop [--every <dur>] [--times N] [--for <dur>] [prompt]
                        repeat the prompt every turn until --times/--for (default 20 turns or
                        1h); a bare /loop toggles; --every waits between turns
+/goal <objective>      set a persistent goal that repeats every turn until done or budgeted
+                       (default 30 turns or 2h); /goal shows it, /goal pause|resume|drop
+                       controls it, /goal budget <N turns|<dur>|<N> tokens> caps it
 /copy [code]          copy the last assistant message (or its last code block)
 /compact [note]       summarize the history now and keep the recent part
 /sessions [query]     list this workspace's recent sessions, or search their text
@@ -123,6 +126,9 @@ pub enum Outcome {
     /// limits and an optional prompt. Flags come before the prompt; running it is the loop's
     /// job (an effect), like every other command.
     Loop(LoopCommand),
+    /// `/goal` (continuation step 3, ADR 0047): the persistent goal. Parsing only; running
+    /// it journals through the loop (an effect), like every other command.
+    Goal(GoalCommand),
     /// `/copy [code]`: copy the last committed assistant message — or its last fenced code
     /// block — through the configured clipboard backend.
     Copy { code_only: bool },
@@ -295,6 +301,11 @@ pub fn tree() -> &'static [Command] {
             description: "repeat the prompt every turn until --times/--for (default 20 turns or \
              1h); a bare /loop toggles",
             levels: &[free_level],
+        },
+        Command {
+            name: "goal",
+            description: "set a persistent goal that repeats every turn until done or budgeted",
+            levels: &[goal_level],
         },
         Command {
             name: "copy",
@@ -1074,6 +1085,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/retry") if tokens.len() == 1 => Outcome::Retry,
         Some("/retry") => Outcome::Notices(vec!["usage: /retry (no arguments)".to_owned()]),
         Some("/loop") => loop_request(&tokens[1..]),
+        Some("/goal") => goal_request(&tokens[1..]),
         Some("/copy") => copy_request(&tokens[1..]),
         Some("/memory") => memory_command(&tokens[1..], memory_enabled),
         Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
@@ -1423,6 +1435,148 @@ fn parse_loop_duration(text: &str) -> Option<std::time::Duration> {
         _ => number.checked_mul(3600)?,
     };
     Some(std::time::Duration::from_secs(secs))
+}
+
+/// What `/goal` asked for (ADR 0047). Parsing only: running it journals through the loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalCommand {
+    /// A bare `/goal`: show the goal, its progress and its budget use.
+    Show,
+    /// `/goal <objective>`: set or replace the goal (at most [`GOAL_OBJECTIVE_LIMIT`]
+    /// characters); the budget resets to the default.
+    Set { objective: String },
+    /// `/goal pause`: stop continuing, keep the goal for `/goal resume`.
+    Pause,
+    /// `/goal resume`: continue a paused goal (or restart its stretch after `--resume`).
+    Resume,
+    /// `/goal drop`: forget the goal entirely.
+    Drop,
+    /// `/goal budget …`: set caps, one or more of `<N> turns`, `<dur>`, `<N> tokens`.
+    Budget { specs: Vec<GoalBudgetSpec> },
+}
+
+/// One `/goal budget` cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalBudgetSpec {
+    Turns(u64),
+    Duration(std::time::Duration),
+    Tokens(u64),
+}
+
+/// The longest objective `/goal` accepts (Codex's `/goal` limit, ADR 0047).
+pub const GOAL_OBJECTIVE_LIMIT: usize = 4000;
+
+/// The `/goal` usage line, shared by every refusal below.
+const GOAL_USAGE: &str = "usage: /goal <objective> (up to 4000 chars) | /goal (show) | \
+    /goal pause | /goal resume | /goal drop | /goal budget [<N> turns] [<dur>] [<N> tokens] \
+    (durations like 30s, 5m, 2h)";
+
+/// `/goal …`: the subcommand word decides; anything after `pause`/`resume`/`drop` is a
+/// usage error, never silent prompt text. An objective that is one bare number or duration
+/// is refused (like `/loop`'s prompt: it needs its budget flag to mean anything).
+fn goal_request(args: &[String]) -> Outcome {
+    if args.is_empty() {
+        return Outcome::Goal(GoalCommand::Show);
+    }
+    match args[0].as_str() {
+        "pause" if args.len() == 1 => Outcome::Goal(GoalCommand::Pause),
+        "resume" if args.len() == 1 => Outcome::Goal(GoalCommand::Resume),
+        "drop" if args.len() == 1 => Outcome::Goal(GoalCommand::Drop),
+        "budget" => goal_budget_request(&args[1..]),
+        "pause" | "resume" | "drop" => Outcome::Notices(vec![GOAL_USAGE.to_owned()]),
+        _ => goal_set_request(args),
+    }
+}
+
+/// `/goal <objective>`: the arguments joined with spaces, like `/queue`'s text.
+fn goal_set_request(args: &[String]) -> Outcome {
+    let objective = args.join(" ");
+    let objective = objective.trim();
+    if objective.is_empty() {
+        return Outcome::Notices(vec![GOAL_USAGE.to_owned()]);
+    }
+    // One bare number or duration is not an objective: it needs its budget flag.
+    if !objective.contains(' ')
+        && (objective.parse::<u64>().is_ok() || parse_loop_duration(objective).is_some())
+    {
+        return Outcome::Notices(vec![GOAL_USAGE.to_owned()]);
+    }
+    if objective.chars().count() > GOAL_OBJECTIVE_LIMIT {
+        return Outcome::Notices(vec![format!(
+            "the objective is {} characters (the limit is {GOAL_OBJECTIVE_LIMIT}); shorten it",
+            objective.chars().count()
+        )]);
+    }
+    Outcome::Goal(GoalCommand::Set {
+        objective: objective.to_owned(),
+    })
+}
+
+/// `/goal budget …`: one or more `<N> turns|turn`, `<dur>`, `<N> tokens|token` pairs. Bare
+/// (no pairs) shows the budget instead of changing it.
+fn goal_budget_request(args: &[String]) -> Outcome {
+    if args.is_empty() {
+        return Outcome::Goal(GoalCommand::Budget { specs: Vec::new() });
+    }
+    let mut specs = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let (spec, next) = match goal_budget_pair(args, index) {
+            Some(pair) => pair,
+            None => return Outcome::Notices(vec![GOAL_USAGE.to_owned()]),
+        };
+        specs.push(spec);
+        index = next;
+    }
+    Outcome::Goal(GoalCommand::Budget { specs })
+}
+
+/// One budget pair at `args[index]`: `<N> turns|turn`, a duration, or `<N> tokens|token`.
+/// Returns the spec and the next index.
+fn goal_budget_pair(args: &[String], index: usize) -> Option<(GoalBudgetSpec, usize)> {
+    // A duration stands alone (`2h`); anything else starts with a number.
+    if let Some(duration) = parse_loop_duration(&args[index]) {
+        return Some((GoalBudgetSpec::Duration(duration), index + 1));
+    }
+    let number: u64 = args[index].parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    let unit = args.get(index + 1)?.as_str();
+    match unit {
+        "turn" | "turns" => Some((GoalBudgetSpec::Turns(number), index + 2)),
+        "token" | "tokens" => Some((GoalBudgetSpec::Tokens(number), index + 2)),
+        _ => None,
+    }
+}
+
+/// `/goal`'s one completion level: the subcommand words, then free text.
+fn goal_level(typed: &[&str], _partial: &str) -> Level {
+    match typed.first() {
+        None => Level::Ready(vec![
+            Candidate {
+                insert: "pause".to_owned(),
+                description: "stop continuing, keep the goal".to_owned(),
+                current: false,
+            },
+            Candidate {
+                insert: "resume".to_owned(),
+                description: "continue a paused goal".to_owned(),
+                current: false,
+            },
+            Candidate {
+                insert: "drop".to_owned(),
+                description: "forget the goal".to_owned(),
+                current: false,
+            },
+            Candidate {
+                insert: "budget".to_owned(),
+                description: "cap the goal: turns, duration, tokens".to_owned(),
+                current: false,
+            },
+        ]),
+        Some(_) => Level::Free,
+    }
 }
 
 /// `/copy [code]`: no argument copies the whole message, `code` only its last fenced block.
@@ -1776,6 +1930,99 @@ mod tests {
         }
         assert!(HELP.contains("/loop"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "loop"));
+    }
+
+    /// `/goal`: bare shows, an objective sets, `pause`/`resume`/`drop` control, `budget`
+    /// caps with turns/duration/tokens pairs. Refusals (bare numbers, bad pairs, extra words,
+    /// an over-long objective) are usage notices. It is a command, and it is in `/help`.
+    #[test]
+    fn goal_parses_show_set_control_and_budget() {
+        use std::time::Duration;
+
+        assert!(matches!(
+            parse("/goal", false),
+            Outcome::Goal(GoalCommand::Show)
+        ));
+        match parse("/goal ship the refactor", false) {
+            Outcome::Goal(GoalCommand::Set { objective }) => {
+                assert_eq!(objective, "ship the refactor")
+            }
+            other => panic!("expected a set, got {other:?}"),
+        }
+        assert!(matches!(
+            parse("/goal pause", false),
+            Outcome::Goal(GoalCommand::Pause)
+        ));
+        assert!(matches!(
+            parse("/goal resume", false),
+            Outcome::Goal(GoalCommand::Resume)
+        ));
+        assert!(matches!(
+            parse("/goal drop", false),
+            Outcome::Goal(GoalCommand::Drop)
+        ));
+        // A bare number or duration is not an objective (it needs its budget flag).
+        for line in ["/goal 5", "/goal 5m"] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /goal"), "{line}: {notices:?}")
+                }
+                other => panic!("{line}: expected a usage notice, got {other:?}"),
+            }
+        }
+        // Budget pairs, alone and combined; a bare `budget` shows.
+        match parse("/goal budget 2 turns", false) {
+            Outcome::Goal(GoalCommand::Budget { specs }) => {
+                assert_eq!(specs, vec![GoalBudgetSpec::Turns(2)])
+            }
+            other => panic!("expected a budget, got {other:?}"),
+        }
+        match parse("/goal budget 10 turns 2h 50000 tokens", false) {
+            Outcome::Goal(GoalCommand::Budget { specs }) => {
+                assert_eq!(
+                    specs,
+                    vec![
+                        GoalBudgetSpec::Turns(10),
+                        GoalBudgetSpec::Duration(Duration::from_secs(7200)),
+                        GoalBudgetSpec::Tokens(50000),
+                    ]
+                )
+            }
+            other => panic!("expected a combined budget, got {other:?}"),
+        }
+        assert!(matches!(
+            parse("/goal budget", false),
+            Outcome::Goal(GoalCommand::Budget { specs }) if specs.is_empty()
+        ));
+        // Bad pairs, zero caps and extra words after the verbs are usage notices.
+        for line in [
+            "/goal budget 2",
+            "/goal budget 0 turns",
+            "/goal budget 5x",
+            "/goal budget turns 2",
+            "/goal pause now",
+            "/goal resume later",
+            "/goal drop it",
+        ] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /goal"), "{line}: {notices:?}")
+                }
+                other => panic!("{line}: expected a usage notice, got {other:?}"),
+            }
+        }
+        // The objective limit is enforced at parse time.
+        match parse(
+            &format!("/goal {}", "x".repeat(GOAL_OBJECTIVE_LIMIT + 1)),
+            false,
+        ) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("the limit is"), "{notices:?}")
+            }
+            other => panic!("expected a limit notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/goal"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "goal"));
     }
 
     /// `/copy` copies the whole message, `/copy code` only its last block; anything else is

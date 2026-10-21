@@ -19,6 +19,9 @@ KNOWN_EVENTS = {
     "MemoryInjected", "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
     "ProjectTrustChanged", "UserBash",
     "BackgroundJobStarted", "BackgroundJobSettled",
+    "GoalSet", "GoalBudgetSet", "GoalProgress", "GoalDone",
+    "GoalPaused", "GoalResumed", "GoalDropped", "GoalWait",
+    "GoalBudgetExhausted",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -115,6 +118,23 @@ EXPECT = {
         events=7,
         skips=[],
         user_bash=[(5, "echo hi", False, 0), (6, "false", True, 1)],
+        repair={},
+    ),
+    "goal.jsonl": dict(
+        outcome="accept",
+        events=18,
+        skips=[],
+        goal=[
+            (1, "GoalSet"),
+            (10, "GoalProgress"),
+            (11, "GoalBudgetSet"),
+            (12, "GoalWait"),
+            (13, "GoalPaused"),
+            (14, "GoalResumed"),
+            (15, "GoalDone"),
+            (16, "GoalSet"),
+            (17, "GoalBudgetExhausted"),
+        ],
         repair={},
     ),
     "background-jobs.jsonl": dict(
@@ -815,6 +835,52 @@ def check_fixture(name, exp):
         for e in events:
             if e["event"] == "PermissionResolved" and e["critical"]:
                 raise Corruption(f"{name}: PermissionResolved 必须是 critical:false")
+    if "goal" in exp:
+        # ADR 0047：每个 `Goal*` 事件都是非 critical 审计（持久目标从它们 fold 出来，
+        # replay/repair 永远看不见）。形状：Set/BudgetSet 带可选的三元上限，
+        # Progress 带 note，Done 带可选 note，Wait 带 secs，BudgetExhausted 带 kind；
+        # Paused/Resumed/Dropped 的 data 是 `{}`。
+        got = [(e["seq"], e["event"]) for e in events if e["event"].startswith("Goal")]
+        if got != [tuple(x) for x in exp["goal"]]:
+            raise Corruption(f"{name}: goal events {got} != 期望 {exp['goal']}")
+        for e in events:
+            if not e["event"].startswith("Goal"):
+                continue
+            if e["critical"]:
+                raise Corruption(f"{name}: {e['event']} 必须是 critical:false")
+            data = e["data"]
+            if e["event"] in ("GoalSet", "GoalBudgetSet"):
+                if e["event"] == "GoalSet" and (
+                    not isinstance(data.get("objective"), str) or not data["objective"]
+                ):
+                    raise Corruption(f"{name}: seq {e['seq']}: GoalSet.objective 必须是非空字符串")
+                if e["event"] == "GoalBudgetSet" and "objective" in data:
+                    raise Corruption(f"{name}: seq {e['seq']}: GoalBudgetSet 不能带 objective")
+                for field in ("max_turns", "max_duration_secs", "max_tokens"):
+                    value = data.get(field)
+                    if value is not None and (
+                        not isinstance(value, int) or isinstance(value, bool) or value < 0
+                    ):
+                        raise Corruption(f"{name}: seq {e['seq']}: {field} 不是非负整数")
+            elif e["event"] == "GoalProgress":
+                if not isinstance(data.get("note"), str) or not data["note"]:
+                    raise Corruption(f"{name}: seq {e['seq']}: GoalProgress.note 必须是非空字符串")
+            elif e["event"] == "GoalDone":
+                note = data.get("note")
+                if note is not None and not isinstance(note, str):
+                    raise Corruption(f"{name}: seq {e['seq']}: GoalDone.note 不是字符串")
+            elif e["event"] in ("GoalPaused", "GoalResumed", "GoalDropped"):
+                if data != {}:
+                    raise Corruption(f"{name}: seq {e['seq']}: {e['event']} 的 data 必须是空对象")
+            elif e["event"] == "GoalWait":
+                secs = data.get("secs")
+                if not isinstance(secs, int) or isinstance(secs, bool) or secs <= 0:
+                    raise Corruption(f"{name}: seq {e['seq']}: GoalWait.secs 不是正整数")
+            elif e["event"] == "GoalBudgetExhausted":
+                if data.get("kind") not in ("turns", "duration", "tokens"):
+                    raise Corruption(f"{name}: seq {e['seq']}: GoalBudgetExhausted.kind 非法")
+            else:
+                raise Corruption(f"{name}: seq {e['seq']}: 未知的 Goal 事件 {e['event']}")
     if "background_jobs" in exp:
         starts = [
             (

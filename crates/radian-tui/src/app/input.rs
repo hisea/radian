@@ -103,6 +103,12 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// A `/goal` journal append finished (the result of [`Effect::GoalAppend`]): what to
+    /// apply on success, and whether the append held. A failure changes nothing.
+    GoalDone {
+        apply: goal_mode::GoalApply,
+        result: Result<(), String>,
+    },
     /// A wake-gate degrade fired (one per degrade): the wake-budget notice line. `update`
     /// shows a single line per burst (rewriting it with the latest count) and marks the
     /// session as wake-waiting for herdr until the next turn starts.

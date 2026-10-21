@@ -146,6 +146,9 @@ pub fn resolve_fork_point(parent: &Session, seq: Option<u64>) -> Result<ForkPoin
 pub async fn fork(request: ForkRequest) -> Result<ForkOutcome, ForkError> {
     let parent = open_parent(&request.parent_path, &request.parent_id)?;
     let point = resolve_fork_point(&parent, request.seq)?;
+    // ADR 0047: the parent's current goal (folded from its full event list, not just the
+    // fork point) rides into the child as paused.
+    let goal = crate::goal::fold(parent.events());
     drop(parent);
     let parent_journal =
         SessionJournal::resume(&request.parent_path, &request.parent_id).map_err(|source| {
@@ -154,7 +157,7 @@ pub async fn fork(request: ForkRequest) -> Result<ForkOutcome, ForkError> {
                 source,
             }
         })?;
-    let outcome = write_child_and_record(&request, &point, &parent_journal).await?;
+    let outcome = write_child_and_record(&request, &point, &goal, &parent_journal).await?;
     drop(parent_journal);
     Ok(outcome)
 }
@@ -168,8 +171,10 @@ pub async fn fork_with_journal(
 ) -> Result<ForkOutcome, ForkError> {
     let parent = open_parent(parent_journal.path(), &request.parent_id)?;
     let point = resolve_fork_point(&parent, request.seq)?;
+    // ADR 0047: same goal carry as [`fork`].
+    let goal = crate::goal::fold(parent.events());
     drop(parent);
-    write_child_and_record(&request, &point, parent_journal).await
+    write_child_and_record(&request, &point, &goal, parent_journal).await
 }
 
 fn open_parent(path: &std::path::Path, session_id: &str) -> Result<Session, ForkError> {
@@ -190,6 +195,7 @@ fn open_parent(path: &std::path::Path, session_id: &str) -> Result<Session, Fork
 async fn write_child_and_record(
     request: &ForkRequest,
     point: &ForkPoint,
+    goal: &Option<crate::goal::GoalState>,
     parent_journal: &SessionJournal,
 ) -> Result<ForkOutcome, ForkError> {
     let created = SessionCreatedData::forked(
@@ -247,6 +253,55 @@ async fn write_child_and_record(
             &temp_path,
             JournalError(format!("test seam: failing after {appended} messages")),
         ));
+    }
+    // ADR 0047: an active or paused goal rides into the child as paused (objective, budget
+    // and latest progress; the counters restart — the child is a new session with its own
+    // budget). A done, exhausted or dropped goal stays behind.
+    if let Some(goal) = goal
+        && matches!(
+            goal.status,
+            crate::goal::GoalStatus::Active | crate::goal::GoalStatus::Paused
+        )
+    {
+        let carried = [RuntimeEvent::GoalSet {
+            objective: goal.objective.clone(),
+            max_turns: goal.budget.max_turns,
+            max_duration_secs: goal.budget.max_duration_secs,
+            max_tokens: goal.budget.max_tokens,
+        }];
+        for event in carried {
+            if let Err(source) = child.append_runtime_event(event).await {
+                drop(child);
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(ForkError::Child {
+                    child_id: request.child_id.clone(),
+                    source,
+                });
+            }
+        }
+        if let Some(note) = goal.progress.clone()
+            && let Err(source) = child
+                .append_runtime_event(RuntimeEvent::GoalProgress { note })
+                .await
+        {
+            drop(child);
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(ForkError::Child {
+                child_id: request.child_id.clone(),
+                source,
+            });
+        }
+        if let Err(source) = child
+            .append_runtime_event(RuntimeEvent::GoalPaused {})
+            .await
+        {
+            drop(child);
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(ForkError::Child {
+                child_id: request.child_id.clone(),
+                source,
+            });
+        }
     }
     // Close the child (every append already fsynced), then publish it atomically.
     drop(child);

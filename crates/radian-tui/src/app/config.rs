@@ -70,6 +70,7 @@ impl App {
                 queued: HashSet::new(),
                 last_turn_failed: false,
                 loop_state: loop_mode::LoopState::default(),
+                goal_mode: GoalMode::default(),
                 session_ended: None,
                 turn_committed: true,
                 pending_fork: None,
@@ -290,29 +291,33 @@ impl App {
     /// Replaces the read handle with the host's projection, so the renderer reads the same
     /// facts the facade owns.
     /// The inputs to the herdr state function (ADR 0034 H2): the turn state, the pending
-    /// queue's length, whether the startup trust prompt is waiting, whether degraded
-    /// wake notices wait while idle, and this session's running background-job count (the
-    /// footer's `jobs` item reads the same start/settle pair, so there is no second source).
+    /// queue's length, whether the startup trust prompt is waiting, whether a block
+    /// waits while idle (a used-up wake budget, or a `/goal` budget stop, ADR 0047 —
+    /// one bit: the jobs rule treats both the same), and this session's running
+    /// background-job count (the footer's `jobs` item reads the same start/settle pair,
+    /// so there is no second source).
     pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool, bool, usize) {
         let trust = matches!(self.top_modal(), Some(Modal::Trust(_)));
         (
             self.session.projection.read().turn(),
             self.pending,
             trust,
-            self.session.wake_waiting,
+            self.session.wake_waiting || self.session.goal_mode.blocked,
             self.session.running_jobs.len(),
         )
     }
 
     /// What is blocking, for herdr's category-only message (ADR 0034 H2). The approval's tool
     /// name only - never the command, path or question body. A used-up wake budget reports
-    /// only while no modal claims the block.
+    /// only while no modal claims the block; a `/goal` budget stop (ADR 0047) reports with
+    /// the `goal budget` label until the next turn starts.
     pub fn herdr_blocked(&self) -> Option<radian_host::herdr::Blocked> {
         match self.top_modal() {
             Some(Modal::Approval(prompt)) => Some(radian_host::herdr::Blocked::Approval(
                 prompt.request.tool.clone(),
             )),
             Some(Modal::Question(_)) => Some(radian_host::herdr::Blocked::Question),
+            _ if self.session.goal_mode.blocked => Some(radian_host::herdr::Blocked::GoalBudget),
             _ if self.session.wake_waiting => Some(radian_host::herdr::Blocked::WakeBudget),
             _ => None,
         }
