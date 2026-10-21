@@ -66,9 +66,14 @@ and asserts the forced exit happened in under 1 s (i.e. it did not wait out the 
 |---|---|---|
 | M-S1 | remove the "second Ctrl-C of an open wind-down forces" check | ✅ caught: `second_sigint_exits_130` fails with `the CLI did not exit while stdin stayed open` (the forced exit never happens) |
 | M-S2 | revert to a fresh `tokio::signal::ctrl_c()` per loop iteration | ❌ not caught in 12 runs (0/12): with the state-gate test the second signal is sent while the loop is already awaiting, so the lost-signal window is too narrow to hit reliably. The single listener removes the whole class anyway; the original 2/15 reproduction is the evidence that the window was real. |
+| M-S3 | the forwarding task loops on a fresh `tokio::signal::ctrl_c()` per signal instead of one persistent `unix::signal` subscription | ✅ caught, but only under a pinned scheduler: six busy loops and the test pinned to the same four cores hang about one iteration in seven (the second Ctrl-C falls into the re-subscription gap; the hang-time stderr shows the turn still ending Cancelled and the prompt coming back, then silence). The persistent listener trips zero in 300 pinned iterations against the same load. |
 
 `second_sigint_exits_130` was then run **30 times** with `--no-fail-fast`; all 30 passed
-(0 failures). Outputs: `/tmp/a66-30runs/run-{1..30}.txt`.
+(0 failures). Outputs: `/tmp/a66-30runs/run-{1..30}.txt`. Unpinned stress stayed green
+later too (60 + 100 iterations); the gap only shows with the test and the load pinned
+to the same cores, where the forwarding task is preempted between forwarding the
+first signal and re-subscribing. Non-unix keeps the portable `ctrl_c()` loop: no
+persistent subscription exists there.
 
 ## Profiles, sandbox and permissions (Phase 3 / cli-tools)
 
