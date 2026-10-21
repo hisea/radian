@@ -28,8 +28,8 @@ pub(super) struct HerdrReporter {
 
 impl HerdrReporter {
     pub(super) fn maybe_report(&mut self, app: &App) {
-        let (turn, pending, trust) = app.herdr_state_inputs();
-        let state = radian_host::herdr::state(turn, pending, trust);
+        let (turn, pending, trust, wake_waiting) = app.herdr_state_inputs();
+        let state = radian_host::herdr::state(turn, pending, trust, wake_waiting);
         let message = (state == radian_host::herdr::State::Blocked)
             .then(|| radian_host::herdr::blocked_message(app.herdr_blocked().as_ref(), trust));
         if self.last.as_ref() != Some(&(state, message.clone())) {
@@ -105,7 +105,7 @@ fn metadata_tokens(app: &App) -> BTreeMap<String, Option<String>> {
         .map(|fraction| format!("{:.0}%", fraction * 100.0));
     // The status bar's tier string carries where the choice came from (`workspace (project)`,
     // ADR 0038 decision 3); the token wants the tier name only (decision 1's
-    // `safe | workspace | full`), so the source marker is dropped here.
+    // `workspace | full`), so the source marker is dropped here.
     let tier = app
         .session
         .projection

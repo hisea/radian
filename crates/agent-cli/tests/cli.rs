@@ -195,11 +195,11 @@ fn spawn_radian_command(exec: bool, args: &[&str], envs: &[(&str, &str)]) -> Chi
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", fresh_session_dir())
         // Tests must not read the user's catalog cache or reach the real models.dev. A fresh
-        // `HOME` isolates the cache; the catalog URL points at a closed local port, so a
-        // lookup fails fast and the window is unknown. A test that wants the catalog
-        // overrides both through `envs`.
+        // `HOME` isolates the cache; the catalog URL is the fast-failing sink
+        // ([`common::fast_catalog_url`]), so a lookup fails fast and the window is unknown.
+        // A test that wants the catalog overrides both through `envs`.
         .env("HOME", fresh_session_dir())
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         // No test may read the user's real config file: pin the whole `~/.radian` root and
         // drop `RADIAN_CONFIG` (either could otherwise point at a real file).
         .env("RADIAN_HOME", &home)
@@ -1715,7 +1715,7 @@ async fn system_prompt_is_sent() {
 #[tokio::test]
 async fn the_default_role_layers_are_sent() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
-    // A private home: the runtime tool list must not depend on the machine's real memory.
+    // A private home: the mounted tools must not depend on the machine's real memory.
     let home = scratch("default-role");
     let (code, _, _) = feed_and_wait(
         spawn_radian(
@@ -1738,20 +1738,20 @@ async fn the_default_role_layers_are_sent() {
         content.contains("You are radian, a coding agent"),
         "the default role: {content}"
     );
-    // ADR 0021 D7: an empty memory mounts no search, so the runtime tool list names no
+    // ADR 0021 D7: an empty memory mounts no search, so the tool definitions name no
     // memory tool at all.
     assert!(
         !content.contains("memory_search"),
-        "the runtime tool list: {content}"
+        "the mounted tools: {content}"
     );
     assert!(content.trim_end().ends_with("</session>"), "{content}");
     assert!(content.contains("model: m"), "{content}");
 }
 
-/// The `<runtime>` Unix-socket sentence follows the backend, not the tier: Linux bwrap
-/// does not restrict Unix sockets (the accepted gap), so a `workspace` session there must
-/// not tell the model otherwise; macOS seatbelt does, so the sentence stays exactly as
-/// today. Setting the flag from the tier again fails the Linux half.
+/// The `<runtime>` Unix-socket sentence follows the backend: Linux bwrap denies every
+/// Unix socket in `workspace` (slice 0's seccomp filter), so the sentence is present;
+/// macOS seatbelt does too, so the sentence stays exactly as today. Setting the flag
+/// from the tier again fails the Linux half.
 #[tokio::test]
 async fn the_workspace_system_prompt_unix_socket_sentence_follows_the_backend() {
     let dir = scratch("unix-sockets-backend");
@@ -1784,8 +1784,8 @@ async fn the_workspace_system_prompt_unix_socket_sentence_follows_the_backend() 
     let content = system["content"].as_str().unwrap_or_default();
     if cfg!(target_os = "linux") {
         assert!(
-            !content.contains("Outbound Unix socket connections are denied"),
-            "bwrap does not restrict Unix sockets, so the sentence must be gone: {content}"
+            content.contains("Outbound Unix socket connections are denied"),
+            "bwrap denies every Unix socket in workspace, so the sentence is present: {content}"
         );
     } else {
         assert!(
@@ -1795,11 +1795,58 @@ async fn the_workspace_system_prompt_unix_socket_sentence_follows_the_backend() 
     }
 }
 
-/// ADR 0036: the `safe` tier mounts no `shell`, so layer 0a does not advertise one.
+/// The `full` tier has no sandbox and a reachable network (ADR 0016 decision 1, ADR
+/// 0043 decision 5), so its `<runtime>` facts say so in plain sentences.
 #[tokio::test]
-async fn the_safe_tier_runtime_layer_has_no_shell() {
+async fn the_full_system_prompt_states_network_on() {
+    let dir = scratch("full-network-on");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, _, _) = feed_and_wait(
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "full",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let messages = messages_of(&server, 0);
+    let system = &messages.as_array().expect("messages")[0];
+    let content = system["content"].as_str().unwrap_or_default();
+    assert!(
+        content.contains("There is no sandbox."),
+        "full has no sandbox: {content}"
+    );
+    assert!(
+        content.contains("The network is on."),
+        "full has a reachable network: {content}"
+    );
+    assert!(
+        !content.contains("Network: off."),
+        "no stale off flag beside the no-sandbox facts: {content}"
+    );
+}
+
+/// The removed tier name is unknown: `--profile safe` fails like any typo (fail closed),
+/// and never runs the model.
+#[tokio::test]
+async fn profile_safe_is_rejected_as_an_unknown_tier() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
         spawn_radian(
             &[
                 "--model",
@@ -1816,14 +1863,14 @@ async fn the_safe_tier_runtime_layer_has_no_shell() {
         "",
     )
     .await;
-    assert_eq!(code, 0);
-    let messages = messages_of(&server, 0);
-    let system = &messages.as_array().expect("messages")[0];
-    let content = system["content"].as_str().unwrap_or_default();
-    let runtime = content.split("</runtime>").next().unwrap_or(content);
+    assert_ne!(code, 0, "an unknown tier must fail: {stderr}");
     assert!(
-        !runtime.contains("- shell:"),
-        "the safe tier has no shell tool:\n{runtime}"
+        stderr.contains("'safe'"),
+        "the refusal must name the problem: {stderr}"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "the model must never run for an unknown tier"
     );
 }
 
@@ -1850,7 +1897,8 @@ async fn turn_timeout_ends_the_turn() {
     )
     .await;
 
-    assert_eq!(code, 1);
+    // A turn that hits the deadline ends Cancelled(DeadlineExceeded): exit 3 (ADR 0044).
+    assert_eq!(code, 3, "a deadline-exceeded turn exits 3: {stderr}");
     assert!(stderr.contains("DeadlineExceeded"), "{stderr}");
     assert!(
         start.elapsed() < Duration::from_secs(6),
@@ -2712,8 +2760,12 @@ async fn full_is_the_default_and_no_write_tools_without_a_workspace() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("done"), "{stdout}");
-    // The default is named on startup, and it is `full` with no sandbox.
+    // The default is named on startup, and it is `full` with no sandbox and no prompts.
     assert!(stderr.contains("[profile] full"), "{stderr}");
+    assert!(
+        stderr.contains("no prompts"),
+        "the default must say nothing prompts: {stderr}"
+    );
     assert!(
         stderr.contains("[sandbox] no sandbox:"),
         "the default must say there is no sandbox: {stderr}"
@@ -2826,7 +2878,7 @@ async fn a_remembered_tier_is_narrowed_by_the_project() {
     let dir = scratch("project-narrows");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    write_project_config(&ws, "[permissions]\nprofile = \"safe\"\n");
+    write_project_config(&ws, "[permissions]\nprofile = \"workspace\"\n");
     let rh = dir.join("rh");
     let access = rh.join("access");
     std::fs::create_dir_all(&access).unwrap();
@@ -2834,7 +2886,7 @@ async fn a_remembered_tier_is_narrowed_by_the_project() {
     write_file(
         &access,
         "access.json",
-        &format!("{{\"{}\": \"workspace\"}}\n", key.display()),
+        &format!("{{\"{}\": \"full\"}}\n", key.display()),
     );
     let server = MockServer::start(vec![text_reply("done")]).await;
 
@@ -2858,10 +2910,10 @@ async fn a_remembered_tier_is_narrowed_by_the_project() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stderr.contains("[access] safe (from project config)"),
+        stderr.contains("[access] workspace (from project config)"),
         "{stderr}"
     );
-    assert!(stderr.contains("[profile] safe"), "{stderr}");
+    assert!(stderr.contains("[profile] workspace"), "{stderr}");
 }
 
 /// ADR 0043 decision 2: an explicit `--profile` wins, and the startup line still names what
@@ -3127,15 +3179,34 @@ fn shell_reply(id: &str, command: &str) -> Reply {
     tool_reply(id, "shell", &json!({"command": command}).to_string())
 }
 
-/// 3: a shell command asks; "allow once" runs it; the *next* identical command asks again.
+/// A shell call that asks to leave the sandbox: the ask-mechanics tests below use these,
+/// because slice 1 of `sandbox-auto-allow-shell` lets a sandboxed `workspace` shell run
+/// without asking. An approved outside call really runs unsandboxed, so these stay on
+/// harmless `echo` commands.
+fn outside_reply(id: &str, command: &str) -> Reply {
+    tool_reply(
+        id,
+        "shell",
+        &json!({
+            "command": command,
+            "outside_sandbox": true,
+            "outside_sandbox_reason": "the test leaves the sandbox on purpose",
+        })
+        .to_string(),
+    )
+}
+
+/// 3: a shell call that leaves the sandbox asks; "allow once" runs it; the *next*
+/// identical call asks again. Runs under `--profile workspace` with `outside_sandbox`
+/// calls — a sandboxed shell no longer asks (slice 1 of `sandbox-auto-allow-shell`).
 #[tokio::test]
 async fn a_shell_command_asks_every_time_when_allowed_once() {
     let dir = scratch("shell-ask");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![
-        shell_reply("c1", "echo hi"),
-        shell_reply("c2", "echo hi"),
+        outside_reply("c1", "echo hi"),
+        outside_reply("c2", "echo hi"),
         text_reply("done"),
     ])
     .await;
@@ -3148,6 +3219,8 @@ async fn a_shell_command_asks_every_time_when_allowed_once() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &[],
     );
@@ -3174,20 +3247,28 @@ async fn a_shell_command_asks_every_time_when_allowed_once() {
 }
 
 /// 4: "allow for this session" covers the next call in the same turn; a resumed session has
-/// no grant and asks again.
+/// no grant and asks again. Uses `outside_sandbox` calls: a sandboxed `workspace` shell
+/// no longer asks (slice 1 of `sandbox-auto-allow-shell`), and the grant never crosses
+/// the sandbox boundary.
 #[tokio::test]
 async fn allow_for_session_covers_the_turn_and_not_a_resume() {
     let sessions = fresh_session_dir();
     let dir = scratch("shell-session");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
+    let outside_args = json!({
+        "command": "echo hi",
+        "outside_sandbox": true,
+        "outside_sandbox_reason": "the test leaves the sandbox on purpose",
+    })
+    .to_string();
     let two_calls = Reply::sse(&[
         chunk(
             json!({"tool_calls": [
                 {"index": 0, "id": "c1", "type": "function",
-                 "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}},
+                 "function": {"name": "shell", "arguments": outside_args}},
                 {"index": 1, "id": "c2", "type": "function",
-                 "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}}
+                 "function": {"name": "shell", "arguments": outside_args.clone()}}
             ]}),
             None,
         ),
@@ -3196,7 +3277,7 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
     let server = MockServer::start(vec![
         two_calls,
         text_reply("done"),
-        shell_reply("c3", "echo hi"),
+        outside_reply("c3", "echo hi"),
         text_reply("done again"),
     ])
     .await;
@@ -3209,6 +3290,8 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
             "--session-id",
             "s-session",
             "--session-dir",
@@ -3243,6 +3326,8 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
             "--resume",
             "s-session",
             "--session-dir",
@@ -3259,16 +3344,23 @@ async fn allow_for_session_covers_the_turn_and_not_a_resume() {
     assert!(stderr.contains("[y/N]"), "resume must ask again: {stderr}");
 }
 
-/// 5: an allow rule is matched at the subcommand level, so a composite command always asks.
+/// Slice 1 of `sandbox-auto-allow-shell`: a compound runs without a prompt inside the
+/// sandbox — the tier's blanket `allow` covers every segment (`approver = policy`), so
+/// no allow rule is involved at all. The unsandboxed ask stays covered end to end by the
+/// `outside_sandbox` tests (`a_shell_command_asks_every_time_when_allowed_once`,
+/// `allow_for_session_covers_the_turn_and_not_a_resume`,
+/// `never_turns_ask_into_a_denial`, `every_decision_is_audited_once_with_the_right_approver`);
+/// the unit tests in `workspace_sandbox.rs` pin the unsandboxed compound ask.
 #[tokio::test]
-async fn a_composite_shell_command_always_asks() {
-    let dir = scratch("composite");
+async fn a_sandboxed_compound_shell_command_runs_without_a_prompt() {
+    let sessions = fresh_session_dir();
+    let dir = scratch("compound-sandboxed");
     let ws = dir.join("ws");
-    let outside = dir.join("outside");
     std::fs::create_dir_all(&ws).unwrap();
-    std::fs::create_dir_all(&outside).unwrap();
-    let sentinel = outside.join("escaped.txt");
-    let composite = format!("git status; touch {}", sentinel.display());
+    // Inside the workspace: the shell really runs, and a confined sandbox still lets
+    // workspace-local writes through, so the marker proves execution either way.
+    let marker = ws.join("compound-ran.txt");
+    let composite = format!("git status; touch {}", marker.display());
     let server = MockServer::start(vec![
         shell_reply("c1", "git status"),
         shell_reply("c2", &composite),
@@ -3284,48 +3376,117 @@ async fn a_composite_shell_command_always_asks() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
-            "--allow-shell-command",
-            "git status",
+            "--profile",
+            "workspace",
+            "--session-id",
+            "s-compound",
+            "--session-dir",
+            sessions.to_str().unwrap(),
         ],
         &[],
     );
     child.write("go\n").await;
-    // The simple command is allowed by the rule; only the composite asks.
-    child.wait_for_stderr_count("[y/N]", 1).await;
-    child.write("n\n").await;
+    // No prompt to wait for: gate on the model's third request (two tool calls, then the
+    // final text) instead.
+    wait_until("both shell calls to reach the model", || {
+        server.requests().len() >= 3
+    })
+    .await;
     child.write("/exit\n").await;
     let (code, _, stderr) = child.finish().await;
 
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(
-        stderr.matches("[y/N]").count(),
-        1,
-        "only the composite may ask: {stderr}"
-    );
     assert!(
-        !sentinel.exists(),
-        "a composite command must never be let through by an allow rule"
+        !stderr.contains("[y/N]"),
+        "nothing may ask for a sandboxed shell: {stderr}"
     );
+    assert!(marker.exists(), "the compound ran: {stderr}");
     let simple = tool_result_for(&server, 1, "c1");
     assert!(
         simple.contains("$ git status") && !simple.contains("denied"),
-        "the allowed simple command ran: {simple}"
+        "the simple command ran: {simple}"
     );
-    let composite = tool_result_for(&server, 2, "c2");
+    let compound = tool_result_for(&server, 2, "c2");
     assert!(
-        composite.contains("denied"),
-        "the composite was denied: {composite}"
+        !compound.contains("denied"),
+        "the compound was not denied: {compound}"
+    );
+
+    let raw = std::fs::read_to_string(sessions.join("s-compound.jsonl")).unwrap();
+    let decisions: Vec<Value> = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| value["event"] == "PermissionResolved")
+        .map(|value| value["data"].clone())
+        .collect();
+    for call in ["c1", "c2"] {
+        let decision = decisions
+            .iter()
+            .find(|d| d["call_id"] == call)
+            .unwrap_or_else(|| panic!("no decision for {call}: {decisions:#?}"));
+        assert_eq!(decision["decision"], "allow", "{decision:#?}");
+        assert_eq!(
+            decision["approver"], "policy",
+            "the tier blanket decided it: {decision:#?}"
+        );
+    }
+}
+
+/// 6: `--approval never` turns an `ask` into a denial: the command never runs. Uses an
+/// `outside_sandbox` call — a sandboxed `workspace` shell no longer asks (slice 1 of
+/// `sandbox-auto-allow-shell`).
+#[tokio::test]
+async fn never_turns_ask_into_a_denial() {
+    let dir = scratch("never-deny");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![outside_reply("c1", "echo hi"), text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "--approval",
+                "never",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.contains("outside the sandbox"),
+        "the denial must name what was refused: {result}"
+    );
+    assert!(
+        !result.contains("exit code: 0"),
+        "the command never runs: {result}"
     );
 }
 
-/// 6: `--yes` removes the question; it does not override a `deny` rule.
+/// `full` runs shell with no terminal and no `--yes`: nothing asks, so the command runs
+/// and only real output comes back (`42` cannot come from a denial: denials echo the
+/// command, which never contains it). Reverting the tier's blanket shell `allow` denies
+/// the call, so this test is that mutation's end-to-end catcher.
 #[tokio::test]
-async fn yes_does_not_bypass_a_deny_rule() {
-    let dir = scratch("deny");
+async fn full_runs_shell_without_a_terminal_and_without_yes() {
+    let dir = scratch("full-shell-no-yes");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![
-        tool_reply("c1", "write", r#"{"path":"new.txt","content":"x"}"#),
+        shell_reply("c1", "echo $((40 + 2))"),
         text_reply("done"),
     ])
     .await;
@@ -3340,8 +3501,7 @@ async fn yes_does_not_bypass_a_deny_rule() {
                 "--workspace",
                 ws.to_str().unwrap(),
                 "--profile",
-                "safe",
-                "--yes",
+                "full",
                 "-p",
                 "go",
             ],
@@ -3352,24 +3512,119 @@ async fn yes_does_not_bypass_a_deny_rule() {
     .await;
 
     assert_eq!(code, 0, "{stderr}");
-    let result = tool_result_content(&server, 1);
     assert!(
-        result.contains("denied") || result.contains("safe mode does not modify files"),
-        "{result}"
+        !stderr.contains("[y/N]"),
+        "nothing may ask in full: {stderr}"
+    );
+    let result = tool_result_for(&server, 1, "c1");
+    assert!(result.contains("42"), "the command ran: {result}");
+    assert!(!result.contains("denied"), "{result}");
+    assert!(!result.contains("not approved"), "{result}");
+}
+
+/// Slice 1 of `sandbox-auto-allow-shell`: headless `radian exec --profile workspace`
+/// without `--yes` runs a sandboxed shell with no prompt — the tier's blanket `allow`
+/// answers it (`approver = policy`), the way `full` already did. Reverting the blanket
+/// `allow` denies the call (no terminal to ask in), so this test is that mutation's
+/// end-to-end catcher.
+#[tokio::test]
+async fn workspace_runs_a_sandboxed_shell_without_a_terminal_and_without_yes() {
+    let dir = scratch("workspace-shell-no-yes");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        shell_reply("c1", "echo $((40 + 2))"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !stderr.contains("[y/N]"),
+        "nothing may ask for a sandboxed shell: {stderr}"
+    );
+    let result = tool_result_for(&server, 1, "c1");
+    assert!(result.contains("42"), "the command ran: {result}");
+    assert!(!result.contains("denied"), "{result}");
+    assert!(!result.contains("not approved"), "{result}");
+}
+
+/// Slice 1 of `sandbox-auto-allow-shell`: the same headless run with an
+/// `outside_sandbox` request is denied with a clear result — `ask` with no approver is
+/// denied as before, and nothing re-runs the command outside automatically. Letting it
+/// skip `ask` runs the call, so this test is that mutation's end-to-end catcher.
+#[tokio::test]
+async fn workspace_outside_sandbox_is_denied_without_a_terminal() {
+    let dir = scratch("workspace-outside-no-yes");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        outside_reply("c1", "echo SHOULD-NOT-RUN"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let result = tool_result_for(&server, 1, "c1");
+    assert!(
+        result.contains("not approved") || result.contains("denied"),
+        "the outside call must be denied with a clear result: {result}"
     );
     assert!(
-        !ws.join("new.txt").exists(),
-        "--yes must not write when a rule denies"
+        !result.contains("exit code: 0"),
+        "the command must not have run: {result}"
     );
 }
 
 /// 7: Ctrl-C while waiting for a shell approval cancels the turn; the process does not hang.
+/// Uses an `outside_sandbox` call so there is an approval to cancel (a sandboxed
+/// `workspace` shell no longer asks since slice 1).
 #[tokio::test]
 async fn cancelling_at_the_shell_approval_does_not_hang() {
     let dir = scratch("shell-cancel");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let server = MockServer::start(vec![shell_reply("c1", "echo hi"), text_reply("done")]).await;
+    let server = MockServer::start(vec![outside_reply("c1", "echo hi"), text_reply("done")]).await;
 
     let mut child = Running::spawn(
         &[
@@ -3379,6 +3634,8 @@ async fn cancelling_at_the_shell_approval_does_not_hang() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
         ],
         &[],
     );
@@ -3414,7 +3671,10 @@ async fn every_decision_is_audited_once_with_the_right_approver() {
                 {"index": 0, "id": "r1", "type": "function",
                  "function": {"name": "read", "arguments": "{\"path\":\"f.txt\"}"}},
                 {"index": 1, "id": "s1", "type": "function",
-                 "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}},
+                 "function": {"name": "shell", "arguments": json!({
+                     "command": "echo hi",
+                     "outside_sandbox": true,
+                     "outside_sandbox_reason": "the test leaves the sandbox on purpose"}).to_string()}},
                 {"index": 2, "id": "w1", "type": "function",
                  "function": {"name": "write",
                               "arguments": format!("{{\"path\":{},\"content\":\"x\"}}", json!(outside_file.to_string_lossy()))}}
@@ -3433,6 +3693,8 @@ async fn every_decision_is_audited_once_with_the_right_approver() {
             &server.base_url,
             "--workspace",
             ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
             "--session-id",
             "s-audit",
             "--session-dir",
@@ -3441,8 +3703,9 @@ async fn every_decision_is_audited_once_with_the_right_approver() {
         &[],
     );
     child.write("go\n").await;
-    // `read` is allowed by a rule (no prompt); `shell` asks; `write` outside the workspace
-    // has no rule and falls to ask.
+    // `read` is allowed by a rule (no prompt); a sandboxed `shell` no longer asks either
+    // (slice 1 of `sandbox-auto-allow-shell`), so the audited `ask` is the
+    // `outside_sandbox` call; `write` outside the workspace has no rule and falls to ask.
     child.wait_for_stderr_count("[y/N]", 1).await;
     child.write("y\n").await;
     child.wait_for_stderr_count("[y/N]", 2).await;
@@ -3528,6 +3791,10 @@ async fn shell_cannot_write_outside_the_workspace() {
     assert_ne!(
         exit, "0",
         "the sandboxed command must fail (a redirection denied): {result}"
+    );
+    assert!(
+        result.contains("sandbox denied: filesystem-write"),
+        "the failure must carry the sandbox marker: {result}"
     );
     assert!(
         !target.exists(),
@@ -3847,7 +4114,7 @@ fn spawn_radian_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> 
         .env("RADIAN_SESSION_DIR", session_dir)
         // Isolate the catalog cache, the `~/.radian` root and the network, like `spawn_radian`.
         .env("HOME", fresh_session_dir())
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         .env("RADIAN_HOME", &home)
         .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
@@ -4079,6 +4346,651 @@ async fn a_bad_mcp_config_leaves_no_session() {
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains(bad.to_str().unwrap()), "{stderr}");
     assert_session_dir_empty(&session_dir);
+}
+
+// ---------- user [mcp] (ADR 0008 §8) ----------
+
+/// Writes a user `config.toml` whose `[mcp]` points one `fx` server at the fixture,
+/// logging to `log`. `form` is `"servers"` (`[[mcp.servers]]`) or `"mcpServers"`
+/// (`[mcp.mcpServers.fx]`).
+fn mcp_user_config(dir: &Path, form: &str, log: &Path) -> PathBuf {
+    let fixture = fixture_bin();
+    let body = match form {
+        "servers" => format!(
+            "schema_version = 1\n[[mcp.servers]]\nid = \"fx\"\ncommand = \"{}\"\n\
+             [mcp.servers.env]\nFIXTURE_LOG = \"{}\"\n",
+            fixture.display(),
+            log.display()
+        ),
+        _ => format!(
+            "schema_version = 1\n[mcp.mcpServers.fx]\ncommand = \"{}\"\n\
+             [mcp.mcpServers.fx.env]\nFIXTURE_LOG = \"{}\"\n",
+            fixture.display(),
+            log.display()
+        ),
+    };
+    write_file(dir, "user-config.toml", &body)
+}
+
+/// `[mcp]` with `[[mcp.servers]]` reaches the session: the fixture echo runs with no
+/// `--mcp-config` on the command line.
+#[tokio::test]
+async fn mcp_servers_from_the_user_config_run() {
+    let dir = scratch("mcp-user-servers");
+    let log = dir.join("fixture.log");
+    let config = mcp_user_config(&dir, "servers", &log);
+    let server = MockServer::start(echo_then("done")).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+}
+
+/// `[mcp]` with `[mcp.mcpServers.fx]` reaches the session the same way.
+#[tokio::test]
+async fn mcp_mcp_servers_from_the_user_config_run() {
+    let dir = scratch("mcp-user-shared");
+    let log = dir.join("fixture.log");
+    let config = mcp_user_config(&dir, "mcpServers", &log);
+    let server = MockServer::start(echo_then("done")).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+}
+
+/// On an id collision the `--mcp-config` file wins: only its server process ever starts
+/// (the config's `FIXTURE_LOG` stays empty), and one `[mcp]` warning names the id.
+#[tokio::test]
+async fn an_mcp_id_collision_uses_the_command_line_with_one_warning() {
+    let dir = scratch("mcp-collision");
+    let config_log = dir.join("config-fixture.log");
+    let config_path = mcp_user_config(&dir, "servers", &config_log);
+    let file_log = dir.join("file-fixture.log");
+    let mut file_env = serde_json::Map::new();
+    file_env.insert(
+        "FIXTURE_LOG".to_owned(),
+        serde_json::Value::String(file_log.to_string_lossy().into_owned()),
+    );
+    let file = write_file(
+        &dir,
+        "mcp.json",
+        &json!({"servers": [{
+            "id": "fx",
+            "command": fixture_bin(),
+            "env": file_env,
+        }]})
+        .to_string(),
+    );
+    let server = MockServer::start(echo_then("done")).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config_path.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--mcp-config",
+                file.to_str().unwrap(),
+                "-p",
+                "go",
+                "--yes",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+    // The file's server ran; the config's never started.
+    assert!(
+        !log_lines(&file_log).is_empty(),
+        "the winning server must log its methods"
+    );
+    assert!(
+        std::fs::read_to_string(&config_log)
+            .unwrap_or_default()
+            .is_empty(),
+        "the config's colliding server must never start"
+    );
+    let collisions: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("[mcp]") && line.contains("--mcp-config"))
+        .collect();
+    assert_eq!(collisions.len(), 1, "{stderr}");
+    assert!(collisions[0].contains("`fx`"), "{stderr}");
+}
+
+/// Both `[mcp]` forms at once is a config error: startup refuses before any session file
+/// exists, like a malformed `--mcp-config`.
+#[tokio::test]
+async fn both_mcp_config_forms_are_refused_before_any_session() {
+    let dir = scratch("mcp-both-forms");
+    let session_dir = dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let config = write_file(
+        &dir,
+        "user-config.toml",
+        "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n[mcp.mcpServers]\n",
+    );
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_in(
+            &session_dir,
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--session-dir",
+                session_dir.to_str().unwrap(),
+                "--session-id",
+                "mcp-both-forms",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("cannot be combined"), "{stderr}");
+    assert_session_dir_empty(&session_dir);
+}
+
+/// `--no-config-mcp` (the `explore` subagent child's flag) ignores the config file's
+/// `[mcp]`: the fixture server never starts, so the model is told there is no such
+/// tool. The same config without the flag starts the server (the control, so the test
+/// cannot pass for the wrong reason: a broken fixture path would fail the control, not
+/// silently pass the flag case).
+#[tokio::test]
+async fn no_config_mcp_ignores_the_config_mcp_section() {
+    for (name, no_config_mcp) in [("flag", true), ("control", false)] {
+        let dir = scratch(&format!("no-config-mcp-{name}"));
+        let log = dir.join("fixture.log");
+        let config = mcp_user_config(&dir, "servers", &log);
+        let server = MockServer::start(echo_then("done")).await;
+        let mut args = vec![
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "-p",
+            "go",
+            "--yes",
+        ];
+        if no_config_mcp {
+            args.push("--no-config-mcp");
+        }
+
+        let (code, _, stderr) = feed_and_wait(spawn_radian(&args, &[]), "").await;
+
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let started = !std::fs::read_to_string(&log).unwrap_or_default().is_empty();
+        if no_config_mcp {
+            assert!(!started, "{name}: the config server must never start");
+            assert_ne!(
+                tool_result_content(&server, 1),
+                r#"{"hello":"mcp"}"#,
+                "{name}: no MCP tool may be offered"
+            );
+        } else {
+            assert!(started, "{name}: the control must start the config server");
+            assert_eq!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+        }
+    }
+}
+
+// ---------- project .mcp.json (slice B2) ----------
+
+/// Writes `<ws>/.mcp.json` pointing one `fx` server at the fixture, in the shared
+/// `mcpServers` form, with `extra_env` merged into the server's `env`.
+fn mcp_project_config(ws: &Path, log: &Path, extra_env: &[(&str, &str)]) -> PathBuf {
+    let mut env = serde_json::Map::new();
+    env.insert(
+        "FIXTURE_LOG".to_owned(),
+        json!(log.to_string_lossy().into_owned()),
+    );
+    for (key, value) in extra_env {
+        env.insert((*key).to_owned(), json!(value));
+    }
+    write_file(
+        ws,
+        ".mcp.json",
+        &json!({"mcpServers": {"fx": {"command": fixture_bin(), "env": env}}}).to_string(),
+    )
+}
+
+/// A minimal user config with no `[mcp]` section.
+fn minimal_user_config(dir: &Path) -> PathBuf {
+    write_file(dir, "user-config.toml", "schema_version = 1\n")
+}
+
+/// B2: an untrusted workspace starts no project server process (the fixture log stays
+/// empty) and the startup line says the file was not loaded; `--trust` loads it (the
+/// control, so the test cannot pass for the wrong reason: a broken fixture path would
+/// fail the trusted case, not silently pass the untrusted one). The mutation (untrusted
+/// loads too) fails the untrusted assertions.
+#[tokio::test]
+async fn project_mcp_loads_only_when_trusted() {
+    for (name, trust) in [("untrusted", false), ("trusted", true)] {
+        let dir = scratch(&format!("project-mcp-{name}"));
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let log = dir.join("fixture.log");
+        mcp_project_config(&ws, &log, &[]);
+        let config = minimal_user_config(&dir);
+        let server = MockServer::start(echo_then("done")).await;
+        let mut args = vec![
+            "--config",
+            config.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "-p",
+            "go",
+            "--yes",
+        ];
+        if trust {
+            args.push("--trust");
+        }
+        let (code, _, stderr) = feed_and_wait(spawn_radian(&args, &[]), "").await;
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let started = !std::fs::read_to_string(&log).unwrap_or_default().is_empty();
+        if trust {
+            assert!(
+                stderr.contains("project .mcp.json: loaded 1 server"),
+                "{name}: {stderr}"
+            );
+            assert!(started, "{name}: the project server must start");
+            assert_eq!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+        } else {
+            assert!(!started, "{name}: untrusted must start no project server");
+            assert!(
+                stderr.contains("project .mcp.json not loaded (untrusted)"),
+                "{name}: {stderr}"
+            );
+            assert_ne!(tool_result_content(&server, 1), r#"{"hello":"mcp"}"#);
+        }
+    }
+}
+
+/// B2: a trusted project that edits its `.mcp.json` gets the new content on restart with
+/// no new question: run 1 loads the fixture server, run 2 (only a remote entry left)
+/// loads nothing and warns skipped. The trust decision is seeded in a private
+/// `RADIAN_HOME`, like a previous `/trust` choice.
+#[tokio::test]
+async fn a_trusted_project_reloads_an_edited_mcp_json_without_reasking() {
+    let dir = scratch("project-mcp-restart");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let canonical = ws.canonicalize().unwrap();
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join("trust")).unwrap();
+    std::fs::write(
+        home.join("trust/trust.json"),
+        format!(r#"{{"{}": true}}"#, canonical.to_string_lossy()),
+    )
+    .unwrap();
+    let config = minimal_user_config(&dir);
+    let home_str = home.to_str().unwrap().to_owned();
+
+    // Run 1: one stdio server at the fixture.
+    let log = dir.join("fixture.log");
+    mcp_project_config(&ws, &log, &[]);
+    let server = MockServer::start(echo_then("done")).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+            ],
+            &[("RADIAN_HOME", home_str.as_str())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("project .mcp.json: loaded 1 server"),
+        "run 1: {stderr}"
+    );
+    assert!(
+        !std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+        "run 1: the project server must start"
+    );
+    assert!(
+        !stderr.contains("trust them?"),
+        "run 1: must not re-ask: {stderr}"
+    );
+    drop(server);
+
+    // Run 2: the project file now holds only a remote entry.
+    write_file(
+        &ws,
+        ".mcp.json",
+        r#"{"mcpServers":{"web": {"type": "http", "url": "https://example.com/mcp"}}}"#,
+    );
+    let server = MockServer::start(echo_then("done")).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+            ],
+            &[("RADIAN_HOME", home_str.as_str())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("project .mcp.json: loaded 0 servers"),
+        "run 2 reads the edited file: {stderr}"
+    );
+    assert!(stderr.contains("skipped `web`"), "run 2: {stderr}");
+    assert!(
+        !stderr.contains("trust them?"),
+        "run 2: must not re-ask: {stderr}"
+    );
+}
+
+/// B2: a credential variable in a project entry expands to empty end to end (the fixture
+/// `env` tool reads `TOKEN` back), while the same entry as a user `[mcp]` section expands
+/// as today. The mutation (project entries expand credentials) fails the first assertion.
+#[tokio::test]
+async fn project_credential_variables_expand_to_empty_end_to_end() {
+    let replies = || {
+        vec![
+            tool_reply("call_1", "fx__env", r#"{"name":"PROBE"}"#),
+            text_reply("done"),
+        ]
+    };
+    // The project entry: blanked.
+    let dir = scratch("project-mcp-credential");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let log = dir.join("fixture.log");
+    // `PROBE` (not a `*_TOKEN`-style sensitive name): the user config below must parse —
+    // a bare string on a sensitive key is refused as a plaintext secret (ADR 0008 §3).
+    // The blanking keys on the *variable*, not the key, so the probe still proves it.
+    mcp_project_config(&ws, &log, &[("PROBE", "${ANTHROPIC_API_KEY}")]);
+    let config = minimal_user_config(&dir);
+    let server = MockServer::start(replies()).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+                "--trust",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-b2-live-test")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        tool_result_content(&server, 1),
+        "",
+        "the project server must not see the shell credential: {stderr}"
+    );
+    drop(server);
+    // The same entry as a user `[mcp]` section: expanded as today.
+    let dir = scratch("user-mcp-credential");
+    let log = dir.join("fixture.log");
+    let fixture = fixture_bin();
+    let config = write_file(
+        &dir,
+        "user-config.toml",
+        &format!(
+            "schema_version = 1\n[mcp.mcpServers.fx]\ncommand = \"{}\"\n\
+             [mcp.mcpServers.fx.env]\nFIXTURE_LOG = \"{}\"\nPROBE = \"${{ANTHROPIC_API_KEY}}\"\n",
+            fixture.display(),
+            log.display(),
+        ),
+    );
+    let server = MockServer::start(replies()).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-b2-live-test")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        tool_result_content(&server, 1),
+        "sk-b2-live-test",
+        "user entries keep today's expansion: {stderr}"
+    );
+}
+
+/// B2: `--no-config-mcp` (the `explore` child's flag) skips the project file even when
+/// trusted: no process starts, one line says so.
+#[tokio::test]
+async fn no_config_mcp_skips_the_project_file() {
+    let dir = scratch("project-mcp-no-config");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let log = dir.join("fixture.log");
+    mcp_project_config(&ws, &log, &[]);
+    let config = minimal_user_config(&dir);
+    let server = MockServer::start(echo_then("done")).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+                "--trust",
+                "--no-config-mcp",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+        "the project server must never start"
+    );
+    assert!(
+        stderr.contains("project .mcp.json skipped (--no-config-mcp)"),
+        "{stderr}"
+    );
+}
+
+/// B2: the project file loses to both user sources: `--mcp-config` wins the `fx`
+/// collision and `[mcp]` wins the `cfg` collision, each with one warning naming the id
+/// and the winning side; only the winning servers' processes ever start.
+#[tokio::test]
+async fn a_project_collision_uses_the_command_line_with_one_warning() {
+    let dir = scratch("project-mcp-collision");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // The project file holds both colliding ids.
+    let project_fx_log = dir.join("project-fx.log");
+    let project_cfg_log = dir.join("project-cfg.log");
+    let fixture = fixture_bin();
+    write_file(
+        &ws,
+        ".mcp.json",
+        &json!({"mcpServers": {
+            "fx": {"command": fixture,
+                    "env": {"FIXTURE_LOG": project_fx_log.to_string_lossy().into_owned()}},
+            "cfg": {"command": fixture,
+                    "env": {"FIXTURE_LOG": project_cfg_log.to_string_lossy().into_owned()}},
+        }})
+        .to_string(),
+    );
+    // `[mcp]` holds `cfg`; `--mcp-config` holds `fx`.
+    let cfg_log = dir.join("cfg.log");
+    let config = write_file(
+        &dir,
+        "user-config.toml",
+        &format!(
+            "schema_version = 1\n[mcp.mcpServers.cfg]\ncommand = \"{}\"\n\
+             [mcp.mcpServers.cfg.env]\nFIXTURE_LOG = \"{}\"\n",
+            fixture.display(),
+            cfg_log.display(),
+        ),
+    );
+    let file_fx_log = dir.join("file-fx.log");
+    let file = write_file(
+        &dir,
+        "mcp.json",
+        &json!({"servers": [{
+            "id": "fx",
+            "command": fixture_bin(),
+            "env": {"FIXTURE_LOG": file_fx_log.to_string_lossy().into_owned()},
+        }]})
+        .to_string(),
+    );
+    let server = MockServer::start(echo_then("done")).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--mcp-config",
+                file.to_str().unwrap(),
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "go",
+                "--yes",
+                "--trust",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    for (log, name) in [
+        (&project_fx_log, "project fx"),
+        (&project_cfg_log, "project cfg"),
+    ] {
+        assert!(
+            std::fs::read_to_string(log).unwrap_or_default().is_empty(),
+            "the {name} server must never start"
+        );
+    }
+    for (log, name) in [(&file_fx_log, "command-line fx"), (&cfg_log, "config cfg")] {
+        assert!(
+            !std::fs::read_to_string(log).unwrap_or_default().is_empty(),
+            "the {name} server must start"
+        );
+    }
+    assert!(
+        stderr
+            .contains("server `fx` is set in both .mcp.json and --mcp-config; using --mcp-config"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("server `cfg` is set in both .mcp.json and [mcp]; using [mcp]"),
+        "{stderr}"
+    );
 }
 
 // ---------- provider selection: anthropic (Phase 7 / anthost) ----------
@@ -5250,15 +6162,18 @@ fn scratch_directories_are_removed_when_the_guard_drops() {
     );
 }
 
-/// ADR 0016: the tier names are `safe`/`workspace`/`full`; the old names stay accepted as
-/// aliases but are not advertised in `--help`.
+/// ADR 0016: the tier names are `workspace`/`full`; the old names stay accepted as
+/// aliases but are not advertised in `--help`. The removed `safe` tier is rejected.
 #[tokio::test]
 async fn tier_names_and_aliases_are_accepted_but_help_lists_only_new_names() {
     let (code, stdout, stderr) = feed_and_wait(spawn_radian(&["--help"], &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("workspace"), "{stdout}");
     assert!(stdout.contains("full"), "{stdout}");
-    assert!(stdout.contains("safe"), "{stdout}");
+    assert!(
+        !stdout.contains("safe"),
+        "the removed tier must not be advertised: {stdout}"
+    );
     assert!(
         !stdout.contains("workspace-write"),
         "the old name must not be advertised: {stdout}"
@@ -5268,13 +6183,7 @@ async fn tier_names_and_aliases_are_accepted_but_help_lists_only_new_names() {
         "the old name must not be advertised: {stdout}"
     );
 
-    for profile in [
-        "safe",
-        "workspace",
-        "full",
-        "workspace-write",
-        "full-access",
-    ] {
+    for profile in ["workspace", "full", "workspace-write", "full-access"] {
         let dir = scratch(&format!("alias-{profile}"));
         let sessions = dir.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
@@ -7491,7 +8400,7 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
         .args(["memory", "add", "--global", "a memory record"])
         .env("RADIAN_HOME", home.as_os_str())
         .env("HOME", home.as_os_str())
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -7545,7 +8454,7 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
             .env("RADIAN_HOME", home_arg)
             .env("HOME", home_arg)
             .env("RADIAN_SESSION_DIR", sessions_arg)
-            .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+            .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
             .stdin(Stdio::null())
             .stdout(closed_stdout())
             .stderr(Stdio::piped())
@@ -7946,6 +8855,185 @@ async fn config_import_pi_requires_from_and_an_existing_directory() {
     assert!(stdout.is_empty(), "{stdout}");
 }
 
+/// `radian config import-claude`: a dry run drafts user + project skills, translates hooks
+/// and reports the waits on stderr without writing; `--write` merges the config (never
+/// overwrites) and creates the skills and `AGENTS.md` (with the trust-gate notice); an
+/// existing `AGENTS.md`/`SKILL.md` is skipped, a second `--write` adds nothing, and there
+/// is no `--force` flag.
+#[tokio::test]
+async fn config_import_claude_drafts_and_writes() {
+    let dir = scratch("import-claude");
+    let home = dir.join("claude-home");
+    std::fs::create_dir_all(home.join("commands")).unwrap();
+    std::fs::create_dir_all(home.join("skills")).unwrap();
+    std::fs::write(
+        home.join("commands/review.md"),
+        "---\ndescription: Review a PR diff.\n---\n\nReview $ARGUMENTS now.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".claude.json"),
+        r#"{"mcpServers": {
+            "secret-srv": {"command": "node", "env": {"API_KEY": "sk-test-please-ignore-0000"}}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("settings.json"),
+        r#"{"hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo pre"}]},
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo late", "async": true}]}
+            ]}}"#,
+    )
+    .unwrap();
+    std::fs::write(home.join("CLAUDE.md"), "# Mine\n").unwrap();
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(proj.join(".claude/commands")).unwrap();
+    std::fs::create_dir_all(proj.join(".claude/skills/team")).unwrap();
+    std::fs::write(
+        proj.join(".claude/commands/deploy.md"),
+        "---\ndescription: Deploy.\n---\n\nDeploy $ARGUMENTS.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join(".claude/skills/team/SKILL.md"),
+        "---\nname: team\ndescription: Team.\n---\n\nTeam.\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join(".mcp.json"), r#"{"mcpServers": {}}"#).unwrap();
+    std::fs::write(
+        proj.join(".claude/settings.json"),
+        r#"{"hooks": {"PreToolUse": [{"matcher": "Bash",
+            "hooks": [{"type": "command", "command": "echo proj"}]}]}}"#,
+    )
+    .unwrap();
+    let home_arg = home.to_str().unwrap().to_owned();
+    let proj_arg = proj.to_str().unwrap().to_owned();
+
+    // Dry run: the draft on stdout, the report on stderr, nothing written.
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian_top(
+            &[
+                "config",
+                "import-claude",
+                "--claude-home",
+                &home_arg,
+                "--project",
+                &proj_arg,
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("schema_version"), "{stdout}");
+    assert!(stdout.contains("Review $ARGUMENTS now."), "{stdout}");
+    assert!(!stdout.contains("sk-test-please-ignore"), "{stdout}");
+    assert!(stderr.contains("[import-claude]"), "{stderr}");
+    assert!(stderr.contains("`async`"), "{stderr}");
+    assert!(
+        stderr.contains("reads MCP servers from `--mcp-config` only"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("does not load project hooks"), "{stderr}");
+    assert!(stderr.contains("nothing was written"), "{stderr}");
+
+    // `--write`: the config is merged (a comment and an unrelated key survive), the
+    // skills and `AGENTS.md` land, with the trust-gate notice for project files.
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let out_arg = out.to_str().unwrap().to_owned();
+    let config_path = out.join("config/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        "# keep me\nschema_version = 1\n[model]\nmodel = \"m-1\"\n",
+    )
+    .unwrap();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_top(
+            &[
+                "config",
+                "import-claude",
+                "--claude-home",
+                &home_arg,
+                "--project",
+                &proj_arg,
+                "--write",
+            ],
+            &[("RADIAN_HOME", &out_arg), ("HOME", &out_arg)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("trust-gate resources"), "{stderr}");
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    radian_host::parse_config(&config_path, &text).expect("the written file reads back");
+    assert!(text.contains("# keep me"), "{text}");
+    assert!(text.contains("model = \"m-1\""), "{text}");
+    assert!(text.contains("echo pre"), "{text}");
+    assert!(
+        out.join(".agents/skills/review/SKILL.md").exists(),
+        "{stderr}"
+    );
+    assert!(out.join("AGENTS.md").exists(), "{stderr}");
+    assert!(
+        proj.join(".agents/skills/deploy/SKILL.md").exists(),
+        "{stderr}"
+    );
+    assert!(
+        proj.join(".agents/skills/team/SKILL.md").exists(),
+        "{stderr}"
+    );
+
+    // A second `--write` merges again: nothing is duplicated, existing files are skipped
+    // with one line each, and the exit is still 0.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_top(
+            &[
+                "config",
+                "import-claude",
+                "--claude-home",
+                &home_arg,
+                "--write",
+            ],
+            &[("RADIAN_HOME", &out_arg), ("HOME", &out_arg)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("exists, not written"), "{stderr}");
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert_eq!(text.matches("echo pre").count(), 1, "{text}");
+
+    // There is no `--force` flag: it is rejected as an unknown argument (exit 2).
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_top(
+            &[
+                "config",
+                "import-claude",
+                "--claude-home",
+                &home_arg,
+                "--write",
+                "--force",
+            ],
+            &[("RADIAN_HOME", &out_arg), ("HOME", &out_arg)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+
+    // No source is a usage error.
+    let (code, _, stderr) =
+        feed_and_wait(spawn_radian_top(&["config", "import-claude"], &[]), "").await;
+    assert_eq!(code, 2, "{stderr}");
+}
+
 /// Acceptance 6: a closed stdout is a normal stop (D21), not a panic.
 #[cfg(unix)]
 #[test]
@@ -8073,10 +9161,7 @@ async fn named_providers_keep_separate_keys_and_config_wins_over_auth() {
                 "HOME".into(),
                 fresh_session_dir().to_string_lossy().into_owned(),
             ),
-            (
-                "RADIAN_CATALOG_URL".into(),
-                "http://127.0.0.1:1/api.json".to_string(),
-            ),
+            ("RADIAN_CATALOG_URL".into(), common::fast_catalog_url()),
         ];
         all.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         all
@@ -8217,7 +9302,7 @@ impl PtyChild {
             .env("HOME", home)
             .env("RADIAN_HOME", home)
             .env("RADIAN_SESSION_DIR", fresh_session_dir())
-            .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+            .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
             .env_remove("RADIAN_CONFIG")
             .stdin(unsafe {
                 // SAFETY: slave_fd is a fresh owned fd, moved into the Command.
@@ -8467,69 +9552,4 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
         ["skill", "subagent"],
         "the exact tool set of a fresh headless session: {names:?}"
     );
-}
-
-/// ADR 0043 decision 3, end to end: an old name is never advertised, but a call to it still runs
-/// the new tool and the result starts with one line saying the tool was renamed.
-#[tokio::test]
-async fn the_renamed_git_name_is_accepted_but_never_advertised() {
-    if !git_available() {
-        eprintln!("skipping: git is not installed");
-        return;
-    }
-    let dir = scratch("renamed-git");
-    let ws = dir.join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    git(&ws, &["init", "-q"]);
-    git(&ws, &["config", "user.email", "test@example.com"]);
-    git(&ws, &["config", "user.name", "Test"]);
-    std::fs::write(ws.join("tracked.txt"), "one\n").unwrap();
-    git(&ws, &["add", "tracked.txt"]);
-    git(&ws, &["commit", "-q", "-m", "init"]);
-    std::fs::write(ws.join("tracked.txt"), "one\ntwo\n").unwrap();
-    std::fs::write(ws.join("untracked.txt"), "new\n").unwrap();
-
-    let server = MockServer::start(vec![
-        tool_reply("c1", "git_status", "{}"),
-        text_reply("DONE"),
-    ])
-    .await;
-    let (code, stdout, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                ws.to_str().unwrap(),
-                "--yes",
-                "-p",
-                "status please",
-            ],
-            &[],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("DONE"), "{stdout}");
-
-    // The model never saw the old name; the new one is there.
-    let names = advertised_tools(&server, 0);
-    assert!(
-        !names.iter().any(|name| name == "git_status"),
-        "the renamed `git_status` must not be advertised: {names:?}"
-    );
-    assert!(names.iter().any(|name| name == "git_diff"), "{names:?}");
-
-    // The call ran as `git_diff { stat: true }` and said so: the rename line, then the short
-    // status (with the untracked file) and the `--stat` summary.
-    let result = tool_result_content(&server, 1);
-    assert!(
-        result.starts_with("`git_status` was renamed"),
-        "the result must open with the rename line: {result}"
-    );
-    assert!(result.contains("untracked.txt"), "{result}");
-    assert!(result.contains("tracked.txt |"), "{result}");
 }

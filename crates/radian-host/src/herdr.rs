@@ -112,14 +112,21 @@ pub enum Blocked {
     /// `approval: <tool>`; the tool name, never the command.
     Approval(String),
     Question,
+    /// The wake budget is used up and degraded notices wait; the session is idle until a
+    /// user message wakes it. The count is not reported, only the category.
+    WakeBudget,
 }
 
-/// The pure state function (ADR H2): `blocked` wins over `working`.
-pub fn state(turn: TurnState, pending: usize, trust_modal: bool) -> State {
+/// The pure state function (ADR H2): trust and pending `blocked` wins over `working`; a
+/// used-up wake budget blocks only while idle — a started turn reads `working` again, so
+/// the report is back to normal on the next turn start.
+pub fn state(turn: TurnState, pending: usize, trust_modal: bool, wake_waiting: bool) -> State {
     if trust_modal || pending > 0 {
         State::Blocked
     } else if turn == TurnState::Running {
         State::Working
+    } else if wake_waiting {
+        State::Blocked
     } else {
         State::Idle
     }
@@ -133,6 +140,7 @@ pub fn blocked_message(blocked: Option<&Blocked>, trust_modal: bool) -> String {
     match blocked {
         Some(Blocked::Approval(tool)) => format!("approval: {tool}"),
         Some(Blocked::Question) => "question".to_owned(),
+        Some(Blocked::WakeBudget) => "wake budget".to_owned(),
         None => "blocked".to_owned(),
     }
 }
@@ -283,6 +291,7 @@ pub fn blocked_label(blocked: Option<&Blocked>, trust_modal: bool) -> Option<Str
     match blocked {
         Some(Blocked::Approval(_)) => Some("approval".to_owned()),
         Some(Blocked::Question) => Some("question".to_owned()),
+        Some(Blocked::WakeBudget) => Some("wake budget".to_owned()),
         None => None,
     }
 }
@@ -671,17 +680,35 @@ mod tests {
 
     #[test]
     fn blocked_wins_over_working() {
-        assert_eq!(state(TurnState::Running, 1, false), State::Blocked);
-        assert_eq!(state(TurnState::Running, 0, true), State::Blocked);
-        assert_eq!(state(TurnState::Running, 0, false), State::Working);
-        assert_eq!(state(TurnState::Idle, 0, false), State::Idle);
-        assert_eq!(state(TurnState::Cancelled, 0, false), State::Idle);
+        assert_eq!(state(TurnState::Running, 1, false, false), State::Blocked);
+        assert_eq!(state(TurnState::Running, 0, true, false), State::Blocked);
+        assert_eq!(state(TurnState::Running, 0, false, false), State::Working);
+        assert_eq!(state(TurnState::Idle, 0, false, false), State::Idle);
+        assert_eq!(state(TurnState::Cancelled, 0, false, false), State::Idle);
         assert_eq!(
             blocked_message(Some(&Blocked::Approval("shell".into())), false),
             "approval: shell"
         );
         assert_eq!(blocked_message(None, true), "trust");
         assert_eq!(blocked_message(Some(&Blocked::Question), false), "question");
+        assert_eq!(
+            blocked_message(Some(&Blocked::WakeBudget), false),
+            "wake budget"
+        );
+    }
+
+    /// A used-up wake budget blocks an idle session, and the next turn start reads
+    /// working again (the TUI clears the flag on `TurnStarted`).
+    #[test]
+    fn a_used_up_wake_budget_blocks_only_while_idle() {
+        assert_eq!(state(TurnState::Idle, 0, false, true), State::Blocked);
+        assert_eq!(state(TurnState::Cancelled, 0, false, true), State::Blocked);
+        assert_eq!(
+            state(TurnState::Running, 0, false, true),
+            State::Working,
+            "a started turn is back to normal"
+        );
+        assert_eq!(state(TurnState::Idle, 0, false, false), State::Idle);
     }
 
     #[test]
@@ -972,7 +999,7 @@ mod tests {
     fn only_the_changed_token_keys_are_sent() {
         let mut last = BTreeMap::new();
         last.insert("model".to_owned(), "gpt-5".to_owned());
-        last.insert("tier".to_owned(), "safe".to_owned());
+        last.insert("tier".to_owned(), "full".to_owned());
         let mut now: BTreeMap<String, Option<String>> = BTreeMap::new();
         now.insert("model".to_owned(), Some("gpt-5".to_owned()));
         now.insert("tier".to_owned(), Some("workspace".to_owned()));
@@ -1007,6 +1034,10 @@ mod tests {
         assert_eq!(
             blocked_label(Some(&Blocked::Question), false),
             Some("question".to_owned())
+        );
+        assert_eq!(
+            blocked_label(Some(&Blocked::WakeBudget), false),
+            Some("wake budget".to_owned())
         );
         assert_eq!(blocked_label(None, true), Some("trust".to_owned()));
         assert_eq!(blocked_label(None, false), None);

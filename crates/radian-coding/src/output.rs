@@ -1,5 +1,5 @@
-//! Reading and creating **session-owned command output files**, shared by `job_output`
-//! (background jobs) and `shell_output` (a foreground command's retained output).
+//! Reading and creating **session-owned command output files**, shared by background jobs
+//! and a foreground command's retained output (both read back through the `job` tool).
 //!
 //! The file is always created by [`open_output_file`] — `O_CREAT|O_EXCL|O_NOFOLLOW`, mode
 //! 0600, in a caller-owned 0700 directory (ADR 0039 decision 1) — and read only through
@@ -57,7 +57,7 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
 /// `create_new` already refuses an existing path, and a symlink is an existing path, so
 /// `O_NOFOLLOW` is defence in depth here: when the destination is a symlink the two are
 /// equivalent, which `job_output_security` pins. The pair is what the ADR asks for, and both
-/// `job_output`'s file and `shell_output`'s retained file go through this one creator.
+/// a background job's file and a retained foreground file go through this one creator.
 pub(crate) fn open_output_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.append(true).create_new(true);
@@ -200,9 +200,133 @@ impl PrivateDir {
             .create_new(true)
             .open(self.path.join(name))
     }
+
+    /// Clears the directory on resume (ADR 0037 §6): every regular file and every symlink
+    /// is unlinked (the link itself, never its target); anything else (a subdirectory, a
+    /// socket, …) is left in place and counted as skipped. The listing goes through the
+    /// directory fd (`fdopendir` on a duplicate), so a swapped parent cannot redirect it.
+    /// The first I/O failure is kept in [`SweepSummary::first_error`]; the sweep continues
+    /// past it. Nothing is logged here: the host warns once.
+    #[cfg(unix)]
+    pub(crate) fn sweep(&self) -> SweepSummary {
+        let entries = match crate::safe_fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                return SweepSummary {
+                    removed: 0,
+                    skipped: 0,
+                    first_error: Some(error.to_string()),
+                };
+            }
+        };
+        let mut summary = SweepSummary::default();
+        for entry in entries {
+            match entry.kind {
+                crate::safe_fs::EntryKind::File | crate::safe_fs::EntryKind::Symlink => {
+                    match unlink(&self.dir, &entry.name) {
+                        Ok(()) => summary.removed += 1,
+                        Err(error) => {
+                            if summary.first_error.is_none() {
+                                summary.first_error =
+                                    Some(format!("{}: {error}", entry.name.to_string_lossy()));
+                            }
+                        }
+                    }
+                }
+                _ => summary.skipped += 1,
+            }
+        }
+        summary
+    }
+
+    /// The non-Unix sweep: the same rule (regular files and symlinks are removed as links,
+    /// anything else is left and counted as skipped) over a path-based listing. The coding
+    /// tools run on Unix hosts; like [`PrivateDir::open`]/`create` above this keeps the
+    /// crate compiling elsewhere with no symlink defence.
+    #[cfg(not(unix))]
+    pub(crate) fn sweep(&self) -> SweepSummary {
+        let listing = match std::fs::read_dir(&self.path) {
+            Ok(listing) => listing,
+            Err(error) => {
+                return SweepSummary {
+                    removed: 0,
+                    skipped: 0,
+                    first_error: Some(error.to_string()),
+                };
+            }
+        };
+        let mut summary = SweepSummary::default();
+        for entry in listing {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    if summary.first_error.is_none() {
+                        summary.first_error = Some(error.to_string());
+                    }
+                    continue;
+                }
+            };
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) => {
+                    if summary.first_error.is_none() {
+                        summary.first_error =
+                            Some(format!("{}: {error}", entry.file_name().to_string_lossy()));
+                    }
+                    continue;
+                }
+            };
+            // `DirEntry::file_type` never follows a symlink, and `remove_file` removes the
+            // link itself, so a link's target is never touched here either.
+            if kind.is_file() || kind.is_symlink() {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => summary.removed += 1,
+                    Err(error) => {
+                        if summary.first_error.is_none() {
+                            summary.first_error =
+                                Some(format!("{}: {error}", entry.file_name().to_string_lossy()));
+                        }
+                    }
+                }
+            } else {
+                summary.skipped += 1;
+            }
+        }
+        summary
+    }
 }
 
-/// The shared file-read arguments of `job` (and the one-version aliases).
+/// What a resume sweep removed, skipped and failed on (ADR 0037 §6). `first_error` is the
+/// first I/O failure; the sweep continues past it. The host warns once on `Some`, never
+/// failing the open.
+#[derive(Debug, Default)]
+pub struct SweepSummary {
+    /// Regular files and symlinks unlinked.
+    pub removed: usize,
+    /// Subdirectories and anything else left in place.
+    pub skipped: usize,
+    /// The first I/O failure, if any.
+    pub first_error: Option<String>,
+}
+
+/// `unlinkat(dirfd, name, 0)`: removes a regular file or a symlink itself, never a link's
+/// target. Directories are never passed here (the caller counts them as skipped).
+#[cfg(unix)]
+fn unlink(dir: &File, name: &OsStr) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::AsRawFd;
+    let c = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in name"))?;
+    // SAFETY: `dir` is an open directory fd and `c` a NUL-terminated name; flags 0 means
+    // unlink the entry itself (no `AT_REMOVEDIR`), so a symlink's target is untouched.
+    let rc = unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The shared file-read arguments of the `job` tool.
 #[derive(Deserialize)]
 pub(crate) struct FileArgs {
     /// 1-based line of the output file to start at.
@@ -223,23 +347,24 @@ pub(crate) fn file_properties() -> serde_json::Value {
         "from_line": {
             "type": "integer",
             "minimum": 1,
-            "description": "1-based line of the output file to start at. Use with \
-                            max_lines to page."
+            "description": "First output-file line to return (1-based). Use it with \
+                            `max_lines` to page."
         },
         "max_lines": {
             "type": "integer",
             "minimum": 1,
-            "description": "Maximum full-file lines to return from from_line."
+            "description": "Maximum full-file lines to return from `from_line`."
         },
         "tail_lines": {
             "type": "integer",
             "minimum": 1,
-            "description": "Return the last N lines of the output file."
+            "description": "Return the last N lines of the output file. The result names \
+                            the total line count."
         },
         "pattern": {
             "type": "string",
-            "description": "Return only output-file lines matching this Rust regex (same \
-                            convention as `grep`), numbered and capped."
+            "description": "Return only output-file lines that match this Rust regex. \
+                            Lines are numbered and capped."
         }
     })
 }
@@ -404,7 +529,7 @@ pub(crate) fn read_failure(code: &str, error: &std::io::Error) -> ToolFailure {
 }
 
 /// Which part of the output file a call asks for. `None` is the incremental ring read, which
-/// only `job_output` has.
+/// only `job` with `op: read` and no range has.
 pub(crate) enum FileMode {
     Range {
         from_line: u64,

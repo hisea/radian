@@ -114,8 +114,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The status area's height follows the footer preset (ADR 0027 C2): one row for `classic`
     // (today's line), the configured rows for `pi`.
     let status_height = status_height(app, area.width as usize);
+    // ADR 0035 V1: blocks are separated by exactly one blank row, owned by the layout rather
+    // than by each block: the transcript's last row never touches the completion list, the
+    // input (or the modal/find box standing in for it) below it. The spacer costs the
+    // transcript one row; on a screen too short to keep a transcript row beside the input,
+    // the input wins and the spacer drops to zero, so the layout degrades to the old one.
+    let below_len = completion.len() as u16 + middle + status_height;
+    let spacer_len: u16 = u16::from(area.height > below_len.saturating_add(2));
     let chunks = Layout::vertical([
         Constraint::Min(1),
+        Constraint::Length(spacer_len),
         Constraint::Length(completion.len() as u16),
         Constraint::Length(middle),
         Constraint::Length(status_height),
@@ -127,7 +135,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Min(1),
         Constraint::Length(below_lines.len() as u16),
     ])
-    .split(chunks[2]);
+    .split(chunks[3]);
     let input_area = middle_chunks[1];
     if !above_lines.is_empty() {
         let rows = Layout::vertical(vec![Constraint::Length(1); above_lines.len()])
@@ -221,9 +229,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(picker) = app.picker() {
         crate::picker::draw(frame, chunks[0], picker, &app.theme, app.footer_glyphs());
     }
+    // The inspector overlay draws over the transcript the same way: one tabbed panel,
+    // never above a modal (the layer stack guarantees the tier).
+    if let Some(inspector) = app.inspector() {
+        crate::inspector::draw(frame, chunks[0], inspector, &app.theme, app.footer_glyphs());
+    }
 
     if !completion.is_empty() {
-        frame.render_widget(Paragraph::new(completion), chunks[1]);
+        frame.render_widget(Paragraph::new(completion), chunks[2]);
     }
 
     match app.top_modal() {
@@ -298,11 +311,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::Trust(wizard)) => {
             let lines = trust_panel(
                 wizard,
-                chunks[2].width as usize,
+                chunks[3].width as usize,
                 &app.theme,
                 app.footer_glyphs(),
             );
-            frame.render_widget(Paragraph::new(lines), chunks[2]);
+            frame.render_widget(Paragraph::new(lines), chunks[3]);
         }
         Some(Modal::ConfirmLogout(provider)) => {
             let lines = logout_panel(
@@ -494,8 +507,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     let t_status = std::time::Instant::now();
-    let status = status_lines(app, chunks[3].width as usize);
+    let status = status_lines(app, chunks[4].width as usize);
     radian_session::trace::took("draw/status-lines", t_status);
-    frame.render_widget(Paragraph::new(status), chunks[3]);
+    frame.render_widget(Paragraph::new(status), chunks[4]);
     radian_session::trace::mark("draw/end");
 }

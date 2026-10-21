@@ -272,36 +272,37 @@ fn specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "memory_search".into(),
         description: format!(
-            "{LOW_TRUST_NOTE} Read durable memory. Pass exactly one of `query` (search: \
-             every word must match) or `ids` (read those records in full). Results carry \
-             their scope, source and verification. A search returns newest/most relevant \
-             records first, at most `limit` (default {DEFAULT_SEARCH_LIMIT}, max \
-             {MAX_SEARCH_LIMIT})."
+            "{LOW_TRUST_NOTE} Read durable memory. To search, pass `query`. To read records \
+             in full, pass `ids`. A search matches every word. The tool matches words \
+             case-insensitively. A search returns at most `limit` records. Scope orders the \
+             results first. Project scope comes before global scope. Trust orders them next. User \
+             trust and confirmed trust come before agent-unverified trust. Match score comes \
+             after trust. Newest comes after match score. The id comes last. Results carry \
+             their scope, source, and verification."
         ),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Keywords; every word must appear in the content or key."
+                    "description": "Keywords to search for. Every word must appear in the content or the key."
                 },
                 "ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Record ids to read in full (as returned by a search). \
-                                    Pass exactly one of `query` or `ids`."
+                    "description": "Ids of records to read in full. Pass `query` or `ids`, not both."
                 },
                 "scope": {
                     "type": "string",
                     "enum": ["project", "global", "all"],
-                    "description": "Which scopes to search; `all` (the default) is \
-                                    project then global."
+                    "description": "Scopes to search. `all` searches project scope first and global scope second. Default: `all`."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_SEARCH_LIMIT,
-                    "description": "Maximum records to return."
+                    "description": format!("Maximum records to return. Default: \
+                                          {DEFAULT_SEARCH_LIMIT}. Maximum: {MAX_SEARCH_LIMIT}.")
                 }
             },
             "additionalProperties": false
@@ -376,6 +377,49 @@ mod tests {
                 _ => String::new(),
             })
             .collect()
+    }
+
+    /// Item 3: the description states the D6 order (scope, trust, match score, newest, id)
+    /// instead of "newest/most relevant first", and says matching is case-insensitive.
+    /// Keyword matching is case-insensitive (catches: the description promising it while
+    /// `score` compares case-sensitively).
+    #[tokio::test]
+    async fn the_search_description_states_the_order_and_case_insensitivity() {
+        let (dir, service) = service("order-words");
+        service.create_project().unwrap();
+        service
+            .add(WriteScope::Project, Kind::Fact, None, "prefers Tabs".into())
+            .unwrap();
+        let session = session(service.clone()).await;
+        let specs = session.tool_specs();
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == "memory_search")
+            .expect("the memory_search spec");
+        for phrase in [
+            "case-insensitively",
+            "Project scope comes before global scope",
+            "come before agent-unverified trust",
+            "Match score comes after trust",
+            "Newest comes after match score",
+            "The id comes last",
+        ] {
+            assert!(
+                spec.description.contains(phrase),
+                "the description must state {phrase:?}: {}",
+                spec.description
+            );
+        }
+        // The behavior the description promises: an uppercase query matches lowercase text.
+        let found = run(&session, "memory_search", json!({"query": "TABS"}))
+            .await
+            .unwrap();
+        assert!(
+            output_text(&found).contains("prefers Tabs"),
+            "{}",
+            output_text(&found)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

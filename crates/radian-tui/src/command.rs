@@ -13,17 +13,25 @@ use radian_host::memory::commands::{self, CommandOutput, MemoryCommand};
 /// The `/help` text. Kept short; the full grammar is `radian_host::memory::commands`.
 pub const HELP: &str = "\
 /help                 list the commands
+/queue <text>          queue a message for the next turn, even while one runs
+/retry                resend the last message after a model error
+/loop [--every <dur>] [--times N] [--for <dur>] [prompt]
+                       repeat the prompt every turn until --times/--for (default 20 turns or
+                       1h); a bare /loop toggles; --every waits between turns
+/copy [code]          copy the last assistant message (or its last code block)
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary (ADR 0022)
+/new                  start a new session here; the old session stays resumable
 /theme <name>         switch the color theme and write it back to the config file
 /model <provider>/<model>
                       switch the model at the next turn boundary (ADR 0026 D5)
 /thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
 /usage                show the current provider's usage, one line per window (ADR 0027)
+/context              show the next request's estimated size by category (ADR 0015)
 /auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
 /yolo                 alias of /auto
-/access [safe|workspace|full]
+/access [workspace|full]
                       show or switch the permission tier (ADR 0038); the switch takes effect
                       at the next tool call, and `full` asks for confirmation
 /export [md|json] [path] [--force]
@@ -32,7 +40,11 @@ pub const HELP: &str = "\
                       forget, purge, confirm, export, import, project, relink, split, merge
 /skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
 /skills               list the discovered skills
-/jobs [kill <id|all>] list the running background jobs, or stop one/all (ADR 0037)
+/jobs                 open the inspector's jobs page (list) or stop one/all (ADR 0037)
+/tools                open the inspector's tools page
+/mcp                  open the inspector's mcp page
+/hooks                open the inspector's hooks page
+/panel                open the inspector on the last page
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
@@ -64,12 +76,54 @@ pub enum JobsRequest {
     KillAll,
 }
 
+/// One page of the inspector overlay (`jobs | tools | mcp | hooks`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectorPage {
+    Jobs,
+    Tools,
+    Mcp,
+    Hooks,
+}
+
+impl InspectorPage {
+    /// The four pages in tab order.
+    pub const ALL: [InspectorPage; 4] = [
+        InspectorPage::Jobs,
+        InspectorPage::Tools,
+        InspectorPage::Mcp,
+        InspectorPage::Hooks,
+    ];
+
+    /// The tab label.
+    pub fn label(self) -> &'static str {
+        match self {
+            InspectorPage::Jobs => "jobs",
+            InspectorPage::Tools => "tools",
+            InspectorPage::Mcp => "mcp",
+            InspectorPage::Hooks => "hooks",
+        }
+    }
+}
+
 /// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
 /// (ADR 0023 U3), and whether a write needs confirmation is the executor's answer.
 #[derive(Debug)]
 pub enum Outcome {
     /// Show these lines as notices and keep the line out of the conversation.
     Notices(Vec<String>),
+    /// `/queue <text>`: like a send, but always a followup — even while a turn runs
+    /// (Enter steers then). The loop expands the `@` references first, like a send.
+    Queue(String),
+    /// `/retry`: resend the last user message after a model-error turn. The app decides
+    /// (idle and the last turn failed); the text goes as-is, with no `@` expansion.
+    Retry,
+    /// `/loop` (continuation step 1-2): toggle the per-turn repeat, or arm/enable it with
+    /// limits and an optional prompt. Flags come before the prompt; running it is the loop's
+    /// job (an effect), like every other command.
+    Loop(LoopCommand),
+    /// `/copy [code]`: copy the last committed assistant message — or its last fenced code
+    /// block — through the configured clipboard backend.
+    Copy { code_only: bool },
     /// A `/memory` command to run through the shared executor.
     Memory(MemoryCommand),
     /// A manual `/compact` (ADR 0018): the host runs it on the runtime, between turns, and
@@ -82,6 +136,10 @@ pub enum Outcome {
     Export(ExportRequest),
     /// `/fork`: the host forks the current (idle) session at its last turn boundary.
     Fork,
+    /// `/new`: leave the loop; the host ends this session and opens a fresh one in the
+    /// same workspace, then the loop runs again. No host work happens here (unlike
+    /// `/fork`), so there is no `SessionOutcome`: setting the flag IS the execution.
+    New,
     /// `/theme <name>` (ADR 0008 revision): switch the theme now and write `tui.theme` back
     /// to the config file. The loop loads the theme (I/O) and does the write-back.
     Theme(String),
@@ -93,6 +151,10 @@ pub enum Outcome {
     /// `/usage` (ADR 0027): the current provider's usage snapshot, every
     /// window of it. The app reads the contribution store, so there is no effect.
     Usage,
+    /// `/context` (backlog `tui-context-command`): the next request's estimated size by
+    /// category, plus the reported line, the message count and the compactions. Read-only;
+    /// the loop reads it from the facade, so it works mid-turn.
+    Context,
     /// `/login [provider]`: open the credential wizard. `Some(id)` skips the provider
     /// choice (a built-in id or `custom`); `None` starts at the choice.
     Login(Option<String>),
@@ -101,7 +163,7 @@ pub enum Outcome {
     /// `/auto on|off` (and `/yolo`, its alias): the in-session auto-approval switch
     /// (ADR 0026 D9). `true` = on.
     AutoToggle(bool),
-    /// `/access [safe|workspace|full]` (ADR 0038 slice 2): show the current tier and where it
+    /// `/access [workspace|full]` (ADR 0038 slice 2): show the current tier and where it
     /// came from (`None`), or switch to a named tier (`Some`).
     Access(Option<String>),
     /// `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and sends
@@ -111,7 +173,10 @@ pub enum Outcome {
     /// `/skills`: list the discovered skills (name + description) as notices.
     Skills,
     /// `/jobs`: list the running background jobs, or stop one/all (ADR 0037 decision 4).
+    /// A bare `/jobs` opens the inspector's jobs page; `kill` forms stay text notices.
     Jobs(JobsRequest),
+    /// Open the inspector overlay on one page, or on the last page (`None` = `/panel`).
+    Inspector(Option<InspectorPage>),
     /// A user's `!`/`!!` shell command (ADR 0033). The command string runs in the sandbox
     /// (the tier's shell); `exclude_from_context` (`!!`) keeps its output out of the model's
     /// context. Execution is the loop's effect.
@@ -210,6 +275,27 @@ pub fn tree() -> &'static [Command] {
             levels: &[],
         },
         Command {
+            name: "queue",
+            description: "queue a message for the next turn, even while one runs",
+            levels: &[free_level],
+        },
+        Command {
+            name: "retry",
+            description: "resend the last message after a model error",
+            levels: &[],
+        },
+        Command {
+            name: "loop",
+            description: "repeat the prompt every turn until --times/--for (default 20 turns or \
+             1h); a bare /loop toggles",
+            levels: &[free_level],
+        },
+        Command {
+            name: "copy",
+            description: "copy the last assistant message (or its last code block)",
+            levels: &[copy_level],
+        },
+        Command {
             name: "compact",
             description: "summarize the history now and keep the recent part (ADR 0018)",
             levels: &[free_level],
@@ -222,6 +308,11 @@ pub fn tree() -> &'static [Command] {
         Command {
             name: "fork",
             description: "fork this session at its last turn boundary (ADR 0022)",
+            levels: &[],
+        },
+        Command {
+            name: "new",
+            description: "start a new session here; the old session stays resumable",
             levels: &[],
         },
         Command {
@@ -242,6 +333,11 @@ pub fn tree() -> &'static [Command] {
         Command {
             name: "usage",
             description: "show the current provider's usage, one line per window (ADR 0027)",
+            levels: &[],
+        },
+        Command {
+            name: "context",
+            description: "show the next request's estimated size by category (ADR 0015)",
             levels: &[],
         },
         Command {
@@ -289,6 +385,31 @@ pub fn tree() -> &'static [Command] {
             name: "logout",
             description: "remove a stored credential (asks first)",
             levels: &[logout_level],
+        },
+        Command {
+            name: "jobs",
+            description: "open the inspector's jobs page (list) or stop one/all",
+            levels: &[jobs_level],
+        },
+        Command {
+            name: "tools",
+            description: "open the inspector's tools page",
+            levels: &[],
+        },
+        Command {
+            name: "mcp",
+            description: "open the inspector's mcp page",
+            levels: &[],
+        },
+        Command {
+            name: "hooks",
+            description: "open the inspector's hooks page",
+            levels: &[],
+        },
+        Command {
+            name: "panel",
+            description: "open the inspector on the last page",
+            levels: &[],
         },
     ];
     TREE
@@ -493,14 +614,9 @@ fn auto_level(_typed: &[&str], _partial: &str) -> Level {
     ])
 }
 
-/// `/access`: the three tier names (ADR 0038 slice 2).
+/// `/access`: the two tier names (ADR 0038 slice 2).
 fn access_level(_typed: &[&str], _partial: &str) -> Level {
     Level::Ready(vec![
-        Candidate {
-            insert: "safe".to_owned(),
-            description: "read-only; no shell, no network".to_owned(),
-            current: false,
-        },
         Candidate {
             insert: "workspace".to_owned(),
             description: "write the workspace; sandboxed shell".to_owned(),
@@ -512,6 +628,31 @@ fn access_level(_typed: &[&str], _partial: &str) -> Level {
             current: false,
         },
     ])
+}
+
+/// `/jobs`: `kill` then the id (`all` or free text). A bare `/jobs` opens the panel.
+fn jobs_level(typed: &[&str], _partial: &str) -> Level {
+    match typed.first() {
+        None => Level::Ready(vec![Candidate {
+            insert: "kill".to_owned(),
+            description: "stop one/all background jobs".to_owned(),
+            current: false,
+        }]),
+        Some(_) => Level::Free,
+    }
+}
+
+/// `/copy [code]`: the only argument is the `code` selector; past it, free text (nothing).
+fn copy_level(typed: &[&str], _partial: &str) -> Level {
+    if typed.is_empty() {
+        Level::Ready(vec![Candidate {
+            insert: "code".to_owned(),
+            description: "only the last code block, without the fences".to_owned(),
+            current: false,
+        }])
+    } else {
+        Level::Free
+    }
 }
 
 /// `/export`: the format, then the path (with `--force` offered as a candidate).
@@ -918,11 +1059,18 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
     };
     match tokens.first().map(String::as_str) {
         Some("/help") => Outcome::Notices(vec![HELP.to_owned()]),
+        Some("/queue") => queue_text(&tokens[1..]),
+        Some("/retry") if tokens.len() == 1 => Outcome::Retry,
+        Some("/retry") => Outcome::Notices(vec!["usage: /retry (no arguments)".to_owned()]),
+        Some("/loop") => loop_request(&tokens[1..]),
+        Some("/copy") => copy_request(&tokens[1..]),
         Some("/memory") => memory_command(&tokens[1..], memory_enabled),
         Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
         Some("/fork") => Outcome::Fork,
+        Some("/new") if tokens.len() == 1 => Outcome::New,
+        Some("/new") => Outcome::Notices(vec!["usage: /new (no arguments)".to_owned()]),
         Some("/theme") => theme_name(&tokens[1..]),
         Some("/thinking") => match tokens[1..].first() {
             Some(level) => Outcome::Thinking(level.clone()),
@@ -930,6 +1078,8 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         },
         Some("/usage") if tokens.len() == 1 => Outcome::Usage,
         Some("/usage") => Outcome::Notices(vec!["usage: /usage (no arguments)".to_owned()]),
+        Some("/context") if tokens.len() == 1 => Outcome::Context,
+        Some("/context") => Outcome::Notices(vec!["usage: /context (no arguments)".to_owned()]),
         Some("/model") => match model_switch(&tokens[1..]) {
             Ok(switch) => Outcome::Model(switch),
             Err(usage) => Outcome::Notices(vec![usage]),
@@ -941,6 +1091,14 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/skills") if tokens.len() == 1 => Outcome::Skills,
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
         Some("/jobs") => jobs_request(&tokens[1..]),
+        Some("/tools") if tokens.len() == 1 => Outcome::Inspector(Some(InspectorPage::Tools)),
+        Some("/tools") => Outcome::Notices(vec!["usage: /tools (no arguments)".to_owned()]),
+        Some("/mcp") if tokens.len() == 1 => Outcome::Inspector(Some(InspectorPage::Mcp)),
+        Some("/mcp") => Outcome::Notices(vec!["usage: /mcp (no arguments)".to_owned()]),
+        Some("/hooks") if tokens.len() == 1 => Outcome::Inspector(Some(InspectorPage::Hooks)),
+        Some("/hooks") => Outcome::Notices(vec!["usage: /hooks (no arguments)".to_owned()]),
+        Some("/panel") if tokens.len() == 1 => Outcome::Inspector(None),
+        Some("/panel") => Outcome::Notices(vec!["usage: /panel (no arguments)".to_owned()]),
         Some(other) if other.starts_with("/skill:") => skill_command(other, line),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
@@ -974,10 +1132,12 @@ pub fn jobs_list_notices(jobs: &[radian_coding::JobSummary]) -> Vec<String> {
     }
 }
 
-/// `/jobs [kill <id|all>]` (ADR 0037 decision 4). Anything else is a usage notice.
+/// `/jobs [kill <id|all>]` (ADR 0037 decision 4, inspector panel): a bare `/jobs` opens
+/// the inspector's jobs page; `kill` forms stay text notices on the same path as before,
+/// so scripts and herdr are unaffected. Anything else is a usage notice.
 fn jobs_request(args: &[String]) -> Outcome {
     match args {
-        [] => Outcome::Jobs(JobsRequest::List),
+        [] => Outcome::Inspector(Some(InspectorPage::Jobs)),
         [kill, id] if kill == "kill" && id == "all" => Outcome::Jobs(JobsRequest::KillAll),
         [kill, id] if kill == "kill" && !id.is_empty() => {
             Outcome::Jobs(JobsRequest::Kill(id.clone()))
@@ -1071,13 +1231,13 @@ fn auto_toggle(args: &[String]) -> Outcome {
     }
 }
 
-/// `/access [safe|workspace|full]` (ADR 0038 slice 2). No argument is the query; one name is
+/// `/access [workspace|full]` (ADR 0038 slice 2). No argument is the query; one name is
 /// the switch; anything else is a usage notice.
 fn access_request(args: &[String]) -> Outcome {
     match (args.first(), args.get(1)) {
         (None, _) => Outcome::Access(None),
         (Some(name), None) => Outcome::Access(Some(name.clone())),
-        _ => Outcome::Notices(vec!["usage: /access [safe|workspace|full]".to_owned()]),
+        _ => Outcome::Notices(vec!["usage: /access [workspace|full]".to_owned()]),
     }
 }
 
@@ -1113,6 +1273,152 @@ fn export_request(args: &[String]) -> Outcome {
         path,
         force,
     })
+}
+
+/// `/queue <text>`: the arguments joined with spaces, like `/compact`'s note. Empty is a
+/// usage notice.
+fn queue_text(args: &[String]) -> Outcome {
+    let joined = args.join(" ");
+    let joined = joined.trim();
+    if joined.is_empty() {
+        return Outcome::Notices(vec!["usage: /queue <text>".to_owned()]);
+    }
+    Outcome::Queue(joined.to_owned())
+}
+
+/// What `/loop` asked for: a bare toggle, or an enable with limits and an optional prompt.
+/// A bare `/loop` toggles (off when on; armed when off — the next message becomes the loop
+/// prompt). Flags come before the prompt; a `--` token after the prompt started is a usage
+/// error, never silent prompt text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopCommand {
+    /// A bare `/loop`: the app toggles the mode.
+    Toggle,
+    /// `/loop [--every <dur>] [--times N] [--for <dur>] [prompt]`.
+    Enable(LoopOptions),
+}
+
+/// The `/loop` limits and prompt. Durations are `std::time::Duration`; `None` is "not
+/// given" (the app resolves the default cap).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LoopOptions {
+    /// Wait at least this long between iteration starts (`--every <dur>`).
+    pub every: Option<std::time::Duration>,
+    /// Stop after this many loop turns (`--times N`).
+    pub times: Option<u64>,
+    /// Stop this long after the loop started (`--for <dur>`).
+    pub for_duration: Option<std::time::Duration>,
+    /// The loop prompt (`None` = armed: the next user message becomes it).
+    pub prompt: Option<String>,
+}
+
+/// The `/loop` usage line, shared by every refusal below.
+const LOOP_USAGE: &str = "usage: /loop [--every <dur>] [--times N] [--for <dur>] [prompt] \
+    (durations like 30s, 5m, 2h; flags come before the prompt; a bare number or duration \
+    needs its flag; a bare /loop toggles)";
+
+/// `/loop ...`: flags (`--every`, `--times`, `--for`) before the prompt, then the prompt
+/// words. A bare number or a bare duration is refused even as a prompt (omp's limit versus
+/// pi-loop's interval would be ambiguous); anything else unknown is the same usage notice.
+fn loop_request(args: &[String]) -> Outcome {
+    if args.is_empty() {
+        return Outcome::Loop(LoopCommand::Toggle);
+    }
+    let mut options = LoopOptions::default();
+    let mut prompt_at: Option<usize> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let token = &args[index];
+        if prompt_at.is_none() && token.starts_with("--") {
+            let flag = token.trim_start_matches('-');
+            match flag {
+                "every" | "times" | "for" => {
+                    let Some(value) = args.get(index + 1) else {
+                        return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                    };
+                    match flag {
+                        "every" => {
+                            let Some(duration) = parse_loop_duration(value) else {
+                                return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                            };
+                            options.every = Some(duration);
+                        }
+                        "times" => {
+                            let Ok(times) = value.parse::<u64>() else {
+                                return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                            };
+                            if times == 0 {
+                                return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                            }
+                            options.times = Some(times);
+                        }
+                        _ => {
+                            let Some(duration) = parse_loop_duration(value) else {
+                                return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+                            };
+                            options.for_duration = Some(duration);
+                        }
+                    }
+                    index += 2;
+                }
+                _ => return Outcome::Notices(vec![LOOP_USAGE.to_owned()]),
+            }
+        } else if token.starts_with("--") {
+            // A flag after the prompt started: refuse rather than loop the literal flag
+            // text ("flags come before the prompt" is the rule the usage line states).
+            return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+        } else {
+            if prompt_at.is_none() {
+                prompt_at = Some(index);
+            }
+            index += 1;
+        }
+    }
+    if let Some(start) = prompt_at {
+        let prompt = args[start..].join(" ");
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+        }
+        // One bare number or duration is not a prompt: it needs its flag.
+        if !prompt.contains(' ')
+            && (prompt.parse::<u64>().is_ok() || parse_loop_duration(prompt).is_some())
+        {
+            return Outcome::Notices(vec![LOOP_USAGE.to_owned()]);
+        }
+        options.prompt = Some(prompt.to_owned());
+    }
+    Outcome::Loop(LoopCommand::Enable(options))
+}
+
+/// A loop duration: a positive integer with one unit (`30s`, `5m`, `2h`). Anything else —
+/// no unit, an unknown unit, zero, overflow — is `None`. The bare-number refusal above
+/// reuses it, so the two stay one definition.
+fn parse_loop_duration(text: &str) -> Option<std::time::Duration> {
+    let unit = text.chars().last()?;
+    if !matches!(unit, 's' | 'm' | 'h') {
+        return None;
+    }
+    let number: u64 = text[..text.len() - unit.len_utf8()].parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    let secs = match unit {
+        's' => number,
+        'm' => number.checked_mul(60)?,
+        _ => number.checked_mul(3600)?,
+    };
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// `/copy [code]`: no argument copies the whole message, `code` only its last fenced block.
+/// Anything else is a usage notice.
+fn copy_request(args: &[String]) -> Outcome {
+    match args {
+        [] => Outcome::Copy { code_only: false },
+        [one] if one == "code" => Outcome::Copy { code_only: true },
+        _ => Outcome::Notices(vec!["usage: /copy [code]".to_owned()]),
+    }
 }
 
 fn memory_command(args: &[String], memory_enabled: bool) -> Outcome {
@@ -1269,6 +1575,170 @@ mod tests {
         }
     }
 
+    /// `/queue <text>` parses to the queued text (arguments joined, like `/compact`'s note);
+    /// empty is a usage notice. It is a command, and it is in `/help`.
+    #[test]
+    fn queue_parses_to_its_text_and_rejects_an_empty_line() {
+        match parse("/queue do this next", false) {
+            Outcome::Queue(text) => assert_eq!(text, "do this next"),
+            other => panic!("expected the queued text, got {other:?}"),
+        }
+        match parse("/queue \"quoted  words\"", false) {
+            Outcome::Queue(text) => assert_eq!(text, "quoted  words"),
+            other => panic!("expected the queued text, got {other:?}"),
+        }
+        for line in ["/queue", "/queue   "] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /queue"), "{line}: {notices:?}")
+                }
+                other => panic!("{line}: expected notices, got {other:?}"),
+            }
+        }
+        assert!(HELP.contains("/queue"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "queue"));
+    }
+
+    /// `/new` takes no argument; anything after it is a usage notice. It is a command,
+    /// and it is in `/help`.
+    #[test]
+    fn new_takes_no_arguments() {
+        assert!(matches!(parse("/new", false), Outcome::New));
+        match parse("/new now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /new"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/new"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "new"));
+    }
+
+    /// `/retry` takes no argument; anything after it is a usage notice. It is a command,
+    /// and it is in `/help`.
+    #[test]
+    fn retry_takes_no_arguments() {
+        assert!(matches!(parse("/retry", false), Outcome::Retry));
+        match parse("/retry now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /retry"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/retry"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "retry"));
+    }
+
+    /// `/loop`: a bare line toggles; flags (`--every`, `--times`, `--for`) come before the
+    /// prompt; a bare number or bare duration is refused even as a prompt; a flag after the
+    /// prompt started, an unknown flag, a missing value and a zero limit are usage notices.
+    /// It is a command, and it is in `/help`.
+    #[test]
+    fn loop_parses_toggle_flags_and_prompt() {
+        use std::time::Duration;
+
+        assert!(matches!(
+            parse("/loop", false),
+            Outcome::Loop(LoopCommand::Toggle)
+        ));
+
+        // Flags with a prompt.
+        match parse("/loop --every 5m --times 3 fix the build", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.every, Some(Duration::from_secs(300)));
+                assert_eq!(options.times, Some(3));
+                assert_eq!(options.for_duration, None);
+                assert_eq!(options.prompt.as_deref(), Some("fix the build"));
+            }
+            other => panic!("expected the loop options, got {other:?}"),
+        }
+        // Flags without a prompt arm the loop; the next message becomes the prompt.
+        match parse("/loop --times 2", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.times, Some(2));
+                assert_eq!(options.prompt, None);
+            }
+            other => panic!("expected an armed loop, got {other:?}"),
+        }
+        // A prompt with no flags.
+        match parse("/loop watch the tests", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.prompt.as_deref(), Some("watch the tests"));
+                assert_eq!(options.every, None);
+            }
+            other => panic!("expected a prompt-only loop, got {other:?}"),
+        }
+        // A multi-word prompt may start with a number; a single bare number or bare
+        // duration is refused (it needs its flag).
+        match parse("/loop run 5 times", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.prompt.as_deref(), Some("run 5 times"));
+            }
+            other => panic!("expected the prompt, got {other:?}"),
+        }
+        for line in [
+            "/loop 5",
+            "/loop 5m",
+            "/loop 0",
+            "/loop --times 0",
+            "/loop --every",
+        ] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /loop"), "{line}: {notices:?}")
+                }
+                other => panic!("{line}: expected a usage notice, got {other:?}"),
+            }
+        }
+        // A flag after the prompt started, an unknown flag and a bad duration are the
+        // same usage notice — never silent prompt text.
+        for line in [
+            "/loop fix it --times 2",
+            "/loop --forever 2 fix it",
+            "/loop --every 5x fix it",
+            "/loop --for two fix it",
+        ] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /loop"), "{line}: {notices:?}")
+                }
+                other => panic!("{line}: expected a usage notice, got {other:?}"),
+            }
+        }
+        // Durations take seconds, minutes and hours; zero is refused.
+        match parse("/loop --every 30s --for 2h go", false) {
+            Outcome::Loop(LoopCommand::Enable(options)) => {
+                assert_eq!(options.every, Some(Duration::from_secs(30)));
+                assert_eq!(options.for_duration, Some(Duration::from_secs(7200)));
+            }
+            other => panic!("expected durations, got {other:?}"),
+        }
+        assert!(HELP.contains("/loop"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "loop"));
+    }
+
+    /// `/copy` copies the whole message, `/copy code` only its last block; anything else is
+    /// a usage notice. It is a command, and it is in `/help`.
+    #[test]
+    fn copy_parses_its_optional_code_selector() {
+        assert!(matches!(
+            parse("/copy", false),
+            Outcome::Copy { code_only: false }
+        ));
+        assert!(matches!(
+            parse("/copy code", false),
+            Outcome::Copy { code_only: true }
+        ));
+        match parse("/copy everything please", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /copy"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/copy"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "copy"));
+    }
+
     /// The completion table and the clap grammar must name the same subcommands, in both
     /// directions: the table is what the UI completes, the grammar is what runs.
     #[test]
@@ -1359,6 +1829,22 @@ mod tests {
         }
         assert!(HELP.contains("/usage"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "usage"));
+        assert!(tree().iter().any(|command| command.name == "context"));
+    }
+
+    /// `/context` takes no argument, is a command, and is in `/help`; anything
+    /// after it is a usage notice.
+    #[test]
+    fn context_is_a_command_with_no_arguments() {
+        assert!(matches!(parse("/context", false), Outcome::Context));
+        match parse("/context now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /context"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/context"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "context"));
     }
 
     /// `/usage`'s lines list **every** window, one line each, then the provider's trailing word

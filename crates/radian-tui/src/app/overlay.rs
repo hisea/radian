@@ -55,6 +55,9 @@ pub enum Overlay {
     Completion(Vec<crate::command::Candidate>),
     /// The session picker (ADR 0023 U4): `--pick` at startup, `/sessions` in a session.
     Picker(Picker),
+    /// The inspector (`jobs | tools | mcp | hooks`): one tabbed overlay over the
+    /// transcript. Temporary, like the picker; never above a modal.
+    Inspector(crate::inspector::Inspector),
 }
 
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
@@ -166,16 +169,23 @@ impl Default for AccessWizard {
 }
 
 /// The startup trust modal's state (ADR 0031 T3): the workspace and the highlighted option.
-/// The default highlight is "do not trust this directory", so Enter is the
-/// fail-safe answer.
+/// The default highlight is "trust this directory, and use the sandbox for this project"
+/// (decision 2026-10-20: for a project with no trusted decision the sandbox choice
+/// comes first and is pre-selected, so Enter trusts with the sandbox). This keeps the
+/// owner rule below the access wizard: opening the sandbox's absence is never the
+/// pre-selected answer.
+///
+/// Slice B2: `mcp` carries the project `.mcp.json` preview the modal lists (one line per
+/// server, env key names only, never values), or `None` when there is no project file.
 pub struct TrustWizard {
     pub workspace: PathBuf,
     pub cursor: usize,
     pub choices: Vec<radian_host::trust::Choice>,
+    pub mcp: Option<radian_host::ProjectPreview>,
 }
 
 impl TrustWizard {
-    pub fn new(workspace: PathBuf) -> Self {
+    pub fn new(workspace: PathBuf, mcp: Option<radian_host::ProjectPreview>) -> Self {
         let choices: Vec<radian_host::trust::Choice> = radian_host::trust::Choice::ALL
             .into_iter()
             // "Trust parent" needs a parent to name.
@@ -185,12 +195,13 @@ impl TrustWizard {
             .collect();
         let cursor = choices
             .iter()
-            .position(|choice| *choice == radian_host::trust::Choice::UntrustHere)
+            .position(|choice| *choice == radian_host::trust::Choice::TrustHereSandbox)
             .unwrap_or(0);
         Self {
             workspace,
             cursor,
             choices,
+            mcp,
         }
     }
 

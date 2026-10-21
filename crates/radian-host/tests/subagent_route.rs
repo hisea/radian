@@ -195,15 +195,17 @@ async fn the_child_runs_the_parents_live_model_route() {
             price_for: None,
             shell_auto_background: None,
             servers: Vec::new(),
+            mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
+            window_context: None,
             auto_compact: false,
             compaction_settings: Value::Null,
             compaction_settings_for: None,
             retries: 0,
             sandbox: None,
-            tier: Preset::Safe,
-            profile: Profile::safe(&workspace)
+            tier: Preset::FullAccess,
+            profile: Profile::full_access(&workspace)
                 .unwrap()
                 .with_approval(ApprovalPolicy::Auto),
             access_builder: None,
@@ -222,6 +224,7 @@ async fn the_child_runs_the_parents_live_model_route() {
             tools_allow: None,
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
+            hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: json!({"provider": "openai-compatible", "model": "old"}),
@@ -243,6 +246,8 @@ async fn the_child_runs_the_parents_live_model_route() {
             driver_stopped: Arc::new(|_| {}),
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
+            hooks_warning: Arc::new(|_message: &str| {}),
+            wake_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await

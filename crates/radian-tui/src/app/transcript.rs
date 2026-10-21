@@ -42,8 +42,9 @@ impl App {
     }
 
     /// The leading startup block, rebuilt from [`StartupScreen`]: the wordmark (the wide form
-    /// when it fits the current width), the collapsed line or the full lines, the safety
-    /// lines (always shown), and the Tip.
+    /// when it fits the current width), the trust hint under it (only while the project is
+    /// untrusted), the collapsed line or the full lines, the safety lines (always shown),
+    /// and the Tip.
     fn rebuild_startup_entries(&mut self) {
         let Some(startup) = self.session.startup_screen.clone() else {
             self.session
@@ -57,6 +58,9 @@ impl App {
             .into_iter()
             .map(|line| Entry::new(EntryKind::Banner, line))
             .collect();
+        if let Some(hint) = &startup.trust_hint {
+            block.push(Entry::new(EntryKind::Startup, hint.clone()));
+        }
         if startup.expanded {
             block.push(Entry::new(
                 EntryKind::Startup,
@@ -81,16 +85,71 @@ impl App {
         let replace = self.session.startup_len.min(self.session.entries.len());
         self.session.entries.splice(0..replace, block);
         self.session.startup_len = block_len;
+        // The splice shifts every later entry: the wake-budget line moves with it (like a
+        // selection anchor in `shift_anchors`), or is gone when it sat inside the replaced
+        // startup block (it never does — the block is leading and the notice is pushed
+        // later — but the guard keeps the index honest).
+        if let Some(index) = self.session.wake_notice {
+            self.session.wake_notice = index
+                .checked_sub(replace)
+                .map(|shifted| shifted + block_len);
+        }
     }
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     pub(super) fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
-        if let RuntimeEvent::TurnFinished { .. } = event {
+        // The loop tracks its own echo pair first (which turns are loop-attributed); the
+        // arms below read the same event for their own facts.
+        super::loop_mode::track_loop_runtime_event(&mut self.session.loop_state, event, self.now);
+        if let RuntimeEvent::InboxEnqueued {
+            lane, message_id, ..
+        } = event
+        {
+            // The `queued` footer item: a `next_turn` input the runtime has not admitted
+            // yet. The set dedupes by id (a re-enqueue of the same input cannot
+            // double-count); a `NextStep` enqueue (`steer`, `inject`) never enters it.
+            if *lane == radian_session::InboxLane::NextTurn
+                && self.session.queued.insert(message_id.clone())
+            {
+                return UpdateResult::dirty();
+            }
+        }
+        if let RuntimeEvent::InputAdmitted { message_id, .. } = event {
+            // Only a tracked id leaves the set: a `steer` admission carries an id that
+            // was never queued here, so it cannot move the count.
+            if self.session.queued.remove(message_id) {
+                return UpdateResult::dirty();
+            }
+        }
+        if let RuntimeEvent::TurnFinished { outcome, .. } = event {
             // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
             self.session.turn_committed = true;
-            if self.session.pending_fork.take().is_some() {
-                return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
+            let mut result = match self.session.pending_fork.take() {
+                Some(_) => UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork)),
+                None => UpdateResult::none(),
+            };
+            // The `/loop` turn-end decision (the one place step 3 extends): a finished loop
+            // turn re-sends, waits for `--every`, or stops with a notice.
+            let loop_result = self.loop_turn_finished(*outcome);
+            result.dirty |= loop_result.dirty;
+            result.effects.extend(loop_result.effects);
+            // A completed or failed turn rings the bell in every mode but `off`: the user
+            // may be looking at another window. A cancel needs no ring — the user pressed
+            // the key themselves.
+            if matches!(outcome, TurnOutcome::Completed | TurnOutcome::Failed)
+                && self.bell != BellMode::Off
+            {
+                result.effects.push(Effect::Bell);
+                result.dirty = true;
             }
+            if result.dirty || !result.effects.is_empty() {
+                return result;
+            }
+        }
+        // A new turn started: the previous turn's failure (if any) is no longer retryable —
+        // `/retry` is only for the turn that just failed.
+        if let RuntimeEvent::TurnStarted { .. } = event {
+            self.session.last_turn_failed = false;
         }
         if let RuntimeEvent::ConfigChanged { change, .. } = event {
             // The driver applied the queued change: the status bar's `next:` promise is done.
@@ -117,17 +176,44 @@ impl App {
                 id: job_id.clone(),
                 started: self.now,
             });
+            if self.inspector().is_some() {
+                return UpdateResult::effect(Effect::RefreshInspector);
+            }
             return UpdateResult::dirty();
         }
         if let RuntimeEvent::BackgroundJobSettled { job_id, .. } = event {
             self.session.running_jobs.retain(|job| job.id != *job_id);
-            return UpdateResult::dirty();
+            // The inspector shows the job list, so refresh it while it is open. The job's
+            // completion notice also arrived: `all` rings for it, `attention` does not.
+            // Both can be true at once, so one result carries every effect that applies.
+            let mut effects = Vec::new();
+            if self.inspector().is_some() {
+                effects.push(Effect::RefreshInspector);
+            }
+            if self.bell.rings_for_job_settle() {
+                effects.push(Effect::Bell);
+            }
+            if effects.is_empty() {
+                return UpdateResult::dirty();
+            }
+            return UpdateResult {
+                dirty: true,
+                effects,
+            };
         }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.session.entries.push(Entry::new(
                 EntryKind::Notice,
-                format!("turn failed: {message}"),
+                format!("turn failed: {message}\n/retry to resend"),
             ));
+            // `/retry` resends the last user message, but only while this flag stands: the
+            // next turn's start clears it.
+            self.session.last_turn_failed = true;
+            // The loop pauses instead of retrying into a broken provider (its prompt is
+            // kept, so `/retry` resumes it).
+            if self.session.loop_state.active {
+                self.pause_loop_failed();
+            }
             // ADR 0018's fallback: a recognizable context overflow gets one extra line, since
             // automatic compaction did not keep the request inside the window. The host only
             // has the text, so the prefix is what identifies it.
@@ -149,6 +235,33 @@ impl App {
             .push(Entry::new(EntryKind::Notice, text));
     }
 
+    /// A wake-gate degrade fired: one visible notice line per burst. The first degrade of
+    /// a burst pushes the line; a later one rewrites it with the latest count, so two
+    /// degraded notices still show one line. The next turn start clears the burst (the
+    /// line stays as plain history) and herdr reports normal again.
+    pub fn wake_budget_notice(&mut self, text: impl Into<String>) -> UpdateResult {
+        let text = text.into();
+        match self.session.wake_notice {
+            Some(index)
+                if self
+                    .session
+                    .entries
+                    .get(index)
+                    .is_some_and(|entry| entry.wake_notice) =>
+            {
+                self.session.entries[index].text = text;
+            }
+            _ => {
+                let mut entry = Entry::new(EntryKind::Notice, text);
+                entry.wake_notice = true;
+                self.session.entries.push(entry);
+                self.session.wake_notice = Some(self.session.entries.len() - 1);
+            }
+        }
+        self.session.wake_waiting = true;
+        UpdateResult::dirty()
+    }
+
     /// Applies a live event. Deltas build `live` entries; the committed message
     /// (`TranscriptAppended`) replaces them, so a dropped delta can never leave a duplicate.
     /// Returns the effects the event implies (clearing an approval prompt abandons its reply
@@ -162,6 +275,10 @@ impl App {
             AgentEvent::TurnStarted => {
                 // The turn is being written now; a `/fork` must wait for its `TurnFinished`.
                 self.session.turn_committed = false;
+                // Back to normal: a new turn ends the wake-budget burst (the notice line
+                // stays as plain history) and herdr stops reporting `wake budget`.
+                self.session.wake_notice = None;
+                self.session.wake_waiting = false;
             }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
@@ -473,7 +590,8 @@ impl App {
                     // The call-time head is the tool name and the renderer's title (ADR 0028
                     // revision 5 decision 1); the meta and the status glyph are the block
                     // layer's, drawn from the card and the entry's state. The pairing refreshes
-                    // the title once the result is in (a `git_diff` title is terse until then).
+                    // the title once the result is in (a title that parses the result text
+                    // is terse until then).
                     let mut entry =
                         Entry::new(EntryKind::ToolCall, crate::tools::call_text(&card, ""));
                     entry.tool = Some(Box::new(card));
@@ -507,11 +625,11 @@ impl App {
                         entry.result = Some(result.is_error);
                         if let Some(card) = entry.tool.as_mut() {
                             card.structured = result.structured.clone();
-                            // The head's title can only be final now (a `git_diff`'s counts
-                            // come from the result text), so the entry's text - what renders
-                            // and copies - is regenerated from the same function the layout
-                            // uses. The result's own row count is part of the head's collapsed
-                            // meta (`· N lines`), and only this entry can see the result text.
+                            // The head's title can only be final now, so the entry's text -
+                            // what renders and copies - is regenerated from the same function
+                            // the layout uses. The result's own row count is part of the head's
+                            // collapsed meta (`· N lines`), and only this entry can see the
+                            // result text.
                             let display = crate::tools::result_display_text(card, &result.text());
                             card.result_lines = Some(crate::tools::body_line_count(&display));
                             // ADR 0024: the call entry draws the whole ask block
@@ -798,5 +916,45 @@ mod tests {
             status: agent_core::RunStatus::Completed,
         });
         assert!(app.session.entries.is_empty());
+    }
+
+    /// Two degraded notices show one line with the latest count, and the session reports
+    /// wake-waiting for herdr until the next turn starts.
+    #[test]
+    fn two_degraded_notices_show_one_line_with_the_latest_count() {
+        let mut app = App::new("m", "s");
+        app.wake_budget_notice(
+            "wake budget used up: 1 job notices are waiting — send any message to continue",
+        );
+        app.wake_budget_notice(
+            "wake budget used up: 2 job notices are waiting — send any message to continue",
+        );
+        assert_eq!(app.session.entries.len(), 1, "one line per burst");
+        assert_eq!(
+            app.session.entries[0].text,
+            "wake budget used up: 2 job notices are waiting — send any message to continue"
+        );
+        assert_eq!(app.session.entries[0].kind, EntryKind::Notice);
+        assert!(app.session.wake_waiting);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::WakeBudget)
+        );
+        assert!(app.herdr_state_inputs().3);
+
+        // The next turn start ends the burst but keeps the line as history; a later
+        // burst pushes a fresh line.
+        app.apply_event(&AgentEvent::TurnStarted);
+        assert!(!app.session.wake_waiting);
+        assert_eq!(app.session.wake_notice, None);
+        assert_eq!(
+            app.herdr_blocked(),
+            None,
+            "herdr is back to normal on the next turn start"
+        );
+        app.wake_budget_notice(
+            "wake budget used up: 1 job notices are waiting — send any message to continue",
+        );
+        assert_eq!(app.session.entries.len(), 2);
     }
 }

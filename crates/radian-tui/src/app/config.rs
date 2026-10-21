@@ -16,12 +16,13 @@ impl App {
             footer_context: radian_host::FooterContext::new(),
             input: Composer::new(),
             quit: false,
+            new_session: false,
             pending: 0,
             quit_pending: None,
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
-            pending_expand: None,
+            pending_expand: VecDeque::new(),
             slash_completion: None,
             mention_completion: None,
             completion_cursor: 0,
@@ -35,11 +36,13 @@ impl App {
             picker_outcome: None,
             mouse_enabled: true,
             clipboard: ClipboardMode::Osc52,
+            bell: BellMode::Off,
             // ADR 0028 R3's default: thinking collapsed to one line.
             reasoning_mode: ReasoningMode::Collapsed,
             tool_display: crate::tools::ToolDisplay::default(),
             mermaid_enabled: true,
             highlight_enabled: true,
+            inspector_last: None,
             session: SessionView {
                 session_id: session_id.into(),
                 model_name: model_name.into(),
@@ -64,6 +67,9 @@ impl App {
                 note: None,
                 running_tools: Vec::new(),
                 running_jobs: Vec::new(),
+                queued: HashSet::new(),
+                last_turn_failed: false,
+                loop_state: loop_mode::LoopState::default(),
                 session_ended: None,
                 turn_committed: true,
                 pending_fork: None,
@@ -88,6 +94,8 @@ impl App {
                 selecting: None,
                 last_click: None,
                 pending_compaction: None,
+                wake_notice: None,
+                wake_waiting: false,
             },
         }
     }
@@ -141,8 +149,8 @@ impl App {
         self.session.sandbox_note = note;
     }
 
-    /// Whether this session has a shell for `!` (ADR 0033): false on the `safe` tier, which
-    /// has no sandbox at all (ADR 0012).
+    /// Whether this session has a shell for `!` (ADR 0033): false when the session mounts
+    /// no `shell`.
     pub fn set_bash_available(&mut self, available: bool) {
         self.session.bash_available = available;
     }
@@ -244,6 +252,16 @@ impl App {
             self.clipboard = ClipboardMode::Osc52;
             warnings.push("tui.clipboard = \"pbcopy\" is macOS-only; using osc52".into());
         }
+        // `tui.bell` (default off). An unknown spelling never reaches here (the host
+        // config reader skips it with a warning, the way `tui.clipboard` does); a direct
+        // construction falls back to off all the same. `NO_COLOR` does not affect it: the
+        // bell is a control character, not a color.
+        self.bell = config
+            .tui
+            .bell
+            .as_deref()
+            .and_then(BellMode::parse)
+            .unwrap_or_default();
         // `[tui.footer]` (ADR 0027 C2); the legacy `[tui.widgets]` (C3) folds into rows
         // positioned above/below the input (ADR 0027), with one warning.
         let mut footer = config.tui.footer.clone();
@@ -270,20 +288,28 @@ impl App {
     /// Replaces the read handle with the host's projection, so the renderer reads the same
     /// facts the facade owns.
     /// The inputs to the herdr state function (ADR 0034 H2): the turn state, the pending
-    /// queue's length, and whether the startup trust prompt is waiting.
-    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool) {
+    /// queue's length, whether the startup trust prompt is waiting, and whether degraded
+    /// wake notices wait while idle.
+    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool, bool) {
         let trust = matches!(self.top_modal(), Some(Modal::Trust(_)));
-        (self.session.projection.read().turn(), self.pending, trust)
+        (
+            self.session.projection.read().turn(),
+            self.pending,
+            trust,
+            self.session.wake_waiting,
+        )
     }
 
     /// What is blocking, for herdr's category-only message (ADR 0034 H2). The approval's tool
-    /// name only - never the command, path or question body.
+    /// name only - never the command, path or question body. A used-up wake budget reports
+    /// only while no modal claims the block.
     pub fn herdr_blocked(&self) -> Option<radian_host::herdr::Blocked> {
         match self.top_modal() {
             Some(Modal::Approval(prompt)) => Some(radian_host::herdr::Blocked::Approval(
                 prompt.request.tool.clone(),
             )),
             Some(Modal::Question(_)) => Some(radian_host::herdr::Blocked::Question),
+            _ if self.session.wake_waiting => Some(radian_host::herdr::Blocked::WakeBudget),
             _ => None,
         }
     }

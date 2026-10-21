@@ -27,21 +27,7 @@ mod tests {
             .iter()
             .map(|s| s.name.as_str())
             .collect();
-        assert_eq!(
-            names,
-            [
-                "read",
-                "write",
-                "patch",
-                "list",
-                "glob",
-                "grep",
-                "git_diff",
-                // The one-version alias (ADR 0043 decision 3): registered for preflight, never
-                // advertised (the host model strips it from every request).
-                "git_status"
-            ]
-        );
+        assert_eq!(names, ["read", "write", "patch", "glob", "grep"]);
 
         let call = agent_core::ToolCall {
             id: "t".into(),

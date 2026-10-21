@@ -53,24 +53,24 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Workspace-relative file path."
+                "description": "File to change. Use a workspace-relative path."
             },
             "old": {
                 "type": "string",
-                "description": "Text to find; must locate exactly one occurrence unless replace_all is true. Use with `new` (or use `edits` instead)."
+                "description": "Text to find. It must occur exactly once."
             },
             "new": {
                 "type": "string",
-                "description": "Replacement text for the legacy `old`/`new` form."
+                "description": "Replacement text. Use it with `old`."
             },
             "replace_all": {
                 "type": "boolean",
-                "description": "Replace every located occurrence instead of refusing when there is more than one; defaults to false."
+                "description": "Replace every match. Default: false."
             },
             "edits": {
                 "type": "array",
                 "minItems": 1,
-                "description": "Several edits to the single `path`, applied atomically: every edit is located in the original file, all ranges must be disjoint, and if any edit fails nothing is written. Each entry is `{old, new, replace_all?}` with its own `replace_all` default (false). Use this instead of `old`/`new`.",
+                "description": "Several edits to one file. The tool applies them atomically. Every edit is matched in the original file. All ranges must be disjoint. A failed edit writes nothing.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -91,19 +91,10 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "patch".into(),
-        description: "Replace `old` with `new` in an existing workspace file. Matching is \
-                      layered, and every layer only *locates* text, it never invents any: \
-                      (1) exact; (2) with typographic quotes, dashes and no-break spaces \
-                      normalised to ASCII on both sides; (3) line by line, ignoring trailing \
-                      whitespace. A match at any layer must be unique, or the edit is refused \
-                      and the file is unchanged; set replace_all: true to replace every \
-                      located occurrence instead. For several edits to the one file, pass \
-                      `edits` (an array of `{old, new, replace_all?}`) instead of `old`/`new`: \
-                      every edit is located in the original file, all ranges must be disjoint, \
-                      and if any edit fails nothing is written. A CRLF file is matched on an LF \
-                      view, the offsets are mapped back, and the file stays CRLF. When nothing \
-                      matches, the error names the closest region of the file, with line \
-                      numbers, so you do not need another read."
+        description: "Replace `old` with `new` in a file. Matching ignores typographic \
+                      quotes, dashes, no-break spaces, and trailing whitespace. The match must \
+                      be unique. To replace every match, set `replace_all`. To make several \
+                      edits to one file, pass `edits` instead of `old`/`new`."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Exclusive,

@@ -39,7 +39,7 @@ clap = { version = "4", features = ["derive"] }
 grok-mermaid = { path = "../../third_party/grok-mermaid" }
 # Assistant-text Markdown (ADR 0028 R2): CommonMark + tables, no syntax highlighting (slice 5).
 # `default-features = false` drops the HTML renderer and the SIMD scanner: this crate only
-# walks the event stream, and the build stays dependency-light on the 1.88 MSRV.
+# walks the event stream, and the build stays dependency-light on the 1.99.1 MSRV.
 pulldown-cmark = { version = "0.12", default-features = false }
 # The slash-command arguments: quoted values like `/memory add "two words"`.
 shlex = "2"

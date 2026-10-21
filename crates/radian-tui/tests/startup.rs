@@ -16,6 +16,7 @@ fn screen() -> StartupScreen {
     StartupScreen {
         banner: banner_rows("0.1.0", "mock-model", "~/Code/radian"),
         banner_narrow: "R radian 0.1.0".to_string(),
+        trust_hint: None,
         summary: "workspace · macOS sandbox · context 1000 · memory off · ask_user on".to_string(),
         lines: vec![
             "profile: workspace".to_string(),
@@ -42,6 +43,58 @@ fn with_startup() -> App {
     app
 }
 
+/// decision 2026-10-20: the wordmark carries `untrusted project · /trust to trust
+/// it` under it while the project has no trusted decision, and nothing once it is
+/// trusted. Showing it always (or never) fails this test, so it is the mutation catcher
+/// for both directions.
+#[test]
+fn the_trust_hint_shows_until_the_project_is_trusted() {
+    use radian_host::trust::{Decision, Resolved, Setup, Source};
+    use radian_tui::startup::trust_hint;
+    use std::path::PathBuf;
+
+    let untrusted = Setup::untrusted(&PathBuf::from("/work/example"), false);
+    assert_eq!(
+        trust_hint(&untrusted),
+        Some("untrusted project · /trust to trust it".to_string())
+    );
+    let trusted = Setup {
+        workspace: PathBuf::from("/work/example"),
+        resolved: Resolved {
+            decision: Decision::Trust,
+            source: Source::Session,
+        },
+        needs_ask: false,
+    };
+    assert_eq!(trust_hint(&trusted), None);
+}
+
+/// The hint is its own entry directly under the wordmark rows, so it survives the
+/// information fold; without it no such line exists.
+#[test]
+fn the_trust_hint_is_an_entry_under_the_wordmark() {
+    let mut hinted = screen();
+    hinted.trust_hint = Some("untrusted project · /trust to trust it".to_string());
+    let mut app = App::new("mock", "s");
+    app.set_transcript_width(120);
+    app.set_startup(hinted);
+    let texts = entry_texts(&app);
+    let banner_len = radian_tui::startup::BANNER_WIDE.len();
+    assert_eq!(
+        texts[banner_len], "untrusted project · /trust to trust it",
+        "{texts:?}"
+    );
+    assert_eq!(app.session.entries[banner_len].kind, EntryKind::Startup);
+
+    let plain = with_startup();
+    assert!(
+        !entry_texts(&plain)
+            .iter()
+            .any(|text| text.contains("/trust to trust it")),
+        "{:?}",
+        entry_texts(&plain)
+    );
+}
 /// The default is one collapsed line (plus the wordmark, safety and Tip); `Ctrl-P` expands
 /// it to the full lines and folds it back.
 #[test]

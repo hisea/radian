@@ -124,36 +124,35 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "path": {
                 "type": "string",
-                "description": "Workspace-relative directory (or file) to search; a read-only \
-                                absolute or `~` directory under the cargo registry sources or a \
-                                toolchain's `lib/rustlib/src` is also accepted (its results are \
-                                absolute). Defaults to the workspace root."
+                "description": "Directory or file to search. Default: the workspace root. \
+                                A read-only absolute directory or `~` directory under the cargo \
+                                registry sources or a toolchain `lib/rustlib/src` is also \
+                                accepted. Its results are absolute."
             },
             "glob": {
                 "type": "string",
-                "description": "Only search files whose workspace-relative path matches this glob, e.g. `**/*.rs`."
+                "description": "Search only files with a workspace-relative path that matches this glob. Example: `**/*.rs`."
             },
             "case_insensitive": {
                 "type": "boolean",
-                "description": "Match without regard to case; defaults to false."
+                "description": "Ignore case. Default: false."
             },
             "context": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Lines of context to show before and after each match; defaults to 0. A larger value than the limit (30) is cut to it, not refused."
+                "description": "Lines to show before and after each match. Default: 0. The tool cuts values above 30 to 30."
             },
             "max_matches": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 5000,
-                "description": "Maximum total matches to return; defaults to 200."
+                "description": "Maximum matches to return. Default: 200."
             },
             "output": {
                 "type": "string",
                 "enum": ["content", "files", "count"],
-                "description": "`content` (default) prints each match as `path:line:text`; \
-                                `files` prints one line per matching file with its match count; \
-                                `count` prints only the totals."
+                "description": "`content` (default) prints each match. `files` prints each \
+                                matching file. `count` prints only the totals."
             }
         },
         "required": ["pattern"],
@@ -164,17 +163,12 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "grep".into(),
-        description: "Search file contents under the workspace (or under path) with a regex. \
-                      Each match is reported as `path:line:text`; with `context` the lines \
-                      around it are reported too, as `path-line-text`, and groups are separated \
-                      by `--`. `.gitignore` is respected, `.git` and symlinks are skipped, and \
-                      binary files are skipped. `glob` limits the files searched, \
-                      `case_insensitive` ignores case. Matches are capped per file and in \
-                      total, total output is bounded by bytes, each cut named in the text; \
-                      `output` selects `content` (default), `files` (one line per matching file) \
-                      or `count` (totals only). Use `output: \"files\"` for which files contain \
-                      a pattern and `output: \"count\"` for how many matches there are. \
-                      An invalid regex is an error."
+        description: "Search file contents with a Rust regex. The tool reports each match \
+                      as `path:line:text`. `.gitignore` and `.ignore` files apply from the \
+                      workspace root down to the search directory, and the global gitignore \
+                      is not read. The tool skips `.git`, symlinks, and binary files. Use \
+                      `output: \"files\"` for which files contain a pattern. Use `output: \
+                      \"count\"` for how many matches there are."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
@@ -221,59 +215,142 @@ pub(crate) async fn run(
         Some(n) => n as usize,
         None => limits.default_grep_matches,
     };
+    let scan = BlockingScan {
+        root: root.clone(),
+        limits: *limits,
+        regex,
+        file_filter,
+        pattern: args.pattern,
+        path: args.path.unwrap_or_else(|| ".".to_owned()),
+        output: args.output,
+        arguments: arguments.clone(),
+        context,
+        context_cut,
+        cap,
+    };
+    // The walk and every file read below are synchronous and never yield, so the scan runs
+    // on the blocking pool: `grep` calls batched in one Core task overlap instead of
+    // queueing behind each other. Cancellation drops this future; the blocking scan then
+    // runs on to the end in the background (read-only, so nothing is written) and its
+    // result is never written back: Core's own `cancelled` wins the race.
+    match tokio::task::spawn_blocking(move || scan_blocking(scan)).await {
+        Ok(result) => result,
+        Err(error) => match error.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            Err(_) => Err(fail("internal", "the grep scan did not finish")),
+        },
+    }
+}
 
-    // `resolve_existing` canonicalizes, so a symlinked `path` that escapes is refused and the
-    // base is always inside the workspace.
-    let requested = args.path.as_deref().unwrap_or(".");
+/// Everything `run` does after argument parsing: the fd walk, the per-file scans and the
+/// rendering. Synchronous by construction (see `run`); the body is the old `run` tail,
+/// limits, outputs and errors unchanged.
+struct BlockingScan {
+    root: WorkspaceRoot,
+    limits: Limits,
+    regex: Regex,
+    file_filter: Option<globset::GlobMatcher>,
+    pattern: String,
+    path: String,
+    output: Option<String>,
+    /// The raw arguments, for the `output`-mode error after the walk (same order as before:
+    /// a bad path fails before a bad `output`).
+    arguments: serde_json::Value,
+    context: usize,
+    context_cut: bool,
+    cap: usize,
+}
+
+fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
+    let BlockingScan {
+        root,
+        limits,
+        regex,
+        file_filter,
+        pattern,
+        path,
+        output,
+        arguments,
+        context,
+        context_cut,
+        cap,
+    } = scan;
+    // `resolve_existing` canonicalizes, so a symlinked `path` that escapes is refused and
+    // the base is always inside the workspace.
+    let requested: &str = &path;
 
     // ADR 0039 decision 2 and revision 1: the base and every file are opened through the
     // root's directory fd; the walk hands back open fds, never paths to re-open. An absolute
     // or `~` base must be under a read-only root, and its results are rendered with that
     // root's prefix so they can be passed to `read` again.
+    // Several whitespace-separated bases in one `path`: each resolved as a lone call
+    // would resolve it, the files merged with duplicates removed and the caps shared
+    // across the whole call. Every walk stays fd-relative (ADR 0039 decision 2); a found
+    // file's open fd is the one scanned, never a path re-opened.
+    let resolved = search::resolve_bases(&root, requested)?;
+    let header = resolved.header;
     let mut files: Vec<(File, String)> = Vec::new();
-    match root.read_base(requested) {
-        Ok(base) => {
-            let prefix = base.prefix.clone();
-            search::walk(&base.dir, &base.relative, &mut |found| {
-                let rel = found.relative;
-                if let Some(filter) = &file_filter
-                    && !filter.is_match(&rel)
-                {
-                    return true;
+    {
+        let mut seen = std::collections::HashSet::new();
+        for base in resolved.bases {
+            match base {
+                search::SingleBase::Dir(dir_base) => {
+                    let prefix = dir_base.prefix.clone();
+                    search::walk(
+                        &dir_base.dir,
+                        &dir_base.relative,
+                        dir_base.ancestors,
+                        &mut |found| {
+                            let rel = found.relative;
+                            if let Some(filter) = &file_filter
+                                && !filter.is_match(&rel)
+                            {
+                                return true;
+                            }
+                            let display = display_path(prefix.as_deref(), &rel);
+                            if seen.insert(display.clone()) {
+                                files.push((found.file, display));
+                            }
+                            true
+                        },
+                    );
                 }
-                files.push((found.file, display_path(prefix.as_deref(), &rel)));
-                true
-            });
-            files.sort_by(|a, b| a.1.cmp(&b.1));
-        }
-        Err(failure) if failure.code == "not_a_directory" => {
-            // A file base: the pattern is matched against its own root-relative path.
-            let opened = root.open_read(requested)?;
-            if opened.stat.kind != crate::safe_fs::EntryKind::File {
-                return Err(fail(
-                    "not_a_file",
-                    format!("`{requested}` is not a regular file"),
-                ));
+                search::SingleBase::File {
+                    opened,
+                    relative,
+                    prefix,
+                    segment,
+                } => {
+                    // A file base: the pattern is matched against its own root-relative path.
+                    if opened.stat.kind != crate::safe_fs::EntryKind::File {
+                        return Err(fail(
+                            "not_a_file",
+                            format!("`{segment}` is not a regular file"),
+                        ));
+                    }
+                    if file_filter
+                        .as_ref()
+                        .is_none_or(|filter| filter.is_match(&relative))
+                    {
+                        let display = display_path(prefix.as_deref(), &relative);
+                        if seen.insert(display.clone()) {
+                            files.push((opened.file, display));
+                        }
+                    }
+                }
             }
-            let (rel, prefix) = root.read_relative(requested)?;
-            if file_filter
-                .as_ref()
-                .is_none_or(|filter| filter.is_match(&rel))
-            {
-                files.push((opened.file, display_path(prefix.as_deref(), &rel)));
-            }
         }
-        Err(failure) => return Err(failure),
     }
+    files.sort_by(|a, b| a.1.cmp(&b.1));
 
-    let mode = match args.output.as_deref() {
+    let mode = match output.as_deref() {
         None | Some("content") => OutputMode::Content,
         Some("files") => OutputMode::Files,
         Some("count") => OutputMode::Count,
         Some(other) => {
             return Err(args::invalid(
                 "grep",
-                arguments,
+                &arguments,
                 [format!(
                     "`output` must be one of \"content\", \"files\" or \"count\", got \"{other}\""
                 )],
@@ -544,14 +621,18 @@ pub(crate) async fn run(
         }
     }
     if total == 0 && !byte_truncated && mode != OutputMode::Count {
-        suffix.push_str(&format!("[no matches for `{}`]\n", args.pattern));
+        suffix.push_str(&format!("[no matches for `{pattern}`]\n"));
     }
     debug_assert!(
         suffix.len() <= BYTE_NOTE_RESERVE,
         "grep suffix {}B exceeds the {BYTE_NOTE_RESERVE}B reserve",
         suffix.len()
     );
-    let mut out = String::with_capacity(body.len() + suffix.len());
+    let mut out =
+        String::with_capacity(header.as_ref().map_or(0, String::len) + body.len() + suffix.len());
+    if let Some(header) = header {
+        out.push_str(&header);
+    }
     out.push_str(&body);
     out.push_str(&suffix);
     if out.len() > byte_cap {
@@ -567,7 +648,7 @@ pub(crate) async fn run(
     Ok(ToolOutput {
         content: vec![ContentPart::text(out)],
         structured: Some(json!({
-            "pattern": args.pattern,
+            "pattern": pattern,
             "path": requested,
             "matches": total,
             "files": files_matched,

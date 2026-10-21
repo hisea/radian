@@ -52,6 +52,15 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            // `/queue`: the text goes through the same `@` expansion as a send, but the
+            // result is always a followup — never a steer, even while a turn runs.
+            command::Outcome::Queue(text) => self.begin_queue(text),
+            // `/retry`: resend the last user message, but only after a model-error turn.
+            command::Outcome::Retry => self.retry(),
+            // `/loop`: toggle the per-turn repeat, or arm/enable it with limits and an
+            // optional prompt. The loop's own inline prompt goes through `@` expansion
+            // like `/queue`.
+            command::Outcome::Loop(command) => self.loop_command(command),
             command::Outcome::Memory(command) => UpdateResult::effect(Effect::RunMemoryCommand {
                 command,
                 confirmed: false,
@@ -98,6 +107,36 @@ impl App {
                     return UpdateResult::dirty();
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
+            }
+            command::Outcome::New => {
+                // `/new` ends this session and opens a fresh one in place. Like `/fork` it
+                // needs an idle live session; a running background job would outlive the
+                // session it belongs to, so it refuses with a pointer to `/jobs kill`.
+                // Leaving the loop IS the execution, so this sets the flags, not an effect.
+                if self.session.session_ended.is_some() {
+                    self.push_notice(
+                        "the session has ended; there is nothing to start over (`/new` needs a \
+                         live session)",
+                    );
+                    return UpdateResult::dirty();
+                }
+                if self.turn() == TurnState::Running {
+                    self.push_notice(
+                        "finish the current turn before starting a new session (`/new` needs \
+                         an idle session)",
+                    );
+                    return UpdateResult::dirty();
+                }
+                if !self.session.running_jobs.is_empty() {
+                    self.push_notice(
+                        "a background job is still running; stop it with `/jobs kill` first \
+                         (`/new` needs an idle session)",
+                    );
+                    return UpdateResult::dirty();
+                }
+                self.new_session = true;
+                self.quit = true;
+                UpdateResult::dirty()
             }
             command::Outcome::Theme(name) => {
                 // ADR 0008 revision: the loop loads the theme (I/O) and writes `tui.theme`
@@ -261,7 +300,17 @@ impl App {
             } => self.begin_bash(command, exclude_from_context),
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
+            // `/context`: the loop reads the estimate from the facade; the answer
+            // comes back as `Input::SessionDone`.
+            command::Outcome::Context => UpdateResult::effect(Effect::Context),
             command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
+            // The inspector (`/jobs`, `/tools`, `/mcp`, `/hooks`, `/panel`): the loop
+            // gathers the snapshot; `update` stays pure. A bare `/jobs` opens the jobs
+            // page; `kill` forms stay text (the `Jobs` arm above).
+            command::Outcome::Inspector(page) => {
+                UpdateResult::effect(Effect::OpenInspector { page })
+            }
+            command::Outcome::Copy { code_only } => self.copy(code_only),
             command::Outcome::Message => UpdateResult::none(),
         }
     }
@@ -380,5 +429,51 @@ impl App {
                 UpdateResult::dirty()
             }
         }
+    }
+
+    /// Runs `/copy [code]`: copy the last committed assistant message — or its last fenced
+    /// code block — through the configured clipboard backend (the same `Effect::Copy` a
+    /// mouse selection uses, so OSC 52 and `pbcopy` report the same way). A streaming entry
+    /// never counts; with no committed message, no block, an oversized message, or a
+    /// disabled/unsupported backend the reason is a notice and nothing is copied.
+    pub(super) fn copy(&mut self, code_only: bool) -> UpdateResult {
+        let Some(source) = crate::copy::last_assistant_text(&self.session.entries) else {
+            self.push_notice("nothing to copy");
+            return UpdateResult::dirty();
+        };
+        let text = if code_only {
+            match crate::copy::last_fenced_block(source) {
+                Some(block) => block,
+                None => {
+                    self.push_notice("no code block in the last assistant message");
+                    return UpdateResult::dirty();
+                }
+            }
+        } else {
+            source.to_owned()
+        };
+        // Refuse the absurd honestly, with the reason (the mouse selection's own rule).
+        if text.len() > MAX_CLIPBOARD_BYTES {
+            self.push_notice(format!(
+                "message too large to copy: {} bytes (the limit is {})",
+                text.len(),
+                MAX_CLIPBOARD_BYTES
+            ));
+            return UpdateResult::dirty();
+        }
+        // `off` keeps the selection visual for the mouse path, but an explicit `/copy`
+        // answers: nothing was copied, and why.
+        if self.clipboard == ClipboardMode::Off {
+            self.push_notice("copy is off (tui.clipboard = \"off\"); nothing was copied");
+            return UpdateResult::dirty();
+        }
+        if !self.clipboard.supported_on_this_platform() {
+            self.push_notice(format!(
+                "tui.clipboard = {:?} is not supported on this platform; nothing was copied",
+                self.clipboard
+            ));
+            return UpdateResult::dirty();
+        }
+        UpdateResult::effect(Effect::Copy { text })
     }
 }

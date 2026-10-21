@@ -29,6 +29,7 @@ fn all_events() -> Vec<RuntimeEvent> {
             lane: InboxLane::NextTurn,
             source: InputSource::User,
             wake: true,
+            degraded: false,
         },
         RuntimeEvent::InputClaimed {
             message_ids: vec![message_id.clone()],
@@ -144,12 +145,14 @@ async fn runtime_events_round_trip_through_typed_reader_variants() {
             lane,
             source,
             wake,
+            degraded,
         } => {
             assert_eq!(message.text(), "hello");
             assert_eq!(message_id.0, "inbox-1");
             assert_eq!(*lane, InboxLane::NextTurn);
             assert_eq!(*source, InputSource::User);
             assert!(*wake, "a `next_turn` entry wakes");
+            assert!(!*degraded, "a normal entry is not a degrade");
         }
         other => panic!("expected InboxEnqueued, got {other:?}"),
     }

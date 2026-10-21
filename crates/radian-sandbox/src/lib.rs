@@ -19,21 +19,34 @@
 
 #[cfg(target_os = "linux")]
 mod bwrap;
+mod deny;
 mod error;
+mod git_exec;
 mod inherited;
 mod policy;
 #[cfg(target_os = "macos")]
 mod seatbelt;
+#[cfg(target_os = "linux")]
+mod seccomp;
 mod slot;
 
 #[cfg(feature = "testing")]
 pub mod harness;
 
 use std::ffi::{OsStr, OsString};
+use std::ops::{Deref, DerefMut};
 use std::process::Command;
 
+pub use deny::{DenialCategory, MARKER_PREFIX, classify_denial};
 pub use error::{ProbeReport, SandboxError};
-pub use policy::{DEFAULT_ALLOW_ENV, DEFAULT_DENY_READ, GitAccess, SandboxMode, SandboxPolicy};
+pub use git_exec::{
+    GIT_EXEC_DIRS, GIT_EXEC_FILES, GIT_MODULE_DIRS, GIT_MODULE_FILES, GIT_WORKTREE_FILES,
+    is_git_exec_entry,
+};
+pub use policy::{
+    DEFAULT_ALLOW_ENV, DEFAULT_DENY_READ, GitAccess, SandboxMode, SandboxPolicy,
+    discover_git_metadata,
+};
 pub use slot::SandboxSlot;
 
 /// A concrete sandbox mechanism. `command` returns a launcher `Command` that runs `program`
@@ -47,13 +60,15 @@ pub trait SandboxBackend: Send + Sync {
     fn probe(&self) -> Result<ProbeReport, SandboxError>;
 
     /// Builds the launcher command. `program`/`args` are the child's argv; the backend
-    /// prepends its own launcher and options.
+    /// prepends its own launcher and options. The returned [`SandboxCommand`] owns any file
+    /// descriptor the launcher needs (on Linux, the seccomp program); dropping it closes the
+    /// fd, so building commands in a loop cannot leak.
     fn command(
         &self,
         policy: &SandboxPolicy,
         program: &OsStr,
         args: &[OsString],
-    ) -> Result<Command, SandboxError>;
+    ) -> Result<SandboxCommand, SandboxError>;
 
     /// Whether this backend **enforces** [`GitAccess::WritableExceptExec`] for `policy`
     /// (ADR 0038 decision 4): the discovered git metadata is writable except the entries git
@@ -81,6 +96,124 @@ pub trait SandboxBackend: Send + Sync {
     }
 }
 
+/// A sandboxed launcher command: a [`std::process::Command`] plus ownership of any file
+/// descriptor the launcher needs (on Linux, the read end of the pipe holding the compiled
+/// seccomp program, inherited by `bwrap` under `--seccomp`).
+///
+/// It derefs to the inner command, so `stdin`/`spawn`/`output`/`pre_exec` (the shell tool
+/// registers its own `pre_exec` for `setsid` on the same command) all work unchanged; what
+/// it adds is lifetime: dropping the command closes the fd, whether the command was
+/// spawned or not. Each command owns a freshly written pipe, so concurrent builds never
+/// share an offset. There is deliberately no `Clone` and no `into_inner`: the fd must not
+/// outlive the command it was built for.
+#[derive(Debug)]
+pub struct SandboxCommand {
+    /// Whether the launcher clears the child's environment itself (Linux `bwrap`
+    /// `--clearenv`): the launcher's own environment never reaches the child, so extra
+    /// variables must ride launcher arguments, not [`Command::env`]. Every other backend
+    /// inherits the launcher's environment, so `env` is enough there.
+    clears_child_env: bool,
+    command: Command,
+    /// Linux `workspace` only: the seccomp program `bwrap` reads. `None` everywhere else
+    /// (`full`, `inherited`, macOS).
+    #[cfg(target_os = "linux")]
+    _seccomp_filter: Option<std::os::fd::OwnedFd>,
+}
+
+impl SandboxCommand {
+    /// Wraps a plain command (backends with no launcher fd: `full`, `inherited`, macOS).
+    pub fn new(command: Command) -> Self {
+        Self {
+            command,
+            clears_child_env: false,
+            #[cfg(target_os = "linux")]
+            _seccomp_filter: None,
+        }
+    }
+
+    /// Wraps a command whose launcher clears the child's environment itself (Linux `bwrap`
+    /// `--clearenv`): [`SandboxCommand::set_child_env`] rides `--setenv` arguments there.
+    /// Only the Linux backend builds one, so this is unused elsewhere.
+    #[allow(dead_code)]
+    pub(crate) fn with_cleared_child_env(command: Command) -> Self {
+        Self {
+            command,
+            clears_child_env: true,
+            #[cfg(target_os = "linux")]
+            _seccomp_filter: None,
+        }
+    }
+
+    /// Sets an environment variable in the sandboxed child (ADR 0039 decision 5: the shell
+    /// tool's git hardening). On most backends this is the launcher's own environment, which
+    /// the child inherits; where the launcher clears it (Linux `bwrap`), it becomes a
+    /// `--setenv` launcher argument placed before the `--` separator instead. Either way the
+    /// variable reaches the child's environment and nothing else changes.
+    pub fn set_child_env(&mut self, name: &str, value: &str) {
+        if !self.clears_child_env {
+            self.command.env(name, value);
+            return;
+        }
+        let mut args: Vec<OsString> = self
+            .command
+            .get_args()
+            .map(|arg| arg.to_os_string())
+            .collect();
+        let at = args
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(args.len());
+        args.splice(
+            at..at,
+            [
+                OsString::from("--setenv"),
+                OsString::from(name),
+                OsString::from(value),
+            ],
+        );
+        let mut rebuilt = Command::new(self.command.get_program());
+        rebuilt.args(args);
+        if let Some(dir) = self.command.get_current_dir() {
+            rebuilt.current_dir(dir);
+        }
+        for (key, old) in self.command.get_envs() {
+            match old {
+                Some(old) => {
+                    rebuilt.env(key, old);
+                }
+                None => {
+                    rebuilt.env_remove(key);
+                }
+            }
+        }
+        self.command = rebuilt;
+    }
+
+    /// A command whose launcher needs `filter` inherited (Linux `workspace`'s `--seccomp`).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_seccomp_filter(command: Command, filter: std::os::fd::OwnedFd) -> Self {
+        Self {
+            command,
+            clears_child_env: true,
+            _seccomp_filter: Some(filter),
+        }
+    }
+}
+
+impl Deref for SandboxCommand {
+    type Target = Command;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl DerefMut for SandboxCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
+}
+
 /// The backend used for `FullAccess`: it wraps nothing. It is never chosen for an enforced
 /// mode.
 pub struct NoSandbox;
@@ -104,10 +237,10 @@ impl SandboxBackend for NoSandbox {
         policy: &SandboxPolicy,
         program: &OsStr,
         args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         let mut command = Command::new(program);
         command.args(args).current_dir(&policy.workspace);
-        Ok(command)
+        Ok(SandboxCommand::new(command))
     }
 }
 
@@ -202,7 +335,7 @@ pub struct Sandbox {
 impl Sandbox {
     /// Builds a sandbox for `mode` and `workspace`.
     ///
-    /// `Safe`/`WorkspaceWrite` require a working backend: if the tool is missing or the probe
+    /// `WorkspaceWrite` requires a working backend: if the tool is missing or the probe
     /// fails, this returns an error and the caller must refuse to run. `FullAccess` returns a
     /// transparent sandbox without probing, because nothing is being enforced.
     pub fn new(
@@ -313,8 +446,9 @@ impl Sandbox {
     }
 
     /// A `Command` that runs `program args` under the sandbox. The returned command has its
-    /// environment cleared to the policy's whitelist and its cwd set to the workspace.
-    pub fn command<S, I, A>(&self, program: S, args: I) -> Result<Command, SandboxError>
+    /// environment cleared to the policy's whitelist and its cwd set to the workspace, and
+    /// owns any launcher fd (Linux `workspace`'s seccomp program) until it is dropped.
+    pub fn command<S, I, A>(&self, program: S, args: I) -> Result<SandboxCommand, SandboxError>
     where
         S: AsRef<OsStr>,
         I: IntoIterator<Item = A>,
@@ -328,7 +462,11 @@ impl Sandbox {
     }
 
     /// Convenience over [`Sandbox::command`] for string arguments.
-    pub fn command_str(&self, program: &str, args: &[&str]) -> Result<Command, SandboxError> {
+    pub fn command_str(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> Result<SandboxCommand, SandboxError> {
         self.command(program, args.iter().copied())
     }
 }
@@ -374,4 +512,63 @@ pub(crate) fn probe_dir() -> Result<std::path::PathBuf, SandboxError> {
     let dir = std::env::temp_dir().join(format!("radian-sandbox-probe-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(command: &SandboxCommand) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Where the launcher inherits its environment, the variable lands there.
+    #[test]
+    fn child_env_uses_the_launcher_environment_by_default() {
+        let mut command = SandboxCommand::new(Command::new("/bin/sh"));
+        command.set_child_env("GIT_CONFIG_COUNT", "1");
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "GIT_CONFIG_COUNT"),
+            Some((
+                std::ffi::OsStr::new("GIT_CONFIG_COUNT"),
+                Some(std::ffi::OsStr::new("1"))
+            ))
+        );
+        assert!(!args(&command).contains(&"--setenv".to_owned()));
+    }
+
+    /// Where the launcher clears the child's environment (`bwrap --clearenv`), the variable
+    /// rides a `--setenv` launcher argument placed before the `--` separator, and the rest
+    /// of the argv is unchanged.
+    #[test]
+    fn child_env_rides_setenv_before_the_separator_when_the_launcher_clears_it() {
+        let mut launcher = Command::new("bwrap");
+        launcher.args(["--clearenv", "--", "/bin/sh", "-c", "true"]);
+        let mut command = SandboxCommand::with_cleared_child_env(launcher);
+        command.set_child_env("GIT_CONFIG_COUNT", "1");
+        command.set_child_env("GIT_CONFIG_KEY_0", "core.fsmonitor");
+        let args = args(&command);
+        let dash = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("the separator");
+        assert_eq!(
+            &args[..dash],
+            [
+                "--clearenv",
+                "--setenv",
+                "GIT_CONFIG_COUNT",
+                "1",
+                "--setenv",
+                "GIT_CONFIG_KEY_0",
+                "core.fsmonitor"
+            ]
+        );
+        assert_eq!(&args[dash..], ["--", "/bin/sh", "-c", "true"]);
+    }
 }

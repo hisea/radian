@@ -204,6 +204,41 @@ fn start_job(app: &mut App) {
     app.set_now(start + std::time::Duration::from_secs(18 * 60));
 }
 
+/// One waiting followup, the way the runtime reports it: `queued` counts the `next_turn`
+/// inputs without a matching admission.
+fn enqueue(app: &mut App, id: &str) {
+    app.update(Input::Runtime(RuntimeEvent::InboxEnqueued {
+        message: agent_core::Message::user("queued text"),
+        message_id: agent_core::MessageId(id.to_string()),
+        lane: radian_session::InboxLane::NextTurn,
+        source: agent_core::InputSource::User,
+        wake: true,
+        degraded: false,
+    }));
+}
+
+/// Enables `/loop` with an inline prompt, running the `@` expansion the way the loop
+/// does, so the `loop` item has something to show.
+fn enable_loop(app: &mut App) {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    app.input = "/loop watch it".into();
+    let effects = app
+        .on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .effects;
+    for effect in effects {
+        if let radian_tui::app::Effect::ExpandMentions { text } = effect {
+            app.update(Input::MentionsExpanded(Ok(
+                radian_tui::mention::Expansion {
+                    text,
+                    attachments: Vec::new(),
+                    warnings: Vec::new(),
+                },
+            )));
+        }
+    }
+}
+
 /// Every item named in each preset file appears in its widest golden (p1 review of 83cb172:
 /// the old fixture left `speed`/`cost` empty, so a `speed`/`cost` swap stayed green). The
 /// marker is the fixture value that proves the item drew; an id with no marker is a hard
@@ -257,6 +292,31 @@ fn every_preset_item_appears_in_its_widest_golden() {
                     assert!(
                         rendered.contains("1 job"),
                         "{preset}: the with-job screen shows the `jobs` item"
+                    );
+                    continue;
+                }
+                if item.id == "queued" {
+                    // `queued` hides with nothing waiting, like `jobs` with no job: the
+                    // guard renders with two followups waiting instead of the golden.
+                    let mut app = fixed_app(preset, "unicode");
+                    enqueue(&mut app, "q-1");
+                    enqueue(&mut app, "q-2");
+                    let rendered = screen(&mut app, 120);
+                    assert!(
+                        rendered.contains("2 queued"),
+                        "{preset}: the with-queue screen shows the `queued` item"
+                    );
+                    continue;
+                }
+                if item.id == "loop" {
+                    // `loop` hides while the mode is off, like `queued` with nothing
+                    // waiting: the guard renders with the mode on instead of the golden.
+                    let mut app = fixed_app(preset, "unicode");
+                    enable_loop(&mut app);
+                    let rendered = screen(&mut app, 120);
+                    assert!(
+                        rendered.contains("loop"),
+                        "{preset}: the with-loop screen shows the `loop` item"
                     );
                     continue;
                 }

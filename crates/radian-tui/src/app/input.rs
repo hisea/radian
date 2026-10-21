@@ -24,6 +24,9 @@ pub enum Input {
     QuitDeadline,
     /// The deadline of a `/fork` waiting for the turn boundary to reach the journal.
     ForkDeadline,
+    /// The deadline of a `/loop --every` wait: the next iteration is due while idle.
+    /// The turn-end decision re-checks everything, so a stale deadline is harmless.
+    LoopDeadline,
     /// A printable character typed into the focused text field.
     Char(char),
     /// The find box's backspace (not keymap-driven).
@@ -100,6 +103,10 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// A wake-gate degrade fired (one per degrade): the wake-budget notice line. `update`
+    /// shows a single line per burst (rewriting it with the latest count) and marks the
+    /// session as wake-waiting for herdr until the next turn starts.
+    WakeBudgetNotice(String),
     /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
     /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
     /// turn state when the command was submitted.
@@ -117,6 +124,18 @@ pub enum Input {
     PickerClose,
     /// The session picker's data arrived (the result of [`Effect::OpenPicker`]).
     PickerOpened(PickerData),
+    /// One key for the inspector overlay. The inspector owns its own parser, so the key
+    /// is forwarded rather than resolved here.
+    InspectorKey(KeyEvent),
+    /// The inspector's snapshot arrived (the result of [`Effect::OpenInspector`]): the
+    /// requested page (`None` = the last page, `/panel`) and the data to show.
+    InspectorOpened {
+        requested: Option<command::InspectorPage>,
+        snapshot: crate::inspector::InspectorSnapshot,
+    },
+    /// The open inspector's snapshot was reloaded (the result of
+    /// [`Effect::RefreshInspector`]).
+    InspectorRefreshed(crate::inspector::InspectorSnapshot),
     /// One key inside the `/login` wizard (ADR 0026 D3). Hardcoded keys, like the approval.
     LoginKey(LoginKey),
     /// The `/login` verification request finished (D3). `name` is the provider the wizard is
@@ -239,4 +258,8 @@ pub enum PendingSend {
 pub(super) struct PendingExpand {
     pub(super) kind: PendingSend,
     pub(super) text: String,
+    /// This send carries the loop prompt: tag it and record it when the expansion lands.
+    /// Set at submit time (a `/loop` inline prompt, or a message typed while the loop is
+    /// armed or paused); re-checked against the live loop state on arrival.
+    pub(super) loop_capture: bool,
 }

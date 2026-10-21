@@ -93,14 +93,19 @@ also kills every running group on `close()` and on drop (the panic path, `killpg
 `subagent { agent?, task }` runs one task in a **fresh, blocking child `radian exec`** — the
 current executable, so there is only one binary (ADR 0032) — and returns its last assistant text
 (its journal, cut at 4 000 characters with a visible marker), the child session id and the usage
-and denials its journal recorded. `explore` mounts only `read list glob grep`;
+and denials its journal recorded. `explore` mounts only `read glob grep`;
 `general` (the default) mounts the child's ordinary headless set, which is this session's tools
-minus `subagent`. A user-level cheaper model for `explore` is not implemented.
+minus `subagent`. `explore` runs on the user-level `[model.smol]` route (`provider` and
+`model`, the same meaning as the `[model]` route keys) when it is set, and otherwise follows
+the parent exactly as `general` always does; a half-set table warns and is ignored, and a
+project config never sets it.
 
 The child gets the parent's **resolved** tier (`--profile` read from the live sandbox slot, so
 `/access` is obeyed) and never a wider one, and `--yes` only while the parent's approval policy
 is `auto`; otherwise the child has no terminal, so every `ask` is denied and the result names
-what was denied. The tool is `Shared`: several calls in one reply are the parallelism. The
+what was denied. A `general` child always gets the parent's **live** route (`--provider` and
+`--model` read from the same slot a `/model` switch lands in); an `explore` child gets the
+`[model.smol]` route when one is configured. The tool is `Shared`: several calls in one reply are the parallelism. The
 parent turn's cancellation kills the child's whole session through the same `kill_session` /
 `signal_session` path the job supervisor uses. The depth is 1: `open_session` drops the launch
 parts when the session's own `parent` relation is `"subagent"`, so a child never mounts
@@ -243,14 +248,14 @@ line's skipped list.
 | `memory_search` mounts only past the budget; a `memory_save` call is an unknown tool and the turn still succeeds | `memory_search_mounts_only_past_the_injection_budget`, `a_model_call_to_memory_save_is_an_unknown_tool_and_the_turn_succeeds` | `agent-cli/tests/cli.rs` |
 | A single-turn run (`-p`) appends nothing; a resume ranks by the session's first user message | `exec_p_ranks_the_block_by_its_prompt_and_appends_nothing`, `a_resumed_session_ranks_the_block_by_its_first_user_message` | `agent-cli/tests/cli.rs` |
 | `[memory.injection]` carries `additions`/`addition_budget`; the rest is reported as skipped | `the_memory_injection_keys_are_read_and_the_rest_is_reported` | `tests/config_fixtures.rs` |
-| `memory_search` is `allow` in all three tiers; no memory tool asks | `memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks` | `radian-permissions/src/profile.rs` |
+| `memory_search` is `allow` in both tiers; no memory tool asks | `memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks` | `radian-permissions/src/profile.rs` |
 
 ## The startup description
 
 `describe(mode, sandbox, wording) -> (String, String)` returns the two startup lines: what was
 chosen, and what it actually means. The two hosts keep only the phrases that are honestly
-different, in `Wording`: `CLI_WORDING` ("commands and built-in tools", and the `safe` line names
-MCP) and `TUI_WORDING` ("shell and the built-in tools"). Everything else — including the sentence
+different, in `Wording`: `CLI_WORDING` ("commands and built-in tools")
+and `TUI_WORDING` ("shell and the built-in tools"). Everything else — including the sentence
 that must **not** be weakened, "MCP servers are NOT sandboxed" (ADR 0012 decision 4) — is
 written once here.
 
@@ -258,21 +263,21 @@ written once here.
 `workspace` it names the real backend in plain words — `macOS sandbox` for `macos-seatbelt`,
 `Linux sandbox` for `linux-bwrap`, and the backend's own name for one this build does not know —
 so a summary can never be read as "no sandbox"; the exact backend name stays in the expanded
-`profile:` line. `safe` is `no exec` (there is no command execution to sandbox) and `full` is
-`no sandbox` (the built-in default since ADR 0043). A missing backend in an enforced mode is
+`profile:` line. `full` is `no sandbox · no prompts` (the built-in default since ADR 0043). A missing backend in an enforced mode is
 `sandbox missing`, never `none`.
 
 The `workspace` line says `sandbox on: commands stay in the workspace` (ADR 0043 decision 2.4);
-`full`'s line is plain `full`, with the "no sandbox" sentence as its facts line.
+`full`'s line is `full · no sandbox · no prompts`, with the "no sandbox … · no prompts"
+sentence as its facts line.
 
 ## The project declaration
 
 `project::read(workspace)` reads `<workspace>/.radian/config.toml` (ADR 0043 decision 2). The
-only key it uses is `[permissions] profile = "workspace" | "safe"`; `full` there is a warning
+only key it uses is `[permissions] profile = "workspace"`; `full` there is a warning
 and is ignored, any other key is skipped and named, and `[sandbox]` keys (`allow_env`,
 `allow_unix_sockets`) are refused by name because the user-level configuration owns them
 (ADR 0034). `project::narrow` / `project::effective` return the narrower
-of two tiers (`safe` < `workspace` < `full`): a project can turn the sandbox on and can never
+of two tiers (`workspace` < `full`): a project can turn the sandbox on and can never
 turn it off. The file's presence also counts as a project resource for the trust gate.
 
 ## What it guarantees (each with the test that holds it)

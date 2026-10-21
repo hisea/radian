@@ -315,16 +315,17 @@ pub trait Prompter: Send + Sync {
 }
 
 /// The model-facing spec. Only advertised when a [`Prompter`] is injected.
+///
+/// The `description` states when to ask (ADR 0024 decision 2, ADR 0036 "look before you
+/// ask"); the limits live in `input_schema` and in [`QuestionRequest::validate`], never in
+/// prose twice.
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "ask_user".into(),
-        description: "Ask the user one or more structured questions and wait for the answers. \
-                      Use it when a decision needs the human: one choice, several choices, or \
-                      free text. The turn pauses until the user answers or declines; the user \
-                      may also cancel the turn. Only available when an interactive user is \
-                      present. Give each question a short `header` (two or three words; it \
-                      becomes the tab label) and mark `recommended: true` only on the option \
-                      you actually recommend (at most one for a `single` question)."
+        description: "Ask the user a question. Wait for the answer. Ask only for decisions \
+                      that belong to the user. Ask about a real ambiguity only when you cannot \
+                      resolve it by looking. Do not ask what you can find in the code, \
+                      config, docs, or history. Mark the option that you recommend."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -333,25 +334,25 @@ pub(crate) fn spec() -> ToolSpec {
                     "type": "array",
                     "minItems": 1,
                     "maxItems": MAX_QUESTIONS,
-                    "description": "The questions to ask, shown in this order.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "id": {
                                 "type": "string",
                                 "pattern": "^[a-z0-9_-]{1,32}$",
-                                "description": "Answer key for this question; unique in the request."
+                                "description": "Answer key. It must be unique in this request."
                             },
+                            // No `maxLength` here: the limit is display width (a CJK
+                            // character is 2), counted in characters it would wrongly
+                            // refuse a 9-CJK-character header; `QuestionRequest::validate`
+                            // enforces the width and the description states it.
                             "header": {
                                 "type": "string",
-                                "maxLength": MAX_HEADER_WIDTH,
-                                "description": "A short tab label, two or three words (at most \
-                                                16 display cells); the `id` when absent."
+                                "description": "Tab label of two or three words. Maximum: 16 display cells. One CJK character is 2 cells. Default: the `id`."
                             },
                             "prompt": {
                                 "type": "string",
-                                "maxLength": MAX_PROMPT_CHARS,
-                                "description": "The question as the user should read it."
+                                "maxLength": MAX_PROMPT_CHARS
                             },
                             "kind": {
                                 "type": "string",
@@ -361,7 +362,7 @@ pub(crate) fn spec() -> ToolSpec {
                             "options": {
                                 "type": "array",
                                 "maxItems": MAX_OPTIONS,
-                                "description": "The choices, for `single`/`multi`. Not allowed for `text`.",
+                                "description": "For `single` and `multi`. Never for `text`.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -370,7 +371,7 @@ pub(crate) fn spec() -> ToolSpec {
                                         "description": { "type": "string", "maxLength": MAX_DESCRIPTION_CHARS },
                                         "recommended": {
                                             "type": "boolean",
-                                            "description": "The option you recommend; at most one for `single`."
+                                            "description": "The option that you recommend. At most one for `single`."
                                         }
                                     },
                                     "required": ["id", "label"],
@@ -379,11 +380,11 @@ pub(crate) fn spec() -> ToolSpec {
                             },
                             "allow_other": {
                                 "type": "boolean",
-                                "description": "`single`/`multi`: also offer a free-text `Other` answer."
+                                "description": "Also offer a free-text `Other` answer. Default: false."
                             },
                             "required": {
                                 "type": "boolean",
-                                "description": "The user may not submit without answering this one."
+                                "description": "The user must answer before submitting. Default: false."
                             }
                         },
                         "required": ["id", "prompt", "kind"],

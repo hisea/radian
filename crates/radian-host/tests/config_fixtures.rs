@@ -38,9 +38,13 @@ fn the_reader_matches_the_reference_checker() {
         ("skills-extra-paths.toml", "accept"),
         ("skills-builtin.toml", "accept"),
         ("shell-auto-background.toml", "accept"),
+        ("model-smol.toml", "accept"),
+        ("mcp-servers.toml", "accept"),
+        ("mcp-mcp-servers.toml", "accept"),
         ("memory-injection.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
+        ("hooks.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
@@ -127,6 +131,35 @@ fn the_unknown_fields_are_ignored_but_reported() {
     assert!(config.skipped.contains(&"tui.theme".to_string()));
 }
 
+/// `hooks.toml` (ADR 0045 slice A): the three events parse with matchers and commands;
+/// the non-subset entries (`http`, `async`, unknown event) are skipped, never refused.
+#[test]
+fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
+    let (path, text) = fixture("hooks.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.hooks.pre_tool_use.len(), 1);
+    assert_eq!(
+        config.hooks.pre_tool_use[0].matcher.as_deref(),
+        Some("shell|write")
+    );
+    assert_eq!(config.hooks.pre_tool_use[0].hooks.len(), 1);
+    assert_eq!(config.hooks.pre_tool_use[0].hooks[0].timeout_secs, Some(10));
+    assert_eq!(config.hooks.post_tool_use.len(), 1);
+    assert_eq!(config.hooks.stop.len(), 1);
+    assert_eq!(config.hooks.stop[0].hooks[0].timeout_secs, Some(30));
+    for key in [
+        "hooks.PostToolUse[1]",
+        "hooks.PreToolUse[1]",
+        "hooks.SessionStart",
+    ] {
+        assert!(
+            config.skipped.contains(&key.to_string()),
+            "{key}: {:?}",
+            config.skipped
+        );
+    }
+}
+
 /// `control.toml` (ADR 0043): `[control] enabled` is carried, defaulting to true.
 #[test]
 fn the_control_enabled_flag_is_carried() {
@@ -194,6 +227,73 @@ fn the_tui_theme_colors_fixture_is_carried_raw() {
     assert!(get("mdHeading").underline == Some(false));
 }
 
+/// `model-smol.toml` (ADR 0008 §1, ADR 0043 §1): `[model.smol]` carries the cheap route
+/// slot, and nothing is reported as skipped.
+#[test]
+fn the_model_smol_fixture_carries_the_route() {
+    let (path, text) = fixture("model-smol.toml");
+    let config = config::parse(&path, &text).unwrap();
+    let smol = config.model.smol.as_ref().expect("smol is set");
+    assert_eq!(smol.provider.as_str(), "openai-compatible");
+    assert_eq!(smol.model.as_str(), "m-cheap");
+    assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+}
+
+/// `mcp-servers.toml` (ADR 0008 §8): the `[[mcp.servers]]` form is carried, two
+/// servers, no warnings, and `mcp` is never a skipped key.
+#[test]
+fn the_mcp_servers_fixture_is_carried() {
+    let (path, text) = fixture("mcp-servers.toml");
+    let config = config::parse(&path, &text).unwrap();
+    let ids: Vec<&str> = config
+        .mcp
+        .servers
+        .iter()
+        .map(|server| server.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["files", "timer"]);
+    assert!(config.mcp.warnings.is_empty(), "{:?}", config.mcp.warnings);
+    assert!(
+        !config.skipped.iter().any(|key| key == "mcp"),
+        "{:?}",
+        config.skipped
+    );
+}
+
+/// `mcp-mcp-servers.toml` (ADR 0008 §8): the shared form is carried with the `HOME`
+/// default; the remote entry is skipped with a warning and starts nothing.
+#[test]
+fn the_mcp_mcp_servers_fixture_skips_the_remote_entry() {
+    let (path, text) = fixture("mcp-mcp-servers.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.mcp.servers.len(), 1);
+    assert_eq!(config.mcp.servers[0].id, "files");
+    assert_eq!(
+        config.mcp.servers[0].inherit_env,
+        vec![std::ffi::OsString::from("HOME")]
+    );
+    assert_eq!(config.mcp.warnings.len(), 1, "{:?}", config.mcp.warnings);
+    assert!(
+        config.mcp.warnings[0].contains("skipped `web`"),
+        "{:?}",
+        config.mcp.warnings
+    );
+}
+
+/// `minimal.toml` carries its `[[mcp.servers]]` entry: the user config's example server
+/// is wired now, not skipped.
+#[test]
+fn the_minimal_fixture_mcp_server_is_wired() {
+    let (path, text) = fixture("minimal.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.mcp.servers.len(), 1);
+    assert_eq!(config.mcp.servers[0].id, "files");
+    assert!(
+        !config.skipped.iter().any(|key| key == "mcp"),
+        "{:?}",
+        config.skipped
+    );
+}
 /// `memory-injection.toml` (ADR 0021): the two keys this revision adds
 /// are read; the rest of D6's table is known but unwired, so it is reported as skipped rather
 /// than refused.
@@ -237,6 +337,30 @@ fn the_tui_mouse_preference_is_read_from_the_minimal_fixture() {
     let (path, text) = fixture("minimal.toml");
     let config = config::parse(&path, &text).unwrap();
     assert_eq!(config.tui.mouse, Some(false));
+}
+
+/// `tui-bell.toml` (terminal bell): `bell = "attention"` is carried raw; the TUI parses it.
+/// An unknown spelling is skipped with a warning (the `tui.*` display-field rule), and the
+/// TUI falls back to `off`.
+#[test]
+fn the_tui_bell_preference_is_carried_and_unknown_falls_back() {
+    let (path, text) = fixture("tui-bell.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.tui.bell.as_deref(), Some("attention"));
+    assert!(
+        !config.skipped.iter().any(|key| key == "tui.bell"),
+        "{:?}",
+        config.skipped
+    );
+
+    let path = PathBuf::from("bell-unknown");
+    let config = config::parse(&path, "schema_version = 1\n[tui]\nbell = \"loud\"\n").unwrap();
+    assert_eq!(config.tui.bell, None);
+    assert!(
+        config.skipped.contains(&"tui.bell".to_string()),
+        "{:?}",
+        config.skipped
+    );
 }
 
 /// The refusal messages never echo a value that could be a secret.

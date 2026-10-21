@@ -4,6 +4,8 @@
 `bubblewrap`。它只提供一件事——**受约束地启动一个子进程**；审批（`ApprovalPolicy`）与规则集
 （`ToolRuleSet`）不在本 crate，也**没有**接进 `agent-cli`。
 
+**`full` 的安全声明＼�：** `full` 信任你的环境，不弹任何内建审批，也不防陌生仓库里的提示注入——恶意的 skill、配置与上下文文件里的指令在 `full` 下畅通无阻。想要边界就用 `workspace`、容器或专用 OS 用户。
+
 **消费者（2026-10-12，Phase 3 shell 切片）：** `radian-coding` 的 `shell` 工具是第一个消费者
 （`CodingTools::with_sandbox`）；没有 `Sandbox` 时它根本不注册。三点值得记在这里：① `FullAccess`
 下后端是透明的（不探测、不包裹），但 shell 工具仍自己按 `allow_env` 清环境——**full 是
@@ -13,14 +15,30 @@
 ③ 输出截断也是 shell 工具自己的策略：每流独立预算、保留头尾（尾部更大，因为失败命令的错误在
 末尾）、边读边丢，沙箱不参与。
 
+## 沙箱拒绝标记（片 1，2026-10-20）
+
+命令因沙箱被拒时，`shell` 工具的结果里带固定标记 `sandbox denied: <类别>`（正文一行，
+structured 里是 `sandbox_denied`）。分类在沙箱层按 errno 文本与策略路径做，分不清的当
+命令自己失败（没有标记；多标不如不标）：
+
+| 类别 | 含义 | Linux（bwrap + seccomp，已测） | macOS（seatbelt，预期、未在本机测） |
+|---|---|---|---|
+| `filesystem-write` | 写工作区外 | `EROFS`/`EACCES` | deny 规则 → `EPERM` |
+| `git` | 写受保护的 `.git` 条目 | `EROFS`/`EACCES` 且命令提到发现到的 git 路径 | deny 规则 → `EPERM` |
+| `sensitive-read` | 读禁读清单 | 遮住的目录 `ENOENT`（文件被盖成 `/dev/null`，读到空而不失败，无标记） | deny 规则 → `EPERM` |
+| `network` | 联网被拒 | `ENETUNREACH`（关网时；`workspace` 默认开网） | deny 规则 → `EPERM`（预期） |
+| `unix-socket` | Unix socket 被拒 | seccomp 拒 `socket(AF_UNIX, …)` 与 `io_uring_setup`，`EPERM` | 出站 unix-socket 拒绝（预期） |
+
+路径匹配优先于裸 errno（`EPERM` 既可能是 seccomp 的 socket 拒绝，也可能是 seatbelt
+的读拒绝）；`inherited` 后端不做分类（外层说了算，见上）。
+
 **ADR 0016（2026-10-13）：** `workspace` 档位改为**开网**（出站与本机回环 connect/bind/listen），
-并放开 **pty**（`/dev/ptmx` 与 `/dev/ttys[0-9]+` 的写与 `file-ioctl`，后者**只**对这两类路径）；
-`safe` 仍关网、无设备。shell 工具用 `setsid` 让受约束命令没有控制终端，配合内核的
+并放开 **pty**（`/dev/ptmx` 与 `/dev/ttys[0-9]+` 的写与 `file-ioctl`，后者**只**对这两类路径）。shell 工具用 `setsid` 让受约束命令没有控制终端，配合内核的
 controlling-terminal 检查堵住 `TIOCSTI`（矩阵新增 `tiocsti_outside_terminal`）。
 
 ## 硬规则：请求沙箱但后端不可用 = 明确失败
 
-`Sandbox::new(mode, workspace)` 与 `Sandbox::from_policy` 对 `Safe` / `WorkspaceWrite` **先探测
+`Sandbox::new(mode, workspace)` 与 `Sandbox::from_policy` 对 `WorkspaceWrite` **先探测
 后端**（跑一个真子进程，证明 deny 与 workspace allow 都生效），探测失败就返回 `SandboxError`。
 **没有任何路径**把受约束档位变成无沙箱运行；`FullAccess` 只有调用方点名才会用到，且不探测。
 （ADR 0012，决定第 2 条。）测试：`an_unavailable_backend_is_an_error_and_never_a_downgrade`、
@@ -67,7 +85,7 @@ Linux VM 验证恢复时一并做。
 
 ## 运行中切换档位（ADR 0038 切片 ②，2026-10-15）
 
-档位不再固定：`/access safe|workspace|full` 可以在会话里切换，从**下一次工具调用**起生效。
+档位不再固定：`/access workspace|full` 可以在会话里切换，从**下一次工具调用**起生效。
 
 - `radian-sandbox` 的 `SandboxSlot` 是共享的 `Arc<RwLock<Option<Arc<Sandbox>>>>`。`shell` 与后台
   任务工具在每次调用开始时取出 `Arc<Sandbox>` 并持有整次调用，所以切换只影响**下一次**调用；
@@ -80,7 +98,7 @@ Linux VM 验证恢复时一并做。
 
 ## 后端与策略
 
-- `SandboxMode::{Safe, WorkspaceWrite, FullAccess}` 是产品概念；SBPL / bwrap 的参数只是实现。
+- `SandboxMode::{WorkspaceWrite, FullAccess}` 是产品概念；SBPL / bwrap 的参数只是实现。
 - `SandboxPolicy`：canonical workspace、`network`、`read_only`（git 元数据自动发现：`.git` 目录、
   worktree 指针文件及其共享 common dir）、`git_access`（ADR 0038：这些 git 元数据是整块只读，
   还是只留执行入口只读；见下）、`deny_read`（默认 `~/.ssh`、`~/.aws`、`~/.gnupg`、
@@ -128,7 +146,19 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
   都整块只读）；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
   `--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内 `.radian-sandbox/{home,tmp}`。
 
-## 逃逸清单（两平台各 39 例，全部带"关掉沙箱后成功"的对照）
+## Linux seccomp 过滤器（片 0，2026-10-20）
+
+`workspace` 档在 Linux 上给 bwrap 传 `--seccomp FD`：FD 里是一个手写的 classic-BPF 程序（`crates/radian-sandbox/src/seccomp.rs`，只用 `libc` 常量，无新依赖），bwrap 在 exec 命令前以 `PR_SET_NO_NEW_PRIVS` 装上。规则按顺序：
+
+1. `seccomp_data.arch` 必须是本机（x86_64 取 `AUDIT_ARCH_X86_64`，aarch64 取 `AUDIT_ARCH_AARCH64`，编译期定），否则 `EPERM`：x86_64 上 32 位进程可能经 `int 0x80` 走 `socketcall`。**代价：32 位二进制在沙箱里跑不了。**
+2. x86_64 上 `seccomp_data.nr & 0x40000000`（x32 ABI 位）置位则 `EPERM`。
+3. `nr == SYS_socket` 且 `args[0]` 低 32 位等于 `AF_UNIX`（1）则 `EPERM`：路径与抽象 socket 一并堵上（两者都要先建 socket），seccomp 看不见路径所以没有按路径放行。
+4. `nr == SYS_io_uring_setup` 则 `EPERM`（`IORING_OP_SOCKET` 可以不经过 `socket` 建 socket）。
+5. 其余一律放行。`socketpair` 保持可用（无名连接对到不了外面）。
+
+只在 `workspace` 档装过滤器，`full` 不传 `--seccomp`。过滤器 fd 的生命期绑在返回的 `SandboxCommand` 上（每条命令一条新 pipe，drop 即关）：不用 `pre_exec`（shell 工具随后为 `setsid` 注册自己的 `pre_exec`，会整体替换掉）；也不在进程间共享 pipe（读偏移共享，第二条命令会读到 EOF 而 `EINVAL`，已实测）。macOS 的 seatbelt 路径白名单不变。
+
+## 逃逸清单（两平台各 48 例，全部带"关掉沙箱后成功"的对照）
 
 `radian-sandbox` 的 `harness`（`testing` feature）跑同一套矩阵：每条"应当失败"的用例都在
 `WorkspaceWrite` 下跑一次、在 `FullAccess` 对照下跑同一命令。`Case::passed()` 要求
@@ -298,15 +328,11 @@ macOS 后端**全开 `mach-lookup`**，`mach-lookup` 最小化排到 Phase 7。�
 另注：环境变量过滤属于**启动层**（本 crate 的 `command`），不是沙箱机制本身；`sandbox-exec` 与
 bwrap 都不过滤环境。
 
-**Unix socket（ADR 0016，2026-10-14）**：`(allow network*)` 同时放行了连接本机**任何同用户
+**Unix socket（ADR 0016，2026-10-14；Linux 片 0，2026-10-20）**：`(allow network*)` 同时放行了连接本机**任何同用户
 的 Unix socket**（herdr、ssh-agent、`docker.sock` 等），本修订之前的版本存在这个口子。现在开网时
 seatbelt 追加 `(deny network-outbound (remote unix-socket))`，只放行固定的 mDNSResponder（DNS 需要）
 和用户级配置 `[sandbox] allow_unix_sockets` 里写明的路径（canonicalize；失败只警告并跳过）。
-`mach-lookup` **仍是全放**（另一类本机 IPC，未收紧，单独评估）。Linux（bwrap）的同类问题已在
-Linux 上实测：路径 socket 经共享的只读根挂载可达（`safe` 与 `workspace` 都是），抽象 socket 在
-`workspace` 共享主机网络命名空间下可达（只有 `safe` 的 `--unshare-all` 把它隔开）。`[sandbox]
-allow_unix_sockets` 在 Linux 上没有效果（只有 macOS 的 seatbelt 读它；macOS only, no effect on
-Linux）。测量表见“未验证 / 已知边界”。
+`mach-lookup` **仍是全放**（另一类本机 IPC，未收紧，单独评估）。Linux（bwrap）的同类问题在片 0（2026-10-20）用 seccomp 堵上，见下“Linux seccomp 过滤器”：`workspace` 档拒绝一切 `AF_UNIX`，`allow_unix_sockets` 在 Linux 上被忽略并在启动输出里警告一次。测量表见“未验证 / 已知边界”（该节的 Linux 已知限制行随片 0 删除）。
 
 ## 复现 Linux 运行（VM）
 
@@ -404,33 +430,18 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 
 ## 未验证 / 已知边界
 
-- **只在 macOS 27.0.1（arm64）与一台 aarch64 Arch ARM VM（内核 7.2.6、bwrap 0.12.0、git 2.55.0）
-  上跑过**；
-  其他 macOS 版本、发行版、x86_64、容器内、setuid bwrap、无特权 userns 被禁用的发行版均未验证。
+- **只在 macOS 27.0.1（arm64）、一台 aarch64 Arch ARM VM（内核 7.2.6、bwrap 0.12.0、git 2.55.0）
+  与一片 x86_64 Linux 机（内核 6.8.12-1-pve，bwrap 0.11.1，片 0 在此跑过逃逸矩阵与 seccomp 单测）上跑过**；
+  其他 macOS 版本、发行版、容器内、setuid bwrap、无特权 userns 被禁用的发行版均未验证。
 - **没有测** `network = true` 的细粒度（只做全开/全关）；`mach-lookup` 最小化未做；时间注入类
   逃生未系统测试（`already-open fd` 不受限，spawner 不向子进程传可写 fd，但没有专门用例）。
-- **Unix socket（Linux：已实测、接受为已知限制，决定 4）**：bwrap 在任何
-  档位都不限制 Unix socket。macOS 的修复照旧有逃逸矩阵的 `unix_socket` 组（workspace 拒、白名单
-  放行、DNS 通、safe 拒）；Linux 上 `workspace_denied` 与 `safe_denied` 两例按已知限制报
-  `KNOWN-LIMIT`（不是 PASS 也不是 FAIL，macOS 侧保持严格）。`[sandbox] allow_unix_sockets`
-  在 Linux 上没有效果（macOS only; no effect on Linux）。实测（路径 listener 在 `/tmp` 下由沙箱外
-  持有；抽象 listener 同理）：
-
-  | tier（Linux bwrap） | 路径 socket | 抽象 socket |
-  |---|---|---|
-  | `safe`（`--unshare-all`） | 可连（rc=0） | 拒绝（`ConnectionRefused`，errno 111） |
-  | `workspace`（共享主机网络命名空间） | 可连（rc=0） | 可连（rc=0） |
-
-  原因：路径 socket 是共享只读根（`--ro-bind / /`）上的普通文件系统项，`connect()` 不受只读挂载
-  阻止；抽象 socket 的隔离靠网络命名空间，而 `workspace` 为保住出站 TCP/UDP 有意不建新的。
-- `Safe` 档位在 Linux 上 `HOME`/`TMPDIR` 位于工作区但工作区只读，需要临时目录的命令会失败——
-  这是 `Safe` 的诚实语义，未专门验证。
+- **Unix socket（Linux：片 0 已堵上，不再是已知限制，决定 4 重开）**：`workspace` 档 seccomp 拒绝一切 `AF_UNIX`（路径与抽象 socket 一并堵上），逃逸矩阵的 `unix_socket` 组在 Linux 上为 `workspace_denied` / `abstract_denied` / `whitelisted_denied`（白名单同样被拒）与 `dns_resolves` 全部 PASS；macOS 侧保持严格（拒、白名单放行、DNS 通）。`[sandbox] allow_unix_sockets` 在 Linux 上被忽略并在启动输出里警告一次（macOS 的 seatbelt 照旧读它）。旧实测结论（只读挂载挡不住 `connect()`、抽象 socket 随共享网络命名空间可达）被 seccomp 否决 `socket` 调用本身取代，不再成立。
 - 兼容性轮次只覆盖列出的命令；任意第三方构建系统可能还需要别的放行。
 
 ## 评审补充（合并时由评审者追加，2026-10-12）
 
 1. **复现步骤里的文件名错了，已改。** 二进制叫 `sandbox-escape`（`Cargo.toml` 的 `[[bin]] name`），`scp … /tmp/` 后它在 `/tmp/sandbox-escape`，而原文下一行运行的是 `/tmp/radian-sandbox-escape`——照原文复现会直接失败。评审者按原文执行时撞上，已改成 `/tmp/sandbox-escape`。
-2. **"真实 `cargo build` 能跑"的覆盖范围比测试本身更宽，但要说准。** 仓库里的兼容性测试验的是一个**零依赖**的 hello-world（`--offline`）。评审者另外在本机（macOS）沙箱里做了一次**带依赖的真实构建**：一个依赖 `serde_json` 的项目（共 11 个包，依赖从本机 cargo 缓存读取、`--offline`、网络关闭、`Cargo.lock` 在沙箱外预先生成），`cargo build` **成功**，用时约 8 秒。该探针依赖本机缓存状态，因此没有提交成测试。**未验证**：需要联网拉依赖的构建（这次探针是显式关网跑的；ADR 0016 之后 `workspace` 默认**开网**，`safe` 关网，关网时这类构建按设计会失败）、带 build script 写工作区外路径的 crate、其他构建系统。
+2. **"真实 `cargo build` 能跑"的覆盖范围比测试本身更宽，但要说准。** 仓库里的兼容性测试验的是一个**零依赖**的 hello-world（`--offline`）。评审者另外在本机（macOS）沙箱里做了一次**带依赖的真实构建**：一个依赖 `serde_json` 的项目（共 11 个包，依赖从本机 cargo 缓存读取、`--offline`、网络关闭、`Cargo.lock` 在沙箱外预先生成），`cargo build` **成功**，用时约 8 秒。该探针依赖本机缓存状态，因此没有提交成测试。**未验证**：需要联网拉依赖的构建（这次探针是显式关网跑的；ADR 0016 之后 `workspace` 默认**开网**，关网时这类构建按设计会失败）、带 build script 写工作区外路径的 crate、其他构建系统。
 3. **Linux 结果本轮评审未能独立重跑。**（**后续已补**：2026-10-12 评审者在 VM 上独立重跑，26/26，零差异；见文末“Linux 独立复核”节。） 驱动可以按文档交叉编译（得到静态链接的 aarch64 ELF），但评审时 VM 已不可达（`ssh: … No route to host`）。所以 Linux 的 26/26 目前**以本文作者提交的证据为准**（`tests/data/escape-linux.{txt,json}`），评审者核对了证据文件格式与"每条失败都带关沙箱对照"的列，但没有在 VM 上再跑一次。上一轮 Linux spike 的 26 条中的同类用例评审者是独立复现过的（见 `docs/spikes/linux-sandbox.md`）。
 4. **本切片在 owner 的 Mac 上装了 rustup target `aarch64-unknown-linux-musl`**（用于交叉编译 VM 上跑的驱动）。这是一次开发环境改动，不影响仓库，但值得知道。
 5. **`git add`/`git commit` 在旧版 `workspace-write` 下失败曾是设计结果**（`.git` 整块只读）。ADR 0038 之后，通用会话在该档位下 `.git` 可写、可直接提交（`config`/`hooks` 等执行入口仍只读）；当前没有 task agent 的整体只读规则。
@@ -457,7 +468,7 @@ clippy::uninlined_format_args`。1.88 的 clippy 在 Linux 上报了一处 macOS
 **3. 逃逸矩阵**：`cargo test -p radian-sandbox` → 10 passed；`linux_escape_matrix` **34 cases, 0
 failed**，矩阵前后 `ps` 无 `bwrap`/`mcp_echo.py`/`sandbox-exec` 孤儿。关键行：
 `network_workspace connect_local_port / bind_local_port / connect_external` 全 `ok`；
-`network_safe connect_local_port` `denied`；`devices openpty` `ok`；
+`devices openpty` `ok`；
 `devices tiocsti_outside_terminal` `denied`。
 
 **4. shell 工具**：`cargo test -p radian-coding --test shell` → **13/13**；跑完无 `sleep 600`
@@ -508,7 +519,7 @@ deps/pty-… --exact pty_end_to_end_conversation_and_clean_exit → ok (EXIT=0) 
 `No space left on device`）。所以改为在宿主上按同一组 profile 参数预编译，沙箱内**直接运行
 测试二进制**——测的还是同一段代码（mock server 的 bind 与 pty 的 openpty），且绕开了重建。
 
-**未验证**：`cargo test` 整体在沙箱内运行（上述原因）；`network_safe` 之外的细粒度网络；
+**未验证**：`cargo test` 整体在沙箱内运行（上述原因）；细粒度网络；
 x86_64 与其它发行版。
 
 **评审补充（合并时，2026-10-13）**：第 6 条的 pty harness 修复与 main 上已有的修复重叠（目录缓存

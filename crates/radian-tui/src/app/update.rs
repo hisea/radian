@@ -35,6 +35,9 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            // A `/loop --every` wait ended while idle: the turn-end decision re-checks
+            // everything (a running turn ignores the deadline; its end decides).
+            Input::LoopDeadline => self.loop_deadline_fired(),
             Input::Action(action) => {
                 // A completion menu is a selectable list: while it is up,
                 // Up/Down (and Ctrl-N) move the highlight and wrap, Enter and Tab accept the
@@ -154,6 +157,7 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            Input::WakeBudgetNotice(text) => self.wake_budget_notice(text),
             Input::TrustMove(delta) => {
                 if let Some(Modal::Trust(wizard)) =
                     self.layers.iter_mut().rev().find_map(|layer| match layer {
@@ -215,14 +219,13 @@ impl App {
                         } else {
                             crate::profile::AccessSource::Session
                         };
-                        self.set_tier(format!(
-                            "{}{}",
-                            tier.as_str(),
-                            self.session.access_source.suffix()
+                        self.set_tier(crate::profile::footer_tier(
+                            tier,
+                            self.session.access_source,
                         ));
-                        // `!`/`!!` exist whenever the new tier has a sandbox (`full` and
-                        // `workspace`; not `safe`).
-                        self.set_bash_available(tier != crate::profile::Tier::Safe);
+                        // `!`/`!!` run under the new tier's sandbox; a successful switch
+                        // always has one (a failed probe refuses in `SetAccess`).
+                        self.set_bash_available(true);
                         if remember {
                             self.push_notice(format!(
                                 "access: {} for this session, and remembered for this project",
@@ -246,6 +249,13 @@ impl App {
             }
             Input::SkillExpanded { result, steer } => self.skill_expanded(result, steer),
             Input::CommandRefused(refused) => {
+                // A refused `send` around now may be the loop's own followup (the inbox
+                // rejects when full): drop the in-flight mark so the turn-end decision
+                // re-evaluates instead of wedging. A refusal the loop did not cause can at
+                // worst cost one extra iteration, still capped.
+                if refused.command == "send" {
+                    self.session.loop_state.awaiting_echo = false;
+                }
                 self.push_notice(format!(
                     "the session refused `{}`: {}",
                     refused.command, refused.reason
@@ -258,6 +268,12 @@ impl App {
                 UpdateResult::dirty()
             }
             Input::PickerOpened(data) => self.picker_opened(data),
+            Input::InspectorKey(key) => self.inspector_key(key),
+            Input::InspectorOpened {
+                requested,
+                snapshot,
+            } => self.inspector_opened(requested, snapshot),
+            Input::InspectorRefreshed(snapshot) => self.inspector_refreshed(snapshot),
             // The `/login` wizard's keys, its verification result, and the save/removal
             // results (ADR 0026 D3).
             Input::LoginKey(key) => {
@@ -474,6 +490,10 @@ impl App {
                     }
                 }
                 Layer::Overlay(Overlay::Completion(_)) => Step::Pass,
+                // The inspector owns its keys (tabs, selection, detail, `k`): every key
+                // goes to it, and `Esc` closes it. Typing never falls through to the
+                // composer while it is open.
+                Layer::Overlay(Overlay::Inspector(_)) => Step::Input(Input::InspectorKey(*key)),
                 Layer::Surface => {
                     if let Some(found) = action {
                         Step::Input(Input::Action(found))

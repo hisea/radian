@@ -1,7 +1,7 @@
 //! `subagent` (ADR 0043 decision 1a): a blocking, one-shot child `radian exec`.
 //!
-//! One tool, two built-in kinds: `explore` mounts only the four read-only tools
-//! (`read list glob grep`) and `general` mounts the child's ordinary headless set. The child is
+//! One tool, two built-in kinds: `explore` mounts only the three read-only tools
+//! (`read glob grep`) and `general` mounts the child's ordinary headless set. The child is
 //! a real `radian exec` process — the **current executable** (ADR 0032: one binary) — with its
 //! own journal, its own session id and `SessionCreated.parent { relation = "subagent" }`.
 //!
@@ -15,9 +15,11 @@
 //! - **The parent's approval is not inherited into an answer.** `--yes` is passed only while
 //!   the parent's permission hooks are `auto`; otherwise the child is headless with no terminal,
 //!   so its `ask` is denied (fail closed) and the result names what was denied.
-//! - **The parent's live route, never the startup one.** Each call reads the parent's model
-//!   route out of the same config slot a `/model` switch lands in (ADR 0026 D5) and passes
-//!   `--provider`/`--model`, so a child started after a switch runs the new model.
+//! - **The parent's live route, never the startup one** — except an `explore` child with a
+//!   configured route. Each call reads the parent's model route out of the same config slot
+//!   a `/model` switch lands in (ADR 0026 D5) and passes `--provider`/`--model`, so a child
+//!   started after a switch runs the new model; an `explore` child instead runs
+//!   `[model.smol]` when the user configured one (ADR 0043 §1).
 //! - **The parent's `--header` values.** They are secrets, so they reach the child through its
 //!   environment ([`crate::headers::CHILD_HEADERS_ENV`]), never its argv; the child's startup
 //!   adds them to its redaction list. Config headers already reach it through the config file.
@@ -78,6 +80,10 @@ pub struct SubagentParts {
     pub provider: String,
     /// The model the parent resolved (`--model`).
     pub model: String,
+    /// The `[model.smol]` route (ADR 0043 §1): an `explore` child runs on it, a
+    /// `general` child always follows the parent. `None` means `explore` follows the parent
+    /// too.
+    pub smol: Option<ModelRoute>,
     /// The effective endpoint override (`--base-url`), only for a provider that takes one.
     pub base_url: Option<String>,
     /// An explicit `--config` the parent read; a default or `RADIAN_CONFIG` config is inherited
@@ -178,13 +184,14 @@ impl Kind {
 fn spec() -> ToolSpec {
     ToolSpec {
         name: "subagent".into(),
-        description: "Run one task in a fresh blocking child session and return its last \
-                      assistant text. `explore` (read list glob grep only) is for reading and \
-                      searching; `general` (the default) has this session's tools minus \
-                      `subagent` itself. The child starts blank — `task` is its first input — \
-                      and inherits this session's permission tier, never a wider one. Several \
-                      `subagent` calls in one reply run at the same time; a call blocks until \
-                      its child finishes, and this turn's cancellation kills the child."
+        description: "Run one task in a fresh child session. The call blocks until the \
+                      child finishes. The tool returns the last assistant text of the child. \
+                      `explore` (read glob grep only) is for reading and searching. \
+                      `general` (the default) has this session's tools minus `subagent` \
+                      itself. The child starts blank. `task` is its first input. The child \
+                      inherits this session's permission tier. It never gets a wider tier. \
+                      Several `subagent` calls in one reply run at the same time. This turn's \
+                      cancellation kills the child."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -192,11 +199,11 @@ fn spec() -> ToolSpec {
                 "agent": {
                     "type": "string",
                     "enum": ["explore", "general"],
-                    "description": "`explore` is read-only; `general` (the default) has this session's tools minus `subagent`."
+                    "description": "Which subagent to run."
                 },
                 "task": {
                     "type": "string",
-                    "description": "The child's first input: what to do, and what to report."
+                    "description": "First input of the child. Tell it what to do and what to report."
                 }
             },
             "required": ["task"],
@@ -360,9 +367,9 @@ impl SubagentSession {
         }
         if kind == Kind::Explore {
             args.push("--tools".into());
-            args.push("read,list,glob,grep".into());
+            args.push("read,glob,grep".into());
         }
-        let route = self.current_route();
+        let route = self.route_for(kind);
         if !route.model.is_empty() {
             args.push("--model".into());
             args.push(route.model);
@@ -387,14 +394,23 @@ impl SubagentSession {
             args.push("--thinking".into());
             args.push(thinking.clone());
         }
-        // `explore` mounts exactly the four read-only tools, and MCP specs are never
+        // `explore` mounts exactly the three read-only tools, and MCP specs are never
         // filtered by `--tools`: passing the parent's config would hand the child tools
         // that can write. A `general` child keeps it — it runs the parent's own set.
+        // An `explore` child also ignores the implicit MCP sources (this flag): neither the
+        // config file's `[mcp]` nor the workspace's `.mcp.json` (which a trusted parent
+        // would otherwise load through the inherited `--trust`). A `general` child reads
+        // the same config file and the same `--mcp-config` path and merges them the same
+        // way, so it ends up with the parent's own server set — neither lost nor started
+        // twice per process.
         if kind != Kind::Explore
             && let Some(mcp) = &self.parts.mcp_config
         {
             args.push("--mcp-config".into());
             args.push(mcp.clone());
+        }
+        if kind == Kind::Explore {
+            args.push("--no-config-mcp".into());
         }
         args.push("--profile".into());
         args.push(current_tier(&self.sandbox).to_owned());
@@ -409,6 +425,18 @@ impl SubagentSession {
         args.push("-p".into());
         args.push(task.to_owned());
         args
+    }
+
+    /// The route the child is told to use: `general` always runs the parent's live route
+    /// ([`current_route`]); `explore` runs `[model.smol]` when the user configured one
+    /// (ADR 0043 §1), else the same live route.
+    fn route_for(&self, kind: Kind) -> ModelRoute {
+        if kind == Kind::Explore
+            && let Some(route) = &self.parts.smol
+        {
+            return route.clone();
+        }
+        self.current_route()
     }
 
     /// The route the child is told to use **right now** (ADR 0043 1a point 2): the config
@@ -486,9 +514,8 @@ impl Drop for SessionKillGuard {
 fn current_tier(sandbox: &SandboxSlot) -> &'static str {
     match sandbox.mode() {
         Some(SandboxMode::WorkspaceWrite) => "workspace",
-        Some(SandboxMode::FullAccess) => "full",
-        // No sandbox is the `safe` tier; `Some(Safe)` never happens (safe builds none).
-        _ => "safe",
+        // `full` and no sandbox alike: a session without a sandbox is unsandboxed.
+        _ => "full",
     }
 }
 
@@ -714,6 +741,43 @@ mod tests {
             vec![("shell".to_owned(), Some("no terminal".to_owned()))]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Item 14: `explore`/`general` differ in the description only (the usage); the `agent`
+    /// field only names which subagent to run (the constraint lives in the `enum` and the
+    /// default in the description) and no longer repeats either in prose.
+    #[test]
+    fn the_agent_field_does_not_repeat_the_explore_general_difference() {
+        let spec = spec();
+        assert!(
+            spec.description
+                .contains("`explore` (read glob grep only) is for reading and searching"),
+            "the description keeps what `explore` is: {}",
+            spec.description
+        );
+        assert!(
+            spec.description
+                .contains("`general` (the default) has this session's tools minus `subagent`"),
+            "the description keeps what `general` is: {}",
+            spec.description
+        );
+        let field = &spec.input_schema["properties"]["agent"];
+        assert_eq!(
+            field["enum"],
+            serde_json::json!(["explore", "general"]),
+            "the `enum` still constrains the values: {field}"
+        );
+        assert!(
+            field["description"]
+                .as_str()
+                .is_some_and(|text| !text.contains("`explore`") && !text.contains("`general`")),
+            "the field prose must not repeat the values or the default: {field}"
+        );
+        assert!(
+            !spec.description.contains("Which subagent to run"),
+            "the field's own question lives in one place only: {}",
+            spec.description
+        );
     }
 
     /// The cut is at the character bound and the marker names the rest.

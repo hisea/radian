@@ -1,4 +1,4 @@
-//! ADR 0043: the `explore` subagent is read-only — exactly `read list glob grep` — so
+//! ADR 0043: the `explore` subagent is read-only — exactly `read glob grep` — so
 //! it must not receive the parent's `--mcp-config`, while `general` keeps it.
 //!
 //! The child here is a stub shell script rather than a `radian` binary: the fact each test
@@ -18,8 +18,10 @@ use radian_sandbox::SandboxSlot;
 use serde_json::{Value, json};
 
 fn scratch(label: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "radian-subagent-mcp-{}-{label}",
+        "radian-subagent-mcp-{}-{label}-{unique}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
@@ -49,7 +51,7 @@ fn flag_value(argv: &[String], flag: &str) -> Option<String> {
     argv.get(index + 1).cloned()
 }
 
-async fn run_child(arguments: Value, coding_root: Option<PathBuf>) -> Vec<String> {
+async fn run_child(arguments: Value, coding_root: Option<PathBuf>, trust: bool) -> Vec<String> {
     let label = if arguments.get("agent").and_then(Value::as_str) == Some("explore") {
         "explore"
     } else {
@@ -64,7 +66,7 @@ async fn run_child(arguments: Value, coding_root: Option<PathBuf>) -> Vec<String
 
     static SINK: NoopSink = NoopSink;
     let permissions = Arc::new(radian_permissions::PermissionHooks::new(
-        Profile::safe(&workspace)
+        Profile::workspace_write(&workspace)
             .unwrap()
             .with_approval(ApprovalPolicy::Auto),
         None,
@@ -74,6 +76,7 @@ async fn run_child(arguments: Value, coding_root: Option<PathBuf>) -> Vec<String
         SubagentParts {
             executable: Some(child),
             mcp_config: Some("parent-mcp.json".into()),
+            trust,
             ..SubagentParts::default()
         },
         dir.clone(),
@@ -106,29 +109,63 @@ async fn run_child(arguments: Value, coding_root: Option<PathBuf>) -> Vec<String
 }
 
 /// An `explore` child starts without `--mcp-config` even when the parent has one: it mounts
-/// exactly the four read-only tools, and MCP tools are never filtered by `--tools`.
+/// exactly the three read-only tools, and MCP tools are never filtered by `--tools`. It
+/// also ignores the config file's `[mcp]` (`--no-config-mcp`), so it starts no MCP
+/// server from either source.
 #[tokio::test]
 async fn the_explore_child_gets_no_mcp_config() {
-    let argv = run_child(json!({"agent": "explore", "task": "MCP-TASK"}), None).await;
+    let argv = run_child(json!({"agent": "explore", "task": "MCP-TASK"}), None, false).await;
     assert!(
         !argv.iter().any(|arg| arg == "--mcp-config"),
         "an explore child must not receive --mcp-config: {argv:?}"
     );
+    assert!(
+        argv.iter().any(|arg| arg == "--no-config-mcp"),
+        "an explore child must ignore the config [mcp]: {argv:?}"
+    );
     // The read-only allow-list is still there.
     assert_eq!(
         flag_value(&argv, "--tools").as_deref(),
-        Some("read,list,glob,grep"),
+        Some("read,glob,grep"),
         "{argv:?}"
     );
 }
 
+/// B2: a `general` child of a trusted parent inherits `--trust`, so it loads the
+/// workspace's `.mcp.json` like the parent; an `explore` child of a trusted parent still
+/// passes `--no-config-mcp` (extended to the project file), so it loads none. The
+/// mutation (trust is not inherited, or explore drops the flag) fails this test.
+#[tokio::test]
+async fn trust_reaches_the_general_child_but_explore_still_loads_none() {
+    let general = run_child(json!({"agent": "general", "task": "MCP-TASK"}), None, true).await;
+    assert!(
+        general.iter().any(|arg| arg == "--trust"),
+        "a general child of a trusted parent must inherit --trust: {general:?}"
+    );
+    assert!(
+        !general.iter().any(|arg| arg == "--no-config-mcp"),
+        "a general child still reads every implicit source: {general:?}"
+    );
+    let explore = run_child(json!({"agent": "explore", "task": "MCP-TASK"}), None, true).await;
+    assert!(
+        explore.iter().any(|arg| arg == "--no-config-mcp"),
+        "an explore child must skip the project file even when trusted: {explore:?}"
+    );
+}
+
 /// A `general` child keeps the parent's `--mcp-config`: it runs the parent session's tools.
+/// It reads the same config file and merges it the same way (no `--no-config-mcp`), so
+/// it ends up with the parent's own server set.
 #[tokio::test]
 async fn the_general_child_keeps_mcp_config() {
-    let argv = run_child(json!({"agent": "general", "task": "MCP-TASK"}), None).await;
+    let argv = run_child(json!({"agent": "general", "task": "MCP-TASK"}), None, false).await;
     assert_eq!(
         flag_value(&argv, "--mcp-config").as_deref(),
         Some("parent-mcp.json"),
         "a general child must keep the parent's --mcp-config: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg == "--no-config-mcp"),
+        "a general child must still read the config [mcp]: {argv:?}"
     );
 }

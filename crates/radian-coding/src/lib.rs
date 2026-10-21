@@ -1,6 +1,5 @@
-//! Built-in coding tools for radian: `read`, `write`, `patch`, `list`, `glob`, `grep`,
-//! `git_diff` (`stat: true` gives the status and a `--stat` summary), and (only when the host
-//! supplies a sandbox) `shell`. [`AskTools`]
+//! Built-in coding tools for radian: `read` (files and directories), `write`, `patch`,
+//! `glob`, `grep`, and (only when the host supplies a sandbox) `shell` and `job`. [`AskTools`]
 //! is the separate `ask_user` provider: a host with no workspace still mounts it (ADR 0024
 //! Q5). See `README.md` next to this crate for the tool/limit tables.
 //!
@@ -10,7 +9,7 @@
 //! not enforce.
 //!
 //! - paths are workspace-relative; absolute paths and `..` escapes are refused;
-//! - `read`, `grep`, `glob` and `list` additionally read two **read-only** roots outside the
+//! - `read`, `grep` and `glob` additionally read two **read-only** roots outside the
 //!   workspace (ADR 0039): the cargo registry sources, `$CARGO_HOME/registry/src`,
 //!   and every toolchain's `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`. A model names one as an
 //!   absolute path or with `~`; it is opened from that root's fd with the same per-component
@@ -38,9 +37,11 @@
 //!   puts that secret into the tool result and therefore into the session JSONL (ADR 0006
 //!   §11). Filtering is not this crate's job; hosts should treat session files as
 //!   potentially sensitive.
-//! - **`git` is invoked as a child process.** It can read `~/.gitconfig` and the repository,
-//!   and it is told not to take optional locks (`--no-optional-locks`); the tests assert
-//!   `.git` is unchanged. No sandbox is applied to it.
+//! - **`git` is not a tool.** The model runs git through `shell`; in a project the user
+//!   has not trusted, every shell child carries the host git hardening as environment
+//!   (`GIT_CONFIG_*`, ADR 0039 decision 5), so repository configuration cannot run
+//!   commands through it. In a trusted project nothing is injected, so the user's own
+//!   hooks run.
 //! - **`shell`'s confinement is exactly the sandbox's.** Under `workspace` the
 //!   backend confines filesystem writes, sensitive reads and the network; the macOS backend
 //!   leaves `mach-lookup` open, so the IPC boundary is not tightened, and no text may present
@@ -57,7 +58,6 @@
 mod args;
 mod ask;
 mod foreground;
-mod git;
 mod glob;
 mod grep;
 pub mod host_git;
@@ -81,6 +81,7 @@ pub use ask::{
 };
 pub use jobs::{
     JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,
+    SweepSummary,
 };
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
 pub use read_roots::ReadRoots;

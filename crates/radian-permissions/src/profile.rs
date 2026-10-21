@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use radian_sandbox::SandboxMode;
+use radian_sandbox::{Sandbox, SandboxMode};
 
 use crate::rule::{Action, ResourceMatcher, Rule, ToolMatcher};
 
@@ -49,7 +49,6 @@ impl ApprovalPolicy {
 /// cannot be swapped for a different execution boundary by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
-    Safe,
     WorkspaceWrite,
     FullAccess,
 }
@@ -59,7 +58,6 @@ impl Preset {
     /// aliases, but this is the name the hosts print and the status bar shows (ADR 0016).
     pub fn as_str(self) -> &'static str {
         match self {
-            Preset::Safe => "safe",
             Preset::WorkspaceWrite => "workspace",
             Preset::FullAccess => "full",
         }
@@ -67,14 +65,14 @@ impl Preset {
 
     pub fn sandbox_mode(self) -> SandboxMode {
         match self {
-            Preset::Safe => SandboxMode::Safe,
             Preset::WorkspaceWrite => SandboxMode::WorkspaceWrite,
             Preset::FullAccess => SandboxMode::FullAccess,
         }
     }
 }
 
-/// Why a profile could not be built (a workspace root that does not resolve).
+/// Why a profile could not be built (a workspace root that does not resolve, or a
+/// sandbox that does not enforce anything).
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
     #[error("{path}: cannot use as the permission workspace root: {source}")]
@@ -84,63 +82,44 @@ pub enum ProfileError {
     },
     #[error("{0}: the permission workspace root is not a directory")]
     NotADirectory(PathBuf),
+    /// A sandboxed profile needs an enforced sandbox: a probed local backend or
+    /// `inherited`, never the transparent `FullAccess` backend.
+    #[error(
+        "a sandboxed `workspace` profile needs an enforced sandbox (a probed local backend or `inherited`), not a transparent one"
+    )]
+    SandboxNotEnforced,
 }
 
 /// One permission profile: a preset's rule set plus its approval policy and sandbox mode.
+///
+/// `sandboxed` is the sandbox's effective state for the session (slice 1 of
+/// `sandbox-auto-allow-shell`): `true` when the session's `workspace` shell calls run
+/// inside a sandbox (a local backend whose probe succeeded, or ADR 0016's `inherited`),
+/// in which case the tier's blanket shell rule is `allow`. It is static for the session —
+/// the host builds the profile after the sandbox, so the rule never depends on a live
+/// probe — and `false` keeps the fail-closed `ask` (a failed probe never becomes an
+/// allow). Approval still cannot widen the sandbox (ADR 0012 P1): this only stops asking
+/// for what the sandbox already confines.
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub preset: Preset,
     pub sandbox: SandboxMode,
     pub approval: ApprovalPolicy,
     pub workspace: PathBuf,
+    pub sandboxed: bool,
     rules: Vec<Rule>,
 }
 
 impl Profile {
-    pub fn safe(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
-        Self::build(Preset::Safe, workspace, |_ws| {
-            let mut rules = read_only();
-            rules.extend(memory_rules());
-            rules.extend(always_allowed());
-            rules.extend([
-                Rule::new(
-                    ToolMatcher::Name("write".into()),
-                    ResourceMatcher::Any,
-                    Action::Deny,
-                )
-                .with_reason("safe mode does not modify files"),
-                Rule::new(
-                    ToolMatcher::Name("patch".into()),
-                    ResourceMatcher::Any,
-                    Action::Deny,
-                )
-                .with_reason("safe mode does not modify files"),
-                Rule::new(
-                    ToolMatcher::Name("shell".into()),
-                    ResourceMatcher::Any,
-                    Action::Deny,
-                )
-                .with_reason("safe mode has no shell"),
-                // A legacy deny for the removed `git_commit` tool name; safe does not write.
-                Rule::new(
-                    ToolMatcher::Name("git_commit".into()),
-                    ResourceMatcher::Any,
-                    Action::Deny,
-                )
-                .with_reason("safe mode does not write the repository"),
-                Rule::new(ToolMatcher::Mcp, ResourceMatcher::Any, Action::Deny)
-                    .with_reason("safe mode does not start MCP tools"),
-            ]);
-            rules
-        })
-    }
-
+    /// The `workspace` tier without a sandbox (or before the probe): shell asks.
+    /// A failed probe never becomes an allow — fail closed.
     pub fn workspace_write(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
             rules.extend(memory_rules());
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
+            rules.extend(git_exec_denies(ws));
             rules.extend([
                 Rule::new(
                     ToolMatcher::Name("shell".into()),
@@ -153,6 +132,42 @@ impl Profile {
         })
     }
 
+    /// The `workspace` tier with a sandbox in force: shell inside the sandbox is `allow`
+    /// (a `deny` rule still wins first, and MCP stays `ask`). The proof is the `sandbox`
+    /// argument itself — a probed local backend, or `inherited` — so passing a transparent
+    /// sandbox (`FullAccess`, which enforces nothing) is refused instead of building the
+    /// allow-shell profile. Using the profile without an enforced sandbox is the mutation
+    /// `workspace_sandboxed_shell_is_allowed_only_with_a_sandbox` catches.
+    pub fn workspace_write_sandboxed(
+        workspace: impl AsRef<Path>,
+        sandbox: &Sandbox,
+    ) -> Result<Self, ProfileError> {
+        if !sandbox.mode().is_enforced() {
+            return Err(ProfileError::SandboxNotEnforced);
+        }
+        let mut profile = Self::build(Preset::WorkspaceWrite, workspace, |ws| {
+            let mut rules = read_only();
+            rules.extend(memory_rules());
+            rules.extend(always_allowed());
+            rules.extend(write_under(ws));
+            rules.extend([
+                // Inside the sandbox: the OS boundary, not the prompt, is what confines
+                // the command — so, like `full`, it covers every compound segment,
+                // every `cd` (even one leaving the workspace) and every wrapper.
+                // A `deny` rule still wins first, and a named `ask` rule still asks.
+                Rule::new(
+                    ToolMatcher::Name("shell".into()),
+                    ResourceMatcher::Any,
+                    Action::Allow,
+                ),
+                Rule::new(ToolMatcher::Mcp, ResourceMatcher::Any, Action::Ask),
+            ]);
+            rules
+        })?;
+        profile.sandboxed = true;
+        Ok(profile)
+    }
+
     pub fn full_access(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::FullAccess, workspace, |ws| {
             let mut rules = read_only();
@@ -160,11 +175,12 @@ impl Profile {
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend([
-                // Still ask: full-access is not "run anything silently".
+                // `full` trusts the environment (like pi): no built-in prompt.
+                // A user's own `deny`/`ask` rules still win (deny > ask > allow).
                 Rule::new(
                     ToolMatcher::Name("shell".into()),
                     ResourceMatcher::Any,
-                    Action::Ask,
+                    Action::Allow,
                 ),
                 Rule::new(ToolMatcher::Mcp, ResourceMatcher::Any, Action::Allow),
             ]);
@@ -185,12 +201,44 @@ impl Profile {
             sandbox: preset.sandbox_mode(),
             approval,
             workspace,
+            sandboxed: false,
             rules,
         })
     }
 
     pub fn rules(&self) -> &[Rule] {
         &self.rules
+    }
+
+    /// Marks the profile as sandboxed from an enforced [`Sandbox`] (hosts that add their
+    /// own rules with [`Profile::custom`] on top of a sandboxed session). Only `Some` with
+    /// an enforced mode (`is_enforced`: a probed local backend, or `inherited`) sets the
+    /// flag; `None` and a transparent sandbox leave it unsandboxed. It only ever narrows
+    /// the question, never the boundary: approval still cannot widen the sandbox.
+    pub fn with_sandbox(mut self, sandbox: Option<&Sandbox>) -> Self {
+        self.sandboxed = sandbox.is_some_and(|sandbox| sandbox.mode().is_enforced());
+        self
+    }
+
+    /// Whether this session's `workspace` shell calls run inside a sandbox (slice 1 of
+    /// `sandbox-auto-allow-shell`): the compound-segment check reads it, so a segment
+    /// matched only by the tier's blanket `allow` still falls through to `ask`.
+    pub fn is_sandboxed(&self) -> bool {
+        self.sandboxed
+    }
+
+    /// Whether the tier's shell rule is a blanket `allow` (the `full` tier, or the
+    /// `workspace` tier with a sandbox in force): the permission layer trusts it as
+    /// the execution boundary, so a compound, a `cd` segment (even one leaving the
+    /// workspace — the sandbox confines it) and a wrapper segment are judged like
+    /// any other call there. Inspected from the rule set, not from the preset name,
+    /// so a custom profile without the blanket rule never counts as blanket-allowed.
+    pub fn shell_blanket_allow(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.action == Action::Allow
+                && matches!(&rule.tool, ToolMatcher::Name(name) if name == "shell")
+                && matches!(rule.resource, ResourceMatcher::Any)
+        })
     }
 
     /// Allows these tool names in **every** tier, with the normal rule priority: tools such as
@@ -247,6 +295,7 @@ impl Profile {
             sandbox: preset.sandbox_mode(),
             approval: ApprovalPolicy::OnAsk,
             workspace,
+            sandboxed: false,
             rules,
         })
     }
@@ -277,10 +326,8 @@ fn memory_rules() -> Vec<Rule> {
 
 /// The read-only built-ins, allowed regardless of path: `radian-coding` enforces the
 /// workspace boundary itself for these tools, so the permission layer does not need to.
-/// `git_status` is not here: it is a one-version alias judged as `git_diff` (ADR 0043
-/// decision 3).
 fn read_only() -> Vec<Rule> {
-    ["read", "list", "glob", "grep", "git_diff"]
+    ["read", "glob", "grep"]
         .into_iter()
         .map(|name| {
             Rule::new(
@@ -310,6 +357,31 @@ fn always_allowed() -> Vec<Rule> {
             )
         })
         .collect()
+}
+
+/// ADR 0038 decision 3: in the `workspace` tier the file tools deny the `.git` entries git
+/// can execute — the same shared list the sandbox enforces (`radian_sandbox::git_exec`).
+/// `write`/`patch` never enter the sandbox, so without these rules the model could write
+/// `.git/hooks/pre-commit` and have it run at the next commit. `full` has no such rules by
+/// design (it allows everything). A worktree pointer file is denied whole: rewriting it
+/// repoints git at a gitdir the model controls.
+fn git_exec_denies(workspace: &Path) -> Vec<Rule> {
+    const REASON: &str = "denied by ADR 0038: .git entries git can execute (config, hooks) are read-only in the workspace tier; writing them would run code outside the sandbox";
+    let mut rules = Vec::new();
+    for git_path in radian_sandbox::discover_git_metadata(workspace) {
+        for tool in ["write", "patch"] {
+            let resource = if git_path.is_dir() {
+                ResourceMatcher::GitExec(git_path.clone())
+            } else {
+                ResourceMatcher::PathUnder(git_path.clone())
+            };
+            rules.push(
+                Rule::new(ToolMatcher::Name(tool.into()), resource, Action::Deny)
+                    .with_reason(REASON),
+            );
+        }
+    }
+    rules
 }
 
 /// File modification allowed only when the resolved path stays under the workspace.
@@ -344,12 +416,42 @@ mod tests {
         crate::rule::evaluate(profile.rules(), &profile.workspace, &call(name)).action
     }
 
-    /// ADR 0021 D5/D7: `memory_search` is allowed in all three tiers; no memory tool asks.
+    /// A fresh empty directory, removed on drop. `workspace_write` discovers git metadata
+    /// under the workspace, so these tests use an isolated dir rather than the shared temp
+    /// dir itself (which can hold near a million entries on a lived-in machine and make
+    /// each profile build walk all of them).
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "radian-profile-test-{}-{label}-{n}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(std::fs::canonicalize(&dir).unwrap())
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    /// ADR 0021 D5/D7: `memory_search` is allowed in both tiers; no memory tool asks.
     #[test]
     fn memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("memory");
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {
@@ -375,9 +477,8 @@ mod tests {
     /// never prompts. Removing the rule would make it fall through to the default `ask`.
     #[test]
     fn ask_user_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("ask-user");
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {
@@ -392,9 +493,8 @@ mod tests {
     /// make it fall through to the default `ask` and be denied without a terminal.
     #[test]
     fn subagent_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("subagent");
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {
@@ -407,9 +507,8 @@ mod tests {
     /// them and they never prompt (they enforce the workspace boundary in `radian-coding`).
     #[test]
     fn the_search_tools_are_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("search");
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {
@@ -423,9 +522,8 @@ mod tests {
     /// Removing the rule would make it fall through to the default `ask`.
     #[test]
     fn skill_is_allowed_in_every_tier() {
-        let ws = std::env::temp_dir();
+        let ws = TestDir::new("skill");
         for profile in [
-            Profile::safe(&ws).unwrap(),
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {

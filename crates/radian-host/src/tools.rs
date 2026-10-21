@@ -35,6 +35,11 @@ pub struct HostTools {
     /// `deny` the registry still installs is defence in depth beneath that). MCP tools are not
     /// in this universe; they stay governed by the session's configured MCP servers/provider.
     tool_allow: Option<Vec<String>>,
+    /// Where the opened session's tool specs are reported. Set by `open_session` when
+    /// present, so a host that needs the model-visible set (the inspector's tools page)
+    /// can read it without a Core API change: the driver owns the `AgentSession`, but the
+    /// provider runs inside it and can publish the specs it just opened.
+    spec_sink: Option<std::sync::Arc<std::sync::Mutex<Option<Vec<ToolSpec>>>>>,
 }
 
 impl HostTools {
@@ -51,7 +56,19 @@ impl HostTools {
             subagent: None,
             mcp,
             tool_allow: None,
+            spec_sink: None,
         }
+    }
+
+    /// Publish the opened session's tool specs into `sink` (the inspector's tools page).
+    /// The sink is filled by `open_session` with the same `specs` the `HostSession`
+    /// carries, so the snapshot is the provider's own list, not a reconstruction.
+    pub fn with_spec_sink(
+        mut self,
+        sink: std::sync::Arc<std::sync::Mutex<Option<Vec<ToolSpec>>>>,
+    ) -> Self {
+        self.spec_sink = Some(sink);
+        self
     }
 
     /// Mount only the built-in tools this allow-list names. `None` mounts every built-in the
@@ -91,69 +108,6 @@ impl HostTools {
     pub fn with_subagent(mut self, subagent: SubagentTools) -> Self {
         self.subagent = Some(subagent);
         self
-    }
-
-    /// The mounted built-in tools as `(name, one-line purpose)`, for the system prompt's
-    /// `<runtime>` layer (ADR 0036 D1's 0a). The MCP tools are dynamic (they depend on the
-    /// server), so they are named by server in the same layer, not listed here.
-    pub fn builtin_tools(&self) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = Vec::new();
-        let mut push = |name: &str, purpose: &str| {
-            out.push((name.to_owned(), purpose.to_owned()));
-        };
-        if self.coding.is_some() {
-            push(
-                "read",
-                "read a file; lines are numbered, with offset and limit",
-            );
-            push(
-                "patch",
-                "replace text in a file (layered match; replace_all for many)",
-            );
-            push("write", "create or overwrite a file");
-            push("list", "list a directory");
-            push("glob", "find files whose path matches a glob");
-            push("grep", "search file contents with a regex");
-            push(
-                "shell",
-                "run a command in the workspace; one that runs past the auto-background \
-                 threshold is moved to the background automatically (`background: true` starts \
-                 it there at once)",
-            );
-            push(
-                "job",
-                "read, wait for, or stop a background shell job by id",
-            );
-            push(
-                "git_diff",
-                "a diff of the working tree; `stat: true` gives the status and a --stat summary",
-            );
-        }
-        if self.memory.is_some() {
-            push(
-                "memory_search",
-                "search durable memory, or read records in full by id",
-            );
-        }
-        if self.ask.is_some() {
-            push("ask_user", "ask the user a structured question");
-        }
-        if self.skills.is_some() {
-            push("skill", "read one of the discovered skills");
-        }
-        if self.subagent.is_some() {
-            push(
-                "subagent",
-                "run one task in a fresh blocking child session (`explore` is read-only) and \
-                 return its last assistant text",
-            );
-        }
-        // The session allow-list narrows what is even listed in layer 0a; a built-in it
-        // does not name is not mounted and must not appear here.
-        if self.tool_allow.is_some() {
-            out.retain(|(name, _)| self.allows(name));
-        }
-        out
     }
 }
 
@@ -248,6 +202,9 @@ impl ToolProvider for HostTools {
             built_in_specs.retain(|spec| self.allows(&spec.name));
         }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
+        if let Some(sink) = &self.spec_sink {
+            *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(specs.clone());
+        }
 
         Ok(HostSession {
             coding,

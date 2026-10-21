@@ -18,12 +18,24 @@ pub struct ModelConfig {
     pub provider: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    /// `[model.smol]` (ADR 0008 §1, ADR 0043 §1): the cheap route slot. Today only the
+    /// `explore` subagent reads it; `None` means unset (and a half-set table warns as
+    /// `model.smol` and is ignored, like any unknown key).
+    pub smol: Option<SmolConfig>,
     pub headers: Vec<(String, String)>,
     pub context_window: Option<u64>,
     /// `[model] retries` (ADR 0017): how many times a transient model failure is
     /// retried inside one model call. `None` means the host's default
     /// ([`agent_core::DEFAULT_MODEL_RETRIES`]); `0` disables retrying.
     pub retries: Option<u32>,
+}
+
+/// `[model.smol]` (ADR 0008 §1): the cheap route slot's `provider` + `model`, the same
+/// meaning as the `[model]` route keys, carried verbatim.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SmolConfig {
+    pub provider: String,
+    pub model: String,
 }
 
 pub(super) fn parse_providers(
@@ -160,6 +172,36 @@ pub(super) fn parse_model(
             }
             ("retries", _) => {
                 return Err(wrong_type(path, "model.retries", "a non-negative integer"));
+            }
+            // `[model.smol]` (ADR 0008 §1, ADR 0043 §1): the cheap route slot. Both keys
+            // carry the same meaning as the `[model]` route keys; a half-set table warns
+            // (`model.smol`) and is ignored, like any unknown key.
+            ("smol", Value::Table(smol)) => {
+                let mut provider = None;
+                let mut model = None;
+                for (key, value) in smol {
+                    match (key.as_str(), value) {
+                        ("provider", Value::String(provider_name)) => {
+                            provider = Some(provider_name.clone());
+                        }
+                        ("model", Value::String(model_name)) => {
+                            model = Some(model_name.clone());
+                        }
+                        (other, _) => {
+                            config.skipped.push(format!("model.smol.{other}"));
+                        }
+                    }
+                }
+                match (provider, model) {
+                    (Some(provider), Some(model)) => {
+                        config.model.smol = Some(SmolConfig { provider, model });
+                    }
+                    (None, None) => {}
+                    _ => config.skipped.push("model.smol".into()),
+                }
+            }
+            ("smol", _) => {
+                config.skipped.push("model.smol".into());
             }
             // Known by the ADR, not wired here (the host's `--include-usage` controls it).
             ("include_usage", _) => config.skipped.push("model.include_usage".into()),

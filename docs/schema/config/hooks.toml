@@ -1,0 +1,45 @@
+# ADR 0045 切片 A：用户级外部命令 hook（Claude/Codex 子集）。
+# 三个事件（`PreToolUse`/`PostToolUse`/`Stop`），每个是 `{ matcher, hooks }` 条目列
+# 表，每个 hook 是 `{ type = "command", command, timeout }`。
+# `matcher` 只认 Radian 工具名（`shell`/`write`/`patch`/`read`……），`|` 分隔多个。
+# 子集之外（`type = "http"`、`async = true`、未知事件名）只跳过、不拒绝。
+schema_version = 1
+
+[[hooks.PreToolUse]]
+matcher = "shell|write"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/work/example/hooks/check-shell.sh"
+timeout = 10
+
+[[hooks.PostToolUse]]
+matcher = "patch"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/work/example/hooks/lint.sh"
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "/work/example/hooks/verify.sh"
+timeout = 30
+
+# 子集之外：逐条跳过并各报一行（启动行 `[config] ignored key …`）。
+[[hooks.PreToolUse]]
+matcher = "read"
+[[hooks.PreToolUse.hooks]]
+type = "http"
+command = "https://example.com/hook"
+
+[[hooks.PostToolUse]]
+matcher = "read"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/work/example/hooks/late.sh"
+async = true
+
+[[hooks.SessionStart]]
+matcher = "read"
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/work/example/hooks/early.sh"

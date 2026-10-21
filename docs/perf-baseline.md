@@ -994,3 +994,110 @@ Verify（含 1.88）已在该合并树上重跑。
 `terminal-ready` 里的 2 s pty 查询是探针环境的假象，真实终端不付；100k 条、真实 provider 首
 token 未测。
 
+
+## 文件工具 `spawn_blocking`（file-tools-parallel，本项改前）
+
+方法：`crates/radian-coding/tests/perf_file_tools.rs`（全部 `#[ignore]`），debug 构建。
+单次 grep 与同一任务里 `tokio::join!` 的三个 grep（Core 批量的形状：一个任务轮询三个
+`session.execute` future），pattern 都是全树扫完也命中不了的 needle（输出只有一个
+`[no matches]`，墙钟 = walk + 读文件）。本仓库以相对 `.` 为 workspace 搜；
+大树是 `~/.cargo/registry/src` 下最大的展开树（`index.crates.io-1949cf8c6b5b557f`，
+约 601 MB），以绝对路径搜（`CodingTools::new` 从环境解析只读根）。各 1 次 warmup，
+本仓库 5 次、registry 3 次取中位。
+
+```sh
+cargo test -p radian-coding --test perf_file_tools -- --ignored --nocapture --test-threads=1
+```
+
+**负载**：`uptime` 1 分钟负载约 24（同一台机器上还有别的编译）。
+
+| 树 | 单次 grep 中位 | 同一批三个 grep 中位 | 比值 |
+|---|---|---|---|
+| 本仓库（worktree，`.radian-worktrees` 被 walk 剪掉） | 162.6 ms | 504.8 ms | **3.10×** |
+| registry 最大展开树（601 MB） | 1.89 s | 5.83 s | **3.08×** |
+
+**结论：串行**。三个并发 grep 的墙钟 ≈ 单次的三倍：`run` 里的同步 walk + 逐行读从来不
+让出，一个任务里的批量只能一个一个跑。`shell` 描述里的"run in parallel"到此未经证实；
+本项把扫描搬进 `spawn_blocking` 后重测（见下节）。
+
+## 文件工具 `spawn_blocking`（file-tools-parallel，本项改后）
+
+同一命令、同一台机器（`uptime` 负载约 30）。改动：`grep`/`glob` 的 `run` 只做参数
+解析与限额计算，fd walk + 逐文件读 + 渲染搬进 `tokio::task::spawn_blocking`（Core
+不改；取消时丢掉 future，阻塞侧读完即弃，只读所以无害）。
+
+| 树 | 单次 grep 中位 | 同一批三个 grep 中位 | 比值（改前） |
+|---|---|---|---|
+| 本仓库 | 174.8 ms | 200.9 ms | **1.15×**（改前 3.10×） |
+| registry 最大展开树 | 1.77 s | 1.57 s | **0.89×**（改前 3.08×） |
+
+**结论：并行**。三个并发 grep 的墙钟 ≈ 单次，不再是三倍。`shell` 描述里的"run in
+parallel"至此证实，无需改字。`glob` 走同一条路（同一实现形状）；重叠的确定性证明
+见 `crates/radian-coding/tests/file_tools_parallel.rs`（`resolve_hook` 里的 `Barrier`，
+不依赖墙钟），取消见同一文件的 `a_cancelled_batch_returns_without_the_scan_result`。
+
+## 编辑后同步检查的增量耗时（edit-check-timing，2026-10-20）
+
+为 `docs/backlog/command-hooks-claude-subset.md` 的"编辑后 hook 的批处理"一节量
+`cargo check` 增量一次的实际时长。只测量，不改产品代码；本项的提交只有
+`benchmarks/edit-check-timing.sh`（复现脚本）与本节。
+
+```sh
+bash benchmarks/edit-check-timing.sh [/tmp/edit-check-timing]
+```
+
+**方法**（debug profile，worktree 内默认 `target/`，`CARGO_TARGET_DIR` 未设置）：
+先 `cargo check --workspace --all-targets` warm 一次（35.8 s）；然后对每个文件，
+**每次计时运行前**都追加一行 `// timing …`（内容变化，触发该 crate 重查），
+分别计时 `cargo check -p <crate>` 与 `cargo check --workspace`（各 5 次，取中位与最大），
+以及 `cargo clippy -p <crate>`（3 次，取中位与最大）。每次运行都检查 cargo 输出里有
+`Checking <crate>`（clippy 首轮冷缓存时是 `Compiling <crate>`，同样算重建）；
+跑完 `git checkout` 恢复全部 5 个文件。计时是包住 cargo 子进程的
+`time.monotonic()` 墙钟。
+
+| 编辑的文件 | crate | `check -p` 中位 / 最大 | `check --workspace` 中位 / 最大 | `clippy -p` 中位 / 最大 | 稳态重查范围（第 2–5 轮） |
+|---|---|---|---|---|---|
+| `radian-permissions/src/shell.rs`（leaf） | radian-permissions | 0.179 s / 7.990 s | 1.185 s / 10.431 s | 0.250 s / 1.697 s | `-p` 1 个；workspace 4 个（permissions、host、agent-cli、tui） |
+| `radian-coding/src/read.rs`（mid） | radian-coding | 0.294 s / 4.724 s | 1.231 s / 1.290 s | 0.433 s / 1.583 s | `-p` 1 个；workspace 4 个（coding、host、agent-cli、tui） |
+| `radian-host/src/context.rs`（host） | radian-host | 0.448 s / 7.140 s | 1.113 s / 1.140 s | 0.699 s / 3.514 s | `-p` 1 个；workspace 3 个（host、agent-cli、tui） |
+| `radian-tui/src/startup.rs`（TUI） | radian-tui | 0.599 s / 1.123 s | 0.560 s / 0.588 s | 0.844 s / 6.109 s | `-p` 1 个；workspace 1 个（tui） |
+| `agent-core/src/turn.rs`（core） | agent-core | 0.242 s / 0.400 s | 1.584 s / 1.632 s | 0.325 s / 0.447 s | `-p` 1 个；workspace 13 个（core 之上全部） |
+
+**负载**：warm 前 1 分钟 load 13.7；各系列开始前 `uptime` 的 1 分钟 load 在
+22.7–47.3 之间（同一台机器上别的 agent 在编译，15 分钟 load 约 23–24）。
+第 2–5 轮彼此相差约 10% 以内，中位不受首轮离群影响；**最大值都是第 1 轮**：
+它是 `--all-targets` warm 后首次换 flag 集（特性统一变化导致第三方依赖重查，
+如 permissions 首轮重查 33 个单元）叠加 load 尖峰（首系列时 1 分钟 load 47.3），
+不是稳态。clippy 的最大值同样是首轮冷缓存（clippy driver 首次跑）。
+
+**这对"每次编辑同步跑"意味着什么**：模型每次编辑后要等的，是上面对应格的中位——
+单 crate 检查约 0.2–0.6 s，workspace 全查约 0.6–1.6 s（core 改动最大，1.58 s；
+TUI 改动最小，workspace 与 `-p` 都是约 0.6 s，因为它是没有下游的顶层），
+clippy 约 0.3–0.8 s。冷缓存或高负载尖峰下同一次检查可到 6–10 s（本轮量到的最大）。
+本节只给数字，不做 (a)/(b) 取舍的推荐。
+
+## 文件工具 `spawn_blocking`（read，本项改前改后）
+
+方法：`crates/radian-coding/tests/perf_file_tools.rs::perf_read_single_vs_batch_big_file`
+（`#[ignore]`，debug 构建）。workspace 里一个 100 万行的大文件（`big.txt`，约 46 MB）：
+单次 `read`（深 `offset` + `limit: 50`，墙钟主要是跳到 `offset` 的字节扫描）与同一任务
+里 `tokio::join!` 的三个 `read`（三个不同的深 `offset`，Core 批量的形状）。改前数字是把
+`read.rs` 临时 revert 到 `spawn_blocking` 之前跑出来的，跑完即恢复（`git diff` 确认）。
+各 1 次 warmup，5 次取中位。
+
+```sh
+cargo test -p radian-coding --test perf_file_tools -- --ignored --nocapture perf_read_single_vs_batch_big_file
+```
+
+**负载**：`uptime` 1 分钟负载约 18（同一台机器上还有别的编译）。
+
+| | 单次 read 中位 | 同一批三个 read 中位 | 比值 |
+|---|---|---|---|
+| 改前 | 186.4 ms | 516.0 ms | **2.77×** |
+| 改后 | 183.5 ms | 205.9 ms | **1.12×** |
+
+**结论：并行**。改前三个并发 read 的墙钟 ≈ 单次的 2.8 倍（串行），改后 ≈ 单次
+（1.12×）。`read`（含目录列举，同一条路）至此与 `grep`/`glob` 一致；`shell` 描述里的
+"run in parallel"对 `read`、`grep`、`glob` 三者都成立，无需改字。重叠的确定性证明见
+`crates/radian-coding/tests/file_tools_parallel.rs` 的 `two_reads_in_one_batch_overlap`
+与 `two_directory_reads_in_one_batch_overlap`（`resolve_hook` 会合，不依赖墙钟）。

@@ -14,8 +14,9 @@
 //!   before both storing and looking up, so a symlink and its target share one decision (T5).
 //! - **Trigger**: a workspace needs a decision only when it holds a resource from T1's list;
 //!   today that list is a project skill (`<dir>/.agents/skills/<x>/SKILL.md` for any directory
-//!   from the workspace up to the repository root) and the project declaration
-//!   `<workspace>/.radian/config.toml` (ADR 0043 decision 1). A bare `.radian/` does not
+//!   from the workspace up to the repository root), the project declaration
+//!   `<workspace>/.radian/config.toml` (ADR 0043 decision 1), and the project MCP file
+//!   `<workspace>/.mcp.json` (ADR 0031 T1, slice B2). A bare `.radian/` does not
 //!   trigger (T1).
 
 use std::collections::BTreeMap;
@@ -98,13 +99,14 @@ impl Setup {
 }
 
 /// The six choices the startup prompt offers (ADR 0031 T3 revision by ADR 0043 decision 2;
-/// owner ruling 6). The order is the display order; `UntrustHere` is the default highlight.
+/// owner ruling 6, revised 2026-10-20: for a project with no trusted decision the sandbox
+/// choice comes first and is the default highlight). The order is the display order.
 /// `TrustHereSandbox` trusts this directory **and** remembers `workspace` for it in
 /// `~/.radian/access/access.json`, the same record `/access` writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
-    TrustHere,
     TrustHereSandbox,
+    TrustHere,
     TrustParent,
     TrustSession,
     UntrustHere,
@@ -113,8 +115,8 @@ pub enum Choice {
 
 impl Choice {
     pub const ALL: [Choice; 6] = [
-        Choice::TrustHere,
         Choice::TrustHereSandbox,
+        Choice::TrustHere,
         Choice::TrustParent,
         Choice::TrustSession,
         Choice::UntrustHere,
@@ -420,12 +422,15 @@ pub fn untrusted_notice(workspace: &Path) -> String {
 }
 
 /// Whether `workspace` holds a resource from T1's list. The list (ADR 0031 T1, shrunk by ADR
-/// 0043 decision 1 to the project's own skills and its project-level configuration):
+/// 0043 decision 1 to the project's own skills and its project-level configuration, extended
+/// by slice B2 with the project MCP file):
 ///
 /// - a project-level skill: `<dir>/.agents/skills/<x>/SKILL.md` for any directory from the
 ///   workspace up to and including the repository root (the same roots skill discovery scans
 ///   when trusted);
-/// - the project declaration: `<workspace>/.radian/config.toml`.
+/// - the project declaration: `<workspace>/.radian/config.toml`;
+/// - the project MCP file: `<workspace>/.mcp.json` (only the workspace root itself, never a
+///   parent: it is the project's own servers, loaded only once trusted).
 ///
 /// A bare `.radian/` does not trigger, and `.radian-sandbox/` is ignored. The check is a **file**
 /// question: a malformed file is still something the loader would read, so it still triggers.
@@ -435,6 +440,7 @@ pub fn has_project_resources(workspace: &Path) -> bool {
         .iter()
         .any(|root| crate::skills::has_skill_file(root))
         || crate::project::path(workspace).is_file()
+        || crate::mcp::project_path(workspace).is_file()
 }
 
 /// The canonical form of `path`: symlinks resolved, `.`/`..` removed. Falls back to the path
@@ -678,6 +684,25 @@ mod tests {
         assert!(!has_project_resources(&other));
         std::fs::write(other.join(".radian/config.toml"), "[permissions]\n").unwrap();
         assert!(has_project_resources(&other));
+    }
+
+    /// Slice B2: the project MCP file is a project resource by itself: a workspace with
+    /// only `.mcp.json` (no skill, no project config) triggers, and removing it stops the
+    /// trigger. The mutation (the `.mcp.json` check is dropped) fails the first assertion.
+    #[test]
+    fn the_project_mcp_file_triggers_by_itself() {
+        let root = Scratch::new("trigger-mcp");
+        let ws = root.root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        assert!(!has_project_resources(&ws));
+        std::fs::write(
+            ws.join(".mcp.json"),
+            r#"{"mcpServers":{"a":{"command":"true"}}}"#,
+        )
+        .unwrap();
+        assert!(has_project_resources(&ws));
+        std::fs::remove_file(ws.join(".mcp.json")).unwrap();
+        assert!(!has_project_resources(&ws));
     }
 
     /// The trigger searches from the workspace up to the repository root: a skill at the root

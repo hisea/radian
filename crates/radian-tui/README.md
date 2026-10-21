@@ -171,8 +171,8 @@ config error). Without it the glyph set's default is used (`nerd` `󰰠`, `unico
 lacks it draws a fallback glyph, which may sit off the baseline. `[tui.footer.items.brand] style`
 still overrides the color.
 The collapsed summary names the sandbox in plain words: `workspace · macOS
-sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux, `no exec` for
-`safe` and `no sandbox` for `full`; the exact backend name (`macos-seatbelt`, `linux-bwrap`)
+sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux and `no sandbox · no prompts` for
+`full`; the exact backend name (`macos-seatbelt`, `linux-bwrap`)
 stays in the expanded `profile:` line.
 The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
 bare arrow keys belong to the composer.
@@ -327,6 +327,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
 | `elapsed` | `{elapsed}` | `16.2s`, live while a generation runs, the last one when idle, empty after a resume |
 | `pending` | `{count}` | shown only when a request waits |
+| `queued` | `{count}` | the `next_turn` inputs this session sent that the runtime has not admitted yet (`/queue` and an idle Enter while its turn has not started); shown only while something waits. In the default `deck` preset's second row, right group |
 | `mcp` | `{mcp}` | the configured/connected servers |
 | `scroll` | `{position}`, `{mode}` | `{position} {mode}` |
 
@@ -499,6 +500,12 @@ with `[tui.colors]`.
   report failure honestly; configured anywhere else it is a startup warning and OSC 52.
   Selections over 1 MiB are refused with the reason. `off` keeps the selection visual and
   copies nothing.
+- `bell` (default `off`): when the terminal bell rings — one `\x07` per event class.
+  `attention` rings when an approval or `ask_user` prompt opens and when a turn ends
+  (completed or failed; a cancel needs no ring), `all` additionally rings when a
+  background job settles. Events that share a frame merge into one ring; nothing rings
+  while a turn streams. An unknown value warns and falls back to `off`. `NO_COLOR` does
+  not affect it.
 - `keybindings` maps an **action** to one or more key strings; a listed action's keys
   **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
   `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
@@ -558,8 +565,8 @@ openai-compatible).
 
 The levels are data (`command.rs`): the command names from their `/help` lines, `/memory`'s
 subcommands, the record ids of `show`/`edit`/`archive`/`restore`/`forget`/`confirm` (listed by
-the host — `update` never does I/O), `/export`'s `md|json` and `--force`, and free text for
-`/sessions` and `/compact`. A future `/model` (provider → model, ADR 0026) or `/login` is one
+the host — `update` never does I/O), `/export`'s `md|json` and `--force`, `/copy`'s `code`
+selector, and free text for `/sessions`, `/compact` and `/queue`. A future `/model` (provider → model, ADR 0026) or `/login` is one
 more entry in the same tree.
 
 
@@ -576,8 +583,11 @@ the rest is sent as an ordinary message.
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
-| `/jobs [kill <id\|all>]` | list this session's background `shell` jobs (id, state, elapsed, command) as notices, or stop one/all (ADR 0037 decision 4). `kill` sends SIGTERM to the process group, then SIGKILL after 2 s; the model gets a completion message on the busy/idle lane |
+| `/jobs [kill <id\|all>]` | list this session's running background `shell` jobs (id, state, elapsed, command) as notices, or stop one/all (ADR 0037 decision 4). `kill` sends SIGTERM to the process group, then SIGKILL after 2 s; the model gets a completion message on the busy/idle lane |
 | `/usage` | print the current provider's usage snapshot, **every** window, as notices (ADR 0027). The footer's `usage` line is the short form of the same snapshot; no usage source, or no snapshot yet, is one line saying so |
+| `/queue <text>` | queue a message for the next turn as an `Inbox::followup`, even while a turn runs (Enter steers then; idle it opens a turn at once). The footer's `queued` item shows the waiting count |
+| `/retry` | resend the last user message, but only when idle and the previous turn ended in a model error; anything else is a `nothing to retry` notice. The `turn failed` notice ends with `/retry to resend` |
+| `/copy [code]` | copy the last committed assistant message's markdown source (a streaming entry never counts), or with `code` only its last fenced block without the fence lines, through `tui.clipboard` |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
   Unbalanced quotes are an error notice.
@@ -590,7 +600,7 @@ the rest is sent as an ordinary message.
   it between turns, so a running turn finishes first, and the result is a notice. Ctrl-C/Esc
   cancels an in-flight compaction without committing.
 - `/sessions` opens the session picker overlay (the same one `--pick` runs); the event loop loads the rows, because that reads the session directory. It never switches sessions in place — selecting shows `--resume <id>`, and the composer keeps typing until you navigate into the picker. `/export` uses the same
-- `/jobs` lists the session's background `shell` jobs as notices; `/jobs kill <id>` and `/jobs kill all` stop them. A settle the model has not seen arrives as a System message (busy: injected into the running turn; idle: a follow-up turn that wakes it), and after three wake-started turns with no user input it is injected only (ADR 0037 decision 3).
+- `/jobs` lists the session's running background `shell` jobs as notices; `/jobs kill <id>` and `/jobs kill all` stop them. A settle the model has not seen arrives as a System message (busy: injected into the running turn; idle: a follow-up turn that wakes it), and after three wake-started turns with no user input it is injected only (ADR 0037 decision 3).
   `radian-host` renderer as `radian exec --export` (redacted, read-only JSONL), writes atomically,
   and refuses to overwrite without `--force`; a relative path is resolved against the
   workspace, an absolute one may point anywhere the user named.
@@ -622,9 +632,9 @@ the rest is sent as an ordinary message.
   by whether a body is drawn under it (ADR 0035's 2026-10-16 "折叠标记统一" note, option A):
   `◻` when a body is (`errors` preview, error body, `Ctrl-O`), `◼` when the head is all that
   shows an explicitly folded body (`collapsed`'s `· N lines`), and `•` for every other head-only
-  block (a running call, an empty result, or a `read`/`grep`/`glob`/`list` result of **any**
+  block (a running call, an empty result, or a `read`/`grep`/`glob` result of **any**
   size); ascii
-  `-`/`+`/`*`. A small tool (`read`, `grep`, `glob`, `list`) is that one line — a `•`, never a
+  `-`/`+`/`*`. A small tool (`read`, `grep`, `glob`) is that one line — a `•`, never a
   fold — until it errors or `Ctrl-O` expands it. A **multi-line** `shell` command (a heredoc)
   follows its block (ADR 0035's 2026-10-16 "多行命令" note, option A): the fold marker is on the
   first row only, which carries the command's first line, the `… (+N lines)` note (N its
@@ -656,7 +666,7 @@ The transcript owns its scrolling:
 | 9 | approval: allow-once runs the tool, deny is fed back, always skips the next prompt, Ctrl-C cancels, the resolved path is shown, `PermissionResolved` is durable | `tests/pty.rs`, `tests/approval.rs` |
 | 10 | driver task panic: orderly exit, terminal restored, failure reported | `tests/pty.rs` |
 | 11 | a failed sandbox probe refuses instead of running unsandboxed | `tests/pty.rs` |
-| 12 | shell approval shows the whole command; a capped result keeps the truncation marker visible; a compound command always asks | `tests/pty.rs` |
+| 12 | shell approval shows the whole command; a capped result keeps the truncation marker visible; a compound command asks unless every segment is allowed | `tests/pty.rs` |
 | 13 | an over-budget request is still sent and the turn completes; the status bar shows `T / B` and the honest wording; no window says the budget is off | `tests/pty.rs`, `tests/budget.rs` |
 | 14 | `--header` `{session_id}` expands for new and resumed sessions; `authorization` and a malformed header are refused without echoing the value | `tests/pty.rs` |
 | 15 | `--mcp-config` mounts the fixture; its tool runs through the approval dialog; the status bar shows the connected servers/tools; the startup notice names the MCP sandbox gap | `tests/pty.rs` |
@@ -707,13 +717,13 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   does the output arrive without a perceptible stall? Type `!!ls` — is the dimmer block clearly
   different? Does `!sleep 30` cancel with Esc, and does a second `!` while one runs say so? Is
   the sandbox visible (a write outside the workspace fails with a readable line) and does the
-  command never open an approval box? On the `safe` tier `!` must refuse with one line.
+  command never open an approval box?
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.
 - **the `/access` confirmation and marker** (ADR 0038 slice 2): type `/access` — does it name
   the current tier and its source (`flag`/`config`/`project`/`session`/`default`)? Type
-  `/access full` — does the confirmation panel make "full means no sandbox" obvious, is the
+  `/access full` — does the confirmation panel make "full means no sandbox" and "no prompts" obvious, is the
   default highlight on `cancel`, and do ↑/↓/Enter/Esc feel right? After "remember for this
   project", restart — is the tier applied and is the `(project)` marker readable in the footer
   and the startup summary? pty automation asserts the text, not the feel (ADR 0009).
@@ -721,9 +731,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   `main`** of a real repo, start a general `workspace` session and run a `git commit` through
   `shell` — the commit must land with native git. The `shell` tool
   description the model sees and the startup line must say git can commit/branch/stash in the
-  sandbox while `.git/config` and `.git/hooks/` stay read-only. After `/access safe` the notice
+  sandbox while `.git/config` and `.git/hooks/` stay read-only. After `/access workspace` the notice
   must say the shell description and the startup line are fixed for this session; a new session
-  must show the read-only wording. pty automation cannot see the model-facing description, so
+  must show the new tier's wording. pty automation cannot see the model-facing description, so
   this one is yours (ADR 0009).
 - **starting inside an outer sandbox** (ADR 0016): run `radian` from a context that is
   already confined — e.g. `sandbox-exec -p '(version 1)(deny default)(allow file-read*)(allow
@@ -873,8 +883,7 @@ Run a general `workspace` session in a throwaway terminal and get the model to c
 8. **`write`, new and overwrite**: write a new file, then overwrite an existing one. *Expect*
    `◻ write <path> · +N ✓` for a new file and `+N −M` when the result carries `previous_lines`
    (the overwrite). *Look*: does the `−M` show only for the overwrite?
-9. **`git_diff` multi-hunk and the no-start-line fallback**: run `git_diff` on a change with
-   two hunks in one file. *Expect* each hunk's `@@` (weak `frame` colour, **not** the accent)
+9. **`patch` multi-hunk and the no-start-line fallback**: run `patch` with two hunks in one file. *Expect* each hunk's `@@` (weak `frame` colour, **not** the accent)
    and the numbered rows; then, for a diff text **without** `@@` (a resumed older entry, an MCP
    tool), the numberless fallback: the signs and the code with **no** gutter. *Look*: does the
    numbering restart at each `@@`, and does the fallback keep the sign column without a gutter?
@@ -1083,7 +1092,7 @@ the terminal). The cost: `RUST_BACKTRACE` is not honoured.
 
 Slice A's panic hook restored the terminal and then called `process::exit(101)`, which skips
 every `Drop`. That was safe only while the TUI owned no child processes. Slice B wires the
-built-in file tools, whose `git_diff` spawns `git`, so the precondition no longer
+built-in tools, whose `shell` spawns children, so the precondition no longer
 holds.
 
 `main` now keeps the runtime outside `run`, catches the panic with `catch_unwind`, shuts the
@@ -1134,7 +1143,7 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 | How it ends | Exit | Reason line (stderr, after restore) |
 |---|---|---|
 | clean quit (Ctrl-C twice / driver ends by request) | 0 | `session <id> saved; resume with `--resume <id>`` |
-| startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 1 | `radian: <the error>` (terminal never entered) |
+| startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 2 | `radian: <the error>` (terminal never entered) |
 | driver task ends with a `RunError` | 1 | `radian: driver: <error>` |
 | driver task panics | 1 | `radian: the driver task ended unexpectedly: <join error>: <redacted panic>` |
 | the app itself panics (`main` thread) | 101 | `radian: the app panicked: <redacted panic> (panic log: <path>)` |
@@ -1255,7 +1264,7 @@ The common flags have short forms: `-m`/`--model`, `-w`/`--workspace`, `-r`/`--r
 `-m`/`--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
 `--system`, `--session-dir`, `--session-id`, `-r`/`--resume`, `-l`/`--list`, `--pick`,
 `--version`, `-w`/`--workspace DIR`, `--mcp-config FILE`,
-`--profile safe|workspace|full` (default `full`, ADR 0043; the old `workspace-write`/`full-access`
+`--profile workspace|full` (default `full`, ADR 0043; the old `workspace-write`/`full-access`
 are accepted aliases but not listed),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
 `--context-window TOKENS`, `--offline-catalog`, `--catalog-provider PROVIDER`. The key is
@@ -1273,24 +1282,25 @@ and a malformed argument is reported without echoing its value.
 
 ## Tools, permissions and the approval dialog
 
-`--workspace DIR` mounts the built-in file and read-only git tools (`read`, `write`, `patch`,
-`list`, `git_diff`) rooted at that directory, plus **`shell`** when a sandbox
-could be built. This is the same wiring `agent-cli` uses:
+`--workspace DIR` mounts the built-in file tools (`read`, `write`, `patch`,
+`glob`, `grep`) rooted at that directory, plus **`shell`** and **`job`** when a sandbox
+could be built. The model runs git through `shell` (hardened via `GIT_CONFIG_*` in
+untrusted projects, ADR 0039 decision 5). This is the same wiring `agent-cli` uses:
 
 - The sandbox is built **before** the tools: `workspace` and `full` call
   `radian_sandbox::Sandbox::new`, and a missing backend or a failed probe is an **error**, never
-  a fallback to an unsandboxed run (ADR 0012 decision 2). The app then exits 1 without
+  a fallback to an unsandboxed run (ADR 0012 decision 2). The app then exits 2 without
   entering the terminal. `RADIAN_SANDBOX_PROBE_FAIL=1` is a test seam that can only cause a
   refusal. The one other path is ADR 0016: in the `workspace` tier, when the kernel
   says this process is already confined by an outer sandbox (`sandbox_check`), the outer sandbox
   is inherited (`Sandbox::inherited`), nothing is probed, and the startup line and `/access` say
   so — no flag, config key or environment variable can select it.
 - `shell` exists only when a sandbox does (`radian-coding` does not advertise it otherwise), and
-  it never runs without one. `safe` builds no sandbox, so it has no shell; its rules deny
-  writes and execution.
+  it never runs without one.
 - `--allow-shell-command "git status"` (repeatable) adds a host `allow` rule. Only a **simple**
-  command matches: any shell metacharacter (`;`, `&`, `|`, `$`, quotes, …) keeps the call at
-  `ask`, so a compound command always prompts. Write these at the subcommand level, never at a
+  command matches: any shell metacharacter (`;`, `&`, `|`, `$`, quotes, …) keeps that segment at
+  `ask`, so a compound command is allowed only when every segment is allowed (a user rule or
+  the built-in read-only table) and otherwise prompts. Write these at the subcommand level, never at a
   bare program name.
 - Two startup notices state what was chosen and what it means. The meaning line follows ADR
   0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
@@ -1307,7 +1317,7 @@ could be built. This is the same wiring `agent-cli` uses:
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 
-- `--profile safe|workspace|full` picks the rule set (default `full`, ADR 0043: no sandbox;
+- `--profile workspace|full` picks the rule set (default `full`, ADR 0043: no sandbox, no prompts;
   `workspace` enforces the sandbox: reads allowed, writes allowed only when the resolved path
   stays inside the workspace, and the network is on). A project's `.radian/config.toml` can
   narrow the tier, never widen it.
@@ -1556,7 +1566,7 @@ owns fork/rewind).
   (`crates/radian-host`'s provider). A name collision fails the session rather than silently
   shadowing a built-in tool.
 - Under `workspace` an MCP call is an `ask`: it goes through the same approval dialog
-  as a built-in tool. `safe` denies MCP; `full` allows it.
+  as a built-in tool. `full` allows it.
 - **The servers themselves are not sandboxed** (ADR 0012 option B). The `workspace`
   startup notice says so, because the notice is the only safeguard.
 
@@ -1568,7 +1578,7 @@ The bottom line carries, most important first:
 |---|---|
 | model | the `--model` value |
 | turn | `idle` / `running` / `cancelled` |
-| tier | `safe` / `workspace` / `full` |
+| tier | `workspace` / `full` |
 | usage | `usage <input>/<output>` from **provider-reported** totals; `-` for a field never reported, `none` for a session with no reports |
 | mcp | `mcp off`, `mcp N/…` (configured, not open) or `mcp servers/tools` (what connected) |
 | context | the ADR 0015 wording above |
@@ -1596,8 +1606,6 @@ looked up by name in a compile-time registry with a generic fallback:
 | `read` | the path and the line range | a small tool: one line, the text only when expanded or on error |
 | `patch` | the path (`+N −M` in the meta) | the numbered `-old` / `+new` rows, one hunk per replaced range (the `hunks` structured field), no invented context |
 | `write` | the path (`+N −M` in the meta) | the content written |
-| `git_diff` | the file count and `+N −M`, or the entry count under `stat: true` | git's unified diff with the numbered gutter, or the plain status text under `stat: true` |
-| `list` | the entry count | a small tool: one line (the aligned table on expand) |
 | `ask_user` | the open `╭─ ask …` frame | one `prompt → answer` line per question, the chosen option marked `◉` |
 | `memory_search` / `_save` / `_revise` | the record id, the ids read, or the query | the tool's record summary |
 | anything else (MCP included) | the name and the arguments' JSON summary | the result text |

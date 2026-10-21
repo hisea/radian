@@ -21,20 +21,20 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "pattern": {
                 "type": "string",
-                "description": "Glob matched against each workspace-relative path, e.g. `src/**/*.rs`."
+                "description": "Glob to match against each workspace-relative path. Example: `src/**/*.rs`."
             },
             "path": {
                 "type": "string",
-                "description": "Workspace-relative directory (or file) to search under; a \
-                                read-only absolute or `~` directory under the cargo registry \
-                                sources or a toolchain's `lib/rustlib/src` is also accepted (its \
-                                results are absolute). Defaults to the workspace root."
+                "description": "Directory or file to search under. Default: the workspace \
+                                root. A read-only absolute directory or `~` directory under the \
+                                cargo registry sources or a toolchain `lib/rustlib/src` is also \
+                                accepted. Its results are absolute."
             },
             "max_results": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 5000,
-                "description": "Maximum paths to return; defaults to 500."
+                "description": "Maximum paths to return. Default: 500."
             }
         },
         "required": ["pattern"],
@@ -45,12 +45,11 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "glob".into(),
-        description: "Find files under the workspace whose workspace-relative path matches a \
-                      glob, such as `src/**/*.rs`, `**/Cargo.toml` or `tests/*.rs`. `*` does \
-                      not cross a `/`; `**` does. Results are sorted. `.gitignore` is \
-                      respected, `.git` is skipped, and a symlink is never followed (a \
-                      symlinked file is not a match). Truncated past max_results with a line \
-                      naming what was cut."
+        description: "Find files with a glob. `*` stops at `/`. `**` crosses `/`. \
+                      The tool sorts the results. `.gitignore` and `.ignore` files apply \
+                      from the workspace root down to the search directory, and the global \
+                      gitignore is not read. The tool skips `.git`. The tool never follows \
+                      a symlink."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
@@ -83,43 +82,99 @@ pub(crate) async fn run(
         Some(n) => n as usize,
         None => limits.default_glob_results,
     };
+    let scan = BlockingScan {
+        root: root.clone(),
+        matcher,
+        pattern: args.pattern,
+        path: args.path.unwrap_or_else(|| ".".to_owned()),
+        cap,
+    };
+    // The walk below is synchronous and never yields, so it runs on the blocking pool:
+    // `glob` calls batched in one Core task overlap instead of queueing behind each
+    // other. Cancellation drops this future; the blocking walk then runs on to the end
+    // in the background (read-only, so nothing is written) and its result is never
+    // written back: Core's own `cancelled` wins the race.
+    match tokio::task::spawn_blocking(move || scan_blocking(scan)).await {
+        Ok(result) => result,
+        Err(error) => match error.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            Err(_) => Err(fail("internal", "the glob scan did not finish")),
+        },
+    }
+}
 
+/// Everything `run` does after argument parsing: the fd walk and the rendering.
+/// Synchronous by construction (see `run`); the body is the old `run` tail, limits,
+/// output and errors unchanged.
+struct BlockingScan {
+    root: WorkspaceRoot,
+    matcher: globset::GlobMatcher,
+    pattern: String,
+    path: String,
+    cap: usize,
+}
+
+fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
+    let BlockingScan {
+        root,
+        matcher,
+        pattern,
+        path,
+        cap,
+    } = scan;
     // ADR 0039 decision 2 and revision 1: the base is opened through the root's directory fd
     // (no symlink in any component) and the walk descends by fd; only regular files can match.
     // An absolute or `~` base must be under a read-only root, and its results are rendered
     // with that root's prefix so they can be passed to `read` again.
-    let requested = args.path.as_deref().unwrap_or(".");
+    // Several whitespace-separated bases in one `path`: each resolved as a lone call
+    // would resolve it, the matches merged with duplicates removed and the cap shared
+    // across the whole call. Every walk stays fd-relative (ADR 0039 decision 2).
+    let requested: &str = &path;
+    let resolved = search::resolve_bases(&root, requested)?;
     let mut matches: Vec<String> = Vec::new();
-    match root.read_base(requested) {
-        Ok(base) => {
-            let prefix = base.prefix.clone();
-            search::walk(&base.dir, &base.relative, &mut |found| {
-                let rel = found.relative;
-                if matcher.is_match(&rel) {
-                    matches.push(display_path(prefix.as_deref(), &rel));
-                }
-                true
-            });
-        }
-        Err(failure) if failure.code == "not_a_directory" => {
-            // A file base: the pattern is matched against its own root-relative path.
-            let opened = root.open_read(requested)?;
-            if opened.stat.kind == crate::safe_fs::EntryKind::File {
-                let (rel, prefix) = root.read_relative(requested)?;
-                if matcher.is_match(&rel) {
-                    matches.push(display_path(prefix.as_deref(), &rel));
+    for base in resolved.bases {
+        match base {
+            search::SingleBase::Dir(dir_base) => {
+                let prefix = dir_base.prefix.clone();
+                search::walk(
+                    &dir_base.dir,
+                    &dir_base.relative,
+                    dir_base.ancestors,
+                    &mut |found| {
+                        let rel = found.relative;
+                        if matcher.is_match(&rel) {
+                            matches.push(display_path(prefix.as_deref(), &rel));
+                        }
+                        true
+                    },
+                );
+            }
+            search::SingleBase::File {
+                opened,
+                relative,
+                prefix,
+                ..
+            } => {
+                // A file base: the pattern is matched against its own root-relative path.
+                if opened.stat.kind == crate::safe_fs::EntryKind::File
+                    && matcher.is_match(&relative)
+                {
+                    matches.push(display_path(prefix.as_deref(), &relative));
                 }
             }
         }
-        Err(failure) => return Err(failure),
     }
 
     matches.sort();
+    matches.dedup();
     let total = matches.len();
     let truncated = total > cap;
     matches.truncate(cap);
 
     let mut text = String::new();
+    if let Some(header) = resolved.header {
+        text.push_str(&header);
+    }
     for path in &matches {
         text.push_str(path);
         text.push('\n');
@@ -131,13 +186,13 @@ pub(crate) async fn run(
         ));
     }
     if matches.is_empty() {
-        text.push_str(&format!("[no files matched `{}`]\n", args.pattern));
+        text.push_str(&format!("[no files matched `{pattern}`]\n"));
     }
 
     Ok(ToolOutput {
         content: vec![ContentPart::text(text)],
         structured: Some(json!({
-            "pattern": args.pattern,
+            "pattern": pattern,
             "path": requested,
             "matches": matches.len(),
             "total_matches": total,

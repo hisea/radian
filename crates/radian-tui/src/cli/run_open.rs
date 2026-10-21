@@ -28,6 +28,10 @@ pub(super) struct SessionInputs {
     pub(super) driver_stopped: std::sync::Arc<dyn Fn(radian_host::DriverEnd) + Send + Sync>,
     pub(super) before_driver: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     pub(super) memory_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    pub(super) hooks_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    /// A wake-budget degrade's notice line: one transcript notice per burst, plus the
+    /// herdr `wake budget` block while the notices wait.
+    pub(super) wake_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     pub(super) trust_setup: radian_host::trust::Setup,
     /// Where the memory service lives (`None` when no RADIAN_HOME/HOME): the session
     /// shares it with the agent's tools and injection.
@@ -49,6 +53,7 @@ pub(super) fn build_session_inputs(
     app: &mut App,
     resume: &Option<String>,
     tier: radian_tui::profile::Tier,
+    carry_auto: bool,
     allow_unix_sockets: &[PathBuf],
     session_id: &str,
     secrets: &radian_tui::terminal::SharedSecrets,
@@ -116,27 +121,37 @@ pub(super) fn build_session_inputs(
     };
     // ADR 0033: the user's `!`/`!!` commands run in the **same** sandbox the coding tools use
     // (including ADR 0016's Unix-socket rules). `Sandbox` is cheap to clone; `None`
-    // (the `safe` tier) means `!` is unavailable.
+    // (no `shell` mounted) means `!` is unavailable.
     let bash_sandbox = sandbox.clone();
-    // The MCP config file is read and validated here: before any server process starts and
-    // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The
-    // MCP provider itself, the memory service and the coding tools are built by
-    // `radian_host::open_session` (ADR 0023 U5).
-    let servers = match &cli.mcp_config {
+    // The MCP servers come from the user's `[mcp]` section and from `--mcp-config`
+    // together (ADR 0008 §8): the file is read and validated here, before any server
+    // process starts and before a session file exists, so a bad file leaves nothing
+    // behind (dogfooding D2). They merge with the project `.mcp.json` below, after trust
+    // is resolved (the project file needs the decision). The MCP provider itself, the
+    // memory service and the coding tools are built by `radian_host::open_session`
+    // (ADR 0023 U5).
+    let mcp_file = match &cli.mcp_config {
         Some(path) => load_mcp_config(path)?,
-        None => Vec::new(),
+        None => radian_host::McpLoad::default(),
     };
+    // The TUI has no `--no-config-mcp` (only `radian exec` does, for the `explore`
+    // child): the config section always loads here.
+    let mcp_user = config.mcp.clone();
     // ADR 0026 D9: `--approval` and `--yes` (its shorthand) are the command line's choice.
     // When they are silent, the config's `[permissions] approval` and the journal's last
     // in-session switch decide; `radian_host::resolve_startup` owns that precedence, the
-    // `full`-tier rules and the backfill record.
-    let cli_approval =
+    // `full`-tier rules and the backfill record. `/new` carries the live Auto policy as an
+    // explicit command-line-equivalent choice, so it behaves like `--yes` (and backfills).
+    let cli_approval = if carry_auto {
+        Some(radian_permissions::ApprovalPolicy::Auto)
+    } else {
         match &cli.approval {
             Some(name) => Some(radian_permissions::ApprovalPolicy::parse(name).ok_or_else(
                 || format!("--approval {name:?} is not one of on-ask, always, never, auto"),
             )?),
             None => cli.yes.then_some(radian_permissions::ApprovalPolicy::Auto),
-        };
+        }
+    };
     let config_approval = config
         .permissions
         .approval
@@ -154,9 +169,16 @@ pub(super) fn build_session_inputs(
         tier.preset(),
         resume.is_some(),
     );
-    let profile =
-        radian_tui::profile::build_profile(tier, workspace_path, &cli.allow_shell_command)?
-            .with_approval(startup_approval.policy);
+    // Slice 1 of `sandbox-auto-allow-shell`: the sandbox above is already built, so the
+    // profile takes the sandbox itself (`sandbox.as_ref()`) and the `workspace` rule is
+    // static for the session.
+    let profile = radian_tui::profile::build_profile(
+        tier,
+        workspace_path,
+        &cli.allow_shell_command,
+        sandbox.as_ref(),
+    )?
+    .with_approval(startup_approval.policy);
 
     // D4: panics after this point get a log in the diagnostics directory (ADR 0013 decision
     // 4), not next to the session: the session is the authoritative record and must not be
@@ -241,8 +263,12 @@ pub(super) fn build_session_inputs(
     };
     let driver_stopped: Arc<dyn Fn(radian_host::DriverEnd) + Send + Sync> = {
         let tx = tx.clone();
+        let session_id = session_id.to_owned();
         Arc::new(move |end| {
-            let _ = tx.send(UiEvent::DriverStopped(end));
+            let _ = tx.send(UiEvent::DriverStopped {
+                session_id: session_id.clone(),
+                end,
+            });
         })
     };
     let before_driver: Option<Arc<dyn Fn() + Send + Sync>> = cli
@@ -259,6 +285,27 @@ pub(super) fn build_session_inputs(
             let _ = tx.send(UiEvent::Command(AppInput::SessionDone(vec![format!(
                 "radian: [memory] {message}"
             )])));
+        })
+    };
+    // ADR 0045: command-hook warnings ride the same UI channel as memory warnings, with
+    // the `[hooks]` prefix (both fire mid-turn, when stderr would draw over the screen).
+    let hooks_warning: Arc<dyn Fn(&str) + Send + Sync> = {
+        let tx = tx.clone();
+        Arc::new(move |message: &str| {
+            let _ = tx.send(UiEvent::Command(AppInput::SessionDone(vec![format!(
+                "radian: [hooks] {message}"
+            )])));
+        })
+    };
+    // A wake-budget degrade (a background-job settle or a `Stop`-hook continuation past
+    // its cap): its own input, so `update` shows one notice line per burst and marks the
+    // session wake-waiting for herdr, instead of pushing a line per degrade.
+    let wake_warning: Arc<dyn Fn(&str) + Send + Sync> = {
+        let tx = tx.clone();
+        Arc::new(move |message: &str| {
+            let _ = tx.send(UiEvent::Command(AppInput::WakeBudgetNotice(
+                message.to_owned(),
+            )));
         })
     };
     // ADR 0031 T3: resolve project trust before the session exists. The TUI is interactive, so
@@ -280,6 +327,19 @@ pub(super) fn build_session_inputs(
     // The status line is in the startup block either way (`trust::status_line` is pushed there
     // once the session exists): inside the alternate screen the block is where it shows.
     startup_log.print_before_screen(&radian_host::trust::status_line(&trust_setup));
+    // Slice B2: the project `.mcp.json` joins the user's sources now that trust is resolved
+    // — trusted (or `--trust`) loads it, untrusted starts no process. The user's own
+    // precedence stands (the command line over `[mcp]`, both over the project file).
+    let (project, project_lines) = radian_host::load_project(
+        workspace_path,
+        trust_setup.resolved.decision.as_bool(),
+        false,
+    );
+    let merged = radian_host::merge_project_mcp(project, mcp_user, mcp_file);
+    for line in project_lines.iter().chain(merged.warnings.iter()) {
+        startup_log.line(format!("[mcp] {line}"));
+    }
+    let servers = merged.servers;
     Ok((
         SessionInputs {
             sandbox,
@@ -298,6 +358,8 @@ pub(super) fn build_session_inputs(
             driver_stopped,
             before_driver,
             memory_warning,
+            hooks_warning,
+            wake_warning,
             trust_setup,
             memory_root,
         },
@@ -323,7 +385,6 @@ pub(super) fn open_session_and_refresh(
     provider_name: &str,
     model_name: &str,
     provider_ref: &radian_host::ProviderRef,
-    provider: radian_host::Provider,
     key_id: &str,
 ) -> Result<radian_host::LocalSession, RunError> {
     let SessionInputs {
@@ -339,6 +400,8 @@ pub(super) fn open_session_and_refresh(
         driver_stopped,
         before_driver,
         memory_warning,
+        hooks_warning,
+        wake_warning,
         trust_setup,
         memory_root,
         access_builder,
@@ -355,6 +418,9 @@ pub(super) fn open_session_and_refresh(
         route_price,
         ..
     } = route;
+    // ADR 0043 §1: `[model.smol]` rides the shared settings into the child's launch
+    // parameters; it is cloned here because `settings` moves into `LeadSetup` below.
+    let smol_route = settings.smol_route.clone();
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
     // first thing that creates durable state. ADR 0032 slice 5: `LeadSetup::setup` fills what
@@ -374,12 +440,14 @@ pub(super) fn open_session_and_refresh(
                 budget_for: Some(budget_for),
                 price_for: Some(Arc::clone(&route_price)),
                 servers,
+                mcp_config_path: cli.mcp_config.clone(),
                 system_prompt: cli.system.clone(),
                 context_budget: window
                     .budget
                     // ADR 0015: a zero budget is unset, never a real zero-token budget.
                     .filter(|tokens| *tokens > 0)
                     .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
+                window_context: window.context,
                 sandbox,
                 tier: tier.preset(),
                 profile,
@@ -389,6 +457,7 @@ pub(super) fn open_session_and_refresh(
                     executable: std::env::current_exe().ok(),
                     provider: provider_name.to_owned(),
                     model: model_name.to_owned(),
+                    smol: smol_route,
                     base_url: provider_ref
                         .takes_base_url_override()
                         .then(|| route.base_url.clone()),
@@ -403,9 +472,13 @@ pub(super) fn open_session_and_refresh(
                 memory_root,
                 trust: trust_setup,
                 resume: resume.is_some(),
+                // The effective startup route (a `/new` carry resolves here like a flag),
+                // so `SessionCreated` names the route and tier this session actually runs.
+                // `agent-cli` records the same `access` key (ADR 0043 1a).
                 config_snapshot: serde_json::json!({
-                    "provider": provider.as_str(),
-                    "model": cli.model,
+                    "provider": provider_name,
+                    "model": model_name,
+                    "access": tier.as_str(),
                 }),
                 turn_options: TurnOptions {
                     max_model_calls: Some(cli.max_model_calls),
@@ -427,6 +500,8 @@ pub(super) fn open_session_and_refresh(
                 driver_stopped,
                 before_driver,
                 memory_warning,
+                hooks_warning,
+                wake_warning,
             },
         ))
         .map_err(|error| error.to_string())?;
@@ -438,8 +513,9 @@ pub(super) fn open_session_and_refresh(
     // The providers worth refreshing now: the one this run started with. `/model`'s other
     // targets refresh on their next use (the fetch itself is on the loop's runtime).
     let refresh_targets = vec![key_id.to_owned()];
-    // ADR 0026 D0: refresh the switched-to providers' `/v1/models` in the background. It never
-    // blocks startup and its failures are silent (the next `/model` just sees the old cache).
+    // ADR 0026 D0: refresh the switched-to providers' model list in the background (their
+    // descriptor's own URL when named, else `/v1/models`). It never blocks startup and its
+    // failures are silent (the next `/model` just sees the old cache).
     runtime.spawn(async move {
         for provider_id in refresh_targets {
             let Some(key) = radian_host::auth::resolve_key(&provider_id)
@@ -471,7 +547,7 @@ pub(super) fn open_session_and_refresh(
             let base_url = radian_host::descriptor(&provider_id)
                 .map(|descriptor| descriptor.default_base_url.to_owned())
                 .unwrap_or_default();
-            match radian_host::fetch_provider_models(&base_url, &key).await {
+            match radian_host::fetch_provider_models(&provider_id, &base_url, &key).await {
                 Some(models) => {
                     let _ = radian_host::write_provider_models(&provider_id, &key, models);
                 }

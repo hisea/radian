@@ -135,7 +135,7 @@ async fn open_with_records(
             thinking_budget: None,
         },
     );
-    let profile = Profile::safe(&workspace).unwrap();
+    let profile = Profile::full_access(&workspace).unwrap();
     let session = open_session(
         SessionSetup {
             session_id: SessionId::new(label),
@@ -149,14 +149,16 @@ async fn open_with_records(
             price_for: None,
             shell_auto_background: None,
             servers: Vec::new(),
+            mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
+            window_context: None,
             auto_compact: false,
             compaction_settings: serde_json::Value::Null,
             compaction_settings_for: None,
             retries: 0,
             sandbox: None,
-            tier: Preset::Safe,
+            tier: Preset::FullAccess,
             profile,
             access_builder: None,
             parent: None,
@@ -168,6 +170,7 @@ async fn open_with_records(
             tools_allow: None,
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
+            hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume,
             config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
@@ -189,6 +192,8 @@ async fn open_with_records(
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
+            hooks_warning: Arc::new(|_message: &str| {}),
+            wake_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await
@@ -264,7 +269,7 @@ async fn a_local_session_accepts_a_declared_command() {
             thinking_budget: None,
         },
     );
-    let profile = Profile::safe(&workspace).unwrap();
+    let profile = Profile::full_access(&workspace).unwrap();
     let session = open_session(
         SessionSetup {
             session_id: SessionId::new("can-send"),
@@ -278,14 +283,16 @@ async fn a_local_session_accepts_a_declared_command() {
             price_for: None,
             shell_auto_background: None,
             servers: Vec::new(),
+            mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
+            window_context: None,
             auto_compact: false,
             compaction_settings: serde_json::Value::Null,
             compaction_settings_for: None,
             retries: 0,
             sandbox: None,
-            tier: Preset::Safe,
+            tier: Preset::FullAccess,
             profile,
             access_builder: None,
             parent: None,
@@ -297,6 +304,7 @@ async fn a_local_session_accepts_a_declared_command() {
             tools_allow: None,
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
+            hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: json!({}),
@@ -318,6 +326,8 @@ async fn a_local_session_accepts_a_declared_command() {
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
+            hooks_warning: Arc::new(|_message: &str| {}),
+            wake_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await

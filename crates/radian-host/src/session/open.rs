@@ -47,6 +47,8 @@ pub async fn open_session(
         driver_stopped,
         before_driver,
         memory_warning,
+        hooks_warning,
+        wake_warning,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -56,8 +58,10 @@ pub async fn open_session(
         coding_root,
         model,
         servers,
+        mcp_config_path,
         system_prompt,
         context_budget,
+        window_context,
         auto_compact,
         compaction_settings,
         compaction_settings_for,
@@ -75,6 +79,7 @@ pub async fn open_session(
         tools_allow,
         skills_allow,
         memory_injection,
+        hooks: hooks_config,
         trust,
         resume,
         config_snapshot,
@@ -113,13 +118,35 @@ pub async fn open_session(
     // comes from the real backend name, not from searching the description text (which does
     // not name the backend in the `workspace` tier).
     let (profile_line, sandbox_facts) = describe(tier.sandbox_mode(), sandbox.as_ref(), wording);
-    // The `<runtime>` Unix-socket sentence follows the backend's effective answer (ADR 0016
-    // revision 1 as accepted for Linux: bwrap does not restrict Unix sockets), the way
+    // The `<runtime>` Unix-socket sentence follows the backend's effective answer (slice 0:
+    // Linux bwrap denies every Unix socket with seccomp; macOS seatbelt denies with a
+    // whitelist), the way
     // `git_writable_except_exec` already asks the backend (ADR 0038 slice ④) — never the
     // tier alone, which would claim a deny the backend does not enforce.
     let unix_sockets_restricted = sandbox
         .as_ref()
         .is_some_and(|sandbox| sandbox.restricts_unix_sockets());
+    // The prompt's own tier facts (layer 0a): STE sentences built from the tier and the
+    // backend's effective answers — never the TUI's `describe` string. `inherited`
+    // claims no local rules at all (ADR 0016 decision 4).
+    let tier_facts = match (tier.sandbox_mode(), sandbox.as_ref()) {
+        (radian_sandbox::SandboxMode::FullAccess, _) => crate::prompt::SandboxFacts::None,
+        (radian_sandbox::SandboxMode::WorkspaceWrite, Some(sandbox))
+            if sandbox.backend_name() == "inherited" =>
+        {
+            crate::prompt::SandboxFacts::Inherited
+        }
+        (radian_sandbox::SandboxMode::WorkspaceWrite, Some(sandbox)) => {
+            crate::prompt::SandboxFacts::Workspace {
+                git_writable: sandbox.git_writable_except_exec(),
+            }
+        }
+        (radian_sandbox::SandboxMode::WorkspaceWrite, None) => {
+            crate::prompt::SandboxFacts::Workspace {
+                git_writable: false,
+            }
+        }
+    };
     let sandbox_word = sandbox_word(
         tier.sandbox_mode(),
         sandbox.as_ref().map(Sandbox::backend_name),
@@ -168,6 +195,7 @@ pub async fn open_session(
         );
     let memory_notice = memory_notice(&memory, &injection_config);
     radian_session::trace::took("open/memory", t0);
+    let mcp_server_configs = servers.clone();
     let mcp = McpToolProvider::new(servers);
     let mcp_configured = mcp.configured();
 
@@ -233,13 +261,30 @@ pub async fn open_session(
     }
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
-    // The built-in coding tools are built here.
+    // The built-in coding tools are built here. `harden_git` is the trust decision
+    // (ADR 0039 decision 5): an untrusted project hardens git in every shell child.
+    let harden_git = !trust.resolved.decision.as_bool();
     let (coding, jobs) = build_coding_tools(
         coding_root.as_deref(),
         sandbox_slot.clone(),
         &jobs_dir,
         shell_auto_background,
+        harden_git,
     )?;
+    // ADR 0037 §6: a resumed session clears its jobs directory. The registry is built empty
+    // above, so at this point no file in the directory can belong to it and nothing is
+    // running (the resume path holds the session's exclusive writer lock, so no other live
+    // process can own these files either). Only the resume path sweeps; a failure warns
+    // once and never fails the open.
+    if resume && let Some(jobs) = jobs.as_ref() {
+        let summary = jobs.sweep_unregistered();
+        if let Some(error) = summary.first_error.as_deref() {
+            memory_warning(&format!(
+                "could not sweep the jobs directory {}: {error}",
+                jobs_dir.display()
+            ));
+        }
+    }
 
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
     // prompt answers them directly.
@@ -253,6 +298,19 @@ pub async fn open_session(
         profile,
         Some(approver),
         audit(Arc::clone(&journal)),
+    ));
+    // ADR 0045 slice A: the user-level command hooks, chained directly after the
+    // permissions (a hook can only narrow what the rules already allowed). The inbox
+    // carries the Stop continuations; the runtime spawns them off the sync turn-end hook.
+    let command_hooks = Arc::new(crate::CommandHooks::new(
+        &hooks_config,
+        &workspace,
+        session_id.as_str(),
+        sandbox_slot.clone(),
+        &inbox,
+        &runtime,
+        hooks_warning,
+        Arc::clone(&wake_warning),
     ));
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
@@ -295,7 +353,11 @@ pub async fn open_session(
     );
     let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
-    let mut tools = HostTools::new(coding, memory_tools, mcp.clone()).with_tool_allow(tools_allow);
+    let spec_sink: std::sync::Arc<std::sync::Mutex<Option<Vec<agent_core::ToolSpec>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut tools = HostTools::new(coding, memory_tools, mcp.clone())
+        .with_tool_allow(tools_allow)
+        .with_spec_sink(std::sync::Arc::clone(&spec_sink));
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);
@@ -321,8 +383,8 @@ pub async fn open_session(
             Arc::clone(&hooks),
         ));
     }
-    // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> lists
-    // the tools this host actually mounted and the tier/sandbox facts; 1 <role> is the role
+    // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> carries
+    // the tier/sandbox facts; 1 <role> is the role
     // prompt (or `--system`); 2 is the context files; 3 is appended by the skills/memory hooks;
     // 0b <session> is appended last by its own hook, so the static prefix stays cacheable.
     let model_name = config_snapshot
@@ -330,13 +392,14 @@ pub async fn open_session(
         .and_then(|value| value.as_str())
         .unwrap_or("unknown")
         .to_owned();
-    let mounted = tools.builtin_tools();
-    let workspace_mode = tier.sandbox_mode() == radian_sandbox::SandboxMode::WorkspaceWrite;
     let runtime_layer = crate::prompt::runtime_layer(&crate::prompt::Runtime {
-        tools: &mounted,
         tier: tier.as_str(),
-        sandbox: &sandbox_facts,
-        network: workspace_mode,
+        sandbox: tier_facts,
+        // Both tiers leave the network on: `workspace` allows outbound and loopback
+        // TCP/UDP (ADR 0016 decision 1), and `full` has no sandbox at all (ADR 0043
+        // decision 5). Deriving this from the tier printed `Network: off.` for
+        // `full`, against the sandbox facts beside it.
+        network: true,
         unix_sockets_restricted,
     });
     let role_override = system_prompt.clone();
@@ -363,7 +426,7 @@ pub async fn open_session(
     };
     let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(
         workspace.clone(),
-        model_name,
+        model_name.clone(),
         Some(Arc::clone(&config_slot)),
     ));
     let agent = Arc::new(
@@ -372,6 +435,7 @@ pub async fn open_session(
             .with_hooks(session_hooks(
                 Arc::clone(&role_hooks),
                 Arc::clone(&hooks),
+                Arc::clone(&command_hooks),
                 Arc::clone(&memory_hooks),
                 Arc::clone(&skills_hooks),
                 Arc::clone(&facts_hooks),
@@ -446,6 +510,7 @@ pub async fn open_session(
     // live runtime-event sink, which is how the TUI's footer `jobs` item reads them (never
     // by polling the journal file).
     let turn_running = driver.turn_running_handle();
+    let idle = driver.idle_signal();
     let job_notifier = jobs.as_ref().map(|jobs| {
         let notifier = crate::job_notify::JobNotifier::new(
             Arc::clone(jobs),
@@ -453,6 +518,7 @@ pub async fn open_session(
             Arc::clone(&journal),
             Arc::clone(&turn_running),
             Arc::clone(&runtime_events),
+            wake_warning,
         );
         notifier.spawn(&runtime);
         notifier
@@ -525,6 +591,11 @@ pub async fn open_session(
     });
 
     radian_session::trace::took("open/driver-task", t0);
+    let tool_specs = spec_sink
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
     let facts = SessionFacts {
         profile_line,
         sandbox_facts,
@@ -539,6 +610,30 @@ pub async fn open_session(
         context_line: context.line(&workspace, user_home().as_deref()),
         context_files: context.files.clone(),
     };
+    // The `/context` estimate inputs: the system layers split so the categories
+    // add up (base is everything except the context section and the memory
+    // block, which are counted separately), the per-file blocks, the skills
+    // listing, and the session facts. Read-only; the loop reads them while a
+    // turn runs.
+    let system_base_prefix = crate::prompt::assemble(&runtime_layer, &role_layer, "");
+    let skills_section = skills_hooks.section().to_owned();
+    let skills_count = shared_skills
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+        .count();
+    let session_section = crate::prompt::session_layer(&workspace, &model_name);
+    let system_base = format!("{system_base_prefix}{skills_section}\n{session_section}");
+    let context_blocks = context
+        .blocks
+        .iter()
+        .map(|block| {
+            (
+                block.path.to_string_lossy().into_owned(),
+                block.block.clone(),
+            )
+        })
+        .collect();
+    let context_section = context.section.clone();
     Ok(LocalSession {
         id: session_id,
         config_queue,
@@ -549,15 +644,29 @@ pub async fn open_session(
         journal,
         inbox,
         hooks,
+        command_hooks,
         sandbox_slot,
         access_builder,
         turn_running,
+        idle,
         projection,
         queue,
         memory,
         skills: shared_skills,
         job_notifier,
         jobs,
+        tool_specs,
+        system_base,
+        context_section,
+        context_blocks,
+        skills_section,
+        skills_count,
+        memory_injection: Arc::clone(&injection),
+        context_budget,
+        window_context,
+        mcp_servers: mcp_server_configs,
+        mcp_config_path,
+        hooks_config,
         trust: Mutex::new(trust),
         runtime,
         driver: DriverTask {

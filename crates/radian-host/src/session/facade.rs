@@ -101,6 +101,33 @@ pub trait SessionFacade: Send + Sync {
 
     /// Stop every running background job (`/jobs kill all`).
     fn kill_all_jobs(&self);
+
+    /// The model-visible tool specs at open time (the inspector's tools page). Old alias
+    /// names are still registered here; the inspector strips them the way the model
+    /// request does (ADR 0043 decision 3).
+    fn tool_specs(&self) -> Vec<agent_core::ToolSpec>;
+
+    /// The MCP server configs this session was opened with (the inspector's mcp page).
+    fn mcp_servers(&self) -> Vec<agent_extensions::McpServerConfig>;
+
+    /// Where the MCP servers came from (`--mcp-config <FILE>`). `None` when no file was
+    /// given.
+    fn mcp_config_path(&self) -> Option<String>;
+
+    /// The resolved `[hooks]` section (the inspector's hooks page, ADR 0045 slice A).
+    fn hooks_config(&self) -> crate::config::HooksConfig;
+
+    /// The tail of a job's output plus its state, for the inspector's jobs detail.
+    /// `None` for an unknown id. The ring is in-memory, so this is not I/O.
+    fn job_tail(&self, id: &str, max: usize) -> Option<(radian_coding::JobState, String)>;
+
+    /// The `/context` notice lines (backlog `tui-context-command`): per-category
+    /// estimated tokens and share of the next request, the total `T / B`, the
+    /// last provider-reported input (`none yet` without one), the message count
+    /// and the compactions this session. Read-only; it never touches the inbox
+    /// or the driver, so it works mid-turn. The history is the journal's
+    /// committed view (live deltas excluded).
+    fn context_report(&self) -> Vec<String>;
 }
 
 /// How the driver task ended.

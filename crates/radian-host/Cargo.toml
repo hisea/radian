@@ -74,6 +74,10 @@ sha2 = "0.10"
 # already resolved transitively (rustls' `ring`), this makes it a direct, auditable dependency
 # at the version already in the lockfile.
 getrandom = "0.3"
+# The `[hooks]` matcher is Claude's case-sensitive pattern (`*`/empty matches all,
+# otherwise `^(?:<matcher>)$`); `regex` is already in the workspace via `radian-coding`
+# (and in `Cargo.lock`), so this adds no new dependency to the tree.
+regex = "1"
 
 [dev-dependencies]
 # The crate's own tests always build with the worktree-root test seam, so a plain `cargo test`

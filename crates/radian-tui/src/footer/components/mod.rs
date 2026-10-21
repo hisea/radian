@@ -23,9 +23,12 @@ mod elapsed;
 mod git_branch;
 mod host;
 mod jobs;
+#[path = "loop.rs"]
+mod loop_item;
 mod mcp;
 mod model;
 mod pending;
+mod queued;
 mod reasoning;
 mod scroll;
 mod session;
@@ -129,6 +132,8 @@ static COMPONENTS: &[&'static dyn Component] = &[
     &elapsed::Elapsed,
     &cost::Cost,
     &pending::Pending,
+    &queued::Queued,
+    &loop_item::Loop,
     &jobs::Jobs,
     &mcp::Mcp,
     &scroll::Scroll,

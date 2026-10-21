@@ -2322,6 +2322,7 @@ dependencies = [
  "radian-runtime",
  "radian-sandbox",
  "radian-session",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

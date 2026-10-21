@@ -16,21 +16,38 @@ fn linux_escape_matrix() {
     }
     let matrix = radian_sandbox::harness::run_matrix().expect("the bwrap backend must probe");
     eprintln!("{}", matrix.render_text());
-    // The two Unix-socket denial cases describe the accepted Linux gap (
-    // decision 4): bwrap reaches pathname sockets through the shared root in both tiers, so
-    // they report KNOWN-LIMIT — neither PASS nor FAIL — while the matrix as a whole passes.
-    for case in &matrix.cases {
-        if case.group == "unix_socket"
-            && (case.name == "workspace_denied" || case.name == "safe_denied")
-        {
-            assert_eq!(
-                case.verdict(&matrix.backend),
-                radian_sandbox::harness::Verdict::KnownLimit,
-                "unix_socket / {} must be a known limit on Linux",
-                case.name
-            );
-        }
+    // Slice 0: the seccomp filter denies every Unix socket in the `workspace` tier, so the
+    // pathname and abstract denial cases pass like any other case (the old KNOWN-LIMIT for
+    // `workspace_denied` is gone: a sandbox that connects is an escape, not a limit).
+    for name in ["workspace_denied", "abstract_denied"] {
+        let case = matrix
+            .cases
+            .iter()
+            .find(|c| c.group == "unix_socket" && c.name == name)
+            .unwrap_or_else(|| panic!("the matrix must contain unix_socket / {name}"));
+        assert!(
+            case.passed(),
+            "unix_socket / {name} must pass: {}",
+            case.sandbox.detail
+        );
+        assert_eq!(
+            case.verdict(),
+            radian_sandbox::harness::Verdict::Pass,
+            "unix_socket / {name} must be a pass, not a limit",
+        );
     }
+    // The whitelist stays denied on Linux (seccomp cannot whitelist by path); macOS keeps
+    // enforcing it as an allow.
+    let whitelisted = matrix
+        .cases
+        .iter()
+        .find(|c| c.group == "unix_socket" && c.name == "whitelisted_denied")
+        .expect("the matrix must contain unix_socket / whitelisted_denied on Linux");
+    assert!(
+        whitelisted.passed(),
+        "unix_socket / whitelisted_denied must pass: {}",
+        whitelisted.sandbox.detail
+    );
     let failures = matrix.failures();
     assert!(
         failures.is_empty(),

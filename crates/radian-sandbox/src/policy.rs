@@ -12,8 +12,6 @@ use crate::error::SandboxError;
 /// into `FullAccess`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxMode {
-    /// Read-only: the workspace is not writable, and no network unless requested.
-    Safe,
     /// The workspace is writable; repository metadata and sensitive directories are not. The
     /// network is **on** (ADR 0016): outbound and local-loopback connect/bind/listen are
     /// allowed, because an agent that cannot run the project's own tests is not useful.
@@ -25,7 +23,6 @@ pub enum SandboxMode {
 impl SandboxMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Safe => "safe",
             Self::WorkspaceWrite => "workspace",
             Self::FullAccess => "full",
         }
@@ -33,7 +30,7 @@ impl SandboxMode {
 
     /// Whether this mode requires an enforcing backend.
     pub fn is_enforced(self) -> bool {
-        matches!(self, Self::Safe | Self::WorkspaceWrite)
+        matches!(self, Self::WorkspaceWrite)
     }
 }
 
@@ -47,12 +44,13 @@ pub enum GitAccess {
     /// is the narrower grant: a caller must name `WritableExceptExec` to widen it.
     #[default]
     ReadOnly,
-    /// The git metadata is writable except the entries git can execute. In a git directory that
-    /// is `config`, `config.worktree` and `hooks/` (and, under `modules/<name>/`, each
-    /// submodule's `config` and `hooks/`). A worktree's per-worktree git dir and its shared
-    /// common dir are discovered separately and get the same treatment. Everything else — the
-    /// object store, refs, the index, `logs/`, `info/` — stays writable, so `git commit`,
-    /// `checkout`, `stash`, `branch` and friends run natively in the sandbox (ADR 0038).
+    /// The git metadata is writable except the entries git can execute. The exact list lives
+    /// in [`crate::git_exec`]: `config`, `config.worktree` and `hooks/` in a git directory
+    /// (and, under `modules/<name>/`, each submodule's `config` and `hooks/`). A worktree's
+    /// per-worktree git dir and its shared common dir are discovered separately and get the
+    /// same treatment. Everything else — the object store, refs, the index, `logs/`, `info/` —
+    /// stays writable, so `git commit`, `checkout`, `stash`, `branch` and friends run natively
+    /// in the sandbox (ADR 0038).
     WritableExceptExec,
 }
 
@@ -63,8 +61,8 @@ pub struct SandboxPolicy {
     pub mode: SandboxMode,
     /// Canonical workspace root. The only writable place in `workspace-write`.
     pub workspace: PathBuf,
-    /// `true` allows network; the default follows the mode: **off for `safe`, on for
-    /// `workspace`** (ADR 0016). A caller can still override it with [`SandboxPolicy::network`].
+    /// `true` allows network; the default follows the mode: **on for `workspace`**
+    /// (ADR 0016). A caller can still override it with [`SandboxPolicy::network`].
     pub network: bool,
     /// The git metadata discovered under the workspace (`.git` directories, a worktree pointer
     /// file and its shared common dir). [`SandboxPolicy::git_access`] decides whether each entry
@@ -133,11 +131,6 @@ impl SandboxPolicy {
         Self::new(SandboxMode::WorkspaceWrite, workspace)
     }
 
-    /// A `safe` (read-only, network off) policy.
-    pub fn safe(workspace: impl AsRef<Path>) -> Result<Self, SandboxError> {
-        Self::new(SandboxMode::Safe, workspace)
-    }
-
     pub fn new(mode: SandboxMode, workspace: impl AsRef<Path>) -> Result<Self, SandboxError> {
         let workspace = canonical_dir(workspace.as_ref())?;
         let read_only = discover_git_metadata(&workspace);
@@ -145,7 +138,7 @@ impl SandboxPolicy {
         Ok(Self {
             mode,
             workspace,
-            // ADR 0016: the workspace tier opens the network; safe keeps it off.
+            // ADR 0016: the workspace tier opens the network.
             network: matches!(mode, SandboxMode::WorkspaceWrite),
             read_only,
             git_access: GitAccess::default(),
@@ -277,6 +270,9 @@ pub(crate) fn canonical_dir(path: &Path) -> Result<PathBuf, SandboxError> {
 
 /// Canonicalizes `path`, or its nearest existing ancestor when the path itself is absent, so
 /// a deny rule for `~/.ssh` still binds before the directory has been created.
+///
+/// The denial classifier also uses this to resolve the paths a failed command spells: the
+/// shell prints `/var/...` while the policy holds `/private/var/...`.
 pub(crate) fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     // Resolve symlinks in the part that exists and keep the missing tail: a deny rule for a
     // not-yet-created `~/.netrc` must name `~/.netrc`, never stop at `$HOME` (which would
@@ -321,8 +317,9 @@ fn default_deny_read() -> Vec<PathBuf> {
 
 /// Finds `.git` entries under the workspace (bounded depth) and returns the paths that must
 /// stay read-only: the git directory itself, and for a worktree pointer file also the
-/// shared common directory it names.
-pub(crate) fn discover_git_metadata(workspace: &Path) -> Vec<PathBuf> {
+/// shared common directory it names. The permission layer builds its `.git` deny rules from
+/// the same list (ADR 0038 decision 3).
+pub fn discover_git_metadata(workspace: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_git(workspace, 0, &mut out, &mut |_| {});
     out.sort();

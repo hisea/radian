@@ -13,6 +13,13 @@
 //!   equal to (or, for the first token, whose file name equals) the rule's first token starts
 //!   a match for the whole rule prefix. Any segment matching denies the whole command.
 //!
+//! A compound command (`a && b`) is allowed only when **every** `&&`/`||`/`;`/`|` segment
+//! is allowed — by a user `allow` rule, by the tier's blanket `allow` (`full`, or
+//! `workspace` with a sandbox in force), or by the read-only table — with the
+//! effective directory carried through `cd` segments. See [`segments`],
+//! [`WRAPPER_PROGRAMS`] and [`cd_target`]: without a blanket `allow` a wrapper
+//! first token never allows, and `cd` only moves inside the `workspace` tier.
+//!
 //! What this **cannot** see, and never claims to: shell aliases, `eval`, a called program
 //! that starts its own shell, `.`/`source`, or `sh -c "…"` where the nested command is a
 //! quoted argument (the quotes make the outer command non-simple, so it asks; but the nested
@@ -37,6 +44,201 @@ pub fn is_simple(command: &str) -> bool {
 /// Whitespace-separated tokens of a simple command.
 pub fn tokens(command: &str) -> Vec<String> {
     command.split_whitespace().map(str::to_owned).collect()
+}
+
+/// Programs that run their arguments as a command (`xargs rm`, `sh -c …`, `sudo …`). A
+/// segment that starts with one of them is never allowed by a prefix rule or by the
+/// read-only table: the rule only sees the wrapper's own tokens, never what it will run.
+/// (The pipe only carries data; this table stops the tail execution `a | xargs rm`.)
+/// `deny` matching is unaffected and still runs first.
+pub const WRAPPER_PROGRAMS: &[&str] = &[
+    "xargs", "env", "sudo", "nohup", "time", "timeout", "watch", "sh", "bash", "zsh", "eval",
+    "exec", "command", "builtin", "nice", "stdbuf",
+];
+
+/// True when the command's first whitespace-separated token names a
+/// [`WRAPPER_PROGRAMS`] entry. Only an exact token matches (`xargsfoo` is not `xargs`).
+pub fn starts_with_wrapper(command: &str) -> bool {
+    tokens(command)
+        .first()
+        .is_some_and(|first| WRAPPER_PROGRAMS.contains(&first.as_str()))
+}
+
+/// Programs whose session-grant prefix keeps the subcommand: the prefix is the program
+/// plus the first non-option token (`cargo test`, `git log`, `npm run`). Every other
+/// program grants the program alone (`rg`, `make`).
+const SUBCOMMAND_PROGRAMS: &[&str] = &["cargo", "git", "npm", "pnpm", "yarn", "go", "docker"];
+
+/// Commands that never earn a prefix grant (ADR 0012 slice 2): a grant for one of them
+/// covers the exact command line only. A one-token entry is a bare program (`rm …`);
+/// a longer entry is program plus subcommand (`git push …`). The list only ever grows
+/// toward narrower grants — over-asking is the intended failure mode.
+pub const NEVER_PREFIX_COMMANDS: &[&[&str]] = &[
+    &["rm"],
+    &["mv"],
+    &["dd"],
+    &["chmod"],
+    &["chown"],
+    &["curl"],
+    &["wget"],
+    &["ssh"],
+    &["scp"],
+    &["kubectl"],
+    &["git", "push"],
+    &["git", "reset"],
+    &["git", "clean"],
+    &["git", "checkout"],
+    &["docker", "run"],
+];
+
+/// The session-grant prefix for a shell command (`Some`), or `None` when the grant stays
+/// an exact command line. Only a simple, single-segment, non-wrapper command whose
+/// program evaluates nothing itself qualifies: a compound, a wrapper (`sh -c …`,
+/// `sudo …`, `eval …`), `source`/`.`, anything non-simple, and the never-prefix list
+/// keep exact-string grants (or ask). For the subcommand programs the prefix is the
+/// program plus the first non-option token; with no non-option token the grant stays
+/// exact (a bare `cargo` would cover `cargo build`). For every other program the prefix
+/// is the program alone.
+pub fn session_grant_prefix(command: &str) -> Option<Vec<String>> {
+    if !is_simple(command) {
+        return None;
+    }
+    let (segments, _) = split_compound(command)?;
+    if segments.len() != 1 {
+        return None;
+    }
+    if starts_with_wrapper(command) {
+        return None;
+    }
+    let tokens = tokens(&segments[0]);
+    let (program, rest) = tokens.split_first()?;
+    // `source`/`.` evaluate their arguments as shell, like `eval` (already a wrapper):
+    // a prefix grant could never see what they run, so they stay exact.
+    if program == "source" || program == "." {
+        return None;
+    }
+    let words: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    if NEVER_PREFIX_COMMANDS
+        .iter()
+        .any(|prefix| words.starts_with(prefix))
+    {
+        return None;
+    }
+    if SUBCOMMAND_PROGRAMS.contains(&program.as_str()) {
+        let sub = rest.iter().find(|token| !token.starts_with('-'))?;
+        return Some(vec![program.clone(), sub.clone()]);
+    }
+    Some(vec![program.clone()])
+}
+
+/// When the segment is exactly `cd <target>` (two tokens, no options), the target.
+/// Anything else (`cd` alone, `cd -P x`, `cd a b`, `ls x`) is not a plain `cd` segment.
+pub fn cd_target(segment: &str) -> Option<&str> {
+    let mut words = segment.split_whitespace();
+    match (words.next(), words.next(), words.next()) {
+        (Some("cd"), Some(target), None) => Some(target),
+        _ => None,
+    }
+}
+
+/// Split a command at every **unquoted** `&&`, `||`, `;` and `|`. Each segment must
+/// itself be a [`is_simple`] simple command; any other metacharacter (redirection,
+/// `$(…)`, backticks, a lone `&`, a newline, globs, quotes that survive, …) or an
+/// empty segment makes the whole split `None`, which is today's behaviour (`ask`).
+/// A simple command without separators is one segment.
+///
+/// Quotes only protect the separators: `echo 'a && b'` is one segment (which is still
+/// not simple, so it still asks — it is just not split).
+pub fn segments(command: &str) -> Option<Vec<String>> {
+    split_compound(command).map(|(segments, _)| segments)
+}
+
+/// Like [`segments`], but also returns the exact text between the trimmed segments
+/// (each separator with its surrounding whitespace), so a caller can rebuild the
+/// command with one segment rewritten and every separator as it was.
+pub fn split_compound(command: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    // Byte offsets of each separator token; quotes and separators are ASCII, so byte
+    // indexing is safe as long as every cut is at one of them or at ASCII whitespace.
+    let separators = separator_spans(command);
+    // Raw pieces between the separators; each must trim to a non-empty simple command.
+    let mut raws: Vec<&str> = Vec::with_capacity(separators.len() + 1);
+    let mut prev = 0;
+    for &(start, end) in &separators {
+        raws.push(&command[prev..start]);
+        prev = end;
+    }
+    raws.push(&command[prev..]);
+    let mut trimmed: Vec<(usize, usize)> = Vec::with_capacity(raws.len());
+    // `raw_start` is the raw piece's start in `command`: the raw pieces tile `command`
+    // except for the separator tokens, so the next piece starts at the last token's end.
+    let mut raw_start = 0;
+    for (n, raw) in raws.iter().enumerate() {
+        let leading = raw.len() - raw.trim_start().len();
+        let trailing = raw.len() - raw.trim_end().len();
+        let (start, end) = (raw_start + leading, raw_start + raw.len() - trailing);
+        if start >= end || !is_simple(&command[start..end]) {
+            return None;
+        }
+        trimmed.push((start, end));
+        if n < separators.len() {
+            raw_start = separators[n].1;
+        }
+    }
+    let segments = trimmed
+        .iter()
+        .map(|&(start, end)| command[start..end].to_owned())
+        .collect();
+    let mut between: Vec<String> = Vec::with_capacity(separators.len());
+    for n in 0..separators.len() {
+        between.push(command[trimmed[n].1..trimmed[n + 1].0].to_owned());
+    }
+    Some((segments, between))
+}
+
+/// Byte spans of the separator tokens in `command`: `&&`, `||`, `;` and `|` outside
+/// single and double quotes. A lone `&` is not a separator (it stays in the segment
+/// text, which then fails [`is_simple`]). Quotes are only tracked so a separator
+/// inside them does not split; unbalanced quotes simply protect to the end.
+fn separator_spans(command: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = command.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+        } else if c == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+        } else if !in_single && !in_double {
+            let two = i + 1 < bytes.len();
+            let len = if two && c == b'&' && bytes[i + 1] == b'&'
+                || two && c == b'|' && bytes[i + 1] == b'|'
+            {
+                2
+            } else if c == b';' || c == b'|' {
+                1
+            } else {
+                0
+            };
+            if len > 0 {
+                spans.push((i, i + len));
+                i += len;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    spans
 }
 
 /// `CommandPrefix` match for `allow`/`ask`: the command must be simple and its tokens must
@@ -140,6 +342,193 @@ mod tests {
             &rule(&["git", "status"])
         ));
         assert!(!simple_prefix_matches("git", &rule(&["git", "status"])));
+    }
+
+    #[test]
+    fn compound_commands_split_at_unquoted_separators() {
+        assert_eq!(
+            segments("cargo fmt && cargo test"),
+            Some(vec!["cargo fmt".to_owned(), "cargo test".to_owned()])
+        );
+        assert_eq!(
+            segments("cargo fmt||cargo test"),
+            Some(vec!["cargo fmt".to_owned(), "cargo test".to_owned()])
+        );
+        assert_eq!(
+            segments("cd sub; cargo test"),
+            Some(vec!["cd sub".to_owned(), "cargo test".to_owned()])
+        );
+        assert_eq!(
+            segments("rg foo | head"),
+            Some(vec!["rg foo".to_owned(), "head".to_owned()])
+        );
+        assert_eq!(segments("git status"), Some(vec!["git status".to_owned()]));
+    }
+
+    #[test]
+    fn quoted_separators_do_not_split() {
+        // The scanner never reports a separator inside quotes: with the quotes
+        // removed the `&&`/`;` would split, inside them they do not.
+        assert_eq!(separator_spans("echo 'a && b'"), vec![]);
+        assert_eq!(separator_spans("echo \"a; b\""), vec![]);
+        assert_eq!(separator_spans("echo 'a' && b"), vec![(9, 11)]);
+        assert_eq!(separator_spans("echo \"a\"; b"), vec![(8, 9)]);
+        assert_eq!(
+            separator_spans("a && b || c; d | e"),
+            vec![(2, 4), (7, 9), (11, 12), (15, 16)]
+        );
+        // A lone `&` is not a separator; `&&&` is `&&` plus a lone `&`.
+        assert_eq!(separator_spans("a & b"), vec![]);
+        assert_eq!(separator_spans("a &&& b"), vec![(2, 4)]);
+        // Quotes only protect the split: a surviving quote still fails the segment,
+        // so the whole split is `None` and the caller falls back to `ask`.
+        assert_eq!(segments("echo 'a && b'"), None);
+    }
+
+    #[test]
+    fn anything_but_the_four_separators_refuses_the_split() {
+        // Each of these leaves a non-simple segment (or an empty one), so the whole
+        // split is `None` and the caller falls back to today's behaviour (`ask`).
+        for command in [
+            "git status > /tmp/x",      // redirection
+            "git status >> /tmp/x",     // redirection
+            "git status < /etc/passwd", // redirection
+            "git status & rm -rf /",    // a lone `&` is not a separator
+            "git status &&",            // empty tail segment
+            "&& git status",            // empty head segment
+            "git $(whoami)",            // subshell
+            "git `whoami`",             // backticks
+            "echo $HOME",               // variable
+            "echo a*b",                 // glob
+            "git status; rm -rf ~",     // `~` is not a simple char
+            "",                         // empty
+            "   ",                      // blank
+        ] {
+            assert_eq!(segments(command), None, "{command:?}");
+        }
+        // `;` splits, and `/` is a simple char, so both segments here are simple.
+        assert_eq!(
+            segments("git status; rm -rf /"),
+            Some(vec!["git status".to_owned(), "rm -rf /".to_owned()])
+        );
+    }
+
+    #[test]
+    fn split_compound_keeps_every_separator_as_it_was() {
+        let (segs, separators) = split_compound("cargo fmt&&git log -p ; ls").unwrap();
+        assert_eq!(segs, vec!["cargo fmt", "git log -p", "ls"]);
+        assert_eq!(separators, vec!["&&", " ; "]);
+        // Rebuilding with one segment rewritten keeps the rest byte-for-byte.
+        let rewritten = segs
+            .iter()
+            .enumerate()
+            .map(|(n, s)| {
+                if n == 1 {
+                    "git log --no-ext-diff --no-textconv -p".to_owned()
+                } else {
+                    s.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut out = rewritten[0].clone();
+        for (n, sep) in separators.iter().enumerate() {
+            out.push_str(sep);
+            out.push_str(&rewritten[n + 1]);
+        }
+        assert_eq!(
+            out,
+            "cargo fmt&&git log --no-ext-diff --no-textconv -p ; ls"
+        );
+    }
+
+    #[test]
+    fn wrappers_match_on_the_exact_first_token() {
+        for command in [
+            "xargs rm",
+            "sudo ls",
+            "env FOO=1 cargo test",
+            "time cargo test",
+        ] {
+            assert!(starts_with_wrapper(command), "{command:?}");
+        }
+        for command in ["ls", "cargo test", "xargsfoo bar", "mytime x"] {
+            assert!(!starts_with_wrapper(command), "{command:?}");
+        }
+        assert_eq!(
+            WRAPPER_PROGRAMS.len(),
+            16,
+            "the runs-its-arguments table: {WRAPPER_PROGRAMS:?}"
+        );
+    }
+
+    #[test]
+    fn session_grant_prefixes_keep_the_subcommand_where_there_is_one() {
+        for (command, want) in [
+            ("cargo test -p a", Some(vec!["cargo", "test"])),
+            ("cargo test", Some(vec!["cargo", "test"])),
+            ("git log -p", Some(vec!["git", "log"])),
+            ("npm run build", Some(vec!["npm", "run"])),
+            ("docker ps -a", Some(vec!["docker", "ps"])),
+            ("go test ./...", Some(vec!["go", "test"])),
+            ("rg foo", Some(vec!["rg"])),
+            ("make", Some(vec!["make"])),
+            ("make check", Some(vec!["make"])),
+        ] {
+            assert_eq!(
+                session_grant_prefix(command),
+                want.map(|words| words.iter().map(|w| (*w).to_owned()).collect()),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_grant_prefix_stays_exact_without_a_subcommand_or_outside_the_rule() {
+        // A subcommand program with no non-option token: a bare-program grant would
+        // cover `cargo build`, so the grant stays exact instead.
+        for command in [
+            "cargo --version",
+            "cargo",
+            // The never-prefix list: the exact string only, never a prefix.
+            "rm a",
+            "rm -rf x",
+            "mv a b",
+            "dd if=/dev/zero of=x",
+            "chmod 644 x",
+            "chown me x",
+            "curl https://example.com",
+            "wget https://example.com",
+            "ssh host",
+            "scp a host:b",
+            "kubectl get pods",
+            "git push origin main",
+            "git reset --hard",
+            "git clean -fd",
+            "git checkout main",
+            "docker run --rm img",
+            // Compounds, wrappers, shell-evaluating builtins, anything non-simple.
+            "cargo test && rm -rf x",
+            "cargo test; echo hi",
+            "sudo ls",
+            "eval echo hi",
+            "source env.sh",
+            ". env.sh",
+            "echo $HOME",
+            "git status > /tmp/x",
+            "",
+            "   ",
+        ] {
+            assert_eq!(session_grant_prefix(command), None, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn cd_target_only_matches_plain_cd_with_one_target() {
+        assert_eq!(cd_target("cd sub"), Some("sub"));
+        assert_eq!(cd_target("cd .."), Some(".."));
+        for segment in ["cd", "cd -P sub", "cd a b", "ls sub", "cdd sub", ""] {
+            assert_eq!(cd_target(segment), None, "{segment:?}");
+        }
     }
 
     #[test]

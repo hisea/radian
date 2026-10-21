@@ -14,7 +14,7 @@ Harbor releases may rename these modules.
 
 | File | Description |
 |---|---|
-| `radian_agent.py` | Harbor agent: uploads the binary + CA bundle, writes `auth.json`, runs `radian exec -p <instruction>` |
+| `radian_agent.py` | Harbor agent: uploads the binary + CA bundle, writes `auth.json`, runs `radian exec --output jsonl -p <instruction>` |
 | `radian_command.py` | Stdlib-only command builders (provider selection, `auth.json` rendering, static-binary check, shell quoting, redaction) |
 | `build-static.sh` | Builds the static musl binary the task containers need |
 | `tests/test_radian_command.py` | Builder unit tests (no Harbor dependency) |
@@ -64,6 +64,12 @@ Harbor releases may rename these modules.
   Harbor's token/cost fields, with fee micros converted to USD. A counter no
   record reported stays `None` ("not reported", never 0). `run()` deliberately
   leaves the context empty: Harbor only calls the backfill while it is empty.
+- **Outcome reporting.** Every trial runs `--output jsonl`, so stdout ends
+  with a `Result` record (ADR 0044): `run()` reads its `exit_code` and
+  `stop_reason` into the trial facts and the backfilled metadata, instead of
+  inferring the outcome from the exit code alone (turn outcomes that used to
+  share exit 1 — failed, over budget, unfinished — now report 1/3/4 with
+  their reason named).
 - **auth.json ownership.** `auth.json` goes up through Harbor's
   `_upload_config_text`, which chowns it to the container's default agent user
   (plus 0600): a 0600 root-owned file would be unreadable to radian under a

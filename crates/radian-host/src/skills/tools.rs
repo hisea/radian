@@ -15,7 +15,7 @@ use agent_core::{
 };
 use serde_json::Value;
 
-use super::{SKILL_FILE_NAME, Skill, read_skill_body};
+use super::{Skill, read_skill_body};
 
 /// The largest body the tool returns. A skill bigger than this is a tool-result error rather
 /// than a truncation: half a skill is worse than a clear failure (ADR 0025 S3). The repo has no
@@ -179,21 +179,20 @@ fn specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "skill".into(),
         description: format!(
-            "Read the full body of one of the skills listed in the system prompt. Pass the \
-             skill's `name`; its body is returned with its directory noted as the base for \
-             relative paths. Optional `args` fill the body's `$ARGUMENTS` placeholder when it \
-             has one, and are appended verbatim otherwise. The body is limited to {SKILL_BODY_LIMIT_BYTES} bytes."
+            "Read the full body of one skill. Pass the skill name that the system prompt \
+             lists. The body comes back with its directory. That directory is the base for \
+             relative paths. The body is limited to {SKILL_BODY_LIMIT_BYTES} bytes."
         ),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": format!("The skill's name, exactly as listed (its `{SKILL_FILE_NAME}` frontmatter `name`).")
+                    "description": "Skill name as listed. Without a frontmatter `name`, use the directory name.",
                 },
                 "args": {
                     "type": "string",
-                    "description": "Optional arguments: fill the body's `$ARGUMENTS` placeholder, or are appended verbatim when it has none."
+                    "description": "Arguments for the skill. They fill the `$ARGUMENTS` placeholder in the body. Without the placeholder, the tool appends them verbatim."
                 }
             },
             "required": ["name"],
@@ -297,6 +296,32 @@ mod tests {
         assert!(
             text.contains(&scratch.root.join("skills/greet").display().to_string()),
             "{text}"
+        );
+    }
+
+    /// Item 2: the `name` field says what the name is when the frontmatter has none — the
+    /// directory name (Claude Code compatibility, the fallback `load_text` applies). A
+    /// skill discovered without a `name` is readable under its directory name (catches: the
+    /// description drifting from the fallback).
+    #[tokio::test]
+    async fn the_name_field_names_the_directory_fallback() {
+        let scratch = Scratch::new("spec-name");
+        scratch.write("mydir", "---\ndescription: Has no name.\n---\nBody.\n");
+        let session = scratch.session().await;
+        // The behavior the description promises: readable under the directory name.
+        let out = run(&session, &call("mydir", None)).await.unwrap();
+        assert!(text_of(&out).contains("Body."), "{}", text_of(&out));
+        let spec = session
+            .tool_specs()
+            .iter()
+            .find(|spec| spec.name == "skill")
+            .expect("the skill spec");
+        let field = &spec.input_schema["properties"]["name"]["description"];
+        assert!(
+            field
+                .as_str()
+                .is_some_and(|text| text.contains("directory name")),
+            "the `name` field must name the directory fallback: {field}"
         );
     }
 
@@ -419,5 +444,40 @@ mod tests {
         );
         assert_eq!(strip_frontmatter("Body.\n"), None);
         assert_eq!(strip_frontmatter("---\nname: a\nBody.\n"), None);
+    }
+
+    /// Say-each-fact-once: no parameter description repeats a sentence of the `skill`
+    /// description. Fragments under 24 characters are too short to be a repeated fact.
+    #[tokio::test]
+    async fn no_parameter_description_repeats_a_sentence_of_the_description() {
+        use agent_core::{ToolProvider, ToolSession};
+        let session = SkillTools::new(Arc::new(Vec::new()))
+            .open_session()
+            .await
+            .unwrap();
+        let spec = session
+            .tool_specs()
+            .iter()
+            .find(|spec| spec.name == "skill")
+            .expect("the skill spec");
+        let sentences: Vec<&str> = spec
+            .description
+            .split(". ")
+            .map(str::trim)
+            .filter(|sentence| sentence.len() >= 24)
+            .collect();
+        let properties = spec.input_schema["properties"]
+            .as_object()
+            .expect("the skill properties");
+        for sentence in sentences {
+            for (name, property) in properties {
+                if let Some(text) = property["description"].as_str() {
+                    assert!(
+                        !text.contains(sentence),
+                        "the `{name}` field repeats {sentence:?}: {text:?}"
+                    );
+                }
+            }
+        }
     }
 }

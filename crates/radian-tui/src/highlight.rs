@@ -141,7 +141,7 @@ const LANGUAGES: &[(&str, &str)] = &[
 
 /// The language a file **path**'s suffix names, in the spelling [`LANGUAGES`] uses: `src/main.rs`
 /// -> `rust`, `docs/notes.md` -> `markdown`, `Makefile` -> `None`. The diff body's entry point
-/// into the table (ADR 0028: `patch`, `git_diff` and `write` highlight by
+/// into the table (ADR 0028: `patch` and `write` highlight by
 /// the file's suffix, with the same scope→role table a fenced code block uses — so this is only
 /// a lookup, and [`highlighted`] does the work).
 ///

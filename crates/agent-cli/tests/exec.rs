@@ -50,7 +50,7 @@ impl Env {
     }
 }
 
-/// Spawns `radian <args>` in `env`, plus a catalog URL pointing at a closed port, so no run
+/// Spawns `radian <args>` in `env`, plus [`common::fast_catalog_url`], so no run
 /// reads or writes the user's state or reaches the network.
 fn spawn_in(args: &[&str], env: &Env) -> Child {
     Command::new(common::radian_bin())
@@ -61,7 +61,7 @@ fn spawn_in(args: &[&str], env: &Env) -> Child {
         .env("HOME", &env.home)
         .env("RADIAN_HOME", &env.home)
         .env("RADIAN_SESSION_DIR", &env.sessions)
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -119,7 +119,7 @@ async fn a_budget_exceeded_turn_names_the_limit_and_the_flag() {
     ))
     .await;
 
-    assert_eq!(code, 1, "a budget-exceeded turn exits 1: {err}");
+    assert_eq!(code, 3, "a budget-exceeded turn exits 3 (ADR 0044): {err}");
     assert!(out.is_empty(), "stdout carries only model text: {out}");
     assert!(
         err.contains("the turn used its 1 model calls; raise the limit with --max-model-calls N"),

@@ -9,6 +9,11 @@ here — approval cannot turn a sandbox refusal into a run.
 `--profile` / `--approval` / `--allow-shell-command` flags build one of its `Profile`s and
 write every decision to the session journal. The `radian-runtime` driver is not itself a host.
 
+The sandboxed `workspace` profile is built only from an enforced `Sandbox` instance:
+`workspace_write_sandboxed` takes `&Sandbox` and refuses a transparent backend, and
+`with_sandbox` marks the flag only for an enforced one — the instance is the proof, not
+the host's build order, and no bare `bool` can mark a profile sandboxed.
+
 ## Rules
 
 A rule is `(tool matcher, resource matcher) -> allow | ask | deny`.
@@ -25,21 +30,20 @@ A rule is `(tool matcher, resource matcher) -> allow | ask | deny`.
 **Priority: `deny` > `ask` > `allow`; no rule matching means `ask`.** So an `ask` rule beats
 an `allow` rule when both match, and the default is conservative.
 
-The memory tool (ADR 0021 D5) follows this rule: `memory_search` is `allow` in all three tiers.
+The memory tool (ADR 0021 D5) follows this rule: `memory_search` is `allow` in both tiers.
 There is deliberately no agent tool for archive/forget/purge/confirm/save/revise (D5: the
 model has no write path).
 
-Renamed tools (ADR 0043 decision 3) are judged under their **new** name
-(`rule::canonical_tool_name`): a call to `git_status` is checked as `git_diff`. A config rule
-written against an old name therefore never matches; the alias can never bypass a `deny` on
-the new tool.
+Removed tool names are refused as unknown tools: there is no alias mapping, so a rule
+written against `git_diff`, `list` or another removed name matches only that literal name
+and never affects a live tool.
 
-`ask_user` (ADR 0024 Q6) is `allow` in **all three** tiers: it writes nothing and runs
+`ask_user` (ADR 0024 Q6) is `allow` in **both** tiers: it writes nothing and runs
 nothing, so it never prompts. It still goes through the ordinary hook path, and its answer is
 data — it grants no permission for the tool calls the model makes afterwards.
 (`ask_user_is_allowed_in_every_tier` in `src/profile.rs`.)
 
-`skill` (ADR 0025 S3) is `allow` in **all three** tiers for the same reason: it only reads a
+`skill` (ADR 0025 S3) is `allow` in **both** tiers for the same reason: it only reads a
 `SKILL.md` that discovery already accepted, so **a skill is not a permission** — reading one
 grants nothing. (`skill_is_allowed_in_every_tier` in `src/profile.rs`.)
 
@@ -59,6 +63,28 @@ This is a deliberate conservative approximation, **not a shell parser**.
   command is split on separators and the contents of quotes/backticks/subshells, and any
   segment whose token matches (or whose file name matches, so `/bin/rm` counts) denies the
   whole command.
+- A compound command (`cargo fmt && cargo test`, `cd sub && cargo test`) is allowed
+  only when **every** segment is allowed — by a user `allow` rule or by the read-only
+  table below. Any segment without one falls through to `ask`. The command is split
+  only at unquoted `&&`, `||`, `;` and `|` (`shell::segments`); any other metacharacter
+  or a non-simple segment leaves the whole command at `ask`, exactly as before.
+- A segment that starts with a runs-its-arguments program (`xargs`, `env`, `sudo`,
+  `nohup`, `time`, `timeout`, `watch`, `sh`, `bash`, `zsh`, `eval`, `exec`, `command`,
+  `builtin`, `nice`, `stdbuf` — `shell::WRAPPER_PROGRAMS`) is never allowed by a
+  prefix rule or by the table: the rule only sees the wrapper's own tokens, never what
+  it will run. `ls | xargs rm` therefore asks. `deny` matching is unaffected and still
+  runs first.
+- `cd <path>` as a segment is allowed only in the `workspace` tier, only with a user
+  `allow` rule, and only when the target resolves inside the workspace (no `..` escape,
+  no symlink out) and is an existing directory. In the `full` tier the tier's blanket
+  `allow` judges a `cd` segment like any other (git runs the target directory's hooks,
+  and there is no sandbox wall around that — `full` trusts the environment). Paths after a `cd` resolve from the `cd` target, not from the workspace
+  root: the effective directory is carried through the segments, so `cd sub && cat
+  link/passwd` with `sub/link` pointing out asks.
+- When a table segment of a compound command would be rewritten (`git diff`/`git
+  log`/`git show`), the whole command is rebuilt with that segment rewritten and every
+  separator as it was — one `Rewrite` for the whole call (`cargo fmt && git log -p`
+  keeps `cargo fmt` byte-for-byte and gains the flags on the `git log` segment).
 
 **What this cannot see, and does not claim to:** shell aliases, `eval`, `.`/`source`, a
 called program that starts its own shell, and a nested command inside quotes (the outer
@@ -79,12 +105,67 @@ allows arbitrary code. **Write `allow` rules at the subcommand level, never at t
 program name,** and treat build tools as code execution by design — the sandbox, not this
 layer, is what contains them.
 
+## The built-in read-only table
+
+On top of the rules above, the hook consults a built-in table of read-only shell commands
+(`src/readonly.rs`): `git status`/`diff`/`log`/`show`, `git branch` (no arguments or
+`--list`), `git rev-parse`, `git remote -v`, `git stash list`, `ls`, `pwd`, `wc`, `cat`,
+`head`, `tail`, `stat`, `file`, `du`, `tree`, `rg`, `grep`, `find`, `cargo metadata` and
+`cargo tree`. It sits after the user's rules and before the tier's blanket shell rule: a
+rule `deny` still wins first, and a named `ask` rule (an explicit user rule) still wins
+over the table — only the tier's blanket shell `ask` and the no-match default yield to
+it. A hit bypasses the approval policy (`always`/`never`/`auto` never turn it into a
+question: read-only commands are not worth reviewing, and a headless turn must not lose
+them) and is recorded with `approver = policy`.
+
+A hit needs all three at once:
+
+1. The command is simple (see above): `~`, quotes, `$`, globs and `;` already fall
+   through to `ask`.
+2. Every non-option token resolves inside the workspace (the same `resolve` as path
+   rules: no `..` escape, no leading `/`, no symlink out). For one segment of a
+   compound command the resolution starts at that segment's effective directory (the
+   workspace, or a `cd` target the earlier segments moved to) and must still land
+   inside the workspace. A token that is not a path
+   (a pattern, a count, a revision) just has to survive the same check, so plain words
+   pass and only real escapes fail.
+3. No executable, long-lived or file-writing option, and no unknown option. Each program
+   carries its own forbidden list — `find -exec`/`-execdir`/`-delete`/`-ok`/`-fprint*`,
+   `-L`/`-follow` anywhere traversal would follow symlinks out, `git -c`/`-C`/
+   `--exec-path`/`--git-dir`/`--work-tree`, global `-p`/`--paginate` (it executes the
+   pager), `grep`/`rg --pre`/`--pre-glob`, `tail -f`/`--follow`/`--retry`,
+   `file -C`/`--compile`, `tree -o`, `git diff/log/show --output`/`--ext-diff`/
+   `--textconv` — plus a small safe list; anything else falls through to `ask`.
+   Over-asking is the intended failure mode here too.
+
+`git diff`/`git log`/`git show` hits are a `Rewrite`, not an `Allow`: the hook inserts
+`--no-ext-diff --no-textconv` right after the subcommand, so a model-writable
+`.gitattributes` driver can never make the call execute an external diff or textconv
+command (ADR 0039 decision 3). Only those three subcommands take the flags: `git
+branch`/`status`/`rev-parse`/`remote`/`stash` reject `--no-textconv` (checked on git
+2.53.0), and `rev-parse` echoes it back as a revision instead of accepting it. The
+rewritten call is still judged `allow` by policy and audited as a policy `rewrite`.
+
+The option lists were read from each program's `--help` on the dev box, except `rg`,
+`tree` and `cargo`, which are not installed there: their lists come from their
+documented options.
+
 ## Paths
 
 `PathUnder` matches the **resolved** path: relative paths are joined to the permission
 workspace, symlinks in the existing part are resolved, and `.`/`..` are removed lexically. A
 link or a `..` therefore cannot move a call from one rule to another
-(`rules_match_resolved_paths_so_dotdot_and_symlinks_cannot_bypass`).
+(`rules_match_resolved_paths_so_dotdot_and_symlinks_cannot_bypass`). A `PathUnder` prefix
+matches by path components, so denying `.git/config` never spills onto `.git/config-other`.
+
+**Git executable entries (ADR 0038 decision 3).** In the `workspace` tier, `write`/`patch`
+deny the `.git` entries git can execute: `config`, `config.worktree`, `hooks/...`, each
+submodule's `config` and `hooks/...`, and a linked worktree's `gitdir`/`commondir`/
+`config.worktree` — one `deny` rule per discovered git directory
+(`ResourceMatcher::GitExec`), or a `PathUnder` deny on a worktree pointer file (rewriting
+it would repoint git at a gitdir the model controls). The entry list lives in
+`radian-sandbox` (`git_exec`) and is shared with the sandbox profile, so the two cannot
+drift apart. The rest of `.git` stays writable, and `full` has no such rules by design.
 
 ## Approval, grants, and sources
 
@@ -96,6 +177,20 @@ link or a `..` therefore cannot move a call from one rule to another
   `PermissionHooks` instance, so a new session (what resume is) no longer has it
   (`a_session_grant_applies_to_the_next_call_and_not_after_resume`). It is never written into
   a profile or the JSONL.
+- **A session grant for a `shell` call widens from the exact command line to the command's
+  prefix** — only for a simple command (`shell::session_grant_prefix`). For `cargo`, `git`,
+  `npm`, `pnpm`, `yarn`, `go` and `docker` the prefix is the program plus the first
+  non-option token (`cargo test`, `git log`, `npm run`); for every other program it is the
+  program alone (`rg`, `make`). A compound command, a wrapper first token
+  (`shell::starts_with_wrapper`, including `eval`), `source`/`.`, and anything non-simple
+  keep exact-string grants (or ask). These never become prefix grants, the exact string
+  only: `git push`, `git reset`, `git clean`, `git checkout`, `rm`, `mv`, `dd`, `chmod`,
+  `chown`, `curl`, `wget`, `ssh`, `scp`, `docker run`, `kubectl`
+  (`shell::NEVER_PREFIX_COMMANDS`). Prefix grants live where session grants live (real-time
+  state, per session); they are never written into the project's `config.toml` — an allow
+  can never come from the project (`a_project_config_cannot_create_a_prefix_grant`). A
+  non-human turn cannot borrow a prefix grant either
+  (`a_non_human_turn_cannot_borrow_a_prefix_grant`).
 - A turn whose source is not `User` cannot turn an `ask` into an `allow`, and cannot borrow a
   session grant; an `ask` from such a turn is denied. An unset source is treated the same way
   (fail safe). Explicit `allow`/`deny` **rules** still apply to every source — they are the
@@ -134,9 +229,24 @@ transcript record, so it never appears in `journal_records`/`replay`.
 | 7 | internal error denies | `tests/hooks.rs` |
 | 8 | one `PermissionResolved` per decision, right approver | `tests/hooks.rs` |
 | 9 | `PermissionResolved` round trip, not replayed | `radian-session/tests/permission_event.rs` |
-| 10 | preset behaviour (safe denies writes, full allows) | `tests/rule.rs` |
+| 10 | preset behaviour (workspace asks MCP, full allows) | `tests/rule.rs` |
 | 11 | resolved-path matching (`..`, symlinks) | `tests/rule.rs` |
-| 12 | `ask_user` is fixed `allow` in all three tiers (ADR 0024 Q6) | `src/profile.rs` |
+| 12 | `ask_user` is fixed `allow` in both tiers (ADR 0024 Q6) | `src/profile.rs` |
+| 13 | read-only shell table allows without a prompt, incl. under `always`/`never` and non-human turns | `tests/readonly.rs` |
+| 14 | paths, options and subcommand shapes outside the table still ask | `tests/readonly.rs` |
+| 15 | `git diff`/`log`/`show` rewritten with `--no-ext-diff --no-textconv`, audited as a policy rewrite | `tests/readonly.rs` |
+| 16 | `deny` and named user-`ask` outrank the table; user `allow` keeps the git rewrite | `tests/readonly.rs` |
+| 17 | compound shell allows only when every segment is allowed (`a && b` asks when `b` has no rule) | `tests/compound.rs` |
+| 18 | a wrapper segment (`ls \| xargs rm`) is never allowed by a prefix rule or the table | `tests/compound.rs` |
+| 19 | quoted separators do not split; `cd` needs the workspace tier and an inside target; later paths resolve from the `cd` target | `tests/compound.rs` |
+| 20 | a table segment in a compound command is rewritten in place, separators kept | `tests/compound.rs` |
+| 21 | session grant widens to the command prefix (`cargo test -p b` covered) | `tests/session_prefix.rs` |
+| 22 | a bare program grants the program, a subcommand program keeps its subcommand | `tests/session_prefix.rs` |
+| 23 | a compound command neither earns nor borrows a prefix grant | `tests/session_prefix.rs` |
+| 24 | the never-prefix list keeps exact-string grants | `tests/session_prefix.rs` |
+| 25 | a project config cannot create a prefix grant (grants are per-session state) | `tests/session_prefix.rs` |
+| 26 | a non-human turn cannot borrow a prefix grant | `tests/session_prefix.rs` |
+| 27 | a prefix grant never crosses the sandbox boundary | `tests/session_prefix.rs` |
 
 ## Not verified / limits
 

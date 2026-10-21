@@ -178,12 +178,12 @@ async fn glob_finds_a_registry_source_file() {
 }
 
 #[tokio::test]
-async fn list_lists_a_registry_directory() {
+async fn read_lists_a_registry_directory() {
     let fx = fixture();
     let tools = tools();
-    let out = call(&tools, "list", json!({"path": abs(&fx.registry)}))
+    let out = call(&tools, "read", json!({"path": abs(&fx.registry)}))
         .await
-        .expect("list reads the registry root");
+        .expect("read lists the registry root");
     let body = text(&out);
     assert!(body.contains("crate-1.0.0"), "{body}");
     assert!(

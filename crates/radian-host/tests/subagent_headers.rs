@@ -63,7 +63,7 @@ async fn the_header_value_reaches_the_child_through_the_environment_not_its_argv
 
     static SINK: NoopSink = NoopSink;
     let permissions = Arc::new(radian_permissions::PermissionHooks::new(
-        Profile::safe(&workspace)
+        Profile::workspace_write(&workspace)
             .unwrap()
             .with_approval(ApprovalPolicy::Auto),
         None,

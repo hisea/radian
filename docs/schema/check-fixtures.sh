@@ -70,6 +70,15 @@ EXPECT = {
         inbox_wake=[(1, True), (2, None)],
         repair={},
     ),
+    "inbox-degraded.jsonl": dict(
+        outcome="accept",
+        events=3,
+        skips=[],
+        # 唤醒预算的降级注入：`degraded` 是可选字段。(seq, degraded)——一条降级记
+        # 录带 `true`，一条旧记录两个字段都没有（按 `false` 读）。
+        inbox_degraded=[(1, True), (2, None)],
+        repair={},
+    ),
     "memory-injected.jsonl": dict(
         outcome="accept",
         events=6,
@@ -200,6 +209,19 @@ EXPECT = {
         interrupted_present=True,
         usage_present=True,
         repair={"call-9": "outcome_unknown_after_crash"},
+    ),
+    "context-files-imports.jsonl": dict(
+        outcome="accept",
+        events=1,
+        skips=[],
+        # (文件路径, [(导入路径, 字节数)]) —— ADR 0036 C2：快照列出每份文件的导入。
+        context_imports=[
+            (
+                "/work/example/CLAUDE.md",
+                [("/work/example/docs/conventions.md", 3481)],
+            ),
+        ],
+        repair={},
     ),
 }
 
@@ -537,6 +559,33 @@ def check_fixture(name, exp):
         sid, seq = exp["forked"]
         if forked.get("child_session_id") != sid or forked.get("parent_seq") != seq:
             raise Corruption(f"{name}: SessionForked {forked!r} != 期望")
+    if "context_imports" in exp:
+        # ADR 0036 C2：`config_snapshot.context.files[]` 的导入是可选的加法字段——
+        # 有导入的文件带 `imports: [{path, bytes}]`，没有的文件没有该键。
+        created = next(e["data"] for e in events if e["event"] == "SessionCreated")
+        files = created["config_snapshot"]["context"]["files"]
+        for f in files:
+            if not isinstance(f.get("path"), str) or not f["path"]:
+                raise Corruption(f"{name}: context file 的 path 必须是非空字符串")
+            if not isinstance(f.get("bytes"), int) or isinstance(f.get("bytes"), bool):
+                raise Corruption(f"{name}: context file 的 bytes 不是整数")
+            if not isinstance(f.get("truncated"), bool):
+                raise Corruption(f"{name}: context file 的 truncated 不是布尔值")
+            for imp in f.get("imports", []):
+                if set(imp) != {"path", "bytes"}:
+                    raise Corruption(f"{name}: imports 条目字段必须是 path/bytes：{imp!r}")
+                if not isinstance(imp["path"], str) or not imp["path"]:
+                    raise Corruption(f"{name}: imports.path 必须是非空字符串")
+                if not isinstance(imp["bytes"], int) or isinstance(imp["bytes"], bool):
+                    raise Corruption(f"{name}: imports.bytes 不是整数")
+        got = [
+            (f["path"], [(imp["path"], imp["bytes"]) for imp in f.get("imports", [])])
+            for f in files
+        ]
+        if got != [tuple(x) for x in exp["context_imports"]]:
+            raise Corruption(f"{name}: context_imports {got} != 期望 {exp['context_imports']}")
+        if not any(imports for _, imports in got):
+            raise Corruption(f"{name}: 期望至少一份文件带 imports")
     repair = simulate_repair(events)
     if repair != exp.get("repair", {}):
         raise Corruption(f"{name}: repair {repair} != 期望 {exp.get('repair', {})}")
@@ -664,6 +713,23 @@ def check_fixture(name, exp):
             raise Corruption(f"{name}: 期望至少一条旧记录（没有 wake 字段）")
         if not any(isinstance(wake, bool) for _, wake in got):
             raise Corruption(f"{name}: 期望至少一条带布尔 wake 的记录")
+    if "inbox_degraded" in exp:
+        # 唤醒预算的降级注入（ADR 0006 §5.5）：`degraded` 是 InboxEnqueued 的**可选**
+        # 字段，缺省即旧记录（不是降级）。这里逐条钉住带字段与缺字段两种形状，并检查类型。
+        got = []
+        for e in events:
+            if e["event"] != "InboxEnqueued":
+                continue
+            data = e["data"]
+            if "degraded" in data and not isinstance(data["degraded"], bool):
+                raise Corruption(f"{name}: seq {e['seq']}: InboxEnqueued.degraded 不是布尔值")
+            got.append((e["seq"], data.get("degraded")))
+        if got != [tuple(x) for x in exp["inbox_degraded"]]:
+            raise Corruption(f"{name}: inbox_degraded {got} != 期望 {exp['inbox_degraded']}")
+        if not any(degraded is None for _, degraded in got):
+            raise Corruption(f"{name}: 期望至少一条旧记录（没有 degraded 字段）")
+        if not any(degraded is True for _, degraded in got):
+            raise Corruption(f"{name}: 期望至少一条带 degraded:true 的降级记录")
     if "approval_changed" in exp:
         changed = [
             (e["seq"], e["data"].get("policy"))
@@ -757,10 +823,138 @@ def check_fixture(name, exp):
     return f"PASS {name}: 接受 {len(events)} 个事件，0 跳过，repair={repair or '∅'}"
 
 
+# `radian exec --output jsonl` 的 closing `Result` 记录（ADR 0044 §2）：它不是 journal 行，
+# 没有信封七字段，单独校验。`exec-result.jsonl` 恰好两行，以 LF 结尾：一行无 resume
+#（`run_*` 与累计组字节相同），一行有 resume（`run_*` 只是本次运行）。
+RESULT_FIELDS = {
+    "type", "session_id", "outcome", "exit_code", "stop_reason",
+    "turns", "usage", "cost", "run_turns", "run_usage", "run_cost", "text",
+}
+RESULT_OUTCOMES = {
+    "completed", "refused", "budget_exceeded", "failed",
+    "poisoned", "incomplete", "cancelled", "unknown",
+}
+RESULT_STOP_REASONS = {
+    "completed", "failed", "budget", "deadline", "max_tokens",
+    "content_filtered", "tool_use_without_calls", "refused", "cancelled", "terminated",
+}
+RESULT_USAGE_KEYS = {"input", "output", "cache_read", "cache_write"}
+
+
+def check_one_result(ev, label):
+    if not isinstance(ev, dict) or set(ev) != RESULT_FIELDS:
+        raise Corruption(
+            f"{label}: 字段集合不是 Result 的十二个字段: "
+            f"{sorted(ev) if isinstance(ev, dict) else type(ev)}"
+        )
+    if ev["type"] != "Result":
+        raise Corruption(f"{label}: type {ev['type']!r} != 'Result'")
+    if not isinstance(ev["session_id"], str) or not ev["session_id"]:
+        raise Corruption(f"{label}: session_id 必须是非空字符串")
+    if ev["outcome"] not in RESULT_OUTCOMES:
+        raise Corruption(f"{label}: outcome {ev['outcome']!r} 不在 ADR 0044 §2 的集合")
+    if not isinstance(ev["exit_code"], int) or isinstance(ev["exit_code"], bool):
+        raise Corruption(f"{label}: exit_code 不是整数")
+    reason = ev["stop_reason"]
+    if not isinstance(reason, str) or not (
+        reason in RESULT_STOP_REASONS
+        or (reason.startswith("unknown:") and len(reason) > len("unknown:"))
+    ):
+        raise Corruption(f"{label}: stop_reason {reason!r} 不在 ADR 0044 §2 的集合")
+    if (
+        not isinstance(ev["turns"], int)
+        or isinstance(ev["turns"], bool)
+        or ev["turns"] < 0
+    ):
+        raise Corruption(f"{label}: turns 不是非负整数")
+    if (
+        not isinstance(ev["run_turns"], int)
+        or isinstance(ev["run_turns"], bool)
+        or ev["run_turns"] < 0
+    ):
+        raise Corruption(f"{label}: run_turns 不是非负整数")
+    if ev["run_turns"] > ev["turns"]:
+        raise Corruption(f"{label}: run_turns {ev['run_turns']} > turns {ev['turns']}")
+    for key in ("usage", "run_usage"):
+        usage = ev[key]
+        if not isinstance(usage, dict):
+            raise Corruption(f"{label}: {key} 不是对象")
+        unknown = set(usage) - RESULT_USAGE_KEYS
+        if unknown:
+            raise Corruption(f"{label}: {key} 有未知字段 {sorted(unknown)}")
+        for field, value in usage.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise Corruption(f"{label}: {key}.{field} 不是非负整数")
+    for key in ("cost", "run_cost"):
+        cost = ev[key]
+        if cost is not None:
+            if not isinstance(cost, dict) or set(cost) != {"micros", "incomplete", "estimated"}:
+                raise Corruption(f"{label}: {key} 不是 null 也不是完整的费用对象")
+            if (
+                not isinstance(cost["micros"], int)
+                or isinstance(cost["micros"], bool)
+                or cost["micros"] < 0
+            ):
+                raise Corruption(f"{label}: {key}.micros 不是非负整数")
+            for field in ("incomplete", "estimated"):
+                if not isinstance(cost[field], bool):
+                    raise Corruption(f"{label}: {key}.{field} 不是布尔值")
+    if not isinstance(ev["text"], str):
+        raise Corruption(f"{label}: text 不是字符串")
+    return ev
+
+
+def check_result_fixture(name):
+    raw = open(f"fixtures/{name}", "rb").read()
+    if not raw.endswith(b"\n"):
+        raise Corruption(f"{name}: 文件不以 LF 结尾")
+    lines = [l for l in raw.split(b"\n") if l != b""]
+    if len(lines) != 2:
+        raise Corruption(f"{name}: 期望恰好两行 Result 记录（无 resume + 有 resume），得到 {len(lines)} 行")
+    try:
+        first = json.loads(lines[0])
+        second = json.loads(lines[1])
+    except json.JSONDecodeError as e:
+        raise Corruption(f"{name}: JSON 解析失败: {e}") from None
+    check_one_result(first, f"{name} line 1")
+    check_one_result(second, f"{name} line 2")
+    # 第一行无 resume：两组字节相同（`run_*` 与累计组相等）。
+    if not (
+        first["run_turns"] == first["turns"]
+        and first["run_usage"] == first["usage"]
+        and first["run_cost"] == first["cost"]
+    ):
+        raise Corruption(f"{name} line 1: 无 resume 时 run_* 必须与累计组相同")
+    # 第二行有 resume：`run_*` 只是本次运行，小于累计。
+    if not (second["run_turns"] < second["turns"]):
+        raise Corruption(f"{name} line 2: 有 resume 时 run_turns 必须小于 turns")
+    for field in RESULT_USAGE_KEYS:
+        if field in second["run_usage"] and field in second["usage"]:
+            if not second["run_usage"][field] <= second["usage"][field]:
+                raise Corruption(f"{name} line 2: run_usage.{field} 必须 <= usage.{field}")
+    if second["cost"] is not None and second["run_cost"] is not None:
+        if not second["run_cost"]["micros"] < second["cost"]["micros"]:
+            raise Corruption(f"{name} line 2: run_cost.micros 必须小于 cost.micros")
+        if second["cost"].get("estimated") is not True:
+            raise Corruption(f"{name} line 2: 有 resume 且含旧记录时 cost.estimated 必须为 true")
+        if second["run_cost"].get("estimated") is not False:
+            raise Corruption(f"{name} line 2: run_cost.estimated 必须为 false（本轮费用是现算的）")
+    return f"PASS {name}: Result 记录形状正确（无 resume + 有 resume 各一行）"
+
+
+RESULT_FIXTURES = ["exec-result.jsonl"]
+
+
 failures = 0
 for name in sorted(EXPECT):
     try:
         print(check_fixture(name, EXPECT[name]))
+    except Corruption as e:
+        print(f"FAIL {e}")
+        failures += 1
+for name in RESULT_FIXTURES:
+    try:
+        print(check_result_fixture(name))
     except Corruption as e:
         print(f"FAIL {e}")
         failures += 1

@@ -16,6 +16,7 @@ mod command;
 mod error;
 mod events;
 mod inspect;
+mod jsonl;
 /// `radian login` / `radian logout` (ADR 0026 D3).
 mod login;
 mod profile;
@@ -101,23 +102,30 @@ pub struct Cli {
     #[arg(long)]
     mcp_config: Option<String>,
 
-    /// Expose the built-in file tools rooted at this directory (read/write/patch/list,
-    /// glob/grep, git_diff). The `shell` tool is exposed as well unless the profile is `safe`
-    /// (which builds no sandbox): `workspace` confines it, `full` (the default) is
-    /// unsandboxed.
+    /// Hidden: ignore the config file's `[mcp]` servers and the workspace's `.mcp.json`.
+    /// The `explore` subagent child mounts exactly the three read-only tools, so it starts
+    /// no MCP server from any implicit source (it also gets no `--mcp-config`). An explicit
+    /// `--mcp-config` still loads: the flag only mutes the implicit sources.
+    #[arg(long = "no-config-mcp", hide = true)]
+    no_config_mcp: bool,
+
+    /// Expose the built-in file tools rooted at this directory (read/write/patch,
+    /// glob/grep). The `shell` and `job` tools are exposed as well: `workspace` confines them,
+    /// `full` (the default) is unsandboxed.
     #[arg(long)]
     workspace: Option<String>,
 
-    /// Permission profile: `safe` (read-only, no shell, no MCP), `workspace` (sandboxed:
-    /// writes confined to the workspace, `shell` sandboxed, network on), or `full` (the
-    /// default since ADR 0043: explicitly unsandboxed). A project's `.radian/config.toml`
-    /// can narrow the result but never widen it.
+    /// Permission profile: `workspace` (sandboxed: writes confined to the workspace,
+    /// `shell` sandboxed, network on), or `full` (the default since ADR 0043: explicitly
+    /// unsandboxed). A project's `.radian/config.toml` can narrow the result but never widen it.
     #[arg(long, value_name = "PROFILE")]
     profile: Option<profile::ProfileArg>,
 
     /// Allow a simple shell command prefix without asking (repeatable), e.g.
-    /// `--allow-shell-command "git status"`. Only a simple command matches; a composite
-    /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
+    /// `--allow-shell-command "git status"`. Only a simple command matches; a compound
+    /// command is allowed only when every segment is allowed, otherwise it still asks
+    /// (`git status; rm -x` asks). The `workspace` tier has no allow
+    /// rule for shell by default; the `full` tier allows shell without asking.
     #[arg(long = "allow-shell-command", value_name = "PREFIX")]
     allow_shell_command: Vec<String>,
 
@@ -133,9 +141,16 @@ pub struct Cli {
     #[arg(long)]
     yes: bool,
 
-    /// One-shot mode: run this prompt, then exit.
+    /// One-shot mode: run this prompt, then exit. `-p -` reads the prompt from stdin to
+    /// EOF; a literal `-` prompt is not possible.
     #[arg(short, long, conflicts_with = "list")]
     prompt: Option<String>,
+
+    /// Machine-readable output: `--output jsonl` prints every durable journal line, the
+    /// live-only delta lines and a closing `Result` record to stdout, one JSON object per
+    /// line. Omitted, stdout carries only the model text.
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    output: Option<jsonl::OutputMode>,
 
     /// Extra request headers, repeatable: `--header NAME=VALUE`. The value is never
     /// printed; `Authorization` is refused because the key comes only from
@@ -231,8 +246,10 @@ pub struct Cli {
     include_usage: Option<bool>,
 
     /// Allow a simple shell command prefix without asking (repeatable), e.g.
-    /// `--allow-shell-command "git status"`. Only a simple command matches; a composite
-    /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
+    /// `--allow-shell-command "git status"`. Only a simple command matches; a compound
+    /// command is allowed only when every segment is allowed, otherwise it still asks
+    /// (`git status; rm -x` asks). The `workspace` tier has no allow
+    /// rule for shell by default; the `full` tier allows shell without asking.
 
     /// The per-turn model call limit. The default is shared with the TUI and named in
     /// `--help`; agent-core's own default is a lower fuse for a host that sets no limit.
@@ -284,7 +301,7 @@ pub struct Cli {
     parent_seq: u64,
 
     /// Hidden: mount only these built-in tools, comma-separated. The `explore` subagent child
-    /// is started with `read,list,glob,grep`; a name not listed is not mounted at all.
+    /// is started with `read,glob,grep`; a name not listed is not mounted at all.
     #[arg(long = "tools", value_name = "NAME,...", hide = true)]
     tools: Option<String>,
 }

@@ -7,9 +7,9 @@
 //!
 //! - **`full-access` is the default** (ADR 0043 decision 2): [`default_profile`] returns it,
 //!   because the neighbouring harnesses run unsandboxed by default and every real dogfood did.
-//!   `--profile workspace`/`safe` and a project's own `.radian/config.toml` turn the sandbox
+//!   `--profile workspace` and a project's own `.radian/config.toml` turn the sandbox
 //!   on; a project can only narrow, never widen.
-//! - **A failed probe never degrades.** For an enforced mode, [`build_sandbox`] returns an
+//! - **A failed probe never degrades.** For the enforced mode, [`build_sandbox`] returns an
 //!   error when the backend is missing or its probe fails; it never returns `None` so the
 //!   caller could run unsandboxed.
 
@@ -23,11 +23,10 @@ use radian_sandbox::{GitAccess, Sandbox, SandboxError, SandboxMode, SandboxPolic
 use crate::SetupError;
 
 /// The `--profile` value. A product concept (ADR 0012 P1), not a backend flag. The names are
-/// `safe`/`workspace`/`full` (ADR 0016); the old `workspace-write`/`full-access` are accepted
+/// `workspace`/`full` (ADR 0016); the old `workspace-write`/`full-access` are accepted
 /// aliases but are deliberately **not** listed in `--help`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum ProfileArg {
-    Safe,
     #[value(name = "workspace", alias = "workspace-write")]
     WorkspaceWrite,
     #[value(name = "full", alias = "full-access")]
@@ -37,7 +36,6 @@ pub(crate) enum ProfileArg {
 impl ProfileArg {
     pub(crate) fn preset(self) -> Preset {
         match self {
-            Self::Safe => Preset::Safe,
             Self::WorkspaceWrite => Preset::WorkspaceWrite,
             Self::FullAccess => Preset::FullAccess,
         }
@@ -52,7 +50,6 @@ impl ProfileArg {
 /// to the known names; this maps them onto the CLI's values (old aliases included).
 pub(crate) fn parse_profile(name: &str) -> Result<ProfileArg, SetupError> {
     match name {
-        "safe" => Ok(ProfileArg::Safe),
         "workspace" | "workspace-write" => Ok(ProfileArg::WorkspaceWrite),
         "full" | "full-access" => Ok(ProfileArg::FullAccess),
         other => Err(SetupError(format!("unknown profile {other:?}"))),
@@ -62,7 +59,6 @@ pub(crate) fn parse_profile(name: &str) -> Result<ProfileArg, SetupError> {
 /// The [`ProfileArg`] for a [`Preset`] (the reverse of [`ProfileArg::preset`]).
 pub(crate) fn from_preset(preset: Preset) -> ProfileArg {
     match preset {
-        Preset::Safe => ProfileArg::Safe,
         Preset::WorkspaceWrite => ProfileArg::WorkspaceWrite,
         Preset::FullAccess => ProfileArg::FullAccess,
     }
@@ -73,9 +69,9 @@ pub(crate) fn from_preset(preset: Preset) -> ProfileArg {
 /// Rationale: the neighbour harnesses (Claude Code, opencode, Gemini CLI) do not turn the OS
 /// sandbox on by default, every dogfood run here used `--profile full`, and the built-in file
 /// tools keep their own workspace boundary either way. The sandbox stays available and is the
-/// recommended choice for an unfamiliar repository or an unattended run; `--profile workspace`
-/// or `safe`, a remembered per-project choice, or the project's own `.radian/config.toml` all
-/// turn it on (a project can only narrow).
+/// recommended choice for an unfamiliar repository or an unattended run; `--profile workspace`,
+/// a remembered per-project choice, or the project's own `.radian/config.toml` all turn it on
+/// (a project can only narrow).
 pub(crate) fn default_profile() -> ProfileArg {
     ProfileArg::FullAccess
 }
@@ -84,16 +80,26 @@ pub(crate) fn default_profile() -> ProfileArg {
 /// commands. The preset is never changed; extra rules are added on top (ADR 0012: a host may
 /// add `allow` rules, and only at the subcommand level — see
 /// `crates/radian-permissions/README.md`).
+///
+/// Slice 1 of `sandbox-auto-allow-shell`: `sandbox` is the sandbox itself — `Some` when
+/// the caller just built one (a probed local backend, or `inherited`) — so the
+/// `workspace` rule is static for the session: `allow` inside an enforced sandbox, `ask`
+/// without one (fail closed). The caller builds the sandbox first and passes
+/// `sandbox.as_ref()`; a failed probe is the error that refuses the run, never a
+/// fallback.
 pub(crate) fn build_profile(
     profile: ProfileArg,
     workspace: &Path,
     allow_shell_commands: &[String],
+    sandbox: Option<&Sandbox>,
 ) -> Result<Profile, SetupError> {
     let preset = profile.preset();
-    let base = match preset {
-        Preset::Safe => Profile::safe(workspace),
-        Preset::WorkspaceWrite => Profile::workspace_write(workspace),
-        Preset::FullAccess => Profile::full_access(workspace),
+    let base = match (preset, sandbox) {
+        (Preset::WorkspaceWrite, Some(sandbox)) => {
+            Profile::workspace_write_sandboxed(workspace, sandbox)
+        }
+        (Preset::WorkspaceWrite, None) => Profile::workspace_write(workspace),
+        (Preset::FullAccess, _) => Profile::full_access(workspace),
     }
     .map_err(|e| SetupError(format!("--workspace {}: {e}", workspace.display())))?;
     if allow_shell_commands.is_empty() {
@@ -102,7 +108,7 @@ pub(crate) fn build_profile(
     // The preset's blanket "shell asks" rule would outrank every allow rule (`evaluate` keeps
     // the highest-ranked action among matches), so an allowlist *replaces* it: a shell command
     // that matches no allow rule then falls to the default `ask`. `deny` rules are never
-    // removed, so `--profile safe` still denies everything.
+    // removed, so an allowlist can never widen a tier past what the preset allows.
     let mut rules: Vec<Rule> = base
         .rules()
         .iter()
@@ -129,14 +135,14 @@ pub(crate) fn build_profile(
         );
     }
     Profile::custom(preset, ApprovalPolicy::OnAsk, workspace, rules)
+        .map(|profile| profile.with_sandbox(sandbox.filter(|_| preset == Preset::WorkspaceWrite)))
         .map_err(|e| SetupError(format!("--workspace {}: {e}", workspace.display())))
 }
 
 /// Builds the sandbox for `profile`.
 ///
-/// `safe` mounts no `shell` and its rules deny every execution path, so there is nothing to
-/// sandbox and `None` is returned. `workspace-write` and `full-access` build a sandbox for
-/// the workspace; for the enforced mode a probe failure is an **error**, never a fallback.
+/// The enforced mode builds a sandbox for the workspace; a probe failure is an **error**,
+/// never a fallback.
 ///
 /// The one other path is ADR 0016: in the `workspace` tier, when the kernel says
 /// this process is already confined by an outer sandbox, the outer sandbox is inherited and
@@ -149,9 +155,6 @@ pub(crate) fn build_sandbox(
     allow_unix_sockets: &[std::path::PathBuf],
     allow_env: &[String],
 ) -> Result<Option<Sandbox>, SetupError> {
-    if profile == ProfileArg::Safe {
-        return Ok(None);
-    }
     // ADR 0016: a process the **kernel** says is already confined by an
     // outer sandbox inherits it instead of stacking a second one. The nested probe cannot run
     // at all (the kernel refuses `sandbox_apply` under a deny-default profile), so this comes
@@ -176,7 +179,7 @@ pub(crate) fn build_sandbox(
     };
     // ADR 0038 decision 4: a general (and, later, lead) session in the `workspace` tier may
     // write `.git` except the entries git can execute, so `git commit` and friends work in the
-    // sandbox. `full` has no backend to enforce it and `safe` builds no sandbox.
+    // sandbox. `full` has no backend to enforce it.
     if profile == ProfileArg::WorkspaceWrite {
         policy = policy.git_access(GitAccess::WritableExceptExec);
     }
@@ -227,6 +230,18 @@ fn probe_failure_injected() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The config file's `permissions.profile` names: the two tiers plus the old aliases.
+    /// Anything else — including the removed `safe` tier — is refused, never guessed.
+    #[test]
+    fn parse_profile_accepts_only_the_two_tiers_and_their_aliases() {
+        for name in ["workspace", "workspace-write", "full", "full-access"] {
+            assert!(parse_profile(name).is_ok(), "{name}");
+        }
+        for name in ["safe", "bogus"] {
+            assert!(parse_profile(name).is_err(), "{name} must be refused");
+        }
+    }
 
     /// ADR 0038 decision 4: the `workspace` tier a general (and later lead) session runs in
     /// must let it write `.git` except the exec entries. If a host forgets to ask for it, the

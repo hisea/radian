@@ -84,7 +84,7 @@ async fn dropping_the_call_leaves_no_grandchild_alive() {
 
     static SINK: NoopSink = NoopSink;
     let permissions = Arc::new(radian_permissions::PermissionHooks::new(
-        Profile::safe(&workspace)
+        Profile::workspace_write(&workspace)
             .unwrap()
             .with_approval(ApprovalPolicy::Auto),
         None,

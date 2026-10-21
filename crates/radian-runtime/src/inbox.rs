@@ -54,6 +54,8 @@ use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::futures::Notified;
 
+use super::driver::RuntimeEvents;
+
 /// Which queue an input waits in (ADR 0011 L1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
@@ -160,6 +162,21 @@ pub struct Inbox {
     state: Mutex<State>,
     /// Woken by `followup`, `steer` and `cancel`; **not** by `inject`.
     wake: Notify,
+    /// How many times the queue changed (every enqueue, claim and requeue). A host that
+    /// checks "is there a turn to run" reads it before and after the check: equal means
+    /// no entry arrived or left in between, so the check saw a consistent queue. In
+    /// particular the driver's claim (which pops silently, with no notification) cannot
+    /// slip between the two reads unnoticed.
+    version: AtomicU64,
+    /// Turn-opening claims outstanding: incremented by [`Inbox::claim_next_turn`] in the
+    /// same critical section as the pop, decremented when the turn ends (or the entry
+    /// is handed back). A host that decides "may I exit" reads this next to the queue:
+    /// a claimed-but-unstarted turn is already visible here, before the driver's
+    /// `turn_running` flag is set and before `TurnStarted` reaches any listener — the
+    /// window between the pop and those later signals cannot hide a turn from the
+    /// check. Only turn-opening claims count (`claim_next_step` runs mid-turn, when the
+    /// count is already nonzero).
+    inflight: AtomicU64,
     next_seq: AtomicU64,
     next_id: AtomicU64,
     /// A per-process prefix so ids never collide across a restart: the numeric counter
@@ -176,6 +193,11 @@ pub struct Inbox {
     closed: AtomicBool,
     /// When present, `InboxEnqueued` is written before the input becomes visible.
     journal: Option<Arc<SessionJournal>>,
+    /// When present, every accepted `InboxEnqueued` is also forwarded here (after the
+    /// journal write, without holding the queue lock): the host's live listener hears the
+    /// enqueue without reading the journal. Installed by the driver from its own
+    /// `set_runtime_events`, so a host sets one listener, not two.
+    runtime_events: std::sync::Mutex<Option<Arc<dyn RuntimeEvents>>>,
     /// Control requests the driver runs between turns (ADR 0018: `/compact`). Not a lane.
     control: Mutex<VecDeque<ControlRequest>>,
 }
@@ -220,6 +242,8 @@ impl Inbox {
             state: Mutex::new(State::default()),
             wake: Notify::new(),
             next_seq: AtomicU64::new(0),
+            version: AtomicU64::new(0),
+            inflight: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
             id_prefix: format!("inbox-{}-", id_nonce()),
             cancel_calls: AtomicU64::new(0),
@@ -228,8 +252,19 @@ impl Inbox {
             last_cause: std::sync::Mutex::new(None),
             closed: AtomicBool::new(false),
             journal,
+            runtime_events: std::sync::Mutex::new(None),
             control: Mutex::new(VecDeque::new()),
         })
+    }
+
+    /// Installs the host listener for `InboxEnqueued` (the driver calls this from its own
+    /// `set_runtime_events`, so a host sets one listener, not two). `None` keeps the
+    /// behavior a host that never installed one had before.
+    pub fn set_runtime_events(&self, sink: Arc<dyn RuntimeEvents>) {
+        *self
+            .runtime_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
     }
 
     /// `next_turn`: a new task for after the current turn. Wakes an idle driver.
@@ -238,7 +273,7 @@ impl Inbox {
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextTurn, input.into(), source, true)
+        self.enqueue(Lane::NextTurn, input.into(), source, true, false)
             .await
     }
 
@@ -249,7 +284,7 @@ impl Inbox {
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextStep, input.into(), source, true)
+        self.enqueue(Lane::NextStep, input.into(), source, true, false)
             .await
     }
 
@@ -260,7 +295,19 @@ impl Inbox {
         input: impl Into<Message>,
         source: InputSource,
     ) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextStep, input.into(), source, false)
+        self.enqueue(Lane::NextStep, input.into(), source, false, false)
+            .await
+    }
+
+    /// `next_step` like [`Inbox::inject`], marked as a wake-gate degrade: the wake budget
+    /// was used up, so this input waits for a turn without ever opening one itself. The
+    /// durable `InboxEnqueued` record says so (`degraded: true`, ADR 0006 §5.5).
+    pub async fn inject_degraded(
+        &self,
+        input: impl Into<Message>,
+        source: InputSource,
+    ) -> Result<MessageId, InboxError> {
+        self.enqueue(Lane::NextStep, input.into(), source, false, true)
             .await
     }
 
@@ -270,6 +317,7 @@ impl Inbox {
         mut message: Message,
         source: InputSource,
         wake: bool,
+        degraded: bool,
     ) -> Result<MessageId, InboxError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(InboxError::Closed { message });
@@ -299,19 +347,23 @@ impl Inbox {
                 id
             }
         };
+        let event = RuntimeEvent::InboxEnqueued {
+            message: message.clone(),
+            message_id: id.clone(),
+            lane: lane.wire(),
+            source,
+            // ADR 0011: the entry's waking flag is durable, so a resume
+            // knows which `next_step` entries may open a turn themselves.
+            wake,
+            // A wake-gate degrade (ADR 0006 §5.5): written only when true, so an
+            // ordinary line is byte-identical to before.
+            degraded,
+        };
         if let Some(journal) = &self.journal {
             // Journal first, then memory (ADR 0001 S1): an input that is not durable was
             // never accepted.
             journal
-                .append_runtime_event(RuntimeEvent::InboxEnqueued {
-                    message: message.clone(),
-                    message_id: id.clone(),
-                    lane: lane.wire(),
-                    source,
-                    // ADR 0011: the entry's waking flag is durable, so a resume
-                    // knows which `next_step` entries may open a turn themselves.
-                    wake,
-                })
+                .append_runtime_event(event.clone())
                 .await
                 .map_err(|error| InboxError::Journal {
                     message: message.clone(),
@@ -327,7 +379,20 @@ impl Inbox {
             message,
             seq,
         });
+        // Inside the same critical section as the push, so a version read brackets it.
+        self.version.fetch_add(1, Ordering::SeqCst);
         drop(state);
+        // The host hears the enqueue once it is durable, like the turn boundary: the sink
+        // sends on an unbounded channel, so it never blocks, and it runs without the queue
+        // lock held.
+        if let Some(sink) = self
+            .runtime_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            sink.on_runtime_event(&event);
+        }
         if wake {
             self.wake.notify_one();
         }
@@ -407,6 +472,11 @@ impl Inbox {
         self.state.lock().await.len()
     }
 
+    /// How many times the queue changed. See the field comment.
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
+    }
+
     pub async fn is_empty(&self) -> bool {
         self.len().await == 0
     }
@@ -425,6 +495,14 @@ impl Inbox {
 
     /// Resolves the next time `followup`/`steer`/`cancel` wakes the driver. `inject` never
     /// resolves it.
+    ///
+    /// Single waiter: the driver. Its `Notify` hands one permit to one waiter, so a
+    /// second waiter could steal the wake meant for the driver (or vice versa) and
+    /// deadlock the other side: the permit is consumed, the entry stays queued, and no
+    /// further signal ever comes. Hosts learn about wakes through `started`, the
+    /// settled/stops/idle signals and the queue itself — never by waiting here.
+    /// (`radian-runtime`'s and `radian-host`'s integration tests also call this to
+    /// observe a wake; that is why it stays `pub`.)
     pub fn wake_signal(&self) -> Notified<'_> {
         self.wake.notified()
     }
@@ -440,18 +518,44 @@ impl Inbox {
     /// stays and is absorbed by a turn's first safe point. Every older entry keeps its
     /// relative order: an `inject` pushed before the chosen steer stays in `next_step` in
     /// front of the later entries.
+    ///
+    /// The pop and the in-flight count move together, under the queue lock: when this
+    /// returns an entry, [`Inbox::inflight_turns`] already counts it. A host checking
+    /// "may I exit" between the pop and the turn's start still sees the claimed turn.
     pub async fn claim_next_turn(&self) -> Option<InboxEntry> {
         let mut state = self.state.lock().await;
         if let Some(entry) = state.next_turn.pop_front() {
+            self.version.fetch_add(1, Ordering::SeqCst);
+            self.inflight.fetch_add(1, Ordering::SeqCst);
             return Some(entry);
         }
         let index = state.next_step.iter().position(|entry| entry.wake)?;
+        self.version.fetch_add(1, Ordering::SeqCst);
+        self.inflight.fetch_add(1, Ordering::SeqCst);
         state.next_step.remove(index)
+    }
+
+    /// How many turn-opening claims are outstanding (claimed, turn not yet ended).
+    /// The driver decrements it when the turn ends, next to clearing `turn_running`.
+    pub fn inflight_turns(&self) -> u64 {
+        self.inflight.load(Ordering::SeqCst)
+    }
+
+    /// Marks one claimed turn finished. The driver calls it when the turn ends, next to
+    /// clearing `turn_running`, so a host watching [`Inbox::inflight_turns`] sees the
+    /// whole claimed-to-ended span as busy. Every [`Inbox::claim_next_turn`] pop pairs
+    /// with exactly one of these (a requeued entry is re-popped, which counts again).
+    pub fn turn_ended(&self) {
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// Removes the oldest `next_step` entry, if any. Used by the driver at a safe point.
     pub async fn claim_next_step(&self) -> Option<InboxEntry> {
-        self.state.lock().await.next_step.pop_front()
+        let entry = self.state.lock().await.next_step.pop_front();
+        if entry.is_some() {
+            self.version.fetch_add(1, Ordering::SeqCst);
+        }
+        entry
     }
 
     /// Puts a claimed entry back at the front of its lane (recovery, ADR 0011 L3-2).
@@ -461,6 +565,7 @@ impl Inbox {
             Lane::NextTurn => state.next_turn.push_front(entry),
             Lane::NextStep => state.next_step.push_front(entry),
         }
+        self.version.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Puts recovered entries back, preserving their relative order. The input is in

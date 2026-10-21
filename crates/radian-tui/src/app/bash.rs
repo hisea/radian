@@ -1,21 +1,18 @@
 //! The `!`/`!!` shell commands (ADR 0033): running one at a time, queueing it behind a
-//! running turn, the mixed-safe behavior, and the `RunBash` audit records the loop
-//! appends.
+//! running turn, and the `RunBash` audit records the loop appends.
 
 use super::*;
 
 impl App {
     /// A `!`/`!!` command (ADR 0033): one at a time, and while a turn is running it waits for
-    /// the turn to end rather than racing it. The `safe` tier has no shell at all.
+    /// the turn to end rather than racing it.
     pub(super) fn begin_bash(
         &mut self,
         command: String,
         exclude_from_context: bool,
     ) -> UpdateResult {
         if !self.session.bash_available {
-            self.push_notice(
-                "the `safe` tier has no shell (ADR 0012); `!` needs a shell-capable tier",
-            );
+            self.push_notice("this session has no shell; `!` needs a shell-capable tier");
             return UpdateResult::dirty();
         }
         if self.session.bash_running.is_some() {
@@ -122,16 +119,21 @@ mod tests {
         );
     }
 
-    /// ADR 0012: the `safe` tier has no shell, so `!` never runs there.
+    /// Without a shell, `!` never runs.
     #[test]
-    fn a_bang_on_the_safe_tier_does_not_run() {
+    fn a_bang_without_a_shell_does_not_run() {
         let mut app = App::new("m", "s");
         app.set_bash_available(false);
         let result = app.run_slash_command("!echo hi");
         assert!(result.effects.is_empty());
         assert!(app.session.bash_running.is_none());
         assert!(
-            app.session.entries.last().unwrap().text.contains("safe"),
+            app.session
+                .entries
+                .last()
+                .unwrap()
+                .text
+                .contains("no shell"),
             "{}",
             app.session.entries.last().unwrap().text
         );

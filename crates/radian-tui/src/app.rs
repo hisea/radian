@@ -10,18 +10,23 @@
 //! layer: approval prompt, `/memory` confirmation, find box), and [`App::on_key`] is the thin
 //! wrapper that resolves and updates.
 
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_core::{AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, UsageSource};
+use agent_core::{
+    AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, MessageId, UsageSource,
+};
 use radian_coding::PromptError;
 use radian_host::memory::commands::MemoryCommand;
 use radian_host::{PendingRequest, PendingResponse, PendingView};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
+use radian_session::TurnOutcome;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::bell::BellMode;
 use crate::blocks::{Block, ReasoningMode};
 use crate::clip::ClipboardMode;
 use crate::clip::MAX_CLIPBOARD_BYTES;
@@ -48,7 +53,9 @@ mod find;
 mod footer;
 mod history;
 mod input;
+mod inspector;
 mod layers;
+pub(crate) mod loop_mode;
 mod mouse;
 mod overlay;
 mod send;
@@ -74,6 +81,10 @@ use state::{bash_context_text, bash_entry, bash_entry_from_context, is_user_inpu
 // (`radian-host`) and `App` only reads it. Re-exported here so the existing `app::TurnState`
 // path keeps working.
 pub use radian_host::projection::TurnState;
+
+// The `/loop` message tags (the `origin` the journal audits, ADR 0005): the integration
+// tests build the expected followups with them, the unit tests cover the round trip.
+pub use loop_mode::{loop_iteration, loop_message};
 
 /// How long the first idle Ctrl-C arms "press again to quit" (ADR 0023 U4, owner
 /// 2026-10-14). A second Ctrl-C inside the window quits; the window closing, or any other
@@ -140,7 +151,8 @@ pub enum Effect {
     /// Load this workspace's sessions and open the picker overlay (`/sessions`). The result is
     /// [`Input::PickerOpened`]; loading is I/O, so it is the loop's job (ADR 0023 U3).
     OpenPicker { query: Option<String> },
-    /// Run the `/login` verification request (ADR 0026 D3): one `GET <base>/models`. The
+    /// Run the `/login` verification request (ADR 0026 D3): one `GET` of the descriptor's
+    /// verification URL (`<base>/models`, or the descriptor's own when it names one). The
     /// answer is [`Input::LoginVerified`].
     LoginVerify {
         name: String,
@@ -189,13 +201,30 @@ pub enum Effect {
     /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
     /// [`Input::SessionDone`].
     ListSkills,
+    /// `/context` (backlog `tui-context-command`): the next request's estimated size by
+    /// category. The loop reads it from the facade (journal + stored layers, no inbox, no
+    /// driver) and answers with [`Input::SessionDone`], so it works mid-turn.
+    Context,
     /// `/jobs` (ADR 0037 decision 4): list the running background jobs, or stop one/all. The
     /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
     Jobs(command::JobsRequest),
+    /// Open the inspector overlay (`/jobs`, `/tools`, `/mcp`, `/hooks`, `/panel`). The loop
+    /// gathers the snapshot (jobs, tools, mcp, hooks) and answers with
+    /// [`Input::InspectorOpened`]. `None` opens the last page (`/panel`).
+    OpenInspector {
+        page: Option<command::InspectorPage>,
+    },
+    /// Reload the open inspector's snapshot after an event (a job settle, a turn
+    /// boundary). The loop answers with [`Input::InspectorRefreshed`]. No polling: the
+    /// refresh is requested by `update` when it sees the event, never by a timer.
+    RefreshInspector,
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
     Copy { text: String },
+    /// Ring the terminal bell: one `\x07` on stdout (`tui.bell`). The loop runs it at most
+    /// once per frame — bell-class events that share a frame merge into one ring.
+    Bell,
     /// `/theme <name>` (ADR 0008 revision): load the theme and write `tui.theme` back to the
     /// config file. Both are I/O, so the loop runs them and answers with
     /// [`Input::ThemeReady`].
@@ -307,6 +336,7 @@ impl PartialEq for Effect {
             (LoginOAuthBrowser, LoginOAuthBrowser) | (LoginOAuthDevice, LoginOAuthDevice) => true,
             (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
+            (Bell, Bell) => true,
             (SetTrust { choice: a }, SetTrust { choice: b }) => a == b,
             (
                 ExpandSkill {
@@ -322,6 +352,8 @@ impl PartialEq for Effect {
             ) => an == bn && aa == ba && as_ == bs,
             (ListSkills, ListSkills) => true,
             (Jobs(a), Jobs(b)) => a == b,
+            (OpenInspector { page: a }, OpenInspector { page: b }) => a == b,
+            (RefreshInspector, RefreshInspector) => true,
             (Theme { name: a }, Theme { name: b }) => a == b,
             (Inject(a), Inject(b)) => a == b,
             (CancelBash, CancelBash) => true,
@@ -479,6 +511,20 @@ pub struct SessionView {
     /// appends with the loop's clock, its settle removes; the age ticks with the existing
     /// footer refresh (a contributor tick redraws), so no new timer exists for it.
     pub(crate) running_jobs: Vec<RunningJob>,
+    /// The `next_turn` inputs this process sent that the runtime has not admitted yet: one
+    /// entry per `InboxEnqueued` without a matching `InputAdmitted`, by message id. The
+    /// footer's `queued` item reads its length. A `steer` never touches it — its enqueue is
+    /// `NextStep` and its admission carries an untracked id — so the count only moves on a
+    /// followup's own enqueue and admission.
+    pub(crate) queued: HashSet<MessageId>,
+    /// Whether the last turn ended in a model or hook error (`TurnFailed` seen, no new turn
+    /// started since): `/retry` resends the last user message only then. A normal end, a
+    /// cancel or a fresh session leaves it false.
+    pub(crate) last_turn_failed: bool,
+    /// The `/loop` continuation (steps 1-2): the per-turn repeat state. Process-local;
+    /// quitting the TUI ends it. The turn-end decision lives in `loop_mode` so step 3
+    /// (`goal-mode.md`) can add its input in the same place.
+    pub(crate) loop_state: loop_mode::LoopState,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
     /// reason is readable; the user quits with the ordinary keys.
@@ -522,7 +568,7 @@ pub struct SessionView {
     pub bash_running: Option<String>,
     /// A `!`/`!!` command submitted while a turn was running: it starts when the turn ends.
     pub queued_bash: Option<(String, bool)>,
-    /// Whether this session has a shell (`!`) at all: false on the `safe` tier (ADR 0012).
+    /// Whether this session has a shell (`!`) at all: false when no `shell` is mounted.
     pub bash_available: bool,
     /// The exact `Ran \`cmd\`` text we displayed live as a [`EntryKind::Bash`] block for a `!`
     /// command. When that message is admitted to the transcript, `push_message` skips it so
@@ -549,6 +595,14 @@ pub struct SessionView {
     /// The last `CompactionFinished`'s numbers, handed to the summary message that follows it
     /// (ADR 0018). `(revision, tokens_before, tokens_after, deterministic, dropped)`.
     pending_compaction: Option<(u64, u64, u64, bool, u64)>,
+    /// The wake-budget notice entry of the current degrade burst, if shown. `update`
+    /// rewrites it with the latest count instead of pushing a line per degrade; the next
+    /// turn start clears it (the line stays as plain history). An entry-list mutation that
+    /// shifts entries (the startup-block splice) moves it along.
+    pub(crate) wake_notice: Option<usize>,
+    /// Degraded wake notices wait while the session is idle: herdr reports `blocked` with
+    /// the `wake budget` label until the next turn starts (which clears this).
+    pub(crate) wake_waiting: bool,
 }
 
 /// The whole TUI's state: the global chrome every session view shares, plus exactly one
@@ -577,6 +631,10 @@ pub struct App {
     /// The input composer: text plus a cursor (ADR 0009 Phase 4).
     pub input: Composer,
     pub quit: bool,
+    /// `/new` was accepted: the loop leaves, the host ends this session and opens a fresh
+    /// one in the same terminal. Set with `quit` (the same exit), read by the loop's caller;
+    /// a new session's app starts with it cleared.
+    pub new_session: bool,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
     /// When the first idle Ctrl-C armed "press again to quit": the
@@ -593,8 +651,12 @@ pub struct App {
     /// Whether this process has a memory root. `/memory` runs through the loop, which owns the
     /// service; without one the command is refused with the same notice as before.
     pub memory_enabled: bool,
-    /// The send waiting for its `@` expansion (see [`Effect::ExpandMentions`]).
-    pending_expand: Option<PendingExpand>,
+    /// The sends waiting for their `@` expansion, in submit order (see
+    /// [`Effect::ExpandMentions`]): one entry per submitted send, so two rapid submits —
+    /// `/queue a` then `/queue b`, or two fast Enters — cannot overwrite each other and drop
+    /// one. The loop runs the effects in order and their results come back in order, so the
+    /// front entry is always the one a result belongs to.
+    pending_expand: VecDeque<PendingExpand>,
     /// The `/…` completion on screen: the range a candidate replaces and the candidates, best
     /// first. `None` when the line is not a slash command or the level has nothing to offer.
     /// (The overlay's *rows* live in the layer stack, next to the `@` list's.)
@@ -631,6 +693,10 @@ pub struct App {
     mouse_enabled: bool,
     /// How a copy reaches the system clipboard (config `tui.clipboard`, default OSC 52).
     pub clipboard: ClipboardMode,
+    /// When the terminal bell rings (config `tui.bell`, default off): a newly shown
+    /// approval/question and a completed or failed turn end (`attention`), plus a
+    /// background job's settle (`all`).
+    pub bell: BellMode,
     /// How the reasoning channel displays (ADR 0028 R3, `tui.display.reasoning`). Part of
     /// the block/layout cache keys: toggling re-lays the reasoning entries out.
     pub reasoning_mode: ReasoningMode,
@@ -648,6 +714,9 @@ pub struct App {
     /// The one session view this process holds today (the per-session view). A later slice
     /// (a later session-view slice) keeps several and switches between them.
     pub session: SessionView,
+    /// The inspector's last page (`/panel` reopens it). Survives the overlay's close, so
+    /// `/panel` after an `Esc` returns where the user was.
+    pub inspector_last: Option<command::InspectorPage>,
 }
 
 impl SessionView {

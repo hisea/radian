@@ -4,7 +4,7 @@
 //! the same sandbox construction from `radian-sandbox`, the same two invariants:
 //!
 //! - **`full-access` is the default** (ADR 0043): [`parse_tier`] and the CLI default pick
-//!   `full`; `safe`/`workspace` are only reached by naming them, a remembered project choice,
+//!   `full`; `workspace` is only reached by naming it, a remembered project choice,
 //!   or a project's own `.radian/config.toml` (which can only narrow).
 //! - **A failed probe never degrades.** [`build_sandbox`] returns an error for an enforced
 //!   tier when the backend is missing or its probe fails; it never returns `None` so a caller
@@ -20,7 +20,6 @@ use radian_sandbox::{GitAccess, Sandbox, SandboxError, SandboxMode, SandboxPolic
 /// The `--profile` value: a product concept (ADR 0012 P1), not a backend flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
-    Safe,
     WorkspaceWrite,
     FullAccess,
 }
@@ -28,7 +27,6 @@ pub enum Tier {
 impl Tier {
     pub fn preset(self) -> Preset {
         match self {
-            Self::Safe => Preset::Safe,
             Self::WorkspaceWrite => Preset::WorkspaceWrite,
             Self::FullAccess => Preset::FullAccess,
         }
@@ -41,19 +39,15 @@ impl Tier {
 
 pub fn parse_tier(value: &str) -> Result<Tier, String> {
     match value {
-        "safe" => Ok(Tier::Safe),
         "workspace" | "workspace-write" => Ok(Tier::WorkspaceWrite),
         "full" | "full-access" => Ok(Tier::FullAccess),
-        other => Err(format!(
-            "--profile {other:?} is not one of safe, workspace, full"
-        )),
+        other => Err(format!("--profile {other:?} is not one of workspace, full")),
     }
 }
 
 /// The [`Tier`] for a [`Preset`] (the reverse of [`Tier::preset`]).
 pub fn tier_of(preset: Preset) -> Tier {
     match preset {
-        Preset::Safe => Tier::Safe,
         Preset::WorkspaceWrite => Tier::WorkspaceWrite,
         Preset::FullAccess => Tier::FullAccess,
     }
@@ -105,7 +99,14 @@ impl AccessSource {
     }
 }
 
-/// The [`radian_host::AccessParts`] a run-time tier switch rebuilds (ADR 0038 slice 2): the
+/// The footer's tier item: the tier plus where it came from. For `full` it says plainly
+/// that nothing prompts (`full · no prompts`); `workspace` stays bare.
+pub fn footer_tier(tier: Tier, source: AccessSource) -> String {
+    match tier {
+        Tier::FullAccess => format!("full · no prompts{}", source.suffix()),
+        Tier::WorkspaceWrite => format!("{}{}", tier.as_str(), source.suffix()),
+    }
+}
 /// profile with this host's `--allow-shell-command` rules, and the sandbox with the deny-read
 /// list and the Unix-socket whitelist. A failed sandbox probe is the `Err` that makes
 /// `/access` refuse (ADR 0012: a failed probe never degrades).
@@ -117,9 +118,12 @@ pub fn build_access(
     allow_unix_sockets: &[std::path::PathBuf],
     allow_env: &[String],
 ) -> Result<radian_host::AccessParts, String> {
+    // Slice 1 of `sandbox-auto-allow-shell`: the sandbox is built first and the
+    // profile after it, so the `workspace` rule is static for the session. A failed
+    // probe is the `Err` that refuses the switch (and the startup), never a fallback.
     let tier = tier_of(preset);
-    let profile = build_profile(tier, workspace, allow_shell_commands)?;
     let sandbox = build_sandbox(tier, workspace, deny_read, allow_unix_sockets, allow_env)?;
+    let profile = build_profile(tier, workspace, allow_shell_commands, sandbox.as_ref())?;
     Ok(radian_host::AccessParts { profile, sandbox })
 }
 
@@ -129,16 +133,24 @@ pub fn build_access(
 /// preset's blanket "shell asks" rule, because `evaluate` keeps the highest-ranked action and
 /// an `ask` would otherwise outrank every `allow`. A command matching no allow rule then falls
 /// to the default `ask`, and `deny` rules are never removed.
+///
+/// Slice 1 of `sandbox-auto-allow-shell`: `sandbox` is the sandbox itself — the caller
+/// built it first and passes `sandbox.as_ref()` — so the `workspace` rule is static for
+/// the session (`allow` inside an enforced sandbox, `ask` without one; fail closed).
+/// See `agent-cli`'s identical wiring; the two must not drift.
 pub fn build_profile(
     tier: Tier,
     workspace: &Path,
     allow_shell_commands: &[String],
+    sandbox: Option<&Sandbox>,
 ) -> Result<Profile, String> {
     let preset = tier.preset();
-    let base = match preset {
-        Preset::Safe => Profile::safe(workspace),
-        Preset::WorkspaceWrite => Profile::workspace_write(workspace),
-        Preset::FullAccess => Profile::full_access(workspace),
+    let base = match (preset, sandbox) {
+        (Preset::WorkspaceWrite, Some(sandbox)) => {
+            Profile::workspace_write_sandboxed(workspace, sandbox)
+        }
+        (Preset::WorkspaceWrite, None) => Profile::workspace_write(workspace),
+        (Preset::FullAccess, _) => Profile::full_access(workspace),
     }
     .map_err(|e| format!("--workspace {}: {e}", workspace.display()))?;
     if allow_shell_commands.is_empty() {
@@ -170,14 +182,14 @@ pub fn build_profile(
         );
     }
     Profile::custom(preset, ApprovalPolicy::OnAsk, workspace, rules)
+        .map(|profile| profile.with_sandbox(sandbox.filter(|_| preset == Preset::WorkspaceWrite)))
         .map_err(|e| format!("--workspace {}: {e}", workspace.display()))
 }
 
 /// Builds the sandbox for `tier`.
 ///
-/// `safe` mounts no `shell` and its rules deny every execution path, so there is nothing to
-/// sandbox and `None` is returned. `workspace-write` and `full-access` build a sandbox for the
-/// workspace; for the enforced tier a probe failure is an **error**, never a fallback.
+/// The enforced tier builds a sandbox for the workspace; a probe failure is an **error**,
+/// never a fallback.
 ///
 /// The one other path is ADR 0016: in the `workspace` tier, when the kernel says
 /// this process is already confined by an outer sandbox, the outer sandbox is inherited and
@@ -190,9 +202,6 @@ pub fn build_sandbox(
     allow_unix_sockets: &[std::path::PathBuf],
     allow_env: &[String],
 ) -> Result<Option<Sandbox>, String> {
-    if tier == Tier::Safe {
-        return Ok(None);
-    }
     // ADR 0016: a process the **kernel** says is already confined by an
     // outer sandbox inherits it instead of stacking a second one. The nested probe cannot run
     // at all (the kernel refuses `sandbox_apply` under a deny-default profile), so this comes
@@ -210,7 +219,7 @@ pub fn build_sandbox(
         .map_err(|error| format!("{}: {error}", unavailable(tier, mode)))?;
     // ADR 0038 decision 4: a general (and, later, lead) session in the `workspace` tier may
     // write `.git` except the entries git can execute, so `git commit` and friends work in the
-    // sandbox. `full` has no backend to enforce it and `safe` builds no sandbox.
+    // sandbox. `full` has no backend to enforce it.
     if tier == Tier::WorkspaceWrite {
         policy = policy.git_access(GitAccess::WritableExceptExec);
     }
@@ -276,7 +285,6 @@ mod tests {
     #[test]
     fn tier_names_and_aliases_parse() {
         for (name, tier) in [
-            ("safe", Tier::Safe),
             ("workspace", Tier::WorkspaceWrite),
             ("workspace-write", Tier::WorkspaceWrite),
             ("full", Tier::FullAccess),
@@ -284,11 +292,31 @@ mod tests {
         ] {
             assert_eq!(parse_tier(name).unwrap(), tier, "{name}");
         }
-        let error = parse_tier("bogus").unwrap_err();
-        assert!(error.contains("workspace"), "{error}");
-        assert!(error.contains("full"), "{error}");
-        assert!(!error.contains("workspace-write"), "{error}");
-        assert!(!error.contains("full-access"), "{error}");
+        for bogus in ["bogus", "safe"] {
+            let error = parse_tier(bogus).unwrap_err();
+            assert!(error.contains("workspace"), "{bogus}: {error}");
+            assert!(error.contains("full"), "{bogus}: {error}");
+            assert!(!error.contains("workspace-write"), "{bogus}: {error}");
+            assert!(!error.contains("full-access"), "{bogus}: {error}");
+        }
+    }
+
+    /// The footer's tier item says `no prompts` for `full` and stays bare for `workspace`.
+    /// Dropping the words fails this test.
+    #[test]
+    fn the_footer_tier_says_no_prompts_for_full() {
+        assert_eq!(
+            footer_tier(Tier::FullAccess, AccessSource::Default),
+            "full · no prompts"
+        );
+        assert_eq!(
+            footer_tier(Tier::FullAccess, AccessSource::Project),
+            "full · no prompts (project)"
+        );
+        assert_eq!(
+            footer_tier(Tier::WorkspaceWrite, AccessSource::Session),
+            "workspace (session)"
+        );
     }
 
     /// ADR 0038 decision 4: the TUI's `workspace` tier must request `WritableExceptExec` so

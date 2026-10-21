@@ -27,7 +27,8 @@ use crate::subagent::SubagentParts;
 use crate::trust;
 
 /// The parts a tier switch rebuilds (ADR 0038 slice 2): the permission profile and the
-/// sandbox for the new tier. The sandbox is `None` for `safe`.
+/// sandbox for the new tier. The sandbox is `None` when the session has no command
+/// execution.
 pub struct AccessParts {
     pub profile: Profile,
     pub sandbox: Option<Sandbox>,
@@ -67,8 +68,13 @@ pub struct SessionSetup {
     /// disables adoption (the config's `0`, or a host that does not set it).
     pub shell_auto_background: Option<Duration>,
     pub servers: Vec<McpServerConfig>,
+    /// Where the MCP servers came from (`--mcp-config <FILE>`), for the inspector's mcp
+    /// page. `None` when no file was given; the servers are then empty too.
+    pub mcp_config_path: Option<String>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
+    /// `C` (ADR 0018): the context window size for `/context`. `None` when unknown.
+    pub window_context: Option<u64>,
     pub auto_compact: bool,
     /// The request-level settings the **compaction** call carries (ADR 0018,
     /// decision 1), already converted to the route's wire value by the host
@@ -82,7 +88,7 @@ pub struct SessionSetup {
     /// `[model] retries` (ADR 0017), the host already resolved against the default:
     /// how many times a transient model failure is retried inside one model call; `0` disables.
     pub retries: u32,
-    /// The sandbox `shell` runs under; `None` for the safe tier.
+    /// The sandbox `shell` runs under; `None` when the session mounts no `shell`.
     pub sandbox: Option<Sandbox>,
     /// The tier, for the startup description.
     pub tier: Preset,
@@ -122,6 +128,10 @@ pub struct SessionSetup {
     /// The memory injection configuration (ADR 0021). The host builds it
     /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.
     pub memory_injection: InjectionConfig,
+    /// The resolved `[hooks]` section (ADR 0045 slice A): user-level external command hooks.
+    /// The host copies it from the config; `open_session` builds the [`crate::CommandHooks`]
+    /// from it and chains it after the permissions.
+    pub hooks: crate::config::HooksConfig,
     /// `true` to resume
     /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
     /// before `open_session`; `needs_ask` means an interactive host must ask before the first
@@ -180,6 +190,12 @@ pub struct HostBindings {
     pub before_driver: Option<Arc<dyn Fn() + Send + Sync>>,
     /// A memory hook's warning line (the two hosts prefix it differently).
     pub memory_warning: Arc<dyn Fn(&str) + Send + Sync>,
+    /// A command hook's warning line (ADR 0045: refused `allow`/`ask`, unparsable stdout,
+    /// hook errors outside a turn). Routed like `memory_warning`, with the `[hooks]` prefix.
+    pub hooks_warning: Arc<dyn Fn(&str) + Send + Sync>,
+    /// A wake-budget degrade's notice line (one per degrade; the TUI shows a single line
+    /// per burst and reports `blocked` with the `wake budget` label while they wait).
+    pub wake_warning: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
@@ -189,7 +205,7 @@ pub struct SessionFacts {
     /// The `[sandbox]` line.
     pub sandbox_facts: String,
     /// The startup summary's word for the sandbox (ADR 0027): the real backend in plain
-    /// words for `workspace` (`macOS sandbox` / `Linux sandbox`), `no exec` for `safe`,
+    /// words for `workspace` (`macOS sandbox` / `Linux sandbox`),
     /// `no sandbox` for `full`. The TUI prints it as-is.
     pub sandbox_word: String,
     /// The `[memory]` line.

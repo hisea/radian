@@ -21,12 +21,14 @@
 //! errors name the key path and nothing else.
 
 pub mod default;
+pub mod migrate_claude;
 pub mod migrate_pi;
 pub mod model_write;
 pub mod preserve;
 pub mod theme_write;
 
 mod error;
+mod hooks;
 mod model;
 mod sandbox;
 mod tui;
@@ -34,8 +36,11 @@ mod tui;
 use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
-pub use model::ModelConfig;
-pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets};
+pub use hooks::{
+    DEFAULT_HOOK_TIMEOUT_SECS, HookCommand, HookMatcher, HooksConfig, matcher_effective,
+};
+pub use model::{ModelConfig, SmolConfig};
+pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets, unix_sockets_ignored_warning};
 pub use tui::{
     TuiColorOverride, TuiColorValue, TuiConfig, TuiFooterConfig, TuiFooterItemConfig,
     TuiFooterRowConfig, TuiWidgetsConfig,
@@ -201,12 +206,20 @@ pub struct Config {
     pub skills: SkillsConfig,
     /// `[memory]` (ADR 0021): the injection keys this revision adds.
     pub memory: MemoryConfig,
+    /// `[hooks]` (ADR 0045 slice A): user-level external command hooks.
+    pub hooks: HooksConfig,
     /// `[shell]` (ADR 0037): the shell tool's limits.
     pub shell: ShellConfig,
     pub tui: TuiConfig,
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
     pub providers: std::collections::BTreeMap<String, crate::provider::ProviderDecl>,
+    /// `[mcp]` (ADR 0008 §8): the user's MCP servers, in the same two forms as
+    /// `--mcp-config` (`[mcp.mcpServers.<name>]` tables or `[[mcp.servers]]` entries).
+    /// Parsed by the same loader the file uses, so the rules cannot drift; the hosts
+    /// merge these with the `--mcp-config` file's servers (the command line wins).
+    /// Warnings print as `[mcp] …` like the file's.
+    pub mcp: crate::mcp::McpLoad,
     /// Known-but-unwired and unknown keys, as dotted paths, for the startup line. Never a
     /// value.
     pub skipped: Vec<String>,
@@ -308,14 +321,13 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "integrations" => parse_integrations(value, path, &mut config)?,
             "control" => parse_control(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
+            "hooks" => hooks::parse_hooks(value, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
             "memory" => parse_memory(value, path, &mut config)?,
             "shell" => parse_shell(value, &mut config)?,
             "tui" => tui::parse_tui(value, path, &mut config)?,
             "providers" => model::parse_providers(value, path, &mut config)?,
-            // Known by the ADR, not wired in this slice: the hosts take MCP servers from
-            // `--mcp-config`. Ignored, and named on the startup line.
-            "mcp" => config.skipped.push("mcp".into()),
+            "mcp" => parse_mcp(value, path, &mut config)?,
             other => config.skipped.push(other.to_owned()),
         }
     }
@@ -330,8 +342,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
 /// resolve the built-in instead).
 /// The profile names ADR 0008 §2 lists (`ask`/`allow`/`deny`) plus the tiers ADR 0012/0016
 /// define. A value outside this set is refused rather than guessed (fail-closed).
-const KNOWN_PROFILES: [&str; 8] = [
-    "safe",
+const KNOWN_PROFILES: [&str; 7] = [
     "workspace",
     "workspace-write",
     "full",
@@ -366,7 +377,7 @@ fn parse_permissions(
                     }
                 } else if matches!(
                     profile.as_str(),
-                    "safe" | "workspace" | "workspace-write" | "full" | "full-access"
+                    "workspace" | "workspace-write" | "full" | "full-access"
                 ) {
                     config.permissions.profile = Some(profile.clone());
                 } else {
@@ -634,6 +645,29 @@ fn resolve_extra_path(entry: &str, config_dir: Option<&Path>, home: Option<&Path
     }
 }
 
+/// Parses `[mcp]` (ADR 0008 §8): the same two forms as `--mcp-config`, spelled in TOML
+/// (`[mcp.mcpServers.<name>]` tables or `[[mcp.servers]]` entries). One normaliser: the
+/// TOML value is converted to JSON and the file's loader runs on it, so the rules (both
+/// forms or neither is an error, duplicate ids are refused, remote entries are skipped
+/// with a warning, `${VAR}` is expanded) cannot drift. A structural problem is a config
+/// error; the warnings ride in [`Config::mcp`] and the hosts print them as `[mcp] …`.
+fn parse_mcp(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    if value.as_table().is_none() {
+        return Err(wrong_type(path, "mcp", "a table"));
+    }
+    let origin = format!("{} [mcp]", path.display());
+    match crate::mcp::load_mcp_from_toml(value, &origin) {
+        Ok(load) => {
+            config.mcp = load;
+            Ok(())
+        }
+        Err(message) => Err(ConfigError::Parse {
+            path: path.to_path_buf(),
+            message,
+        }),
+    }
+}
+
 fn wrong_type(path: &Path, key: &str, expected: &'static str) -> ConfigError {
     ConfigError::WrongType {
         path: path.to_path_buf(),
@@ -866,6 +900,28 @@ mod tests {
         assert_eq!(paths[0], std::fs::canonicalize(&sock).unwrap());
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Slice 0: on Linux a non-empty `allow_unix_sockets` warns once that it is ignored
+    /// (the seccomp filter cannot whitelist by path); an empty list never warns, and on
+    /// macOS the list is honored so there is no warning either.
+    #[test]
+    fn the_linux_unix_socket_warning_fires_only_for_a_non_empty_list() {
+        assert_eq!(
+            unix_sockets_ignored_warning(&[]),
+            None,
+            "an empty list needs no warning"
+        );
+        let warning = unix_sockets_ignored_warning(&[PathBuf::from("/run/herdr.sock")]);
+        if cfg!(target_os = "linux") {
+            let warning = warning.expect("a non-empty list warns on Linux");
+            assert!(
+                warning.contains("ignored on Linux"),
+                "the line says it is ignored: {warning}"
+            );
+        } else {
+            assert_eq!(warning, None, "macOS honors the list");
+        }
     }
 
     #[test]
@@ -1365,6 +1421,96 @@ theme = "light"
         );
     }
 
+    /// An unset `auto_background_secs` is the 60 s built-in default, not the old 120 s: a
+    /// mutation back to 120 fails this test.
+    #[test]
+    fn an_unset_auto_background_secs_defaults_to_sixty_seconds() {
+        assert_eq!(
+            radian_coding::Limits::default().auto_background_after,
+            Some(std::time::Duration::from_secs(60))
+        );
+        let config = parse_str("schema_version = 1\n").unwrap();
+        assert_eq!(config.shell.auto_background_secs, None);
+        assert_eq!(
+            config.shell.auto_background_after(),
+            Some(std::time::Duration::from_secs(60))
+        );
+    }
+
+    /// `[model.smol]` (ADR 0008 §1, ADR 0043 §1) carries the cheap route slot: both keys
+    /// set means set; a half-set table warns (`model.smol`) and is ignored.
+    #[test]
+    fn the_model_smol_route_is_carried_and_a_half_set_table_is_ignored() {
+        let config =
+            parse_str("schema_version = 1\n[model.smol]\nprovider = \"cheap\"\nmodel = \"m-c\"\n")
+                .unwrap();
+        let smol = config.model.smol.as_ref().expect("smol is set");
+        assert_eq!(smol.provider.as_str(), "cheap");
+        assert_eq!(smol.model.as_str(), "m-c");
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+
+        // Only one of the two keys: warned and ignored, so `explore` follows the parent.
+        for text in [
+            "schema_version = 1\n[model.smol]\nprovider = \"cheap\"\n",
+            "schema_version = 1\n[model.smol]\nmodel = \"m-c\"\n",
+        ] {
+            let config = parse_str(text).unwrap();
+            assert_eq!(config.model.smol, None, "{text}");
+            assert!(
+                config.skipped.contains(&"model.smol".to_owned()),
+                "{text}: {:?}",
+                config.skipped
+            );
+        }
+
+        // Unset: nothing carried, nothing warned.
+        let config = parse_str("schema_version = 1\n").unwrap();
+        assert_eq!(config.model.smol, None);
+        assert!(config.skipped.is_empty());
+    }
+
+    /// Unknown `[model.smol]` keys and wrong types are skipped, never refused (the
+    /// warn-and-skip style); a wrong-typed key cannot half-set the table.
+    #[test]
+    fn model_smol_unknown_keys_and_wrong_types_are_skipped() {
+        let config = parse_str(
+            "schema_version = 1\n[model]\nfuture = 1\n[model.smol]\nmodel = \"m-c\"\nprovider = 3\n",
+        )
+        .unwrap();
+        assert_eq!(config.model.smol, None);
+        for expected in ["model.future", "model.smol.provider", "model.smol"] {
+            assert!(
+                config.skipped.contains(&expected.to_owned()),
+                "{expected}: {:?}",
+                config.skipped
+            );
+        }
+
+        let config = parse_str("schema_version = 1\n[model]\nsmol = 3\n").unwrap();
+        assert_eq!(config.model.smol, None);
+        assert!(
+            config.skipped.contains(&"model.smol".to_owned()),
+            "{:?}",
+            config.skipped
+        );
+    }
+
+    /// `[subagent.explore]` was never released: it is now an unknown section, skipped and
+    /// warned like any unknown key, never read.
+    #[test]
+    fn subagent_explore_is_now_an_unknown_section() {
+        let config = parse_str(
+            "schema_version = 1\n[subagent.explore]\nprovider = \"cheap\"\nmodel = \"m-c\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.model.smol, None);
+        assert!(
+            config.skipped.contains(&"subagent".to_owned()),
+            "{:?}",
+            config.skipped
+        );
+    }
+
     /// ADR 0037: `[shell] auto_background_secs` is carried; `0` means off, unset
     /// means the built-in default, and a bad value is skipped (never a refusal).
     #[test]
@@ -1464,14 +1610,111 @@ future_top = 1
 [model]
 include_usage = true
 future_option = "alpha"
-[mcp.servers]
 "#,
         )
         .unwrap();
         assert!(config.skipped.contains(&"future_top".to_string()));
         assert!(config.skipped.contains(&"model.include_usage".to_string()));
         assert!(config.skipped.contains(&"model.future_option".to_string()));
-        assert!(config.skipped.contains(&"mcp".to_string()));
+        assert!(
+            !config.skipped.iter().any(|key| key == "mcp"),
+            "mcp is wired now, never skipped: {:?}",
+            config.skipped
+        );
+    }
+
+    /// `[mcp]` (ADR 0008 §8): both TOML forms reach the server list through the same
+    /// loader the `--mcp-config` file uses; `mcp` is never a skipped key.
+    #[test]
+    fn the_mcp_servers_form_is_carried_and_never_skipped() {
+        let config = parse_str(
+            "schema_version = 1\n[[mcp.servers]]\nid = \"files\"\ncommand = \"/work/example/mcp-files\"\nargs = [\"--root\", \"/work/example\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].id, "files");
+        assert!(config.mcp.warnings.is_empty(), "{:?}", config.mcp.warnings);
+        assert!(
+            !config.skipped.iter().any(|key| key == "mcp"),
+            "{:?}",
+            config.skipped
+        );
+    }
+
+    /// `[mcp.mcpServers.<name>]` (ADR 0008 §8): the shared form normalises the same way,
+    /// with the same `HOME` default the file form has.
+    #[test]
+    fn the_mcp_mcp_servers_form_is_carried_with_the_home_default() {
+        let config = parse_str(
+            "schema_version = 1\n[mcp.mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].id, "files");
+        assert_eq!(
+            config.mcp.servers[0].inherit_env,
+            vec![std::ffi::OsString::from("HOME")],
+            "{:?}",
+            config.mcp.servers[0].inherit_env
+        );
+        assert!(config.mcp.warnings.is_empty(), "{:?}", config.mcp.warnings);
+    }
+
+    /// A remote `[mcp.mcpServers]` entry is skipped with a warning and starts nothing;
+    /// the stdio entry still lands.
+    #[test]
+    fn a_remote_mcp_entry_is_skipped_and_starts_nothing() {
+        let config = parse_str(
+            "schema_version = 1\n[mcp.mcpServers.web]\ntype = \"http\"\nurl = \"https://example.com/mcp\"\n[mcp.mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].id, "files");
+        assert_eq!(config.mcp.warnings.len(), 1, "{:?}", config.mcp.warnings);
+        assert!(
+            config.mcp.warnings[0].contains("skipped `web`"),
+            "{:?}",
+            config.mcp.warnings
+        );
+    }
+
+    /// Both `[mcp]` forms at once, or neither, is a config error like it is for the file.
+    #[test]
+    fn both_mcp_forms_or_neither_is_a_config_error() {
+        let error = parse_str(
+            "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n[mcp.mcpServers]\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot be combined"), "{error}");
+        let error = parse_str("schema_version = 1\n[mcp]\nfuture = 1\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expected `servers` or `mcpServers`"),
+            "{error}"
+        );
+        let error = parse_str("schema_version = 1\n[mcp]\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expected `servers` or `mcpServers`"),
+            "{error}"
+        );
+    }
+
+    /// `[mcp]` must be a table, and duplicate ids are refused before any process starts.
+    #[test]
+    fn a_non_table_mcp_and_a_duplicate_mcp_id_are_refused() {
+        let error = parse_str("schema_version = 1\nmcp = 3\n").unwrap_err();
+        assert!(
+            error.to_string().contains("`mcp` must be a table"),
+            "{error}"
+        );
+        let error = parse_str(
+            "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate server id"), "{error}");
     }
 
     #[test]

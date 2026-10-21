@@ -40,7 +40,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// One isolated environment: `HOME`/`RADIAN_HOME`, the session directory, a workspace, and a
-/// catalog URL pointing at a closed port (no run reads the user's state or the network).
+/// fast-failing catalog URL (no run reads the user's state or the network).
 struct Env {
     home: PathBuf,
     sessions: PathBuf,
@@ -84,7 +84,7 @@ fn spawn_parent_env(env: &Env, args: &[&str], extra: &[(&str, String)]) -> Child
         .env("HOME", &env.home)
         .env("RADIAN_HOME", &env.home)
         .env("RADIAN_SESSION_DIR", &env.sessions)
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -251,11 +251,11 @@ fn sigint(child: &Child) {
 
 // ---------- the tests ----------
 
-/// ADR 0043 1a: `explore` is exactly the four read-only tools, so a `write` call is an unknown
+/// ADR 0043 1a: `explore` is exactly the three read-only tools, so a `write` call is an unknown
 /// tool rather than a permission decision. The mutation (mounting the general set for
 /// `explore`, e.g. by dropping the hidden `--tools`) fails the exact-list assertion.
 #[tokio::test]
-async fn an_explore_child_has_only_the_four_read_tools_and_write_is_refused() {
+async fn an_explore_child_has_only_the_three_read_tools_and_write_is_refused() {
     let server = MockServer::start(vec![
         tool_reply(
             "p1",
@@ -289,7 +289,7 @@ async fn an_explore_child_has_only_the_four_read_tools_and_write_is_refused() {
     let index = child_request(&server, "EXPLORE-TASK");
     assert_eq!(
         advertised(&server, index),
-        ["glob", "grep", "list", "read"],
+        ["glob", "grep", "read"],
         "an explore child's tool list is exactly the read tools"
     );
     assert!(
@@ -477,13 +477,20 @@ async fn a_long_conclusion_is_cut_and_marked() {
 }
 
 /// ADR 0043 1a point 7: a non-auto parent gives the child no `--yes`, so the child's `ask` is
-/// denied (it has no terminal) and the result says what was denied. The mutation (passing
-/// `--yes` always) lets the shell run and the result has no `denied` line.
+/// denied (it has no terminal) and the result says what was denied. Runs under
+/// `--profile workspace` with an `outside_sandbox` call — a sandboxed shell no longer
+/// asks there since slice 1 of `sandbox-auto-allow-shell` (`full` has nothing left to
+/// deny). The mutation (passing `--yes` always) lets the call run and the result has no
+/// `denied` line.
 #[tokio::test]
 async fn a_non_auto_parent_denies_the_childs_ask_and_says_so() {
     let server = MockServer::start(vec![
         tool_reply("p1", "subagent", r#"{"task":"ASK-TASK"}"#),
-        tool_reply("c1", "shell", r#"{"command":"echo SHOULD-NOT-RUN"}"#),
+        tool_reply(
+            "c1",
+            "shell",
+            r#"{"command":"echo SHOULD-NOT-RUN","outside_sandbox":true,"outside_sandbox_reason":"the test leaves the sandbox"}"#,
+        ),
         text_reply("CHILD-COULD-NOT"),
         text_reply("PARENT-SAW"),
     ])
@@ -499,6 +506,8 @@ async fn a_non_auto_parent_denies_the_childs_ask_and_says_so() {
             &server.base_url,
             "--workspace",
             &workspace,
+            "--profile",
+            "workspace",
             "-p",
             "go",
         ],
@@ -890,4 +899,107 @@ async fn a_cancelled_parent_turn_stops_the_childs_background_job() {
     assert!(!alive(job), "the job {job} outlived the cancelled turn");
     let (code, _, _) = run(parent).await;
     assert_ne!(code, 0, "a cancelled turn is not a clean exit");
+}
+
+/// Directory holding the real `cargo` binary: `rustup which cargo` resolves the active
+/// toolchain's binary, never the proxy. Used to aim a sandboxed shell at the real
+/// toolchain (see `a_non_auto_workspace_child_runs_a_sandboxed_shell`).
+fn real_toolchain_bin() -> Option<PathBuf> {
+    let output = std::process::Command::new("rustup")
+        .args(["which", "cargo"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let cargo = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    cargo.parent().map(Path::to_path_buf)
+}
+
+/// Slice 1 of `sandbox-auto-allow-shell`: a `general` child of a non-auto `workspace`
+/// parent runs a sandboxed shell with no approval at all — the tier's blanket `allow`
+/// answers it, so the headless child never meets the no-terminal denial. No extra
+/// wiring: the child inherits the tier (0043 1a) and builds the sandboxed profile.
+/// Before the slice the same call was denied; denying it again fails this test.
+///
+/// The child's `cargo check` must reach the real toolchain binary, not the rustup proxy:
+/// the proxy wants to create `$HOME/.rustup`, and the child's `HOME` is a scratch
+/// directory outside the workspace, which the sandbox denies. `PATH` is the only channel
+/// that reaches the sandboxed grandchild — the sandbox clears every other variable to
+/// its whitelist — so the toolchain directory goes first on `PATH`; setting
+/// `RUSTUP_HOME`/`CARGO_HOME` on the child would not survive into the sandbox.
+#[tokio::test]
+async fn a_non_auto_workspace_child_runs_a_sandboxed_shell() {
+    let server = MockServer::start(vec![
+        tool_reply(
+            "p1",
+            "subagent",
+            r#"{"agent":"general","task":"CHECK-TASK"}"#,
+        ),
+        tool_reply("c1", "shell", r#"{"command":"cargo check"}"#),
+        text_reply("CHILD-DONE"),
+        text_reply("PARENT-DONE"),
+    ])
+    .await;
+    let env = Env::new("child-shell");
+    let workspace = env.workspace.to_str().unwrap().to_owned();
+    // The real toolchain's `bin` directory, first on the child's `PATH` (see above).
+    // `None` keeps the inherited `PATH`: when `rustup` is absent the plain `cargo`
+    // on `PATH` is whatever the machine runs outside any sandbox too.
+    let mut extra: Vec<(&str, String)> = Vec::new();
+    if let Some(bin) = real_toolchain_bin() {
+        let mut paths = vec![bin];
+        if let Some(current) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&current));
+        }
+        if let Ok(joined) = std::env::join_paths(paths)
+            && let Some(joined) = joined.into_string().ok()
+        {
+            extra.push(("PATH", joined));
+        }
+    }
+    let (code, stdout, stderr) = run(spawn_parent_env(
+        &env,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            &workspace,
+            "--profile",
+            "workspace",
+            "--session-id",
+            "parent",
+            "-p",
+            "go",
+        ],
+        &extra,
+    ))
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("PARENT-DONE"), "{stdout}");
+    // The child's own follow-up request carries the shell result: it ran.
+    let index = child_request(&server, "CHECK-TASK");
+    let result = tool_contents(&server, index + 1);
+    assert!(
+        result.contains("exit code"),
+        "the child's shell must have run: {result}"
+    );
+    assert!(
+        !result.contains("denied"),
+        "nothing in the child's shell may be denied: {result}"
+    );
+    assert!(
+        !result.contains("no terminal to ask in"),
+        "the child must not have been asked: {result}"
+    );
+    // …and it stayed in the parent's tier.
+    let journals = child_journals(&env, "parent");
+    assert_eq!(journals.len(), 1, "{journals:?}");
+    assert_eq!(
+        created(&journals[0])["data"]["config_snapshot"]["access"],
+        "workspace",
+        "the child's SessionCreated records the parent's tier"
+    );
 }

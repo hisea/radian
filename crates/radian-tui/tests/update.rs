@@ -98,6 +98,79 @@ fn fork_is_refused_while_a_turn_runs() {
     );
 }
 
+/// `/new` ends the session when idle: no effect (leaving the loop is the execution), and
+/// the flags the loop reads to end this session and open the next.
+#[test]
+fn new_starts_a_new_session_when_idle() {
+    let mut app = App::new("m", "s");
+    let effects = submit(&mut app, "/new");
+    assert!(effects.is_empty(), "leaving needs no effect: {effects:?}");
+    assert!(app.new_session, "the loop must open a new session");
+    assert!(app.quit, "the loop must leave this session");
+    assert!(notices(&app).is_empty(), "{:?}", notices(&app));
+}
+
+/// `/new` while a turn runs is refused with a notice and the session is unchanged.
+#[test]
+fn new_is_refused_while_a_turn_runs() {
+    let mut app = App::new("m", "s");
+    app.session.projection.set_turn(TurnState::Running);
+    let effects = submit(&mut app, "/new");
+    assert!(
+        effects.is_empty(),
+        "no new session while running: {effects:?}"
+    );
+    assert!(!app.new_session && !app.quit, "the session is unchanged");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|note| note.contains("finish the current turn before starting a new session")),
+        "{:?}",
+        notices(&app)
+    );
+}
+
+/// `/new` while a background job runs is refused with a notice pointing to `/jobs kill`,
+/// and the session is unchanged.
+#[test]
+fn new_is_refused_while_a_background_job_runs() {
+    let mut app = App::new("m", "s");
+    app.update(Input::Runtime(
+        radian_session::RuntimeEvent::BackgroundJobStarted {
+            job_id: "job-1".to_owned(),
+            command: "sleep 60".to_owned(),
+            output: "available through job".to_owned(),
+        },
+    ));
+    let effects = submit(&mut app, "/new");
+    assert!(effects.is_empty(), "no new session with a job: {effects:?}");
+    assert!(!app.new_session && !app.quit, "the session is unchanged");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|note| note.contains("`/jobs kill`")),
+        "{:?}",
+        notices(&app)
+    );
+}
+
+/// `/new` after the session ended is refused (like `/fork`), and the session is unchanged.
+#[test]
+fn new_is_refused_after_the_session_ended() {
+    let mut app = App::new("m", "s");
+    app.session.session_ended = Some("the driver failed".to_owned());
+    let effects = submit(&mut app, "/new");
+    assert!(effects.is_empty(), "no new session when ended: {effects:?}");
+    assert!(!app.new_session && !app.quit, "the session is unchanged");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|note| note.contains("needs a live session")),
+        "{:?}",
+        notices(&app)
+    );
+}
+
 /// The result inputs: each one changes the state the way the loop's result used to.
 #[test]
 fn the_result_inputs_change_the_state() {
@@ -161,7 +234,9 @@ fn a_failed_turn_is_a_notice_and_an_overflow_adds_the_help() {
         message: "boom".into(),
     }));
     assert!(
-        notices(&app).iter().any(|note| note == "turn failed: boom"),
+        notices(&app)
+            .iter()
+            .any(|note| note.contains("turn failed: boom") && note.contains("/retry to resend")),
         "{:?}",
         notices(&app)
     );
@@ -510,7 +585,7 @@ fn typing_filters_the_slash_menu_and_resets_the_highlight() {
 #[test]
 fn escaping_the_trust_modal_untrusts_this_session_only() {
     let mut app = App::new("m", "s");
-    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"), None);
     assert!(app.has_modal());
     let effects = app.on_key(key(KeyCode::Esc)).effects;
     assert_eq!(
@@ -526,16 +601,17 @@ fn escaping_the_trust_modal_untrusts_this_session_only() {
         "Esc writes no trust.json: the next start asks again"
     );
 
-    // Enter takes the highlighted default: the **persistent** "do not trust this directory".
+    // Enter takes the highlighted default: the sandbox choice (trust this directory and
+    // remember `workspace` for the project). It is persistent, unlike Esc.
     let mut app = App::new("m", "s");
-    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"), None);
     assert_eq!(
         app.on_key(key(KeyCode::Enter)).effects,
         vec![Effect::SetTrust {
-            choice: radian_host::trust::Choice::UntrustHere
+            choice: radian_host::trust::Choice::TrustHereSandbox
         }]
     );
-    assert!(radian_host::trust::Choice::UntrustHere.persistent());
+    assert!(radian_host::trust::Choice::TrustHereSandbox.persistent());
 }
 
 /// Esc with an empty input and a running turn cancels it (README): the app-level effect.

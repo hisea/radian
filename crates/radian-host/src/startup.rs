@@ -15,7 +15,7 @@ use std::time::Duration;
 use agent_core::{ContextBudget, TurnOptions};
 use agent_extensions::McpServerConfig;
 use radian_permissions::{Preset, Profile};
-use radian_runtime::{BudgetFor, CompactionSettingsFor, ConfigQueue, ConfigSlot};
+use radian_runtime::{BudgetFor, CompactionSettingsFor, ConfigQueue, ConfigSlot, ModelRoute};
 use radian_sandbox::Sandbox;
 
 use crate::config::{Config, resolve_extra_paths};
@@ -211,6 +211,9 @@ pub struct SessionSettings {
     /// `[shell] auto_background_secs` (ADR 0037): a **foreground** `shell` call still
     /// running after this is adopted by the job registry in place. `None` disables adoption.
     pub shell_auto_background: Option<Duration>,
+    /// `[model.smol]` (ADR 0008 §1, ADR 0043 §1): the cheap route slot. `None` follows
+    /// the parent, exactly as `general` always does; today only `explore` reads it.
+    pub smol_route: Option<ModelRoute>,
     /// `[skills] extra_paths` (ADR 0025 slice 4), resolved against the config file's directory
     /// and the user's home.
     pub skills_extra_paths: Vec<PathBuf>,
@@ -220,6 +223,8 @@ pub struct SessionSettings {
     pub skills_disabled: Vec<String>,
     /// The memory injection configuration (ADR 0021).
     pub memory_injection: InjectionConfig,
+    /// The resolved `[hooks]` section (ADR 0045 slice A): user-level command hooks.
+    pub hooks: crate::config::HooksConfig,
 }
 
 impl SessionSettings {
@@ -261,6 +266,11 @@ impl SessionSettings {
             compaction_settings,
             compaction_settings_for: Some(compaction_settings_for),
             shell_auto_background: config.shell.auto_background_after(),
+            smol_route: config
+                .model
+                .smol
+                .as_ref()
+                .map(|smol| ModelRoute::new(&smol.provider, &smol.model)),
             skills_extra_paths: resolve_extra_paths(
                 &config.skills.extra_paths,
                 config.source.as_deref().and_then(Path::parent),
@@ -269,6 +279,7 @@ impl SessionSettings {
             skills_builtin: config.skills.builtin.unwrap_or(true),
             skills_disabled: config.skills.disabled.clone(),
             memory_injection: config.memory.injection(),
+            hooks: config.hooks.clone(),
         };
         (settings, notice)
     }
@@ -299,9 +310,14 @@ pub struct LeadSetup {
     /// Resolves a route's catalog prices from the warm local cache (ADR 0027).
     pub price_for: Option<RoutePrice>,
     pub servers: Vec<McpServerConfig>,
+    /// Where the MCP servers came from (`--mcp-config <FILE>`), for the inspector's mcp
+    /// page. `None` when no file was given.
+    pub mcp_config_path: Option<String>,
     /// `--system`/`--system-file`, already read: the fixed layer 1 (ADR 0036).
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
+    /// `C` (ADR 0018): the context window size for `/context`. `None` when unknown.
+    pub window_context: Option<u64>,
     pub sandbox: Option<Sandbox>,
     pub tier: Preset,
     pub profile: Profile,
@@ -346,8 +362,10 @@ impl LeadSetup {
             price_for: self.price_for,
             shell_auto_background: settings.shell_auto_background,
             servers: self.servers,
+            mcp_config_path: self.mcp_config_path,
             system_prompt: self.system_prompt,
             context_budget: self.context_budget,
+            window_context: self.window_context,
             auto_compact: settings.auto_compact,
             compaction_settings: settings.compaction_settings,
             compaction_settings_for: settings.compaction_settings_for,
@@ -365,6 +383,7 @@ impl LeadSetup {
             tools_allow: self.tools_allow,
             skills_allow: None,
             memory_injection: settings.memory_injection,
+            hooks: settings.hooks,
             trust: self.trust,
             resume: self.resume,
             config_snapshot: self.config_snapshot,

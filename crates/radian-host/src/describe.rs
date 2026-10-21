@@ -12,21 +12,17 @@ use radian_sandbox::{Sandbox, SandboxMode};
 /// two in the tree; a host may pass its own.
 #[derive(Debug, Clone, Copy)]
 pub struct Wording {
-    /// Appended to the `safe` label after "no command execution" (e.g. `, no MCP tools`).
-    pub safe_note: &'static str,
     /// Subject of the confined-mode sentence (e.g. `commands and built-in tools`).
     pub confined_subject: &'static str,
 }
 
 /// `agent-cli`'s wording: the line prompt has MCP tools, so it names them.
 pub const CLI_WORDING: Wording = Wording {
-    safe_note: ", no MCP tools",
     confined_subject: "commands and built-in tools",
 };
 
 /// `radian-tui`'s wording: the full-screen host talks about its shell.
 pub const TUI_WORDING: Wording = Wording {
-    safe_note: "",
     confined_subject: "shell and the built-in tools",
 };
 
@@ -50,15 +46,6 @@ pub fn describe(
     wording: Wording,
 ) -> (String, String) {
     match (mode, sandbox) {
-        (SandboxMode::Safe, _) => (
-            format!(
-                "safe (no sandbox needed: no command execution{})",
-                wording.safe_note
-            ),
-            "writes and command execution are denied; the read/list/git tools are confined to \
-             the workspace by the tools themselves"
-                .into(),
-        ),
         (SandboxMode::WorkspaceWrite, Some(sandbox)) if sandbox.backend_name() == "inherited" => (
             INHERITED_PROFILE_LINE.to_string(),
             INHERITED_FACTS.to_string(),
@@ -73,9 +60,10 @@ pub fn describe(
         ),
         (SandboxMode::FullAccess, _) => (
             // ADR 0043 decision 2: `full` is the built-in default now, so the line does not
-            // say "chosen explicitly".
-            "full".into(),
-            "no sandbox: commands can read and write anywhere you can, including the network"
+            // say "chosen explicitly". It names the whole deal: no sandbox, no prompts.
+            "full · no sandbox · no prompts".into(),
+            "no sandbox: commands can read and write anywhere you can, including the network \
+             · no prompts"
                 .into(),
         ),
         // Unreachable: an enforced mode always has a sandbox or the build failed.
@@ -115,11 +103,10 @@ fn workspace_sandbox_facts(wording: Wording, git_writable: bool) -> String {
 /// The startup summary's word for the sandbox. `workspace` names the **real** backend in
 /// plain words — `macOS sandbox` for `macos-seatbelt`, `Linux sandbox` for `linux-bwrap`, and
 /// the backend's own name for one it does not know — so it can never be read as "no sandbox".
-/// The exact backend name is still in the expanded `profile:` line. `safe` has nothing to
-/// sandbox (`no exec`: no command execution at all); `full` is `no sandbox`.
+/// The exact backend name is still in the expanded `profile:` line. `full` is
+/// `no sandbox · no prompts`.
 pub fn sandbox_word(mode: SandboxMode, backend: Option<&str>) -> String {
     match mode {
-        SandboxMode::Safe => "no exec".to_string(),
         SandboxMode::WorkspaceWrite => match backend {
             Some("macos-seatbelt") => "macOS sandbox".to_string(),
             Some("linux-bwrap") => "Linux sandbox".to_string(),
@@ -127,7 +114,7 @@ pub fn sandbox_word(mode: SandboxMode, backend: Option<&str>) -> String {
             Some(other) => other.to_string(),
             None => "sandbox missing".to_string(),
         },
-        SandboxMode::FullAccess => "no sandbox".to_string(),
+        SandboxMode::FullAccess => "no sandbox · no prompts".to_string(),
     }
 }
 
@@ -171,12 +158,26 @@ mod tests {
         );
     }
 
-    /// `safe` is "no exec" (there is no command execution to sandbox), `full` is
-    /// "no sandbox" (the built-in default since ADR 0043).
+    /// `workspace` means a sandbox, `full` is
+    /// "no sandbox · no prompts" (the built-in default since ADR 0043).
     #[test]
     fn the_summary_word_names_what_the_tier_means() {
-        assert_eq!(sandbox_word(SandboxMode::Safe, None), "no exec");
-        assert_eq!(sandbox_word(SandboxMode::FullAccess, None), "no sandbox");
+        assert_eq!(
+            sandbox_word(SandboxMode::FullAccess, None),
+            "no sandbox · no prompts"
+        );
+    }
+
+    /// The `full` startup lines say the whole deal up front: no sandbox, no prompts.
+    /// Dropping `no prompts` from either line fails this test.
+    #[test]
+    fn the_full_startup_lines_say_no_sandbox_no_prompts() {
+        let (line, facts) = describe(SandboxMode::FullAccess, None, TUI_WORDING);
+        assert_eq!(line, "full · no sandbox · no prompts");
+        assert!(
+            facts.contains("no sandbox:") && facts.contains("no prompts"),
+            "{facts}"
+        );
     }
 
     /// The facts sentence is printed as plain text by both hosts, so it carries no Markdown
@@ -285,10 +286,10 @@ mod tests {
             policy: &radian_sandbox::SandboxPolicy,
             program: &std::ffi::OsStr,
             args: &[std::ffi::OsString],
-        ) -> Result<std::process::Command, radian_sandbox::SandboxError> {
+        ) -> Result<radian_sandbox::SandboxCommand, radian_sandbox::SandboxError> {
             let mut command = std::process::Command::new(program);
             command.args(args).current_dir(&policy.workspace);
-            Ok(command)
+            Ok(radian_sandbox::SandboxCommand::new(command))
         }
 
         fn git_writable_except_exec(&self, _policy: &radian_sandbox::SandboxPolicy) -> bool {

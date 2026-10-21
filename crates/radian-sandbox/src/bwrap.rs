@@ -9,18 +9,31 @@
 //! so an escape attempt fails with a permission error rather than a missing path — the
 //! control in the harness proves the target really exists.
 //!
-//! Unix sockets are **not** restricted by this backend (the accepted gap, ADR 0016 revision
-//! 1 as decided for Linux): pathname sockets stay reachable through the shared read-only
-//! `--ro-bind / /`, and abstract sockets through the shared network namespace in the
-//! `workspace` tier (only `safe` unshares it). `[sandbox] allow_unix_sockets` therefore has
-//! no effect on Linux; only macOS's seatbelt backend reads it.
+//! The Linux backend: bubblewrap (`bwrap`) with a seccomp filter in the `workspace` tier.
+//!
+//! bubblewrap is the only backend that satisfies `.git` read-only inside a writable workspace
+//! (mount-level `--ro-bind` carve-outs; Landlock cannot express it — its rules are a union of
+//! allows). It needs an unprivileged user namespace or a setuid installation; when neither is
+//! available the probe fails and the mode is refused, never downgraded.
+//!
+//! The whole host filesystem is mounted read-only and the workspace is bound back writable,
+//! so an escape attempt fails with a permission error rather than a missing path — the
+//! control in the harness proves the target really exists.
+//!
+//! Unix sockets **are** restricted by this backend in the `workspace` tier (slice 0): a
+//! seccomp filter (`crate::seccomp`) denies `socket(AF_UNIX, …)` and `io_uring_setup` with
+//! `EPERM`, covering pathname and abstract sockets alike (both need `socket` first, and
+//! seccomp cannot see paths, so there is no per-path whitelist on Linux).
+//! `[sandbox] allow_unix_sockets` therefore still has no effect on Linux — only macOS's
+//! seatbelt backend reads it — and a non-empty list warns once at startup.
 
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
 use crate::error::{ProbeReport, SandboxError};
 use crate::policy::{GitAccess, SandboxMode, SandboxPolicy};
-use crate::{SandboxBackend, workspace_tmp};
+use crate::seccomp;
+use crate::{SandboxBackend, SandboxCommand, workspace_tmp};
 
 pub(crate) static BWRAP: Bwrap = Bwrap;
 
@@ -33,6 +46,16 @@ pub struct Bwrap;
 impl SandboxBackend for Bwrap {
     fn name(&self) -> &'static str {
         "linux-bwrap"
+    }
+
+    /// The Linux backend denies outbound Unix sockets in the `workspace` tier (slice 0): the
+    /// seccomp filter rejects `socket(AF_UNIX, …)` outright, so the `<runtime>` prompt layer
+    /// reports the deny through [`crate::Sandbox::restricts_unix_sockets`]. There is no
+    /// per-path whitelist on Linux — seccomp cannot see paths — so the sentence's whitelist
+    /// clause only ever names macOS-allowed sockets; a non-empty `allow_unix_sockets` warns
+    /// once at startup that it is ignored on Linux.
+    fn restricts_unix_sockets(&self, policy: &SandboxPolicy) -> bool {
+        policy.mode == SandboxMode::WorkspaceWrite
     }
 
     fn probe(&self) -> Result<ProbeReport, SandboxError> {
@@ -59,8 +82,8 @@ impl SandboxBackend for Bwrap {
             read_only: Vec::new(),
             git_access: GitAccess::default(),
             deny_read: Vec::new(),
-            // The probe policy only needs the workspace bind; the unix-socket whitelist is empty
-            // (the Linux backend does not restrict unix sockets, see the module docs).
+            // The probe policy has an empty whitelist; on Linux the key is ignored anyway
+            // (the seccomp filter denies every Unix socket, so there is nothing to allow).
             allow_unix_sockets: Vec::new(),
             allow_env: vec!["PATH".into()],
         };
@@ -112,9 +135,20 @@ impl SandboxBackend for Bwrap {
         policy: &SandboxPolicy,
         program: &OsStr,
         args: &[OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         let mut command = Command::new(BWRAP_BIN);
         command.arg("--die-with-parent").arg("--new-session");
+        // Slice 0: the seccomp filter fd, owned by the returned command (see
+        // `crate::seccomp::pipe_for_program` for the lifetime guarantee). No `pre_exec`
+        // hook: the shell tool registers its own `pre_exec` for `setsid` afterwards,
+        // which would replace one set here (measured: the second hook wins).
+        let mut seccomp_filter = None;
+        if policy.mode == SandboxMode::WorkspaceWrite {
+            // Deny `socket(AF_UNIX, …)` and `io_uring_setup` with `EPERM`.
+            let (filter, number) = seccomp::pipe_for_program()?;
+            command.arg("--seccomp").arg(number.to_string());
+            seccomp_filter = Some(filter);
+        }
         if policy.network {
             // Keep the network namespace; isolate everything else.
             command.args([
@@ -181,7 +215,10 @@ impl SandboxBackend for Bwrap {
             }
         }
         command.arg("--").arg(program).args(args);
-        Ok(command)
+        match seccomp_filter {
+            Some(filter) => Ok(SandboxCommand::with_seccomp_filter(command, filter)),
+            None => Ok(SandboxCommand::with_cleared_child_env(command)),
+        }
     }
 }
 
@@ -199,13 +236,13 @@ fn shell_quote(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
 
-    /// The Linux backend never claims to restrict Unix sockets (the accepted gap): pathname
-    /// sockets stay reachable through the shared `--ro-bind / /`, and abstract sockets
-    /// through the shared network namespace in `workspace` — so the `<runtime>` layer must
-    /// carry no deny sentence there. The old tier-driven flag said otherwise on this
-    /// machine.
+    /// The Linux backend restricts Unix sockets in the `workspace` tier (slice 0): the
+    /// seccomp filter denies `socket(AF_UNIX, …)` outright. The old tier-driven claim said
+    /// otherwise; a filter that denies every Unix socket must be reported as a deny, or the
+    /// `<runtime>` layer would hide it from the model. Removing the `--seccomp` install above
+    /// (or the `AF_UNIX` rule in the filter) breaks the escape matrix's `unix_socket` cases.
     #[test]
-    fn the_linux_backend_does_not_restrict_unix_sockets() {
+    fn the_linux_backend_restricts_unix_sockets_in_the_workspace_tier() {
         let ws = std::env::temp_dir().join(format!("radian-bwrap-sockets-{}", std::process::id()));
         std::fs::create_dir_all(&ws).unwrap();
         let ws = std::fs::canonicalize(&ws).unwrap();
@@ -213,11 +250,37 @@ mod tests {
             let policy = SandboxPolicy::new(SandboxMode::WorkspaceWrite, &ws)
                 .unwrap()
                 .network(network);
-            assert!(
-                !BWRAP.restricts_unix_sockets(&policy),
-                "network = {network}"
-            );
+            assert!(BWRAP.restricts_unix_sockets(&policy), "network = {network}");
+            // The deny is installed for the tier regardless of the network flag: with the
+            // network off, pathname sockets would otherwise stay reachable through the
+            // shared read-only root.
+            let command = BWRAP
+                .command(
+                    &policy,
+                    std::ffi::OsStr::new("/bin/true"),
+                    &[] as &[std::ffi::OsString],
+                )
+                .unwrap();
+            let argv: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let seccomp_at = argv.iter().position(|arg| arg == "--seccomp");
+            assert!(seccomp_at.is_some(), "workspace gets --seccomp: {argv:?}");
         }
+        let full = SandboxPolicy::new(SandboxMode::FullAccess, &ws).unwrap();
+        assert!(!BWRAP.restricts_unix_sockets(&full));
+        let command = BWRAP
+            .command(
+                &full,
+                std::ffi::OsStr::new("/bin/true"),
+                &[] as &[std::ffi::OsString],
+            )
+            .unwrap();
+        assert!(
+            !command.get_args().any(|arg| arg == "--seccomp"),
+            "full runs no sandbox and gets no filter"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

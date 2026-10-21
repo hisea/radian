@@ -14,15 +14,36 @@ use tokio::sync::{Notify, mpsc};
 
 use super::approval::{JournalAudit, TerminalApprover};
 use super::events::spawn_signals;
+use super::jsonl;
 use super::profile;
 use super::redact::redact;
 use super::trust::trust_prompt;
-use super::turn::{Run, interactive_loop, one_shot};
+use super::turn::{LoopDone, Run, interactive_loop, one_shot};
 use super::ui::{LineHub, Ui};
 use super::{Cli, Setup, SetupError};
 
-pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
+pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> {
     let interactive = cli.prompt.is_none();
+    // `-p -` reads the prompt from stdin to EOF before anything else starts: the line hub
+    // below takes stdin as soon as it spawns, so reading here first is the only way the
+    // prompt gets the whole pipe.
+    if cli.prompt.as_deref() == Some("-") {
+        let prompt = tokio::task::spawn_blocking(|| jsonl::read_prompt(std::io::stdin()))
+            .await
+            .map_err(|error| SetupError(format!("cannot read the prompt from stdin: {error}")))?
+            .map_err(|error| SetupError(format!("cannot read the prompt from stdin: {error}")))?;
+        cli.prompt = Some(prompt);
+    }
+    let jsonl_mode = cli.output == Some(super::jsonl::OutputMode::Jsonl);
+    // The `--output jsonl` stdout pipeline: durable journal bytes and live delta lines meet
+    // on one channel and one task owns stdout, so a blocked pipe never stalls a journal
+    // write. Created before the session so the UI can hold the live sender from the start.
+    let (jsonl_tx, jsonl_rx) = if jsonl_mode {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     let lines = LineHub::spawn();
     // One-shot mode with no terminal on stdin has nobody to ask; interactive mode reads its
     // answers from the same line hub as the prompt loop.
@@ -31,11 +52,13 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // The profile and the sandbox: what may run, and what the OS enforces. `full` is only
     // reachable because the user named it; a failed probe is an error, never a fallback. All
     // of this runs **before** the session file is created (dogfooding D2).
+    //
+    // Slice 1 of `sandbox-auto-allow-shell`: the sandbox is built first and the profile
+    // after it, so the `workspace` rule is static for the session — `allow` inside an
+    // enforced sandbox (`sandbox.as_ref()`: a probed backend, or `inherited`), `ask`
+    // without one. Approval still cannot widen the sandbox (ADR 0012 P1).
     let profile_arg = setup.profile;
     let workspace_path = setup.workspace.clone();
-    let permission_profile =
-        profile::build_profile(profile_arg, &workspace_path, &cli.allow_shell_command)?
-            .with_approval(setup.approval.policy);
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
     // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
     // paths that exist) can hide them.
@@ -67,6 +90,13 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         &setup.allow_unix_sockets,
         &setup.allow_env,
     )?;
+    let permission_profile = profile::build_profile(
+        profile_arg,
+        &workspace_path,
+        &cli.allow_shell_command,
+        sandbox.as_ref(),
+    )?
+    .with_approval(setup.approval.policy);
 
     // The approver and the audit sink. An `auto` policy (ADR 0026 D9, from `--yes`/`--approval
     // auto`/config/resume) answers every `ask` before any approver is consulted, so the
@@ -83,7 +113,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         let tx = audit_tx.clone();
         Arc::new(move |_journal| JournalAudit::new(tx.clone()) as Arc<dyn AuditSink>)
     };
-    let ui = Arc::new(Ui::new(setup.max_model_calls));
+    let ui = Arc::new(Ui::new(setup.max_model_calls, jsonl_tx.clone()));
     let projection = Arc::new(radian_host::SessionProjection::new());
     let signals = spawn_signals();
     let driver_ended = Arc::new(Notify::new());
@@ -153,7 +183,9 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     }
     let mut trust_choice = None;
     if trust_setup.needs_ask {
-        if let Some(choice) = trust_prompt(&lines, &workspace_path).await {
+        // Slice B2: the question lists the project servers that trust would load.
+        let preview = radian_host::preview_project(&workspace_path);
+        if let Some(choice) = trust_prompt(&lines, &workspace_path, preview.as_ref()).await {
             trust_setup.resolved =
                 radian_host::trust::resolved_for(choice, &workspace_path).map_err(SetupError)?;
             trust_setup.needs_ask = false;
@@ -168,6 +200,28 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     }
     eprintln!("{}", radian_host::trust::status_line(&trust_setup));
 
+    // Slice B2: the project `.mcp.json` joins the user's sources now that trust is resolved
+    // — trusted (or `--trust`) loads it, untrusted starts no process. The user's own
+    // precedence stands (the command line over `[mcp]`, both over the project file), and
+    // the `[mcp] …` lines print here, before any session file exists.
+    let (project, mut project_lines) = radian_host::load_project(
+        &workspace_path,
+        trust_setup.resolved.decision.as_bool(),
+        cli.no_config_mcp,
+    );
+    // The question just listed these servers: only the non-interactive default restates it.
+    if trust_choice.is_some() {
+        project_lines.retain(|line| !line.contains("not loaded (untrusted)"));
+    }
+    for line in &project_lines {
+        eprintln!("[mcp] {line}");
+    }
+    let merged = radian_host::merge_project_mcp(project, setup.mcp_user, setup.mcp_file);
+    for warning in &merged.warnings {
+        eprintln!("[mcp] {warning}");
+    }
+    let servers = merged.servers;
+
     // ADR 0043 decision 1a: the child `radian exec` this session may start. The model, the
     // provider and the (generic-provider) endpoint are the parent's resolved ones; the key is
     // not passed — the child reads the same `auth.json`. `--config` is forwarded only when it
@@ -176,6 +230,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         executable: std::env::current_exe().ok(),
         provider: setup.provider_id.clone(),
         model: setup.model_name.clone(),
+        smol: setup.settings.smol_route.clone(),
         base_url: setup.base_url.clone(),
         config: cli.config.clone(),
         headers: setup.headers.clone(),
@@ -190,7 +245,7 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         .parent
         .as_ref()
         .map(|id| radian_session::ForkParent::subagent(id.clone(), cli.parent_seq));
-    // The hidden `--tools` list is a physical unmount (the `explore` child's four read tools).
+    // The hidden `--tools` list is a physical unmount (the `explore` child's three read tools).
     let tools_allow = cli.tools.as_deref().map(|raw| {
         raw.split(',')
             .map(str::trim)
@@ -216,9 +271,11 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             config_slot: setup.config_slot,
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
-            servers: setup.servers,
+            servers,
+            mcp_config_path: setup.mcp_config.clone(),
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
+            window_context: setup.window.context,
             sandbox,
             tier: profile_arg.preset(),
             profile: permission_profile,
@@ -261,6 +318,8 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             },
             before_driver: None,
             memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
+            hooks_warning: Arc::new(|message: &str| eprintln!("[hooks] {message}")),
+            wake_warning: Arc::new(|message: &str| eprintln!("[wake] {message}")),
         },
     )
     .await
@@ -384,6 +443,41 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // The approval prompt and the prompt loop share stdin. While approval may read, the loop
     // must not compete for a line; with `--yes` (or nobody to ask) it may.
     ui.set_approval_may_read(can_ask && !cli.yes);
+    // `--output jsonl`, installed once the journal exists: the tee returns the prefix length,
+    // the prefix is read from the file (the lines written before the tee, e.g.
+    // `SessionCreated`), and the printer owns stdout from here on. Because install and every
+    // write take the same lock, no line is missed or printed twice.
+    let (jsonl_printer, jsonl_prefix_len) = if jsonl_mode {
+        let tx = jsonl_tx
+            .clone()
+            .expect("the jsonl channel exists in jsonl mode");
+        let prefix_len = session.journal().set_tee(tx) as usize;
+        let bytes = std::fs::read(session.journal_path()).map_err(|error| {
+            SetupError(format!(
+                "cannot read the session file {}: {error}",
+                session.journal_path().display()
+            ))
+        })?;
+        let end = prefix_len.min(bytes.len());
+        let prefix = bytes[..end]
+            .split_inclusive(|byte: &u8| *byte == b'\n')
+            .map(|line| line.to_vec())
+            .collect::<Vec<_>>();
+        (
+            Some(jsonl::spawn_printer(
+                prefix,
+                jsonl_rx.expect("the jsonl channel exists in jsonl mode"),
+            )),
+            prefix_len as u64,
+        )
+    } else {
+        (None, 0)
+    };
+    // What the `Result` record reports. Read before the drops below: the projection lives
+    // with the session.
+    let jsonl_session_id = session.id().as_str().to_owned();
+    let jsonl_journal_path = session.journal_path().to_path_buf();
+    let jsonl_cost_estimated = session.projection().read().cost_estimated();
     let mut run = Run {
         inbox: Arc::clone(session.inbox()),
         hooks: Arc::clone(session.hooks()),
@@ -393,17 +487,45 @@ pub(crate) async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         session: Arc::clone(&session),
         secrets: setup.secrets.clone(),
     };
-    let code = if let Some(prompt) = cli.prompt {
+    // Count started-but-unresolved turns for `exec -p`'s exit decision (see
+    // `CommandHooks::note_turn_started`): every turn start raises it synchronously,
+    // `on_turn_end` resolves it, so the run never decides in the gap between
+    // `RunFinished` emission and the Stop verdict.
+    let command_hooks = run.session.command_hooks();
+    run.ui.set_turn_started_hook(Arc::new(move || {
+        command_hooks.note_turn_started();
+    }));
+    let done: LoopDone = if let Some(prompt) = cli.prompt {
         one_shot(&mut run, prompt).await
     } else {
         interactive_loop(&mut run, &lines).await
     };
     ui.end_of_turn();
     // Flush the audit: dropping the session drops the agent and the hooks, and dropping the
-    // last sender closes the channel; the task writes what is left before it ends.
+    // last sender closes the channel; the task writes what is left before it ends. The UI is
+    // dropped here too: in `--output jsonl` mode it holds a live-line sender, and the
+    // printer below only ends once every sender is gone.
     drop(run);
+    drop(ui);
     drop(session);
     drop(audit_tx);
     let _ = audit_task.await;
-    Ok(code)
+    // The `Result` line goes after the last durable line: every tee sender is dropped by now
+    // (the UI with its run, the journal with its session and the flushed audit task), so
+    // awaiting the printer drains the whole stream before the summary is folded.
+    if let Some(printer) = jsonl_printer {
+        drop(jsonl_tx);
+        let _ = printer.await;
+        let summary = jsonl::summarize_journal(&jsonl_journal_path);
+        let run_summary = jsonl::summarize_journal_from(&jsonl_journal_path, jsonl_prefix_len);
+        let line = jsonl::result_line(
+            &jsonl_session_id,
+            &done.end,
+            &summary,
+            &run_summary,
+            jsonl_cost_estimated,
+        );
+        let _ = std::io::Write::write_all(&mut std::io::stdout().lock(), &line);
+    }
+    Ok(done.code)
 }

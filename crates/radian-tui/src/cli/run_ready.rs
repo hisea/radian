@@ -6,9 +6,18 @@
 
 use super::*;
 
+/// What `wire_post_open` returns: the two usage gates for the event loop, plus every
+/// background producer this session started, so the host can abort them when the session
+/// ends (`/new` must not leak the old session's ticks and notices into the next one).
+pub(super) struct PostOpen {
+    pub(super) usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    pub(super) chatgpt_usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    pub(super) background: Vec<tokio::task::JoinHandle<()>>,
+}
+
 /// `run()`'s post-open wiring: records the command line's overrides, mirrors the live
 /// policy/tier/price into the app, and spawns the background contributors and usage
-/// gates. Returns the two usage gates for the event loop.
+/// gates. Returns the two usage gates for the event loop, plus the background producers.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn wire_post_open(
     cli: &Cli,
@@ -17,6 +26,7 @@ pub(super) fn wire_post_open(
     tx: &Sender<UiEvent>,
     session: &radian_host::LocalSession,
     app: &mut App,
+    carry: Option<&super::run_resolve::SessionCarry>,
     workspace_path: &Path,
     provider_name: &str,
     model_name: &str,
@@ -33,10 +43,7 @@ pub(super) fn wire_post_open(
     command_specs: Vec<radian_host::CommandSpec>,
     session_id: &str,
     startup_log: &mut StartupLog,
-) -> (
-    Option<tokio::sync::watch::Sender<bool>>,
-    Option<tokio::sync::watch::Sender<bool>>,
-) {
+) -> PostOpen {
     // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
     // override is recorded so the journal stays the authority for the next resume.
     if cli.resume.is_some()
@@ -80,6 +87,25 @@ pub(super) fn wire_post_open(
             .config_queue()
             .push(serde_json::json!({ "access": tier.as_str() }));
     }
+    // `/new` carries the previous session's effective route, thinking level and tier:
+    // they are this session's explicit startup choices, so they are recorded like the
+    // command line's own backfills above (D8/D9/C8) — the journal stays the authority for
+    // the next resume. The driver applies them at the first turn boundary (and journals
+    // them even when the session ends before any turn), so the record is durable.
+    if let Some(carry) = carry {
+        if let Some((provider, model)) = &carry.route {
+            session.queue_config(radian_host::ModelRoute::new(provider, model).to_value());
+            startup_log.line(format!(
+                "radian: the new session carries over {provider}/{model} from the previous one"
+            ));
+        }
+        if let Some(thinking) = &carry.thinking {
+            session.queue_config(serde_json::json!({ "thinking": thinking }));
+        }
+        if let Some(tier) = carry.tier {
+            session.queue_config(serde_json::json!({ "access": tier.as_str() }));
+        }
+    }
     // The status bar mirrors the live policy from the first frame; the switch below is the
     // only other writer.
     app.set_auto(startup_approval.policy == radian_permissions::ApprovalPolicy::Auto);
@@ -87,7 +113,7 @@ pub(super) fn wire_post_open(
     // remembered record, the `(project)` marker. The host set the projection's tier when it
     // opened the session; the marker is added here.
     app.set_access_source(access_source);
-    app.set_tier(format!("{}{}", tier.as_str(), access_source.suffix()));
+    app.set_tier(radian_tui::profile::footer_tier(tier, access_source));
     // ADR 0016: `/access` repeats the startup line's own words for an
     // inherited sandbox (and says nothing extra for any other tier).
     if inherited_sandbox {
@@ -131,12 +157,13 @@ pub(super) fn wire_post_open(
             let _ = contrib_tx.send(UiEvent::Command(AppInput::SessionDone(vec![notice])));
         }
     });
-    radian_host::spawn_contributor(
+    let mut background = Vec::new();
+    background.push(radian_host::spawn_contributor(
         runtime.handle(),
         Arc::new(radian_host::GitContributor::new(workspace_path)),
         Arc::clone(&contributions),
         Arc::clone(&on_tick),
-    );
+    ));
     // ADR 0027 C4 + revision 5 + revision 14 decision 3: the provider's usage source comes
     // from its descriptor (`usage = Endpoint`). It is spawned only when a key is stored, but it
     // refreshes (and its row shows) only while the **current** model's provider is
@@ -153,7 +180,7 @@ pub(super) fn wire_post_open(
             .map(|(provider, _)| provider)
             .unwrap_or_else(|| provider_name.to_owned());
         let (gate_tx, gate_rx) = tokio::sync::watch::channel(startup_provider == "opencode-go");
-        radian_host::spawn_usage_gated(
+        background.push(radian_host::spawn_usage_gated(
             runtime.handle(),
             (endpoint.build)(&radian_host::UsageArgs {
                 url: endpoint.url.to_owned(),
@@ -164,7 +191,7 @@ pub(super) fn wire_post_open(
             Arc::clone(&contributions),
             Arc::clone(&on_tick),
             gate_rx,
-        );
+        ));
         Some(gate_tx)
     } else {
         None
@@ -182,7 +209,7 @@ pub(super) fn wire_post_open(
             .unwrap_or_else(|| provider_name.to_owned());
         let (gate_tx, gate_rx) =
             tokio::sync::watch::channel(chatgpt_usage_active(&startup_provider));
-        radian_host::spawn_usage_gated(
+        background.push(radian_host::spawn_usage_gated(
             runtime.handle(),
             (endpoint.build)(&radian_host::UsageArgs {
                 url: endpoint.url.to_owned(),
@@ -193,7 +220,7 @@ pub(super) fn wire_post_open(
             Arc::clone(&contributions),
             Arc::clone(&on_tick),
             gate_rx,
-        );
+        ));
         Some(gate_tx)
     } else {
         None
@@ -216,22 +243,26 @@ pub(super) fn wire_post_open(
             Some(workspace_path.to_string_lossy().into_owned()),
         ));
         if once {
-            radian_host::spawn_contributor_once(
+            background.push(radian_host::spawn_contributor_once(
                 runtime.handle(),
                 contributor,
                 Arc::clone(&contributions),
                 Arc::clone(&on_tick),
-            );
+            ));
         } else {
-            radian_host::spawn_contributor(
+            background.push(radian_host::spawn_contributor(
                 runtime.handle(),
                 contributor,
                 Arc::clone(&contributions),
                 Arc::clone(&on_tick),
-            );
+            ));
         }
     }
-    (usage_gate, chatgpt_usage_gate)
+    PostOpen {
+        usage_gate,
+        chatgpt_usage_gate,
+        background,
+    }
 }
 
 /// Everything the event loop runs with: the entered terminal, the session's memory
@@ -242,6 +273,8 @@ pub(super) struct TerminalReady {
     pub(super) terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
     pub(super) memory_service: Option<radian_host::memory::MemoryService>,
     pub(super) history: Vec<agent_core::Message>,
+    /// The queue-change forwarder for this session, aborted when the session ends.
+    pub(super) queue_wake: tokio::task::JoinHandle<()>,
 }
 
 /// `run()`'s terminal phase: enters the terminal on a plain run (the `--pick` path
@@ -274,7 +307,7 @@ pub(super) fn enter_terminal_and_history(
     // ADR 0023 U7: the queue's changes are a wake-up source. A push, an answer, an abort and
     // a waiter that gave up all bump it, so the UI re-reads the head and the modal matches the
     // queue even when nothing else happened.
-    {
+    let queue_wake = {
         let mut changes = session.queue().subscribe();
         let pending_tx = tx.clone();
         runtime.spawn(async move {
@@ -283,8 +316,8 @@ pub(super) fn enter_terminal_and_history(
                     break;
                 }
             }
-        });
-    }
+        })
+    };
     if cli.panic_after_enter {
         panic!("radian: panic path test");
     }
@@ -355,5 +388,6 @@ pub(super) fn enter_terminal_and_history(
         terminal,
         memory_service,
         history,
+        queue_wake,
     })
 }

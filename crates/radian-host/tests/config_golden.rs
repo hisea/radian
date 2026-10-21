@@ -185,6 +185,11 @@ fn edge_cases() -> Vec<(String, String)> {
             "permissions.profile.unknown",
             "schema_version = 1\n[permissions]\nprofile = \"future\"\n",
         ),
+        // The removed tier is unknown too: it takes the same refusal branch as any typo.
+        (
+            "permissions.profile.removed_safe",
+            "schema_version = 1\n[permissions]\nprofile = \"safe\"\n",
+        ),
         (
             "permissions.profile.unknown_read_only",
             "schema_version = 99\n[permissions]\nprofile = \"future\"\n",
@@ -347,6 +352,35 @@ fn edge_cases() -> Vec<(String, String)> {
             "memory.injection.addition_budget.wrong_type",
             "schema_version = 1\n[memory.injection]\naddition_budget = \"x\"\n",
         ),
+        // ---- hooks (ADR 0045 slice A) ----
+        (
+            "hooks.section_not_a_table",
+            "schema_version = 1\nhooks = 3\n",
+        ),
+        (
+            "hooks.event_not_a_list",
+            "schema_version = 1\n[hooks]\nPreToolUse = 3\n",
+        ),
+        (
+            "hooks.unknown_event",
+            "schema_version = 1\n[[hooks.SessionStart]]\nmatcher = \"read\"\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\n",
+        ),
+        (
+            "hooks.ok",
+            "schema_version = 1\n[[hooks.PreToolUse]]\nmatcher = \"shell\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\ntimeout = 5\n",
+        ),
+        (
+            "hooks.non_command_type",
+            "schema_version = 1\n[[hooks.PreToolUse]]\nmatcher = \"read\"\n[[hooks.PreToolUse.hooks]]\ntype = \"http\"\ncommand = \"https://example.com\"\n",
+        ),
+        (
+            "hooks.async_handler",
+            "schema_version = 1\n[[hooks.PostToolUse]]\nmatcher = \"read\"\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\nasync = true\n",
+        ),
+        (
+            "hooks.bad_timeout",
+            "schema_version = 1\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\ntimeout = \"x\"\n",
+        ),
         // ---- shell: a bad value is skipped, a non-table is ignored ----
         (
             "shell.desktop",
@@ -367,6 +401,29 @@ fn edge_cases() -> Vec<(String, String)> {
         (
             "shell.section_not_a_table",
             "schema_version = 1\nshell = 3\n",
+        ),
+        // ---- model.smol (ADR 0008 §1, ADR 0043 §1): carried when both keys are set,
+        // warned and ignored when half-set; unknown keys and wrong types are skipped ----
+        (
+            "model.smol.ok",
+            "schema_version = 1\n[model.smol]\nprovider = \"cheap\"\nmodel = \"m-c\"\n",
+        ),
+        (
+            "model.smol.half",
+            "schema_version = 1\n[model.smol]\nprovider = \"cheap\"\n",
+        ),
+        (
+            "model.smol.wrong_type",
+            "schema_version = 1\n[model.smol]\nprovider = 3\nmodel = \"m-c\"\n",
+        ),
+        (
+            "model.smol.not_a_table",
+            "schema_version = 1\n[model]\nsmol = 3\n",
+        ),
+        // `[subagent.explore]` was never released: now an unknown top-level section.
+        (
+            "unknown.subagent_explore",
+            "schema_version = 1\n[subagent.explore]\nprovider = \"cheap\"\nmodel = \"m-c\"\n",
         ),
         // ---- tui ----
         ("tui.section_not_a_table", "schema_version = 1\ntui = 3\n"),
@@ -524,6 +581,25 @@ fn edge_cases() -> Vec<(String, String)> {
             "providers.reasoning_replay.empty",
             "schema_version = 1\n[providers.corp]\nkind = \"anthropic\"\nbase_url = \"https://x\"\nreasoning_replay = \"\"\n",
         ),
+        // ---- mcp (ADR 0008 §8) ----
+        (
+            "mcp.servers_form",
+            "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n",
+        ),
+        (
+            "mcp.mcp_servers_form",
+            "schema_version = 1\n[mcp.mcpServers.a]\ncommand = \"true\"\n",
+        ),
+        (
+            "mcp.both_forms",
+            "schema_version = 1\n[[mcp.servers]]\nid = \"a\"\ncommand = \"true\"\n[mcp.mcpServers]\n",
+        ),
+        // `unknown.mcp` above already covers the neither case (`[mcp]` with no form).
+        (
+            "mcp.remote_skipped",
+            "schema_version = 1\n[mcp.mcpServers.web]\ntype = \"http\"\nurl = \"https://example.com/mcp\"\n[mcp.mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n",
+        ),
+        ("mcp.not_a_table", "schema_version = 1\nmcp = 3\n"),
         // ---- secrets (§4.2 / §4.1) ----
         (
             "secret.lookalike",

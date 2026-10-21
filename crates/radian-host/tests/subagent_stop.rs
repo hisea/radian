@@ -136,7 +136,7 @@ async fn fixture(label: &str) -> Fixture {
     let pid = dir.join("grandchild.pid");
     let child = stub(&dir, &leader, &pid);
     let permissions = Arc::new(radian_permissions::PermissionHooks::new(
-        Profile::safe(&workspace)
+        Profile::workspace_write(&workspace)
             .unwrap()
             .with_approval(ApprovalPolicy::Auto),
         None,

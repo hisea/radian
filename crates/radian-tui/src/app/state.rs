@@ -133,6 +133,10 @@ pub struct Entry {
     /// the global fold says, which is how a search hit opens exactly one folded entry.
     /// Cleared by the next global fold toggle. Part of the layout cache key.
     pub fold_override: Option<bool>,
+    /// True for the wake-budget notice entry of the current degrade burst. `update`
+    /// rewrites this entry (not a new line per degrade) while the burst lasts; the next
+    /// turn start clears the session's index, leaving the line as plain history.
+    pub wake_notice: bool,
     /// When the live reasoning channel's **first delta** arrived (ADR 0028
     /// decision 4). Live-only: never journaled, so a resumed entry has `None` and shows no
     /// duration. The pair with [`Entry::reasoning_ended`] is the entry's own wall clock; the
@@ -180,6 +184,7 @@ impl Entry {
             card: crate::blocks::Card::None,
             error_code: None,
             fold_override: None,
+            wake_notice: false,
             reasoning_started: None,
             reasoning_ended: None,
             block_cache: None,
@@ -316,6 +321,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::Form(_)
         | Input::PickerKey(_)
         | Input::PickerClose
+        | Input::InspectorKey(_)
         | Input::LoginKey(_)
         | Input::ConfirmLogout(_)
         | Input::TrustMove(_)
@@ -327,6 +333,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::MouseUp { .. } => true,
         Input::QuitDeadline
         | Input::ForkDeadline
+        | Input::LoopDeadline
         | Input::Resize { .. }
         | Input::Stream(_)
         | Input::Event(_)
@@ -342,10 +349,13 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::ModelChecked { .. }
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
+        | Input::WakeBudgetNotice(_)
         | Input::TrustResolved(_)
         | Input::AccessApplied { .. }
         | Input::CommandRefused(_)
         | Input::PickerOpened(_)
+        | Input::InspectorOpened { .. }
+        | Input::InspectorRefreshed(_)
         | Input::LoginVerified { .. }
         | Input::LoginSaved { .. }
         | Input::LoginOAuthUrlReady { .. }

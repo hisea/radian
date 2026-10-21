@@ -7,7 +7,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use radian_sandbox::{
-    NoSandbox, ProbeReport, Sandbox, SandboxBackend, SandboxError, SandboxMode, SandboxPolicy,
+    NoSandbox, ProbeReport, Sandbox, SandboxBackend, SandboxCommand, SandboxError, SandboxMode,
+    SandboxPolicy,
 };
 
 struct TempDir(std::path::PathBuf);
@@ -55,7 +56,7 @@ impl SandboxBackend for Unavailable {
         _policy: &SandboxPolicy,
         _program: &OsStr,
         _args: &[std::ffi::OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         unreachable!("an unavailable backend is never asked for a command")
     }
 }
@@ -80,7 +81,7 @@ impl SandboxBackend for ProbeFails {
         _policy: &SandboxPolicy,
         _program: &OsStr,
         _args: &[std::ffi::OsString],
-    ) -> Result<Command, SandboxError> {
+    ) -> Result<SandboxCommand, SandboxError> {
         unreachable!("a failing probe is never followed by a command")
     }
 }
@@ -123,13 +124,13 @@ fn full_access_is_transparent_and_unprobed() {
         probes: AtomicUsize::new(0),
     }));
     // Enforced modes fail...
-    assert!(Sandbox::from_backend(backend, SandboxMode::Safe, dir.path()).is_err());
+    assert!(Sandbox::from_backend(backend, SandboxMode::WorkspaceWrite, dir.path()).is_err());
     // ... FullAccess does not even need the backend's probe.
     let sandbox = Sandbox::from_backend(backend, SandboxMode::FullAccess, dir.path()).unwrap();
     assert_eq!(
         backend.probes.load(Ordering::SeqCst),
         1,
-        "only the Safe call probed"
+        "only the WorkspaceWrite call probed"
     );
     let cmd = sandbox.command("echo", ["hi"]).unwrap();
     assert_eq!(cmd.get_program(), OsStr::new("echo"));

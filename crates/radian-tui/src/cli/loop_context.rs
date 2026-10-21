@@ -39,10 +39,13 @@ pub(super) struct LoopContext<'a> {
     /// How a selection copy reaches the clipboard (`tui.clipboard`), read once from the app
     /// when the context is built: the mode cannot change mid-run.
     pub(super) clipboard: ClipboardMode,
+    /// Whether a `Bell` already rang in this frame: bell-class events that share a frame
+    /// merge into one ring, and the loop re-arms the flag for the next frame.
+    pub(super) bell_rang: bool,
     /// The herdr reporter (ADR 0034), when running inside a herdr pane.
     pub(super) herdr: Option<HerdrReporter>,
     /// The sandbox the user's `!`/`!!` commands run in (ADR 0033): the coding tools' own,
-    /// cloned. `None` on the `safe` tier (no shell).
+    /// cloned. `None` when the session mounts no `shell`.
     pub(super) bash_sandbox: Option<radian_sandbox::Sandbox>,
     /// The running `!` command's cancellation token (Esc, ADR 0033).
     pub(super) bash_cancel: Option<agent_core::CancellationToken>,
@@ -133,12 +136,18 @@ impl LoopContext<'_> {
                 app.quit = true;
                 return false;
             }
-            UiEvent::DriverStopped(end) => {
+            UiEvent::DriverStopped { session_id, end } => {
                 // The driver stopped: a fatal error (ADR 0001: the journal may be broken, so
                 // no record is written), a panic, or a graceful close. The session is over.
                 // The TUI leaves `Running`, names the reason in the status bar and refuses
                 // `/fork` (ADR 0022 §1's "idle session" no longer exists). It stays so the
                 // reason is readable; the user quits with the ordinary keys.
+                // An end for another session is not ours: `/new` ends one session and opens
+                // the next on the same channel, and the old session's graceful close lands
+                // here after the new loop started. Ignore it, so it never reads as ours.
+                if session_id != self.session.id().as_str() {
+                    return false;
+                }
                 let reason = match &end {
                     radian_host::DriverEnd::Ok => "the driver stopped".to_string(),
                     radian_host::DriverEnd::Failed(error) => format!("driver failed: {error}"),
@@ -194,15 +203,21 @@ impl LoopContext<'_> {
                 let tx = self.tx.clone();
                 let sandbox = self.bash_sandbox.clone();
                 let workspace = self.workspace.to_path_buf();
+                // ADR 0039 decision 5: a `!` command hardens git exactly like the `shell`
+                // tool when the project is not trusted. Read at call time: `/trust` can
+                // change the decision mid-session.
+                let harden_git = !self.session.trust().resolved.decision.as_bool();
                 let cancel = agent_core::CancellationToken::new();
                 self.bash_cancel = Some(cancel.clone());
                 self.runtime.spawn(async move {
                     let result = match sandbox {
                         Some(sandbox) => {
-                            radian_coding::run_user_bash(&workspace, &sandbox, &command, &cancel)
-                                .await
+                            radian_coding::run_user_bash(
+                                &workspace, &sandbox, &command, harden_git, &cancel,
+                            )
+                            .await
                         }
-                        None => Err("the `safe` tier has no shell (ADR 0012); `!` needs a \
+                        None => Err("this session has no shell; `!` needs a \
                                      shell-capable tier"
                             .to_owned()),
                     };
@@ -358,21 +373,14 @@ impl LoopContext<'_> {
                             .session
                             .model_route()
                             .unwrap_or_else(|| self.startup_route.clone());
-                        model_route_candidates(
-                            Some(current_provider.as_str()),
-                            &self.config_providers,
+                        mark_current_route(
+                            model_route_candidates(
+                                Some(current_provider.as_str()),
+                                &self.config_providers,
+                            ),
+                            &current_provider,
+                            &current_model,
                         )
-                        .into_iter()
-                        .map(|mut candidate| {
-                            let is_current = candidate.insert
-                                == format!("{current_provider}/{current_model}")
-                                || candidate.insert == format!("{current_provider}/");
-                            if is_current {
-                                candidate.current = true;
-                            }
-                            candidate
-                        })
-                        .collect()
                     }
                     radian_tui::command::Fetch::ThinkingLevels { .. } => {
                         // D11: only the levels the current model supports. Each row names the
@@ -472,6 +480,13 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            // `/context`: read-only (journal + stored layers, no inbox, no driver),
+            // so it works mid-turn and never interrupts it.
+            Effect::Context => {
+                let notices = self.session.context_report();
+                self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
             // ADR 0037 decision 4: `/jobs` lists the running background jobs, or stops
             // one/all. The registry lives in the host, so the loop reads it here and shows
             // notices.
@@ -501,6 +516,21 @@ impl LoopContext<'_> {
                     }
                 };
                 self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
+            // The inspector overlay: gather the snapshot (jobs, tools, mcp, hooks) and
+            // hand it to `update`, which stays pure. Reads live in the loop (ADR 0023 U3).
+            Effect::OpenInspector { page } => {
+                let snapshot = Self::inspector_snapshot(self.session);
+                self.send(AppInput::InspectorOpened {
+                    requested: page,
+                    snapshot,
+                });
+                Ok(())
+            }
+            Effect::RefreshInspector => {
+                let snapshot = Self::inspector_snapshot(self.session);
+                self.send(AppInput::InspectorRefreshed(snapshot));
                 Ok(())
             }
             // ADR 0031 T3: apply the startup trust choice through the facade (it writes
@@ -685,7 +715,7 @@ impl LoopContext<'_> {
                     .unwrap_or(radian_host::Protocol::OpenAiCompatible);
                 let tx = self.tx.clone();
                 self.runtime.spawn(async move {
-                    let result = radian_host::login::verify(protocol, &base_url, &key).await;
+                    let result = radian_host::login::verify(&name, protocol, &base_url, &key).await;
                     let _ = tx.send(UiEvent::Command(AppInput::LoginVerified { name, result }));
                 });
                 Ok(())
@@ -814,6 +844,16 @@ impl LoopContext<'_> {
                 self.send(AppInput::ClipboardDone(notice));
                 Ok(())
             }
+            // One `\x07` per frame: bell-class events that share a frame (an approval
+            // arriving as a turn ends) ring once — the first `Bell` of the frame wins and
+            // the loop re-arms the flag for the next one.
+            Effect::Bell => {
+                if !self.bell_rang {
+                    self.bell_rang = true;
+                    write_bel();
+                }
+                Ok(())
+            }
         }
     }
 
@@ -833,5 +873,39 @@ impl LoopContext<'_> {
     /// Sends an effect's result back as an event, so it is handled like every other input.
     pub(super) fn send(&self, input: AppInput) {
         let _ = self.tx.send(UiEvent::Command(input));
+    }
+
+    /// Gathers the inspector's snapshot from the facade: jobs with their tails, the
+    /// model-visible tools, the MCP servers with
+    /// their tool counts, and the hooks. The tail is in-memory (the ring), so this is
+    /// not I/O; it still runs in the loop so `update` stays pure (ADR 0023 U3).
+    fn inspector_snapshot(
+        session: &Arc<dyn radian_host::SessionFacade>,
+    ) -> radian_tui::inspector::InspectorSnapshot {
+        let jobs = session.jobs();
+        let tails: Vec<(String, radian_coding::JobState, String)> = jobs
+            .iter()
+            .map(|job| {
+                let (state, tail) = session
+                    .job_tail(&job.id, 4096)
+                    .unwrap_or((job.state.clone(), String::new()));
+                (job.id.clone(), state, tail)
+            })
+            .collect();
+        let specs = session.tool_specs();
+        let mcp_servers = session.mcp_servers();
+        let mcp_ids: Vec<String> = mcp_servers.iter().map(|server| server.id.clone()).collect();
+        let tool_names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
+        radian_tui::inspector::InspectorSnapshot {
+            jobs: radian_tui::inspector::job_entries(&jobs, &tails),
+            tools: radian_tui::inspector::tool_entries(&specs, &mcp_ids),
+            mcp: radian_tui::inspector::mcp_entries(
+                &mcp_servers,
+                &tool_names,
+                session.mcp_config_path().as_deref(),
+            ),
+            hooks: radian_tui::inspector::hook_entries(&session.hooks_config()),
+            mcp_config_path: session.mcp_config_path(),
+        }
     }
 }

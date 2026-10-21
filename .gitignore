@@ -15,3 +15,7 @@ spikes/*/target/
 # Python bytecode caches from the helper scripts (crates/*/scripts/); never tracked.
 __pycache__/
 *.pyc
+
+# Local release bundles (scripts/release.sh): never tracked.
+/dist/
+/target-release/

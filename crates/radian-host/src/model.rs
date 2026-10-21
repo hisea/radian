@@ -172,10 +172,9 @@ pub enum HostModel {
 impl Model for HostModel {
     async fn complete(
         &self,
-        mut request: ModelRequest,
+        request: ModelRequest,
         cx: ModelContext<'_>,
     ) -> Result<ModelResponse, ModelError> {
-        strip_renamed_tool_aliases(&mut request);
         match self {
             Self::OpenAi(model) => model.complete(request, cx).await,
             Self::Anthropic(model) => model.complete(request, cx).await,
@@ -183,21 +182,6 @@ impl Model for HostModel {
             Self::Responses(model) => model.complete(request, cx).await,
         }
     }
-}
-
-/// Removes the one-version alias specs (ADR 0043 decision 3) from every request, so the model
-/// is never offered `git_status`, `job_output`, `job_list`, `job_kill` or
-/// `shell_output`.
-///
-/// The alias stays in the provider's `tool_specs()` because `agent_core`'s preflight refuses a
-/// call whose name is not registered **before** any host hook or the provider runs, and a call
-/// to an old name must still reach the provider (which answers it and says it was renamed). This
-/// is the only boundary at which "registered but not advertised" can be expressed without an
-/// `agent-core` API change.
-fn strip_renamed_tool_aliases(request: &mut ModelRequest) {
-    request
-        .tools
-        .retain(|spec| radian_permissions::canonical_tool_name(&spec.name) == spec.name);
 }
 
 /// The `chatgpt` descriptor's model (ADR 0026). Unlike the other two
@@ -599,43 +583,6 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// ADR 0043 decision 3: the renamed tool's old name is never advertised, whatever the
-    /// provider. The alias stays registered in the provider so Core's preflight accepts the
-    /// call.
-    #[test]
-    fn the_renamed_tool_alias_is_stripped_from_every_request() {
-        let spec = |name: &str| agent_core::ToolSpec {
-            name: name.to_owned(),
-            description: String::new(),
-            input_schema: serde_json::json!({"type": "object"}),
-            concurrency: agent_core::ToolConcurrency::Shared,
-        };
-        let mut request = ModelRequest {
-            system_prompt: None,
-            messages: Vec::new(),
-            tools: vec![
-                spec("read"),
-                spec("git_status"),
-                spec("git_diff"),
-                spec("memory_search"),
-                spec("shell"),
-                spec("job"),
-                spec("job_output"),
-                spec("job_list"),
-                spec("job_kill"),
-                spec("shell_output"),
-            ],
-            settings: serde_json::json!({}),
-        };
-        strip_renamed_tool_aliases(&mut request);
-        let names: Vec<&str> = request
-            .tools
-            .iter()
-            .map(|spec| spec.name.as_str())
-            .collect();
-        assert_eq!(names, ["read", "git_diff", "memory_search", "shell", "job"]);
-    }
 
     #[test]
     fn anthropic_only_flags_are_refused_for_openai_compatible() {

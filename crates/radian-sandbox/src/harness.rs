@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::policy::{SandboxMode, SandboxPolicy};
-use crate::{Sandbox, SandboxError};
+use crate::{Sandbox, SandboxCommand, SandboxError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
@@ -62,52 +62,33 @@ impl Case {
         }
     }
 
-    /// Whether this case is one of the two Unix-socket denial cases Linux cannot enforce
-    /// (the accepted gap, decision 4): bwrap reaches pathname sockets
-    /// through the shared root in both tiers, so on `linux-bwrap` they are reported as a
-    /// known limitation rather than a regression. Every other case — and these two cases
-    /// on any other backend — stays strict.
-    pub fn is_accepted_linux_limit(&self) -> bool {
-        self.group == "unix_socket"
-            && matches!(self.name.as_str(), "workspace_denied" | "safe_denied")
-    }
-
-    /// The reason reported with a [`Verdict::KnownLimit`].
-    pub fn known_limit_reason(&self) -> &'static str {
-        "bwrap does not restrict Unix sockets (accepted gap, decision 4)"
-    }
-
     /// Whether this case was skipped for this machine (see [`Self::skip`]).
     pub fn skipped(&self) -> bool {
         self.skip.is_some()
     }
 
-    /// The verdict under `backend`: a skipped case is [`Verdict::Skip`] on every backend —
-    /// without a working control it proves nothing, so it never counts as a failure. A
-    /// passing case is [`Verdict::Pass`]; one of the two accepted Linux limits is
-    /// [`Verdict::KnownLimit`] on `linux-bwrap` (and still [`Verdict::Fail`] anywhere
-    /// else, so macOS stays strict); anything else that did not pass is [`Verdict::Fail`].
-    pub fn verdict(&self, backend: &str) -> Verdict {
+    /// The verdict: a skipped case is [`Verdict::Skip`] — without a working control it
+    /// proves nothing, so it never counts as a failure. Anything else is [`Verdict::Pass`]
+    /// or [`Verdict::Fail`]. (Slice 0 closed the old Linux Unix-socket known limit: the
+    /// seccomp filter denies every Unix socket, so the denial cases must pass like any
+    /// other case. There is no per-backend exception left.)
+    pub fn verdict(&self) -> Verdict {
         if self.skipped() {
             Verdict::Skip
         } else if self.passed() {
             Verdict::Pass
-        } else if backend == "linux-bwrap" && self.is_accepted_linux_limit() {
-            Verdict::KnownLimit
         } else {
             Verdict::Fail
         }
     }
 }
 
-/// What one matrix case counts as under the backend that ran it: a pass, a failure, a
-/// documented, accepted limitation (neither a pass nor a failure), or a skip (no working
+/// What one matrix case counts as: a pass, a failure, or a skip (no working
 /// control, so it proves nothing and never counts as a failure either).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Pass,
     Fail,
-    KnownLimit,
     Skip,
 }
 
@@ -120,36 +101,24 @@ pub struct Matrix {
 }
 
 impl Matrix {
-    /// The matrix passes when no case fails: a [`Verdict::KnownLimit`] is an expected,
-    /// documented limitation, and a [`Verdict::Skip`] has no working control — neither is
-    /// a regression and neither is a pass.
+    /// The matrix passes when no case fails: a [`Verdict::Skip`] has no working control,
+    /// so it is never a failure and never a pass.
     pub fn passed(&self) -> bool {
-        self.cases
-            .iter()
-            .all(|c| c.verdict(&self.backend) != Verdict::Fail)
+        self.cases.iter().all(|c| c.verdict() != Verdict::Fail)
     }
 
     pub fn failures(&self) -> Vec<&Case> {
         self.cases
             .iter()
-            .filter(|c| c.verdict(&self.backend) == Verdict::Fail)
+            .filter(|c| c.verdict() == Verdict::Fail)
             .collect()
     }
 
-    /// Cases reported as a known limitation under the backend that ran the matrix.
-    pub fn known_limits(&self) -> Vec<&Case> {
-        self.cases
-            .iter()
-            .filter(|c| c.verdict(&self.backend) == Verdict::KnownLimit)
-            .collect()
-    }
-
-    /// Cases skipped on this machine (no working control) under the backend that ran the
-    /// matrix. Like [`Self::known_limits`], never a failure and never a pass.
+    /// Cases skipped on this machine (no working control). Never a failure and never a pass.
     pub fn skipped(&self) -> Vec<&Case> {
         self.cases
             .iter()
-            .filter(|c| c.verdict(&self.backend) == Verdict::Skip)
+            .filter(|c| c.verdict() == Verdict::Skip)
             .collect()
     }
 
@@ -167,10 +136,9 @@ impl Matrix {
                 "control_succeeded": c.control.succeeded,
                 "control_detail": c.control.detail,
                 "passed": c.passed(),
-                "verdict": match c.verdict(&self.backend) { Verdict::Pass => "PASS", Verdict::Fail => "FAIL", Verdict::KnownLimit => "KNOWN-LIMIT", Verdict::Skip => "SKIP" },
+                "verdict": match c.verdict() { Verdict::Pass => "PASS", Verdict::Fail => "FAIL", Verdict::Skip => "SKIP" },
                 "skipped": c.skipped(),
                 "skip": c.skip,
-                "known_limit": match c.verdict(&self.backend) { Verdict::KnownLimit => json!(c.known_limit_reason()), _ => Value::Null },
                 "note": c.note,
             })).collect::<Vec<_>>(),
             "orphans": self.orphans,
@@ -184,10 +152,9 @@ impl Matrix {
             "group", "case", "expect", "sandbox", "control", "verdict"
         ));
         for c in &self.cases {
-            let verdict = match c.verdict(&self.backend) {
+            let verdict = match c.verdict() {
                 Verdict::Pass => "PASS".to_string(),
                 Verdict::Fail => "FAIL".to_string(),
-                Verdict::KnownLimit => format!("KNOWN-LIMIT: {}", c.known_limit_reason()),
                 Verdict::Skip => "SKIP".to_string(),
             };
             out.push_str(&format!(
@@ -213,10 +180,9 @@ impl Matrix {
             ));
         }
         out.push_str(&format!(
-            "\n{} cases, {} failed, {} known-limit, {} skipped\n\norphan check:\n{}\n",
+            "\n{} cases, {} failed, {} skipped\n\norphan check:\n{}\n",
             self.cases.len(),
             self.failures().len(),
-            self.known_limits().len(),
             skipped.len(),
             self.orphans
         ));
@@ -313,9 +279,8 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     let inside_policy =
         radian_deny(SandboxPolicy::workspace_write(&ws)?).deny_read(&inside_sessions);
     let denied_inside = Sandbox::from_policy(inside_policy)?;
-    // ADR 0016: the network cases are asserted against `safe` (off) and `workspace` (on),
-    // so the rig needs both enforced sandboxes as well as the transparent control.
-    let safe = Sandbox::from_policy(radian_deny(SandboxPolicy::safe(&ws)?))?;
+    // ADR 0016: the network cases are asserted against `workspace` (on),
+    // so the rig needs the enforced sandbox as well as the transparent control.
     // ADR 0016: a listener outside the workspace, and a `workspace` sandbox that
     // whitelists exactly that socket. The listener stays bound (connect fills its backlog).
     // The AF_UNIX path limit (~104 bytes) is why this lives under `/tmp` and not the test
@@ -328,6 +293,18 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     ));
     let _unix_listener = std::os::unix::net::UnixListener::bind(&short)?;
     let unix_listener_path = std::fs::canonicalize(&short)?;
+    // Slice 0: an abstract-namespace listener too (Linux only: macOS has no abstract
+    // namespace, so the case below is recorded only where the control can connect).
+    // The seccomp filter denies `socket(AF_UNIX, …)` before any connect, pathname and
+    // abstract alike.
+    #[cfg(target_os = "linux")]
+    let (abstract_name, _abstract_listener) = {
+        use std::os::linux::net::SocketAddrExt;
+        let name = format!("radian-esc-{}-{}", std::process::id(), unix_socket_seq());
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())?;
+        let listener = std::os::unix::net::UnixListener::bind_addr(&addr)?;
+        (name, listener)
+    };
     let whitelisted = Sandbox::from_policy(
         radian_deny(SandboxPolicy::workspace_write(&ws)?).allow_unix_socket(&unix_listener_path),
     )?;
@@ -352,8 +329,19 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     };
     rig.escape_writes(&sandbox, &control);
     rig.symlink_escapes(&sandbox, &control);
-    rig.network(&safe, &sandbox, &control);
-    rig.unix_socket(&safe, &sandbox, &whitelisted, &control, &unix_listener_path);
+    rig.network(&sandbox, &control);
+    // The abstract listener binds only on Linux; elsewhere there is no case for it.
+    #[cfg(target_os = "linux")]
+    let abstract_name: Option<&str> = Some(abstract_name.as_str());
+    #[cfg(not(target_os = "linux"))]
+    let abstract_name: Option<&str> = None;
+    rig.unix_socket(
+        &sandbox,
+        &whitelisted,
+        &control,
+        &unix_listener_path,
+        abstract_name,
+    );
     rig.pty_ok(&sandbox, &control);
     rig.tiocsti_outside_terminal(&sandbox, &control);
     rig.environment(&sandbox, &control, &secret_name, &secret_value);
@@ -475,28 +463,12 @@ impl Rig {
         );
     }
 
-    fn network(&mut self, safe: &Sandbox, workspace: &Sandbox, control: &Sandbox) {
+    fn network(&mut self, workspace: &Sandbox, control: &Sandbox) {
         let connect_script = |port: u16| {
             format!(
                 "python3 -c 'import socket,sys; s=socket.create_connection((\"127.0.0.1\",{port}),2); s.close(); sys.exit(0)'"
             )
         };
-        // `safe` still has no network: the control connects to a listener this test owns.
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
-        let port = listener.local_addr().unwrap().port();
-        let script = connect_script(port);
-        let sb = run_shell(safe, &script);
-        let ct = run_shell(control, &script);
-        drop(listener);
-        self.record(
-            "network_safe",
-            "connect_local_port",
-            Expect::MustFail,
-            sb,
-            ct,
-            "safe has no network; the control connects to a listener this test owns",
-        );
-
         // `workspace` (ADR 0016) can connect to loopback, bind/listen, and reach out.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
         let port = listener.local_addr().unwrap().port();
@@ -530,22 +502,25 @@ impl Rig {
         );
     }
 
-    /// ADR 0016: the `workspace` tier denies outbound Unix sockets except the
-    /// whitelist; `safe` (no network) denies all of them. DNS still resolves through the
-    /// always-allowed mDNSResponder socket.
+    /// Slice 0: the `workspace` tier denies **every** Unix socket on Linux — the seccomp
+    /// filter rejects `socket(AF_UNIX, …)` before any connect, pathname and abstract alike,
+    /// and seccomp cannot see paths so the whitelist is ignored there (it warns once at
+    /// startup). macOS seatbelt keeps its path whitelist unchanged. DNS still resolves
+    /// (mDNSResponder stays allowed on macOS; on Linux glibc falls back off the denied
+    /// socket).
     fn unix_socket(
         &mut self,
-        safe: &Sandbox,
         workspace: &Sandbox,
         whitelisted: &Sandbox,
         control: &Sandbox,
         sock: &Path,
+        abstract_name: Option<&str>,
     ) {
         let connect = format!(
             "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect({:?}); s.close(); sys.exit(0)'",
             sock.to_string_lossy()
         );
-        // `workspace`: the socket is not whitelisted, so the connect is denied.
+        // `workspace`: the socket is denied (on Linux by the seccomp filter).
         self.sh_case(
             workspace,
             control,
@@ -554,24 +529,39 @@ impl Rig {
             Expect::MustFail,
             &connect,
         );
-        // The same socket in `allow_unix_sockets` connects (the control for the fix).
-        self.sh_case(
-            whitelisted,
-            control,
-            "unix_socket",
-            "whitelisted_allowed",
-            Expect::MustSucceed,
-            &connect,
-        );
-        // `safe` has no network at all.
-        self.sh_case(
-            safe,
-            control,
-            "unix_socket",
-            "safe_denied",
-            Expect::MustFail,
-            &connect,
-        );
+        // The abstract namespace: the same deny, through an abstract listener (Linux only —
+        // macOS has no abstract namespace, so no control could connect there).
+        if let Some(name) = abstract_name {
+            let connect_abstract = format!(
+                "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(\"\\0{name}\"); s.close(); sys.exit(0)'"
+            );
+            self.sh_case(
+                workspace,
+                control,
+                "unix_socket",
+                "abstract_denied",
+                Expect::MustFail,
+                &connect_abstract,
+            );
+        }
+        // The same socket in `allow_unix_sockets`: honored on macOS (the control for the
+        // fix), ignored on Linux where the filter denies it anyway.
+        let (name, expect, note) = if workspace.backend_name() == "linux-bwrap" {
+            (
+                "whitelisted_denied",
+                Expect::MustFail,
+                "Linux ignores allow_unix_sockets: seccomp cannot whitelist by path",
+            )
+        } else {
+            (
+                "whitelisted_allowed",
+                Expect::MustSucceed,
+                "the control for the fix",
+            )
+        };
+        let sb = run_shell(whitelisted, &connect);
+        let ct = run_shell(control, &connect);
+        self.record("unix_socket", name, expect, sb, ct, note);
         // DNS resolution uses mDNSResponder, which stays allowed when the network is on.
         self.sh_case(
             workspace,
@@ -1214,7 +1204,7 @@ impl Drop for OutsidePty {
     }
 }
 
-fn run_outcome(mut command: Command) -> Outcome {
+fn run_outcome(mut command: SandboxCommand) -> Outcome {
     match command.output() {
         Ok(output) => outcome_from(output),
         Err(e) => Outcome {
@@ -1544,8 +1534,9 @@ pub fn startup_overhead(n: usize) -> Result<Overhead, SandboxError> {
 mod tests {
     use super::*;
 
-    /// A Unix-socket denial case whose sandbox connected (the Linux shape: the socket is
-    /// reachable, the control confirms the listener is sound).
+    /// A Unix-socket case whose sandbox connected (the old Linux shape: the socket was
+    /// reachable, the control confirms the listener is sound). After slice 0 this is an
+    /// escape on every backend: the seccomp filter must have denied the `socket` call.
     fn connected_unix_case(name: &str) -> Case {
         Case {
             group: "unix_socket",
@@ -1564,63 +1555,72 @@ mod tests {
         }
     }
 
-    /// The two denial cases are a known limitation on Linux (neither PASS nor FAIL, with
-    /// the reason), and stay strict failures on macOS: a FAIL must still be possible there.
-    /// `workspace_denied` is shown; `safe_denied` takes the same branch by name.
-    #[test]
-    fn the_two_unix_socket_denials_are_a_known_limit_on_linux_and_fail_on_macos() {
-        for name in ["workspace_denied", "safe_denied"] {
-            let case = connected_unix_case(name);
-            assert!(!case.passed(), "{name}");
-            assert_eq!(case.verdict("linux-bwrap"), Verdict::KnownLimit, "{name}");
-            assert_eq!(case.verdict("macos-seatbelt"), Verdict::Fail, "{name}");
-            assert!(
-                !case.known_limit_reason().is_empty(),
-                "a KNOWN-LIMIT carries its reason: {name}"
-            );
-        }
+    /// A Unix-socket denial case that behaved (the slice-0 shape: the sandbox was denied,
+    /// the control connected).
+    fn denied_unix_case(name: &str) -> Case {
+        let mut case = connected_unix_case(name);
+        case.sandbox = Outcome {
+            succeeded: false,
+            detail: "denied".into(),
+        };
+        case
     }
 
-    /// Only the two denial cases take the branch: the whitelisted/dns siblings and every
-    /// other group fail on Linux exactly as before.
+    /// Slice 0 closed the known limit: a denial case that behaved passes on every
+    /// backend, and one whose sandbox connected fails on every backend (a FAIL is still
+    /// possible, so an escape cannot hide behind a limit).
     #[test]
-    fn only_the_two_denial_cases_are_a_known_limit() {
+    fn the_unix_socket_denial_passes_and_an_escape_fails_on_every_backend() {
+        let denied = denied_unix_case("workspace_denied");
+        assert!(denied.passed());
+        assert_eq!(denied.verdict(), Verdict::Pass);
+
+        let escaped = connected_unix_case("workspace_denied");
+        assert!(!escaped.passed());
+        assert_eq!(escaped.verdict(), Verdict::Fail);
+    }
+
+    /// Sibling cases keep their verdicts: a passing sibling passes, and any other group
+    /// still fails exactly as before.
+    #[test]
+    fn sibling_cases_keep_their_verdicts() {
         let mut other = connected_unix_case("whitelisted_allowed");
         other.expect = Expect::MustSucceed;
         assert!(other.passed());
-        assert_eq!(other.verdict("linux-bwrap"), Verdict::Pass);
+        assert_eq!(other.verdict(), Verdict::Pass);
 
         let denied_write = Case {
             group: "escape_write",
             ..connected_unix_case("outside_absolute")
         };
         assert!(!denied_write.passed());
-        assert_eq!(denied_write.verdict("linux-bwrap"), Verdict::Fail);
+        assert_eq!(denied_write.verdict(), Verdict::Fail);
     }
 
-    /// A matrix whose only non-pass is an accepted Linux limit still passes on Linux and
-    /// fails on macOS; a real failure fails on both.
+    /// A matrix with only passing cases passes; one escape fails it. There is no
+    /// backend-dependent exception left.
     #[test]
-    fn the_matrix_verdict_follows_the_backend() {
+    fn the_matrix_has_no_backend_exception_left() {
         let matrix = Matrix {
+            backend: "linux-bwrap".to_string(),
+            probe: "test".to_string(),
+            cases: vec![denied_unix_case("workspace_denied")],
+            orphans: String::new(),
+            root: std::env::temp_dir(),
+        };
+        assert!(matrix.passed());
+        assert!(matrix.failures().is_empty());
+        assert!(!matrix.render_text().contains("KNOWN-LIMIT"));
+
+        let escaping = Matrix {
             backend: "linux-bwrap".to_string(),
             probe: "test".to_string(),
             cases: vec![connected_unix_case("workspace_denied")],
             orphans: String::new(),
             root: std::env::temp_dir(),
         };
-        assert!(matrix.passed());
-        assert!(matrix.failures().is_empty());
-        assert_eq!(matrix.known_limits().len(), 1);
-        assert!(matrix.render_text().contains("KNOWN-LIMIT"),);
-
-        let macos = Matrix {
-            backend: "macos-seatbelt".to_string(),
-            ..matrix
-        };
-        assert!(!macos.passed());
-        assert_eq!(macos.failures().len(), 1);
-        assert!(macos.known_limits().is_empty());
+        assert!(!escaping.passed());
+        assert_eq!(escaping.failures().len(), 1);
     }
 }
 
@@ -1693,14 +1693,12 @@ mod tiocsti_verdict_tests {
         );
     }
 
-    /// A skipped case reports SKIP (with its own reason) on every backend, side by side
-    /// with the KNOWN-LIMIT verdict: neither counts as a failure, and a case that is
-    /// neither still reports FAIL.
+    /// A skipped case reports SKIP (with its own reason): it never counts as a failure,
+    /// and a case that is neither skipped nor passing still reports FAIL.
     #[test]
-    fn a_skipped_case_reports_skip_on_every_backend() {
+    fn a_skipped_case_reports_skip() {
         let skipped = case(false, false);
-        assert_eq!(skipped.verdict("linux-bwrap"), Verdict::Skip);
-        assert_eq!(skipped.verdict("macos-seatbelt"), Verdict::Skip);
+        assert_eq!(skipped.verdict(), Verdict::Skip);
         let matrix = Matrix {
             backend: "linux-bwrap".to_string(),
             probe: "test".to_string(),
@@ -1710,7 +1708,6 @@ mod tiocsti_verdict_tests {
         };
         assert!(matrix.passed());
         assert!(matrix.failures().is_empty());
-        assert!(matrix.known_limits().is_empty());
         assert_eq!(matrix.skipped().len(), 1);
         let text = matrix.render_text();
         assert!(text.contains("SKIP"), "{text}");

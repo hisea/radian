@@ -25,7 +25,7 @@ pub struct SandboxSlot {
 }
 
 impl SandboxSlot {
-    /// A slot with no sandbox: the `safe` tier, or a host whose tools never run a command.
+    /// A slot with no sandbox: a host whose tools never run a command.
     pub fn empty() -> Self {
         Self::default()
     }
@@ -35,7 +35,7 @@ impl SandboxSlot {
         Self::from_option(Some(sandbox))
     }
 
-    /// A slot from an optional sandbox (`None` is the `safe` tier's `build_sandbox` result).
+    /// A slot from an optional sandbox (`None` means no command execution).
     pub fn from_option(sandbox: Option<Sandbox>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(sandbox.map(Arc::new))),
@@ -51,7 +51,7 @@ impl SandboxSlot {
             .clone()
     }
 
-    /// Replaces the sandbox. `None` is the `safe` tier (no shell). The next call reads the
+    /// Replaces the sandbox. `None` means no shell. The next call reads the
     /// new value; a call already in flight keeps the `Arc` it cloned.
     pub fn set(&self, sandbox: Option<Sandbox>) {
         *self

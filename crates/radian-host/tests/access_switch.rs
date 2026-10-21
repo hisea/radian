@@ -2,10 +2,11 @@
 //! read (`resumed_access`).
 //!
 //! `set_access` rebuilds the profile and the sandbox through the host's `AccessBuilder`. These
-//! tests use a builder that returns a transparent `full` sandbox, `None` for `safe`, and an
-//! error for `workspace` (a simulated probe failure), so all three paths run without a real
-//! backend. The switch must apply to the live hooks and the projection, queue one
-//! `ConfigChanged`, and a failed probe must refuse and change nothing.
+//! tests use a builder that returns a transparent `full` sandbox and a `workspace`
+//! profile over a transparent stand-in sandbox (or a simulated probe failure), so the swap
+//! and the refusal paths run without a real backend. The switch must apply to the live
+//! hooks and the projection, queue one `ConfigChanged`, and a failed probe must refuse
+//! and change nothing.
 
 use std::sync::Arc;
 
@@ -67,13 +68,25 @@ fn model(session_id: &str) -> radian_host::SwitchableModel {
     )
 }
 
-/// A builder that simulates the three tiers: `safe` has no sandbox, `full` is transparent, and
-/// `workspace` fails its probe.
-fn switchable_builder(workspace: std::path::PathBuf) -> radian_host::AccessBuilder {
+/// A builder that simulates the two tiers: `workspace` and `full` both succeed (the
+/// `workspace` sandbox is a transparent stand-in — this test is about the profile,
+/// projection and queue swap, not enforcement), and `workspace` can be made to fail its
+/// probe.
+fn switchable_builder(
+    workspace: std::path::PathBuf,
+    fail_workspace: bool,
+) -> radian_host::AccessBuilder {
     Arc::new(move |preset: Preset| match preset {
-        Preset::Safe => Ok(radian_host::AccessParts {
-            profile: Profile::safe(&workspace).map_err(|e| e.to_string())?,
-            sandbox: None,
+        Preset::WorkspaceWrite if fail_workspace => {
+            Err("the `seatbelt` sandbox backend is unavailable or failed its probe".to_string())
+        }
+        Preset::WorkspaceWrite => Ok(radian_host::AccessParts {
+            profile: Profile::workspace_write(&workspace).map_err(|e| e.to_string())?,
+            // A transparent stand-in: the swap mechanics, not enforcement, are under test.
+            sandbox: Some(
+                radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::FullAccess, &workspace)
+                    .map_err(|e| e.to_string())?,
+            ),
         }),
         Preset::FullAccess => Ok(radian_host::AccessParts {
             profile: Profile::full_access(&workspace).map_err(|e| e.to_string())?,
@@ -82,14 +95,19 @@ fn switchable_builder(workspace: std::path::PathBuf) -> radian_host::AccessBuild
                     .map_err(|e| e.to_string())?,
             ),
         }),
-        Preset::WorkspaceWrite => {
-            Err("the `seatbelt` sandbox backend is unavailable or failed its probe".to_string())
-        }
     })
 }
 
-/// Opens a session that starts on `safe` and can switch tiers.
+/// Opens a session that starts on `full` and can switch tiers.
 async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession>) {
+    open_switchable_inner(label, false).await
+}
+
+/// Opens a session whose `workspace` probe fails (for the refusal test).
+async fn open_switchable_inner(
+    label: &str,
+    fail_workspace: bool,
+) -> (Scratch, Arc<radian_host::LocalSession>) {
     let scratch = Scratch::new(label);
     let workspace = scratch.0.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -107,8 +125,10 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             price_for: None,
             shell_auto_background: None,
             servers: Vec::new(),
+            mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
+            window_context: None,
             auto_compact: false,
 
             compaction_settings: serde_json::Value::Null,
@@ -116,10 +136,13 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             compaction_settings_for: None,
 
             retries: 0,
-            sandbox: None,
-            tier: Preset::Safe,
-            profile: Profile::safe(&workspace).unwrap(),
-            access_builder: Some(switchable_builder(workspace.clone())),
+            sandbox: Some(
+                radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::FullAccess, &workspace)
+                    .unwrap(),
+            ),
+            tier: Preset::FullAccess,
+            profile: Profile::full_access(&workspace).unwrap(),
+            access_builder: Some(switchable_builder(workspace.clone(), fail_workspace)),
             parent: None,
             subagent: None,
             memory_root: None,
@@ -129,6 +152,7 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             tools_allow: None,
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
+            hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
@@ -150,6 +174,8 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
+            hooks_warning: Arc::new(|_message: &str| {}),
+            wake_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await
@@ -176,8 +202,24 @@ impl radian_permissions::Approver for NoopApprover {
 #[tokio::test]
 async fn set_access_swaps_the_profile_and_queues_the_change() {
     let (_scratch, session) = open_switchable("set-access").await;
-    assert_eq!(session.hooks().profile().preset, Preset::Safe);
+    assert_eq!(session.hooks().profile().preset, Preset::FullAccess);
 
+    session
+        .set_access(Preset::WorkspaceWrite)
+        .expect("workspace is allowed");
+    assert_eq!(session.hooks().profile().preset, Preset::WorkspaceWrite);
+    assert_eq!(session.projection().read().tier(), Some("workspace"));
+    assert!(
+        session.sandbox_mode().is_some(),
+        "the switch must reach the sandbox the tools read"
+    );
+    assert_eq!(
+        session.config_queue().len(),
+        1,
+        "one ConfigChanged per switch"
+    );
+
+    // Switching back widens again, from the very next call.
     session
         .set_access(Preset::FullAccess)
         .expect("full is allowed");
@@ -188,17 +230,6 @@ async fn set_access_swaps_the_profile_and_queues_the_change() {
         Some(radian_sandbox::SandboxMode::FullAccess),
         "the switch must reach the sandbox the tools read"
     );
-    assert_eq!(
-        session.config_queue().len(),
-        1,
-        "one ConfigChanged per switch"
-    );
-
-    // Switching back narrows again, from the very next call.
-    session.set_access(Preset::Safe).expect("safe is allowed");
-    assert_eq!(session.hooks().profile().preset, Preset::Safe);
-    assert_eq!(session.projection().read().tier(), Some("safe"));
-    assert_eq!(session.sandbox_mode(), None, "safe has no sandbox");
     assert_eq!(session.config_queue().len(), 2);
 
     session.stop();
@@ -209,13 +240,13 @@ async fn set_access_swaps_the_profile_and_queues_the_change() {
 /// the config queue are untouched (ADR 0012: a failed probe never degrades).
 #[tokio::test]
 async fn a_failed_probe_refuses_and_changes_nothing() {
-    let (_scratch, session) = open_switchable("refuse").await;
+    let (_scratch, session) = open_switchable_inner("refuse", true).await;
     let refused = session
         .set_access(Preset::WorkspaceWrite)
         .expect_err("a failed probe must refuse");
     assert!(refused.reason.contains("unavailable"), "{}", refused.reason);
-    assert_eq!(session.hooks().profile().preset, Preset::Safe);
-    assert_eq!(session.projection().read().tier(), Some("safe"));
+    assert_eq!(session.hooks().profile().preset, Preset::FullAccess);
+    assert_eq!(session.projection().read().tier(), Some("full"));
     assert!(session.config_queue().is_empty());
 
     session.stop();
@@ -241,8 +272,10 @@ async fn a_session_without_a_builder_refuses_set_access() {
             price_for: None,
             shell_auto_background: None,
             servers: Vec::new(),
+            mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
+            window_context: None,
             auto_compact: false,
 
             compaction_settings: serde_json::Value::Null,
@@ -251,8 +284,8 @@ async fn a_session_without_a_builder_refuses_set_access() {
 
             retries: 0,
             sandbox: None,
-            tier: Preset::Safe,
-            profile: Profile::safe(&workspace).unwrap(),
+            tier: Preset::FullAccess,
+            profile: Profile::full_access(&workspace).unwrap(),
             access_builder: None,
             parent: None,
             subagent: None,
@@ -263,6 +296,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             tools_allow: None,
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
+            hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: json!({}),
@@ -284,6 +318,8 @@ async fn a_session_without_a_builder_refuses_set_access() {
             ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
+            hooks_warning: Arc::new(|_message: &str| {}),
+            wake_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await
@@ -338,5 +374,34 @@ async fn resumed_access_reads_the_last_change() {
         radian_host::resumed_access(&scratch.0, "missing"),
         None,
         "an unknown session has no access change"
+    );
+}
+
+/// A journal written when `safe` still existed resumes without failing: the old tier name is
+/// unknown now, so it is skipped like any typo and the caller falls back (ADR 0006: old
+/// journals stay readable).
+#[tokio::test]
+async fn resumed_access_skips_the_removed_safe_tier() {
+    let scratch = Scratch::new("resume-safe");
+    let path = scratch.0.join("resumed.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "resumed",
+        radian_session::SessionCreatedData::new("/ws", json!({})),
+    )
+    .unwrap();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: json!({"access": "safe"}),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    assert_eq!(
+        radian_host::resumed_access(&scratch.0, "resumed"),
+        None,
+        "the removed tier name is not a tier anymore"
     );
 }

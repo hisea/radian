@@ -531,6 +531,49 @@ async fn a_wait_timeout_returns_running_and_leaves_the_job_alive() {
     );
 }
 
+// ---------- 2e. the `job` description (items 6, 13) ----------
+
+/// Item 6: `kill` stops the whole *process group* (never "the whole session", which reads
+/// as the agent session). Item 13: the `timeout_ms` default and maximum live in the schema
+/// only (the constraint), not in the description (the usage); the description keeps the
+/// sentence without the numbers.
+#[tokio::test]
+async fn the_job_description_names_the_process_group_and_leaves_numbers_to_the_schema() {
+    let dir = TempDir::new("jobs-desc");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+    let spec = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "job")
+        .expect("job is advertised with a sandbox");
+    assert!(
+        spec.description
+            .contains("stops the job's whole process group"),
+        "`kill` must name the process group: {}",
+        spec.description
+    );
+    assert!(
+        !spec.description.contains("whole session"),
+        "the 'whole session' wording must be gone: {}",
+        spec.description
+    );
+    assert!(
+        !spec.description.contains("30000") && !spec.description.contains("600000"),
+        "the numbers stay in the schema, not the description: {}",
+        spec.description
+    );
+    let field = &spec.input_schema["properties"]["timeout_ms"]["description"];
+    assert!(
+        field
+            .as_str()
+            .is_some_and(|text| text.contains("30000") && text.contains("600000")),
+        "the schema keeps the `timeout_ms` default and maximum: {field}"
+    );
+}
+
 // ---------- 3. an explicit background `timeout_secs` is ignored (ADR 0037) ----------
 
 /// ADR 0037: `background: true` ignores `timeout_secs`. The job is still
@@ -878,12 +921,13 @@ async fn dropping_the_registry_kills_every_running_group() {
     assert!(!group_alive(pid), "group {pid} still has members");
 }
 
-// ---------- 7. the job_list alias ----------
+// ---------- 7. started jobs are visible in the session registry ----------
 
-/// The `job_list` alias reports each job's id, state, command and output path, prefixed
-/// with the rename line.
+/// The session registry (what the host and the TUI footer read) shows each started job's
+/// id and state. The model learns the ids from the `shell` acknowledgement instead: there
+/// is no list tool.
 #[tokio::test]
-async fn the_job_list_alias_reports_the_states() {
+async fn started_jobs_are_visible_in_the_session_registry() {
     let dir = TempDir::new("jobs-list");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -903,22 +947,22 @@ async fn the_job_list_alias_reports_the_states() {
     assert!(done.contains("[status: exited 0]"), "{done}");
     let (run_id, run_output) = start(&session, "sleep 600", None).await;
 
-    let list = output_text(&exec(&session, "job_list", json!({})).await.unwrap());
-    assert!(
-        list.starts_with("`job_list` was renamed"),
-        "the alias names the rename first: {list}"
-    );
-    assert!(list.contains(&done_id), "{list}");
-    assert!(list.contains("exited 0"), "{list}");
-    assert!(list.contains(&run_id), "{list}");
-    assert!(list.contains("running"), "{list}");
-    // The list names `job` where the output path used to be (ADR 0039 decision 1).
+    let listed = session.jobs().list();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    let done = listed
+        .iter()
+        .find(|job| job.id == done_id)
+        .expect("the done job");
+    assert!(!done.state.is_running(), "{done:?}");
+    let running = listed
+        .iter()
+        .find(|job| job.id == run_id)
+        .expect("the running job");
+    assert!(running.state.is_running(), "{running:?}");
+    // The acknowledgement names the `job` tool where the output path used to be
+    // (ADR 0039 decision 1).
     assert_eq!(done_output, radian_coding::OUTPUT_HINT, "{done_output}");
     assert_eq!(run_output, radian_coding::OUTPUT_HINT, "{run_output}");
-    assert!(list.contains(radian_coding::OUTPUT_HINT), "{list}");
-
-    let value = structured(&exec(&session, "job_list", json!({})).await.unwrap());
-    assert_eq!(value["count"], json!(2), "{value}");
 
     session.shutdown_jobs();
 }
@@ -944,23 +988,6 @@ async fn an_unknown_job_is_refused() {
     assert!(
         failure.message.contains("no job `job-0-0`"),
         "one error name for both kinds: {failure:?}"
-    );
-    // The old names are still accepted and answer with the rename line (ADR 0043 decision 3).
-    let failure = exec(&session, "job_output", json!({"job_id": "job-0-0"}))
-        .await
-        .expect_err("unknown job");
-    assert_eq!(failure.code, "unknown_job");
-    assert!(
-        failure.message.starts_with("`job_output` was renamed"),
-        "{failure:?}"
-    );
-    let failure = exec(&session, "job_kill", json!({"job_id": "job-0-0"}))
-        .await
-        .expect_err("unknown job");
-    assert_eq!(failure.code, "unknown_job");
-    assert!(
-        failure.message.starts_with("`job_kill` was renamed"),
-        "{failure:?}"
     );
 }
 
@@ -1081,10 +1108,14 @@ async fn a_long_foreground_command_is_adopted_in_place() {
     );
     assert!(alive(pid), "the adopted process (pid {pid}) must be alive");
 
-    // Registered and running.
-    let list = output_text(&exec(&session, "job_list", json!({})).await.unwrap());
-    assert!(list.contains(&id), "{list}");
-    assert!(list.contains("running"), "{list}");
+    // Registered and running (there is no list tool; the registry is the source).
+    let running = session.jobs().list();
+    assert!(
+        running
+            .iter()
+            .any(|job| job.id == id && job.state.is_running()),
+        "the adopted job is registered and running: {running:?}"
+    );
 
     // The pre-adoption output is already in the job's file.
     let path = session.jobs().output_path(&id);
@@ -1280,8 +1311,13 @@ async fn an_adopted_job_survives_the_turn_cancellation() {
         !gone_within(leader, Duration::from_secs(1)).await,
         "a cancelled turn must not kill an adopted job (pid {leader})"
     );
-    let list = output_text(&exec(&session, "job_list", json!({})).await.unwrap());
-    assert!(list.contains(&id) && list.contains("running"), "{list}");
+    let running = session.jobs().list();
+    assert!(
+        running
+            .iter()
+            .any(|job| job.id == id && job.state.is_running()),
+        "the adopted job is registered and running: {running:?}"
+    );
 
     // Session end is the way to stop it.
     session.shutdown_jobs();

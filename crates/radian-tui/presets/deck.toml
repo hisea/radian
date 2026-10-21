@@ -22,6 +22,8 @@ left = [
 right = [
   { item = "context", symbol = "", format = "{bar} {percent}%" },
   "reasoning",
+  "queued",
+  "loop",
 ]
 
 [[tui.footer.rows]]

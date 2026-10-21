@@ -150,6 +150,10 @@ def build_command(
         parts += ["--turn-timeout-secs", str(invocation.turn_timeout_secs)]
     parts += ["--session-dir", shlex.quote(invocation.session_dir)]
     parts += list(invocation.extra_args)
+    # Machine-readable stdout: journal lines verbatim, live delta lines, and a
+    # closing `Result` record carrying the exit code and the stop reason (ADR 0044).
+    # The trial's text answer is the `Result` record's `text`, not this stdout.
+    parts += ["--output", "jsonl"]
     parts += ["-p", shlex.quote(instruction)]
     parts += [">", shlex.quote(stdout_path), "2>", shlex.quote(stderr_path)]
     return " ".join(parts)
@@ -248,6 +252,28 @@ def summarize_session_usage(sessions_dir: str | Path) -> SessionUsage:
         n_output_tokens=output_tokens if seen_output else None,
         cost_usd=micros / 1_000_000 if seen_fee else None,
     )
+
+
+def parse_result_line(stdout_text: str | None) -> dict | None:
+    """The closing `Result` record of a `--output jsonl` run, or `None`.
+
+    Takes the captured stdout and returns the last line parsed, but only when
+    it is a `Result` record. Anything else (empty output, a killed run, a
+    default-mode text answer) is `None`, never an error: the caller falls back
+    to the process exit code.
+    """
+    if not stdout_text:
+        return None
+    lines = [line for line in stdout_text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        record = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or record.get("type") != "Result":
+        return None
+    return record
 
 
 # Seconds radian keeps clear of the exec kill so the turn ends and the journal

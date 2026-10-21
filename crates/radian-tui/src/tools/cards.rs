@@ -179,7 +179,7 @@ pub(crate) fn exit_code_of(card: &ToolCard) -> Option<i64> {
 /// `· N lines` (ADR 0028) and the pairing's [`ToolCard::result_lines`].
 ///
 /// Every built-in renderer emits exactly one row per line of the display text (`patch`'s
-/// synthesized diff and `list`'s table included), which `the_line_count_mirrors_every_renderer`
+/// synthesized diff included), which `the_line_count_mirrors_every_renderer`
 /// pins; the push path therefore counts without building the rows, which a resume would
 /// otherwise do for every tool result.
 pub fn body_line_count(text: &str) -> usize {
@@ -250,7 +250,7 @@ pub fn meta_parts(card: &ToolCard, cancelled: bool) -> Vec<String> {
 
 /// The `+N −M` a `patch` or `write` head shows: `patch` counts the call's `old`/`new` lines,
 /// `write` the content it wrote (and the file's previous line count when the result carries
-/// one, `git_diff`-style diffs being slice ④'s).
+/// one).
 pub(super) fn diff_meta(card: &ToolCard) -> Option<String> {
     let count = |value: Option<&Value>| -> usize {
         value
@@ -385,95 +385,6 @@ pub(super) fn write_body(card: &ToolCard, text: &str) -> Vec<BodyLine> {
     out
 }
 
-/// `git_diff`: the file count and the added/removed line counts, parsed from the diff text
-/// (`git_diff` reports no structured counts, so they stay in the title).
-pub(super) fn git_diff_head(_card: &ToolCard, text: &str) -> String {
-    if text.trim().is_empty() {
-        // No result text yet (the call-time head): the counts are not known, so they are not
-        // claimed. The pairing refreshes this when the diff arrives.
-        return String::new();
-    }
-    let (files, added, removed) = diff_counts(text);
-    format!("{files} files +{added} −{removed}")
-}
-
-/// `git_diff`: the diff head, or the status head when the call asked for `stat: true`
-/// (ADR 0043 decision 3: the old `git_status` card's shape).
-pub(super) fn git_diff_card_head(card: &ToolCard, text: &str) -> String {
-    if is_git_stat(card) {
-        list_head(card, text)
-    } else {
-        git_diff_head(card, text)
-    }
-}
-
-/// `git_diff`'s body: the unified diff, or the plain status text under `stat: true`.
-pub(super) fn git_diff_card_body(card: &ToolCard, text: &str) -> Vec<BodyLine> {
-    if is_git_stat(card) {
-        plain_body(card, text)
-    } else {
-        diff_body(card, text)
-    }
-}
-
-/// Counts a unified diff's files and `+`/`-` lines (the `git_diff` result text; `structured`
-/// is `None` for that tool).
-pub(super) fn diff_counts(text: &str) -> (usize, usize, usize) {
-    let mut files = 0usize;
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    for line in text.lines() {
-        if line.starts_with("diff ") {
-            files += 1;
-        } else if line.starts_with("@@") || line.starts_with("+++") || line.starts_with("---") {
-            // Structural, not content.
-        } else if line.starts_with('+') {
-            added += 1;
-        } else if line.starts_with('-') {
-            removed += 1;
-        }
-    }
-    (files, added, removed)
-}
-
-/// Whether a card is a `git_diff` call that asked for the status + `--stat` form (the shape the
-/// old `git_status` returned). The `git_status` alias card keeps its own renderer.
-pub(super) fn is_git_stat(card: &ToolCard) -> bool {
-    card.arguments.get("stat").and_then(Value::as_bool) == Some(true)
-}
-
-/// `git_status` / `git_diff { stat: true }` / `list`: the entry count.
-pub(super) fn list_head(card: &ToolCard, _text: &str) -> String {
-    if card.name == "git_status" || is_git_stat(card) {
-        let entries = entry_counts(card).0;
-        match entries {
-            Some(n) => format!("{n} entries"),
-            None => String::new(),
-        }
-    } else {
-        let (entries, total) = entry_counts(card);
-        let base = string_field(&card.arguments, "path").unwrap_or_else(|| ".".into());
-        match (entries, total) {
-            (Some(entries), Some(total)) if total > entries => {
-                format!("{base} ({entries} of {total} entries)")
-            }
-            (Some(entries), _) => format!("{base} ({entries} entries)"),
-            _ => base,
-        }
-    }
-}
-
-/// `(entries, total_entries)` from the result's structured output.
-pub(super) fn entry_counts(card: &ToolCard) -> (Option<u64>, Option<u64>) {
-    let field = |key: &str| {
-        card.structured
-            .as_ref()
-            .and_then(|value| value.get(key))
-            .and_then(Value::as_u64)
-    };
-    (field("entries"), field("total_entries"))
-}
-
 /// `grep`: the regex and the path it searched (`.` when the call named none).
 pub(super) fn grep_head(card: &ToolCard, _text: &str) -> String {
     let pattern = string_field(&card.arguments, "pattern").unwrap_or_default();
@@ -530,8 +441,7 @@ pub(super) fn memory_head(card: &ToolCard, _text: &str) -> String {
 }
 
 /// The unified-diff body (ADR 0028): one row per line of the entry's
-/// text. Used by `patch` (whose entry text **is** the synthesized `@@`/`-old`/`+new` diff) and
-/// by `git_diff` (whose entry text is git's own unified diff).
+/// text. Used by `patch` (whose entry text **is** the synthesized `@@`/`-old`/`+new` diff).
 ///
 /// A hunk header sets the old and new line counters, and every row under it carries its own
 /// file's number: `+` and context rows the **new** file's, `-` rows the **old** file's (the
@@ -540,8 +450,8 @@ pub(super) fn memory_head(card: &ToolCard, _text: &str) -> String {
 pub(super) fn diff_body(card: &ToolCard, text: &str) -> Vec<BodyLine> {
     let mut out = Vec::new();
     let mut offset = 0usize;
-    // The language comes from the file's own path: `patch` and `write` name it in the call,
-    // `git_diff`'s text names it per file (`+++ b/…`).
+    // The language comes from the file's own path: `patch` and `write` name it in the call;
+    // a `+++ b/…` file header in the text overrides it per file.
     let mut path = call_path(card);
     let mut in_hunk = false;
     let (mut old, mut new) = (0u64, 0u64);
@@ -626,109 +536,6 @@ pub(super) fn plain_body(_card: &ToolCard, text: &str) -> Vec<BodyLine> {
     text_body_lines(text, |_| LineRole::Normal)
 }
 
-/// `list`'s body: the aligned table [`result_display_text`] built for the entry, one line per
-/// entry. (The table **is** the entry's text, so a copy yields the table as shown; the raw
-/// `kind\tsize\tname` text stays in the journal.)
-pub(super) fn list_body(_card: &ToolCard, text: &str) -> Vec<BodyLine> {
-    text_body_lines(text, |_| LineRole::Normal)
-}
-
-/// The `list` result as an aligned table: a short kind marker, the size right-aligned in a
-/// human-readable unit, the name left-aligned, and the directories first. The tool's own text
-/// is `kind\tsize\tname` per line (`radian-coding`'s `list.rs`); a line that does not have
-/// that shape is passed through unchanged, so an unexpected output still shows something.
-pub(super) fn list_table(tool_text: &str) -> String {
-    struct Row {
-        kind: &'static str,
-        size: u64,
-        name: String,
-    }
-    let marker = |kind: &str| match kind {
-        "dir" => "d",
-        "file" => "f",
-        "symlink" => "l",
-        _ => "-",
-    };
-    let mut rows: Vec<Row> = Vec::new();
-    let mut passthrough: Vec<String> = Vec::new();
-    for line in tool_text.lines() {
-        let mut fields = line.splitn(3, '\t');
-        let (Some(kind), Some(size), Some(name)) = (fields.next(), fields.next(), fields.next())
-        else {
-            if !line.trim().is_empty() {
-                passthrough.push(line.to_owned());
-            }
-            continue;
-        };
-        let Ok(size) = size.trim().parse::<u64>() else {
-            passthrough.push(line.to_owned());
-            continue;
-        };
-        let kind: &'static str = match kind.trim() {
-            "dir" => "dir",
-            "file" => "file",
-            "symlink" => "symlink",
-            _ => "other",
-        };
-        rows.push(Row {
-            kind,
-            size,
-            name: name.to_owned(),
-        });
-    }
-    // Directories first, then by name (the tool sorts by name; the table re-sorts by kind).
-    rows.sort_by(|a, b| {
-        let rank = |kind: &str| match kind {
-            "dir" => 0,
-            "file" => 1,
-            "symlink" => 2,
-            _ => 3,
-        };
-        rank(a.kind)
-            .cmp(&rank(b.kind))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    let size_width = rows
-        .iter()
-        .map(|row| human_size(row.size).chars().count())
-        .max()
-        .unwrap_or(1);
-    let mut out = String::new();
-    for row in &rows {
-        out.push_str(&format!(
-            "{} {:>size_width$}  {}\n",
-            marker(row.kind),
-            human_size(row.size),
-            row.name
-        ));
-    }
-    for line in passthrough {
-        out.push_str(&line);
-        out.push('\n');
-    }
-    if out.ends_with('\n') {
-        out.pop();
-    }
-    out
-}
-
-/// A byte count as a short human-readable size: `0 B`, `512 B`, `1.7K`, `2.4M`.
-pub(super) fn human_size(bytes: u64) -> String {
-    const UNITS: [(u64, &str); 3] = [(1024 * 1024 * 1024, "G"), (1024 * 1024, "M"), (1024, "K")];
-    for (scale, suffix) in UNITS {
-        if bytes >= scale {
-            let value = bytes as f64 / scale as f64;
-            // One decimal below 10, none above (1.7K, 24K).
-            return if value < 10.0 {
-                format!("{value:.1}{suffix}")
-            } else {
-                format!("{value:.0}{suffix}")
-            };
-        }
-    }
-    format!("{bytes} B")
-}
-
 /// The text a tool **result** entry displays: the tool's own text, except for `patch` (whose
 /// card shows the replacement as a diff - the result text is only "replaced 1 occurrence")
 /// and `write` (whose card shows the content it wrote). Synthesizing the display text here
@@ -738,9 +545,6 @@ pub fn result_display_text(card: &ToolCard, tool_text: &str) -> String {
     match card.name.as_str() {
         "patch" => patch_diff_text(card).unwrap_or_else(|| tool_text.to_owned()),
         "write" => string_field(&card.arguments, "content").unwrap_or_else(|| tool_text.to_owned()),
-        // `list` shows an aligned table instead of its tab-separated raw text (owner hand
-        // test: the tabs rendered as nothing, so `dir512crates` ran together).
-        "list" => list_table(tool_text),
         _ => tool_text.to_owned(),
     }
 }

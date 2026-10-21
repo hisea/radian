@@ -16,6 +16,7 @@ pub mod chatgpt_usage;
 pub mod command_footer;
 pub mod config;
 pub mod context;
+pub mod context_estimate;
 pub mod contrib;
 pub mod control;
 pub mod cost;
@@ -27,6 +28,7 @@ mod headers;
 pub mod headers_usage;
 pub mod herdr;
 mod home;
+pub mod hooks;
 pub mod job_notify;
 pub mod login;
 mod mcp;
@@ -51,6 +53,7 @@ pub mod subagent;
 mod tools;
 pub mod trust;
 pub mod usage;
+pub mod wake_gate;
 mod workspace;
 
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
@@ -95,6 +98,10 @@ pub use command_footer::{
     MAX_OUTPUT_BYTES, command_specs, parse_command as parse_footer_command,
 };
 pub use config::default::{DEFAULT_CONFIG_TEMPLATE, ensure_default_config};
+pub use config::migrate_claude::{
+    ClaudeDraft, ClaudeMigrateError, ClaudeSkill, ClaudeTargets, ClaudeWriteReport, import_claude,
+    write_claude_draft,
+};
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::model_write::{ModelWriteError, write_model_route};
 pub use config::theme_write::{ThemeWriteError, write_theme};
@@ -102,9 +109,9 @@ pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,
     PermissionsConfig, RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
     parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
-    resolved_path as resolved_config_path,
+    resolved_path as resolved_config_path, unix_sockets_ignored_warning,
 };
-pub use context::{ContextFiles, LoadedFile, load as load_context_files};
+pub use context::{ContextFiles, ImportedFile, LoadedFile, load as load_context_files};
 pub use contrib::{
     Contribution, ContributionStore, ContributorRunner, GitContributor, NOTICE_AFTER, Segment,
     SegmentRole, StatusContributor, Tick, spawn as spawn_contributor,
@@ -125,16 +132,20 @@ pub use headers_usage::{
     ANTHROPIC_HEADERS, HeadersUsage, HeadersWindow, OPENAI_HEADERS, headers_snapshot,
 };
 pub use home::{
-    RADIAN_HOME_ENV, access_dir_for, cache_dir_for, catalog_cache, catalog_cache_for, config_dir,
-    config_dir_for, credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,
-    legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, memory_dir,
-    memory_dir_for, radian_home, radian_home_for, run_dir_for, sessions_dir, sessions_dir_for,
-    skills_dir, skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
+    RADIAN_HOME_ENV, access_dir_for, agents_skills_dir, agents_skills_dir_for, cache_dir_for,
+    catalog_cache, catalog_cache_for, config_dir, config_dir_for, credentials_dir,
+    credentials_dir_for, diagnostics_dir_for, ensure_private_dir, legacy_sessions_dirs_for,
+    legacy_sessions_hint, legacy_sessions_hint_for, memory_dir, memory_dir_for, radian_home,
+    radian_home_for, run_dir_for, sessions_dir, sessions_dir_for, skills_dir, skills_dir_for,
+    themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
 };
-pub use job_notify::{
-    JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
+pub use hooks::{CommandHooks, HooksWarning, REASON_CHAR_LIMIT};
+pub use job_notify::{JobNotifier, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message};
+pub use mcp::{
+    CREDENTIAL_VARS, LoadScope, McpLoad, ProjectPreview, ProjectPreviewEntry, load_mcp_config,
+    load_mcp_from_toml, load_project, load_project_file, merge_mcp, merge_project_mcp,
+    preview_lines, preview_project, project_path,
 };
-pub use mcp::load_mcp_config;
 pub use model::{
     COMPACTION_THINKING_CURRENT, ChatGptModel, DEFAULT_MAX_MODEL_CALLS, DEFAULT_MAX_TOKENS,
     HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext, SwitchableModel, Thinking,
