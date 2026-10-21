@@ -10,7 +10,8 @@ per-session JSONL file, so a session can be resumed by either host.
 
 The design of record is `docs/minimal-headless-rust-agent-runtime-design.md`. Decisions that
 constrain the code live under `docs/adr/` (see the index at the end of this file). Read
-`AGENTS.md` before you change code.
+`AGENTS.md` before you change code. How to contribute is in [CONTRIBUTING.md](CONTRIBUTING.md).
+To report a security problem, see [SECURITY.md](SECURITY.md).
 
 ## Crates
 

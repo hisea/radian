@@ -30,8 +30,8 @@
 
 5. **research/ 说明**。根目录 README 与 `research/README.md` 说明：这是实验笔记，带日期，以中文为主，记录当时的测量与判断；不是用户文档，也不随代码更新。
 6. **不写决策记录**。代码注释、crate README、`MUTATIONS.md`、`docs/backlog/`（含它的 README 与条目模板）、AGENTS.md 里的 "owner"、决定日期、"revision N"/"修订 N" 一类标签全部去掉，只留决定本身。`owner-only` 这类描述文件权限的用法是正常词汇，保留。`research/` 里的这类字样留给历史改写的统一替换处理。以后提交的任何文字都不写这些。
-7. **补三个文件**：`CONTRIBUTING.md`（指向 AGENTS.md 的 Verify 一节与 ADR 规则：先读相关 ADR、改决定先改 ADR）；`SECURITY.md`（怎么私下报告沙箱逃逸与其他安全问题，报告里要有什么，不在公开 issue 里贴复现）；`CODE_OF_CONDUCT.md`（采用 Contributor Covenant）。
-8. **`.gitleaksignore`**。gitleaks 在当前树与历史里各命中 3 处，都是测试用的假密钥：`crates/agent-cli/tests/cli.rs` 与 `crates/radian-host/tests/pi_migrate.rs` 里的 `sk-live-abcdef1234567890`、`docs/schema/config/plaintext-secret.toml` 的明文密钥夹具（读取方必须拒绝它）。按指纹放行这 3 处，其他命中一律当作问题处理。
+7. **补两个文件**：`CONTRIBUTING.md`（指向 AGENTS.md 的 Verify 一节与 ADR 规则：先读相关 ADR、改决定先改 ADR）；`SECURITY.md`（怎么私下报告沙箱逃逸与其他安全问题，报告里要有什么，不在公开 issue 里贴复现）。
+8. **`.gitleaks.toml`**。gitleaks 在当前树与历史里各命中 3 处，都是测试用的假密钥：`crates/agent-cli/tests/cli.rs` 与 `crates/radian-host/tests/pi_migrate.rs` 里的 `sk-live-abcdef1234567890`、`docs/schema/config/plaintext-secret.toml` 的明文密钥夹具（读取方必须拒绝它）。以值放行这组假密钥（`sk-live-abcdef` 加数字后缀的正则），其他命中一律当作问题处理。
 
 ## 验收
 
