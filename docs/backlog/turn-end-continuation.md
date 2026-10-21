@@ -2,7 +2,7 @@
 
 - 状态：B idea；A item 4、item 7 open（1、2、3、5、6 已落地）
 - 涉及 ADR：0036（角色规则清单；完成通知作为消息追加）、0037（§2 自动转后台删除、前台缺省超时；决定 5 完成通知的形状、唤醒速率闸门）、0008（`[shell] auto_background_secs` 从 schema 删除）、0045 §3（`Stop` 续跑路径）、0011（`followup` lane、L2 来源、L5 空闲唤醒）、0021（memory 注入范围）、0034（herdr `blocked`）、0005（宿主消息 meta）、0017（只有 `Completed` 续跑）
-- 来源：`docs/research/2026-10-21-intent-stop.md`（§3.4 提示词对比、§4 频率、§5 选项、§6 建议）
+- 来源：`research/2026-10-21-intent-stop.md`（§3.4 提示词对比、§4 频率、§5 选项、§6 建议）
 
 ## 背景
 
