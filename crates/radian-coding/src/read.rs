@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
 use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec};
 use serde::Deserialize;
@@ -37,8 +37,7 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "offset": {
                 "type": "integer",
-                "minimum": 1,
-                "description": "First line to read (1-based). Default: 1."
+                "description": "First line to read (1-based). Default: 1. Negative counts from the end."
             },
             "limit": {
                 "type": "integer",
@@ -138,12 +137,8 @@ pub(crate) async fn run(
 ) -> Result<ToolOutput, ToolFailure> {
     let args: ReadArgs = args::parse("read", &schema(), arguments)?;
     let offset = args.offset.unwrap_or(1);
-    if offset < 1 {
-        return Err(args::invalid(
-            "read",
-            arguments,
-            ["`offset` must be at least 1"],
-        ));
+    if offset == 0 {
+        return Err(args::invalid("read", arguments, ["`offset` must not be 0"]));
     }
     let limit = match args.limit {
         Some(n) if n < 1 => {
@@ -245,6 +240,18 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
     let total = opened.stat.size;
 
     let mut reader = BufReader::new(opened.file);
+    // A negative `offset` counts from the end: resolve it to an absolute line first.
+    // The count scans newlines with `fill_buf`/`consume` only, so it never holds the
+    // file in memory; the bounded `read_stream` below still does the actual read.
+    let offset = if offset < 0 {
+        let total_lines = count_lines(&mut reader).map_err(|e| io_failure(&path, e))?;
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| io_failure(&path, e))?;
+        resolve_from_end(total_lines, offset)
+    } else {
+        offset
+    };
     let outcome = read_stream(&mut reader, &path, total, budget, offset, limit)?;
 
     let structured = outcome.structured(&path, total);
@@ -252,6 +259,45 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
         content: vec![ContentPart::text(outcome.content)],
         structured: Some(structured),
     })
+}
+
+/// Counts the lines `read_stream` would report: each `\\n` ends a line, and a non-empty
+/// tail without a trailing `\\n` is one more line. Scans with `fill_buf`/`consume` only,
+/// so the file is never held in memory. An empty file counts 0 lines.
+fn count_lines<R: BufRead>(reader: &mut R) -> std::io::Result<i64> {
+    let mut newlines = 0i64;
+    let mut seen = 0u64;
+    let mut last_is_newline = true;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        newlines += bytecount_newlines(available);
+        seen += available.len() as u64;
+        last_is_newline = available[available.len() - 1] == b'\n';
+        let take = available.len();
+        reader.consume(take);
+    }
+    if seen > 0 && !last_is_newline {
+        newlines += 1;
+    }
+    Ok(newlines)
+}
+
+/// Counts `\\n` bytes in one buffer fill. `\\n` never appears inside a multi-byte UTF-8
+/// sequence, so a byte scan agrees with the line scan in `skip_lines`.
+fn bytecount_newlines(buf: &[u8]) -> i64 {
+    buf.iter().filter(|&&byte| byte == b'\n').count() as i64
+}
+
+/// Turns a negative `offset` (`-N`, N >= 1) into the absolute 1-based start line:
+/// `total - N + 1`, clamped to 1 when N runs past the start. An empty file resolves
+/// to 1, which the read below reports as past-the-end.
+fn resolve_from_end(total_lines: i64, offset: i64) -> i64 {
+    let want_last = offset.unsigned_abs() as i128;
+    let start = total_lines as i128 - want_last + 1;
+    start.max(1) as i64
 }
 
 /// Reads `budget` bytes from line `offset` on, without ever holding more than about `budget`
@@ -640,5 +686,90 @@ mod tests {
             pulled <= BUDGET + CAPACITY + 1,
             "the read phase pulled {pulled} bytes for a {BUDGET}-byte budget"
         );
+    }
+
+    /// `resolve_from_end(-N)` is `total - N + 1`: one off in either direction reads the
+    /// wrong first line, which the tail tests above pin down.
+    #[test]
+    fn resolving_from_the_end_counts_exactly() {
+        assert_eq!(resolve_from_end(1000, -5), 996);
+        assert_eq!(resolve_from_end(1000, -1), 1000);
+        assert_eq!(resolve_from_end(3, -3), 1);
+        // Past the start clamps to the first line; an empty file reads from line 1.
+        assert_eq!(resolve_from_end(1000, -2000), 1);
+        assert_eq!(resolve_from_end(0, -3), 1);
+    }
+
+    /// The line count treats a non-empty tail without `\\n` as one more line, matching the
+    /// lines `read_stream` reports: `-1` is the last line in both shapes.
+    #[test]
+    fn counting_lines_agrees_with_and_without_a_trailing_newline() {
+        for content in ["a\nb\nc\n", "a\nb\nc"] {
+            let mut reader = BufReader::new(content.as_bytes());
+            assert_eq!(count_lines(&mut reader).unwrap(), 3, "{content:?}");
+        }
+        let mut reader = BufReader::new("".as_bytes());
+        assert_eq!(count_lines(&mut reader).unwrap(), 0);
+        // One newline alone is one (empty) line, not zero.
+        let mut reader = BufReader::new("\n".as_bytes());
+        assert_eq!(count_lines(&mut reader).unwrap(), 1);
+    }
+
+    /// The negative-offset path streams through `fill_buf`/`consume` only and never calls
+    /// `Read::read`: a reader whose `read` panics still counts and reads. A mutation that
+    /// holds the whole file (`read_to_string`/`read_to_end`/collecting lines) calls `read`
+    /// and fails this test instead of silently allocating the file.
+    struct FillOnly<'a> {
+        data: &'a [u8],
+    }
+
+    impl std::io::Read for FillOnly<'_> {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            panic!("the negative-offset path must not call Read::read");
+        }
+    }
+
+    impl BufRead for FillOnly<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            Ok(self.data)
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.data = &self.data[amount..];
+        }
+    }
+
+    #[test]
+    fn the_from_end_path_never_calls_read() {
+        let content = "a\nb\nc\nd\n";
+        let mut reader = FillOnly {
+            data: content.as_bytes(),
+        };
+        assert_eq!(count_lines(&mut reader).unwrap(), 4);
+        let mut reader = FillOnly {
+            data: content.as_bytes(),
+        };
+        let start = resolve_from_end(4, -2);
+        assert_eq!(start, 3);
+        let outcome = read_stream(&mut reader, "f.txt", content.len() as u64, 64, start, None)
+            .expect("streaming read works on fill_buf alone");
+        assert_eq!(outcome.start_line, 3);
+        assert_eq!(outcome.end_line, 4);
+        // Absolute, not relative to the tail: the continuation names a file line.
+        assert!(outcome.next_offset.is_none(), "{:?}", outcome.next_offset);
+        let mut reader = FillOnly {
+            data: content.as_bytes(),
+        };
+        let limited = read_stream(
+            &mut reader,
+            "f.txt",
+            content.len() as u64,
+            64,
+            start,
+            Some(1),
+        )
+        .expect("limited tail reads one line");
+        assert_eq!(limited.end_line, 3);
+        assert_eq!(limited.next_offset, Some(4));
     }
 }
