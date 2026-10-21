@@ -35,7 +35,6 @@
 | `mcp-servers-json.md` | decided（生态 2/4） | 0008、0031、0012、0043 | MCP 配置接受标准 `mcpServers` 结构与 `${VAR}` 展开，只做 stdio；项目 `.mcp.json` 进信任门，目录受信任即加载、不按哈希，信任即批准其 server（一道门）；用户级 `[mcp]`（B1）已落地，余 B2；缺省 `inherit_env=["HOME"]`；环境白名单不变；MCP 文本结果套 `read` 的 64 KiB 上限并带截断标记 |
 | `command-hooks-claude-subset.md` | decided（生态 3/4） | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，用户级 `[hooks]`、项目级 `.radian/hooks.json` 进信任门（目录受信任即加载、不按哈希），工具名只在导入时翻译；吸收总报告第 17 条；编辑后检查是项目级 `PostToolUse`：配了才跑、同步每次、不批处理不延后、不内置不自动启用（本机数据：92% 的编辑消息只有一次编辑、跨轮段平均 1.83） |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
-| `tui-btw-side-question.md` | decided（第一档） | 0010、0018、0023、0007、0017 | `/btw <q>` 一次额外请求，与正式请求同前缀、不执行工具、只在覆盖层、不落 transcript/journal；一次一个 |
 | `tui-new-session.md` | decided（第一档） | 0022、0023、0043、0026、0037 | `/new` 空闲时原地开新会话，沿用当前生效的模型/档位；有 job 时拒绝；不加 `/clear` 别名 |
 | `tui-context-command.md` | decided（第一档） | 0015、0036、0021、0018 | `/context` 按类别打印下一次请求的估算，reported 与 estimated 分开标 |
 | `tui-context-grid.md` | decided（依赖 tui-context-command） | 0035、0029、0015、0018 | `/context` 网格视图�原型 B）：10×20 格 `◼`/`◻`/`▨`，右侧图例，类别色是主题角色，下面明细 |
