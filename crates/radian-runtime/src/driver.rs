@@ -1004,8 +1004,8 @@ fn lane_of(lane: InboxLane) -> Lane {
 ///    order — this covers "claimed but not admitted" (L3-2) and, because the inbox is
 ///    durable, inputs that were enqueued but never claimed before the restart; each keeps its
 ///    durable `wake` and `pending_wake`, so a pending steering entry opens a turn as soon
-///    as the driver runs (ADR 0011) and a stranded job notice does too
-/// (). An old journal has neither field: the reader derives `wake` from the lane
+///    as the driver runs (ADR 0011) and a stranded job notice does too. An old journal has
+///    neither field: the reader derives `wake` from the lane
 ///    and defaults `pending_wake` to `false` (ADR 0006 §5.5);
 /// 3. unpaired tool calls go through the core's `repair` (ADR 0002), and the repaired
 ///    messages are written back before the session is reopened (ADR 0002 E9).
