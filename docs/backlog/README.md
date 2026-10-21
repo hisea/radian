@@ -41,6 +41,7 @@
 | `tui-context-grid.md` | decided（依赖 tui-context-command） | 0035、0029、0015、0018 | `/context` 网格视图�原型 B）：10×20 格 `◼`/`◻`/`▨`，右侧图例，类别色是主题角色，下面明细 |
 | `tui-loop-continuation.md` | decided | 0011、0005、0037、0027、0023、0017 | 续跑引擎第一、二步：`/loop [--every] [--times] [--for] [prompt]` 轮末重投，`User` 来源 + meta，缺省上限 20 次/1 h，不计唤醒闸门 |
 | `goal-mode.md` | decided（依赖 tui-loop-continuation） | 新 ADR；0018、0036、0011、0005、0043、0037、0034、0006、0022 | `/goal` 持久目标 + `goal {progress\|done\|wait}` 工具 + 预算；目标块确定性注入不进摘要；resume 后 paused；`exec -p --goal` 待决 |
+| `no-adr-in-user-text.md` | decided | 0008、0027 | 命令帮助（49 处）、TUI 命令说明与通知（12 处）、配置模板、footer 预设、README/sandbox/pi-migration 里的 ADR 引用全部去掉，改成用户能懂的话；开发者文档保留 |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
