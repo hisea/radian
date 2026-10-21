@@ -14,6 +14,12 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     // The `ask_user` block is not a card: its shape follows the card's arguments and result
     // (ADR 0024), and its result entry is blank when it closes the call. Count it
     // through the layout so the total always equals the drawing.
+    // The `/context` grid entry (spec `tui-context-grid`): the view builder
+    // lays it out from the structured data, so the count always equals the
+    // drawing.
+    if entry.kind == EntryKind::Context {
+        return layout(entry, &[], modes, width).len();
+    }
     if is_ask_entry(entry) {
         return layout(entry, &[], modes, width).len();
     }
@@ -490,6 +496,7 @@ fn layout_unstripped(
             );
             body_plan_lines(&plan.lines, &text, body_width)
         }
+        (EntryKind::Context, _) => super::context_lines(entry, modes, width),
         _ => prose_lines(&text, body_width),
     }
 }
@@ -518,6 +525,11 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
             .collect();
     }
     let reasoning_expanded = expanded(entry, mode == ReasoningMode::Expanded);
+    // The `/context` grid entry (spec `tui-context-grid`): the view builder's
+    // own strings, shared with the laid-out lines.
+    if entry.kind == EntryKind::Context {
+        return super::context_texts(entry, modes, width);
+    }
     match (entry.kind, mode) {
         (EntryKind::Reasoning, ReasoningMode::Hidden) if !reasoning_expanded => Vec::new(),
         (EntryKind::Reasoning, ReasoningMode::Collapsed) if !reasoning_expanded => {

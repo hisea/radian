@@ -83,6 +83,7 @@ GLYPHS = [
     ("╰", "open frame bottom-left (ADR 0035/7)"),
     ("◼", "thinking/tool head folded marker (ADR 0035's 2026-10-16 note; documented exception)"),
     ("◻", "thinking/tool head expanded marker (ADR 0035's 2026-10-16 note; documented exception)"),
+    ("▨", "context grid compaction buffer (spec tui-context-grid; documented exception)"),
     ("…", "truncation"),
 ]
 

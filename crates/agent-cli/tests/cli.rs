@@ -9545,15 +9545,16 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
         );
     }
     // The exact set: a headless session with no `--workspace` and an empty memory mounts the
-    // built-in `skill` (its `theme-import` skill is compiled in) and `subagent` (ADR 0043
-    // decision 1a — a parent mounts it even with no workspace; only `explore` needs one), and
-    // nothing else. `memory_search` mounts only past the injection budget (ADR 0021 D7), so an
-    // empty memory does not list it; `memory_save`/`memory_revise` do not exist.
+    // built-in `skill` (its `theme-import` skill is compiled in), `subagent` (ADR 0043
+    // decision 1a — a parent mounts it even with no workspace; only `explore` needs one) and
+    // `goal` (ADR 0047 — host-level like `ask_user`, answering `no_active_goal` without one),
+    // and nothing else. `memory_search` mounts only past the injection budget (ADR 0021 D7),
+    // so an empty memory does not list it; `memory_save`/`memory_revise` do not exist.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
         got,
-        ["skill", "subagent"],
+        ["goal", "skill", "subagent"],
         "the exact tool set of a fresh headless session: {names:?}"
     );
 }

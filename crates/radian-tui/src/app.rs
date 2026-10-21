@@ -52,11 +52,13 @@ mod composer;
 mod config;
 mod find;
 mod footer;
+pub(crate) mod goal_mode;
 mod history;
 mod input;
 mod inspector;
 mod layers;
 pub(crate) mod loop_mode;
+pub(crate) use goal_mode::GoalMode;
 mod mouse;
 mod overlay;
 mod send;
@@ -204,10 +206,11 @@ pub enum Effect {
     /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
     /// [`Input::SessionDone`].
     ListSkills,
-    /// `/context` (backlog `tui-context-command`): the next request's estimated size by
-    /// category. The loop reads it from the facade (journal + stored layers, no inbox, no
-    /// driver) and answers with [`Input::SessionDone`], so it works mid-turn.
-    Context,
+    /// `/context [all]` (backlog `tui-context-command`, grid spec
+    /// `tui-context-grid`): the next request's estimated size by category. The
+    /// loop reads it from the facade (journal + stored layers, no inbox, no
+    /// driver) and answers with [`Input::ContextReady`], so it works mid-turn.
+    Context { all: bool },
     /// Ask a side question (`/btw`, backlog `tui-btw-side-question`): the loop sends it
     /// through the session's current model and streams the answer back as
     /// [`Input::SideDelta`]/[`Input::SideDone`]. Nothing lands in the transcript.
@@ -257,6 +260,15 @@ pub enum Effect {
         exclude_from_context: bool,
         exit_code: Option<i32>,
         cancelled: bool,
+    },
+    /// Journal one `/goal` change first (ADR 0047): the loop appends `event` to the session
+    /// journal and answers with [`Input::GoalDone`], which applies `apply`. A failed append
+    /// applies nothing. Turn-end stops use the same effect for their audit record, but they
+    /// mutate at once (the decision gates the send) and the completion only reports a lost
+    /// write.
+    GoalAppend {
+        event: radian_session::RuntimeEvent,
+        apply: goal_mode::GoalApply,
     },
     /// Cancel the running `!`/`!!` command (Esc, ADR 0033).
     CancelBash,
@@ -317,6 +329,16 @@ impl PartialEq for Effect {
             (FetchCompletions(a), FetchCompletions(b)) => a == b,
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
+            (
+                GoalAppend {
+                    event: ae,
+                    apply: aa,
+                },
+                GoalAppend {
+                    event: be,
+                    apply: bb,
+                },
+            ) => ae == be && aa == bb,
             (
                 LoginVerify {
                     name: an,
@@ -537,6 +559,10 @@ pub struct SessionView {
     /// quitting the TUI ends it. The turn-end decision lives in `loop_mode` so step 3
     /// (`goal-mode.md`) can add its input in the same place.
     pub(crate) loop_state: loop_mode::LoopState,
+    /// The `/goal` continuation (step 3, ADR 0047): the durable goal's live half. The
+    /// durable state is shared with the `goal` tool and the prompt hook; the stretches,
+    /// deadlines and send guards here are process-local like the loop's.
+    pub(crate) goal_mode: GoalMode,
     /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
     /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
     /// reason is readable; the user quits with the ordinary keys.

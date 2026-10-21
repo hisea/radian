@@ -484,11 +484,18 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
-            // `/context`: read-only (journal + stored layers, no inbox, no driver),
-            // so it works mid-turn and never interrupts it.
-            Effect::Context => {
-                let notices = self.session.context_report();
-                self.send(AppInput::SessionDone(notices));
+            // `/context [all]`: read-only (journal + stored layers, no inbox,
+            // no driver), so it works mid-turn and never interrupts it. The
+            // grid entry renders from the structured report; a read failure is
+            // one notice.
+            Effect::Context { all } => {
+                match self.session.context_report() {
+                    Ok(report) => self.send(AppInput::ContextReady {
+                        report: Box::new(report),
+                        all,
+                    }),
+                    Err(error) => self.send(AppInput::SessionDone(vec![error])),
+                }
                 Ok(())
             }
             // `/btw`: the side question runs through the session's current model and
@@ -725,6 +732,17 @@ impl LoopContext<'_> {
             Effect::Session(request) => {
                 let notices = handle_session_request(self.host, self.runtime, request);
                 self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
+            // ADR 0047: one `/goal` change. The event journals first through the session's
+            // own writer; `Input::GoalDone` applies the change on success and nothing on
+            // failure — a failed append never diverges the live state from the journal.
+            Effect::GoalAppend { event, apply } => {
+                let result = self
+                    .runtime
+                    .block_on(self.host.journal.append_runtime_event(event))
+                    .map_err(|error| error.to_string());
+                self.send(AppInput::GoalDone { apply, result });
                 Ok(())
             }
             Effect::OpenPicker { query } => {

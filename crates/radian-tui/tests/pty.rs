@@ -892,8 +892,8 @@ async fn pty_mounts_only_the_builtin_tools() {
     assert_eq!(
         got,
         [
-            "ask_user", "glob", "grep", "job", "patch", "read", "shell", "skill", "subagent",
-            "write"
+            "ask_user", "glob", "goal", "grep", "job", "patch", "read", "shell", "skill",
+            "subagent", "write"
         ],
         "the exact tool set of a fresh TUI session: {names:?}"
     );
@@ -2027,6 +2027,145 @@ async fn pty_resume_renders_the_stored_history() {
     assert!(
         pty.wait_for_screen("new reply", wait_positive()),
         "the resumed session did not run a turn:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `--resume` with a goal in the journal parks it as paused (ADR 0047) and the startup
+/// block shows `goal paused: <objective>; /goal resume to continue`. Seeded like
+/// `pty_resume_renders_the_stored_history`: only the journal differs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_with_paused_goal_shows_the_resume_hint() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("resume-goal");
+    let path = dir.path().join("goal.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "goal",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    let budget = radian_session::GoalState::default_budget();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::GoalSet {
+            objective: "RESUME-GOAL-42".into(),
+            max_turns: budget.max_turns,
+            max_duration_secs: budget.max_duration_secs,
+            max_tokens: budget.max_tokens,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("new reply")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "goal",
+        ],
+        24,
+        100,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen(
+            "goal paused: RESUME-GOAL-42; /goal resume to continue",
+            wait_positive()
+        ),
+        "the paused-goal hint is missing from the startup block:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/new` from a session with a (paused) goal starts clean: the new startup block has no
+/// `goal paused` line and `/goal` reports no goal. The old goal stays in the old journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_from_a_goal_session_starts_without_a_goal() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-goal");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let path = sessions.join("old.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "old",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    let budget = radian_session::GoalState::default_budget();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::GoalSet {
+            objective: "OLD-GOAL-7".into(),
+            max_turns: budget.max_turns,
+            max_duration_secs: budget.max_duration_secs,
+            max_tokens: budget.max_tokens,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("SECOND-TWO")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--resume",
+            "old",
+        ],
+        24,
+        100,
+    );
+    // The old session resumes with the paused goal and stays idle (a paused goal never
+    // auto-continues), so `/new` is accepted.
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("goal paused: OLD-GOAL-7", wait_positive()),
+        "the old session has no paused-goal hint:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("--resume old", wait_positive()),
+        "the /new notice must name the old session:\n{}",
+        pty.screen()
+    );
+    // The new session is live: one turn gets the mock reply, with no goal continuation.
+    pty.send(b"hello second\r");
+    assert!(
+        pty.wait_for_screen("SECOND-TWO", wait_positive()),
+        "the new session did not answer:\n{}",
+        pty.screen()
+    );
+    // Its startup block carries no goal hint ...
+    pty.expand_startup();
+    assert!(
+        pty.screen_absent("goal paused"),
+        "the new session must not show a paused-goal hint:\n{}",
+        pty.screen()
+    );
+    // ... and `/goal` reports no goal (a carried-over goal would name its objective).
+    pty.send(b"/goal\r");
+    assert!(
+        pty.wait_for_screen("no goal; /goal <objective> sets one", wait_positive()),
+        "the new session must have no goal:\n{}",
         pty.screen()
     );
     pty.quit();
@@ -5221,7 +5360,7 @@ async fn pty_compact_shows_its_result_without_a_model_request() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// `/context` prints the next request's estimated categories with the reported
+/// `/context` draws the grid view (spec `tui-context-grid`) with the reported
 /// line separate (ADR 0015 C1), without sending a model request. Read-only, so
 /// it works on an idle session with no usage yet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5236,14 +5375,16 @@ async fn pty_context_prints_estimated_categories_without_a_model_request() {
             "mock",
             "--base-url",
             &server.base_url,
+            "--context-window",
+            "200000",
             "--session-dir",
             dir.path().to_str().unwrap(),
             "--session-id",
             "context",
         ],
-        // Tall enough for the whole notice: the header rows must stay visible
+        // Tall enough for the whole grid: the legend rows must stay visible
         // with the startup block above them.
-        40,
+        60,
         110,
     );
     assert!(
@@ -5253,19 +5394,24 @@ async fn pty_context_prints_estimated_categories_without_a_model_request() {
     );
     pty.send(b"/context\r");
     assert!(
-        pty.wait_for_screen("context (estimated)", wait_positive()),
+        pty.wait_for_screen("estimated by category", wait_positive()),
         "{}",
         pty.screen()
     );
-    // The notice is longer than the frame, so the first rows scroll off: wait
+    // The grid is longer than the frame, so the first rows scroll off: wait
     // for rows near the end instead.
     assert!(
-        pty.wait_for_screen("compactions this session: 0", wait_positive()),
+        pty.wait_for_screen("0 compactions this session", wait_positive()),
         "{}",
         pty.screen()
     );
     assert!(
         pty.wait_for_screen("reported: none yet", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("compaction buffer", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -6605,6 +6751,79 @@ async fn pty_new_starts_a_fresh_session_carrying_route_tier_and_auto() {
             .any(|change| change.get("approval") == Some(&json!("auto"))),
         "the carried auto policy was not journaled: {changes:?}"
     );
+}
+
+/// `/new` carries the thinking level in force into the new session's **startup** state: the
+/// footer's `reasoning` item shows the carried level from the first frame, before any turn
+/// runs. The new session's `SessionCreated` snapshot carries only `{provider, model,
+/// access}` (`run_open`'s `config_snapshot`; thinking is journaled later as a
+/// `ConfigChanged` backfill straight from the carry, bypassing `resolve_model`), so the
+/// footer is what pins the `resolve_model` carry path: a mutation that drops the carry
+/// there (falling back to the CLI/default level) leaves every backfill assertion green
+/// and must fail this test. The suite default footer (`classic`) has no thinking item, so
+/// this runs the `pi` preset, whose identity row pairs the model with `reasoning`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_carries_thinking_into_the_new_sessions_startup_footer() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-thinking-carry");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    // A short workspace so the footer's cwd item cannot squeeze the reasoning item out.
+    let ws = short_workspace("new-thinking-carry");
+    // No turn ever runs: the server only satisfies session startup, never a request.
+    let anthropic_server = anth::MockServer::start(vec![anth_text_reply("NEVER")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-a",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "first",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-new-thinking"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        "schema_version = 1\n[tui.footer]\npreset = \"pi\"\n",
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    // Queue the switch without running a turn: the carry prefers the queued level over the
+    // applied one. The first Enter accepts the slash completion; the second submits.
+    pty.send(b"/thinking high\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: thinking high", wait_positive()),
+        "the thinking switch did not queue:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"/new\r");
+    // One predicate for both halves (the timing rule): the new session is up (its notice
+    // names the old session) **and** its footer already shows the carried level. The model
+    // name pins the identity row, so a stray `high` anywhere else cannot satisfy this.
+    assert!(
+        pty.wait_until(wait_positive(), |screen| {
+            screen.contains("--resume first")
+                && screen
+                    .lines()
+                    .any(|row| row.contains("claude-a") && row.contains("high"))
+        }),
+        "the new session's footer must show the carried thinking level from startup:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
 /// `/new` while a turn runs is refused with a notice and the session is unchanged.

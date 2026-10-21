@@ -13,6 +13,7 @@ use agent_core::{
 use agent_extensions::{McpSession, McpToolProvider};
 use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
 
+use crate::goal::{GoalSession, GoalTools};
 use crate::memory::{MemorySession, MemoryTools};
 use crate::skills::tools::{SkillSession, SkillTools};
 use crate::subagent::{SubagentSession, SubagentTools};
@@ -20,6 +21,10 @@ use crate::subagent::{SubagentSession, SubagentTools};
 pub struct HostTools {
     coding: Option<CodingTools>,
     memory: Option<MemoryTools>,
+    /// `goal` (ADR 0047). Host-level like `ask_user`: mounted always, so the model's
+    /// write end of the persistent goal exists in every session; without an active goal
+    /// it answers `no_active_goal`.
+    goal: Option<GoalTools>,
     /// `ask_user` (ADR 0024 Q5). Separate from the coding tools: a host with no workspace
     /// still has a human to ask.
     ask: Option<AskTools>,
@@ -51,6 +56,7 @@ impl HostTools {
         Self {
             coding,
             memory,
+            goal: None,
             ask: None,
             skills: None,
             subagent: None,
@@ -88,6 +94,13 @@ impl HostTools {
         }
     }
 
+    /// Mounts `goal` (ADR 0047). The host calls this with the session's shared goal
+    /// state and journal, so the tool journals every write it applies.
+    pub fn with_goal(mut self, goal: GoalTools) -> Self {
+        self.goal = Some(goal);
+        self
+    }
+
     /// Mounts `ask_user`. The host calls this only when a human is there to answer; without it
     /// the model's tool list has no `ask_user` at all.
     pub fn with_ask(mut self, ask: AskTools) -> Self {
@@ -114,6 +127,7 @@ impl HostTools {
 pub struct HostSession {
     coding: Option<CodingSession>,
     memory: Option<MemorySession>,
+    goal: Option<GoalSession>,
     ask: Option<AskSession>,
     skills: Option<SkillSession>,
     subagent: Option<SubagentSession>,
@@ -124,6 +138,7 @@ pub struct HostSession {
     ask_names: HashSet<String>,
     skill_names: HashSet<String>,
     subagent_names: HashSet<String>,
+    goal_names: HashSet<String>,
 }
 
 impl ToolProvider for HostTools {
@@ -138,6 +153,10 @@ impl ToolProvider for HostTools {
         };
         let memory = match &self.memory {
             Some(memory) => Some(memory.open_session().await?),
+            None => None,
+        };
+        let goal = match &self.goal {
+            Some(goal) => Some(goal.open_session().await?),
             None => None,
         };
         let ask = match &self.ask {
@@ -158,6 +177,7 @@ impl ToolProvider for HostTools {
         let mut ask_names = HashSet::new();
         let mut skill_names = HashSet::new();
         let mut subagent_names = HashSet::new();
+        let mut goal_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
@@ -168,6 +188,12 @@ impl ToolProvider for HostTools {
         if let Some(memory) = &memory {
             for spec in memory.tool_specs() {
                 memory_names.insert(spec.name.clone());
+                built_in_specs.push(spec.clone());
+            }
+        }
+        if let Some(goal) = &goal {
+            for spec in goal.tool_specs() {
+                goal_names.insert(spec.name.clone());
                 built_in_specs.push(spec.clone());
             }
         }
@@ -199,6 +225,7 @@ impl ToolProvider for HostTools {
             ask_names.retain(|name| self.allows(name));
             skill_names.retain(|name| self.allows(name));
             subagent_names.retain(|name| self.allows(name));
+            goal_names.retain(|name| self.allows(name));
             built_in_specs.retain(|spec| self.allows(&spec.name));
         }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
@@ -209,6 +236,7 @@ impl ToolProvider for HostTools {
         Ok(HostSession {
             coding,
             memory,
+            goal,
             ask,
             skills,
             subagent,
@@ -219,6 +247,7 @@ impl ToolProvider for HostTools {
             ask_names,
             skill_names,
             subagent_names,
+            goal_names,
         })
     }
 }
@@ -255,6 +284,14 @@ impl ToolSession for HostSession {
                 None => Err(ToolFailure::new(
                     "unknown_tool",
                     format!("`{}` has no question session", call.name),
+                )),
+            }
+        } else if self.goal_names.contains(&call.name) {
+            match &self.goal {
+                Some(goal) => goal.execute(call, cx).await,
+                None => Err(ToolFailure::new(
+                    "unknown_tool",
+                    format!("`{}` has no goal session", call.name),
                 )),
             }
         } else if self.memory_names.contains(&call.name) {

@@ -36,6 +36,9 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::ToolCall => "• ",
         EntryKind::ToolResult => "│ ",
         EntryKind::Notice => "* ",
+        // The `/context` grid entry (spec `tui-context-grid`): the transcript's
+        // notice marker, the same surface `/context` has always used.
+        EntryKind::Context => "* ",
         // The compaction line has no marker of its own: it is a rule-like `── … ──` line.
         EntryKind::Compaction => "",
         // The startup block has no marker of its own (the `Tip:` label is content). The warning
@@ -84,6 +87,9 @@ fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'s
         // revision 6 decision 2).
         EntryKind::ToolCall | EntryKind::ToolResult => theme.frame,
         EntryKind::Notice => theme.notice,
+        // The `/context` grid entry (spec `tui-context-grid`): the transcript's
+        // notice marker, the same surface `/context` has always used.
+        EntryKind::Context => theme.notice,
         EntryKind::Banner => theme.hint,
         EntryKind::Startup => theme.hint,
         EntryKind::Warning => theme.note,
@@ -118,6 +124,10 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::ToolResult if entry.is_error => theme.tool_result_error,
         EntryKind::ToolResult => theme.tool_result,
         EntryKind::Notice => theme.notice,
+        // The grid entry's unstyled spans are the main text level (the legend
+        // names, the model, the headers); the numbers and hints carry their
+        // own per-piece styles.
+        EntryKind::Context => theme.text,
         EntryKind::Banner => theme.text,
         EntryKind::Startup => theme.notice_body,
         EntryKind::Warning => theme.note,
@@ -711,7 +721,10 @@ fn body_spans(
     // decision). Only the first: a wrapped continuation that happens to contain a colon
     // (`https://…`, `12:30`, a `path:line`) is prose, not a label.
     if first_text
-        && matches!(entry.kind, EntryKind::Notice | EntryKind::Startup)
+        && matches!(
+            entry.kind,
+            EntryKind::Notice | EntryKind::Startup | EntryKind::Context
+        )
         && let Some((label, rest)) = split_label(&row.text)
     {
         out.push(Span::styled(label.to_owned(), theme.notice_label));
@@ -818,6 +831,23 @@ fn md_style(style: blocks::MdStyle, body_style: Style, theme: &Theme) -> Style {
         // Handled by [`render_head_row`], which draws the live frame instead of a stored glyph:
         // a non-head path never meets one.
         blocks::MdStyle::StatusRunning => theme.status_ok,
+        // The `/context` grid's category glyph (spec `tui-context-grid`): the tone's
+        // own theme role. The body style never substitutes: a missing theme role
+        // falls back to the built-in palette, never to the surrounding text.
+        blocks::MdStyle::Ctx(tone) => match tone {
+            blocks::CtxTone::System => theme.ctx_system,
+            blocks::CtxTone::Files => theme.ctx_files,
+            blocks::CtxTone::Memory => theme.ctx_memory,
+            blocks::CtxTone::Tools => theme.ctx_tools,
+            blocks::CtxTone::Skills => theme.ctx_skills,
+            blocks::CtxTone::Mcp => theme.ctx_mcp,
+            blocks::CtxTone::User => theme.ctx_user,
+            blocks::CtxTone::Assistant => theme.ctx_assistant,
+            blocks::CtxTone::Reasoning => theme.ctx_reasoning,
+            blocks::CtxTone::Results => theme.ctx_results,
+            blocks::CtxTone::Free => theme.ctx_free,
+            blocks::CtxTone::Buffer => theme.ctx_buffer,
+        },
         blocks::MdStyle::Plain => body_style,
     }
 }

@@ -61,6 +61,10 @@ impl App {
             // optional prompt. The loop's own inline prompt goes through `@` expansion
             // like `/queue`.
             command::Outcome::Loop(command) => self.loop_command(command),
+            // `/goal` (ADR 0047): the objective is literal text (no `@` expansion — the
+            // stored objective is re-sent verbatim every turn). Changes journal through
+            // the loop; `Show` only reads.
+            command::Outcome::Goal(command) => self.goal_command(command),
             command::Outcome::Memory(command) => UpdateResult::effect(Effect::RunMemoryCommand {
                 command,
                 confirmed: false,
@@ -300,9 +304,9 @@ impl App {
             } => self.begin_bash(command, exclude_from_context),
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
-            // `/context`: the loop reads the estimate from the facade; the answer
-            // comes back as `Input::SessionDone`.
-            command::Outcome::Context => UpdateResult::effect(Effect::Context),
+            // `/context [all]`: the loop reads the estimate from the facade; the
+            // answer comes back as `Input::ContextReady`.
+            command::Outcome::Context { all } => UpdateResult::effect(Effect::Context { all }),
             // `/btw [question]`: ask from the current context, or reopen the last
             // side answer. Pure: the loop sends the request and streams it back.
             command::Outcome::Btw(question) => self.run_btw(question),

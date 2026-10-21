@@ -65,6 +65,10 @@ pub struct LocalSession {
     /// completion and `/skill:<name>` expansion; the prompt hook and the `skill` tool share the
     /// same `Arc`.
     pub(super) skills: Arc<Vec<Skill>>,
+    /// The persistent goal (ADR 0047): folded once at open, shared by the `goal` tool, the
+    /// `<goal>` prompt hook and the TUI. The TUI reads and advances it for `/goal` and the
+    /// turn-end continuation; every change is journaled first.
+    pub(super) goal: crate::goal::SharedGoal,
     /// The background-job notifier (ADR 0037 slices 3-4). `None` for a host with no coding
     /// tools. The host calls [`JobNotifier::reset_wakes`] when a user message arrives.
     pub(super) job_notifier: Option<Arc<crate::job_notify::JobNotifier>>,
@@ -86,7 +90,8 @@ pub struct LocalSession {
     pub(super) system_base: String,
     /// The exact `RoleHooks` base (layers 0a, 1 and 2) the next formal request
     /// carries. The side-question shape rebuilds the prompt from it (plus the
-    /// memory block, the skills section and the cached `<session>` facts) so
+    /// memory block, the skills section, the `<goal>` block when a goal exists,
+    /// and the cached `<session>` facts) so
     /// the bytes match what the driver would send.
     pub(super) role_base: String,
     /// The cached `<session>` facts hook, shared with the hook chain: the side
@@ -133,7 +138,8 @@ pub struct LocalSession {
 impl LocalSession {
     /// The next formal request's shape (backlog `tui-btw-side-question`): the
     /// system prompt the hook chain would build (role base, fixed memory block,
-    /// skills section, cached `<session>` facts — in hook order), the journal's
+    /// skills section, the `<goal>` block when a goal exists, cached `<session>`
+    /// facts — in hook order), the journal's
     /// committed history, the open-time tool specs, and `Null` settings (the
     /// route and thinking travel in the model client, not the body).
     ///
@@ -153,9 +159,22 @@ impl LocalSession {
             .fixed(|| first_user_text(&history).unwrap_or_default())
             .map(|injection| injection.text)
             .unwrap_or_default();
-        // Hook order: role base, memory, skills, then `\n` + the cached session
-        // facts (`SessionFactsHooks::before_model_call`).
+        // Hook order: role base, memory, skills, goal, then `\n` + the cached session
+        // facts (`SessionFactsHooks::before_model_call` runs after `GoalHooks`).
         let mut system_prompt = format!("{}{}{}", self.role_base, memory_text, self.skills_section);
+        // The `<goal>` block (ADR 0047): `'\n'` plus the block when a goal exists, exactly
+        // as `GoalHooks::before_model_call` appends it, so the side body stays
+        // byte-identical to the formal body.
+        if let Some(block) = self
+            .goal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(crate::goal::goal_block)
+        {
+            system_prompt.push('\n');
+            system_prompt.push_str(&block);
+        }
         let session = self.facts_hooks.section();
         if !session.is_empty() {
             system_prompt.push('\n');
@@ -204,12 +223,15 @@ impl LocalSession {
         Ok(crate::btw::SideCancel::new(cancel))
     }
 
-    /// The `/context` report (backlog `tui-context-command`): the next request's
-    /// shape split into estimated categories, read from the journal's committed
-    /// view plus the stored system layers. Read-only: it never touches the
-    /// inbox or the driver, so it works mid-turn.
-    fn context_report_inner(&self) -> Vec<String> {
-        use crate::context_estimate::{ContextBlock, EstimateInput, SystemSplit, estimate};
+    /// The `/context` report (backlog `tui-context-command`, grid spec
+    /// `tui-context-grid`): the next request's shape split into estimated
+    /// categories, read from the journal's committed view plus the stored system
+    /// layers. Read-only: it never touches the inbox or the driver, so it works
+    /// mid-turn.
+    fn context_report_inner(&self) -> Result<crate::context_estimate::ContextReport, String> {
+        use crate::context_estimate::{
+            ContextBlock, ContextReport, EstimateInput, SystemSplit, estimate,
+        };
         use crate::memory::first_user_text;
 
         // The committed view: history, compactions, and the last reported input
@@ -218,13 +240,13 @@ impl LocalSession {
         let (history, compactions, reported) = match read_committed(&self.journal_path) {
             Ok(view) => view,
             Err(error) => {
-                return vec![format!("context: cannot read the session file: {error}")];
+                return Err(format!("context: cannot read the session file: {error}"));
             }
         };
         let request = match self.next_request_shape() {
             Ok(request) => request,
             Err(error) => {
-                return vec![format!("context: cannot read the session file: {error}")];
+                return Err(format!("context: cannot read the session file: {error}"));
             }
         };
         // The fixed block's text and record count, for the estimate's split and
@@ -275,7 +297,15 @@ impl LocalSession {
             window: self.window_context,
             threshold,
         });
-        crate::context_estimate::notice_lines(&breakdown, reported, history.len(), compactions)
+        let (provider, model) = self.model_route().unzip();
+        Ok(ContextReport::new(
+            breakdown,
+            provider,
+            model,
+            reported,
+            history.len(),
+            compactions,
+        ))
     }
 }
 
@@ -378,6 +408,13 @@ impl LocalSession {
     /// method because the host owns the `SKILL.md` read.
     pub fn skills(&self) -> &[Skill] {
         &self.skills
+    }
+
+    /// The persistent goal's shared state (ADR 0047): the TUI's `/goal` commands and
+    /// turn-end continuation read and advance it; the `goal` tool and the prompt hook share
+    /// the same `Arc`.
+    pub fn goal(&self) -> crate::goal::SharedGoal {
+        Arc::clone(&self.goal)
     }
 
     /// Expands `/skill:<name> [args]` into the user message ADR 0025 S3 puts in the inbox (the
@@ -680,7 +717,7 @@ impl SessionFacade for LocalSession {
         jobs.tail(id, max).map(|(state, _, tail)| (state, tail))
     }
 
-    fn context_report(&self) -> Vec<String> {
+    fn context_report(&self) -> Result<crate::context_estimate::ContextReport, String> {
         self.context_report_inner()
     }
 
