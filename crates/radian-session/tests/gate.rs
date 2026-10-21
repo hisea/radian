@@ -26,6 +26,7 @@ fn inbox_event(text: &str) -> RuntimeEvent {
         source: InputSource::User,
         wake: true,
         degraded: false,
+        pending_wake: false,
     }
 }
 

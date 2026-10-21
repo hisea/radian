@@ -135,6 +135,11 @@ pub enum RuntimeEvent {
         /// an ordinary line is byte-identical to before; an old journal has no such field
         /// and reads as `false` (ADR 0006 §5.5).
         degraded: bool,
+        /// Whether this `next_step` entry opens the next turn when it is still queued at
+        /// the turn boundary (ADR 0011). Written only when `true`, so an
+        /// ordinary line is byte-identical to before; an old journal has no such field
+        /// and reads as `false` (ADR 0006 §5.5).
+        pending_wake: bool,
     },
     /// The driver claimed these inputs for a turn (ADR 0006 §5.5).
     InputClaimed {
@@ -399,6 +404,10 @@ pub(crate) struct InboxEnqueuedData<'a> {
     /// it to `false` (ADR 0006 §5.5).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub degraded: bool,
+    /// Whether this `next_step` entry opens the next turn when it is still queued at the
+    /// turn boundary (ADR 0011). Written only when `true`, like `degraded`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pending_wake: bool,
 }
 
 #[derive(Serialize)]
@@ -627,6 +636,7 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             source,
             wake,
             degraded,
+            pending_wake,
         } => RuntimeData::InboxEnqueued(InboxEnqueuedData {
             message,
             message_id,
@@ -634,6 +644,7 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             source: *source,
             wake: *wake,
             degraded: *degraded,
+            pending_wake: *pending_wake,
         }),
         RuntimeEvent::InputClaimed {
             message_ids,

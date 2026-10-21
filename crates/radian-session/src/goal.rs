@@ -472,6 +472,7 @@ mod tests {
                     source: agent_core::InputSource::User,
                     wake: true,
                     degraded: false,
+                    pending_wake: false,
                 },
             ),
             event(
@@ -483,6 +484,7 @@ mod tests {
                     source: agent_core::InputSource::User,
                     wake: true,
                     degraded: false,
+                    pending_wake: false,
                 },
             ),
             event(

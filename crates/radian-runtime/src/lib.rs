@@ -14,4 +14,4 @@ mod inbox;
 pub use config::{ConfigQueue, ConfigSlot, ModelRoute};
 pub use driver::{BudgetFor, CompactionSettingsFor};
 pub use driver::{Driver, DriverError, RuntimeEvents, TurnAdditions};
-pub use inbox::{CancelCause, Inbox, InboxEntry, InboxError, Lane};
+pub use inbox::{CancelCause, Inbox, InboxEntry, InboxError, Lane, PendingWakeCallback};

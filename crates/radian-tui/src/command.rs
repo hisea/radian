@@ -32,6 +32,8 @@ pub const HELP: &str = "\
 /thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
 /usage                show the current provider's usage, one line per window (ADR 0027)
 /context              show the next request's estimated size by category (ADR 0015)
+/btw [question]       ask about the current context without touching the transcript;
+                      `/btw` alone reopens the last side answer
 /auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
 /yolo                 alias of /auto
 /access [workspace|full]
@@ -161,6 +163,10 @@ pub enum Outcome {
     /// category, plus the reported line, the message count and the compactions. Read-only;
     /// the loop reads it from the facade, so it works mid-turn.
     Context,
+    /// `/btw [question]` (backlog `tui-btw-side-question`): a side question answered only
+    /// from the current context, streamed into an overlay. `Some` is the question;
+    /// `None` reopens the last side answer. Parsing only: running it is the loop's job.
+    Btw(Option<String>),
     /// `/login [provider]`: open the credential wizard. `Some(id)` skips the provider
     /// choice (a built-in id or `custom`); `None` starts at the choice.
     Login(Option<String>),
@@ -350,6 +356,11 @@ pub fn tree() -> &'static [Command] {
             name: "context",
             description: "show the next request's estimated size by category (ADR 0015)",
             levels: &[],
+        },
+        Command {
+            name: "btw",
+            description: "ask about the current context without touching the transcript",
+            levels: &[free_level],
         },
         Command {
             name: "auto",
@@ -1092,6 +1103,9 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/usage") => Outcome::Notices(vec!["usage: /usage (no arguments)".to_owned()]),
         Some("/context") if tokens.len() == 1 => Outcome::Context,
         Some("/context") => Outcome::Notices(vec!["usage: /context (no arguments)".to_owned()]),
+        // `/btw [question]`: the question is the raw remainder (quotes survive, like
+        // `/skill:`'s args); empty reopens the last side answer.
+        Some("/btw") => Outcome::Btw(btw_question(line)),
         Some("/model") => match model_switch(&tokens[1..]) {
             Ok(switch) => Outcome::Model(switch),
             Err(usage) => Outcome::Notices(vec![usage]),
@@ -1573,6 +1587,17 @@ fn copy_request(args: &[String]) -> Outcome {
         [one] if one == "code" => Outcome::Copy { code_only: true },
         _ => Outcome::Notices(vec!["usage: /copy [code]".to_owned()]),
     }
+}
+
+/// `/btw [question]`: the raw remainder of the line, verbatim (so quotes survive). `None`
+/// reopens the last side answer.
+fn btw_question(line: &str) -> Option<String> {
+    let rest = line
+        .trim()
+        .split_once(char::is_whitespace)
+        .map(|(_, rest)| rest.trim().to_owned())
+        .unwrap_or_default();
+    (!rest.is_empty()).then_some(rest)
 }
 
 fn memory_command(args: &[String], memory_enabled: bool) -> Outcome {
@@ -2077,6 +2102,30 @@ mod tests {
         assert!(HELP.contains("/usage"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "usage"));
         assert!(tree().iter().any(|command| command.name == "context"));
+    }
+
+    /// `/btw [question]` parses to the side question with the raw remainder, verbatim
+    /// (quotes survive); empty reopens the last side answer. It is a command, and it
+    /// is in `/help`.
+    #[test]
+    fn btw_parses_its_question_or_reopens() {
+        match parse("/btw what file was that", false) {
+            Outcome::Btw(Some(question)) => assert_eq!(question, "what file was that"),
+            other => panic!("expected the side question, got {other:?}"),
+        }
+        // The remainder is raw, like `/skill:`'s args: quotes survive shlex.
+        match parse("/btw say \"hi there\"", false) {
+            Outcome::Btw(Some(question)) => assert_eq!(question, "say \"hi there\""),
+            other => panic!("expected the raw question, got {other:?}"),
+        }
+        for line in ["/btw", "/btw   "] {
+            match parse(line, false) {
+                Outcome::Btw(None) => {}
+                other => panic!("{line:?}: expected a reopen, got {other:?}"),
+            }
+        }
+        assert!(HELP.contains("/btw"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "btw"));
     }
 
     /// `/context` takes no argument, is a command, and is in `/help`; anything

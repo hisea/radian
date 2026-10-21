@@ -178,6 +178,10 @@ pub(crate) fn glyph_of(component: &dyn Component, glyphs: Glyphs) -> &'static st
     }]
 }
 
+/// The `jobs` item's displayed age and the idle loop's wait for its next change (ADR 0023
+/// U2): re-exported so the loop ticks exactly the text the item shows.
+pub(crate) use jobs::{age_text, tick_in};
+
 /// What an id resolves to at draw time: a compiled-in component, or the dynamic fallback for an
 /// arbitrary id a contributor has published (ADR 0027).
 pub(crate) enum Resolved<'a> {

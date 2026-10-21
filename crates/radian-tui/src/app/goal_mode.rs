@@ -956,6 +956,7 @@ mod tests {
             source: InputSource::User,
             wake: true,
             degraded: false,
+            pending_wake: false,
         }));
     }
 

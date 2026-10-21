@@ -22,14 +22,18 @@ pub(super) struct HerdrReporter {
     last_tokens: BTreeMap<String, String>,
     /// The last `blocked` label sent (revision 1 decision 2).
     last_label: Option<String>,
+    /// The last `working` label sent (the jobs item): `Some("jobs")` while background jobs
+    /// keep an idle session working. Leaving that state clears herdr's labels on the wire, so
+    /// re-entering it reports again.
+    last_working: Option<String>,
     /// `display_agent` is constant, so it rides the first metadata report only.
     display_agent_sent: bool,
 }
 
 impl HerdrReporter {
     pub(super) fn maybe_report(&mut self, app: &App) {
-        let (turn, pending, trust, wake_waiting) = app.herdr_state_inputs();
-        let state = radian_host::herdr::state(turn, pending, trust, wake_waiting);
+        let (turn, pending, trust, wake_waiting, jobs) = app.herdr_state_inputs();
+        let state = radian_host::herdr::state(turn, pending, trust, wake_waiting, jobs);
         let message = (state == radian_host::herdr::State::Blocked)
             .then(|| radian_host::herdr::blocked_message(app.herdr_blocked().as_ref(), trust));
         if self.last.as_ref() != Some(&(state, message.clone())) {
@@ -44,12 +48,20 @@ impl HerdrReporter {
             }
             self.reporter.report(&report, self.seq.next());
         }
-        self.report_metadata(app, trust);
+        self.report_metadata(app, trust, state, turn, jobs);
     }
 
-    /// Queues a `pane.report_metadata` when a token or the `blocked` label changed (revision 1
-    /// decisions 1 and 2). An empty diff queues nothing, so a live session sends nothing at all.
-    fn report_metadata(&mut self, app: &App, trust: bool) {
+    /// Queues a `pane.report_metadata` when a token or a state label changed (revision 1
+    /// decisions 1 and 2, plus the jobs item's `working: jobs`). An empty diff queues nothing,
+    /// so a live session sends nothing at all.
+    fn report_metadata(
+        &mut self,
+        app: &App,
+        trust: bool,
+        state: radian_host::herdr::State,
+        turn: radian_host::TurnState,
+        jobs: usize,
+    ) {
         let changed = radian_host::herdr::token_diff(&self.last_tokens, &metadata_tokens(app));
         for (name, value) in &changed {
             match value {
@@ -69,10 +81,21 @@ impl HerdrReporter {
             self.last_label = Some(label.clone());
             state_labels.insert("blocked".to_owned(), label.clone());
         }
+        let working = radian_host::herdr::working_label(state, turn, jobs);
+        if let Some(label) = &working
+            && self.last_working.as_deref() != Some(label.as_str())
+        {
+            self.last_working = Some(label.clone());
+            state_labels.insert("working".to_owned(), label.clone());
+        }
+        // Herdr keeps labels until cleared: leaving idle-with-jobs (a turn starts, or the
+        // last job settles) clears them, so a later turn is not shown as `working · jobs`.
+        let clearing = working.is_none() && self.last_working.take().is_some();
         let metadata = radian_host::herdr::Metadata {
             tokens: changed,
             state_labels,
             display_agent: (!self.display_agent_sent).then(|| radian_host::herdr::AGENT.to_owned()),
+            clear_state_labels: clearing,
         };
         if metadata.is_empty() {
             return;
@@ -146,6 +169,7 @@ pub(super) fn herdr_reporter(
             last: None,
             last_tokens: BTreeMap::new(),
             last_label: None,
+            last_working: None,
             display_agent_sent: false,
         },
         note,

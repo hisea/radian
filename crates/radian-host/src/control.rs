@@ -436,6 +436,7 @@ fn runtime_event_json(event: &RuntimeEvent) -> Value {
             source,
             wake,
             degraded,
+            pending_wake,
         } => json!({
             "message": message,
             "message_id": message_id,
@@ -443,6 +444,7 @@ fn runtime_event_json(event: &RuntimeEvent) -> Value {
             "source": source,
             "wake": wake,
             "degraded": degraded,
+            "pending_wake": pending_wake,
         }),
         RuntimeEvent::InputClaimed {
             message_ids,

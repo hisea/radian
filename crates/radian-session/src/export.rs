@@ -347,6 +347,7 @@ fn event_data_value(
             source,
             wake,
             degraded,
+            pending_wake,
         } => {
             let mut value = json!({
                 "message": serde_json::to_value(message)?,
@@ -359,6 +360,9 @@ fn event_data_value(
             // stays shaped like the journal line it came from.
             if *degraded {
                 value["degraded"] = serde_json::Value::Bool(true);
+            }
+            if *pending_wake {
+                value["pending_wake"] = serde_json::Value::Bool(true);
             }
             value
         }

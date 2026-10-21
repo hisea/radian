@@ -58,6 +58,9 @@ pub enum Overlay {
     /// The inspector (`jobs | tools | mcp | hooks`): one tabbed overlay over the
     /// transcript. Temporary, like the picker; never above a modal.
     Inspector(crate::inspector::Inspector),
+    /// The `/btw` side-question overlay (backlog `tui-btw-side-question`): the
+    /// streaming side answer. Temporary, like the picker; never above a modal.
+    Btw(crate::btw::BtwOverlay),
 }
 
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and

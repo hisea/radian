@@ -970,4 +970,25 @@ mod tests {
         );
         assert_eq!(app.session.entries.len(), 2);
     }
+
+    /// The herdr state inputs carry this session's running background-job count: the
+    /// start/settle pair the footer's `jobs` item reads feeds it, so there is no second
+    /// source for the jobs item's `working · jobs`.
+    #[test]
+    fn the_herdr_inputs_carry_the_running_job_count() {
+        let mut app = App::new("m", "s");
+        assert_eq!(app.herdr_state_inputs().4, 0);
+        let _ = app.update(Input::Runtime(RuntimeEvent::BackgroundJobStarted {
+            job_id: "job-1".to_owned(),
+            command: "sleep 3".to_owned(),
+            output: "available through job".to_owned(),
+        }));
+        assert_eq!(app.herdr_state_inputs().4, 1);
+        let _ = app.update(Input::Runtime(RuntimeEvent::BackgroundJobSettled {
+            job_id: "job-1".to_owned(),
+            state: "exited 0".to_owned(),
+            duration_ms: 3_000,
+        }));
+        assert_eq!(app.herdr_state_inputs().4, 0);
+    }
 }
