@@ -26,30 +26,8 @@ pub(crate) async fn trust_prompt(
     hooks_preview: Option<&radian_host::ProjectHooksPreview>,
 ) -> Option<radian_host::trust::Choice> {
     use radian_host::trust::Choice;
-    eprintln!(
-        "project resources found in {}: trust them?",
-        workspace.display()
-    );
-    if let Some(preview) = preview {
-        for line in radian_host::preview_lines(preview) {
-            eprintln!("  {line}");
-        }
-    }
-    if let Some(hooks_preview) = hooks_preview {
-        for line in radian_host::preview_project_hooks_lines(hooks_preview) {
-            eprintln!("  {line}");
-        }
-    }
-    for (index, choice) in Choice::ALL.iter().enumerate() {
-        let label = choice
-            .label(workspace)
-            .unwrap_or_else(|| "Trust the parent directory".to_owned());
-        let marker = if *choice == Choice::TrustHereSandbox {
-            " (default)"
-        } else {
-            ""
-        };
-        eprintln!("  [{}] {label}{marker}", index + 1);
+    for line in trust_question_lines(workspace, preview, hooks_preview) {
+        eprintln!("{line}");
     }
     let choice_default = Choice::ALL
         .iter()
@@ -61,6 +39,44 @@ pub(crate) async fn trust_prompt(
     // The same line hub the approval prompt uses: one reader owns stdin.
     let answer = lines.next().await.unwrap_or_default();
     Some(trust_choice_from_answer(answer.trim()))
+}
+
+/// The trust question's lines, without the `choice [N]: ` prompt: the header, the project
+/// `.mcp.json` preview lines, the project `.radian/hooks.json` preview lines (each `None`
+/// prints nothing), then the numbered choices. Pure, so the listings are testable without
+/// a terminal: what the user sees before trusting is what this returns.
+pub(crate) fn trust_question_lines(
+    workspace: &std::path::Path,
+    preview: Option<&radian_host::ProjectPreview>,
+    hooks_preview: Option<&radian_host::ProjectHooksPreview>,
+) -> Vec<String> {
+    use radian_host::trust::Choice;
+    let mut out = vec![format!(
+        "project resources found in {}: trust them?",
+        workspace.display()
+    )];
+    if let Some(preview) = preview {
+        for line in radian_host::preview_lines(preview) {
+            out.push(format!("  {line}"));
+        }
+    }
+    if let Some(hooks_preview) = hooks_preview {
+        for line in radian_host::preview_project_hooks_lines(hooks_preview) {
+            out.push(format!("  {line}"));
+        }
+    }
+    for (index, choice) in Choice::ALL.iter().enumerate() {
+        let label = choice
+            .label(workspace)
+            .unwrap_or_else(|| "Trust the parent directory".to_owned());
+        let marker = if *choice == Choice::TrustHereSandbox {
+            " (default)"
+        } else {
+            ""
+        };
+        out.push(format!("  [{}] {label}{marker}", index + 1));
+    }
+    out
 }
 
 /// The answer to the trust question, as a choice. An empty line takes the default (the
@@ -124,5 +140,50 @@ mod tests {
                 "{other:?}"
             );
         }
+    }
+
+    /// Slice B (hooks): the exec trust question lists the project `.radian/hooks.json`
+    /// hooks — the event, the matcher and the command as written. The mutation (the
+    /// question drops the hooks preview lines) fails this test.
+    #[test]
+    fn the_trust_question_lists_the_project_hooks_preview() {
+        let lines = trust_question_lines(
+            std::path::Path::new("/work/example"),
+            None,
+            Some(&radian_host::ProjectHooksPreview {
+                entries: vec![
+                    radian_host::ProjectHooksPreviewEntry {
+                        event: "PreToolUse".to_owned(),
+                        matcher: "patch".to_owned(),
+                        command: "make check".to_owned(),
+                    },
+                    radian_host::ProjectHooksPreviewEntry {
+                        event: "Stop".to_owned(),
+                        matcher: "*".to_owned(),
+                        command: "make verify".to_owned(),
+                    },
+                ],
+                error: None,
+            }),
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line
+                    .contains("project .radian/hooks.json: 2 hooks to load once trusted")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("hooks: PreToolUse patch `make check`")),
+            "event, matcher, command: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("hooks: Stop * `make verify`")),
+            "{lines:?}"
+        );
     }
 }

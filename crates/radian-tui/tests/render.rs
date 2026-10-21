@@ -2828,6 +2828,44 @@ fn the_trust_panel_lists_the_project_mcp_preview() {
     assert!(!text.contains("sekret"), "values never leak: {text}");
 }
 
+/// Slice B (hooks): the trust modal lists the project `.radian/hooks.json` hooks — the
+/// event, the matcher and the command as written. The mutation (the modal drops the
+/// hooks preview rows) fails this test.
+#[test]
+fn the_trust_panel_lists_the_project_hooks_preview() {
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(
+        std::path::PathBuf::from("/work/example"),
+        None,
+        Some(radian_host::ProjectHooksPreview {
+            entries: vec![
+                radian_host::ProjectHooksPreviewEntry {
+                    event: "PreToolUse".to_owned(),
+                    matcher: "patch".to_owned(),
+                    command: "make check".to_owned(),
+                },
+                radian_host::ProjectHooksPreviewEntry {
+                    event: "Stop".to_owned(),
+                    matcher: "*".to_owned(),
+                    command: "make verify".to_owned(),
+                },
+            ],
+            error: None,
+        }),
+    );
+    let terminal = render(&mut app, 100, 30);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("project .radian/hooks.json: 2 hooks to load once trusted"),
+        "{text}"
+    );
+    assert!(
+        text.contains("hooks: PreToolUse patch `make check`"),
+        "event, matcher, command: {text}"
+    );
+    assert!(text.contains("hooks: Stop * `make verify`"), "{text}");
+}
+
 /// The session picker (ADR 0035/2): the shared panel with the filter row, the
 /// sessions through the shared list, and the selected `--resume <id>` on the top border.
 #[test]
