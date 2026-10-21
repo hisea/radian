@@ -117,6 +117,10 @@ pub trait SessionFacade: Send + Sync {
     /// The resolved `[hooks]` section (the inspector's hooks page, ADR 0045 slice A).
     fn hooks_config(&self) -> crate::config::HooksConfig;
 
+    /// The project-level hooks (`<workspace>/.radian/hooks.json`, ADR 0045 slice B), empty
+    /// when untrusted (the inspector's hooks page shows them as the `project` level).
+    fn project_hooks_config(&self) -> crate::config::HooksConfig;
+
     /// The tail of a job's output plus its state, for the inspector's jobs detail.
     /// `None` for an unknown id. The ring is in-memory, so this is not I/O.
     fn job_tail(&self, id: &str, max: usize) -> Option<(radian_coding::JobState, String)>;

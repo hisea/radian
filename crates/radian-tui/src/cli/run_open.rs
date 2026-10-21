@@ -36,6 +36,9 @@ pub(super) struct SessionInputs {
     /// `job notice lost` block while it waits (ADR 0037 decision 5's failure rule).
     pub(super) notice_lost_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     pub(super) trust_setup: radian_host::trust::Setup,
+    /// The project-level hooks (`<workspace>/.radian/hooks.json`, ADR 0045 slice B), empty
+    /// when untrusted. Loaded once trust is resolved, like the project `.mcp.json`.
+    pub(super) project_hooks: radian_host::config::HooksConfig,
     /// Where the memory service lives (`None` when no RADIAN_HOME/HOME): the session
     /// shares it with the agent's tools and injection.
     pub(super) memory_root: Option<PathBuf>,
@@ -354,6 +357,13 @@ pub(super) fn build_session_inputs(
         startup_log.line(format!("[mcp] {line}"));
     }
     let servers = merged.servers;
+    // Slice B (hooks): the project `.radian/hooks.json` loads now that trust is resolved —
+    // trusted (or `--trust`) loads it, untrusted loads nothing.
+    let (project_hooks, project_hooks_lines) =
+        radian_host::load_project_hooks(workspace_path, trust_setup.resolved.decision.as_bool());
+    for line in &project_hooks_lines {
+        startup_log.line(format!("[hooks] {line}"));
+    }
     Ok((
         SessionInputs {
             sandbox,
@@ -376,6 +386,7 @@ pub(super) fn build_session_inputs(
             wake_warning,
             notice_lost_warning,
             trust_setup,
+            project_hooks,
             memory_root,
         },
         control_guard,
@@ -419,6 +430,7 @@ pub(super) fn open_session_and_refresh(
         wake_warning,
         notice_lost_warning,
         trust_setup,
+        project_hooks,
         memory_root,
         access_builder,
         ..
@@ -485,6 +497,7 @@ pub(super) fn open_session_and_refresh(
                     trust: trust_setup.resolved.decision.as_bool(),
                 }),
                 tools_allow: None,
+                project_hooks,
                 memory_root,
                 trust: trust_setup,
                 resume: resume.is_some(),

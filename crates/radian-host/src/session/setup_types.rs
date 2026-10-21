@@ -132,6 +132,10 @@ pub struct SessionSetup {
     /// The host copies it from the config; `open_session` builds the [`crate::CommandHooks`]
     /// from it and chains it after the permissions.
     pub hooks: crate::config::HooksConfig,
+    /// The project-level hooks (`<workspace>/.radian/hooks.json`, ADR 0045 slice B), loaded
+    /// once trust is resolved (untrusted means empty). `open_session` layers them before the
+    /// user hooks (project first, then user).
+    pub project_hooks: crate::config::HooksConfig,
     /// `true` to resume
     /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
     /// before `open_session`; `needs_ask` means an interactive host must ask before the first

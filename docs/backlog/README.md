@@ -35,7 +35,6 @@
 | `public-release-tree.md` | decided | 0013、0020 | 公开前清理当前树：AGENTS.md 拆分、脱敏、删 pyc、docs 只留 adr/user/backlog/schema、去掉决策记录、补 CONTRIBUTING/SECURITY/CODE_OF_CONDUCT、`.gitleaksignore` |
 | `adr-english-ste.md` | decided | 全部 | 44 篇 ADR 改写为英文 ASD-STE100，只写现行决定，编号与小节编号不变，逐篇对照原文审查 |
 | `history-rewrite.md` | decided（依赖上两条） | 无 | filter-repo：历史里去掉旧 ADR、替换内网地址与本机路径、去掉决策记录（含提交信息）；gitleaks 前后各扫一次；force-push 前确认 |
-| `command-hooks-claude-subset.md` | decided（生态 3/4） | 新 ADR；0012、0031、0011、0017、0016 | 外部命令 hook 只做 `PreToolUse`/`PostToolUse`/`Stop`，配置与 stdin 用 Claude/Codex 的子集，`allow`/`ask` 拒收，用户级 `[hooks]`、项目级 `.radian/hooks.json` 进信任门（目录受信任即加载、不按哈希），工具名只在导入时翻译；吸收总报告第 17 条；编辑后检查是项目级 `PostToolUse`：配了才跑、同步每次、不批处理不延后、不内置不自动启用（本机数据：92% 的编辑消息只有一次编辑、跨轮段平均 1.83） |
 | `import-claude.md` | decided（生态 4/4） | 新 ADR；0029、0008、0025、0031 | `radian config import-claude` 一次性翻译，来源哪一级产物落哪一级， commands/skills/`mcpServers`/hooks，丢弃项逐行报告，不读凭据、不覆盖、不导入会话与 memory；依赖前两条与 project-skills |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |

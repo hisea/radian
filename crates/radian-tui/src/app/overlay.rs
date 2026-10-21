@@ -180,15 +180,23 @@ impl Default for AccessWizard {
 ///
 /// Slice B2: `mcp` carries the project `.mcp.json` preview the modal lists (one line per
 /// server, env key names only, never values), or `None` when there is no project file.
+/// Slice B (hooks): `hooks` carries the project `.radian/hooks.json` preview the modal
+/// lists (one line per hook: the event, the matcher, the command), or `None` when there is
+/// no project file.
 pub struct TrustWizard {
     pub workspace: PathBuf,
     pub cursor: usize,
     pub choices: Vec<radian_host::trust::Choice>,
     pub mcp: Option<radian_host::ProjectPreview>,
+    pub hooks: Option<radian_host::ProjectHooksPreview>,
 }
 
 impl TrustWizard {
-    pub fn new(workspace: PathBuf, mcp: Option<radian_host::ProjectPreview>) -> Self {
+    pub fn new(
+        workspace: PathBuf,
+        mcp: Option<radian_host::ProjectPreview>,
+        hooks: Option<radian_host::ProjectHooksPreview>,
+    ) -> Self {
         let choices: Vec<radian_host::trust::Choice> = radian_host::trust::Choice::ALL
             .into_iter()
             // "Trust parent" needs a parent to name.
@@ -205,6 +213,7 @@ impl TrustWizard {
             cursor,
             choices,
             mcp,
+            hooks,
         }
     }
 

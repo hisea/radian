@@ -171,6 +171,11 @@ pub fn trust_panel(
             panel = panel.row(Line::from(Span::styled(line, theme.hint)));
         }
     }
+    if let Some(preview) = &wizard.hooks {
+        for line in radian_host::preview_project_hooks_lines(preview) {
+            panel = panel.row(Line::from(Span::styled(line, theme.hint)));
+        }
+    }
     for line in list.lines {
         panel = panel.row(line);
     }
