@@ -83,6 +83,8 @@ impl App {
                 next_thinking: None,
                 bash_running: None,
                 queued_bash: None,
+                btw_in_flight: false,
+                btw_last: None,
                 bash_available: true,
                 bash_context_pending: None,
                 total_lines: 0,

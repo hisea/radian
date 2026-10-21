@@ -13,6 +13,7 @@ pub mod app;
 pub mod attach;
 pub mod bell;
 pub mod blocks;
+pub mod btw;
 pub mod cli;
 pub mod clip;
 pub mod command;

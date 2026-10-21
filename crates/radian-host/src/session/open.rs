@@ -416,6 +416,9 @@ pub async fn open_session(
         &context.section,
         role_override,
     ));
+    // The exact base the hook chain writes (layers 0a, 1 and 2): the side-question
+    // shape rebuilds the prompt from it, so the bytes match the formal request.
+    let role_base = crate::prompt::assemble(&runtime_layer, &role_layer, &context.section);
     let agent_config = AgentConfig {
         system_prompt,
         context_budget,
@@ -429,8 +432,12 @@ pub async fn open_session(
         model_name.clone(),
         Some(Arc::clone(&config_slot)),
     ));
+    // The driver's model, shared with the side-question path: `/btw` sends
+    // through the same route, thinking level and credentials as the next
+    // formal request (`Arc` because `Agent` takes ownership).
+    let side_model = Arc::new(model);
     let agent = Arc::new(
-        Agent::new(model, tools)
+        Agent::new(Arc::clone(&side_model), tools)
             .with_config(agent_config)
             .with_hooks(session_hooks(
                 Arc::clone(&role_hooks),
@@ -657,6 +664,10 @@ pub async fn open_session(
         jobs,
         tool_specs,
         system_base,
+        role_base,
+        facts_hooks,
+        side_model,
+        price_for,
         context_section,
         context_blocks,
         skills_section,

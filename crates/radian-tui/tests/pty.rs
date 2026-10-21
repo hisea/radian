@@ -14760,3 +14760,93 @@ async fn pty_loop_resends_until_times_and_footer_shows_it() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
 }
+
+/// `/btw` asks from the current context: the side answer streams into an overlay
+/// while the transcript keeps only the formal turn, the mock sees the side body
+/// as the formal body plus one trailing message, and the session file never
+/// holds the side question or its answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_btw_side_question_streams_without_touching_the_transcript() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        text_reply("FORMAL-ANSWER-OK"),
+        text_reply("SIDE-ANSWER-OK"),
+    ])
+    .await;
+    let dir = TempDir::new("btw");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "btw",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("FORMAL-ANSWER-OK", wait_positive()),
+        "the formal turn did not answer:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/btw what file was that\r");
+    assert!(
+        pty.wait_for_screen("SIDE-ANSWER-OK", wait_positive()),
+        "the side answer did not stream into the overlay:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "one formal call, one side call");
+    let formal = requests[0].json();
+    let body = requests[1].json();
+    let formal_messages = formal["messages"].as_array().unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len(),
+        formal_messages.len() + 2,
+        "formal history plus its answer plus the trailing side message"
+    );
+    assert_eq!(
+        &messages[..formal_messages.len()],
+        formal_messages.as_slice(),
+        "the formal prefix is byte-identical"
+    );
+    assert!(
+        messages[formal_messages.len()]["content"]
+            .as_str()
+            .unwrap()
+            .contains("FORMAL-ANSWER-OK"),
+        "the committed formal answer is now history: {body}"
+    );
+    assert!(
+        messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("what file was that"),
+        "the trailing message is the side question: {body}"
+    );
+    let journal = std::fs::read_to_string(dir.path().join("btw.jsonl")).unwrap();
+    assert!(
+        !journal.contains("what file was that"),
+        "the side question never entered the session file"
+    );
+    assert!(
+        !journal.contains("SIDE-ANSWER-OK"),
+        "the side answer never entered the session file"
+    );
+}
