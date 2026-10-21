@@ -9,7 +9,7 @@
 - **提示词改不好它。** 两代角色提示词都有「做完再停」的规则（旧版 `Work until the task is done … do not stop at a phase boundary`，新版 `End your turn only when the task is done, when you wait for a background job, or when you need the user`），停顿在两代下都出现。pi 和 opencode 的系统提示词里**没有任何**「继续干」的措辞，却不停顿。
 - **radian 独有、而且和停顿共现的，是「回合中途结束、等通知唤醒」这条路（ADR 0037）**：后台 job、`shell` 描述里的「超过 60 s 自动转后台、完成会通知你」、完成通知以一条 user 角色的消息开启新回合。muse 的 9 次停顿里，4 次发生在通知开启的回合里（模型对通知像对聊天消息一样回一句就停），2 次紧跟在一次合法的等待回合之后，4 次卡在「写报告 / 发 herdr 通知」这最后一步。pi 没有后台执行，同一条 `cargo test` 它同步等了 288 s。
 - **频率**：本机 42 个 muse 会话里 9 次确认停顿（7 个会话），占 muse 纯文本回合结束的 8.7%，占「先说一句再调用工具」那类叙述的 0.7%；pi 的 muse 会话 5 710 条助手消息里 0 次。有人看着时等 1–16 分钟，没人看着时等了 2 小时到一天。
-- **建议**：在 `Stop` 续跑路径（ADR 0045 §3）上内建一条保守的轮末检测 + 一次 `System` 续跑，判断权交给模型，受唤醒闸门与现有三路可见约束，每回合一次、连续两次仍停则 herdr 报 `blocked`；同时把完成通知的文案改成以「继续任务」结尾并修掉少换行的 bug。backlog 草稿：`docs/backlog/turn-end-continuation.md`。
+- **建议**：先改提示词与通知文案（删掉角色里专为此加、却没起作用的 `End your turn only when …`；「工作区外可见要先问」加任务文本的例外；通知以「继续任务」结尾并修少换行；查 lead 记忆漏进 worker），量过之后仍有停顿再在 `Stop` 续跑路径（ADR 0045 §3）上内建保守检测 + 一次 `System` 续跑。backlog：`docs/backlog/turn-end-continuation.md`。
 
 ## 1. 案例
 
@@ -74,6 +74,26 @@ ab6 的四个回合里三个以「宣布下一步」结束，只有最后一个�
 
 未验证、只作假设：同一上下文里已经出现过一次「说一句就结束回合」之后，模型更容易再来一次（ab6 t-1 → t-2 → t-3 连续三次）。
 
+### 3.4 基础提示词逐条对比（ab6 实际发出的内容）
+
+pi 的 system 消息存在它的会话 jsonl 里；radian 的按 ADR 0036 五层拼出，再加 `shell`、`job` 的工具描述（模型同样看得到）。
+
+**pi**：身份一句（`expert coding assistant operating inside pi … help users by reading files, executing commands, editing code, and writing new files`）；工具列表；13 条规则，全是工具用法（`Use bash for file operations like ls, rg, find`、`Use read to examine files instead of cat or sed`、edit 的 `oldText` 规则、`Be concise in your responses`、`Show file paths clearly`）；pi 文档路径；AGENTS.md；skills；cwd。**没有一个字**提到回合、等待、后台、通知或何时结束。`bash` 的 `timeout` 参数写的是 `no default timeout`，模型就同步等。
+
+**radian**：`<runtime>`（full：无沙箱、网络开、无审批弹窗、项目说明文件是数据）；`<role>` 9 条；AGENTS.md；5 条 memory；`<session>`（cwd、日期、os、shell、git、model）；工具描述 9–10 个。
+
+radian 有、pi 没有、且可能导致停顿的内容，按证据强弱排：
+
+| # | radian 独有的内容 | 为什么可能导致停顿 | 证据 |
+|---|---|---|---|
+| 1 | 四句话合起来教模型「等待 = 结束回合」：角色 `Do not use sleep or polling to wait`、`End your turn only when … when you wait for a background job …`；`shell` 描述 `The call returns at once with a job id. You will be notified when the command finishes`；`job` 描述 `A completion notice tells you when a running job ends. Prefer the notice over wait` | pi 的模型没有「任务中途结束回合」这个动作；radian 的模型被明确告知它是对的。用过一次（合法等待）之后，「说一句就停」是同一个动作的误用 | 强：9 次里 6 次在一次合法等待之后一两轮内，4 次在通知开启的回合里 |
+| 2 | 角色 `Ask the user before an action that you cannot undo or that is visible outside the workspace. Examples … publishing` | 给 lead 的 pane 发 `herdr agent prompt` 正是「工作区外可见」的动作。`Sending the notice.`、`Notifying the lead's pane.` 两次停顿恰好停在发通知之前，像在「问」却没写出问句 | 中：2/9 位置吻合；模型没真问，是推测 |
+| 3 | 角色 `Keep your answers short`，加上完成通知以 user 角色消息到达 | pi 也有 `Be concise`，单独不是差别；radian 里模型是在「回答一条用户消息」（通知），短回答 + 用户消息 = 一行就停。通知开启的回合 14% 以宣布下一步结束，用户开启的 7% | 中 |
+| 4 | 5 条 memory，内容是 lead 角色的指令（拆 slice 派给 task agent、及时 bug report、「计划不阻塞时同一轮里直接开始」） | lead 会话的记忆漏进了 worker 会话。其中一条正是反对停顿的，所以不是成因，但角色噪音可能让模型不确定自己是执行者还是调度者 | 弱：污染属实，影响未验证 |
+| 5 | `End your turn only when …` 本身 | 列出三个「允许结束」的理由，等于告诉模型结束回合是一个要选理由的动作；pi 从不提这个动作。停顿时模型没满足任何一条，这句既不是成因也没起作用 | 弱 |
+
+pi 有而 radian 没有的内容里，没有一条和回合有关。pi 不停顿不是因为它说了什么，而是因为它什么都没说：模型只剩「调工具」和「交最终答复」两个动作。
+
 ## 4. 频率：本机全部 radian journal
 
 数据：`~/.radian/sessions/*.jsonl` 348 个文件，其中 133 个会话有完整回合，311 个 `TurnFinished`，286 个 `completed`（13 failed、12 cancelled）。一个 `completed` 回合的最后一条助手消息都是纯文本（否则回合不会结束），所以问题是「这些纯文本里哪些是停顿」。
@@ -131,7 +151,7 @@ muse：9 次 / 42 个会话（7 个会话出事）；另一个模型（GPT lead 
 
 | 选项 | 内容 | 证据说它有用吗 | 误报风险 | 成本 | 怎么证明 |
 |---|---|---|---|---|---|
-| (a) 只改提示词 | 换措辞、加例子（`Do not end the turn after a sentence like "Now X."`） | 弱。两代规则都在，停顿照出；pi/opencode 没有规则却不停。可能把 0.7% 压低一点，不会归零 | 无 | 最低 | 同一任务集 A/B 各 3 次，数人工 `Continue` 次数（ab6 metrics 已有这列） |
+| (a) 先改提示词与通知文案 | 删掉角色里的 `End your turn only when …`（§3.4 第 5 项，专为此加的，没起作用）；「工作区外可见要先问」加例外（任务文本里要求的通知算已获许可）；完成通知以「继续任务」结尾并修少换行；查 lead 记忆漏进 worker 的注入。备选：把等待写成固定句式 `waiting for job <id>` | 中。两代规则都没挡住停顿，所以不指望归零；但 §3.4 的 1、2、5 三项是 radian 独有的诱因，去掉它们是最便宜的一步 | 无 | 最低 | 同一任务集 A/B 各 3 次，数人工 `Continue` 次数（ab6 metrics 已有这列）与纯文本中途结束的次数 |
 | (b) 轮末守卫（harness） | 检测器 + 一次自动 `System` `followup`「继续」，受唤醒闸门，三路可见 | 直接覆盖全部 12 例（都在 `Completed` 回合末、都能被规则命中） | **主要风险**。纯规则直接续跑：11/23 误报，每次误报是一轮计划外的工作。把判断交给模型（续跑消息写明「上一条只宣布了下一步却没调用工具；没完就继续，完了或要问用户就一行说明」）：误报代价变成一次短调用 + transcript 一行，不会做计划外的事 | 中：检测器、meta、闸门接入、TUI/herdr 可见、测试 | mock provider 单测（命中 → 恰好一条 System followup；`Done.`/问句/等待 → 无；连续两次后 `blocked`）；变异去掉检测器/上限；A/B 数人工推动次数与误续跑次数 |
 | (c) 内建到 `Stop` 路径 | 同 (b)，但走 ADR 0045 §3 已有的 `Stop` 续跑：同一闸门、同一降级、同一「只在 `Completed` 跑」；要给 `Stop` 的 stdin 加上一条助手消息的文本 | 同 (b) | 同 (b)；另一个好处是用户能用自己的脚本换掉或关掉内建规则 | 比 (b) 低：唤醒闸门、降级可见、每回合一次都已经有了 | 同 (b)，加 `Stop` stdin 字段的测试 |
 | (d) 模型/参数 | `tool_choice: required` 或改推理档位 | `required` 会让回合永远结不了，不可用；pi 同 `medium` 0 次，档位不是杠杆；协议不是杠杆（opencode 也是 Responses） | — | — | 不建议做 |
@@ -144,12 +164,18 @@ muse：9 次 / 42 个会话（7 个会话出事）；另一个模型（GPT lead 
 
 ## 6. 建议
 
-1. 做 (c)：在 `Stop` 续跑路径上内建一条**保守**的轮末检测（§4.4 的形状：短、无问号、动作主体是我、动名词或 Now/Next 开头，中英两套），命中后发**一条** `System` `followup`，措辞让模型自己判断是继续还是一行说明已完成；每回合最多一次，连续两次续跑后仍停则不再续并让 herdr 报 `blocked`、TUI 一行；计入唤醒闸门；journal 的 `InboxEnqueued` 带 meta `continuation = "intent-stop"`。`/loop`、`/goal` 开着时让它们接管。
-2. 同时改通知文案并修换行 bug。
-3. 不改角色提示词，不动模型参数。
-4. 验收用 A/B/C 现有的「人工 `Continue` 次数」一列归零，再加「误续跑次数」一列（续跑后模型一行说已完成）。
+顺序：先提示词，量过之后再决定要不要守卫。
 
-需要决定的：规则直接续跑还是模型判断（建议后者）；上限 1 还是 2（建议 2）；是否同时给 `Stop` hook 的 stdin 加 `last_assistant_message` 让用户能换掉内建规则（建议是）。
+1. **第一步，提示词与通知文案**（`docs/backlog/turn-end-continuation.md` A 部分）：
+   - **删掉**角色里的 `End your turn only when the task is done, when you wait for a background job, or when you need the user.`。它是 `9aa6fff5` 为这个问题加的，ab6 带着它照样停了 3 次；更早的长版规则（`do not stop at a phase boundary`）在 10-17 也没挡住；pi、opencode 对回合一字不提而 0 次。它唯一的正面作用——告诉模型等 job 时可以结束回合——`shell`、`job` 的描述已经说了（`You will be notified`、`Prefer the notice over wait`）。它的副作用是把「结束回合」变成一个有理由可选的动作。
+   - 备选（只在之后要做守卫、需要可识别的等待标记时再加）：`To wait for a background job, end your reply with exactly: waiting for job <id>.` 一句，不再列结束理由。
+   - 「工作区外可见要先问」加例外：任务文本里要求的通知与提交不用再问。
+   - 完成通知末尾加 `Continue the task; do not end the turn only to report this result.`，修掉尾部为空时少换行的 bug（`job_notify.rs` 的 `completion_message`）。
+   - 查 memory 注入：lead 会话的记忆为什么进了 worker 会话（同一 project scope），是否该按角色或会话隔离。
+   - 角色正文的内容清单写在 ADR 0036 里，落地时同一分支的 docs-only commit 改 ADR。
+2. **量**：同一任务集 A/B/C 各 3 次，看人工 `Continue` 次数和「无 `waiting for job` 标记的纯文本结束」次数。
+3. **第二步，只在第一步之后还有停顿时做**：`Stop` 路径上的内建续跑（B 部分）。那时再加备选的固定等待句式，检测器只需认「没有标记、没有问句的纯文本结束」，不用再靠动名词规则。
+4. 不动模型参数。
 
 ## 附：方法
 

@@ -1,27 +1,40 @@
-# 轮末「只说不做」的内建续跑：检测 + 一次 System 续跑 + 可见
+# 轮末「只说不做」：先改提示词与通知文案，之后再定内建续跑
 
-- 状态：idea（研究建议，设计未定）
-- 涉及 ADR：0011（`followup` lane、L2 来源、L5 空闲唤醒）、0037 决定 5（唤醒速率闸门与到顶可见）、0045 §3（`Stop` 续跑路径）、0036（角色规则与完成通知作为消息追加）、0034（herdr `blocked`）、0005（宿主消息 meta）、0017（只有 `Completed` 续跑）
-- 来源：`docs/research/2026-10-21-intent-stop.md`（§4 频率、§5 选项、§6 建议）
+- 状态：A 部分 decided；B 部分 idea（A 量过之后再定）
+- 涉及 ADR：0036（角色规则清单；完成通知作为消息追加）、0037 决定 5（完成通知的形状、唤醒速率闸门）、0045 §3（`Stop` 续跑路径）、0011（`followup` lane、L2 来源、L5 空闲唤醒）、0021（memory 注入范围）、0034（herdr `blocked`）、0005（宿主消息 meta）、0017（只有 `Completed` 续跑）
+- 来源：`docs/research/2026-10-21-intent-stop.md`（§3.4 提示词对比、§4 频率、§5 选项、§6 建议）
 
 ## 背景
 
-模型有时用一句「下一步是 X」结束回合，没有工具调用，任务没完：`Now the docs-only ADR updates.`、`Writing the report.`、`Confirming the details.`。`agent-core` 把纯文本的 `EndTurn` 回复当作回合完成（`RunStatus::Completed`），之后只等人。本机 journal 里 muse-spark-1.3-contributor 的 42 个会话出现 9 次，平均每次等人 1–16 分钟，没人看着时等了 2 小时到一整天；同一任务、同一模型、同一 brief 下 pi 和 opencode 的 ab6 运行 0 次（研究笔记 §3、§4）。角色提示词里已有「End your turn only when the task is done, when you wait for a background job, or when you need the user」，10-17 的早期案例跑的是更长的旧规则（`Work until the task is done … do not stop at a phase boundary`），两代提示词都没挡住。
+模型有时用一句「下一步是 X」结束回合，没有工具调用，任务没完：`Now the docs-only ADR updates.`、`Writing the report.`、`Confirming the details.`。`agent-core` 把纯文本的 `EndTurn` 回复当作回合完成（`RunStatus::Completed`），之后只等人。本机 journal 里 muse-spark-1.3-contributor 的 42 个会话出现 9 次，有人看着时等 1–16 分钟，没人看着时等了 2 小时到一天；同一任务、同一模型、同一 brief 下 pi 与 opencode 的 ab6 运行 0 次。
 
-radian 独有的是「回合中途结束、等通知唤醒」这条路（ADR 0037）：后台 job 的完成通知以一条 user 角色、`source = system` 的消息开启新回合，模型对它像对聊天消息一样回一句就停。9 次里 4 次发生在通知开启的回合里，2 次紧跟在一次合法等待之后，4 次卡在「写报告 / 发通知」这最后一步。
+radian 独有、且与停顿共现的，是「回合中途结束、等通知唤醒」这条路（ADR 0037）：角色规则 `End your turn only when the task is done, when you wait for a background job, or when you need the user`、`shell`/`job` 描述里的「完成会通知你」、完成通知以一条 user 角色的消息开启新回合。pi 与 opencode 的系统提示词对回合一字不提。那句角色规则是专为这个问题加的（`9aa6fff5`），ab6 带着它照样停了 3 次，更早的长版规则在 10-17 也没挡住。
 
-## 待决问题
+## A. 提示词与通知文案（decided）
 
-1. **检测器**。研究笔记 §4 的规则（最后一句以动名词、Now/Next/Then/Let me/I'll、「接下来/现在/然后」开头；无问号；不以用户/lead 为动作主体；全文不超过约 160 字符）在本机 286 个完成回合里标出 23 条，其中 12 条是真停顿，误报集中在「Next: 由 lead 决定」「Nothing further」「现在重启你的 radian 就能试」三类。是用规则直接续跑，还是规则只做粗筛、把判断交给模型（续跑消息写明「上一条只宣布了下一步却没有调用工具；任务没完就继续，完了或要问用户就用一行说明」）？后者的误报代价是一次短调用加一行 transcript，不会做计划外的事。
-2. **路径**。(a) 复用 ADR 0045 §3 的 `Stop` 路径：内建一条 `Stop` 验证器，命中即 `System` `followup`，受同一唤醒闸门、同一降级可见（journal `degraded`、TUI 一行、herdr `wake budget`）；这要求 `Stop` 的 stdin 多带上一条助手消息的文本（今天只有 `hook_event_name`、`cwd`、`session_id`），顺手让用户也能写自己的检测器。(b) 直接在 driver 轮末做，与 `/loop`、`/goal` 同一个决策点。
-3. **上限**。每回合最多一次自动续跑；连续两次续跑后仍停顿则不再续，herdr 报 `blocked`，TUI 通知——ab6 里人工 `Continue.` 之后模型又停了一次，所以 1 次不够、无上限不行。
-4. **范围**。只对 `RunStatus::Completed` 的回合（ADR 0045 §3 同款）；用户 Esc 取消的回合不续；`/loop`、`/goal` 开着时让它们接管，不叠加。
-5. **通知文案**（独立于本条，可先做）。完成通知现在的结尾是 `output: available through job` 直接接 `Read its output with job.`（尾部为空时少一个换行，`job_notify.rs` 的 `completion_message`），而且没有一句「继续任务」；加一句「Continue the task; do not end the turn only to report this」直接针对 4/9 的情形。
+1. **删掉**角色里的 `End your turn only when the task is done, when you wait for a background job, or when you need the user.`。等 job 的许可已由 `shell`、`job` 描述给出（`You will be notified when the command finishes`、`Prefer the notice over wait`），角色层不重复。ADR 0036 的角色规则清单同步去掉这一条（docs-only commit）。
+2. 「不可撤销或工作区外可见的动作先问用户」加例外：任务文本里明确要求的通知、提交等不用再问。两次停顿正好停在「发 herdr 通知」之前。
+3. 完成通知（`job_notify.rs` 的 `completion_message`）：末尾加 `Continue the task; do not end the turn only to report this result.`；修掉尾部为空时 `output: available through job` 与 `Read its output with job.` 之间少一个换行的 bug。
+4. 查 memory 注入范围：lead 会话写入的记忆（lead 角色指令）注入了同一 project 的 worker 会话。决定是按角色还是按会话隔离，或者只是不把 lead 指令写成 project scope。
+5. 不改 `Do not use sleep or polling to wait`，不动模型参数。
 
-## 验收（草案）
+备选（不在 A 里做）：把等待写成固定句式 `To wait for a background job, end your reply with exactly: waiting for job <id>.`，只在 B 需要可识别的等待标记时再加。
 
-- mock provider：一回合以 `Now the docs-only ADR updates.` 纯文本结束 → 恰好一条 `source = System`、meta 标 `continuation = "intent-stop"` 的 `followup` 入队并开启下一轮；以 `Done.`、以问句、以 `Waiting on the completion notice.`（且有 job 在跑）结束 → 不入队。
+### A 的验收
+
+- `prompt.rs` 的角色关键句测试更新；ADR 0036 清单与 `default.md` 一致。
+- `job_notify` 单测：通知末尾是那句「继续任务」；尾部为空时三行之间都有换行。
+- 同一任务集 A/B/C 各 3 次：人工 `Continue` 次数（ab6 metrics 已有这列）与「纯文本中途结束」次数，改前改后对比。
+
+## B. 内建续跑（idea，A 量过之后再定）
+
+只在 A 之后仍有停顿时做：在 ADR 0045 §3 的 `Stop` 续跑路径上内建一条保守的轮末检测，命中后发一条 `System` `followup`，措辞让模型自己判断是继续还是一行说明已完成；每回合最多一次，连续两次仍停则不再续、herdr 报 `blocked`、TUI 一行；计入唤醒闸门，到顶时按现有方式降级并可见；`/loop`、`/goal` 开着时让它们接管；只对 `RunStatus::Completed` 的回合。
+
+待决：规则直接续跑还是交模型判断（研究建议后者：误报代价是一次短调用加一行 transcript，不会做计划外的事）；是否给 `Stop` hook 的 stdin 加 `last_assistant_message`，让用户能用自己的检测器换掉内建规则；是否先加上面的备选等待句式，让检测器只认「无标记、无问句的纯文本结束」。
+
+### B 的验收（草案）
+
+- mock provider：一回合以 `Now the docs-only ADR updates.` 纯文本结束 → 恰好一条 `source = System`、meta 标 `continuation = "intent-stop"` 的 `followup` 入队并开启下一轮；以 `Done.`、以问句、以等待标记结束 → 不入队。
 - 连续停顿两次后第三次不续，herdr 纯函数输出 `blocked`，TUI 收到一行通知。
-- 唤醒闸门计数包含这类续跑；闸门到顶时降级为 `inject` 并标 `degraded`。
+- 唤醒闸门计数包含这类续跑；到顶时降级为 `inject` 并标 `degraded`。
 - 变异：去掉检测器、去掉上限、让所有终态都续跑，各有一条点名的测试失败。
-- 线上指标：A/B/C 同任务重跑，人工 `Continue` 次数（ab6 的 metrics 已记这一列）归零；误续跑次数（续跑后模型一行说「已完成」）单独计数。
