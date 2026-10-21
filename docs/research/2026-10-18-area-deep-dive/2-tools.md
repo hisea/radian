@@ -1,7 +1,7 @@
 # 深挖 2：工具层（Tools）
 
 日期：2026-10-18（当天按讨论补充了 P3 编辑后诊断的分层方案和 P6 的 rg 结论）· 范围：默认工具集、工具定义大小、编辑、读/搜、shell、报错、编辑后诊断、子 agent、按需加载、结果格式。
-对手版本：Codex `openai/codex` 提交 `8c07694`；opencode `packages/core`（这一版的工具已从 `packages/opencode/src/tool` 搬到 `packages/core/src/tool/plugin`，旧路径不存在）；pi-mono `packages/coding-agent`；omp 18.12.1（`npm-_oh-my-pi_pi-coding-agent/package/src`）；Claude Code 2.1.302（只用 `sdk-tools.d.ts` 和官方文档 https://code.claude.com/docs/en/tools-reference ）。下文 `rad/` = `/home/claude/radian/crates`，`comp/` = 对手源码根目录。
+对手版本：Codex `openai/codex` 提交 `8c07694`；opencode `packages/core`（这一版的工具已从 `packages/opencode/src/tool` 搬到 `packages/core/src/tool/plugin`，旧路径不存在）；pi-mono `packages/coding-agent`；omp 18.12.1（`npm-_oh-my-pi_pi-coding-agent/package/src`）；Claude Code 2.1.302（只用 `sdk-tools.d.ts` 和官方文档 https://code.claude.com/docs/en/tools-reference ）。下文 `rad/` = `<repo>/crates`，`comp/` = 对手源码根目录。
 
 ## 1. 一句话结论
 

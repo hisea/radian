@@ -4,21 +4,21 @@ PASS [normal_use] 读工作区内文件（应成功） cat 输出 "spike\n"
 PASS [normal_use] git 只读 status（--no-optional-locks）（应成功） 退出码 0
 PASS [normal_use] git log（应成功） 退出码 0
 PASS [normal_use] cargo --version（应成功） 退出码 0
-PASS [escape_writes] 绝对路径写工作区外（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/outside/x.txt: Operation not p
+PASS [escape_writes] 绝对路径写工作区外（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/outside/x.txt: Operation not p
 PASS [escape_writes] 用 .. 绕出工作区（应被拒） /bin/sh: ../escape.txt: Operation not permitted
-PASS [escape_writes] 经符号链接写工作区外（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/link-out/s.txt: Operation n
-PASS [escape_writes] 嵌套 sh 仍不能写工作区外（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/outside/deep.txt: Operation no
+PASS [escape_writes] 经符号链接写工作区外（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/ws/link-out/s.txt: Operation n
+PASS [escape_writes] 嵌套 sh 仍不能写工作区外（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/outside/deep.txt: Operation no
 PASS [escape_writes] 嵌套 sh 写工作区内（应成功） 退出码 0
-PASS [git_dir_readonly] 写 .git/hooks（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/hooks/hook: Opera
-PASS [git_dir_readonly] 写 .git/config（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/config: Operation
-PASS [git_dir_readonly] 写 .git/info（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/info/x: Operation
+PASS [git_dir_readonly] 写 .git/hooks（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/ws/proj/.git/hooks/hook: Opera
+PASS [git_dir_readonly] 写 .git/config（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/ws/proj/.git/config: Operation
+PASS [git_dir_readonly] 写 .git/info（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/ws/proj/.git/info/x: Operation
 PASS [git_dir_readonly] git config core.hooksPath（应被拒） error: could not lock config file .git/config: Operation not permitted
-PASS [git_dir_readonly] git add（写 .git/index.lock）（应被拒） fatal: Unable to create '/private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/i
+PASS [git_dir_readonly] git add（写 .git/index.lock）（应被拒） fatal: Unable to create '<scratch>/radian-spike-sb-61190-0/ws/proj/.git/i
 PASS [worktree_escapes] worktree 内写文件（应成功） 退出码 0
-PASS [worktree_escapes] 改 worktree 的 .git 指针文件（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/wt/.git: Operation not permitt
-PASS [worktree_escapes] 写共享 .git/hooks（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/mainrepo/.git/hooks/evil: Oper
-PASS [worktree_escapes] 写共享 .git/worktrees/<wt>/gitdir（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/mainrepo/.git/worktrees/wt/git
-PASS [worktree_escapes] 经 worktree 内符号链接写共享 .git（应被拒） /bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/wt/g/evil3: Operation not perm
+PASS [worktree_escapes] 改 worktree 的 .git 指针文件（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/wt/.git: Operation not permitt
+PASS [worktree_escapes] 写共享 .git/hooks（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/mainrepo/.git/hooks/evil: Oper
+PASS [worktree_escapes] 写共享 .git/worktrees/<wt>/gitdir（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/mainrepo/.git/worktrees/wt/git
+PASS [worktree_escapes] 经 worktree 内符号链接写共享 .git（应被拒） /bin/sh: <scratch>/radian-spike-sb-61190-0/wt/g/evil3: Operation not perm
 PASS [worktree_escapes] worktree 内 git 只读 status（应成功） 退出码 0
 PASS [network_off] connect 自己的监听端口 A（应被拒） Operation not permitted (os error 1)
 PASS [network_off] connect 本机另一端口 B（应被拒） Operation not permitted (os error 1)

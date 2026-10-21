@@ -189,14 +189,14 @@ path = "~/Code/radian"
 max = 1
 
 [hosts.lxc]
-ssh_host = "<linux-host>"
-ssh_user = "hai"
+ssh_host = "<host>"
+ssh_user = "<user>"
 path = "~/radian"
 max = 2
 
 [hosts.pc]
-ssh_host = "<windows-host>"
-ssh_user = "hai"
+ssh_host = "<host>"
+ssh_user = "<user>"
 ssh_port = 2222
 path = "~/radian"
 max = 1

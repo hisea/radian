@@ -3,7 +3,7 @@
 日期：2026-10-18 · 代码版本：Radian `356df1e`；Codex `8c07694`（2026-10-18）；opencode `63c1a27`（2026-10-17）；pi-mono `482c138`（2026-10-18）；omp 18.12.1 npm 包；Claude Code 只看官方文档（每条注明）。
 复用：系统提示词的组成、各家的第 0 层事实、易变事实放最后这几点，见 `docs/research/2026-10-14-system-prompts.md`（下称「提示词调研」）。本文不重复这些，只补**新版本的变化、数字，以及压缩和缓存**。
 
-出处前缀：`rad/` = `/home/claude/radian`；`codex/`、`oc/`（= `opencode/packages/core/src`）、`pi/`（= `pi-mono/packages`）、`omp/`（= `npm-_oh-my-pi_pi-coding-agent/package/src`）、`omp-core/`（= `npm-_oh-my-pi_pi-agent-core/package/src`）都在 `scratchpad/comp/` 下。
+出处前缀：`rad/` = `<repo>`；`codex/`、`oc/`（= `opencode/packages/core/src`）、`pi/`（= `pi-mono/packages`）、`omp/`（= `npm-_oh-my-pi_pi-coding-agent/package/src`）、`omp-core/`（= `npm-_oh-my-pi_pi-agent-core/package/src`）都在 `scratchpad/comp/` 下。
 
 ---
 

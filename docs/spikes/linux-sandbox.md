@@ -1,7 +1,7 @@
 # Phase 0b 可行性验证：Linux 沙箱（Landlock / bubblewrap / seccomp）
 
 - **结论：通过（机制选 bubblewrap）**。10 条标准在 `bwrap` 下全部满足，且每条"失败"用例都有"关掉沙箱后成功"的对照。**Landlock 单独是"部分"**：它满足 1–9，但**无法**把可写工作区里的 `.git` 变成只读（第 10 条不满足）——这是机制本身的限制（Landlock 规则是"允许的并集"，没有 deny 规则）。
-- 环境：**Arch Linux ARM（omarchy），aarch64，内核 `7.2.6-1-aarch64-ARCH`**，活跃 LSM `capability,yama,landlock`，`bubblewrap 0.12.0`、`gcc 16.1.1`、`Python 3.14.7`、`git 2.55.0`。这是一台**虚拟机**（`ssh <user>@<host>`），不是真实主机。
+- 环境：**Arch Linux ARM（omarchy），aarch64，内核 `7.2.6-1-aarch64-ARCH`**，活跃 LSM `capability,yama,landlock`，`bubblewrap 0.12.0`、`gcc 16.1.1`、`Python 3.14.7`、`git 2.55.0`。这是一台**虚拟机**（`ssh <user>@<linux-host>`），不是真实主机。
 - 时间：2026-10-12。**VM 里没有安装任何东西**（cargo/rustc 未装；用既有的 `gcc` + shell + `python3`）。原型在 `spikes/linux-sandbox/`，证据在 `spikes/linux-sandbox/data/`。
 
 ## 与 macOS 结论的结构对齐
@@ -42,10 +42,10 @@ combo-sandbox      ok=21 mismatch=0     combo-control      ok=21 mismatch=0
 ## 2. 复现
 
 ```sh
-ssh <user>@<host> 'uname -s'          # 必须是 Linux
-ssh <user>@<host> 'mkdir -p /tmp/radian-linux-sandbox'
-scp -r spikes/linux-sandbox/{src,scripts} <user>@<host>:/tmp/radian-linux-sandbox/
-ssh <user>@<host> 'cd /tmp/radian-linux-sandbox && ./scripts/run_all.sh'
+ssh <user>@<linux-host> 'uname -s'          # 必须是 Linux
+ssh <user>@<linux-host> 'mkdir -p /tmp/radian-linux-sandbox'
+scp -r spikes/linux-sandbox/{src,scripts} <user>@<linux-host>:/tmp/radian-linux-sandbox/
+ssh <user>@<linux-host> 'cd /tmp/radian-linux-sandbox && ./scripts/run_all.sh'
 ```
 
 `run_all.sh` 会：编译 `ll_probe`/`llsandbox` → 探测 Landlock → 依次跑 bwrap/Landlock/组合的 sandbox 与 control 矩阵 → 跑变异 → 跑启动开销 → 打印孤儿进程检查。所有结果写到 VM 的 `data/`，本目录的 `data/` 是拉回来的同一份。

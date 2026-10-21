@@ -57,7 +57,7 @@ app 用 `TtyGuard`（Drop）+ panic hook 双保险。验证依据（字节日志
 ## 复现
 
 ```sh
-cd <home>/Code/radian-pi-spikes/spikes/tui-fullscreen
+cd <worktree>/spikes/tui-fullscreen
 cargo build --bins          # 重要：tui-driver 起的是 tui-app 二进制，改代码后必须两个 bin 一起重建
 for c in stream-pty stream-test paste width resize restore-normal restore-ctrlc restore-panic idle-cpu; do
   cargo run --bin tui-driver -- $c

@@ -2,7 +2,7 @@
 
 日期：2026-10-14 · 调研者：agent · 状态：**只读调研**，未改动任何代码、未 git commit、未建 worktree
 
-工作区 `<home>/Code/radian-dogfood`（分支 `radian/dogfood`），`git log -1` = `1ce8621`，与 `main` 同一个 commit（ADR 0027 与 ADR 0033 的那次提交）。**本文就是 `main 1ce8621` 的行为**。
+工作区 `<worktree>`（分支 `radian/dogfood`），`git log -1` = `1ce8621`，与 `main` 同一个 commit（ADR 0027 与 ADR 0033 的那次提交）。**本文就是 `main 1ce8621` 的行为**。
 
 任务：核对 ADR 0027 之后默认 footer 的 `tokens`/`cost` 算得对不对。结论：**有 5 处需要处理的问题**，其中 1 处是明确的重复计费（对 OpenAI 兼容端点的长会话可高估近 10 倍），2 处是漏计（压缩调用、resume 之前的历史）。已核对正确的部分见 §8。
 

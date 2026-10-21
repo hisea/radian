@@ -43,7 +43,7 @@
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/outside/x.txt: Operation not p",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/outside/x.txt: Operation not p",
       "expected": "denied",
       "group": "escape_writes",
       "name": "绝对路径写工作区外",
@@ -57,14 +57,14 @@
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/link-out/s.txt: Operation n",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/ws/link-out/s.txt: Operation n",
       "expected": "denied",
       "group": "escape_writes",
       "name": "经符号链接写工作区外",
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/outside/deep.txt: Operation no",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/outside/deep.txt: Operation no",
       "expected": "denied",
       "group": "escape_writes",
       "name": "嵌套 sh 仍不能写工作区外",
@@ -78,21 +78,21 @@
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/hooks/hook: Opera",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/ws/proj/.git/hooks/hook: Opera",
       "expected": "denied",
       "group": "git_dir_readonly",
       "name": "写 .git/hooks",
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/config: Operation",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/ws/proj/.git/config: Operation",
       "expected": "denied",
       "group": "git_dir_readonly",
       "name": "写 .git/config",
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/info/x: Operation",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/ws/proj/.git/info/x: Operation",
       "expected": "denied",
       "group": "git_dir_readonly",
       "name": "写 .git/info",
@@ -106,7 +106,7 @@
       "passed": true
     },
     {
-      "detail": "fatal: Unable to create '/private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/i",
+      "detail": "fatal: Unable to create '<scratch>/radian-spike-sb-61190-0/ws/proj/.git/i",
       "expected": "denied",
       "group": "git_dir_readonly",
       "name": "git add（写 .git/index.lock）",
@@ -120,28 +120,28 @@
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/wt/.git: Operation not permitt",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/wt/.git: Operation not permitt",
       "expected": "denied",
       "group": "worktree_escapes",
       "name": "改 worktree 的 .git 指针文件",
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/mainrepo/.git/hooks/evil: Oper",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/mainrepo/.git/hooks/evil: Oper",
       "expected": "denied",
       "group": "worktree_escapes",
       "name": "写共享 .git/hooks",
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/mainrepo/.git/worktrees/wt/git",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/mainrepo/.git/worktrees/wt/git",
       "expected": "denied",
       "group": "worktree_escapes",
       "name": "写共享 .git/worktrees/<wt>/gitdir",
       "passed": true
     },
     {
-      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/wt/g/evil3: Operation not perm",
+      "detail": "/bin/sh: <scratch>/radian-spike-sb-61190-0/wt/g/evil3: Operation not perm",
       "expected": "denied",
       "group": "worktree_escapes",
       "name": "经 worktree 内符号链接写共享 .git",

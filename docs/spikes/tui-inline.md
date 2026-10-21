@@ -92,7 +92,7 @@ driver 调 `master.resize()`：120×40 → 60×40 → 120×40，并同步更新 
 **需要 owner 人工验证（在自己的终端中执行，非本 spike 自动化的一部分）：**
 
 ```sh
-cd <home>/Code/radian-pi-inline/spikes/tui-inline
+cd <worktree>/spikes/tui-inline
 cargo build --bins
 for i in $(seq 1 50); do printf 'PRE-%04d\n' "$i"; done
 ./target/debug/tui-inline-app --lines 30 --interval-ms 80 --stats /tmp/radian-inline-manual.json
@@ -124,7 +124,7 @@ for i in $(seq 1 50); do printf 'PRE-%04d\n' "$i"; done
 ## 复现
 
 ```sh
-cd <home>/Code/radian-pi-inline/spikes/tui-inline
+cd <worktree>/spikes/tui-inline
 cargo build --bins # driver 会启动 app，改动后必须同时重建两个 bin
 for c in scrollback resize selection prompt-normal prompt-ctrlc prompt-panic clamp; do
   cargo run --bin tui-inline-driver -- "$c"

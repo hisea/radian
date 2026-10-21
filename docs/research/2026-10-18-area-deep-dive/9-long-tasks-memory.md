@@ -3,7 +3,7 @@
 日期：2026-10-18 · 代码版本：Radian `356df1e`；Codex `8c07694`；opencode `63c1a27`（v2 core）；pi-mono `482c138`；omp 18.12.1 npm 包；Claude Code 只看官方文档（每条注明）。
 范围：跨很多轮、跨会话的那一部分。压缩算法、缓存、摘要结构、压缩后补水见 [3-context.md](3-context.md)；空停止、截断续写、doom-loop、步数到顶收尾见 [1-core-loop.md](1-core-loop.md)。本文只在必要时引用，不重复。
 
-出处前缀：`rad/` = `/home/claude/radian`；`codex/` = `comp/codex/codex-rs`；`oc/` = `comp/opencode/packages/core/src`；`pi/` = `comp/pi-mono/packages/coding-agent`；`omp/` = `comp/npm-_oh-my-pi_pi-coding-agent/package/src`（`comp/` 在 scratchpad 下）。CC = Claude Code。
+出处前缀：`rad/` = `<repo>`；`codex/` = `comp/codex/codex-rs`；`oc/` = `comp/opencode/packages/core/src`；`pi/` = `comp/pi-mono/packages/coding-agent`；`omp/` = `comp/npm-_oh-my-pi_pi-coding-agent/package/src`（`comp/` 在 scratchpad 下）。CC = Claude Code。
 
 ---
 

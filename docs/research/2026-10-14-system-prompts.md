@@ -4,7 +4,7 @@
 
 对象：**pi 1.2.0**、**omp（oh-my-pi）18.10.4**（本机 17.3.8 对照）、**Claude Code 2.1.100**（npm 包）、**opencode**（`dev` 分支）、**dsh（DeepSeek Harness）**。
 
-**工作区事实**：本次调研在 `<home>/Code/radian-dogfood`（分支 `radian/dogfood`，`HEAD` = `07c58ff`）内进行。**ADR 0036 与其修订 1、ADR 0030 不在这个工作区里**：它们在 `main`（`628b32e`）上（`git log --oneline main | head -3` 给出 `4aa18ce` = ADR 0036、`d3fb08f` = ADR 0036、`ced3c69` = ADR 0030）。本工作区的 `docs/adr/` 只到 `0035`。因此本文引用这两份 ADR 时用 `git show main:docs/adr/…`（未 checkout、未改动工作区），行号按 `main` 的版本；文中的「初稿」就是修订 1 的三段代码块。代码行号按 `main 628b32e`。
+**工作区事实**：本次调研在 `<worktree>`（分支 `radian/dogfood`，`HEAD` = `07c58ff`）内进行。**ADR 0036 与其修订 1、ADR 0030 不在这个工作区里**：它们在 `main`（`628b32e`）上（`git log --oneline main | head -3` 给出 `4aa18ce` = ADR 0036、`d3fb08f` = ADR 0036、`ced3c69` = ADR 0030）。本工作区的 `docs/adr/` 只到 `0035`。因此本文引用这两份 ADR 时用 `git show main:docs/adr/…`（未 checkout、未改动工作区），行号按 `main` 的版本；文中的「初稿」就是修订 1 的三段代码块。代码行号按 `main 628b32e`。
 
 ---
 

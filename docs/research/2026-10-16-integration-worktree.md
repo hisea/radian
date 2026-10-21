@@ -2,7 +2,7 @@
 
 - Date: 2026-10-16
 - Branch/HEAD the facts were read on: `oc/orch-s10`, from `origin/main` (`d608272`). Worktree
-  `<home>/Code/radian/.radian-worktrees/orch-s10`.
+  `<worktree>/orch-s10`.
 - Purpose: design where the lead's integration worktree lives and how a task branch reaches
   `radian/integration`, before any of it is written. This is a document; it changes no code and no
   ADR.

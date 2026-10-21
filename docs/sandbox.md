@@ -337,16 +337,16 @@ seatbelt 追加 `(deny network-outbound (remote unix-socket))`，只放行固定
 
 ```sh
 # 第一步必须确认是 Linux；返回 Darwin 立即停止（那是 owner 的 Mac）。
-ssh <user>@<host> 'uname -s'          # Linux
+ssh <user>@<linux-host> 'uname -s'          # Linux
 
 SYS=$(rustc --print sysroot)
 RUSTFLAGS="-C link-self-contained=yes" \
   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$SYS/lib/rustlib/aarch64-apple-darwin/bin/rust-lld" \
   cargo build -p radian-sandbox --bin sandbox-escape --features testing \
     --target aarch64-unknown-linux-musl
-scp target/aarch64-unknown-linux-musl/debug/sandbox-escape <user>@<host>:/tmp/
-ssh <user>@<host> '/tmp/sandbox-escape --out /tmp/radian-sandbox-evidence; echo EXIT=$?'
-scp <user>@<host>:/tmp/radian-sandbox-evidence/escape-linux.* crates/radian-sandbox/tests/data/
+scp target/aarch64-unknown-linux-musl/debug/sandbox-escape <user>@<linux-host>:/tmp/
+ssh <user>@<linux-host> '/tmp/sandbox-escape --out /tmp/radian-sandbox-evidence; echo EXIT=$?'
+scp <user>@<linux-host>:/tmp/radian-sandbox-evidence/escape-linux.* crates/radian-sandbox/tests/data/
 ```
 
 VM 上只写 `/tmp` 下自建目录，不碰 `~/.ssh` 或任何真实凭据。矩阵的敏感读用例使用自建的假 key，
@@ -354,7 +354,7 @@ VM 上只写 `/tmp` 下自建目录，不碰 `~/.ssh` 或任何真实凭据。�
 
 ## Linux 独立复核（2026-10-12，评审者本人在 VM 上重跑）
 
-**环境**：`ssh <user>@<host>`，Arch Linux ARM（aarch64，内核 7.2.6，bwrap 0.12.0，git 2.55.0）。
+**环境**：`ssh <user>@<linux-host>`，Arch Linux ARM（aarch64，内核 7.2.6，bwrap 0.12.0，git 2.55.0）。
 第一条命令确认 `uname -s` = Linux。为了跑**真正的测试套件**（而不是交叉编译的驱动），在 VM 里装了
 Rust：下载 `rustup-init`（static.rust-lang.org，aarch64）后用
 `RUSTUP_HOME=/tmp/radian-rust/rustup CARGO_HOME=/tmp/radian-rust/cargo ./rustup-init -y --profile
@@ -447,7 +447,7 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 
 ## Linux 复验（2026-10-13，开网之后）
 
-**环境**：`ssh <user>@<host>`（第一条命令 `uname -s` = Linux）。Arch Linux ARM aarch64，
+**环境**：`ssh <user>@<linux-host>`（第一条命令 `uname -s` = Linux）。Arch Linux ARM aarch64，
 内核 7.2.6-1-aarch64-ARCH，bwrap 0.12.0，git 2.55.0，Rust 1.88.0（`/tmp/radian-rust`，
 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`）。`/tmp` 是
 3.9G tmpfs（构建期间很紧，见下）。源码从 worktree 打包同步到 `/tmp/radian-linux/src`，

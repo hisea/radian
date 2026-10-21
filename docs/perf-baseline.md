@@ -10,7 +10,7 @@
 | 机器 | Apple Mac mini，Apple M4，10 核，32 GiB，macOS 27.0.1（Darwin 27.0.0） |
 | Rust | rustc 1.99.0（release 与 debug 两种构建都测） |
 | 构建 | `cargo test`（debug）与 `cargo test --release`，均为 workspace 默认 profile，无 `lto`/`codegen-units` 调整 |
-| 文件系统 | APFS（`/var/folders` 下的临时目录；`fsync` 数字因此是 APFS 的） |
+| 文件系统 | APFS（`<scratch>` 下的临时目录；`fsync` 数字因此是 APFS 的） |
 
 **重要前提**：这台机器在测量期间同时被多个 worktree / 进程使用，
 `uptime` 的 1 分钟负载在 **7 到 58** 之间波动。绝对数字受此影响（尤其 p95），

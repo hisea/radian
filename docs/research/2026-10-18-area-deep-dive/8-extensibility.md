@@ -1,7 +1,7 @@
 # 深挖 8：扩展机制（hooks、插件、skills、MCP、自定义命令与 agent）
 
 2026-10-18 · Radian `356df1e` · 对手：pi-mono `482c138`（另核对 pi 1.3.0 npm 包）、Codex `8c07694`、opencode `63c1a27`（`packages/core`、`packages/plugin`）、omp 18.12.1 npm 包；Claude Code 只用官方文档。
-下文 `rad/` = `/home/claude/radian/crates`，`comp/` = 对手源码根目录。
+下文 `rad/` = `<repo>/crates`，`comp/` = 对手源码根目录。
 **说明：** `comp/codex` 的工作区文件和它的 git HEAD 对不上（目录里放的是 radian 的 crate），所以 Codex 的源码全部用 `git show HEAD:<path>` 读，行号以 HEAD 为准。
 不重复 4-architecture.md（"没有用户 hook"、方案④的概要）和 2-tools.md（"MCP 不能按需加载"、P8 tool_search）里已有的结论，只往下挖。
 

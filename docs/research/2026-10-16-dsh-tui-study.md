@@ -1,7 +1,7 @@
 # dsh-TUI study: shareable TUI components and an orchestration view
 
 - Date: 2026-10-16
-- Worktree/branch: `<home>/Code/radian/.radian-worktrees/dsh-tui-study` at branch `oc/dsh-tui-study`
+- Worktree/branch: `<worktree>/dsh-tui-study` at branch `oc/dsh-tui-study`
   from `origin/main` (HEAD `e15576b`).
 - Source read: `https://github.com/ccch1mneyyy/dsh-TUI`, cloned shallowly into
   `/private/tmp/dsh-tui-src-2026-10-16`, **pinned at commit

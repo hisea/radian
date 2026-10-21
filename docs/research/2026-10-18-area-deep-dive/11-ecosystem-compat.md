@@ -1,7 +1,7 @@
 # 深挖 11：生态兼容（别家格式能读多少）
 
 2026-10-18 · Radian `356df1e` · 对手：Codex `8c07694`（全部用 `git show HEAD:` 读，行号以 HEAD 为准）、opencode `63c1a27`（`packages/core`、`packages/cli`）、pi 1.3.0 npm 包（下文 `pi/` = `npm-_earendil-works_pi-coding-agent/package/`）、omp 18.12.1 npm 包（下文 `omp/` = `npm-_oh-my-pi_pi-coding-agent/package/src/`）；Claude Code 只用官方文档。
-`rad/` = `/home/claude/radian/crates`。网页的抓取日期都是 2026-10-18。
+`rad/` = `<repo>/crates`。网页的抓取日期都是 2026-10-18。
 本报告接着 8-extensibility.md 往下写。那份报告里已有的"外部命令 hook""stop 钩子""项目级 skill 接线"这里不再重复，只补兼容这一层：字段名、目录位置、子集边界和信任门。
 
 ## 1. 一句话结论

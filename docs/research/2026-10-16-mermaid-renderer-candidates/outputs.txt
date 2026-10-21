@@ -165,7 +165,7 @@
    Compiling icu_collections v2.3.0
    Compiling digest v0.10.7
    Compiling icu_locale_core v2.3.0
-   Compiling radian-sandbox v0.1.0 (<scratch>)
+   Compiling radian-sandbox v0.1.0 (<scratch>/mermaid-samples/crates/radian-sandbox)
    Compiling cpufeatures v0.2.17
    Compiling unicode-width v0.2.2
    Compiling strsim v0.11.1
@@ -188,13 +188,13 @@
    Compiling toml_datetime v0.6.11
    Compiling futures v0.3.34
    Compiling serde_spanned v0.6.9
-   Compiling codex-mermaid v0.0.0 (<scratch>)
+   Compiling codex-mermaid v0.0.0 (<scratch>/mermaid-samples/third_party/codex-mermaid)
    Compiling toml_edit v0.22.27
    Compiling jsonschema v0.58.6
    Compiling clap v4.6.7
    Compiling idna_adapter v1.2.2
    Compiling idna v1.1.0
-   Compiling radian-memory v0.1.0 (<scratch>)
+   Compiling radian-memory v0.1.0 (<scratch>/mermaid-samples/crates/radian-memory)
    Compiling url v2.5.8
    Compiling tokio-util v0.7.20
    Compiling tower v0.5.3
@@ -205,19 +205,19 @@
    Compiling rustls-webpki v0.103.15
    Compiling hyper v1.12.0
    Compiling hyper-util v0.1.21
-   Compiling agent-core v0.1.0 (<scratch>)
-   Compiling radian-session v0.1.0 (<scratch>)
-   Compiling radian-coding v0.1.0 (<scratch>)
-   Compiling agent-extensions v0.1.0 (<scratch>)
+   Compiling agent-core v0.1.0 (<scratch>/mermaid-samples/crates/agent-core)
+   Compiling radian-session v0.1.0 (<scratch>/mermaid-samples/crates/radian-session)
+   Compiling radian-coding v0.1.0 (<scratch>/mermaid-samples/crates/radian-coding)
+   Compiling agent-extensions v0.1.0 (<scratch>/mermaid-samples/crates/agent-extensions)
    Compiling tokio-rustls v0.26.6
    Compiling rustls-platform-verifier v0.7.1
    Compiling hyper-rustls v0.27.10
    Compiling reqwest v0.13.5
-   Compiling agent-provider-anthropic v0.1.0 (<scratch>)
-   Compiling agent-provider-openai-compatible v0.1.0 (<scratch>)
-   Compiling radian-permissions v0.1.0 (<scratch>)
-   Compiling radian-runtime v0.1.0 (<scratch>)
-   Compiling radian-host v0.1.0 (<scratch>)
+   Compiling agent-provider-anthropic v0.1.0 (<scratch>/mermaid-samples/crates/agent-provider-anthropic)
+   Compiling agent-provider-openai-compatible v0.1.0 (<scratch>/mermaid-samples/crates/agent-provider-openai-compatible)
+   Compiling radian-permissions v0.1.0 (<scratch>/mermaid-samples/crates/radian-permissions)
+   Compiling radian-runtime v0.1.0 (<scratch>/mermaid-samples/crates/radian-runtime)
+   Compiling radian-host v0.1.0 (<scratch>/mermaid-samples/crates/radian-host)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 38s
      Running tests/zz_samples.rs (target/debug/deps/zz_samples-d3abb1c2d73c017f)
 

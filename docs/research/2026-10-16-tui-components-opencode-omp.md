@@ -1,7 +1,7 @@
 # opencode and omp: their TUI components, against radian
 
 - Date: 2026-10-16
-- Worktree/branch: `<home>/Code/radian/.radian-worktrees/tui-components-study`, branch
+- Worktree/branch: `<worktree>/tui-components-study`, branch
   `oc/tui-components-study`, from `19bbd0b` (origin/main plus the dsh-TUI study).
 - Purpose: a study, not code. The owner wants to enrich radian's TUI and make panels and
   other components **shareable**. This document answers, for **opencode** and for **omp**:
@@ -18,7 +18,7 @@
 ## How to read this
 
 - **opencode** paths are relative to
-  `<scratch>`:
+  `<scratch>/opencode-src/packages`:
   `tui/` = `packages/tui`, `plugin/` = `packages/plugin` (the plugin SDK),
   `theme/` = `packages/theme`. Version read: **opencode 2.0.30**, TUI package
   `@opencode/tui` 2.0.30 (`tui/package.json:2-3`).

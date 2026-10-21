@@ -4,7 +4,7 @@
 每条改完恢复源码、提交前 `git status --short` 为空。测试一律 `--no-fail-fast`。
 
 macOS 变异跑 `cargo test -p radian-sandbox --test escape_macos`（或 `--test backend`）；
-Linux 变异把 `sandbox-escape` 交叉编译成 aarch64-musl、scp 到 VM（`ssh <user>@<host>`，
+Linux 变异把 `sandbox-escape` 交叉编译成 aarch64-musl、scp 到 VM（`ssh <user>@<linux-host>`，
 先确认 `uname -s` = Linux）后运行，看退出码与失败用例数。
 
 ## macOS
@@ -103,7 +103,7 @@ Base: `2d7cb90` · 一次性检出 `/tmp/radian-us-mut`（detached，跑完删�
 
 ## startup-speed：git 元数据发现跳过缓存目录与 node_modules（2026-10-15）
 
-工作区 `<home>/Code/radian-dogfood-ss`，分支 `dogfood/startup-speed`；每个变异改完从副本
+工作区 `<worktree>`，分支 `dogfood/startup-speed`；每个变异改完从副本
 还原并用 `cmp` 确认。跑 `cargo test -p radian-sandbox --no-fail-fast`。
 
 | # | 变异 | 抓住它的测试 | 结果 |
@@ -122,7 +122,7 @@ Base: `2d7cb90` · 一次性检出 `/tmp/radian-us-mut`（detached，跑完删�
 
 ## ADR 0038 切片①：`git_access` 与 `.git` 只留执行入口只读（macOS，2026-10-15）
 
-工作区 `<home>/Code/radian/.radian-worktrees/git-writable`，分支 `oc/git-writable`。每个变异
+工作区 `<worktree>/git-writable`，分支 `oc/git-writable`。每个变异
 只改 `crates/radian-sandbox/src/seatbelt.rs`，跑完从副本还原并逐字节比较确认一致（脚本与日志在
 `.radian/progress/logs/mutations-round2.txt`）。跑 `cargo test -p radian-sandbox --no-fail-fast
 --test git_writable`（macOS-only 行为测试，每条命令带 `FullAccess` 对照）；GW-5 额外跑
@@ -189,7 +189,7 @@ cargo 记它通过，于是矩阵里那段 acceptance 1（包括「`sandbox-exec
 
 ## ADR 0043 切片 ⓪B：linked worktree 的 git 目录可写（macOS，2026-10-17）
 
-worktree `<home>/Code/radian/.radian-worktrees/s0b-gitdir`，分支 `dogfood/s0b-gitdir`。每个变异
+worktree `<worktree>/s0b-gitdir`，分支 `dogfood/s0b-gitdir`。每个变异
 只改 `crates/radian-sandbox/src/seatbelt.rs`，跑完从副本（`.radian/mut/seatbelt.rs.orig`）还原并
 `cmp` 逐字节一致（SHA256 前后相同）。跑
 `cargo test -p radian-sandbox --locked --no-fail-fast --test git_writable`（macOS-only；每条命令带

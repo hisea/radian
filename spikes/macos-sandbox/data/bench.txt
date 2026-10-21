@@ -1,4 +1,4 @@
 无沙箱   /usr/bin/true: median=1.18ms p95=1.33ms
 sandbox-exec /usr/bin/true: median=7.96ms p95=10.31ms
 开销（中位数差）: 6.79ms
-数据已写 <home>/Code/radian-pi-spikes/spikes/macos-sandbox/data/startup-overhead.csv
+数据已写 <worktree>/spikes/macos-sandbox/data/startup-overhead.csv
