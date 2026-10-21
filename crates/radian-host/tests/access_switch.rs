@@ -128,6 +128,7 @@ async fn open_switchable_inner(
             mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
+            window_context: None,
             auto_compact: false,
 
             compaction_settings: serde_json::Value::Null,
@@ -274,6 +275,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
+            window_context: None,
             auto_compact: false,
 
             compaction_settings: serde_json::Value::Null,

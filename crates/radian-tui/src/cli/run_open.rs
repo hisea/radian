@@ -439,6 +439,7 @@ pub(super) fn open_session_and_refresh(
                     // ADR 0015: a zero budget is unset, never a real zero-token budget.
                     .filter(|tokens| *tokens > 0)
                     .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
+                window_context: window.context,
                 sandbox,
                 tier: tier.preset(),
                 profile,

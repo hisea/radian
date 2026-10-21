@@ -73,6 +73,8 @@ pub struct SessionSetup {
     pub mcp_config_path: Option<String>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
+    /// `C` (ADR 0018): the context window size for `/context`. `None` when unknown.
+    pub window_context: Option<u64>,
     pub auto_compact: bool,
     /// The request-level settings the **compaction** call carries (ADR 0018,
     /// decision 1), already converted to the route's wire value by the host

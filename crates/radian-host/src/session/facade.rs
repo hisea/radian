@@ -120,6 +120,14 @@ pub trait SessionFacade: Send + Sync {
     /// The tail of a job's output plus its state, for the inspector's jobs detail.
     /// `None` for an unknown id. The ring is in-memory, so this is not I/O.
     fn job_tail(&self, id: &str, max: usize) -> Option<(radian_coding::JobState, String)>;
+
+    /// The `/context` notice lines (backlog `tui-context-command`): per-category
+    /// estimated tokens and share of the next request, the total `T / B`, the
+    /// last provider-reported input (`none yet` without one), the message count
+    /// and the compactions this session. Read-only; it never touches the inbox
+    /// or the driver, so it works mid-turn. The history is the journal's
+    /// committed view (live deltas excluded).
+    fn context_report(&self) -> Vec<String>;
 }
 
 /// How the driver task ended.

@@ -119,6 +119,7 @@ async fn open_with_leftover(
             mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
+            window_context: None,
             auto_compact: false,
             compaction_settings: serde_json::Value::Null,
             compaction_settings_for: None,
