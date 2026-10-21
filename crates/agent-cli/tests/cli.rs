@@ -8972,7 +8972,7 @@ async fn config_import_claude_drafts_and_writes() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("trust-gate resources"), "{stderr}");
+    assert!(stderr.contains("need your trust first"), "{stderr}");
     let text = std::fs::read_to_string(&config_path).unwrap();
     radian_host::parse_config(&config_path, &text).expect("the written file reads back");
     assert!(text.contains("# keep me"), "{text}");
