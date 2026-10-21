@@ -53,6 +53,7 @@ pub(super) fn build_session_inputs(
     app: &mut App,
     resume: &Option<String>,
     tier: radian_tui::profile::Tier,
+    carry_auto: bool,
     allow_unix_sockets: &[PathBuf],
     session_id: &str,
     secrets: &radian_tui::terminal::SharedSecrets,
@@ -139,14 +140,18 @@ pub(super) fn build_session_inputs(
     // ADR 0026 D9: `--approval` and `--yes` (its shorthand) are the command line's choice.
     // When they are silent, the config's `[permissions] approval` and the journal's last
     // in-session switch decide; `radian_host::resolve_startup` owns that precedence, the
-    // `full`-tier rules and the backfill record.
-    let cli_approval =
+    // `full`-tier rules and the backfill record. `/new` carries the live Auto policy as an
+    // explicit command-line-equivalent choice, so it behaves like `--yes` (and backfills).
+    let cli_approval = if carry_auto {
+        Some(radian_permissions::ApprovalPolicy::Auto)
+    } else {
         match &cli.approval {
             Some(name) => Some(radian_permissions::ApprovalPolicy::parse(name).ok_or_else(
                 || format!("--approval {name:?} is not one of on-ask, always, never, auto"),
             )?),
             None => cli.yes.then_some(radian_permissions::ApprovalPolicy::Auto),
-        };
+        }
+    };
     let config_approval = config
         .permissions
         .approval
@@ -258,8 +263,12 @@ pub(super) fn build_session_inputs(
     };
     let driver_stopped: Arc<dyn Fn(radian_host::DriverEnd) + Send + Sync> = {
         let tx = tx.clone();
+        let session_id = session_id.to_owned();
         Arc::new(move |end| {
-            let _ = tx.send(UiEvent::DriverStopped(end));
+            let _ = tx.send(UiEvent::DriverStopped {
+                session_id: session_id.clone(),
+                end,
+            });
         })
     };
     let before_driver: Option<Arc<dyn Fn() + Send + Sync>> = cli
@@ -376,7 +385,6 @@ pub(super) fn open_session_and_refresh(
     provider_name: &str,
     model_name: &str,
     provider_ref: &radian_host::ProviderRef,
-    provider: radian_host::Provider,
     key_id: &str,
 ) -> Result<radian_host::LocalSession, RunError> {
     let SessionInputs {
@@ -464,9 +472,13 @@ pub(super) fn open_session_and_refresh(
                 memory_root,
                 trust: trust_setup,
                 resume: resume.is_some(),
+                // The effective startup route (a `/new` carry resolves here like a flag),
+                // so `SessionCreated` names the route and tier this session actually runs.
+                // `agent-cli` records the same `access` key (ADR 0043 1a).
                 config_snapshot: serde_json::json!({
-                    "provider": provider.as_str(),
-                    "model": cli.model,
+                    "provider": provider_name,
+                    "model": model_name,
+                    "access": tier.as_str(),
                 }),
                 turn_options: TurnOptions {
                     max_model_calls: Some(cli.max_model_calls),

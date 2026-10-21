@@ -108,6 +108,36 @@ impl App {
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
             }
+            command::Outcome::New => {
+                // `/new` ends this session and opens a fresh one in place. Like `/fork` it
+                // needs an idle live session; a running background job would outlive the
+                // session it belongs to, so it refuses with a pointer to `/jobs kill`.
+                // Leaving the loop IS the execution, so this sets the flags, not an effect.
+                if self.session.session_ended.is_some() {
+                    self.push_notice(
+                        "the session has ended; there is nothing to start over (`/new` needs a \
+                         live session)",
+                    );
+                    return UpdateResult::dirty();
+                }
+                if self.turn() == TurnState::Running {
+                    self.push_notice(
+                        "finish the current turn before starting a new session (`/new` needs \
+                         an idle session)",
+                    );
+                    return UpdateResult::dirty();
+                }
+                if !self.session.running_jobs.is_empty() {
+                    self.push_notice(
+                        "a background job is still running; stop it with `/jobs kill` first \
+                         (`/new` needs an idle session)",
+                    );
+                    return UpdateResult::dirty();
+                }
+                self.new_session = true;
+                self.quit = true;
+                UpdateResult::dirty()
+            }
             command::Outcome::Theme(name) => {
                 // ADR 0008 revision: the loop loads the theme (I/O) and writes `tui.theme`
                 // back to the config file; the notice says which of those happened.

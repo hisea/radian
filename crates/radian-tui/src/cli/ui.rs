@@ -113,6 +113,14 @@ mod chatgpt_usage_gate_tests {
     }
 }
 
+/// How `ui_loop` left: the ordinary quit (with the signal that asked, if any), or an
+/// accepted `/new` — end this session and open a fresh one in the same terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LoopEnd {
+    Quit(Option<i32>),
+    NewSession,
+}
+
 /// One step of [`run_effect_rounds`]: run one effect, or take the result events the last
 /// batch produced.
 enum RoundStep<'a, T> {
@@ -164,7 +172,7 @@ pub(super) fn ui_loop(
     chatgpt_usage_gate: Option<tokio::sync::watch::Sender<bool>>,
     // The herdr reporter (ADR 0034), when running inside a herdr pane.
     mut herdr: Option<HerdrReporter>,
-) -> Result<Option<i32>, String> {
+) -> Result<LoopEnd, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
         Phase::Picking => None,
@@ -207,7 +215,7 @@ pub(super) fn ui_loop(
     let drawn = draw_frame(terminal, app)?;
     mark("first-frame-done");
     if !drawn {
-        return Ok(None);
+        return Ok(LoopEnd::Quit(None));
     }
     radian_tui::terminal::set_cursor_visible(app.input_editable());
     // The last spinner frame drawn (ADR 0027): the idle tick redraws only when the
@@ -430,7 +438,11 @@ pub(super) fn ui_loop(
     {
         herdr.release();
     }
-    Ok(ctx.and_then(|ctx| ctx.signal).or(picking_signal))
+    Ok(match app.new_session {
+        // `/new`: the host ends this session and opens a fresh one; the terminal stays.
+        true => LoopEnd::NewSession,
+        false => LoopEnd::Quit(ctx.and_then(|ctx| ctx.signal).or(picking_signal)),
+    })
 }
 
 #[cfg(test)]

@@ -631,6 +631,10 @@ pub struct App {
     /// The input composer: text plus a cursor (ADR 0009 Phase 4).
     pub input: Composer,
     pub quit: bool,
+    /// `/new` was accepted: the loop leaves, the host ends this session and opens a fresh
+    /// one in the same terminal. Set with `quit` (the same exit), read by the loop's caller;
+    /// a new session's app starts with it cleared.
+    pub new_session: bool,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
     /// When the first idle Ctrl-C armed "press again to quit": the

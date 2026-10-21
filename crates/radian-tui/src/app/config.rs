@@ -16,6 +16,7 @@ impl App {
             footer_context: radian_host::FooterContext::new(),
             input: Composer::new(),
             quit: false,
+            new_session: false,
             pending: 0,
             quit_pending: None,
             last_answered: None,

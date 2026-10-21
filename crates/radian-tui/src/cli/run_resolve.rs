@@ -33,6 +33,23 @@ pub(super) struct ResolvedModel {
     pub(super) cli_tier: Option<radian_tui::profile::Tier>,
 }
 
+/// What `/new` carries from the ending session into the fresh one: the values in force
+/// after any in-session `/model`, `/thinking`, `/access` or `/auto` switch — not the
+/// config defaults. `None` (a plain startup) leaves the CLI/config/journal chain alone.
+#[derive(Debug, Clone)]
+pub(super) struct SessionCarry {
+    /// The model route in force (`next_model` parsed, else the slot/snapshot route).
+    pub(super) route: Option<(String, String)>,
+    /// The thinking level in force (`next_thinking`, else the applied level).
+    pub(super) thinking: Option<String>,
+    /// The tier in force, winning over the CLI flag; the project narrowing still applies.
+    pub(super) tier: Option<radian_tui::profile::Tier>,
+    /// The live approval policy is Auto (carried like an explicit `--yes`).
+    pub(super) auto: bool,
+    /// The ending session's id, for the notice.
+    pub(super) old_session_id: String,
+}
+
 /// `run()`'s model/provider phase: resolves the model name, the tier and its source, the
 /// provider, the wire protocol, the credential and the request settings. Every check that
 /// can fail runs before the session file exists, so a refusal leaves nothing behind.
@@ -42,6 +59,7 @@ pub(super) fn resolve_model(
     dir: &Path,
     workspace_path: &Path,
     resume: Option<&str>,
+    carry: Option<&SessionCarry>,
     startup_log: &mut StartupLog,
 ) -> Result<ResolvedModel, RunError> {
     // ADR 0026 D8 + review M1: this runs **after** the picker, so `--pick` and a valueless
@@ -58,9 +76,9 @@ pub(super) fn resolve_model(
     // ADR 0008 §2: no model anywhere is not a refusal in the TUI. The session opens with no
     // model selected; submit is blocked until `/model` queues a route, and the first `/model`
     // writes back to the config file. Resuming keeps the journaled route as today.
-    let model_opt = cli
-        .model
-        .clone()
+    let model_opt = carry
+        .and_then(|carry| carry.route.as_ref().map(|(_, model)| model.clone()))
+        .or_else(|| cli.model.clone())
         .or_else(|| resumed_route.as_ref().map(|route| route.model.clone()))
         .or_else(|| config.model.model.clone());
     let has_model = model_opt.is_some();
@@ -107,7 +125,13 @@ pub(super) fn resolve_model(
         .as_deref()
         .map(radian_tui::profile::parse_tier)
         .transpose()?;
-    let (mut tier, mut access_source) = if let Some(tier) = cli_tier {
+    // `/new` carries the tier in force: it wins over the command line (the switch is
+    // newer than the flag), but the project narrowing below still applies (ADR 0043 §3 —
+    // the sandbox follows the project-saved value, never a raw carried one).
+    let carried_tier = carry.and_then(|carry| carry.tier);
+    let (mut tier, mut access_source) = if let Some(tier) = carried_tier {
+        (tier, radian_tui::profile::AccessSource::Session)
+    } else if let Some(tier) = cli_tier {
         (tier, radian_tui::profile::AccessSource::Flag)
     } else if let Some(tier) = resumed_tier {
         (tier, radian_tui::profile::AccessSource::Session)
@@ -122,7 +146,9 @@ pub(super) fn resolve_model(
         )
     };
     if let Some(declared) = project.tier {
-        if cli_tier.is_some() {
+        // An explicit `--profile` wins outright (the note names the project's ask); a
+        // carried tier is still narrowed, like every other non-flag source (ADR 0043 §3).
+        if carried_tier.is_none() && cli_tier.is_some() {
             if radian_host::narrow_tier(tier.preset(), declared) != tier.preset() {
                 startup_log.line(format!(
                     "[access] {} (from flag); the project asks for {}",
@@ -183,8 +209,13 @@ pub(super) fn resolve_model(
     // (D10), so every custom endpoint has its own slot.
     // D8: the command line wins. An explicit `--base-url` is the generic provider's dial
     // (D0), so it counts as the user choosing generic; otherwise the journal's route outranks
-    // the config (review M1: this runs after the picker, so the id is known).
-    let provider_name = if cli.base_url.is_some() {
+    // the config (review M1: this runs after the picker, so the id is known). A carried
+    // `/new` route is newer than all of them: the in-session switch already resolved
+    // everything around it, so it re-resolves here exactly like a fresh startup flag.
+    let carried_route = carry.and_then(|carry| carry.route.clone());
+    let provider_name = if let Some((provider, _)) = &carried_route {
+        provider.clone()
+    } else if cli.base_url.is_some() {
         cli.provider
             .clone()
             .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned())
@@ -215,7 +246,12 @@ pub(super) fn resolve_model(
     let chatgpt_oauth = provider_name == radian_host::CHATGPT_PROVIDER_ID;
     // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
     // version (a warning goes to stderr when one is used).
-    let (thinking, thinking_budget, legacy_thinking) = match cli.thinking.as_deref() {
+    // The in-session switch already won over the command line above, so its thinking level
+    // does the same here; the legacy spelling warning still names what the user typed.
+    let thinking_arg = carry
+        .and_then(|carry| carry.thinking.clone())
+        .or_else(|| cli.thinking.clone());
+    let (thinking, thinking_budget, legacy_thinking) = match thinking_arg.as_deref() {
         Some(raw) => {
             let (level, budget, legacy) = radian_host::parse_thinking_level(raw)?;
             (level.to_owned(), budget, legacy)
@@ -345,6 +381,7 @@ pub(super) fn resolve_window_and_route(
     runtime: &tokio::runtime::Runtime,
     app: &mut App,
     resume: &Option<String>,
+    carry: Option<&SessionCarry>,
     resolved: &ResolvedModel,
     startup_log: &mut StartupLog,
 ) -> Result<ResolvedRoute, RunError> {
@@ -399,9 +436,12 @@ pub(super) fn resolve_window_and_route(
     // is entered. `open_index` can warn about a wide session directory, and that warning must be
     // on the normal screen. The picker owns its data; the phase itself runs after the terminal
     // (ADR 0023 U4).
+    // A carried `/new` session always mints a fresh id: reusing the startup
+    // `--session-id` would collide with the session it carries from.
     let session_id = match (&resume, &cli.session_id) {
-        (Some(id), _) | (None, Some(id)) => id.clone(),
-        (None, None) => radian_host::generate_session_id(),
+        (Some(id), _) => id.clone(),
+        (None, Some(id)) if carry.is_none() => id.clone(),
+        _ => radian_host::generate_session_id(),
     };
     validate_session_id(&session_id)?;
     app.session.session_id = session_id.clone();

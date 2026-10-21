@@ -22,6 +22,7 @@ pub const HELP: &str = "\
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary (ADR 0022)
+/new                  start a new session here; the old session stays resumable
 /theme <name>         switch the color theme and write it back to the config file
 /model <provider>/<model>
                       switch the model at the next turn boundary (ADR 0026 D5)
@@ -135,6 +136,10 @@ pub enum Outcome {
     Export(ExportRequest),
     /// `/fork`: the host forks the current (idle) session at its last turn boundary.
     Fork,
+    /// `/new`: leave the loop; the host ends this session and opens a fresh one in the
+    /// same workspace, then the loop runs again. No host work happens here (unlike
+    /// `/fork`), so there is no `SessionOutcome`: setting the flag IS the execution.
+    New,
     /// `/theme <name>` (ADR 0008 revision): switch the theme now and write `tui.theme` back
     /// to the config file. The loop loads the theme (I/O) and does the write-back.
     Theme(String),
@@ -303,6 +308,11 @@ pub fn tree() -> &'static [Command] {
         Command {
             name: "fork",
             description: "fork this session at its last turn boundary (ADR 0022)",
+            levels: &[],
+        },
+        Command {
+            name: "new",
+            description: "start a new session here; the old session stays resumable",
             levels: &[],
         },
         Command {
@@ -1059,6 +1069,8 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
         Some("/fork") => Outcome::Fork,
+        Some("/new") if tokens.len() == 1 => Outcome::New,
+        Some("/new") => Outcome::Notices(vec!["usage: /new (no arguments)".to_owned()]),
         Some("/theme") => theme_name(&tokens[1..]),
         Some("/thinking") => match tokens[1..].first() {
             Some(level) => Outcome::Thinking(level.clone()),
@@ -1585,6 +1597,21 @@ mod tests {
         }
         assert!(HELP.contains("/queue"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "queue"));
+    }
+
+    /// `/new` takes no argument; anything after it is a usage notice. It is a command,
+    /// and it is in `/help`.
+    #[test]
+    fn new_takes_no_arguments() {
+        assert!(matches!(parse("/new", false), Outcome::New));
+        match parse("/new now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /new"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(HELP.contains("/new"), "{HELP}");
+        assert!(tree().iter().any(|command| command.name == "new"));
     }
 
     /// `/retry` takes no argument; anything after it is a usage notice. It is a command,

@@ -6404,6 +6404,467 @@ async fn pty_fork_refuses_while_a_turn_runs() {
     pty.quit();
 }
 
+/// `/new` (the decided first slice): one turn, switches of model/tier/auto, `/new`, one
+/// more turn. The new session file's `SessionCreated` carries the switched route and tier;
+/// the notice names the old session and its resume command; `/sessions` lists both; both
+/// journals replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_starts_a_fresh_session_carrying_route_tier_and_auto() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-pty");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // Start on anthropic: its route supports thinking levels, so `/thinking` clamps
+    // against the right map even before any switch applies.
+    let anthropic_server = anth::MockServer::start(vec![
+        anth_text_reply("FIRST-ONE"),
+        anth_text_reply("SECOND-TWO"),
+    ])
+    .await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-a",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "first",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-new-test"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"hello first\r");
+    assert!(
+        pty.wait_for_screen("FIRST-ONE", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    // Switch everything `/new` carries: the model, the thinking level, the tier and auto.
+    // The first Enter accepts the slash completion; the second submits the line.
+    pty.send(b"/model anthropic/claude-b\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: anthropic/claude-b", wait_positive()),
+        "the model switch did not queue:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/access workspace\r");
+    assert!(
+        pty.wait_for_screen("access: workspace for this session", wait_positive()),
+        "the tier switch did not apply:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/thinking high\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: thinking high", wait_positive()),
+        "the thinking switch did not queue:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/auto on\r");
+    assert!(
+        pty.wait_for_screen(
+            "auto: tool calls are approved without asking",
+            wait_positive()
+        ),
+        "auto did not switch on:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("--resume first", wait_positive()),
+        "the /new notice must name the old session and its resume command:\n{}",
+        pty.screen()
+    );
+    // The carried auto policy survives: the new session's startup block says so (the old
+    // transcript is gone, so this line can only come from the fresh session).
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen(
+            "auto: tool calls are approved without asking; deny rules",
+            wait_positive()
+        ),
+        "the new session did not carry auto:\n{}",
+        pty.screen()
+    );
+
+    // The new session is blank but routed: one turn reaches the switched provider.
+    pty.send(b"hello second\r");
+    assert!(
+        pty.wait_for_screen("SECOND-TWO", wait_positive()),
+        "the new session is not on the carried route:\n{}",
+        pty.screen()
+    );
+
+    // Two session files: the old one and exactly one new one.
+    let mut files: Vec<String> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".jsonl") && !name.ends_with(".jobs"))
+        .collect();
+    files.sort();
+    assert_eq!(
+        files.len(),
+        2,
+        "one turn plus /new plus one turn: {files:?}"
+    );
+    assert!(files.contains(&"first.jsonl".to_owned()), "{files:?}");
+    let new_id = files
+        .iter()
+        .find(|name| *name != "first.jsonl")
+        .map(|name| name.trim_end_matches(".jsonl").to_owned())
+        .expect("a new session file");
+    // The new `SessionCreated` carries the switched route and tier.
+    let new_text = std::fs::read_to_string(sessions.join(format!("{new_id}.jsonl"))).unwrap();
+    let created: serde_json::Value = serde_json::from_str(
+        new_text
+            .lines()
+            .next()
+            .expect("the new session file has a first line"),
+    )
+    .expect("the first line is JSON");
+    assert_eq!(created["event"], "SessionCreated", "{created:?}");
+    assert_eq!(
+        created["data"]["config_snapshot"]["provider"], "anthropic",
+        "{created:?}"
+    );
+    assert_eq!(
+        created["data"]["config_snapshot"]["model"], "claude-b",
+        "{created:?}"
+    );
+    assert_eq!(
+        created["data"]["config_snapshot"]["access"], "workspace",
+        "{created:?}"
+    );
+
+    // `/sessions` lists both sessions.
+    pty.send(b"/sessions\r");
+    assert!(
+        pty.wait_for_screen(&new_id, wait_positive()),
+        "the picker does not list the new session:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("first"),
+        "the picker does not list the old session:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]); // Esc closes the overlay
+    assert!(
+        pty.wait_until(wait_positive(), |screen| !screen.contains("filter:")),
+        "the overlay did not close:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+
+    // The journal-selfcheck leg: both journals replay to a non-empty transcript.
+    assert_journal_replays(&sessions, "first");
+    assert_journal_replays(&sessions, &new_id);
+    // The carried choices are journaled as `ConfigChanged` in the new session, so a later
+    // `--resume` restores them (the D8/D9/C8 backfill rule, applied to the carry).
+    let changes = config_changes(&sessions, &new_id);
+    assert!(
+        changes
+            .iter()
+            .any(|change| change["model"]["provider"] == "anthropic"
+                && change["model"]["model"] == "claude-b"),
+        "the carried route was not journaled: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.get("thinking") == Some(&json!("high"))),
+        "the carried thinking level was not journaled: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.get("access") == Some(&json!("workspace"))),
+        "the carried tier was not journaled: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.get("approval") == Some(&json!("auto"))),
+        "the carried auto policy was not journaled: {changes:?}"
+    );
+}
+
+/// `/new` while a turn runs is refused with a notice and the session is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_refuses_while_a_turn_runs() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-pty-running");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // A shell tool call that sleeps keeps the turn running while the input box is free.
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            &json!({"command": "sleep 5"}).to_string(),
+        ),
+        text_reply("NEVER"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "running",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("sleep 5", wait_positive()),
+        "the sleeping tool call did not start:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen(
+            "finish the current turn before starting a new session",
+            wait_positive()
+        ),
+        "a running turn must refuse /new:\n{}",
+        pty.screen()
+    );
+    // No new session file was created.
+    let jsonl: Vec<String> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    assert_eq!(jsonl, vec!["running.jsonl".to_owned()], "{jsonl:?}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// `/new` while a background job runs is refused with a notice pointing to `/jobs kill`;
+/// after the kill it works and the old session is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_refuses_while_a_background_job_runs() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-pty-job");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            r#"{"command":"sleep 60","background":true}"#,
+        ),
+        text_reply("TURN-OK"),
+        text_reply("NEVER"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "jobbed",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"start a background job\r");
+    assert!(
+        pty.wait_for_screen("TURN-OK", wait_positive()),
+        "the turn did not end while the job still sleeps:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("stop it with `/jobs kill`", wait_positive()),
+        "a running job must refuse /new:\n{}",
+        pty.screen()
+    );
+    // No new session file was created by the refusal.
+    let before: Vec<String> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    assert_eq!(before, vec!["jobbed.jsonl".to_owned()], "{before:?}");
+
+    // After the kill the session is idle again, so `/new` works.
+    pty.send(b"/jobs kill all\r");
+    assert!(
+        pty.wait_for_screen("stopping 1 background job(s)", wait_positive()),
+        "the kill did not land:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("--resume jobbed", wait_positive()),
+        "killing the job did not free /new:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// `/new` drops the old session's write lock while the process lives: a second process
+/// can `--resume` the old session while the first one runs the new session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_releases_the_old_sessions_lock() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-pty-lock");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let server = MockServer::start(vec![text_reply("LOCK-ONE")]).await;
+    let mut first = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "locked",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(
+        first.wait_for_screen("message", wait_positive()),
+        "{}",
+        first.screen()
+    );
+    first.send(b"hello\r");
+    assert!(
+        first.wait_for_screen("LOCK-ONE", wait_positive()),
+        "{}",
+        first.screen()
+    );
+    first.send(b"/new\r");
+    assert!(
+        first.wait_for_screen("--resume locked", wait_positive()),
+        "the /new notice is missing:\n{}",
+        first.screen()
+    );
+
+    // The old session resumes in a second process: its write lock is free, so the
+    // resumed transcript renders. (The session line itself lives in the folded startup
+    // block; the old turn's reply proves the resume.)
+    let mut second = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--resume",
+            "locked",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(
+        second.wait_for_screen("LOCK-ONE", wait_positive()),
+        "the old session did not resume (its lock is still held?):\n{}",
+        second.screen()
+    );
+    second.quit();
+    assert_eq!(second.app_exit_code(), Some(0), "{}", second.screen());
+    first.quit();
+    assert_eq!(first.app_exit_code(), Some(0), "{}", first.screen());
+
+    assert_journal_replays(&sessions, "locked");
+}
+
+/// Every `ConfigChanged` change in one session file, oldest first.
+fn config_changes(sessions: &std::path::Path, id: &str) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(sessions.join(format!("{id}.jsonl")))
+        .unwrap_or_else(|error| panic!("cannot read the {id} journal: {error}"));
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value["event"] == "ConfigChanged")
+        .map(|value| value["data"]["change"].clone())
+        .collect()
+}
+
+/// The journal-selfcheck leg for `/new`: the file replays through `recover` to the
+/// transcript the turns produced.
+fn assert_journal_replays(sessions: &std::path::Path, id: &str) {
+    let session = radian_session::Session::open(sessions.join(format!("{id}.jsonl")))
+        .unwrap_or_else(|error| panic!("cannot open the {id} journal: {error}"));
+    let history = session
+        .history()
+        .unwrap_or_else(|error| panic!("the {id} journal does not replay: {error}"));
+    assert!(
+        history.len() >= 2,
+        "the {id} journal replayed to {history:?}, but its turns are missing"
+    );
+}
+
 /// Phase 5: `Ctrl-F` searches the transcript and jumps to an earlier match.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
