@@ -14585,3 +14585,76 @@ async fn pty_loop_resends_until_times_and_footer_shows_it() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
 }
+
+/// Bundled manual end to end: the prompt index names `radian://docs/`, the mock model reads
+/// one page through `read`, and the tool result carries the page text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_docs_page_reads_end_to_end() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "read", r#"{"path":"radian://docs/providers.md"}"#),
+        text_reply("DOCS-DONE"),
+    ])
+    .await;
+    let dir = TempDir::new("docs-e2e");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "docs-e2e",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"how do I switch models?\r");
+    assert!(
+        pty.wait_for_screen("DOCS-DONE", wait_positive()),
+        "final reply missing:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+    // The system prompt carries the bundled index.
+    let first = server.requests()[0].json();
+    let system = first["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    assert!(
+        system.contains("radian://docs/"),
+        "index in system: {system}"
+    );
+    assert!(
+        system.contains("radian://docs/providers.md"),
+        "providers page indexed: {system}"
+    );
+    // The tool ran and its result holds the page text.
+    let journal = std::fs::read_to_string(sessions.join("docs-e2e.jsonl")).expect("journal exists");
+    assert!(
+        journal.contains("radian://docs/providers.md"),
+        "journal names the docs path"
+    );
+    assert!(
+        journal.contains("Run `radian login`"),
+        "journal holds the page text"
+    );
+}

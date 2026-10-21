@@ -77,3 +77,42 @@ pub fn page_name(user: &str) -> Option<&str> {
 pub fn is_virtual(user: &str) -> bool {
     user.starts_with(VIRTUAL_PREFIX)
 }
+
+/// The topic for a page file name (`commands.md` -> `commands`).
+pub fn topic(name: &str) -> &str {
+    name.strip_suffix(".md").unwrap_or(name)
+}
+
+/// The frontmatter `description:` of a page, or an empty string when missing.
+pub fn description(text: &str) -> &str {
+    let mut lines = text.lines();
+    if lines.next() != Some("---") {
+        return "";
+    }
+    for line in lines {
+        if line == "---" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("description:") {
+            return rest.trim();
+        }
+    }
+    ""
+}
+
+/// Looks up a `radian docs` topic: `commands` or `commands.md` both find the page.
+pub fn lookup_topic(topic: &str) -> Option<(&'static str, &'static str)> {
+    let name = if topic.ends_with(".md") {
+        topic.to_owned()
+    } else {
+        format!("{topic}.md")
+    };
+    find(&name).map(|text| {
+        let page = DOCS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(n, _)| *n)
+            .unwrap_or("");
+        (page, text)
+    })
+}

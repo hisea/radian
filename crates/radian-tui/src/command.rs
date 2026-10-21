@@ -50,7 +50,8 @@ pub const HELP: &str = "\
 /logout <provider>    remove a stored credential (asks first)
 //…                   send a message that starts with `/`
 !<command>            run a shell command in the sandbox (ADR 0033); `!!` keeps its output
-                      out of the model's context";
+                      out of the model's context
+Ask about radian itself in plain words to read the built in manual";
 
 /// A memory command waiting for the user's confirmation. Only the destructive commands
 /// (`forget`, `purge`, `split`, `merge`) ask (ADR 0021 D7); the rest run immediately. `update`

@@ -77,6 +77,21 @@ async fn a_docs_page_reads_like_a_file() {
         "a capped read names the next offset:\n{part_text}"
     );
 
+    // Stripped of line numbers, the body is the embedded text verbatim.
+    {
+        let mut stripped = String::new();
+        for line in full_text.lines() {
+            if let Some((_, body)) = line.split_once(": ") {
+                stripped.push_str(body);
+                stripped.push('\n');
+            }
+        }
+        // The file may or may not end with a newline; compare without the final newline.
+        let expected = embedded.strip_suffix('\n').unwrap_or(embedded);
+        let got = stripped.strip_suffix('\n').unwrap_or(&stripped);
+        assert_eq!(got, expected, "stripped read equals embedded text");
+    }
+
     // `max_bytes` truncates the same way as a file.
     let capped = call(&tools, "read", json!({"path": path, "max_bytes": 16}))
         .await
@@ -159,6 +174,43 @@ fn the_embedded_manual_has_a_size_cap() {
         "embedded manual is {total} bytes, over the 512 KiB cap"
     );
     assert!(!radian_coding::docs::DOCS.is_empty(), "at least one page");
+}
+
+/// The user manual never mentions internal design numbers and never uses the word slice.
+#[test]
+fn the_user_manual_has_no_design_numbers_or_slices() {
+    for (name, text) in radian_coding::docs::DOCS {
+        assert!(!text.contains("ADR"), "{name} mentions ADR");
+        assert!(!text.contains("slice"), "{name} mentions slice");
+    }
+}
+
+/// Every built-in tool name appears in the manual.
+#[test]
+fn every_tool_name_appears_in_the_manual() {
+    let all: String = radian_coding::docs::DOCS
+        .iter()
+        .map(|(_, text)| *text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for tool in [
+        "read",
+        "write",
+        "patch",
+        "glob",
+        "grep",
+        "shell",
+        "job",
+        "memory_search",
+        "ask_user",
+        "skill",
+        "subagent",
+    ] {
+        assert!(
+            all.contains(tool),
+            "tool `{tool}` is missing from docs/user/"
+        );
+    }
 }
 
 /// The hand-written table matches `docs/user/` on disk.
