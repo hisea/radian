@@ -198,6 +198,7 @@ async fn the_child_runs_the_parents_live_model_route() {
             mcp_config_path: None,
             system_prompt: None,
             context_budget: None,
+            window_context: None,
             auto_compact: false,
             compaction_settings: Value::Null,
             compaction_settings_for: None,

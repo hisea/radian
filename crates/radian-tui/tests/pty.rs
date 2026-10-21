@@ -179,7 +179,7 @@ fn spawn_direct_keeping_slave(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
-    cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+    cmd.env("RADIAN_CATALOG_URL", fast_catalog_url());
     cmd.env("RADIAN_KEYBOARD_ENHANCEMENT", "0");
     let keep_slave = slave.try_clone().unwrap();
     cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
@@ -200,6 +200,37 @@ fn spawn_direct_keeping_slave(
 }
 
 const BIN: &str = env!("CARGO_BIN_EXE_radian");
+
+/// A catalog URL that fails at once on every OS (ADR 0018's `RADIAN_CATALOG_URL` seam).
+///
+/// A connect to a closed loopback port is refused on macOS but times out on this Linux
+/// box (5 s measured), so the old `http://127.0.0.1:1/api.json` held the catalog fetch for
+/// the whole `FETCH_TIMEOUT`. This binds `127.0.0.1:0` once per test process and answers
+/// HTTP 503 to every connection, so the fetch fails fast anywhere. The production code
+/// path is unchanged (no `--offline-catalog`).
+fn fast_catalog_url() -> String {
+    use std::sync::OnceLock;
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind the catalog sink");
+        let addr = listener.local_addr().expect("the sink's address");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                use std::io::{Read, Write};
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        format!("http://{addr}/api.json")
+    })
+    .clone()
+}
 
 /// The positive deadline: how long a wait for something to **appear**, to **change**, or for the
 /// app to **exit** may take before the test fails. Every positive wait in this file uses it (via
@@ -419,8 +450,8 @@ impl Pty {
         }
         cmd.env("TERM", "xterm-256color");
         // Tests must not read the user's catalog cache or reach the real models.dev. A fresh
-        // `HOME` isolates the cache; the catalog URL points at a closed local port, so a
-        // lookup fails fast and the window is unknown. A test that wants the catalog
+        // `HOME` isolates the cache; the catalog URL is the fast-failing sink
+        // (`fast_catalog_url`), so a lookup fails fast and the window is unknown. A test that wants the catalog
         // overrides both through `envs`.
         let home = TempDir::new("home");
         cmd.env("HOME", home.path().as_os_str());
@@ -455,7 +486,7 @@ impl Pty {
         }
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
-        cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+        cmd.env("RADIAN_CATALOG_URL", fast_catalog_url());
         // A pty has nobody to answer the kitty keyboard-enhancement query, and crossterm
         // waits up to 2 s for it; the harness opts out (a test that wants the sequences sets
         // the variable back to `1` through `envs`).
@@ -1507,6 +1538,98 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
     );
     assert!(!pty.screen().contains("project trust"), "{}", pty.screen());
     pty.quit();
+}
+
+/// Slice B2: the startup trust modal lists the project `.mcp.json` servers — names, the
+/// `command` + `args` as written, the `env` key names only (never values) — and marks
+/// remote entries skipped. The workspace holds only the `.mcp.json` (no skill), proving
+/// the file alone triggers the modal. The test untrusts (no server ever starts) and
+/// journals, like the skill-modal test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_trust_modal_lists_the_project_mcp_servers() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("TRUST-MCP-OK")]).await;
+    let dir = TempDir::new("trust-mcp-session");
+    let home = TempDir::new("trust-mcp-home");
+    let ws = TempDir::new("trust-mcp-ws");
+    std::fs::write(
+        ws.path().join(".mcp.json"),
+        r#"{"mcpServers":{
+            "fs": {"command": "npx", "args": ["-y", "${MCP_B2_PTY_BIN}"],
+                "env": {"FIXTURE_LOG": "/tmp/b2.log", "SEKRET": "sekret-value"}},
+            "web": {"type": "http", "url": "https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-mcp",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("project trust", wait_positive()),
+        "the trust modal is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen(
+            "project .mcp.json: 1 server to load once trusted",
+            wait_positive()
+        ),
+        "the preview header is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("mcp: fs `npx -y ${MCP_B2_PTY_BIN}`", wait_positive()),
+        "the command as written is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("FIXTURE_LOG, SEKRET", wait_positive()),
+        "the env key names are missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("mcp: web skipped", wait_positive()),
+        "the skipped remote entry is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("sekret-value"),
+        "values never leak into the modal:\n{}",
+        pty.screen()
+    );
+    // Down four rows from the sandbox default to "do not trust this directory", Enter.
+    for _ in 0..4 {
+        pty.send(b"\x1b[B"); // Down
+    }
+    pty.send(b"\r");
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: not loaded", wait_positive()),
+        "the trust state was not shown:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let canonical = std::fs::canonicalize(ws.path()).unwrap();
+    let trust = std::fs::read_to_string(home.path().join("trust/trust.json")).unwrap();
+    assert!(
+        trust.contains(&canonical.to_string_lossy().to_string()) && trust.contains("false"),
+        "{trust}"
+    );
 }
 
 /// decision 2026-10-20: a project with no trusted decision shows
@@ -5098,6 +5221,62 @@ async fn pty_compact_shows_its_result_without_a_model_request() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// `/context` prints the next request's estimated categories with the reported
+/// line separate (ADR 0015 C1), without sending a model request. Read-only, so
+/// it works on an idle session with no usage yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_context_prints_estimated_categories_without_a_model_request() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("context");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "context",
+        ],
+        // Tall enough for the whole notice: the header rows must stay visible
+        // with the startup block above them.
+        40,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"/context\r");
+    assert!(
+        pty.wait_for_screen("context (estimated)", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    // The notice is longer than the frame, so the first rows scroll off: wait
+    // for rows near the end instead.
+    assert!(
+        pty.wait_for_screen("compactions this session: 0", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("reported: none yet", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        server.requests().is_empty(),
+        "a /context must not reach the model"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 // ---------- the composer: editing, history, paste and drafts (ADR 0009 Phase 4) ----------
 
 /// The last `user` message's text of the `n`-th recorded request.
@@ -6223,6 +6402,467 @@ async fn pty_fork_refuses_while_a_turn_runs() {
         .collect();
     assert_eq!(jsonl, vec!["running.jsonl".to_owned()], "{jsonl:?}");
     pty.quit();
+}
+
+/// `/new` (the decided first slice): one turn, switches of model/tier/auto, `/new`, one
+/// more turn. The new session file's `SessionCreated` carries the switched route and tier;
+/// the notice names the old session and its resume command; `/sessions` lists both; both
+/// journals replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_starts_a_fresh_session_carrying_route_tier_and_auto() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-pty");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // Start on anthropic: its route supports thinking levels, so `/thinking` clamps
+    // against the right map even before any switch applies.
+    let anthropic_server = anth::MockServer::start(vec![
+        anth_text_reply("FIRST-ONE"),
+        anth_text_reply("SECOND-TWO"),
+    ])
+    .await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-a",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "first",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-new-test"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"hello first\r");
+    assert!(
+        pty.wait_for_screen("FIRST-ONE", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    // Switch everything `/new` carries: the model, the thinking level, the tier and auto.
+    // The first Enter accepts the slash completion; the second submits the line.
+    pty.send(b"/model anthropic/claude-b\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: anthropic/claude-b", wait_positive()),
+        "the model switch did not queue:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/access workspace\r");
+    assert!(
+        pty.wait_for_screen("access: workspace for this session", wait_positive()),
+        "the tier switch did not apply:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/thinking high\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: thinking high", wait_positive()),
+        "the thinking switch did not queue:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/auto on\r");
+    assert!(
+        pty.wait_for_screen(
+            "auto: tool calls are approved without asking",
+            wait_positive()
+        ),
+        "auto did not switch on:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("--resume first", wait_positive()),
+        "the /new notice must name the old session and its resume command:\n{}",
+        pty.screen()
+    );
+    // The carried auto policy survives: the new session's startup block says so (the old
+    // transcript is gone, so this line can only come from the fresh session).
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen(
+            "auto: tool calls are approved without asking; deny rules",
+            wait_positive()
+        ),
+        "the new session did not carry auto:\n{}",
+        pty.screen()
+    );
+
+    // The new session is blank but routed: one turn reaches the switched provider.
+    pty.send(b"hello second\r");
+    assert!(
+        pty.wait_for_screen("SECOND-TWO", wait_positive()),
+        "the new session is not on the carried route:\n{}",
+        pty.screen()
+    );
+
+    // Two session files: the old one and exactly one new one.
+    let mut files: Vec<String> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".jsonl") && !name.ends_with(".jobs"))
+        .collect();
+    files.sort();
+    assert_eq!(
+        files.len(),
+        2,
+        "one turn plus /new plus one turn: {files:?}"
+    );
+    assert!(files.contains(&"first.jsonl".to_owned()), "{files:?}");
+    let new_id = files
+        .iter()
+        .find(|name| *name != "first.jsonl")
+        .map(|name| name.trim_end_matches(".jsonl").to_owned())
+        .expect("a new session file");
+    // The new `SessionCreated` carries the switched route and tier.
+    let new_text = std::fs::read_to_string(sessions.join(format!("{new_id}.jsonl"))).unwrap();
+    let created: serde_json::Value = serde_json::from_str(
+        new_text
+            .lines()
+            .next()
+            .expect("the new session file has a first line"),
+    )
+    .expect("the first line is JSON");
+    assert_eq!(created["event"], "SessionCreated", "{created:?}");
+    assert_eq!(
+        created["data"]["config_snapshot"]["provider"], "anthropic",
+        "{created:?}"
+    );
+    assert_eq!(
+        created["data"]["config_snapshot"]["model"], "claude-b",
+        "{created:?}"
+    );
+    assert_eq!(
+        created["data"]["config_snapshot"]["access"], "workspace",
+        "{created:?}"
+    );
+
+    // `/sessions` lists both sessions.
+    pty.send(b"/sessions\r");
+    assert!(
+        pty.wait_for_screen(&new_id, wait_positive()),
+        "the picker does not list the new session:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("first"),
+        "the picker does not list the old session:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]); // Esc closes the overlay
+    assert!(
+        pty.wait_until(wait_positive(), |screen| !screen.contains("filter:")),
+        "the overlay did not close:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+
+    // The journal-selfcheck leg: both journals replay to a non-empty transcript.
+    assert_journal_replays(&sessions, "first");
+    assert_journal_replays(&sessions, &new_id);
+    // The carried choices are journaled as `ConfigChanged` in the new session, so a later
+    // `--resume` restores them (the D8/D9/C8 backfill rule, applied to the carry).
+    let changes = config_changes(&sessions, &new_id);
+    assert!(
+        changes
+            .iter()
+            .any(|change| change["model"]["provider"] == "anthropic"
+                && change["model"]["model"] == "claude-b"),
+        "the carried route was not journaled: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.get("thinking") == Some(&json!("high"))),
+        "the carried thinking level was not journaled: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.get("access") == Some(&json!("workspace"))),
+        "the carried tier was not journaled: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.get("approval") == Some(&json!("auto"))),
+        "the carried auto policy was not journaled: {changes:?}"
+    );
+}
+
+/// `/new` while a turn runs is refused with a notice and the session is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_refuses_while_a_turn_runs() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-pty-running");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // A shell tool call that sleeps keeps the turn running while the input box is free.
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            &json!({"command": "sleep 5"}).to_string(),
+        ),
+        text_reply("NEVER"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "running",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("sleep 5", wait_positive()),
+        "the sleeping tool call did not start:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen(
+            "finish the current turn before starting a new session",
+            wait_positive()
+        ),
+        "a running turn must refuse /new:\n{}",
+        pty.screen()
+    );
+    // No new session file was created.
+    let jsonl: Vec<String> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    assert_eq!(jsonl, vec!["running.jsonl".to_owned()], "{jsonl:?}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// `/new` while a background job runs is refused with a notice pointing to `/jobs kill`;
+/// after the kill it works and the old session is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_refuses_while_a_background_job_runs() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-pty-job");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            r#"{"command":"sleep 60","background":true}"#,
+        ),
+        text_reply("TURN-OK"),
+        text_reply("NEVER"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "jobbed",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"start a background job\r");
+    assert!(
+        pty.wait_for_screen("TURN-OK", wait_positive()),
+        "the turn did not end while the job still sleeps:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("stop it with `/jobs kill`", wait_positive()),
+        "a running job must refuse /new:\n{}",
+        pty.screen()
+    );
+    // No new session file was created by the refusal.
+    let before: Vec<String> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    assert_eq!(before, vec!["jobbed.jsonl".to_owned()], "{before:?}");
+
+    // After the kill the session is idle again, so `/new` works.
+    pty.send(b"/jobs kill all\r");
+    assert!(
+        pty.wait_for_screen("stopping 1 background job(s)", wait_positive()),
+        "the kill did not land:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("--resume jobbed", wait_positive()),
+        "killing the job did not free /new:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// `/new` drops the old session's write lock while the process lives: a second process
+/// can `--resume` the old session while the first one runs the new session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_new_releases_the_old_sessions_lock() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("new-pty-lock");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let server = MockServer::start(vec![text_reply("LOCK-ONE")]).await;
+    let mut first = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "locked",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(
+        first.wait_for_screen("message", wait_positive()),
+        "{}",
+        first.screen()
+    );
+    first.send(b"hello\r");
+    assert!(
+        first.wait_for_screen("LOCK-ONE", wait_positive()),
+        "{}",
+        first.screen()
+    );
+    first.send(b"/new\r");
+    assert!(
+        first.wait_for_screen("--resume locked", wait_positive()),
+        "the /new notice is missing:\n{}",
+        first.screen()
+    );
+
+    // The old session resumes in a second process: its write lock is free, so the
+    // resumed transcript renders. (The session line itself lives in the folded startup
+    // block; the old turn's reply proves the resume.)
+    let mut second = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--resume",
+            "locked",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(
+        second.wait_for_screen("LOCK-ONE", wait_positive()),
+        "the old session did not resume (its lock is still held?):\n{}",
+        second.screen()
+    );
+    second.quit();
+    assert_eq!(second.app_exit_code(), Some(0), "{}", second.screen());
+    first.quit();
+    assert_eq!(first.app_exit_code(), Some(0), "{}", first.screen());
+
+    assert_journal_replays(&sessions, "locked");
+}
+
+/// Every `ConfigChanged` change in one session file, oldest first.
+fn config_changes(sessions: &std::path::Path, id: &str) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(sessions.join(format!("{id}.jsonl")))
+        .unwrap_or_else(|error| panic!("cannot read the {id} journal: {error}"));
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value["event"] == "ConfigChanged")
+        .map(|value| value["data"]["change"].clone())
+        .collect()
+}
+
+/// The journal-selfcheck leg for `/new`: the file replays through `recover` to the
+/// transcript the turns produced.
+fn assert_journal_replays(sessions: &std::path::Path, id: &str) {
+    let session = radian_session::Session::open(sessions.join(format!("{id}.jsonl")))
+        .unwrap_or_else(|error| panic!("cannot open the {id} journal: {error}"));
+    let history = session
+        .history()
+        .unwrap_or_else(|error| panic!("the {id} journal does not replay: {error}"));
+    assert!(
+        history.len() >= 2,
+        "the {id} journal replayed to {history:?}, but its turns are missing"
+    );
 }
 
 /// Phase 5: `Ctrl-F` searches the transcript and jumps to an earlier match.
@@ -13864,4 +14504,84 @@ async fn pty_retry_after_a_model_error_resends_the_same_text() {
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/loop --times 5` re-sends the same prompt every turn: the second request carries the
+/// same user text, the footer counts `loop 1/5` while the hanging second turn runs, Esc
+/// pauses the loop, and `/help` lists `/loop`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_loop_resends_until_times_and_footer_shows_it() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        text_reply("LOOP-REPLY-ONE"),
+        Reply::SseThenHang { pieces: Vec::new() },
+    ])
+    .await;
+    let dir = TempDir::new("loop");
+    // The shipped default footer (the `deck` preset carries the `loop` item): the suite's
+    // `classic` default has no `loop` row, so `spawn_bare` writes no config file. Fifty
+    // rows fit the whole `/help` list, so the `/loop` line cannot scroll off.
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "loop",
+        ],
+        &[],
+        50,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"/loop --times 5 loop-prompt-xyzzy\r");
+    assert!(
+        pty.wait_for_screen("LOOP-REPLY-ONE", wait_positive()),
+        "the first turn did not answer:\n{}",
+        pty.screen()
+    );
+    // The second turn hangs on purpose: the footer stably shows the iteration count.
+    assert!(
+        pty.wait_for_screen("loop 1/5", wait_positive()),
+        "the footer did not count the loop iteration:\n{}",
+        pty.screen()
+    );
+    // Both turns reached the model with the same prompt.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.requests().len() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.requests().len(), 2, "two turns ran");
+    assert_eq!(
+        last_user_text(&server, 0),
+        last_user_text(&server, 1),
+        "both requests carry the loop prompt"
+    );
+    assert!(
+        last_user_text(&server, 0).contains("loop-prompt-xyzzy"),
+        "the text is the typed prompt"
+    );
+    // Esc pauses the hanging loop turn (the mode stays on, the prompt is dropped).
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_for_screen("loop paused", wait_positive()),
+        "Esc did not pause the loop:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/help\r");
+    assert!(
+        pty.wait_for_screen("/loop", wait_positive()),
+        "/help does not list /loop:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
 }

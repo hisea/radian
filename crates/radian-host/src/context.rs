@@ -54,6 +54,15 @@ pub struct ImportedFile {
     pub bytes: usize,
 }
 
+/// One context file's exact prompt block, in prompt order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBlock {
+    /// The real path the file was read from.
+    pub path: PathBuf,
+    /// The exact `<project_instructions>` block, as concatenated into [`ContextFiles::section`].
+    pub block: String,
+}
+
 /// What the context files produced for one session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextFiles {
@@ -63,6 +72,9 @@ pub struct ContextFiles {
     pub warnings: Vec<String>,
     /// The `<project_instructions>` section, empty when no file was loaded.
     pub section: String,
+    /// One block per loaded file, in prompt order; concatenated they are
+    /// exactly [`ContextFiles::section`].
+    pub blocks: Vec<FileBlock>,
 }
 
 impl ContextFiles {
@@ -263,6 +275,13 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
         ));
     }
     result.section = build_section(&raw);
+    result.blocks = raw
+        .iter()
+        .map(|(file, content)| FileBlock {
+            path: file.path.clone(),
+            block: file_block(&file.path.display().to_string(), content),
+        })
+        .collect();
     result.files = raw.into_iter().map(|(file, _)| file).collect();
     result
 }
@@ -528,6 +547,17 @@ pub(crate) fn repo_root(workspace: &Path) -> Option<PathBuf> {
     None
 }
 
+/// One file's `<project_instructions>` block (ADR 0036 C2). [`build_section`]
+/// concatenates these with no extra separators, so the blocks add up to the
+/// section byte for byte.
+fn file_block(path_display: &str, content: &str) -> String {
+    format!(
+        "<project_instructions path=\"{}\">\n{}\n</project_instructions>\n\n",
+        crate::escape::attr(path_display),
+        crate::escape::close_tag(content.trim_end(), "project_instructions")
+    )
+}
+
 /// The section: one `<project_instructions path="…">` block per file (ADR 0036 C2). Empty when there is no file. The content's literal closing tags and the
 /// path's attribute characters are escaped, so a file cannot close the frame early and pretend
 /// to be a higher-priority layer ([`crate::escape`]).
@@ -537,11 +567,7 @@ fn build_section(files: &[(LoadedFile, String)]) -> String {
     }
     let mut out = String::new();
     for (file, content) in files {
-        out.push_str(&format!(
-            "<project_instructions path=\"{}\">\n{}\n</project_instructions>\n\n",
-            crate::escape::attr(&file.path.display().to_string()),
-            crate::escape::close_tag(content.trim_end(), "project_instructions")
-        ));
+        out.push_str(&file_block(&file.path.display().to_string(), content));
     }
     out
 }
@@ -1226,5 +1252,23 @@ mod tests {
         );
         let line = files.line(&dir.path().join("repo"), Some(&dir.path().join("home")));
         assert!(line.contains("not read: ../repo/secret.md"), "{line}");
+    }
+
+    /// The per-file blocks concatenate to the section byte for byte, so the
+    /// `/context` per-file tokens add up to the context category.
+    #[test]
+    fn the_blocks_concatenate_to_the_section() {
+        let dir = TempDir::new("blocks");
+        dir.mkdir("repo/.git");
+        dir.write("repo/AGENTS.md", "agents");
+        dir.mkdir("home");
+        dir.write("home/AGENTS.md", "global");
+        let files = load(&dir.path().join("repo"), Some(&dir.path().join("home")));
+        assert_eq!(files.blocks.len(), files.files.len());
+        let joined: String = files.blocks.iter().map(|b| b.block.as_str()).collect();
+        assert_eq!(joined, files.section);
+        for (block, file) in files.blocks.iter().zip(files.files.iter()) {
+            assert_eq!(block.path, file.path);
+        }
     }
 }

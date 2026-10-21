@@ -40,7 +40,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// One isolated environment: `HOME`/`RADIAN_HOME`, the session directory, a workspace, and a
-/// catalog URL pointing at a closed port (no run reads the user's state or the network).
+/// fast-failing catalog URL (no run reads the user's state or the network).
 struct Env {
     home: PathBuf,
     sessions: PathBuf,
@@ -84,7 +84,7 @@ fn spawn_parent_env(env: &Env, args: &[&str], extra: &[(&str, String)]) -> Child
         .env("HOME", &env.home)
         .env("RADIAN_HOME", &env.home)
         .env("RADIAN_SESSION_DIR", &env.sessions)
-        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

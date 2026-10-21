@@ -126,38 +126,55 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
     // (no symlink in any component) and the walk descends by fd; only regular files can match.
     // An absolute or `~` base must be under a read-only root, and its results are rendered
     // with that root's prefix so they can be passed to `read` again.
+    // Several whitespace-separated bases in one `path`: each resolved as a lone call
+    // would resolve it, the matches merged with duplicates removed and the cap shared
+    // across the whole call. Every walk stays fd-relative (ADR 0039 decision 2).
     let requested: &str = &path;
+    let resolved = search::resolve_bases(&root, requested)?;
     let mut matches: Vec<String> = Vec::new();
-    match root.read_base(requested) {
-        Ok(base) => {
-            let prefix = base.prefix.clone();
-            search::walk(&base.dir, &base.relative, base.ancestors, &mut |found| {
-                let rel = found.relative;
-                if matcher.is_match(&rel) {
-                    matches.push(display_path(prefix.as_deref(), &rel));
-                }
-                true
-            });
-        }
-        Err(failure) if failure.code == "not_a_directory" => {
-            // A file base: the pattern is matched against its own root-relative path.
-            let opened = root.open_read(requested)?;
-            if opened.stat.kind == crate::safe_fs::EntryKind::File {
-                let (rel, prefix) = root.read_relative(requested)?;
-                if matcher.is_match(&rel) {
-                    matches.push(display_path(prefix.as_deref(), &rel));
+    for base in resolved.bases {
+        match base {
+            search::SingleBase::Dir(dir_base) => {
+                let prefix = dir_base.prefix.clone();
+                search::walk(
+                    &dir_base.dir,
+                    &dir_base.relative,
+                    dir_base.ancestors,
+                    &mut |found| {
+                        let rel = found.relative;
+                        if matcher.is_match(&rel) {
+                            matches.push(display_path(prefix.as_deref(), &rel));
+                        }
+                        true
+                    },
+                );
+            }
+            search::SingleBase::File {
+                opened,
+                relative,
+                prefix,
+                ..
+            } => {
+                // A file base: the pattern is matched against its own root-relative path.
+                if opened.stat.kind == crate::safe_fs::EntryKind::File
+                    && matcher.is_match(&relative)
+                {
+                    matches.push(display_path(prefix.as_deref(), &relative));
                 }
             }
         }
-        Err(failure) => return Err(failure),
     }
 
     matches.sort();
+    matches.dedup();
     let total = matches.len();
     let truncated = total > cap;
     matches.truncate(cap);
 
     let mut text = String::new();
+    if let Some(header) = resolved.header {
+        text.push_str(&header);
+    }
     for path in &matches {
         text.push_str(path);
         text.push('\n');

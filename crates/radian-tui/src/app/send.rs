@@ -44,7 +44,9 @@ impl App {
     }
 
     /// The shared send path: the session-ended and no-model guards, then the `@` expansion
-    /// effect. `None` keeps the turn-dependent followup/steer choice; `Some` forces it.
+    /// effect. `None` keeps the turn-dependent followup/steer choice; `Some` forces it. A
+    /// message typed while the loop is armed or paused is captured as the new loop prompt
+    /// when the expansion lands (and resumes a paused loop).
     fn begin_send_as(&mut self, text: String, kind: Option<PendingSend>) -> UpdateResult {
         if let Some(refused) = self.refuse_if_session_ended() {
             self.restore_input(text);
@@ -66,9 +68,11 @@ impl App {
                 PendingSend::Followup
             }
         });
+        let loop_capture = self.loop_captures(false);
         self.pending_expand.push_back(PendingExpand {
             kind,
             text: text.clone(),
+            loop_capture,
         });
         UpdateResult::effect(Effect::ExpandMentions { text })
     }
@@ -77,6 +81,8 @@ impl App {
     /// and the previous turn failed (the `last_turn_failed` flag `TurnFailed` sets); a normal
     /// end, a cancel or no turn at all is a "nothing to retry" notice. The text goes as-is —
     /// the transcript's folded form, with no `@` expansion, so an attachment is not re-read.
+    /// A paused loop resumes on the resent message: it is tagged as the next loop iteration
+    /// (a failed turn consumed no count) and becomes the loop prompt again.
     pub(super) fn retry(&mut self) -> UpdateResult {
         if self.turn() == TurnState::Running || !self.session.last_turn_failed {
             self.push_notice("nothing to retry");
@@ -104,6 +110,9 @@ impl App {
             return UpdateResult::dirty();
         }
         self.session.last_turn_failed = false;
+        if self.session.loop_state.active && self.session.loop_state.paused {
+            return self.resume_loop_on_retry(text);
+        }
         UpdateResult::effect(Effect::SendFollowup(Message::user(text)))
     }
 
@@ -167,7 +176,9 @@ impl App {
 
     /// The `@` expansion finished. On success the send effect is produced, with the notices the
     /// expansion reported; on failure the original text goes back into the input box, so
-    /// nothing is sent and the user can fix the message.
+    /// nothing is sent and the user can fix the message. A send flagged for loop capture
+    /// becomes the loop prompt (tagged as the next iteration) when the loop is still on —
+    /// a `/loop` toggled off mid-expansion sends as an ordinary message.
     pub(super) fn mentions_expanded(
         &mut self,
         result: Result<Expansion, ExpandError>,
@@ -201,7 +212,11 @@ impl App {
                 }
                 // ADR 0018: the message carries the text and each attachment as
                 // separate parts, so Core can keep the user's words verbatim.
-                let message = crate::mention::user_message(&expansion.text, &expansion.attachments);
+                let mut message =
+                    crate::mention::user_message(&expansion.text, &expansion.attachments);
+                if pending.loop_capture && self.session.loop_state.active {
+                    self.capture_loop_message(&mut message);
+                }
                 let effect = match pending.kind {
                     PendingSend::Followup => Effect::SendFollowup(message),
                     PendingSend::Steer => Effect::Steer(message),

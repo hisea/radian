@@ -18,7 +18,7 @@ pub use commands::{
 pub use identity::{candidate_name, project_identity_key};
 pub use injection::{
     ADDITION_KIND, Injection, InjectionConfig, MemoryHooks, MemoryInjection, addition_seam,
-    exceeds_budget, plan,
+    exceeds_budget, first_user_text, plan,
 };
 pub use service::{
     CreatedProject, MemoryService, MemoryServiceError, ProjectForWrite, ProjectState,

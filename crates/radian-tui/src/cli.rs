@@ -787,7 +787,7 @@ fn run(
         command_specs,
         mouse,
         mut startup_terminal,
-        mut startup_log,
+        startup_log,
         mut resume,
         pick_notice,
         startup_picker,
@@ -808,6 +808,113 @@ fn run(
         }
     }
 
+    // `/new` re-runs one session per iteration in the same terminal: the preamble and the
+    // picker happen once; each iteration opens one session and either exits with its reason
+    // (`Done`) or carries the values in force into a fresh session (`Again`). The terminal
+    // pair lives across iterations; each iteration gets its own app and startup log.
+    let mut term = startup_terminal;
+    let mut app = app;
+    let mut apply_warnings: Vec<String> = Vec::new();
+    let mut carry: Option<run_resolve::SessionCarry> = None;
+    // The preamble's log belongs to the first session (`--pick` collected diagnostics in
+    // it); later sessions start a fresh collected log — the screen is up.
+    let mut first_log = Some(startup_log);
+    loop {
+        let first = carry.is_none();
+        let resume_for = if first { resume.clone() } else { None };
+        let startup_log = first_log.take().unwrap_or(StartupLog {
+            deferred: Some(Vec::new()),
+        });
+        match run_one_session(
+            &cli,
+            runtime,
+            &rx,
+            &tx,
+            &dir,
+            &workspace_root,
+            &workspace_path,
+            &config,
+            &config_warnings,
+            &command_specs,
+            mouse,
+            &allow_unix_sockets,
+            resume_for,
+            carry.take(),
+            pick_notice && first,
+            std::mem::take(&mut apply_warnings),
+            app,
+            startup_log,
+            &mut term,
+        ) {
+            Ok(NextSession::Done(reason)) => return Ok(reason),
+            Ok(NextSession::Again(next)) => {
+                carry = Some(next.carry);
+                apply_warnings = next.apply_warnings;
+                app = next.app;
+            }
+            Err(error) => {
+                // The terminal is entered from the second session on; an error after that
+                // must leave it restored (idempotent, and `Drop` restores anyway).
+                if let Some((guard, _)) = term.as_mut() {
+                    guard.restore();
+                }
+                return Err(error);
+            }
+        }
+    }
+}
+
+/// What `run()` does after one session: exit with the reason, or open the next session in
+/// the same terminal with a fresh view.
+enum NextSession {
+    Done(Option<String>),
+    Again(Box<NextCarry>),
+}
+
+/// A `/new` handoff: the carried values, the next session's fresh app, and the warnings
+/// its re-applied config produced (for the next session's startup block).
+struct NextCarry {
+    carry: run_resolve::SessionCarry,
+    app: App,
+    apply_warnings: Vec<String>,
+}
+
+/// One iteration of `run()`: resolve, open, wire, screen and loop exactly one session.
+/// A carried `/new` resolves with no resume (a fresh id) and the carried values; the
+/// terminal pair is reused when present, entered when absent. Returns either the exit or
+/// the next iteration's app (a fresh view: transcript, footer counts and process-local
+/// history reset; the chrome is re-applied from the same config).
+#[allow(clippy::too_many_arguments)]
+fn run_one_session(
+    cli: &Cli,
+    runtime: &tokio::runtime::Runtime,
+    rx: &Receiver<UiEvent>,
+    tx: &Sender<UiEvent>,
+    dir: &Path,
+    workspace_root: &radian_tui::workspace::CodingRoot,
+    workspace_path: &Path,
+    config: &radian_host::Config,
+    config_warnings: &[String],
+    command_specs: &[radian_host::CommandSpec],
+    mouse: bool,
+    allow_unix_sockets: &[PathBuf],
+    resume: Option<String>,
+    carry: Option<run_resolve::SessionCarry>,
+    pick_notice: bool,
+    apply_warnings: Vec<String>,
+    mut app: App,
+    mut startup_log: StartupLog,
+    term: &mut Option<(
+        radian_tui::terminal::TtyGuard,
+        Terminal<CrosstermBackend<std::io::Stdout>>,
+    )>,
+) -> Result<NextSession, RunError> {
+    // The carried values ride above the command line; a fresh session collects its
+    // warnings into the startup block (the normal screen is gone once `/new` has run).
+    let carry_auto = carry.as_ref().is_some_and(|carry| carry.auto);
+    for warning in apply_warnings {
+        startup_log.line(format!("[config] {warning}"));
+    }
     let run_resolve::ResolvedModel {
         model_name,
         has_model,
@@ -829,11 +936,12 @@ fn run(
         resumed_tier,
         cli_tier,
     } = run_resolve::resolve_model(
-        &cli,
-        &config,
-        &dir,
-        &workspace_path,
+        cli,
+        config,
+        dir,
+        workspace_path,
         resume.as_deref(),
+        carry.as_ref(),
         &mut startup_log,
     )?;
     // The window/route phase borrows the model/provider answer and returns the session
@@ -872,11 +980,12 @@ fn run(
         budget_for,
         route_price,
     } = run_resolve::resolve_window_and_route(
-        &cli,
-        &config,
+        cli,
+        config,
         runtime,
         &mut app,
         &resume,
+        carry.as_ref(),
         &resolved_model,
         &mut startup_log,
     )?;
@@ -887,7 +996,6 @@ fn run(
         access_source,
         provider_name,
         provider_ref,
-        provider,
         key_id,
         thinking_for_footer,
         resumed_tier,
@@ -919,16 +1027,17 @@ fn run(
         },
         _control_guard,
     ) = run_open::build_session_inputs(
-        &cli,
-        &config,
+        cli,
+        config,
         runtime,
-        &tx,
-        &dir,
-        &workspace_path,
+        tx,
+        dir,
+        workspace_path,
         &mut app,
         &resume,
         tier,
-        &allow_unix_sockets,
+        carry_auto,
+        allow_unix_sockets,
         &session_id,
         &secrets,
         &mut startup_log,
@@ -941,7 +1050,7 @@ fn run(
     // stay out of it.
     let mut session = run_open::open_session_and_refresh(
         runtime,
-        &cli,
+        cli,
         run_open::SessionInputs {
             sandbox,
             servers,
@@ -976,25 +1085,29 @@ fn run(
             budget_for,
             route_price: route_price.clone(),
         },
-        &dir,
-        &workspace_path,
+        dir,
+        workspace_path,
         &session_id,
         &resume,
         tier,
         &provider_name,
         &model_name,
         &provider_ref,
-        provider,
         &key_id,
     )?;
-    let (usage_gate, chatgpt_usage_gate) = run_ready::wire_post_open(
-        &cli,
-        &config,
+    let run_ready::PostOpen {
+        usage_gate,
+        chatgpt_usage_gate,
+        background,
+    } = run_ready::wire_post_open(
+        cli,
+        config,
         runtime,
-        &tx,
+        tx,
         &session,
         &mut app,
-        &workspace_path,
+        carry.as_ref(),
+        workspace_path,
         &provider_name,
         &model_name,
         thinking_for_footer,
@@ -1007,7 +1120,7 @@ fn run(
         &window,
         &route_price,
         &bash_sandbox,
-        command_specs,
+        command_specs.to_vec(),
         &session_id,
         &mut startup_log,
     );
@@ -1016,63 +1129,92 @@ fn run(
         mut terminal,
         memory_service,
         history,
+        queue_wake,
     } = run_ready::enter_terminal_and_history(
-        &cli,
+        cli,
         runtime,
-        &tx,
-        &dir,
+        tx,
+        dir,
         mouse,
-        startup_terminal,
+        term.take(),
         &mut session,
     )?;
     let herdr = run_finish::build_startup_screen(
-        &cli,
+        cli,
         &mut app,
         &session,
         &history,
-        &dir,
+        dir,
         &session_id,
         &resume,
-        &workspace_root,
-        &workspace_path,
+        workspace_root,
+        workspace_path,
         &window,
         &model_name,
         has_model,
         tier,
         access_source,
-        &config,
+        config,
         &startup_approval,
         pick_notice,
-        &config_warnings,
-        &tx,
+        config_warnings,
+        tx,
         &mut startup_log,
     );
+    // A carried `/new` lands here: name the fresh session and how to resume the old one.
+    // The old session is still open at this point, so its id (but not its journal) is all
+    // the notice needs.
+    if let Some(previous) = carry.as_ref().map(|carry| carry.old_session_id.clone()) {
+        app.push_notice(format!(
+            "new session {session_id}; {previous} is saved — {}",
+            resume_command(&program_name(), &previous, cli, workspace_path)
+        ));
+    }
 
-    run_finish::run_loop_and_teardown(
-        &cli,
-        &config,
+    match run_finish::run_loop_and_teardown(
+        cli,
+        config,
         runtime,
-        &rx,
-        &tx,
+        rx,
+        tx,
         &mut app,
         session,
         &mut terminal,
         guard,
         &memory_service,
-        &workspace_path,
+        workspace_path,
         &provider_name,
         &model_name,
         &route_price,
         bash_sandbox,
         usage_gate,
         chatgpt_usage_gate,
+        background,
+        queue_wake,
         herdr,
-        &dir,
+        dir,
         &session_id,
         &secrets,
-        provider,
         has_model,
-    )
+    )? {
+        run_finish::SessionEnd::Done(reason) => Ok(NextSession::Done(reason)),
+        run_finish::SessionEnd::New(new) => {
+            // The guard was never restored: reassemble the terminal pair for the next
+            // session. A fresh view resets the transcript, the footer counts and the
+            // process-local history; the chrome is re-applied from the same config.
+            *term = Some((new.guard, terminal));
+            let mut app = App::new(String::new(), String::new());
+            app.set_workspace(workspace_path.to_path_buf());
+            let apply_warnings = app
+                .apply_config(config, radian_tui::theme::Theme::no_color_env())
+                .map_err(|error| format!("config: {error}"))?;
+            Ok(NextSession::Again(Box::new(NextCarry {
+                carry: new.carry,
+                app,
+                apply_warnings,
+            })))
+        }
+    }
 }
 
 /// The program name for the resume command: `argv[0]`'s file name, so the line is copyable
