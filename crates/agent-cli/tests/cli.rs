@@ -370,7 +370,11 @@ impl Drop for ScratchDir {
 }
 
 fn scratch(name: &str) -> ScratchDir {
-    let dir = std::env::temp_dir().join(format!("agent-cli-{name}-{}", std::process::id()));
+    // A process-wide counter keeps every call unique: two parallel tests must never
+    // share a directory, and `remove_dir_all` below would delete a running test's files.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("agent-cli-{name}-{n}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     ScratchDir(dir)
@@ -9556,5 +9560,176 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
         got,
         ["goal", "skill", "subagent"],
         "the exact tool set of a fresh headless session: {names:?}"
+    );
+}
+
+/// The intent-stop validator end to end (backlog `turn-end-continuation.md` §B
+/// acceptance): a turn ending with "announcing a next step but no tool call" opens
+/// exactly one more round carrying the fixed continuation text; removing the
+/// validator (or the mock's second reply going unused) fails the request count.
+#[tokio::test]
+async fn intent_stop_continues_an_intent_only_turn_end_once() {
+    let dir = scratch("intent-stop-fire");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        text_reply("Now the docs-only ADR updates."),
+        text_reply("Done."),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one continuation opens exactly one more round"
+    );
+    let second = last_user_text(&messages_of(&server, 1));
+    assert!(
+        second.contains(radian_host::intent_stop::INTENT_STOP_TEXT),
+        "the fixed continuation text rides the new round: {second}"
+    );
+}
+
+/// Ordinary turn ends hold the validator end to end: a done report, a question, and a
+/// long report whose last sentence matches the rule each end the run with no further
+/// round. A validator that fires on any of them adds a request and fails this.
+#[tokio::test]
+async fn ordinary_turn_ends_do_not_continue() {
+    for end in [
+        "Done.".to_owned(),
+        "Is that all you need?".to_owned(),
+        format!("{}\n\nNext: the reviewer decides.", "x".repeat(300)),
+    ] {
+        let dir = scratch("intent-stop-hold");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let server = MockServer::start(vec![text_reply(&end)]).await;
+        let (code, _, stderr) = feed_and_wait(
+            spawn_radian(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "--workspace",
+                    ws.to_str().unwrap(),
+                    "-p",
+                    "hi",
+                ],
+                &[],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{end}: {stderr}");
+        assert_eq!(server.requests().len(), 1, "no continuation after {end:?}");
+    }
+}
+
+/// A waiting text holds while its background job runs: the notice — not the validator —
+/// opens the next round. The validator fires within milliseconds of the turn end while
+/// the notice needs the job's two seconds, so a broken suppression shows up as a
+/// fourth request carrying the fixed text (or a run out of mock replies).
+#[tokio::test]
+async fn waiting_on_a_running_job_does_not_continue() {
+    let dir = scratch("intent-stop-waiting");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "c1",
+            "shell",
+            &json!({"command": "sleep 2", "background": true}).to_string(),
+        ),
+        text_reply("Waiting for the completion notice."),
+        text_reply("Done."),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "prompt, post-tool and post-notice rounds, no validator round"
+    );
+    for (index, request) in requests.iter().enumerate() {
+        assert!(
+            !request.json().to_string().contains("announced a next step"),
+            "request {index} must not carry the validator text"
+        );
+    }
+}
+
+/// `[hooks] intent_stop = false` turns the built-in validator off end to end: an
+/// intent-only turn end opens no further round.
+#[tokio::test]
+async fn intent_stop_off_in_config_does_not_continue() {
+    let dir = scratch("intent-stop-off");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let config = dir.join("radian.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[hooks]\nintent_stop = false\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("Now the docs-only ADR updates.")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[("RADIAN_CONFIG", config.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "the switch turns the validator off"
     );
 }

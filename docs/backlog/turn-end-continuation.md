@@ -1,0 +1,23 @@
+# 轮末「只说不做」：提示词与通知文案（A）
+
+- 状态：A item 4 open（1、2、3、5、6、7 已落地）；B 已落地
+- 涉及 ADR：0036（角色规则清单；完成通知作为消息追加）、0037（后台只走显式 `background: true`、前台缺省超时 300 s；决定 5 完成通知的形状、唤醒速率闸门）、0008（`[shell]` 无生效键，旧键警告并忽略）、0045 §3（`Stop` 续跑路径）、0011（`followup` lane、L2 来源、L5 空闲唤醒）、0021（memory 注入范围）、0034（herdr `blocked`）、0005（宿主消息 meta）、0017（只有 `Completed` 续跑）
+- 来源：`research/2026-10-21-intent-stop.md`（§3.4 提示词对比、§4 频率、§5 选项、§6 建议）
+
+## 背景
+
+模型有时用一句「下一步是 X」结束回合，没有工具调用，任务没完：`Now the docs-only ADR updates.`、`Writing the report.`、`Confirming the details.`。`agent-core` 把纯文本的 `EndTurn` 回复当作回合完成（`RunStatus::Completed`），之后只等人。本机 journal 里 muse-spark-1.3-contributor 的 42 个会话出现 9 次，有人看着时等 1–16 分钟，没人看着时等了 2 小时到一天；同一任务、同一模型、同一 brief 下 pi 与 opencode 的 ab6 运行 0 次。
+
+radian 独有、且与停顿共现的，是「回合中途结束、等通知唤醒」这条路（ADR 0037）：角色规则 `End your turn only when the task is done, when you wait for a background job, or when you need the user`、`shell`/`job` 描述里的「完成会通知你」、完成通知以一条 user 角色的消息开启新回合。pi 与 opencode 的系统提示词对回合一字不提。那句角色规则是专为这个问题加的（`9aa6fff5`），ab6 带着它照样停了 3 次，更早的长版规则在 10-17 也没挡住。
+
+## A. 提示词与通知文案（第 1、2、3、5、6、7 项已落地；第 4 项 open）
+
+已落地的改动随本分支的代码 commit 进 `main`：`default.md` 删掉 `End your turn only when …`、工作区外可见加任务文本例外、完成通知以 `Resume the task using this result. Do not reply to this notice.` 收尾并修少换行、`shell` 显式转后台的返回文本按研究笔记 §3.5 改、取消自动转后台（后台只走显式 `background: true`，前台缺省超时 300 s）。ADR 0036 的角色规则清单已同步。
+
+4. 查 memory 注入范围：lead 会话写入的记忆（lead 角色指令）注入了同一 project 的 worker 会话。决定是按角色还是按会话隔离，或者只是不把 lead 指令写成 project scope。
+
+备选（不在 A 里做）：把等待写成固定句式 `To wait for a background job, end your reply with exactly: waiting for job <id>.`，只在 B 需要可识别的等待标记时再加。
+
+### A 的验收（剩余）
+
+- 同一任务集 A/B/C 各 3 次：人工 `Continue` 次数（ab6 metrics 已有这列）与「纯文本中途结束」次数，改前改后对比。

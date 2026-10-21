@@ -5,6 +5,10 @@
 # 子集之外（`type = "http"`、`async = true`、未知事件名）只跳过、不拒绝。
 schema_version = 1
 
+# 内建验证器的开关（backlog `turn-end-continuation.md` §B.6）：缺省开；`false` 关掉内建规则（用户 `Stop` hook 照跑）。
+[hooks]
+intent_stop = false
+
 [[hooks.PreToolUse]]
 matcher = "shell|write"
 [[hooks.PreToolUse.hooks]]

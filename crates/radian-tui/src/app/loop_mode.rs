@@ -134,6 +134,13 @@ pub(crate) fn format_loop_duration(duration: Duration) -> String {
 }
 
 impl App {
+    /// Whether `/loop` owns the turn end right now (armed, iterating, paused or waiting):
+    /// while this is true the host's intent-stop validator stays off. The loop context
+    /// syncs it into the session after every update.
+    pub fn loop_active(&self) -> bool {
+        self.session.loop_state.active
+    }
+
     /// Runs one `/loop` line. A bare `/loop` toggles; flags and/or a prompt enable fresh
     /// (the last `/loop` wins: counters reset, limits replaced). An inline prompt is sent
     /// through the same `@` expansion as `/queue` — immediately when idle, queued behind
@@ -678,6 +685,19 @@ mod tests {
             "{:?}",
             notices(&app)
         );
+    }
+
+    /// `loop_active` mirrors the mode for the host: off until `/loop` starts it, on
+    /// while armed or iterating, off again when it stops. The host's intent-stop
+    /// validator reads it through the loop's sync.
+    #[test]
+    fn loop_active_mirrors_the_mode_for_the_host() {
+        let mut app = App::new("m", "s");
+        assert!(!app.loop_active());
+        assert!(submit(&mut app, "/loop").is_empty());
+        assert!(app.loop_active(), "armed counts as active");
+        assert!(submit(&mut app, "/loop").is_empty());
+        assert!(!app.loop_active(), "toggling off");
     }
 
     /// `/loop --times 2 go` sends the prompt as iteration 1, then re-sends it once and

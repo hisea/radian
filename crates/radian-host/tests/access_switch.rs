@@ -123,7 +123,6 @@ async fn open_switchable_inner(
             config_queue: radian_runtime::ConfigQueue::new(),
             budget_for: None,
             price_for: None,
-            shell_auto_background: None,
             servers: Vec::new(),
             mcp_config_path: None,
             system_prompt: None,
@@ -178,6 +177,7 @@ async fn open_switchable_inner(
             hooks_warning: Arc::new(|_message: &str| {}),
             wake_warning: Arc::new(|_message: &str| {}),
             notice_lost_warning: Arc::new(|_message: &str| {}),
+            intent_stop_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await
@@ -272,7 +272,6 @@ async fn a_session_without_a_builder_refuses_set_access() {
             config_queue: radian_runtime::ConfigQueue::new(),
             budget_for: None,
             price_for: None,
-            shell_auto_background: None,
             servers: Vec::new(),
             mcp_config_path: None,
             system_prompt: None,
@@ -324,6 +323,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             hooks_warning: Arc::new(|_message: &str| {}),
             wake_warning: Arc::new(|_message: &str| {}),
             notice_lost_warning: Arc::new(|_message: &str| {}),
+            intent_stop_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await

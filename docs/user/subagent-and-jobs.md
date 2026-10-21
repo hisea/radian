@@ -29,10 +29,11 @@ A half set cheap route warns and is ignored.
 
 Use the `shell` tool to run commands.
 Use the `job` tool to manage background commands.
-A foreground command past `[shell] auto_background_secs` moves to the background.
-The default threshold is 60 seconds.
-Set it to 0 to turn the move off.
-The call returns at once with a job id.
+A foreground command never moves to the background on its own.
+Only an explicit `background: true` starts one, and the call returns at once with a job id.
+The foreground default timeout is 300 seconds, the maximum 600.
+Use `background: true` for servers, watchers and commands expected to run longer than 600 s.
+Run tests and builds in the foreground with `timeout_secs`.
 Use `job` with `op: read` to read output.
 Use `job` with `op: wait` to wait for completion.
 Use `job` with `op: kill` to stop the process group.

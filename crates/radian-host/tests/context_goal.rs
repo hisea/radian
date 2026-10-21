@@ -109,7 +109,6 @@ async fn open_inner(label: &str, scratch: &Path, resume: bool) -> Arc<LocalSessi
             config_queue: radian_runtime::ConfigQueue::new(),
             budget_for: None,
             price_for: None,
-            shell_auto_background: None,
             servers: Vec::new(),
             mcp_config_path: None,
             system_prompt: None,
@@ -158,6 +157,7 @@ async fn open_inner(label: &str, scratch: &Path, resume: bool) -> Arc<LocalSessi
             hooks_warning: Arc::new(|_message: &str| {}),
             wake_warning: Arc::new(|_message: &str| {}),
             notice_lost_warning: Arc::new(|_message: &str| {}),
+            intent_stop_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await
@@ -167,8 +167,9 @@ async fn open_inner(label: &str, scratch: &Path, resume: bool) -> Arc<LocalSessi
 
 /// With a paused goal the `<goal>` block rides the system prompt: the report's
 /// categories still sum to the total exactly, the goal's bytes land in
-/// `system prompt`, and every other category is byte-identical to the
-/// goal-free report of the same session.
+/// `system prompt`, and every other category moves by at most the estimator's
+/// one rounding token (the token follows the largest fractional part, so a
+/// longer system prompt can move it to a different category).
 #[tokio::test]
 async fn the_goal_block_folds_into_system_prompt_and_sums_exactly() {
     let scratch = scratch("goal-sum");
@@ -226,10 +227,15 @@ async fn the_goal_block_folds_into_system_prompt_and_sums_exactly() {
             .find(|c| c.name == category.name)
             .map(|c| c.tokens)
             .unwrap_or(u64::MAX);
-        assert_eq!(
-            other, category.tokens,
-            "only system prompt moves: {}",
-            category.name
+        // The estimator hands its one rounding token to the largest fractional
+        // part: when the system prompt grows, the token can land on a different
+        // category, so any other category may move by exactly that token.
+        assert!(
+            other.abs_diff(category.tokens) <= 1,
+            "only the rounding token moves elsewhere: {} ({} vs {})",
+            category.name,
+            category.tokens,
+            other
         );
     }
     session.stop();

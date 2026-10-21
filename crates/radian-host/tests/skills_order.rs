@@ -127,6 +127,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         &tokio::runtime::Handle::current(),
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
     ));
     let hooks = session_hooks(
         role,

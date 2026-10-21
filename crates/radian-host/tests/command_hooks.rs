@@ -94,6 +94,7 @@ fn command_hooks(
         &tokio::runtime::Handle::current(),
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
     ))
 }
 

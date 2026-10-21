@@ -63,10 +63,6 @@ pub struct SessionSetup {
     /// call ran under, which the host can only resolve offline. `None` means no price is
     /// resolved, so a resumed session's tokens are restored but its fee stays hidden.
     pub price_for: Option<RoutePrice>,
-    /// The resolved `[shell] auto_background_secs` (ADR 0037): a **foreground**
-    /// `shell` call still running after this is adopted by the job registry in place. `None`
-    /// disables adoption (the config's `0`, or a host that does not set it).
-    pub shell_auto_background: Option<Duration>,
     pub servers: Vec<McpServerConfig>,
     /// Where the MCP servers came from (`--mcp-config <FILE>`), for the inspector's mcp
     /// page. `None` when no file was given; the servers are then empty too.
@@ -204,6 +200,10 @@ pub struct HostBindings {
     /// TUI shows it as the burst's line and reports `blocked` with the
     /// `job notice lost` label while it waits, ADR 0037 decision 5's failure rule).
     pub notice_lost_warning: Arc<dyn Fn(&str) + Send + Sync>,
+    /// The intent-stop cap's notice line (one per cap report; the TUI shows it as its
+    /// own line and reports `blocked` with the `intent stop` label until the next turn
+    /// starts, backlog `turn-end-continuation.md` §B.3).
+    pub intent_stop_warning: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
