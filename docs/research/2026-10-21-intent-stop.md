@@ -94,6 +94,28 @@ radian 有、pi 没有、且可能导致停顿的内容，按证据强弱排：
 
 pi 有而 radian 没有的内容里，没有一条和回合有关。pi 不停顿不是因为它说了什么，而是因为它什么都没说：模型只剩「调工具」和「交最终答复」两个动作。
 
+### 3.5 七家 harness 怎么说明后台命令与通知
+
+来源：pi、omp、opencode、Claude Code、Codex 看本机安装的二进制或源码；Gemini CLI 看 master 源码（`packages/core/src/tools/definitions/dynamic-declaration-helpers.ts`、`tools/shell.ts`）；Codex 的工具描述原文在二进制里不是明文，只拿到结构。
+
+| harness | 工具层怎么说 | 结果 / 通知怎么到模型 | 缺省自动转后台 |
+|---|---|---|---|
+| pi 1.3.0 | 没有后台概念。`timeout: Timeout in seconds (optional, no default timeout)` | 同步阻塞 | 否 |
+| opencode v2.0.30 | 描述：`Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.` 参数：`Run the command in the background and return immediately (useful for dev servers and long-running builds)… You will be notified when it completes. DO NOT poll for completion.` | 转后台时的返回文本是一整段指令：`You will be notified automatically when the command finishes. The notification will include the command's output. … DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output file is polling, not useful work. … Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically when the command finishes.` | 否；用户可手动 move running work to the background。ab6 里 32 次 shell 全是前台，timeout 60–600 s |
+| Claude Code | `run_in_background runs the command detached: it keeps running across turns and re-invokes you when it exits. No & needed. You will be notified when it exits — do not poll its output file while waiting. Foreground sleep is blocked; use Monitor with an until-loop to wait on a condition.` 前台缺省 120 s、上限 600 s | 任务通知是系统提醒；系统提示另有 `when harness-tracked work finishes, you are re-invoked automatically` | 否 |
+| omp 18.x | `bash.md`：`async: true defers a finite command's result; it does not extend timeout.`；开了 autoBackground 时多一句 `Long foreground calls may auto-background and deliver later. Need inline? Raise timeout.`；返回 `Backgrounded as job X; result will be delivered automatically.` | `custom` 角色消息，包在 `<system-notice>Background job X has completed. Resume your work using the result below. …</system-notice>` 里 | 可选，缺省 false，阈值 60 s |
+| Gemini CLI（master） | `To run a command in the background, set is_background to true. Do NOT use & …`；参数：`Set to true if this command should be run in the background (e.g. for long-running servers or watchers). … allowed to run for a brief moment to check for immediate errors, and then moved to the background.` | 返回 `Command is running in background. PID: N. Initial output: …`；工具文本里没有「会通知你」 | 否；后台定位是服务与监视器 |
+| Codex 0.159.1 | 统一 exec：`exec_command` + `write_stdin`，`yield_time_ms`（缺省由 `default_exec_yield_time_ms` 配），「background terminal」，`background_terminal_max_timeout` 300 s | 命令留在终端会话里，模型在本回合内用 `write_stdin` 或再次 yield 回去看：设计上的轮询，没有开新回合的完成通知 | 否 |
+| radian `8b5e4557` | `shell`：`Without timeout_secs, a command that still runs after the threshold moves to the background. The default threshold is 60 s. … The call returns at once with a job id. You will be notified when the command finishes.`；`job`：`Prefer the notice over wait.`；角色：`Do not use sleep or polling to wait` 与 end-turn 句 | user 角色消息 `[background job … finished: exited 0 after 4m34s] output: … Read its output with job.` | **是，缺省 60 s** |
+
+三点启发：
+
+1. **只有 radian 缺省自动转后台。** 别家都要模型每次显式选 background，并把它定位成 dev server、长 build。radian 任何没写 `timeout_secs` 的命令过 60 s 就转后台，等于每跑一次 `cargo test` 就把模型推进「结束回合等通知」模式；opencode 的模型给自己 300–600 s 超时同步等完，pi 等了 288 s。结论：取消自动转后台（ADR 0037 §2），后台只留显式 `background: true`；前台缺省超时另定（见 §6）。
+2. **opencode 的措辞把「结束回合」写成最后一招**（`Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically.`），而且放在**转后台时的返回文本**里，不在系统提示里：模型只在真的进入等待时才看到。radian 的角色句把它写成三个平级理由之一，且每轮都在。
+3. **通知不要像用户消息。** omp 用 `custom` 角色加 `<system-notice>… Resume your work using the result below.`，Claude Code 用系统提醒。radian 的通知是 user 角色，后面只跟 `Read its output with job.`。角色改不了的话，文本至少改成 `Resume the task using this result. Do not reply to this notice.`。
+
+两家已有「只说不做」的对策：omp 的 `features.unexpectedStopDetection`（缺省关）用小模型给纯文本停顿分类（`Classify whether this assistant message is an unexpected stop: it says it will act, continue working, or call a tool, then ends without doing so`），命中就注入一条 developer 消息 `You said you would continue with a tool call or action but stopped. Continue now. Attempt #n/3`，上限 3 次；Claude Code 走提示词：`Before ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done, do that work now with tool calls.` 前者是 §5 (b)/(c) 的形状，后者是 (a) 的形状。
+
 ## 4. 频率：本机全部 radian journal
 
 数据：`~/.radian/sessions/*.jsonl` 348 个文件，其中 133 个会话有完整回合，311 个 `TurnFinished`，286 个 `completed`（13 failed、12 cancelled）。一个 `completed` 回合的最后一条助手消息都是纯文本（否则回合不会结束），所以问题是「这些纯文本里哪些是停顿」。
@@ -172,6 +194,8 @@ muse：9 次 / 42 个会话（7 个会话出事）；另一个模型（GPT lead 
    - 「工作区外可见要先问」加例外：任务文本里要求的通知与提交不用再问。
    - 完成通知末尾加 `Continue the task; do not end the turn only to report this result.`，修掉尾部为空时少换行的 bug（`job_notify.rs` 的 `completion_message`）。
    - 查 memory 注入：lead 会话的记忆为什么进了 worker 会话（同一 project scope），是否该按角色或会话隔离。
+   - `shell` 转后台时的返回文本借 opencode 的那段（§3.5）：先做不依赖结果的事，实在没事再结束回复，会被自动唤醒；通知文本以「Resume the task using this result. Do not reply to this notice.」收尾。
+   - 取消自动转后台（ADR 0037 §2）：七家里只有 radian 缺省这样做，它是把模型推进「结束回合等通知」模式的独有推力；后台只留显式 `background: true`。连带要定前台缺省超时（今天与阈值绑在 60 s；建议 300 s，上限 600 s 不变）。
    - 角色正文的内容清单写在 ADR 0036 里，落地时同一分支的 docs-only commit 改 ADR。
 2. **量**：同一任务集 A/B/C 各 3 次，看人工 `Continue` 次数和「无 `waiting for job` 标记的纯文本结束」次数。
 3. **第二步，只在第一步之后还有停顿时做**：`Stop` 路径上的内建续跑（B 部分）。那时再加备选的固定等待句式，检测器只需认「没有标记、没有问句的纯文本结束」，不用再靠动名词规则。
