@@ -27,8 +27,7 @@ pub(crate) fn schema() -> serde_json::Value {
                 "type": "string",
                 "description": "File or directory to read. Use a workspace-relative path. For \
                                 cargo registry or Rust toolchain sources, use an absolute path or \
-                                a `~` path. For the bundled manual, use `radian://docs/<page>.md` \
-                                or list `radian://docs/`."
+                                a `~` path. Manual: `radian://docs/<page>.md`."
             },
             "max_bytes": {
                 "type": "integer",
@@ -55,7 +54,7 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "read".into(),
-        description: "Read a UTF-8 text file or list a directory. The bundled manual lives at `radian://docs/`. Each line starts with \
+        description: "Read a UTF-8 text file or list a directory. Each line starts with \
                       its line number and `\": \"`. This prefix is not part of the file. \
                       Remove it before you use the text in `patch`. For a large file, read one \
                       part at a time with `offset` and `limit`. Do not increase `max_bytes` \
