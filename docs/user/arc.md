@@ -680,6 +680,10 @@ A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 1
 When `attempt` has reached the task's `max_attempts` (else `[limits] max_attempts`), the task goes to `failed.exhausted` instead.
 `todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; `start` does this before it claims.
 
+Every attempt of a task runs in one worker session, whose id is the task id.
+The first attempt that reaches the model creates the session; every later attempt, a retry or a rework, resumes it.
+An attempt that failed before the model started (a bad `worker.exec_args` entry, a missing credential) leaves no session, so the next attempt creates it.
+
 Cost is counted per attempt.
 `Result.cost` is the session total, so the attempt's cost is this attempt's session total minus the previous attempt's.
 The delta is added to the task's `cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
