@@ -8,6 +8,12 @@ Every decision that constrains the code lives in a numbered ADR there, newest nu
 
 An ADR is a snapshot of the decisions in force. It holds no revision history, no change table, no dated amendments; git holds the history. Intended work lives in `docs/backlog/`, one file per item: a backlog item references the ADRs it touches, never the reverse (a backlog file is deleted when done, and the ADR stays a clean snapshot). When an item lands, the same branch changes the ADR in its own docs-only commit and deletes the backlog file; all of it merges to `main` together with the code. To change a decision, edit the ADR so it states the new decision as if it had always been the decision, in a docs-only commit on the implementing branch, merged with the code. Never change a decision quietly inside a code commit.
 
+## Document every input that changes behavior
+
+The user manual in `docs/user/` is compiled into the binary, and it is the only reference a user has. If a change adds, removes or changes an input that changes radian's behavior, the same branch updates the manual. An input is anything a user can set or place: a flag (a hidden one too), a configuration key, an environment variable, a file whose presence or content changes behavior, a frontmatter field, a field that a hook or a footer `command` item returns, a theme key, a slash command argument, a key binding. A key that is accepted but has no effect is documented as inert. An input that exists only for tests is not documented.
+
+Each entry gives the name, the type, the default from the code, every allowed value of a closed set (never "for example" in place of the list), limits and units, what it does, and when it takes effect. A nested structure is documented at every level; a built-in preset is shown in full. One fact lives on one page, and other pages link to it. The docs drift tests read names, value sets and defaults from the code. A new closed set gets one list that the parser and the test both read.
+
 ## Verify
 
 Run these before you say a change is done. All of them must pass. The `journal-selfcheck` runs replay every session's journal against its transcript, so they check every transcript write. The minimum Rust version is 1.99.1.
