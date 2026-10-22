@@ -1,0 +1,300 @@
+---
+description: Plan and task orchestration: setup, plans, tasks, the files arc keeps, and its exit codes.
+---
+
+# arc
+
+arc is a plan and task orchestrator built into the same `radian` binary.
+It keeps a plan and its tasks as files in the repository, runs each task as a separate headless `radian` worker, and merges only what passes a fixed gate.
+
+This build has the storage layer and the five subcommands that read and write it: `init`, `add`, `list`, `show`, and `adopt`.
+The gate and the worker wrapper exist as internal parts of the binary; no subcommand runs them yet.
+The scheduling loop, merge, the arc terminal interface, and the MCP server are **not built yet**.
+
+## `radian arc`
+
+`radian arc` with no subcommand would open the arc interface.
+The interface does not exist yet: after setup the command says so, lists the subcommands, and exits `2`.
+
+Without setup, `radian arc` and every subcommand except `init` refuse with a line that names `radian arc init` and exit `3`.
+
+## `radian arc init [--track]`
+
+`init` sets arc up for this repository.
+It runs anywhere inside the working tree and works on the repository root.
+
+It finds:
+
+- the repository root (`git rev-parse --show-toplevel`);
+- the `origin` URL (`git remote get-url origin`);
+- the main branch: `origin`'s own HEAD when it is known, else the checked-out branch, else `main`.
+
+It writes `config.toml` with those values, and it creates the layout below.
+A second `init` keeps an existing `config.toml` byte for byte and creates nothing twice.
+
+It adds the arc paths to `.git/info/exclude`, a local file: `init` never changes a committed `.gitignore`.
+Each line is added once; a second run adds nothing.
+
+| Line | Without `--track` | With `--track` |
+|---|---|---|
+| `/.radian/arc/config.toml` | excluded | tracked |
+| `/.radian/arc/plans/` | excluded | tracked |
+| `/.radian/arc/tasks/` | excluded | tracked |
+| `/.radian/arc/ledger/` | excluded | excluded |
+| `/.radian/arc/runs/` | excluded | excluded |
+| `/.radian/arc/attempts/` | excluded | excluded |
+| `/.radian/arc/gates/` | excluded | excluded |
+| `/.radian/arc/state.lock` | excluded | excluded |
+| `/.radian/arc/runner.lock` | excluded | excluded |
+| `/.radian/arc/worktrees/` | excluded | excluded |
+
+`--track` makes git see `config.toml`, `plans/`, and `tasks/`, so you can commit them when you want; arc never commits them.
+Removing a line that an earlier run added is up to you: `init` only appends.
+
+Then it checks its requirements and prints one line per check:
+
+| Check | What it runs |
+|---|---|
+| `provider credential` | Reads the stored credential (`radian login` writes it to `~/.radian/credentials/auth.json`). No entry is a warning. |
+| `` `origin` reachable `` | `git ls-remote origin`. |
+| `` push to `origin` `<main>` `` | `git push --dry-run <main>:<main>`. A refusal here means the first real push will be refused too. |
+| `workspace sandbox` | Builds a `workspace` sandbox over the repository: `sandbox-exec` on macOS, bubblewrap on Linux. |
+
+A failed check is a warning line, not a refusal: `init` still exits `0`, because a missing credential or a slow remote is something you can fix after setup.
+
+Finally it prints the command that registers the arc MCP server with a lead.
+It does not change any configuration of its own:
+
+```sh
+claude mcp add arc -- radian arc mcp
+```
+
+`init` exits `0` when it wrote the layout and `1` when the directory is not a git working tree or the repository has no `origin` remote.
+
+## `radian arc add`
+
+`add` creates one plan or one task from standard input.
+The new id is printed on stdout, one line.
+
+### `radian arc add plan --slug <SLUG> --title <TITLE>`
+
+Reads the request text from stdin to end of input, writes `plans/<id>.md`, and prints the id.
+
+| Flag | Value | What it does |
+|---|---|---|
+| `--slug` | `SLUG` | The part of the id after the number: 1 to 48 characters from `a-z`, `0-9`, `-`, with no leading or trailing `-`. Required. |
+| `--title` | `TITLE` | The plan's title. Required. It may not be empty. |
+
+The body is the request text, then a `## Change records` section.
+A confirmed plan may only gain change records there; the request text itself is never rewritten.
+
+### `radian arc add task --plan <ID> --slug <SLUG> --title <TITLE> [--after <ID>]... [--allow-noop] [--stage <NAME>]...`
+
+Reads the brief from stdin to end of input, writes `tasks/<id>.md`, appends the id to the plan's `tasks` list, and prints the id.
+
+| Flag | Value | What it does |
+|---|---|---|
+| `--plan` | `ID` | The plan the task belongs to. Required. |
+| `--slug` | `SLUG` | The same slug rule as a plan. Required. |
+| `--title` | `TITLE` | The task's title. Required. It may not be empty. |
+| `--after` | `ID` | A task that must be merged first. Repeat the flag for several. |
+| `--allow-noop` | — | The task may deliver no change on purpose. Off by default. |
+| `--stage` | `NAME` | An extra gate stage to run for this task. Repeat the flag. The value is `commands`, `mutation`, `review`, `ci`, or `human`. |
+
+A task can only be added to a plan whose `status` is `draft`; a confirmed plan exits `3`.
+An `--after` id must name a task of the same plan or a task whose state is `done`; anything else exits `3`.
+
+## `radian arc list [--plan <ID>] [--json]`
+
+Lists plans, each with its tasks in the plan's order.
+Each task line shows `state.phase` and the attempt number.
+
+| Flag | Value | What it does |
+|---|---|---|
+| `--plan` | `ID` | Only this plan. |
+| `--json` | — | Print one JSON array instead of lines. |
+
+A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
+
+The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `max_cost_usd`, `max_wall_time_secs`, `changed_outside_arc`, and `tasks`.
+Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `after`, `supersedes`, `allow_noop`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `retry_at`, and `changed_outside_arc`.
+
+## `radian arc show <ID> [--json]`
+
+Prints one plan or task: every field, whether it changed outside arc, then its body.
+
+The id is looked up among the plans first, then among the tasks.
+A plan and a task can carry the same `NNNN-slug` id because they count in separate sequences, and `show` then prints the plan; `list --plan <id>` always reads the plan.
+
+| Flag | Value | What it does |
+|---|---|---|
+| `--json` | — | Print one JSON object instead of fields. |
+
+The object holds the same keys as in `list --json`, plus `body`.
+An unset field is `null`.
+An id that names nothing exits `1`.
+
+## `radian arc adopt <ID>`
+
+Every file arc writes is recorded with a content hash in the ledger.
+When a plan or task file on disk is not the one arc last wrote, arc does not act on it: the change may have come from an editor, a pull, or a checkout.
+
+`adopt` records the current content as arc's own, so the item can be used again.
+It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`, `extra_stages`, the per-task limits, and a plan's limits and `tasks` list.
+
+It refuses with exit `3` when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
+
+- a task: `state`, `phase`, `attempt`, `base_sha`, `head_sha`, `verified_sha`;
+- a plan: `status`, `auto`.
+
+A file that already matches the ledger is a no-op and prints so.
+Without a recorded version to compare against, `adopt` refuses: it cannot tell which fields changed.
+
+## Exit codes
+
+Every subcommand of this page uses these codes.
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | an error |
+| `2` | a usage error |
+| `3` | the state does not allow the operation (this includes a file changed outside arc, and arc not being set up) |
+| `4` | a lock is held by another process |
+
+Code `2` covers a bad flag or an argument value outside a closed set; a slug, an id, or a stage name that the rules refuse is also `2`.
+A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
+
+## `config.toml`
+
+`init` writes `config.toml` and every other subcommand reads it.
+Unknown keys are refused by name, and `schema_version` must be `1`.
+A key you leave out takes its default.
+
+| Key | Type | Default | Allowed values | When it takes effect |
+|---|---|---|---|---|
+| `schema_version` | integer | `1` | `1` | Every run; another value is refused. |
+| `repository.remote` | string | `"origin"` | A remote name that exists in the repository | When arc reads the main branch or pushes a task branch. |
+| `repository.main_branch` | string | `"main"` (`init` writes what it found) | A branch name | When a task starts from main, and when main is checked before a merge. |
+| `limits.concurrency` | integer | `1` | 1 or more | When a scheduling loop starts a task. |
+| `limits.max_attempts` | integer | `3` | 1 or more | When a task fails and arc decides whether to retry. |
+| `limits.stall_timeout_secs` | integer | `900` | seconds | When a worker prints no new line for that long. |
+| `limits.max_wall_time_secs` | integer | `7200` | seconds | As an absolute limit on one attempt, on top of the stall timeout. |
+| `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
+| `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
+| `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. |
+| `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
+| `gate.command_timeout_secs` | integer | `3600` | seconds | Per gate command line. |
+| `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
+| `gate.profiles.<name>.stages` | array of tables | `[{ required = true, stage = "commands" }, { required = true, stage = "human" }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs, in order. `integration` is not a profile stage: it always runs at merge. |
+| `gate.profiles.<name>.commands` | array of strings | `[]` | Shell command lines | The `commands` stage runs them in order on its own checkout. |
+| `gate.profiles.<name>.key_commands` | array of strings | `[]` | Shell command lines | The integration stage runs them on the merge candidate. |
+
+`gate.profiles.<name>` above is written out as `gate.profiles.default` in the file `init` writes.
+A stage may be listed once per profile: a profile that lists a stage twice, or that lists `integration`, is refused by name.
+A per-task field of the same name overrides a `[limits]` value for that task; a plan budget adds to the task budgets.
+
+## Plan and task files
+
+A plan file is `plans/<id>.md`; a task file is `tasks/<id>.md`.
+Both are front matter between two `---` lines, then a body.
+arc is the only writer; you change them with the subcommands above, and `adopt` after a hand edit.
+
+An id is a four-digit number, a dash, and a slug (`0001-first`).
+Plans count in one sequence and tasks in another, so a plan and a task can share an id.
+The number is the next free one and is never reused while its ledger entry exists; the id is the file name and never changes.
+
+### Plan fields
+
+| Field | Type | Required | Allowed values |
+|---|---|---|---|
+| `schema_version` | integer | yes | `1` |
+| `id` | string | yes | `NNNN-<slug>` |
+| `title` | string | yes | any text |
+| `status` | string | yes | `draft`, `confirmed` |
+| `auto` | string | yes | `off`, `run`, `merge`; only a `confirmed` plan may use `run` or `merge` |
+| `max_cost_usd` | number | no | 0 or more, US dollars |
+| `max_wall_time_secs` | integer | no | seconds |
+| `tasks` | list of ids | yes | the plan's tasks, in display order (`[]` when there are none) |
+
+The body is the request text, then a `## Change records` section.
+
+### Task fields
+
+| Field | Type | Required | Allowed values |
+|---|---|---|---|
+| `schema_version` | integer | yes | `1` |
+| `id` | string | yes | `NNNN-<slug>` |
+| `plan` | string | yes | the plan's id |
+| `title` | string | yes | any text |
+| `state` | string | yes | `todo`, `doing`, `review`, `done`, `failed` |
+| `phase` | string | yes | one of the phases of the task's state, in the table below |
+| `after` | list of ids | yes | tasks that must be merged first (`[]` when there are none) |
+| `supersedes` | string | no | the id of a task this one replaces |
+| `attempt` | integer | yes | 0 or more; `0` when the task is new |
+| `allow_noop` | boolean | yes | `true`, `false`; `false` when the task is new |
+| `extra_stages` | list of strings | yes | gate stages added to the profile (`[]` when there are none) |
+| `max_attempts` | integer | no | 1 or more; overrides `limits.max_attempts` for this task |
+| `max_cost_usd` | number | no | 0 or more, US dollars; overrides the plan limit |
+| `max_wall_time_secs` | integer | no | seconds; overrides the plan limit |
+| `stall_timeout_secs` | integer | no | seconds; overrides `limits.stall_timeout_secs` |
+| `base_sha` | string | no | the commit the task branch started from; filled by a later build |
+| `head_sha` | string | no | the task branch's tip; filled by a later build |
+| `verified_sha` | string | no | the commit the gate verified; filled by a later build |
+| `retry_at` | string | no | an absolute UTC time, `YYYY-MM-DDTHH:MM:SSZ` |
+
+The body is the brief.
+
+### States and phases
+
+| State | Phases |
+|---|---|
+| `todo` | `ready`, `blocked`, `retry_wait`, `paused_budget` |
+| `doing` | `starting`, `running`, `reconciling` |
+| `review` | `verifying`, `rework_pending`, `awaiting_human`, `integrating`, `ready_to_merge` |
+| `done` | `merged` |
+| `failed` | `exhausted`, `cancelled`, `irrecoverable` |
+
+A new task is `todo` / `ready`.
+A plan is done when all of its tasks are merged; `done` is not a stored plan status.
+
+## The `.radian/arc/` layout
+
+Everything arc stores for one repository is in `<repository>/.radian/arc/`:
+
+| Path | What it holds |
+|---|---|
+| `config.toml` | The settings above. |
+| `plans/<id>.md` | One plan: its fields and the request text. |
+| `tasks/<id>.md` | One task: its fields and the brief. |
+| `ledger/plans/<id>.json` | The `state_version` and SHA-256 arc last wrote for that plan. |
+| `ledger/plans/<id>.last.md` | The plan as arc last wrote it, for `adopt`. |
+| `ledger/tasks/<id>.json` | The same for a task. |
+| `ledger/tasks/<id>.last.md` | The task as arc last wrote it. |
+| `runs/<task>/…` | One attempt's output (the worker wrapper writes it). |
+| `attempts/<task>/…` | The host-local attempt records (the worker wrapper writes them). |
+| `gates/<stage>/` | One checkout per gate stage (the gate library uses it; no subcommand runs the gate yet). |
+| `worktrees/<task>/` | The worker's checkout for that task (the worker wrapper creates it). |
+| `state.lock` | The short lock every change takes. |
+| `runner.lock` | The lock a scheduling loop holds. |
+
+Every change is one transaction under `state.lock`:
+take the lock (waiting up to 5 seconds, then exit `4`), compare the file with the ledger, write a temporary file, flush it to disk, rename it over the old one, flush the directory, record the new version and hash in the ledger, release.
+
+Search skips `worktrees/`: `grep`, `glob`, skill discovery, and `@` completion do not enter it.
+They skipped `.radian-worktrees/` for the same reason.
+A worker never reads the rest of `.radian/arc/` from inside its checkout: the worker wrapper denies every entry except `worktrees/`.
+
+## Not built yet
+
+These subcommands are named in the design and do not exist in this build.
+Do not rely on their flags: they have none yet.
+
+`start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `run`, and `mcp`.
+The arc terminal interface is not built either.
+The hidden `work` wrapper exists, but a person does not run it: the scheduling loop that would run it is not built.
+
+## See also
+
+- `cli` for every other `radian` command.
+- `environment` for the files radian reads, including this one.

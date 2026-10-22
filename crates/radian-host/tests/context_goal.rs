@@ -129,6 +129,7 @@ async fn open_inner(label: &str, scratch: &Path, resume: bool) -> Arc<LocalSessi
             skills_builtin: false,
             skills_disabled: Vec::new(),
             tools_allow: None,
+            extra_deny_read: Vec::new(),
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             hooks: Default::default(),

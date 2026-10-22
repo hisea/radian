@@ -75,8 +75,9 @@ pub trait SandboxBackend: Send + Sync {
     /// (ADR 0038 decision 4): the discovered git metadata is writable except the entries git
     /// can execute. The default is `false`: a backend that does not implement the carve-out
     /// keeps the whole metadata read-only whatever the policy asks for, and the safe default
-    /// means a new backend can never claim a writability it does not enforce (Linux is still
-    /// pending). The shell tool's description and the startup line read this — via
+    /// means a new backend can never claim a writability it does not enforce. Both shipped
+    /// backends implement it (seatbelt with SBPL rules, bwrap with bind mounts). The shell
+    /// tool's description and the startup line read this — via
     /// [`Sandbox::git_writable_except_exec`] — not `policy.git_access`, so they cannot claim
     /// that native `git commit` works when the backend would deny it.
     fn git_writable_except_exec(&self, _policy: &SandboxPolicy) -> bool {

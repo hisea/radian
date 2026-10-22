@@ -117,6 +117,10 @@ pub struct SessionSetup {
     /// `Some` mounts only the named ones ("not in the list is not mounted"). MCP tools are not
     /// in this universe — [`SessionSetup::servers`] governs them.
     pub tools_allow: Option<Vec<String>>,
+    /// Extra paths the file tools deny in the `full` tier (ADR 0048 decision 5), on top of
+    /// the host's deny-read list. Internal (`radian arc work`): an ordinary session passes
+    /// an empty list.
+    pub extra_deny_read: Vec<PathBuf>,
     /// The session's skill allow-list. `None` loads every discovered skill; `Some` keeps only
     /// the named ones in the catalog, and a name discovery did not find is reported at spawn,
     /// never a failure.

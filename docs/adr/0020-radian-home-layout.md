@@ -48,7 +48,7 @@ Data at old locations (`~/Library/Application Support/radian/sessions`, `$XDG_DA
 
 ### 6. Project-level directories
 
-`<workspace>/.radian/` holds only `config.toml` (ADR 0008 project-level narrow configuration; its narrowing applies regardless of trust). Project-level skills live in `.agents/skills/` directories (ADR 0025; from the workspace up to the repository root, loaded only when trusted). They are ordinary files inside the workspace. The `workspace`-tier sandbox reads them as usual. The denylist never lists them separately. `.radian-sandbox/` is a sandbox temp directory inside the workspace, next to `.radian/`. It is not a project resource.
+`<workspace>/.radian/` holds only `config.toml` (ADR 0008 project-level narrow configuration; its narrowing applies regardless of trust) and `arc/`: everything arc stores for the repository (ADR 0048 decisions 5 and 15). `init` lists it in `.git/info/exclude`; the owner can choose to track `arc/config.toml`, `arc/plans/`, and `arc/tasks/`. Project-level skills live in `.agents/skills/` directories (ADR 0025; from the workspace up to the repository root, loaded only when trusted). They are ordinary files inside the workspace. The `workspace`-tier sandbox reads them as usual. The denylist never lists them separately. `.radian-sandbox/` is a sandbox temp directory inside the workspace, next to `.radian/`. It is not a project resource.
 
 ## Verification
 

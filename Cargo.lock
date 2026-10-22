@@ -2246,6 +2246,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "radian-arc"
+version = "0.1.3"
+dependencies = [
+ "agent-provider-openai-compatible",
+ "chrono",
+ "fs2",
+ "libc",
+ "radian-coding",
+ "radian-host",
+ "radian-sandbox",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "radian-coding"
 version = "0.1.3"
 dependencies = [
@@ -2408,11 +2427,13 @@ dependencies = [
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
  "clap",
+ "fs2",
  "futures-util",
  "grok-mermaid",
  "libc",
  "portable-pty",
  "pulldown-cmark",
+ "radian-arc",
  "radian-coding",
  "radian-core",
  "radian-exec",

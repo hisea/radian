@@ -257,6 +257,7 @@ async fn open_case(
             skills_builtin: true,
             skills_disabled: Vec::new(),
             tools_allow: None,
+            extra_deny_read: Vec::new(),
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
             hooks: Default::default(),

@@ -70,7 +70,10 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     // service is the same one `radian memory` uses. `None` only when neither `RADIAN_HOME` nor
     // `HOME` is set; then memory is simply off for this run.
     let memory_root = radian_host::memory_dir();
-    let sandbox_deny_read = radian_host::file_tool_deny_read(&sessions_for_deny);
+    let mut sandbox_deny_read = radian_host::file_tool_deny_read(&sessions_for_deny);
+    // ADR 0048 decision 5: `radian arc work` adds the arc files outside the worker's
+    // worktree. The same list is the file tools' deny set below (ADR 0039 decision 4).
+    sandbox_deny_read.extend(cli.deny_read.iter().cloned());
     // ADR 0016: the whitelisted Unix sockets (resolved in `setup`).
     let sandbox = profile::build_sandbox(
         profile_arg,
@@ -290,6 +293,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             parent,
             subagent: Some(subagent_parts),
             tools_allow,
+            extra_deny_read: cli.deny_read.clone(),
             project_hooks,
             memory_root,
             trust: trust_setup,
