@@ -343,6 +343,13 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
             field(&mut out, "state", item.state.as_str());
             field(&mut out, "phase", &item.phase);
             field(&mut out, "attempt", &item.attempt.to_string());
+            field(
+                &mut out,
+                "attempt_id",
+                &optional_text(item.attempt_id.as_deref()),
+            );
+            field(&mut out, "token", &optional_text(item.token.as_deref()));
+            field(&mut out, "cost_usd", &optional_number(item.cost_usd));
             field(&mut out, "after", &joined(&item.after));
             field(
                 &mut out,
@@ -441,6 +448,9 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "state": item.state.as_str(),
         "phase": item.phase,
         "attempt": item.attempt,
+        "attempt_id": item.attempt_id,
+        "token": item.token,
+        "cost_usd": item.cost_usd,
         "after": item.after,
         "supersedes": item.supersedes,
         "allow_noop": item.allow_noop,
