@@ -250,14 +250,16 @@ fn every_footer_preset_block_matches_its_export() {
 /// Each source is the one `ALL` list its parser looks up (`as_str` is exhaustive, so a new
 /// variant fails to compile until it gains a spelling), so a new value fails this test until
 /// the manual names it. Each value is asserted in its key's row, so a mention elsewhere on
-/// the page does not satisfy it.
+/// the page does not satisfy it. Each key's table is located by its own heading; a row in
+/// another table never counts.
 #[test]
 fn every_footer_closed_set_value_appears_in_its_row() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
         .expect("footer.md exists");
-    for (key, values) in [
+    for (heading, key, values) in [
         (
+            "## Rows",
             "position",
             radian_tui::footer::RowPosition::ALL
                 .iter()
@@ -265,6 +267,7 @@ fn every_footer_closed_set_value_appears_in_its_row() {
                 .collect::<Vec<_>>(),
         ),
         (
+            "## `[tui.footer]`",
             "glyphs",
             radian_tui::footer::Glyphs::ALL
                 .iter()
@@ -272,6 +275,7 @@ fn every_footer_closed_set_value_appears_in_its_row() {
                 .collect::<Vec<_>>(),
         ),
         (
+            "## `[tui.footer]`",
             "context_line",
             radian_tui::footer::ContextLine::ALL
                 .iter()
@@ -279,6 +283,7 @@ fn every_footer_closed_set_value_appears_in_its_row() {
                 .collect::<Vec<_>>(),
         ),
         (
+            "## `[tui.footer]`",
             "preset",
             radian_tui::footer::Preset::ALL
                 .iter()
@@ -286,14 +291,12 @@ fn every_footer_closed_set_value_appears_in_its_row() {
                 .collect::<Vec<_>>(),
         ),
     ] {
-        let row = footer_md
-            .lines()
-            .find(|line| line.starts_with(&format!("| `{key}` ")))
-            .unwrap_or_else(|| panic!("footer.md has no `| `{key}` |` row"));
+        let rows = footer_rows_under(&footer_md, heading);
+        let row = footer_row(&rows, key);
         for value in values {
             assert!(
-                row.contains(&format!("`{value}`")),
-                "`{value}` is missing from the `{key}` row: `{row}`"
+                row.iter().any(|cell| cell.contains(&format!("`{value}`"))),
+                "`{value}` is missing from the `{key}` row: {row:?}"
             );
         }
     }
@@ -303,13 +306,15 @@ fn every_footer_closed_set_value_appears_in_its_row() {
 ///
 /// The source is an empty config through [`radian_tui::footer::Footer::from_config`]: the preset,
 /// glyphs, gap fill, transparency and separator the code falls back to. Each default is asserted
-/// in its key's own table row, so a value listed elsewhere on the page does not satisfy it.
+/// in its key's own table row, so a value listed elsewhere on the page does not satisfy it. The
+/// table is located by its `## `[tui.footer]`` heading; a row in another table never counts.
 #[test]
 fn every_footer_default_matches_the_code() {
     use radian_host::config::TuiFooterConfig;
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
         .expect("footer.md exists");
+    let rows = footer_field_rows(&footer_md);
     let (footer, _) = radian_tui::footer::Footer::from_config(&TuiFooterConfig::default());
     // The fixture parses an empty config, so the built footer carries the code defaults.
     assert!(
@@ -347,20 +352,83 @@ fn every_footer_default_matches_the_code() {
             format!("`{}`", radian_tui::footer::DEFAULT_SEPARATOR_STYLE.as_str()),
         ),
     ] {
-        let row = footer_md
-            .lines()
-            .find(|line| line.starts_with(&format!("| `{key}` ")))
-            .unwrap_or_else(|| panic!("footer.md has no `| `{key}` |` row"));
+        let row = footer_row(&rows, key);
         let default_cell = row
-            .split('|')
-            .nth(3)
-            .map(str::trim)
-            .unwrap_or_else(|| panic!("`{key}` row has no Default column: `{row}`"));
+            .get(2)
+            .unwrap_or_else(|| panic!("`{key}` row has no Default column: {row:?}"));
         assert_eq!(
-            default_cell, expected,
+            default_cell, &expected,
             "`{key}` row default is `{default_cell}` but the code default is `{expected}`"
         );
     }
+}
+
+/// The `[tui.footer]` field table's data rows, each split into trimmed cells. The heading is
+/// the anchor: a row in another table on the page never satisfies a check. A missing heading
+/// or table fails with the page and the heading.
+fn footer_field_rows(footer_md: &str) -> Vec<Vec<String>> {
+    footer_rows_under(footer_md, "## `[tui.footer]`")
+}
+
+/// The table's data rows under one `footer.md` heading. The heading is the anchor: a row in
+/// another table never satisfies a check. A missing heading or table fails with the page and
+/// the heading.
+fn footer_rows_under(footer_md: &str, heading: &str) -> Vec<Vec<String>> {
+    let start = footer_md.find(heading).unwrap_or_else(|| {
+        panic!("footer.md has no `{heading}` heading; the check's table anchor is missing")
+    });
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for line in footer_md[start + heading.len()..].lines() {
+        if line.starts_with("## ") || line.starts_with("### ") {
+            break;
+        }
+        if line.starts_with('|') {
+            rows.push(split_cells(line));
+        } else if !rows.is_empty() {
+            break;
+        }
+    }
+    // The first row is the header and the second the separator.
+    rows.drain(..2.min(rows.len()));
+    assert!(
+        !rows.is_empty(),
+        "footer.md's `{heading}` heading has no table"
+    );
+    rows
+}
+
+/// Split a table row on unescaped `|` only, trimmed, without the outer empty cells.
+fn split_cells(row: &str) -> Vec<String> {
+    let mut cells = vec![String::new()];
+    let mut chars = row.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&'|') {
+            cells.last_mut().expect("a cell is open").push('|');
+            chars.next();
+        } else if c == '|' {
+            cells.push(String::new());
+        } else {
+            cells.last_mut().expect("a cell is open").push(c);
+        }
+    }
+    if cells.first().is_some_and(|cell| cell.trim().is_empty()) {
+        cells.remove(0);
+    }
+    if cells.last().is_some_and(|cell| cell.trim().is_empty()) {
+        cells.pop();
+    }
+    cells
+        .into_iter()
+        .map(|cell| cell.trim().to_owned())
+        .collect()
+}
+
+/// The `[tui.footer]` row whose first cell is exactly `` `key` ``.
+fn footer_row<'a>(rows: &'a [Vec<String>], key: &str) -> &'a Vec<String> {
+    let wanted = format!("`{key}`");
+    rows.iter()
+        .find(|row| row.first().is_some_and(|cell| *cell == wanted))
+        .unwrap_or_else(|| panic!("footer.md's `[tui.footer]` table has no `{key}` row"))
 }
 
 /// The `### <name>` section of `footer.md`: from its heading to the next `### ` or `## ` heading.

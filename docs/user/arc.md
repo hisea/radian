@@ -126,6 +126,10 @@ Prints one plan or task: every field, whether it changed outside arc, then its b
 The id is looked up among the plans first, then among the tasks.
 A plan and a task can carry the same `NNNN-slug` id because they count in separate sequences, and `show` then prints the plan; `list --plan <id>` always reads the plan.
 
+| Argument | Value | What it does |
+|---|---|---|
+| `<ID>` | a plan or task id | Required. The plan is looked up first, then the task. |
+
 | Flag | Value | What it does |
 |---|---|---|
 | `--json` | — | Print one JSON object instead of fields. |
@@ -141,6 +145,10 @@ When a plan or task file on disk is not the one arc last wrote, arc does not act
 
 `adopt` records the current content as arc's own, so the item can be used again.
 It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`, `extra_stages`, the per-task limits, and a plan's limits and `tasks` list.
+
+| Argument | Value | What it does |
+|---|---|---|
+| `<ID>` | a plan or task id | Required. The item whose current file becomes arc's own. |
 
 It refuses with exit `3` when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
@@ -175,6 +183,8 @@ radian arc auto <PLAN> <LEVEL>
 |---|---|---|
 | `<PLAN>` | `ID` | The plan id. Required. |
 | `<LEVEL>` | `off`, `run`, `merge` | The level. Required. |
+
+### The levels
 
 | Level | What arc does | Where it stops |
 |---|---|---|
@@ -274,6 +284,8 @@ It reconciles `doing` tasks first, as `start` does.
 |---|---|---|
 | `<TASK>` | `ID` | The task id. Required. |
 
+### What cancel does
+
 | The task is | What `cancel` does |
 |---|---|
 | `todo` (any phase) | moves it to `failed.cancelled` |
@@ -363,7 +375,16 @@ Then it:
 `merge` never checks out or updates the main checkout's working tree: it fetches, pushes, and reads refs only.
 On `done.merged` it prints `<task> done.merged (<candidate sha>)`; a failed worktree removal is a `warning:` line after it and does not undo the merge.
 
-It exits `0` when the task reached `done.merged` or the integration sent it to `review.rework_pending`, `1` on a git or file error, `3` when the state does not allow the merge, the branch moved, the digest changed (the task returns to `review.verifying`), or 3 integration runs did not settle (the task stays in `review.integrating`), and `4` when another process holds `state.lock`.
+The exit codes are the command's own:
+
+### Merge exit codes
+
+| Code | Meaning | When |
+|---|---|---|
+| `0` | success | The task reached `done.merged`, or the integration sent it to `review.rework_pending`. |
+| `1` | an error | A git or file error. |
+| `3` | the state does not allow the operation | The state does not allow the merge, the branch moved, the digest changed (the task returns to `review.verifying`), or 3 integration runs did not settle (the task stays in `review.integrating`). |
+| `4` | a lock is held by another process | Another process holds `state.lock`. |
 
 ## `radian arc reject <TASK> --note <TEXT>`
 
@@ -534,7 +555,7 @@ A key you leave out takes its default.
 | `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
 | `gate.command_timeout_secs` | integer | `3600` | seconds | Per gate command line. |
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
-| `gate.profiles.<name>.stages` | array of tables | `[{ required = true, stage = "commands" }, { required = true, stage = "human" }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs, in order. `integration` is not a profile stage: it always runs at merge. |
+| `gate.profiles.<name>.stages` | array of tables | `[{ stage = "commands", required = true }, { stage = "human", required = true }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs, in order. `integration` is not a profile stage: it always runs at merge. |
 | `gate.profiles.<name>.commands` | array of strings | `[]` | Shell command lines | The `commands` stage runs them in order on its own checkout. |
 | `gate.profiles.<name>.key_commands` | array of strings | `[]` | Shell command lines | The integration stage runs them on the merge candidate. |
 

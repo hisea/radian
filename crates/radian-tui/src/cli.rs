@@ -2027,8 +2027,9 @@ mod tests {
         let mut options = Vec::new();
         collect(&Cli::command(), &mut options);
         assert!(!options.is_empty(), "the tree has options");
+        let tables = cli_option_tables(&cli_md);
         for (flag, values, defaults) in &options {
-            let rows = table_rows(&cli_md, flag);
+            let rows = rows_with_flag(&tables, flag);
             if rows.is_empty() {
                 // Prose-documented flags (attach, footer export, theme import, config
                 // import, memory `--workspace`): presence only, no value set to check.
@@ -2041,14 +2042,14 @@ mod tests {
             for row in &rows {
                 for value in values {
                     assert!(
-                        row.contains(value.as_str()),
-                        "{flag} row is missing value {value}: {row}"
+                        row.iter().any(|cell| cell.contains(value.as_str())),
+                        "{flag} row is missing value {value}: {row:?}"
                     );
                 }
                 for default in defaults {
                     assert!(
                         default_in_row(row, default),
-                        "{flag} row is missing default {default}: {row}"
+                        "{flag} row is missing default {default}: {row:?}"
                     );
                 }
             }
@@ -2079,39 +2080,60 @@ mod tests {
             ),
         ];
         for (flag, values) in stringly {
-            let rows = table_rows(&cli_md, flag);
+            let rows = rows_with_flag(&tables, flag);
             assert!(!rows.is_empty(), "{flag} has no row in cli.md");
             for row in &rows {
                 for value in values {
                     assert!(
-                        row.contains(value.as_str()),
-                        "{flag} row is missing value {value}: {row}"
+                        row.iter().any(|cell| cell.contains(value.as_str())),
+                        "{flag} row is missing value {value}: {row:?}"
                     );
                 }
             }
         }
         // The `--thinking` default is the code's.
-        for row in table_rows(&cli_md, "--thinking") {
+        for row in rows_with_flag(&tables, "--thinking") {
             assert!(
-                row.contains(radian_host::DEFAULT_THINKING_LEVEL),
-                "--thinking row misses its default: {row}"
+                default_in_row(row, radian_host::DEFAULT_THINKING_LEVEL),
+                "--thinking row misses its default: {row:?}"
             );
         }
     }
 
     // ---- the arc manual --------------------------------------------------------------
+    //
+    // Every check in this section locates its table by the heading it sits under. The
+    // heading is the anchor: `arc_tables(doc, "## `radian arc show")` is the only way a
+    // check reads rows, so an unrelated table elsewhere on the page can neither satisfy
+    // nor break it. A missing heading (or a heading with no table) fails with the page and
+    // the heading.
 
-    /// Every Markdown table row whose second cell contains `needle`.
-    fn table_rows<'a>(doc: &'a str, needle: &str) -> Vec<&'a str> {
-        doc.lines()
-            .filter(|line| {
-                line.starts_with('|')
-                    && line
-                        .split('|')
-                        .nth(1)
-                        .is_some_and(|cell| cell.contains(needle))
-            })
-            .collect()
+    /// One Markdown table's data rows, each split into trimmed cells.
+    type DocTable = Vec<Vec<String>>;
+
+    /// Whether `line` opens or closes a fenced code block.
+    fn is_fence(line: &str) -> bool {
+        line.trim_start().starts_with("```")
+    }
+
+    /// The line index and level of the first heading that starts with `prefix`, outside a
+    /// fenced code block.
+    fn heading_at(doc: &str, prefix: &str) -> Option<(usize, usize)> {
+        let mut fenced = false;
+        for (index, line) in doc.lines().enumerate() {
+            if is_fence(line) {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced {
+                continue;
+            }
+            let level = line.chars().take_while(|c| *c == '#').count();
+            if level > 0 && line.starts_with(prefix) {
+                return Some((index, level));
+            }
+        }
+        None
     }
 
     /// Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
@@ -2131,15 +2153,129 @@ mod tests {
         cells
     }
 
+    /// A table row's cells, trimmed, without the empty cells around the outer `|`s.
+    fn table_cells(line: &str) -> Vec<String> {
+        let mut cells = split_cells(line);
+        if cells.first().is_some_and(|cell| cell.trim().is_empty()) {
+            cells.remove(0);
+        }
+        if cells.last().is_some_and(|cell| cell.trim().is_empty()) {
+            cells.pop();
+        }
+        cells
+            .into_iter()
+            .map(|cell| cell.trim().to_owned())
+            .collect()
+    }
+
+    /// Every data table under the heading that starts with `prefix`, from that heading to
+    /// the next heading at the same or a higher level. The heading is the table's anchor:
+    /// a table outside it is never read by a check.
+    fn doc_tables(doc: &str, page: &str, prefix: &str) -> Vec<DocTable> {
+        let (start, level) = heading_at(doc, prefix).unwrap_or_else(|| {
+            panic!("{page} has no heading `{prefix}`; the check's table anchor is missing")
+        });
+        let mut tables = Vec::new();
+        let mut rows: Option<DocTable> = None;
+        let mut fenced = false;
+        for line in doc.lines().skip(start + 1) {
+            if is_fence(line) {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced {
+                continue;
+            }
+            let line_level = line.chars().take_while(|c| *c == '#').count();
+            if line_level > 0 && line_level <= level {
+                break;
+            }
+            if line.starts_with('|') {
+                rows.get_or_insert_with(Vec::new).push(table_cells(line));
+            } else if let Some(mut table) = rows.take() {
+                // The first row is the header and the second the separator.
+                table.drain(..2.min(table.len()));
+                if !table.is_empty() {
+                    tables.push(table);
+                }
+            }
+        }
+        if let Some(mut table) = rows {
+            table.drain(..2.min(table.len()));
+            if !table.is_empty() {
+                tables.push(table);
+            }
+        }
+        assert!(
+            !tables.is_empty(),
+            "{page}'s `{prefix}` heading has no table"
+        );
+        tables
+    }
+
+    /// Every data table under an `arc.md` heading.
+    fn arc_tables(doc: &str, prefix: &str) -> Vec<DocTable> {
+        doc_tables(doc, "arc.md", prefix)
+    }
+
+    /// The first table under `prefix`.
+    fn arc_table(doc: &str, prefix: &str) -> DocTable {
+        arc_tables(doc, prefix).swap_remove(0)
+    }
+
+    /// The `cli.md` tables the option checks read. Each heading is an anchor: a table
+    /// elsewhere on the page is never read.
+    const CLI_OPTION_HEADINGS: &[&str] = &[
+        "### TUI options",
+        "### Model options",
+        "### Session options",
+        "### MCP options",
+        "### Permission options",
+        "## `radian exec`",
+        "## `radian memory`",
+        "## `radian trust`",
+    ];
+
+    fn cli_option_tables(doc: &str) -> Vec<DocTable> {
+        CLI_OPTION_HEADINGS
+            .iter()
+            .flat_map(|heading| doc_tables(doc, "cli.md", heading))
+            .collect()
+    }
+
+    /// A row's first cell.
+    fn first_cell(row: &[String]) -> &str {
+        row.first().map(String::as_str).unwrap_or("")
+    }
+
+    /// The row whose first cell is exactly `cell`.
+    fn row_with_first_cell<'a>(table: &'a DocTable, cell: &str) -> Option<&'a Vec<String>> {
+        table.iter().find(|row| first_cell(row) == cell)
+    }
+
+    /// The rows whose first cell names `needle`.
+    fn rows_with_flag<'a>(tables: &'a [DocTable], needle: &str) -> Vec<&'a Vec<String>> {
+        tables
+            .iter()
+            .flatten()
+            .filter(|row| row.first().is_some_and(|cell| cell.contains(needle)))
+            .collect()
+    }
+
+    /// The argument name of a table's first cell, when it is a positional (`<ID>`).
+    fn positional_name(cell: &str) -> Option<String> {
+        let cell = cell.trim().trim_matches('`');
+        let inner = cell.strip_prefix('<')?.strip_suffix('>')?;
+        Some(inner.strip_suffix("...").unwrap_or(inner).to_owned())
+    }
+
     /// Whether `default` sits in the row's Default cell (the Allowed/Value cells would mask
     /// a changed default). Tables without a Default column fall back to the whole row.
-    fn default_in_row(row: &str, default: &str) -> bool {
-        let cells = split_cells(row);
-        let inner = &cells[1..cells.len() - 1];
-        if inner.len() >= 4 {
-            inner[2].contains(default)
+    fn default_in_row(row: &[String], default: &str) -> bool {
+        if row.len() >= 4 {
+            row[2].contains(default)
         } else {
-            row.contains(default)
+            row.iter().any(|cell| cell.contains(default))
         }
     }
 
@@ -2199,65 +2335,237 @@ mod tests {
         }
     }
 
+    /// One option of one arc command.
+    struct ArcOptionRow {
+        flag: String,
+        values: Vec<String>,
+        defaults: Vec<String>,
+    }
+
+    /// One arc command with the heading that anchors its manual tables.
+    struct ArcCommandRow {
+        heading: String,
+        options: Vec<ArcOptionRow>,
+        positionals: Vec<String>,
+    }
+
+    /// Every visible arc command that takes an option or a positional, with the heading its
+    /// manual tables sit under. The parser is the source: a renamed or added argument fails
+    /// the check without a list to update.
+    fn collect_arc_commands() -> Vec<ArcCommandRow> {
+        fn walk(command: &clap::Command, path: &mut Vec<String>, out: &mut Vec<ArcCommandRow>) {
+            if command.is_hide_set() {
+                return;
+            }
+            if !path.is_empty() {
+                let mut options = Vec::new();
+                let mut positionals = Vec::new();
+                for arg in command.get_arguments() {
+                    if arg.is_hide_set() {
+                        continue;
+                    }
+                    let id = arg.get_id().to_string();
+                    if id == "help" || id == "version" {
+                        continue;
+                    }
+                    if let Some(long) = arg.get_long() {
+                        let takes_value = arg.get_action().takes_values();
+                        let values = if takes_value {
+                            arg.get_possible_values()
+                                .iter()
+                                .map(|value| value.get_name().to_owned())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let defaults = if takes_value {
+                            arg.get_default_values()
+                                .iter()
+                                .map(|value| value.to_string_lossy().into_owned())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        options.push(ArcOptionRow {
+                            flag: format!("--{long}"),
+                            values,
+                            defaults,
+                        });
+                    } else if arg.is_positional() {
+                        match arg.get_value_names() {
+                            Some(names) => positionals
+                                .extend(names.iter().map(|name| name.as_str().to_owned())),
+                            None => positionals.push(id),
+                        }
+                    }
+                }
+                if !options.is_empty() || !positionals.is_empty() {
+                    let level = "#".repeat(path.len() + 1);
+                    out.push(ArcCommandRow {
+                        heading: format!("{level} `radian arc {}", path.join(" ")),
+                        options,
+                        positionals,
+                    });
+                }
+            }
+            for sub in command.get_subcommands() {
+                path.push(sub.get_name().to_owned());
+                walk(sub, path, out);
+                path.pop();
+            }
+        }
+        let mut out = Vec::new();
+        walk(&arc_subcommand(), &mut Vec::new(), &mut out);
+        out
+    }
+
     /// Every option of `radian arc`, with every allowed value and default the parser
-    /// declares, appears in arc.md (in the option's own table rows where it has them).
+    /// declares, appears in the tables under that command's own heading. Every positional
+    /// the parser takes is a `<NAME>` row there, and every `<NAME>` row names a positional
+    /// the parser takes (the reverse). A table elsewhere on the page is never read.
     #[test]
     fn every_arc_option_and_value_appears_in_arc_md() {
         let doc = arc_md();
-        let mut rows = Vec::new();
-        collect_options(&arc_subcommand(), &mut rows);
-        assert!(!rows.is_empty(), "the arc subcommand has options");
-        for row in &rows {
-            let strings = table_rows(&doc, &row.flag);
-            if strings.is_empty() {
-                assert!(
-                    doc.contains(&row.flag),
-                    "{} is missing from arc.md",
-                    row.flag
-                );
-                continue;
+        let commands = collect_arc_commands();
+        assert!(!commands.is_empty(), "the arc subcommand has commands");
+        for command in &commands {
+            let tables = arc_tables(&doc, &command.heading);
+            for option in &command.options {
+                let rows = rows_with_flag(&tables, &option.flag);
+                if rows.is_empty() {
+                    // A flag documented in prose (init's `--track`) still has to be named
+                    // on the page; the heading and the prose around the table are its
+                    // documentation.
+                    assert!(
+                        doc.contains(&option.flag),
+                        "{} is missing from arc.md",
+                        option.flag
+                    );
+                    continue;
+                }
+                for row in rows {
+                    for value in &option.values {
+                        assert!(
+                            row.iter().any(|cell| cell.contains(value.as_str())),
+                            "{} row is missing value {value}: {row:?}",
+                            option.flag
+                        );
+                    }
+                    for default in &option.defaults {
+                        assert!(
+                            default_in_row(row, default),
+                            "{} row is missing default {default}: {row:?}",
+                            option.flag
+                        );
+                    }
+                }
             }
-            for line in &strings {
-                for value in &row.values {
-                    assert!(
-                        line.contains(value.as_str()),
-                        "{} row is missing value {value}: {line}",
-                        row.flag
-                    );
-                }
-                for default in &row.defaults {
-                    assert!(
-                        default_in_row(line, default),
-                        "{} row is missing default {default}: {line}",
-                        row.flag
-                    );
-                }
+            let documented: Vec<String> = tables
+                .iter()
+                .flatten()
+                .filter_map(|row| positional_name(first_cell(row)))
+                .collect();
+            for name in &command.positionals {
+                assert!(
+                    documented.contains(name),
+                    "{} is missing the positional `<{name}>`",
+                    command.heading
+                );
+            }
+            for name in &documented {
+                assert!(
+                    command.positionals.contains(name),
+                    "{} documents `<{name}>`, which the parser does not take",
+                    command.heading
+                );
             }
         }
     }
 
-    /// Every arc exit code and its meaning appears in arc.md's own row.
+    /// Every arc exit code and its meaning appears in the table under `## Exit codes`, and
+    /// that table holds exactly the code's closed list. A decoy table elsewhere on the page
+    /// is never read.
     #[test]
     fn every_arc_exit_code_appears_in_arc_md() {
         let doc = arc_md();
+        let table = arc_table(&doc, "## Exit codes");
         for (code, meaning) in radian_arc::store::EXIT_CODES {
-            let row = doc
-                .lines()
-                .find(|line| line.starts_with(&format!("| `{code}` |")))
-                .unwrap_or_else(|| panic!("arc.md has no row for exit code {code}"));
+            let cell = format!("`{code}`");
+            let row = row_with_first_cell(&table, &cell).unwrap_or_else(|| {
+                panic!("arc.md's `## Exit codes` table has no row for exit code {code}")
+            });
             assert!(
-                row.contains(meaning),
-                "the `{code}` row misses `{meaning}`: {row}"
+                row.iter().any(|cell| cell.contains(meaning)),
+                "the `{code}` row misses `{meaning}`: {row:?}"
             );
         }
+        let mut documented = Vec::new();
+        for row in &table {
+            let code = first_cell(row)
+                .trim_matches('`')
+                .parse::<u8>()
+                .unwrap_or_else(|_| {
+                    panic!("arc.md's `## Exit codes` table has a row that is not a code: {row:?}")
+                });
+            documented.push(code);
+        }
+        let expected: Vec<u8> = radian_arc::store::EXIT_CODES
+            .iter()
+            .map(|(code, _)| *code)
+            .collect();
+        assert_eq!(
+            documented, expected,
+            "arc.md's exit-code table is the code's closed list"
+        );
     }
 
-    /// Every `config.toml` key appears in arc.md's table with the default the code has, and
-    /// every key whose default is "not set" says so. The source is the serialized
-    /// `Config::default()`, so a changed default fails here.
+    /// Every code `radian arc merge` itself returns appears in the table under
+    /// `### Merge exit codes`, with the meaning `EXIT_CODES` gives it, and no other code
+    /// does. The source is `MERGE_EXIT_CODES`, so the table cannot drift from the command.
+    #[test]
+    fn every_merge_exit_code_appears_in_arc_md() {
+        let doc = arc_md();
+        let table = arc_table(&doc, "### Merge exit codes");
+        let mut documented = Vec::new();
+        for row in &table {
+            let code = first_cell(row)
+                .trim_matches('`')
+                .parse::<u8>()
+                .unwrap_or_else(|_| {
+                    panic!("arc.md's merge exit table has a row that is not a code: {row:?}")
+                });
+            documented.push(code);
+            let meaning = radian_arc::store::EXIT_CODES
+                .iter()
+                .find(|(known, _)| *known == code)
+                .unwrap_or_else(|| panic!("merge exit code {code} is not one of arc's exit codes"))
+                .1;
+            assert!(
+                row.iter().any(|cell| cell.contains(meaning)),
+                "the `{code}` merge row misses `{meaning}`: {row:?}"
+            );
+        }
+        let mut expected: Vec<u8> = radian_arc::store::MERGE_EXIT_CODES
+            .iter()
+            .map(|exit| exit.code())
+            .collect();
+        documented.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            documented, expected,
+            "arc.md's merge exit table is the command's own code list"
+        );
+    }
+
+    /// Every `config.toml` key appears in the table under `## config.toml` with the default
+    /// the code has, and every key whose default is "not set" says so. The default is
+    /// compared as a parsed TOML value, so the table may order an inline table's keys
+    /// readably (`stage` before `required`) instead of following the serializer's order.
+    /// The source is the serialized `Config::default()`, so a changed default fails here.
     #[test]
     fn every_config_key_and_default_appears_in_arc_md() {
         let doc = arc_md();
+        let table = arc_table(&doc, "## `config.toml`");
         let config = radian_arc::store::config::Config::default();
         let value = toml::Value::try_from(config).expect("the config serializes to TOML");
         let mut leaves = Vec::new();
@@ -2269,55 +2577,93 @@ mod tests {
                 .any(|(key, _)| key == "gate.profiles.default.stages")
         );
         for (key, rendered) in &leaves {
-            let row = config_key_row(&doc, key)
-                .unwrap_or_else(|| panic!("arc.md has no row for config key `{key}`"));
-            assert!(
-                config_default_cell(row).contains(rendered.as_str()),
-                "`{key}` row default misses `{rendered}`: {row}"
+            let row = config_key_row(&table, key).unwrap_or_else(|| {
+                panic!("arc.md's `## config.toml` table has no row for `{key}`")
+            });
+            let cell = config_default_cell(row);
+            let expected = parse_toml_value(rendered).unwrap_or_else(|| {
+                panic!("the code's `{key}` default `{rendered}` is not a TOML value")
+            });
+            let actual = parse_default_cell(cell)
+                .unwrap_or_else(|| panic!("`{key}`'s Default cell `{cell}` is not a TOML value"));
+            assert_eq!(
+                actual, expected,
+                "`{key}`'s Default cell is `{cell}`, but the code's default is `{rendered}`"
             );
         }
         for key in radian_arc::store::config::OPTIONAL_KEYS {
-            let row = config_key_row(&doc, key)
-                .unwrap_or_else(|| panic!("arc.md has no row for config key `{key}`"));
+            let row = config_key_row(&table, key).unwrap_or_else(|| {
+                panic!("arc.md's `## config.toml` table has no row for `{key}`")
+            });
             assert!(
                 config_default_cell(row).contains("not set"),
-                "`{key}` row must say `not set`: {row}"
+                "`{key}`'s Default cell must say `not set`: {row:?}"
             );
         }
     }
 
-    /// Every attempt failure class appears in arc.md's failure table. The source is
+    /// Every attempt failure class appears in the Class cell of the table under
+    /// `## Failures, retries and the budget`. The source is
     /// `radian_arc::attempt::FAILURE_CLASSES`.
     #[test]
     fn every_attempt_failure_class_appears_in_arc_md() {
         let doc = arc_md();
+        let table = arc_table(&doc, "## Failures, retries and the budget");
         for class in radian_arc::attempt::FAILURE_CLASSES {
+            let found = table
+                .iter()
+                .any(|row| row.get(1).is_some_and(|cell| cell.contains(class)));
             assert!(
-                doc.contains(&format!("`{class}`")),
-                "the failure class `{class}` is missing from arc.md"
+                found,
+                "the failure class `{class}` is missing from the failure table"
             );
         }
     }
 
     /// Every plan status, auto level, stage, task state, and each state's phases appear in
-    /// arc.md: the state rows are the phase table's.
+    /// the table that owns them: the plan fields table's `status` row, the level table, the
+    /// config table's `stages` row, and the states table. A mention elsewhere on the page
+    /// does not satisfy a check.
     #[test]
     fn every_arc_value_set_appears_in_arc_md() {
         let doc = arc_md();
+        let plan_fields = arc_table(&doc, "### Plan fields");
+        let status_row = row_with_first_cell(&plan_fields, "`status`")
+            .expect("the plan fields table has a `status` row");
+        let allowed = status_row
+            .get(3)
+            .expect("the plan fields table has an Allowed values cell");
         for status in radian_arc::store::PLAN_STATUSES {
-            assert!(doc.contains(&format!("`{status}`")), "status {status}");
+            assert!(
+                allowed.contains(status),
+                "the `status` row misses `{status}`: {status_row:?}"
+            );
         }
+        let levels = arc_table(&doc, "### The levels");
         for level in radian_arc::store::AUTO_LEVELS {
-            assert!(doc.contains(&format!("`{level}`")), "auto {level}");
+            assert!(
+                levels
+                    .iter()
+                    .any(|row| first_cell(row) == format!("`{level}`")),
+                "the level table has no `{level}` row"
+            );
         }
+        let config = arc_table(&doc, "## `config.toml`");
+        let stages_row = row_with_first_cell(&config, "`gate.profiles.<name>.stages`")
+            .expect("the config table has a `gate.profiles.<name>.stages` row");
+        let allowed = stages_row
+            .get(3)
+            .expect("the stages row has an Allowed values cell");
         for stage in radian_arc::store::STAGE_NAMES {
-            assert!(doc.contains(&format!("`{stage}`")), "stage {stage}");
+            assert!(
+                allowed.contains(stage),
+                "the stages row misses `{stage}`: {stages_row:?}"
+            );
         }
+        let states = arc_table(&doc, "### States and phases");
         for state in radian_arc::store::TASK_STATES {
-            let row = doc
-                .lines()
-                .find(|line| line.starts_with(&format!("| `{state}` |")))
-                .unwrap_or_else(|| panic!("arc.md has no row for state `{state}`"));
+            let row = row_with_first_cell(&states, &format!("`{state}`"))
+                .unwrap_or_else(|| panic!("the states table has no `{state}` row"));
             let phases = radian_arc::store::TASK_PHASES
                 .iter()
                 .find(|(name, _)| name == state)
@@ -2325,15 +2671,17 @@ mod tests {
                 .expect("every state has a phase list");
             for phase in phases {
                 assert!(
-                    row.contains(&format!("`{phase}`")),
-                    "state `{state}` row misses phase `{phase}`: {row}"
+                    row.get(1).is_some_and(|cell| cell.contains(phase)),
+                    "state `{state}` row misses phase `{phase}`: {row:?}"
                 );
             }
         }
     }
 
-    /// Every front-matter field the writer puts in a plan or a task file has a row in
-    /// arc.md. The source is the writer: a renamed or added field fails here.
+    /// Every front-matter field the writer puts in a plan or a task file has a row in that
+    /// file's own table under `### Plan fields` / `### Task fields`. The source is the
+    /// writer: a renamed or added field fails here, and a task field cannot be satisfied by
+    /// a plan row.
     #[test]
     fn every_plan_and_task_field_appears_in_arc_md() {
         use radian_arc::store::model::{PlanFile, TaskFile, TaskState};
@@ -2376,93 +2724,56 @@ mod tests {
             retry_at: Some("2026-01-01T00:00:00Z".to_owned()),
             body: String::new(),
         };
-        for text in [plan.to_text(), task.to_text()] {
-            for key in front_matter_keys(&text) {
-                assert!(
-                    doc.lines()
-                        .any(|line| line.starts_with(&format!("| `{key}` |"))),
-                    "front-matter field `{key}` has no row in arc.md"
-                );
-            }
+        let plan_table = arc_table(&doc, "### Plan fields");
+        for key in front_matter_keys(&plan.to_text()) {
+            assert!(
+                row_with_first_cell(&plan_table, &format!("`{key}`")).is_some(),
+                "plan field `{key}` has no row in arc.md's plan fields table"
+            );
+        }
+        let task_table = arc_table(&doc, "### Task fields");
+        for key in front_matter_keys(&task.to_text()) {
+            assert!(
+                row_with_first_cell(&task_table, &format!("`{key}`")).is_some(),
+                "task field `{key}` has no row in arc.md's task fields table"
+            );
         }
     }
 
-    /// Every MCP tool of `radian arc mcp` and every parameter of every tool appears in
-    /// arc.md's tools table, with the required or optional word the schema declares. The
-    /// source is `radian_arc::mcp::TOOLS`, the same list `tools/list` answers from, so a
+    /// Every MCP tool of `radian arc mcp` and every parameter of every tool appears in the
+    /// table under `### The tools`, with the required or optional word the schema declares.
+    /// The source is `radian_arc::mcp::TOOLS`, the same list `tools/list` answers from, so a
     /// renamed tool or parameter fails here and a tool added without a page entry fails too.
     /// Mutation: drop one tool from the page's table → this fails naming it.
     #[test]
     fn every_mcp_tool_appears_in_arc_md() {
         let doc = arc_md();
+        let table = arc_table(&doc, "### The tools");
         assert!(!radian_arc::mcp::TOOLS.is_empty(), "the server has tools");
         for tool in radian_arc::mcp::TOOLS {
-            let row = doc
-                .lines()
-                .find(|line| line.starts_with(&format!("| `{}` |", tool.name)))
-                .unwrap_or_else(|| panic!("arc.md has no tools-table row for `{}`", tool.name));
+            let row = row_with_first_cell(&table, &format!("`{}`", tool.name))
+                .unwrap_or_else(|| panic!("arc.md's tools table has no row for `{}`", tool.name));
+            let parameters = row
+                .get(1)
+                .unwrap_or_else(|| panic!("`{}`'s row has no Parameters cell", tool.name));
             for (name, required) in tool.parameters() {
                 let marker = if required { "required" } else { "optional" };
-                let at = row.find(&format!("`{name}`")).unwrap_or_else(|| {
+                let at = parameters.find(&format!("`{name}`")).unwrap_or_else(|| {
                     panic!(
-                        "`{}`'s parameter `{name}` is missing from its row: {row}",
+                        "`{}`'s parameter `{name}` is missing from its row: {row:?}",
                         tool.name
                     )
                 });
-                let rest = row[at + name.len() + 2..].split(')').next().unwrap_or("");
+                let rest = parameters[at + name.len() + 2..]
+                    .split(')')
+                    .next()
+                    .unwrap_or("");
                 assert!(
                     rest.contains(marker),
-                    "`{}`'s `{name}` must be marked `{marker}` in its row: {row}",
+                    "`{}`'s `{name}` must be marked `{marker}` in its row: {row:?}",
                     tool.name
                 );
             }
-        }
-    }
-
-    /// One option of a subtree: its spelling, its possible values, its defaults.
-    struct OptionRow {
-        flag: String,
-        values: Vec<String>,
-        defaults: Vec<String>,
-    }
-
-    fn collect_options(command: &clap::Command, out: &mut Vec<OptionRow>) {
-        for arg in command.get_arguments() {
-            if arg.is_hide_set() {
-                continue;
-            }
-            let id = arg.get_id();
-            if id == "help" || id == "version" {
-                continue;
-            }
-            let Some(long) = arg.get_long() else {
-                continue;
-            };
-            let takes_value = arg.get_action().takes_values();
-            let values = if takes_value {
-                arg.get_possible_values()
-                    .iter()
-                    .map(|value| value.get_name().to_owned())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let defaults = if takes_value {
-                arg.get_default_values()
-                    .iter()
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            out.push(OptionRow {
-                flag: format!("--{long}"),
-                values,
-                defaults,
-            });
-        }
-        for sub in command.get_subcommands() {
-            collect_options(sub, out);
         }
     }
 
@@ -2484,19 +2795,37 @@ mod tests {
     }
 
     /// The config table's row for `key`. The page writes a profile key as
-    /// `gate.profiles.<name>.x`; the default section's own spelling is accepted too.
-    fn config_key_row<'a>(doc: &'a str, key: &str) -> Option<&'a str> {
-        let spellings = [key.to_owned(), key.replace(".default.", ".<name>.")];
-        doc.lines().find(|line| {
-            spellings
-                .iter()
-                .any(|spelling| line.starts_with(&format!("| `{spelling}` |")))
-        })
+    /// `gate.profiles.<name>.x`; the default section's own spelling is accepted too. Only
+    /// the first cell counts, so a decoy row with a matching prefix is never read.
+    fn config_key_row<'a>(table: &'a DocTable, key: &str) -> Option<&'a Vec<String>> {
+        let spellings = [
+            format!("`{key}`"),
+            format!("`{}`", key.replace(".default.", ".<name>.")),
+        ];
+        table
+            .iter()
+            .find(|row| spellings.iter().any(|spelling| first_cell(row) == spelling))
     }
 
     /// The Default cell of a five-column table row.
-    fn config_default_cell(row: &str) -> &str {
-        row.split('|').nth(3).unwrap_or("")
+    fn config_default_cell(row: &[String]) -> &str {
+        row.get(2).map(String::as_str).unwrap_or("")
+    }
+
+    /// Parse one TOML value written inside a Default cell. A TOML document needs a key, so
+    /// wrap the value in one.
+    fn parse_toml_value(text: &str) -> Option<toml::Value> {
+        let mut table: toml::Table = toml::from_str(&format!("value = {text}\n")).ok()?;
+        table.remove("value")
+    }
+
+    /// The first backticked value in a Default cell, parsed as TOML. `not set: no limit`
+    /// has no value and returns `None`.
+    fn parse_default_cell(cell: &str) -> Option<toml::Value> {
+        let start = cell.find('`')?;
+        let rest = &cell[start + 1..];
+        let end = rest.find('`')?;
+        parse_toml_value(&rest[..end])
     }
 
     /// The front-matter keys of a plan or task file, in file order.

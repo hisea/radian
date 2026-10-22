@@ -60,6 +60,12 @@ pub const EXIT_CODES: &[(u8, &str)] = &[
     (4, "a lock is held by another process"),
 ];
 
+/// The exit codes `radian arc merge` itself returns: success, a git or file error, a
+/// refused state (the branch moved, the digest changed, or three integration runs did not
+/// settle), and a held `state.lock`. `2` is clap's usage error before the command runs.
+/// The manual's merge exit table is checked against this list.
+pub const MERGE_EXIT_CODES: &[Exit] = &[Exit::Ok, Exit::Error, Exit::State, Exit::Locked];
+
 /// One exit code, by meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
@@ -1069,6 +1075,22 @@ mod tests {
         assert_eq!(Exit::Usage.code(), 2);
         assert_eq!(Exit::State.code(), 3);
         assert_eq!(Exit::Locked.code(), 4);
+    }
+
+    /// `radian arc merge` returns four of the five codes: it never returns a usage error
+    /// itself (clap refuses a bad flag before `merge` runs). The manual's merge table is
+    /// checked against exactly this list.
+    #[test]
+    fn the_merge_exit_codes_are_the_commands_own() {
+        let codes: Vec<u8> = MERGE_EXIT_CODES.iter().map(|exit| exit.code()).collect();
+        assert_eq!(codes, vec![0, 1, 3, 4]);
+        for exit in MERGE_EXIT_CODES {
+            assert!(
+                EXIT_CODES.iter().any(|(code, _)| *code == exit.code()),
+                "merge's {} is not one of arc's exit codes",
+                exit.code()
+            );
+        }
     }
 
     #[test]
