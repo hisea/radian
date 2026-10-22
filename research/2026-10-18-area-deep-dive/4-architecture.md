@@ -100,7 +100,7 @@ Radian 的骨架本身就快：单个 Rust 二进制，单进程，不需要 dae
 - **为什么。** 6–7 分钟的 Verify 乘以每天的迭代次数，是"迭代速度"里最大的一项可控成本。
 
 ### ⑥ 不值得做的
-- **改成 client/server 或 daemon（opencode、Codex app-server 那样）。** 对单会话、单机的 Radian 没有速度收益，反而多出握手、版本替换和协议层。控制 socket 加 `attach` 已经够 herdr 用了。只有将来做 `radian orca` 或跨机器时才需要（ADR 0043 远期）。
+- **改成 client/server 或 daemon（opencode、Codex app-server 那样）。** 对单会话、单机的 Radian 没有速度收益，反而多出握手、版本替换和协议层。控制 socket 加 `attach` 已经够 herdr 用了。只有将来做 `radian chord` 或跨机器时才需要（ADR 0043 远期）。
 - **主存储换成 SQLite。** 读 JSONL 每个事件 1.2 µs，一轮只有 2–3 次 fsync，而且索引已经是可重建的 SQLite。换掉会动 ADR 0006、0001、0040 和整套 `journal-selfcheck`，换不来什么。
 - **pi 那样同文件的树状分支。** 已经有 fork（ADR 0022）。这项对完成任务的速度没有影响。
 - **把 subagent 改成进程内运行。** 子进程启动约 32–55 ms，相对于一次模型调用（秒级）可以忽略；进程隔离和独立 journal 更值钱。真正要测的是 MCP 重起（见 ②）。

@@ -1,20 +1,20 @@
-# Radian Orca v0：设计审核与竞品分析
+# Radian Chord v0：设计审核与竞品分析
 
 > **审核日期**：2026-10-20  
-> **审核对象**：`hisea/radian` 主分支的三份 Orca 文档及相关已接受 ADR  
-> **结论**：**保留 Orca 的架构方向，但当前 v0 设计不宜直接实施；先修订状态、恢复、Git 发布及验证契约。**  
+> **审核对象**：`hisea/radian` 主分支的三份 Chord 文档及相关已接受 ADR  
+> **结论**：**保留 Chord 的架构方向，但当前 v0 设计不宜直接实施；先修订状态、恢复、Git 发布及验证契约。**  
 > **项目状态**：原 backlog 明确写为 `idea / 不开工`；本报告是审查和建议，**不表示已修改仓库或批准开工**。
 
 ## 摘要
 
-Orca 的正确定位是**独立于 Radian Core 的确定性任务编排与交付控制器**：由 Claude（lead）规划、拆解和决定返工；由 Orca 负责唯一调度权、持久化状态、跨主机执行、验证及交付证据；由 Radian worker 在独立 worktree 中完成编码；由 owner 审批和合并。
+Chord 的正确定位是**独立于 Radian Core 的确定性任务编排与交付控制器**：由 Claude（lead）规划、拆解和决定返工；由 Chord 负责唯一调度权、持久化状态、跨主机执行、验证及交付证据；由 Radian worker 在独立 worktree 中完成编码；由 owner 审批和合并。
 
 这个分层方向符合 Radian 的单会话、最小 Core 原则。不过，现有文档存在多处会影响实际正确性的冲突：
 
-1. **MCP 与 `orca run` 的并发写入语义没有定义**。整个 run 周期持有 `flock` 与随时能 `add/cancel` 的 MCP 入口冲突。
+1. **MCP 与 `chord run` 的并发写入语义没有定义**。整个 run 周期持有 `flock` 与随时能 `add/cancel` 的 MCP 入口冲突。
 2. **SSH worker 的崩溃恢复未闭合**。重启后只看进程 PID，不能证明远端任务已停止，也不能无损接管；可能重复派发和覆盖工作区。
 3. **`done` 的定义不一致**。有时表示 Gate 通过，有时表示分支已经合入 main；依赖解锁条件因此不确定。
-4. **Git 工作流遗漏远端 commit 的发布步骤**。Orca 在 Mac 收到 LXC worker 的 SHA，不代表 Mac 本地就能 `git push` 那个 ref。
+4. **Git 工作流遗漏远端 commit 的发布步骤**。Chord 在 Mac 收到 LXC worker 的 SHA，不代表 Mac 本地就能 `git push` 那个 ref。
 5. **无人值守 worker 默认权限过宽**。ADR 0043 规定 `full` 是 Radian 默认档；原 `radian exec ... --yes` 未显式指定 sandbox。
 6. **Gate 默认过重**。将 mutation 设为所有任务 required，不利于验证最小调度闭环；独立 reviewer 也已不是市场空白。
 7. **已有命令接口与远程 UI 假设有落差**。`radian attach` 是只读 transcript TUI，不是现成的 JSONL 实时事件 API；`Result.cost` 当前为会话累计。
@@ -27,9 +27,9 @@ Orca 的正确定位是**独立于 Radian Core 的确定性任务编排与交付
 
 ### 1.1 项目原始文档
 
-- [Backlog：`docs/backlog/orca.md`](https://github.com/hisea/radian/blob/main/docs/backlog/orca.md)
-- [设计：`research/2026-10-20-orca-v0-design.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-orca-v0-design.md)
-- [竞品调查：`research/2026-10-20-orca-competitors.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-orca-competitors.md)
+- [Backlog：`docs/backlog/chord.md`](https://github.com/hisea/radian/blob/main/docs/backlog/chord.md)
+- [设计：`research/2026-10-20-chord-v0-design.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-chord-v0-design.md)
+- [竞品调查：`research/2026-10-20-chord-competitors.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-chord-competitors.md)
 
 ### 1.2 对照的 Radian 契约
 
@@ -44,7 +44,7 @@ Orca 的正确定位是**独立于 Radian Core 的确定性任务编排与交付
 
 - **已确认事实**：以上 Radian 文件内容，以及本报告参考文献中可核查的竞品官方说明、规格和仓库文档。
 - **设计判断**：风险严重性、状态机建议、实施顺序、差异化定位均是本次审核意见，不等于代码已经实现。
-- **未验证**：未实际运行 Orca 原型、SSH 故障注入、沙箱中 Git worktree commit、跨主机 resume 或一次完整需求的 end-to-end 流程。
+- **未验证**：未实际运行 Chord 原型、SSH 故障注入、沙箱中 Git worktree commit、跨主机 resume 或一次完整需求的 end-to-end 流程。
 - **竞品能力边界**：公开文档声称支持某项功能，不代表已通过独立可靠性测试；未找到说明不等于不具备该能力。
 
 ---
@@ -53,8 +53,8 @@ Orca 的正确定位是**独立于 Radian Core 的确定性任务编排与交付
 
 ### 2.1 应当保留的设计
 
-1. **Radian Core 继续单会话**：Orca 独立处理规划后的队列、worktree、资源、验证、重试、合并；不把 workflow、lead 或工作区池放回 agent-core。这与 ADR 0043 一致。
-2. **Lead 和 orchestrator 角色分离**：Claude 决定“做什么、是否返工”，Orca 负责“何时执行、在哪里执行、是否满足明确条件”；模型输出不能直接改调度状态。
+1. **Radian Core 继续单会话**：Chord 独立处理规划后的队列、worktree、资源、验证、重试、合并；不把 workflow、lead 或工作区池放回 agent-core。这与 ADR 0043 一致。
+2. **Lead 和 orchestrator 角色分离**：Claude 决定“做什么、是否返工”，Chord 负责“何时执行、在哪里执行、是否满足明确条件”；模型输出不能直接改调度状态。
 3. **每项任务隔离执行**：worker 进程一次性，Git worktree 隔离；Agent 可以写自己的源代码工作区，但不能写 backlog。
 4. **Worker 结果结构化**：优先使用 ADR 0044 的 JSONL 和 `Result`，而非屏幕抓取、任意模型文本或与 agent 共享 Markdown 任务状态。
 5. **人类仍负责交付决定**：commands、独立 review 给证据，人类作出最终审批/合并决定。
@@ -71,13 +71,13 @@ Orca 的正确定位是**独立于 Radian Core 的确定性任务编排与交付
 
 ## 3. P0：实现前必须解决的设计问题
 
-### P0-1. MCP Server 与 `orca run` 的单写者冲突
+### P0-1. MCP Server 与 `chord run` 的单写者冲突
 
-**原稿现状**：`orca run` 获取 backlog 独占 `flock`，但 MCP server 也可随时 `add/list/rework/cancel`。如果 MCP 不持锁，违反“唯一写者”；如果长时间持锁，另一入口无法工作。
+**原稿现状**：`chord run` 获取 backlog 独占 `flock`，但 MCP server 也可随时 `add/list/rework/cancel`。如果 MCP 不持锁，违反“唯一写者”；如果长时间持锁，另一入口无法工作。
 
 **建议契约**：
 
-- “单写者”解释为**任一状态变更事务只有一个持锁写入者**，而不是“任一时刻只能有一个 Orca 进程”。
+- “单写者”解释为**任一状态变更事务只有一个持锁写入者**，而不是“任一时刻只能有一个 Chord 进程”。
 - 对 `add`、`claim`、`record_result`、`transition`、`pass`、`cancel` 采用短事务锁；锁内检查期望版本、修改文件、原子替换、完成耐久化，锁外进行 SSH、Git、Gate 等慢操作。
 - 每次状态更新带 `state_version` 或 attempt token 进行 compare-and-swap，防止旧执行结果覆盖新状态。
 - 单控制面与命令语义在 v0 保持一致；到 v1 `serve` 可把所有写操作改为统一处理器，但外部 API 不变。
@@ -86,7 +86,7 @@ Orca 的正确定位是**独立于 Radian Core 的确定性任务编排与交付
 
 ### P0-2. SSH 断开与 worker 进程故障不能混为一谈
 
-**原稿现状**：Orca 读 `doing/meta.toml` 的 PID，若进程活着就“接管等待”，否则按失败处理。对于 SSH 子进程，控制端连接中断时远端进程可能仍在运行；PID 会复用，`kill(pid,0)` 也不是完整的任务身份。
+**原稿现状**：Chord 读 `doing/meta.toml` 的 PID，若进程活着就“接管等待”，否则按失败处理。对于 SSH 子进程，控制端连接中断时远端进程可能仍在运行；PID 会复用，`kill(pid,0)` 也不是完整的任务身份。
 
 **风险**：双 worker 同时编辑同一 worktree、重复 push、审计丢失、旧 attempt 的结果被错误接受。
 
@@ -116,7 +116,7 @@ Orca 的正确定位是**独立于 Radian Core 的确定性任务编排与交付
 
 ADR 0044 的 `completed` 表示 Radian 结束了执行链，并不保证任务达成。甚至“工具被拒后模型放弃”的文本也可能被记录为 completed。
 
-Orca 必须在 worker 退出后独立验证：
+Chord 必须在 worker 退出后独立验证：
 
 - 指定 `base_sha` 与实际 `head_sha`；
 - 确认预期 branch/worktree 和 commit 属于当前 item；
@@ -129,21 +129,21 @@ Orca 必须在 worker 退出后独立验证：
 
 ### P0-5. 远端 Git 提交与 Mac 上的 push 不是同一步
 
-**原稿现状**：worker（例如 LXC）本地 commit，Orca 在 Mac 收到 success 后执行 `git push origin work/<id>`。Mac 本地不一定有那个对象或 ref，因此命令不一定成立。
+**原稿现状**：worker（例如 LXC）本地 commit，Chord 在 Mac 收到 success 后执行 `git push origin work/<id>`。Mac 本地不一定有那个对象或 ref，因此命令不一定成立。
 
 **建议**：
 
 1. Worker 在受限 worktree 内修改并 commit，不直接执行发布动作。
 2. Host-side trusted wrapper 校验 ref、SHA 和 dirty 状态。
-3. Orca 授权对应 host 执行严格限定的 `git push`，或让 Mac 显式 fetch 远端 commit 后再 push（需要可信传输和命名规则）。
-4. Orca `git ls-remote` 验证远端 branch SHA 后启动远程 Gate。
+3. Chord 授权对应 host 执行严格限定的 `git push`，或让 Mac 显式 fetch 远端 commit 后再 push（需要可信传输和命名规则）。
+4. Chord `git ls-remote` 验证远端 branch SHA 后启动远程 Gate。
 5. 合并前再次比较目标分支 HEAD 与该 verdict 的 base；必要时重新执行 integration verification。
 
 Git 发布凭据不应暴露给普通 worker 的 Agent shell；需要验证受限 workspace sandbox 是否允许必要的 Git metadata 写入（worktree 的 `.git` 文件可能指向主仓库 common dir）。
 
 ### P0-6. 无人值守执行必须显式启用沙箱
 
-ADR 0043：Radian 不带 `--profile` 时缺省 `full`，没有沙箱，不提示。原 Orca 示例只有 `--yes`，因此不构成限制。
+ADR 0043：Radian 不带 `--profile` 时缺省 `full`，没有沙箱，不提示。原 Chord 示例只有 `--yes`，因此不构成限制。
 
 应规定：
 
@@ -188,8 +188,8 @@ radian exec -p - \
 示例：
 
 ```text
-item_id     = orca-rad-104
-attempt_id  = orca-rad-104-02
+item_id     = chord-rad-104
+attempt_id  = chord-rad-104-02
 session_id  = rad-104-a
 host        = lxc
 ```
@@ -200,7 +200,7 @@ host        = lxc
 
 ADR 0043 的 `attach` 复用 TUI transcript 渲染，读取 journal 的已提交消息；不显示 streaming delta，也没有完整的 durable permission-wait 事件。当前控制口 `subscribe` 的事件也不包含模型 live delta。
 
-建议 Orca 自己存储 `radian exec --output jsonl` 的执行流，保留 `live` 与 durable 事件区别；v1 UI 对 Orca 的事件订阅 API 读数据，不对 TUI 文本做解析。**无需为 v0 强制修改 `radian attach`。**
+建议 Chord 自己存储 `radian exec --output jsonl` 的执行流，保留 `live` 与 durable 事件区别；v1 UI 对 Chord 的事件订阅 API 读数据，不对 TUI 文本做解析。**无需为 v0 强制修改 `radian attach`。**
 
 ### 4.3 Result 用量可能被重复计算
 
@@ -214,18 +214,18 @@ ADR 0044 当前 `turns/usage/cost` 是 session 累计（包括前一次 resume�
 
 | 来源 | 问题 | 推荐处理 |
 |---|---|---|
-| `orca.md` 验收 vs v0 设计 | Backlog 写 commands/mutation 不同树、**同机同时**；设计稿要求不同树、**不同时** | 以隔离、避免资源争用为原则，修正 backlog 验收。 |
+| `chord.md` 验收 vs v0 设计 | Backlog 写 commands/mutation 不同树、**同机同时**；设计稿要求不同树、**不同时** | 以隔离、避免资源争用为原则，修正 backlog 验收。 |
 | Gate 章节 vs 用户使用流程 | Gate 全绿直接 done；用户流程等 merge 后 done | Gate 全绿进入 review.ready_to_merge；merge 后 done。 |
-| MCP 入口 vs `orca run` | 两个入口都能写 backlog，但只有一个长时间排他锁 | 明确短事务锁和状态版本。 |
+| MCP 入口 vs `chord run` | 两个入口都能写 backlog，但只有一个长时间排他锁 | 明确短事务锁和状态版本。 |
 | `doing/` 重启 | 检查 PID 就能接管远程会话 | 改为 attempt 远程对账；未知状态不得重派。 |
-| SSH worker vs push | Worker commit 仅在远端，Orca 本地没有 ref | host-side trusted push / 明确 fetch。 |
+| SSH worker vs push | Worker commit 仅在远端，Chord 本地没有 ref | host-side trusted push / 明确 fetch。 |
 | `human` vs non-daemon | 等人答复不符合“排空即退” | Human wait durable，run 退出，后续唤醒继续。 |
 | `pass/fail` vs MCP | CLI 使用 pass/fail，但 MCP 只列 add/list/show/rework/cancel | 单独定义权限来源；lead 不能冒充 owner 批准。 |
 | `Result` 与完成 | Radian completed 就移到 review | 额外独立核验 commit/dirty/ref/SHA。 |
 | `meta.toml` 与 `runs/<n>` | 一个 `meta.toml` 容纳多次 attempt，缺少按轮身份 | `attempts/<id>.json` 或记录数组，不能覆盖历史。 |
 | v1 “数据格式就是 API” | 内部 frontmatter 尚未定义 schema | v0 定最小稳定语义；schema_version 演进，不冻结整个内部布局。 |
 
-**额外配置问题**：设计稿 `orca.toml` 示例将 `[hosts.mac] ssh=... path=... max=1` 写在同一行，并在 `[hosts.pc]` 后直接写 `stall_timeout`、`gates`。这不是可直接复制的合法/预期 TOML 顶层配置：每个赋值应独占行，跨表要明确放置，避免全局配置意外落入 `hosts.pc` 表。SSH endpoint/port 也应分别配置，而非将 `-p 2222` 拼进一个含空格的目标字符串。
+**额外配置问题**：设计稿 `chord.toml` 示例将 `[hosts.mac] ssh=... path=... max=1` 写在同一行，并在 `[hosts.pc]` 后直接写 `stall_timeout`、`gates`。这不是可直接复制的合法/预期 TOML 顶层配置：每个赋值应独占行，跨表要明确放置，避免全局配置意外落入 `hosts.pc` 表。SSH endpoint/port 也应分别配置，而非将 `-p 2222` 拼进一个含空格的目标字符串。
 
 ---
 
@@ -233,11 +233,11 @@ ADR 0044 当前 `turns/usage/cost` 是 session 累计（包括前一次 resume�
 
 ### 6.1 分类
 
-| 类型 | 典型项目 | 主要价值 | 对 Orca 的启发 |
+| 类型 | 典型项目 | 主要价值 | 对 Chord 的启发 |
 |---|---|---|---|
-| 终端管理/多路复用 | herdr、cmux、claude-squad | pane、生存期、观察、交互 | Orca 不应回去做终端复用器。 |
+| 终端管理/多路复用 | herdr、cmux、claude-squad | pane、生存期、观察、交互 | Chord 不应回去做终端复用器。 |
 | Agent 开发环境 | [onorca.dev Orca](https://www.onorca.dev/)、Conductor、Emdash | worktree、终端、diff、远端执行、App | Web/iOS 体验和工作区视图已有成熟参考。 |
-| 任务编排与交付 | [Symphony](https://github.com/openai/symphony)、[Sortie](https://github.com/sortie-ai/sortie)、[OrchestratorInc](https://github.com/OrchestratorInc/agent-orchestrator) | tracker、调度、隔离、状态恢复、CI/review 循环 | **Orca 的直接竞争领域**。 |
+| 任务编排与交付 | [Symphony](https://github.com/openai/symphony)、[Sortie](https://github.com/sortie-ai/sortie)、[OrchestratorInc](https://github.com/OrchestratorInc/agent-orchestrator) | tracker、调度、隔离、状态恢复、CI/review 循环 | **Chord 的直接竞争领域**。 |
 | 多 Agent 组织/持久化 | Gas Town + [Beads](https://github.com/gastownhall/beads)、[Paperclip](https://github.com/paperclipai/paperclip) | 原子领取、合并队列、预算、审批、角色治理 | 借用局部机制，不复制复杂组织层。 |
 
 ### 6.2 Symphony：最值得学习状态机
@@ -246,7 +246,7 @@ ADR 0044 当前 `turns/usage/cost` 是 session 累计（包括前一次 resume�
 
 **应学习**：只有编排器改调度状态；workspace 身份确定；worker 不直接改 task claim；失败回到明确的队列与重试时钟；重启后从权威状态重新对账。
 
-**不要照搬**：强制长期运行服务、持续 tracker polling、Codex app-server 细节。Orca 的本地目录 backlog 是合理的另一个控制面选择。
+**不要照搬**：强制长期运行服务、持续 tracker polling、Codex app-server 细节。Chord 的本地目录 backlog 是合理的另一个控制面选择。
 
 ### 6.3 Sortie：对“是否自己造轮子”的最直接挑战
 
@@ -258,7 +258,7 @@ ADR 0044 当前 `turns/usage/cost` 是 session 累计（包括前一次 resume�
 - [Self-Review](https://docs.sortie-ai.com/guides/configure-self-review/)：在 worker 退出之前，运行 verification commands、生成 diff，再由 agent 给 verdict/继续修复；官方 workflow specification 当前说明默认 reviewer 是 `same` session。
 - [CI Feedback / Review Comments](https://github.com/sortie-ai/sortie/blob/main/docs/architecture/05-workflow-specification.md)：支持有限次数的 CI 修复及审查意见回送，并设置 escalation。
 
-**结论**：原竞品报告把 Sortie 说成“仓库未开”、且将独立检查笼统表述为“没人做”，需要改正。Orca 不能靠“有 review/返工”作为差异点。
+**结论**：原竞品报告把 Sortie 说成“仓库未开”、且将独立检查笼统表述为“没人做”，需要改正。Chord 不能靠“有 review/返工”作为差异点。
 
 ### 6.4 onorca.dev Orca：最接近未来客户端体验
 
@@ -272,13 +272,13 @@ ADR 0044 当前 `turns/usage/cost` 是 session 累计（包括前一次 resume�
 
 [Review Loop 官方指南](https://docs.orchestrator.inc/guides/review-loop/) 写明可对 worker PR 启动专用 reviewer agent；reviewer 不拥有 worker 分支，可将评论回送给 worker。
 
-因此“市场上没人做独立 Gate agent”不成立。Orca 的差别只能是独立验证执行的**强约束契约**：具体 SHA、源代码隔离、固定命令、原始输出、阶段 verdict 审计和结果失效规则，而不是“使用另一个 Agent 做 review”。
+因此“市场上没人做独立 Gate agent”不成立。Chord 的差别只能是独立验证执行的**强约束契约**：具体 SHA、源代码隔离、固定命令、原始输出、阶段 verdict 审计和结果失效规则，而不是“使用另一个 Agent 做 review”。
 
 ### 6.6 Gas Town / Beads：学习合并和任务一致性
 
 [Beads 官方仓库](https://github.com/gastownhall/beads) 目前以 Dolt 为源数据，默认 embedded 单写者模式，server 模式支持多个写者；JSONL 作为 export/interchange，而不是权威源。它有原子 `bd update --claim`、依赖图和远端 sync。
 
-从它的演化**不能**推导出“文件 + Git 绝对不可行”。准确结论是：**多个 agent 在各自分支同时修改同一结构化任务状态，并通过 Git 合并解决并发，是高复杂度设计**。Orca 的单写者目录可以避免这个问题，无需为了模仿 Beads 引入 Dolt。
+从它的演化**不能**推导出“文件 + Git 绝对不可行”。准确结论是：**多个 agent 在各自分支同时修改同一结构化任务状态，并通过 Git 合并解决并发，是高复杂度设计**。Chord 的单写者目录可以避免这个问题，无需为了模仿 Beads 引入 Dolt。
 
 Gas Town 的 Refinery/merge queue 方向更有启发：并行验证通过的两个分支不等于都能对不断更新的 main 安全合并。v0 可用简化的 merge 前对账和关键测试复验，不必照搬复杂的多 agent 组织架构。
 
@@ -286,13 +286,13 @@ Gas Town 的 Refinery/merge queue 方向更有启发：并行验证通过的两�
 
 [Paperclip 预算说明](https://github.com/paperclipai/paperclip/blob/master/docs/guides/board-operator/costs-and-budgets.md) 和 [Agent 管理文档](https://github.com/paperclipai/paperclip/blob/master/docs/guides/board-operator/managing-agents.md) 公开描述了预算警告、超额暂停、Agent heartbeat 和审批。
 
-Orca 不需要公司组织结构，但应有任务级 `max_attempts`、`max_cost`、`max_wall_time`、必要时暂停等待 human。无人值守 agent 的开销、资源竞争和重复返工本身就是可靠性问题。
+Chord 不需要公司组织结构，但应有任务级 `max_attempts`、`max_cost`、`max_wall_time`、必要时暂停等待 human。无人值守 agent 的开销、资源竞争和重复返工本身就是可靠性问题。
 
 ### 6.8 能力对照（2026-10-20，公开文档层面）
 
-> `是` 表示有明确文档；`计划` 表示仅 Orca 设计；`未确认` 表示本报告未取得充分材料，不能推定为不支持。
+> `是` 表示有明确文档；`计划` 表示仅 Chord 设计；`未确认` 表示本报告未取得充分材料，不能推定为不支持。
 
-| 能力 | Orca 设计 | Symphony | Sortie | onorca.dev Orca | OrchestratorInc | Paperclip |
+| 能力 | Chord 设计 | Symphony | Sortie | onorca.dev Orca | OrchestratorInc | Paperclip |
 |---|---|---|---|---|---|---|
 | 确定性任务调度 | 计划 | 是 | 是 | 部分重叠 | 是 | 是 |
 | 工作区隔离 | 计划 | 是 | 是 | 是 | 是 | 依适配器 |
@@ -308,7 +308,7 @@ Orca 不需要公司组织结构，但应有任务级 `max_attempts`、`max_cost
 
 ---
 
-## 7. 真正可以验证的 Orca 差异化
+## 7. 真正可以验证的 Chord 差异化
 
 不要把“调多个 Agent”作为产品的核心卖点。更具体的定位应是：
 
@@ -318,17 +318,17 @@ Orca 不需要公司组织结构，但应有任务级 `max_attempts`、`max_cost
 
 1. 执行结果是否可关联到确切的 `item_id/attempt_id/session_id`？
 2. Gate 判定是否指向**不可变的 commit SHA**？
-3. worker 失败、SSH 中断、Orca 被杀后，是否会重复派发？
+3. worker 失败、SSH 中断、Chord 被杀后，是否会重复派发？
 4. 人工批准后，合并之前代码变了，旧批准是否失效？
 5. 两个原本独立通过测试的分支依次合入 main，是否复验新集成结果？
 6. 每项任务的模型和验证成本是否能够界定？
 7. 启动和维护是否足够简单，值得取代已有 CLI + CI 流程？
 
-**重要的保留意见**：固定 SHA 的验证本身可通过 CI、合并队列或现有编排器实现。它是 Orca 的**设计关注点**，不是自动成立的市场独占能力。
+**重要的保留意见**：固定 SHA 的验证本身可通过 CI、合并队列或现有编排器实现。它是 Chord 的**设计关注点**，不是自动成立的市场独占能力。
 
 ---
 
-## 8. 建议的最小 Orca v0.1 架构
+## 8. 建议的最小 Chord v0.1 架构
 
 ```text
                  Claude / Lead
@@ -337,7 +337,7 @@ Orca 不需要公司组织结构，但应有任务级 `max_attempts`、`max_cost
                  MCP / CLI
                       |
               +----------------+
-              | Orca Control   |
+              | Chord Control   |
               | - transactions |
               | - scheduler    |
               | - reconcile    |
@@ -408,7 +408,7 @@ Orca 不需要公司组织结构，但应有任务级 `max_attempts`、`max_cost
 
 ```yaml
 schema_version: 1
-id: orca-rad-104
+id: chord-rad-104
 title: Fix session recovery
 state: review
 phase: awaiting_human
@@ -416,7 +416,7 @@ after: []
 execution:
   host: lxc
   session_id: rad-104-a
-  attempt_id: orca-rad-104-02
+  attempt_id: chord-rad-104-02
   base_sha: abc123
   head_sha: def456
 verification:
@@ -444,9 +444,9 @@ limits:
 
 CI 可看作第一层的远端执行后端；不必在 v0 中为其再设计一整套独立 DSL。
 
-### 8.4 `orca run` 的严格语义
+### 8.4 `chord run` 的严格语义
 
-`orca run`：读取状态、执行所有当前可推进且符合容量限制的任务、收束本次发起的工作、持久化结果，然后在**没有立即可执行步骤**时退出。
+`chord run`：读取状态、执行所有当前可推进且符合容量限制的任务、收束本次发起的工作、持久化结果，然后在**没有立即可执行步骤**时退出。
 
 - `retry_wait` 任务等待下一次定时唤醒。
 - `awaiting_human` 等人操作，不堵住该进程。
@@ -462,7 +462,7 @@ CI 可看作第一层的远端执行后端；不必在 v0 中为其再设计一�
 1. **Mutation 不是默认 required**：先证明执行、验证、返工与合并闭环正确，再通过实验评价 mutation 是否实质提高缺陷发现率。
 2. **不做通用 Gate DSL**：v0 固定 `commands -> [review] -> human` profiles；可选阶段通过可信配置开关。
 3. **不做跨机器 session resume**：正常返工固定原 host；失联后保守等待人工对账。
-4. **不做模型自主生成且直接执行下一轮 rework**：失败报告给 lead，让它提交新 brief，再由 Orca 有界执行。
+4. **不做模型自主生成且直接执行下一轮 rework**：失败报告给 lead，让它提交新 brief，再由 Chord 有界执行。
 5. **不做负载预测调度**：全局/host 静态 slots；有必要的 Gate 设 exclusive。
 6. **不做 UI 之前过度冻结所有文件字段**：先冻结 identity、state、attempt、verification SHA，其他使用 schema version 演进。
 7. **不并入 `radian` 二进制**：先单独目录/仓库进行 adapter 验证；确定值得维护后再讨论 CLI、ADR 0032/0043 的更改。
@@ -483,11 +483,11 @@ CI 可看作第一层的远端执行后端；不必在 v0 中为其再设计一�
 
 ### 必须执行的故障注入测试
 
-- 两个 `orca run` 并发，只有一个能领取同一 item。
+- 两个 `chord run` 并发，只有一个能领取同一 item。
 - 运行中 MCP 添加任务，不破坏正在持久化的结果。
-- Worker 已产生 commit、Orca 未收到 Result 就被杀；恢复不得覆盖或丢弃 commit。
+- Worker 已产生 commit、Chord 未收到 Result 就被杀；恢复不得覆盖或丢弃 commit。
 - SSH 被断开，远端 worker 继续执行；不得重开第二个 worker。
-- 远端同 PID 被复用，Orca 不能把它认成旧 attempt。
+- 远端同 PID 被复用，Chord 不能把它认成旧 attempt。
 - Worker exit 0 但工作区 dirty 或根本无产出；不能直接验证通过。
 - Gate 已验证 SHA A，worker 把分支推到 SHA B；旧 verdict 作废。
 - A、B 从相同旧 main 分叉；A 合入后对 B 进行集成检查或复验。
@@ -496,7 +496,7 @@ CI 可看作第一层的远端执行后端；不必在 v0 中为其再设计一�
 - Budget/attempt 耗尽必须停止，不出现无限返工。
 - `run` 在 human/CI/retry 等待时可以正常退出，下一次能恢复。
 
-### 建议用于比较“Sortie 适配”与“自建 Orca”的指标
+### 建议用于比较“Sortie 适配”与“自建 Chord”的指标
 
 - 部署步骤/依赖数量、常驻服务复杂度。
 - 相同任务从 brief 到 PR/merge 的人工操作次数。
@@ -507,35 +507,35 @@ CI 可看作第一层的远端执行后端；不必在 v0 中为其再设计一�
 
 ---
 
-## 11. “自建 Orca”还是“Sortie + Radian adapter”？
+## 11. “自建 Chord”还是“Sortie + Radian adapter”？
 
 | 你的首要目标 | 倾向 |
 |---|---|
 | 尽快把 GitHub Issues 派给多个 Agent，自动产 PR、收 CI/Review 反馈 | **先试 Sortie**，确认 adapter 兼容性。 |
-| 完全本地文件 backlog、Claude MCP 操作、不依赖 issue tracker | **自建极简 Orca Runner** 更贴合。 |
-| 命令用完即退出，不管理全天候服务 | **Orca** 的简化执行模式有价值。 |
-| 最关注指定 SHA 的隔离验证、审批与可重复交付证据 | 先实现**独立 Orca Gate 原型**，可以为不同 Runner 服务。 |
+| 完全本地文件 backlog、Claude MCP 操作、不依赖 issue tracker | **自建极简 Chord Runner** 更贴合。 |
+| 命令用完即退出，不管理全天候服务 | **Chord** 的简化执行模式有价值。 |
+| 最关注指定 SHA 的隔离验证、审批与可重复交付证据 | 先实现**独立 Chord Gate 原型**，可以为不同 Runner 服务。 |
 | 立即拥有成熟远程 Dashboard 和跨端操作 | 复用已有管理器更快，不建议 v0 同时自研 App。 |
 
 **推荐一次双路径短实验，而不是立即完整自建：**
 
 - **路径 A**：Sortie + 最薄 Radian adapter，在真实 issue 上测试并发、重试、CI/review feedback。
-- **路径 B**：极简 Orca Runner + 独立 Gate，在本地 Markdown backlog 上测试相同需求，尤其 SSH 故障恢复和指定 SHA 的 Gate 语义。
+- **路径 B**：极简 Chord Runner + 独立 Gate，在本地 Markdown backlog 上测试相同需求，尤其 SSH 故障恢复和指定 SHA 的 Gate 语义。
 
-比较结果再决定是否长期维护完整 Orca。这不是要放弃 Orca，而是避免为了 Gate 的差异化目标，无意中再造一整套已有成熟产品的调度和 Dashboard。
+比较结果再决定是否长期维护完整 Chord。这不是要放弃 Chord，而是避免为了 Gate 的差异化目标，无意中再造一整套已有成熟产品的调度和 Dashboard。
 
 ### 可以长期保持独立的两层
 
-- **Orca Runner**：工作项、调度、SSH/stdio、attempt、生命周期及对账。
-- **Orca Gate**：固定 SHA、受信任验收命令、隔离执行、verdict、人工批准及交付前失效规则。
+- **Chord Runner**：工作项、调度、SSH/stdio、attempt、生命周期及对账。
+- **Chord Gate**：固定 SHA、受信任验收命令、隔离执行、verdict、人工批准及交付前失效规则。
 
-Gate 尽量不依赖某个唯一调度器；将来由 Orca Runner、Sortie 或 CI 调用，仍应对同一个 commit 得到可比的证据链。
+Gate 尽量不依赖某个唯一调度器；将来由 Chord Runner、Sortie 或 CI 调用，仍应对同一个 commit 得到可比的证据链。
 
 ---
 
 ## 12. 对三份文档的具体修改清单
 
-### `docs/backlog/orca.md`
+### `docs/backlog/chord.md`
 
 - [ ] 保持 `idea / 不开工` 状态，不把审核建议当成 owner 已拍板。
 - [ ] 修正 commands/mutation “同机同时”与设计稿“不同时”的矛盾。
@@ -543,7 +543,7 @@ Gate 尽量不依赖某个唯一调度器；将来由 Orca Runner、Sortie 或 C
 - [ ] 明确无人值守 worker 必须显式 `--profile workspace`。
 - [ ] 新增 SSH 中断、远端结果未知、固定 SHA 失效与 merge 前检查的验收条款。
 
-### `research/2026-10-20-orca-v0-design.md`
+### `research/2026-10-20-chord-v0-design.md`
 
 - [ ] 将“进程单写者”改为“事务串行化 + 状态版本”，明确 lock scope/durability。
 - [ ] 定义 `reconciling`，删除“按 PID 可直接接管”承诺。
@@ -552,12 +552,12 @@ Gate 尽量不依赖某个唯一调度器；将来由 Orca Runner、Sortie 或 C
 - [ ] 补 host-side trusted push 和 push SHA 校验。
 - [ ] Gate 默认只 required commands + human，mutation/review 可配置。
 - [ ] 明确 Gate command 的可信来源、沙箱、可写缓存和独立测试目录。
-- [ ] 修正 `orca.toml` 的 TOML 语法、配置作用域和 SSH 参数结构。
+- [ ] 修正 `chord.toml` 的 TOML 语法、配置作用域和 SSH 参数结构。
 - [ ] 把 `radian attach` 与 `radian exec --output jsonl` 的职责分开。
 - [ ] 用 per-attempt 增量计费，不重复累计 `Result.cost`。
 - [ ] 定义 `run` 排空与 pending human/CI/retry 的关系。
 
-### `research/2026-10-20-orca-competitors.md`
+### `research/2026-10-20-chord-competitors.md`
 
 - [ ] 更新 Sortie 源码仓库状态、至少 v1.28.1 的版本事实与 Apache-2.0 许可证。
 - [ ] 增补 Stage Chains、Self-Review、CI/Review Feedback；指出 v1 reviewer 默认同 session。
@@ -572,15 +572,15 @@ Gate 尽量不依赖某个唯一调度器；将来由 Orca Runner、Sortie 或 C
 
 ## 13. 结论与建议拍板
 
-**结论 A：架构保留。** Radian 不应重新内置多 Agent 工作流；Orca 独立控制多个一次性 Agent 的交付状态，是合理的分层。
+**结论 A：架构保留。** Radian 不应重新内置多 Agent 工作流；Chord 独立控制多个一次性 Agent 的交付状态，是合理的分层。
 
 **结论 B：v0 方案先修再做。** 优先修补锁事务、远端 attempt 恢复、Git 发布、`done` 定义、sandbox 和固定 SHA Gate。这些是正确性问题，不属于可留到 v1 的体验优化。
 
 **结论 C：降低 v0 复杂度。** v0 应证明可恢复地完成一次实际 coding delivery，不需要一开始实现 mutation 平台、复杂 Gate DSL、跨机器 resume、完整 Web/iOS 客户端。
 
-**结论 D：竞品研究的焦点改为实现差异而不是功能名。** Symphony 已经提供成熟的调度规范；Sortie 已经提供丰富的 adapter、阶段链、验证和反馈；OrchestratorInc 有专用 reviewer；onorca.dev Orca 已经覆盖 SSH 和移动观察。Orca 的意义要通过更清楚的交付契约、更低的本地使用成本和实际可靠性来证明。
+**结论 D：竞品研究的焦点改为实现差异而不是功能名。** Symphony 已经提供成熟的调度规范；Sortie 已经提供丰富的 adapter、阶段链、验证和反馈；OrchestratorInc 有专用 reviewer；onorca.dev Orca 已经覆盖 SSH 和移动观察。Chord 的意义要通过更清楚的交付契约、更低的本地使用成本和实际可靠性来证明。
 
-**我建议的下一步**：先修三篇文档并保持 `idea` 状态；随后做一个可抛弃的端到端原型，同时对照 Sortie adapter。只有当独立的 Orca Runner / Gate 在真实需求中明显降低人工介入并提高恢复正确性，再考虑进入 Radian 主产品或规划桌面与 iOS 客户端。
+**我建议的下一步**：先修三篇文档并保持 `idea` 状态；随后做一个可抛弃的端到端原型，同时对照 Sortie adapter。只有当独立的 Chord Runner / Gate 在真实需求中明显降低人工介入并提高恢复正确性，再考虑进入 Radian 主产品或规划桌面与 iOS 客户端。
 
 ---
 
@@ -588,9 +588,9 @@ Gate 尽量不依赖某个唯一调度器；将来由 Orca Runner、Sortie 或 C
 
 ### Radian
 
-1. [`docs/backlog/orca.md`](https://github.com/hisea/radian/blob/main/docs/backlog/orca.md)
-2. [`research/2026-10-20-orca-v0-design.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-orca-v0-design.md)
-3. [`research/2026-10-20-orca-competitors.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-orca-competitors.md)
+1. [`docs/backlog/chord.md`](https://github.com/hisea/radian/blob/main/docs/backlog/chord.md)
+2. [`research/2026-10-20-chord-v0-design.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-chord-v0-design.md)
+3. [`research/2026-10-20-chord-competitors.md`](https://github.com/hisea/radian/blob/main/research/2026-10-20-chord-competitors.md)
 4. [ADR 0043](https://github.com/hisea/radian/blob/main/docs/adr/0043-single-session-radian.md) · [ADR 0044](https://github.com/hisea/radian/blob/main/docs/adr/0044-exec-jsonl-output.md) · [ADR 0032](https://github.com/hisea/radian/blob/main/docs/adr/0032-one-binary.md) · [ADR 0022](https://github.com/hisea/radian/blob/main/docs/adr/0022-session-fork.md)
 5. [Radian Host Control Protocol](https://github.com/hisea/radian/blob/main/crates/radian-host/CONTROL.md)
 6. [Result 增量用量 backlog](https://github.com/hisea/radian/blob/main/docs/backlog/exec-result-run-usage.md)
