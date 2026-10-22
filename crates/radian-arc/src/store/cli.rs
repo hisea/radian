@@ -21,6 +21,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "auto",
     "pause",
     "start",
+    "reverify",
     "cancel",
     "reset-budget",
     "merge",
@@ -64,6 +65,8 @@ pub enum Command {
     Pause { plan: String },
     /// `radian arc start <task>`.
     Start { task: String },
+    /// `radian arc reverify <task>`: re-run the gate for the same commit without a worker.
+    Reverify { task: String },
     /// `radian arc cancel <task>`.
     Cancel { task: String },
     /// `radian arc reset-budget <id>`: a task or a plan.
@@ -101,6 +104,7 @@ pub fn run(command: Option<&Command>) -> u8 {
         Some(Command::Auto { plan, level }) => set_auto(plan, level).map(emit),
         Some(Command::Pause { plan }) => pause(plan).map(emit),
         Some(Command::Start { task }) => start(task),
+        Some(Command::Reverify { task }) => reverify(task),
         Some(Command::Cancel { task }) => cancel(task),
         Some(Command::ResetBudget { id }) => reset_budget(id),
         Some(Command::Merge { task }) => merge(task),
@@ -148,7 +152,7 @@ fn bare() -> Result<u8, Error> {
     out.push_str(&format!(
         "in this build: `radian arc init`, `radian arc add plan|task`, `radian arc list`, \
          `radian arc show`, `radian arc adopt`, `radian arc confirm`, `radian arc auto`, \
-         `radian arc pause`, `radian arc start`, `radian arc cancel`, \
+         `radian arc pause`, `radian arc start`, `radian arc reverify`, `radian arc cancel`, \
          `radian arc reset-budget`, `radian arc merge`, `radian arc reject`, `radian arc run`, `radian arc mcp`\n{}",
         arc_dir_line(&store)
     ));
@@ -581,6 +585,24 @@ fn start(task: &str) -> Result<u8, Error> {
             Exit::Error.code()
         },
     )
+}
+
+/// `radian arc reverify <task>`: claim a new attempt without a worker and re-run the gate.
+/// The claim's line is printed even when verification refuses; the refusal follows on stderr
+/// with its own exit code, and the task is left in `review.verifying`.
+fn reverify(task: &str) -> Result<u8, Error> {
+    let store = open()?;
+    let reverified = crate::review::reverify(&store, task)?;
+    let text = format!("{}\n", reverified.lines().join("\n"));
+    let code = emit(text);
+    if code != Exit::Ok.code() {
+        return Ok(code);
+    }
+    if let Err(error) = &reverified.verification {
+        eprintln!("radian arc: {}", error.message());
+        return Ok(error.exit().code());
+    }
+    Ok(Exit::Ok.code())
 }
 
 /// `radian arc cancel <task>`: stop a task, or end a todo one.

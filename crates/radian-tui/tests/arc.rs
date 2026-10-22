@@ -52,6 +52,10 @@ impl Drop for Scratch {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    let _ = git_out(dir, args);
+}
+
+fn git_out(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .current_dir(dir)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -68,6 +72,7 @@ fn git(dir: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 fn fixture(label: &str) -> Scratch {
@@ -224,6 +229,7 @@ fn without_setup_the_subcommands_name_init_and_exit_three() {
         vec!["arc", "auto", "0001-a", "run"],
         vec!["arc", "pause", "0001-a"],
         vec!["arc", "start", "0001-a"],
+        vec!["arc", "reverify", "0001-a"],
         vec!["arc", "cancel", "0001-a"],
         vec!["arc", "reset-budget", "0001-a"],
         vec!["arc", "merge", "0001-a"],
@@ -720,6 +726,121 @@ fn a_review_task_shows_its_rework_reason() {
     let value: serde_json::Value = serde_json::from_str(&json.out).expect("show --json parses");
     assert_eq!(value["rework_reason"], "not what the plan asked for");
     assert_eq!(value["phase"], "rework_pending");
+}
+
+/// `radian arc reverify` re-runs the gate for the same commit without a worker: a task whose
+/// gate command was broken goes to `review.awaiting_human` on attempt 2, and no result stream
+/// is written. Mutation: count the reverify attempt toward `max_attempts` (covered at the
+/// store level) or accept a reject note (`reverify_refuses_a_todo_task` and the store tests).
+#[test]
+fn reverify_reruns_the_gate_without_a_worker() {
+    let scratch = fixture("reverify");
+    init(&scratch);
+    let (_plan, task) = confirmed_task(&scratch);
+    let base = git_out(&scratch.repo(), &["rev-parse", "HEAD"]);
+    let branch = format!("work/{task}");
+    git(&scratch.repo(), &["checkout", "-q", "-B", &branch, &base]);
+    scratch.write("repo/feature.txt", "feature\n");
+    git(&scratch.repo(), &["add", "feature.txt"]);
+    git(&scratch.repo(), &["commit", "-q", "-m", "feature"]);
+    let head = git_out(&scratch.repo(), &["rev-parse", "HEAD"]);
+    git(&scratch.repo(), &["push", "-q", "origin", &branch]);
+
+    // The failed gate the first attempt recorded: a verification-stage reason.
+    let store = radian_arc::store::Store::at(scratch.repo());
+    let label = format!("{task}-1");
+    store
+        .change_task(&task, |task| {
+            task.state = radian_arc::store::model::TaskState::Review;
+            task.phase = "rework_pending".to_owned();
+            task.attempt = 1;
+            task.attempt_id = Some(label.clone());
+            task.token = Some("token-1".to_owned());
+            task.base_sha = Some(base.clone());
+            task.head_sha = Some(head.clone());
+            Ok(())
+        })
+        .expect("the task is in review.rework_pending");
+    let dir = scratch
+        .repo()
+        .join(".radian/arc/runs")
+        .join(&task)
+        .join("attempts")
+        .join(&label);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("review.json"),
+        serde_json::json!({
+            "action": "verify",
+            "stage": "commands",
+            "reason": "command_failed",
+            "verdict": null,
+            "text": "commands: command_failed",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // The gate command was wrong; the owner fixes it.
+    let config = scratch.repo().join(".radian/arc/config.toml");
+    let text = fs::read_to_string(&config).expect("config.toml");
+    fs::write(
+        &config,
+        text.replacen("\ncommands = []", "\ncommands = [\"true\"]", 1),
+    )
+    .expect("the fixed config.toml");
+
+    let run = run(&scratch, &["arc", "reverify", &task], "");
+    assert_eq!(run.code, Some(0), "{run:?}");
+    assert!(
+        run.out
+            .contains(&format!("{task}-2 reverify -> review.verifying")),
+        "{}",
+        run.out
+    );
+    assert!(
+        run.out
+            .contains(&format!("{task}-2 verify -> review.awaiting_human")),
+        "{}",
+        run.out
+    );
+    let stored = stored_task(&scratch, &task);
+    assert_eq!(stored.attempt, 2);
+    assert_eq!(
+        stored.attempt_id.as_deref(),
+        Some(format!("{task}-2").as_str())
+    );
+    assert_eq!(stored.head_sha.as_deref(), Some(head.as_str()));
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "awaiting_human")
+    );
+    let new_dir = scratch
+        .repo()
+        .join(".radian/arc/runs")
+        .join(&task)
+        .join("attempts")
+        .join(format!("{task}-2"));
+    assert!(
+        !new_dir.join("result.jsonl").exists(),
+        "a reverify attempt runs no worker"
+    );
+    let record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(new_dir.join("attempt_result.json")).unwrap())
+            .unwrap();
+    assert_eq!(record["class"], "reverify");
+}
+
+/// A task in `todo.ready` is refused with exit `3`, and nothing is claimed.
+#[test]
+fn reverify_refuses_a_todo_task() {
+    let scratch = fixture("reverify-todo");
+    init(&scratch);
+    let (_plan, task) = confirmed_task(&scratch);
+    let run = run(&scratch, &["arc", "reverify", &task], "");
+    assert_eq!(run.code, Some(3), "{run:?}");
+    assert!(run.err.contains("todo.ready"), "{run:?}");
+    assert_eq!(stored_task(&scratch, &task).attempt, 0);
 }
 
 #[test]

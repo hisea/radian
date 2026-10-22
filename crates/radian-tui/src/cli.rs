@@ -545,6 +545,15 @@ enum ArcCommand {
         task: String,
     },
 
+    /// Re-run the gate for a task's already pushed commit without running a worker. It
+    /// applies to a task in `review.rework_pending` or `review.awaiting_human` whose rework
+    /// reason is a verification stage; it claims a new attempt and verifies it at once.
+    Reverify {
+        /// The task id.
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+
     /// Stop a task: a `todo` task ends, a `doing` task's wrapper is signalled.
     Cancel {
         /// The task id.
@@ -679,6 +688,7 @@ impl ArcCommand {
             ArcCommand::Auto { plan, level } => ArcRun::Auto { plan, level },
             ArcCommand::Pause { plan } => ArcRun::Pause { plan },
             ArcCommand::Start { task } => ArcRun::Start { task },
+            ArcCommand::Reverify { task } => ArcRun::Reverify { task },
             ArcCommand::Cancel { task } => ArcRun::Cancel { task },
             ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
             ArcCommand::Merge { task } => ArcRun::Merge { task },
@@ -2569,6 +2579,21 @@ mod tests {
                 "the failure class `{class}` is missing from the failure table"
             );
         }
+    }
+
+    /// A `reverify` attempt records its own class; the manual's failure table names it. The
+    /// source is [`radian_arc::store::attempt_ops::REVERIFY_CLASS`].
+    #[test]
+    fn the_reverify_class_appears_in_arc_md() {
+        let doc = arc_md();
+        let table = arc_table(&doc, "## Failures, retries and the budget");
+        let class = radian_arc::store::attempt_ops::REVERIFY_CLASS;
+        assert!(
+            table
+                .iter()
+                .any(|row| row.get(1).is_some_and(|cell| cell.contains(class))),
+            "the attempt class `{class}` is missing from the failure table"
+        );
     }
 
     /// Every plan status, auto level, stage, task state, and each state's phases appear in

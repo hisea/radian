@@ -146,6 +146,28 @@ impl Verified {
     }
 }
 
+/// What one `radian arc reverify` did: the worker-less attempt, then the verification that
+/// followed it. The verification may refuse (a moved branch, a stage this build does not
+/// run); the task then stays in `review.verifying`, as it does after a pushed attempt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reverified {
+    pub attempt: u32,
+    pub attempt_id: String,
+    pub verification: Result<Verified, Error>,
+}
+
+impl Reverified {
+    /// The lines `radian arc reverify` prints: the claim's own line, then the verification's
+    /// when it ran.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = vec![format!("{} reverify -> review.verifying", self.attempt_id)];
+        if let Ok(verified) = &self.verification {
+            lines.push(verified.line());
+        }
+        lines
+    }
+}
+
 /// What one merge did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Merged {
@@ -348,6 +370,29 @@ pub fn verify(store: &Store, task_id: &str) -> Result<Verified, Error> {
         reason: None,
         digest: Some(digest),
         reused,
+    })
+}
+
+/// `radian arc reverify <task>`: claim a new attempt without a worker and verify it at once
+/// (ADR 0048 decisions 10 and 11).
+///
+/// The claim is refused (exit 3) when the task is not `review.rework_pending` or
+/// `review.awaiting_human`, when its rework reason is a reject note or a delivery failure, or
+/// when it has no `head_sha`. The verification then runs as it does after a pushed attempt:
+/// the remote `work/<task>` must still be `head_sha`, and a moved branch leaves the task in
+/// `review.verifying` with the reason recorded. The new attempt's verdicts are its own.
+///
+/// # Errors
+///
+/// The claim is refused, or the task file changed outside arc. A refused verification is in
+/// [`Reverified::verification`], not in the outer result.
+pub fn reverify(store: &Store, task_id: &str) -> Result<Reverified, Error> {
+    let claim = crate::store::attempt_ops::claim_reverify(store, task_id)?;
+    let verification = verify(store, task_id);
+    Ok(Reverified {
+        attempt: claim.attempt,
+        attempt_id: claim.attempt_id,
+        verification,
     })
 }
 

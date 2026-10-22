@@ -20,7 +20,7 @@ radian arc <subcommand>       run one CLI operation and exit
 ```
 
 - `radian arc` with no subcommand opens the TUI. A subcommand runs the CLI. This follows `radian` (TUI) and `radian exec` (headless).
-- The CLI subcommands are `init`, `add`, `list`, `show`, `adopt`, `start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `run`, `mcp`, and `work`.
+- The CLI subcommands are `init`, `add`, `list`, `show`, `adopt`, `start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `reverify`, `run`, `mcp`, and `work`.
 - Exit codes: 0 success; 1 error; 2 usage error; 3 the state does not allow the operation (this includes a file changed outside arc); 4 a lock is held by another process. `list` and `show` take `--json`.
 - `rad arc` is the same command through the `rad` alias.
 
@@ -102,6 +102,7 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
 | `review.ready_to_merge` | `done.merged` | Main is still `base_sha`, main fast-forwards to `candidate_sha`, the push to `origin` succeeds, and `origin/main` contains `head_sha`. |
 | `review.awaiting_human` | `review.rework_pending` | The owner rejects the task with a note. |
 | `review.*` | `todo.ready` | The lead adds a rework brief. The attempt number goes up by one. |
+| `review.rework_pending`, `review.awaiting_human` | `review.verifying` | The owner runs `radian arc reverify` (decision 11): arc claims a new attempt without a worker. |
 | any | `failed.*` | Retries or budget used up (`exhausted`), cancel (`cancelled`), or a session that cannot continue (`irrecoverable`). |
 
 - When the branch moves after the gate (`head_sha` changes), all verdicts and approvals for the old sha become invalid, and the task returns to `review.verifying`.
@@ -144,6 +145,7 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 ### 10. Gate
 
 - A gate is a fixed profile: a list of stages. There are no conditions, no dynamic graph, and no override rules. A brief can add stages to the profile. It cannot remove a required stage.
+- A verdict is never rewritten. `radian arc reverify <task>` re-runs the gate for the same commit by claiming a new attempt without a worker (decision 11): the attempt number goes up, `attempt_id` and `token` are new, `head_sha` does not change, the attempt result's class is `reverify`, and nothing is pushed. The new attempt's verdicts are its own: an earlier attempt's verdict is not reused. The remote `work/<task>` must still equal `head_sha`; when it moved, the command exits 3 with the moved-branch reason and the task stays in `review.verifying`.
 - Stages are `commands`, `mutation`, `review`, `ci`, `human`, and `integration`. Each stage runs once against the verification candidate and writes one verdict.
 - Before the verification stages run, arc fetches `[repository] remote` and builds the verification candidate in the stage's checkout. When the remote main is an ancestor of `verified_sha`, the candidate is `verified_sha` itself. Otherwise the candidate is a merge commit of `verified_sha` onto the remote main, made in that checkout and never pushed; the merge uses arc's own commit identity, so the same inputs build the same tree. A merge conflict is a failed stage: its reason is `conflict`, its verdict lists the conflicted paths, and the task goes to `review.rework_pending`. `verified_sha` stays the task's commit: the approval, the digest and the merge bind to it, and the candidate is evidence, not a new identity. A verification stage's verdict records `sha` (`verified_sha`), `main_sha` (the remote main the candidate was built on) and `candidate_sha` (the commit the stage ran on).
 - `commands` runs only the fixed commands of the profile on a separate checkout of the candidate. A brief cannot add a shell command.
@@ -155,8 +157,9 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 
 ### 11. Approval
 
-- The MCP tools for the lead are `add_plan`, `add_task`, `update_plan`, `add_rework`, `list`, and `show`. There is no MCP tool to confirm, start, merge, reject, change the auto level, or approve.
+- The MCP tools for the lead are `add_plan`, `add_task`, `update_plan`, `add_rework`, `list`, and `show`. There is no MCP tool to confirm, start, merge, reject, reverify, change the auto level, or approve.
 - `reject <task> --note <text>` records the note in the task's run directory and moves the task to `review.rework_pending`. arc does not send it to the lead in v0: the lead reads it with the MCP `list` and `show` tools.
+- `reverify <task>` is an owner command; there is no MCP tool for it. It applies to a task in `review.rework_pending` or `review.awaiting_human` whose `rework_reason`, if any, comes from a verification stage: a reject note and a delivery failure are refused, and so is any other state (exit 3). It claims a new attempt without a worker (decision 10), moves the task to `review.verifying` and verifies it at once, as `start` does after a pushed attempt. A reverify attempt does not count toward `max_attempts`, costs nothing, and is not an automatic rework.
 - A merge binds to `verified_sha` and `verdict_set_digest`. A new review of the same sha changes the digest and makes an older approval invalid.
 - In v0 this is a process rule, not a security boundary: the lead and arc run as the same OS user, and the arc files are in the repository where the lead works. The lead can run the CLI from a shell or change the files. A real authorization boundary needs a separate identity and a separate store for arc. This ADR does not claim one.
 
