@@ -19,7 +19,7 @@ Each line names one page and what it covers.
 ## Use
 
 - `commands`: every slash command and `!` shell escape in the full-screen interface.
-- `arc`: plan and task orchestration: setup, plans, tasks, and the files arc keeps.
+- `arc`: plan and task orchestration: setup, plans, tasks, the files arc keeps, and the lead's MCP server.
 - `keybindings`: every key in the full-screen interface, by area, and how to rebind it.
 - `sessions`: resume, list, search, fork, export, and attach to sessions.
 - `subagent-and-jobs`: helper sessions and background shell jobs.

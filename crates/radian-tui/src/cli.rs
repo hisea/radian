@@ -503,6 +503,40 @@ enum ArcCommand {
         )]
         extra: Vec<String>,
     },
+
+    /// Confirm a draft plan. A plan with no tasks is refused, and so is a second confirm.
+    Confirm {
+        /// The plan id.
+        #[arg(value_name = "PLAN")]
+        plan: String,
+    },
+
+    /// Set a plan's auto level. Only a confirmed plan can use a level other than `off`.
+    Auto {
+        /// The plan id.
+        #[arg(value_name = "PLAN")]
+        plan: String,
+        /// The level: `off` starts nothing, `run` starts tasks and the gate, `merge` also
+        /// merges what passed.
+        #[arg(
+            value_name = "LEVEL",
+            value_parser = clap::builder::PossibleValuesParser::new(
+                radian_arc::store::AUTO_LEVELS.iter().copied()
+            )
+        )]
+        level: String,
+    },
+
+    /// Set a plan's auto level back to `off`. Tasks that already started are not touched.
+    Pause {
+        /// The plan id.
+        #[arg(value_name = "PLAN")]
+        plan: String,
+    },
+
+    /// Serve the lead's MCP tools over standard input and output. A lead registers this
+    /// command; a person does not run it.
+    Mcp,
 }
 
 /// The `radian arc add` subcommands.
@@ -577,6 +611,10 @@ impl ArcCommand {
             ArcCommand::List { plan, json } => ArcRun::List { plan, json },
             ArcCommand::Show { id, json } => ArcRun::Show { id, json },
             ArcCommand::Adopt { id } => ArcRun::Adopt { id },
+            ArcCommand::Confirm { plan } => ArcRun::Confirm { plan },
+            ArcCommand::Auto { plan, level } => ArcRun::Auto { plan, level },
+            ArcCommand::Pause { plan } => ArcRun::Pause { plan },
+            ArcCommand::Mcp => ArcRun::Mcp,
             // `work` is the trusted wrapper, not a store operation: `run_arc` dispatches it
             // before this conversion.
             ArcCommand::Work { .. } => return None,
@@ -2271,6 +2309,38 @@ mod tests {
                     doc.lines()
                         .any(|line| line.starts_with(&format!("| `{key}` |"))),
                     "front-matter field `{key}` has no row in arc.md"
+                );
+            }
+        }
+    }
+
+    /// Every MCP tool of `radian arc mcp` and every parameter of every tool appears in
+    /// arc.md's tools table, with the required or optional word the schema declares. The
+    /// source is `radian_arc::mcp::TOOLS`, the same list `tools/list` answers from, so a
+    /// renamed tool or parameter fails here and a tool added without a page entry fails too.
+    /// Mutation: drop one tool from the page's table → this fails naming it.
+    #[test]
+    fn every_mcp_tool_appears_in_arc_md() {
+        let doc = arc_md();
+        assert!(!radian_arc::mcp::TOOLS.is_empty(), "the server has tools");
+        for tool in radian_arc::mcp::TOOLS {
+            let row = doc
+                .lines()
+                .find(|line| line.starts_with(&format!("| `{}` |", tool.name)))
+                .unwrap_or_else(|| panic!("arc.md has no tools-table row for `{}`", tool.name));
+            for (name, required) in tool.parameters() {
+                let marker = if required { "required" } else { "optional" };
+                let at = row.find(&format!("`{name}`")).unwrap_or_else(|| {
+                    panic!(
+                        "`{}`'s parameter `{name}` is missing from its row: {row}",
+                        tool.name
+                    )
+                });
+                let rest = row[at + name.len() + 2..].split(')').next().unwrap_or("");
+                assert!(
+                    rest.contains(marker),
+                    "`{}`'s `{name}` must be marked `{marker}` in its row: {row}",
+                    tool.name
                 );
             }
         }

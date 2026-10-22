@@ -164,6 +164,18 @@ fn add_plan(scratch: &Scratch, slug: &str) -> String {
     run.out.trim().to_owned()
 }
 
+fn add_task(scratch: &Scratch, plan: &str, slug: &str, brief: &str) -> String {
+    let run = run(
+        scratch,
+        &[
+            "arc", "add", "task", "--plan", plan, "--slug", slug, "--title", "a task",
+        ],
+        brief,
+    );
+    assert_eq!(run.code, Some(0), "{run:?}");
+    run.out.trim().to_owned()
+}
+
 impl std::fmt::Debug for Run {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -182,6 +194,10 @@ fn without_setup_the_subcommands_name_init_and_exit_three() {
         vec!["arc", "list"],
         vec!["arc", "show", "0001-a"],
         vec!["arc", "adopt", "0001-a"],
+        vec!["arc", "confirm", "0001-a"],
+        vec!["arc", "auto", "0001-a", "run"],
+        vec!["arc", "pause", "0001-a"],
+        vec!["arc", "mcp"],
     ] {
         let run = run(&scratch, &args, "");
         assert_eq!(run.code, Some(3), "{args:?}: {run:?}");
@@ -518,4 +534,94 @@ fn an_unknown_config_key_and_a_bad_slug_use_their_own_exit_codes() {
     let missing = run(&scratch, &["arc", "show", "0099-missing"], "");
     assert_eq!(missing.code, Some(1), "{missing:?}");
     assert!(missing.err.contains("no plan or task"), "{}", missing.err);
+}
+
+#[test]
+fn confirm_refuses_an_empty_plan_and_a_second_confirm() {
+    let scratch = fixture("confirm");
+    init(&scratch);
+    let plan = add_plan(&scratch, "empty");
+
+    let refused = run(&scratch, &["arc", "confirm", &plan], "");
+    assert_eq!(refused.code, Some(3), "{refused:?}");
+    assert!(refused.err.contains("no tasks"), "{}", refused.err);
+    let stored = radian_arc::store::Store::at(scratch.repo())
+        .load_plan(&plan)
+        .expect("the plan reads");
+    assert_eq!(stored.item.status, "draft", "a refusal writes nothing");
+
+    add_task(&scratch, &plan, "work", "the brief\n");
+    let confirmed = run(&scratch, &["arc", "confirm", &plan], "");
+    assert_eq!(confirmed.code, Some(0), "{confirmed:?}");
+    assert!(confirmed.out.contains("confirmed"), "{}", confirmed.out);
+    let json = run(&scratch, &["arc", "list", "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("list --json parses");
+    assert_eq!(value[0]["status"], "confirmed");
+
+    let again = run(&scratch, &["arc", "confirm", &plan], "");
+    assert_eq!(again.code, Some(3), "{again:?}");
+    assert!(again.err.contains("already"), "{}", again.err);
+}
+
+#[test]
+fn auto_needs_a_confirmed_plan_and_a_level_from_the_set() {
+    let scratch = fixture("auto");
+    init(&scratch);
+    let plan = add_plan(&scratch, "levels");
+    add_task(&scratch, &plan, "work", "the brief\n");
+
+    // A draft plan stays `off`; `off` itself is always allowed.
+    for level in ["run", "merge"] {
+        let refused = run(&scratch, &["arc", "auto", &plan, level], "");
+        assert_eq!(refused.code, Some(3), "{level}: {refused:?}");
+        assert!(refused.err.contains("confirmed"), "{}", refused.err);
+    }
+    let off = run(&scratch, &["arc", "auto", &plan, "off"], "");
+    assert_eq!(off.code, Some(0), "{off:?}");
+
+    // A level outside the closed set is a usage error, from the parser.
+    let bad = run(&scratch, &["arc", "auto", &plan, "sometimes"], "");
+    assert_eq!(bad.code, Some(2), "{bad:?}");
+
+    let confirmed = run(&scratch, &["arc", "confirm", &plan], "");
+    assert_eq!(confirmed.code, Some(0), "{confirmed:?}");
+    let set = run(&scratch, &["arc", "auto", &plan, "merge"], "");
+    assert_eq!(set.code, Some(0), "{set:?}");
+    assert!(set.out.contains("merge"), "{}", set.out);
+    let json = run(&scratch, &["arc", "list", "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("list --json parses");
+    assert_eq!(value[0]["auto"], "merge");
+    assert_eq!(value[0]["status"], "confirmed");
+}
+
+#[test]
+fn pause_sets_auto_off_and_leaves_a_started_task_alone() {
+    let scratch = fixture("pause");
+    init(&scratch);
+    let plan = add_plan(&scratch, "paused");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+    assert_eq!(run(&scratch, &["arc", "confirm", &plan], "").code, Some(0));
+    assert_eq!(
+        run(&scratch, &["arc", "auto", &plan, "run"], "").code,
+        Some(0)
+    );
+
+    // A task that already started keeps its state: nothing in this build runs a task, so
+    // the test moves it the way a later scheduling loop would.
+    radian_arc::store::Store::at(scratch.repo())
+        .change_task(&task, |task| {
+            task.state = radian_arc::store::model::TaskState::Doing;
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("the task starts");
+
+    let paused = run(&scratch, &["arc", "pause", &plan], "");
+    assert_eq!(paused.code, Some(0), "{paused:?}");
+    assert!(paused.out.contains("auto off"), "{}", paused.out);
+    let json = run(&scratch, &["arc", "list", "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("list --json parses");
+    assert_eq!(value[0]["auto"], "off");
+    assert_eq!(value[0]["tasks"][0]["state"], "doing");
+    assert_eq!(value[0]["tasks"][0]["phase"], "running");
 }
