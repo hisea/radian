@@ -1363,3 +1363,22 @@ log matches the pre-mutation one; the over-budget and headless set tests pass on
 5/5 抓住。注：MT-5 的空内存钉住集合（headless `skill`+`subagent`、TUI 15 个）看不到它——
 预算内整个 memory provider 不挂载，`specs()` 根本不被咨询；缺席断言放在超预算的那半里，
 这也是唯一能看见 spec 回归的地方。
+
+## mcp-cwd: an MCP server entry's `cwd` (2026-10-22)
+
+Worktree `.radian-worktrees/mcp-cwd`, branch `radian/mcp-cwd` (base `ba3d7f10`). Every
+mutation edits `src/mcp.rs` in place, restores from `.radian/mcp.rs.bak` with `cp` (never
+`git checkout`), and runs the single catching binary with `--no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| MC-1 | a relative `cwd` resolves against the process working directory (`resolve_cwd` drops `base_dir.join`) | ✅ failed | `mcp::tests::cwd_resolves_relative_to_the_declaring_file_in_every_form` |
+| MC-2 | the missing-directory check is gone (`push_server` always pushes) | ✅ failed | `mcp::tests::a_missing_cwd_skips_one_server_with_one_warning` |
+| MC-3 | `cwd` skips `${VAR}` expansion (`let expanded = raw;`) | ✅ failed | `mcp::tests::cwd_expands_env_tilde_and_blanks_project_credentials` |
+| MC-4 | `cwd` expands in `LoadScope::User` even for a project entry (credential blanking lost) | ✅ failed | same test (the `ANTHROPIC_API_KEY` cwd halves) |
+| MC-5 | the resolved `cwd` never reaches `McpServerConfig` (`config.cwd = cwd` removed) | ✅ failed | `mcp_cwd::the_server_process_starts_in_the_configured_directory` |
+| MC-6 | a bare `~` is no longer expanded (falls through to the declaring directory) | ✅ failed | `cwd_expands_env_tilde_and_blanks_project_credentials` |
+
+6/6 caught; the file was byte-identical after the restore. Commands: `cargo test -p
+radian-host --lib mcp::tests::<name>` for MC-1..MC-4 and MC-6, `cargo test -p radian-host
+--test mcp_cwd` for MC-5.
