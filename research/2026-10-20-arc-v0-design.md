@@ -220,7 +220,7 @@ ssh 参数分字段，argv 安全构造，不拼单段 shell 字符串。
 - 通用 gate DSL：固定 profile + 开关。
 - 负载预测调度：静态 slots。
 - 冻结全部文件字段：只冻结 identity、state、attempt、verification sha。
-- 进 `radian` 二进制：先仓库外原型；坐实后新 ADR、改 ADR 0032/0043。
+- 进 `radian` 二进制：从一开始就是 `radian arc` 子命令（不带子命令打开 TUI，带子命令是 CLI），不做仓库外原型；落地前先新 ADR、改 ADR 0032/0043。
 
 ## 已验证的事实（2026-10-20，本机）
 
@@ -239,7 +239,6 @@ ssh 参数分字段，argv 安全构造，不拼单段 shell 字符串。
 - jsonl 流在模型长思考时是否持续有行可用来判 stall。
 - host-local attempt record 的字段冻结（token、pid + 启动时间、session、worktree 路径、branch、终止结果）。
 - brief 里 `mutations:` 的声明格式。
-- 原型语言与位置。
 
 ## 用户视角：跑起来的步骤
 

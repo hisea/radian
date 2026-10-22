@@ -148,20 +148,24 @@ v0 定了"不常驻"：`arc run` 排空即退，谁来触发是待决。本文�
 - 摘要来源：只用 commit message，还是在 gate 的 `review` 阶段顺带产出一段改动摘要。
 - `plans/<plan-id>.md` 与 MCP 工具参数的字段冻结。
 - lead 的 MCP 是否允许 `update_plan` 在 confirmed 后加 task（倾向不允许，走"修改 plan"记录 + 重新 confirm）。
-- v0 设计稿"待决"一节的五项仍然有效（原型位置、Spike 0、`mutations:` 格式、attempt record 字段、`serve` 还是 `arc`）。
+- v0 设计稿"待决"一节的其余四项仍然有效（Spike 0、`mutations:` 格式、attempt record 字段、`serve` 还是 `arc`）。原型位置已定：进 radian 二进制，见"实现路径"。
 
 ## 实现路径
 
 三个界面读的全是 arc 的文件和 jsonl 流，UI 是薄客户端，可替换。顺序：
 
-1. **CLI 先**：控制面本身，`arc add / list / show / start / merge / reject / auto / run`。这是另外两层共用
-   的底座，也是 lead 的 MCP server 的实现。v0 设计稿的大部分工作量在这里，与 UI 无关。
-2. **第一个交互界面是 TUI，独立二进制**，依赖 `radian-tui` 作库：直接复用 `attach`（只读 journal 视图，
-   即界面二的对话流）、`blocks`（markdown、tool card）、`theme`、`keys`、层栈与事件循环（ADR 0023 的
-   Foundation 层）。新写三块：plan / task 列表页、依赖图、整文件 diff 评审页（radian-tui 今天只有
-   tool card 里的局部 edit diff；syntect 高亮可复用）。lead 在旁边的终端 pane 跑，不嵌终端。独立二进制
-   带着 radian-tui 的整棵依赖树，两边版本要一致，原型期可接受；坐实后再并入 `radian arc`（ADR 0032
-   一个二进制，三个界面成为 ADR 0023 的 workspace pages）。
+arc 从一开始就在 radian 二进制里（ADR 0032 一个二进制），不做仓库外原型，也没有独立二进制：
+**`radian arc` 不带子命令打开 TUI，带子命令就是 CLI**，与 `radian`（全屏界面）和 `radian exec`（无界面）
+同一个习惯。别名写法是 `rad arc` / `rad arc run`。本文的 `arc <子命令>` 都是 `radian arc <子命令>` 的简写。
+代价是原型期的代码直接进仓库，走 gate 与 Verify；落地前先写新 ADR，并改 ADR 0032（加 `arc` 子命令）与 0043。
+
+1. **CLI 先**：控制面本身，`radian arc add / list / show / start / merge / reject / auto / run`。这是另外
+   两层共用的底座，也是 lead 的 MCP server 的实现。v0 设计稿的大部分工作量在这里，与 UI 无关。
+2. **第一个交互界面是 TUI，`radian arc` 打开**，在 `radian-tui` 里实现：直接复用 `attach`（只读 journal
+   视图，即界面二的对话流）、`blocks`（markdown、tool card）、`theme`、`keys`、层栈与事件循环（ADR 0023 的
+   Foundation 层），三个界面成为 ADR 0023 的 workspace pages。新写三块：plan / task 列表页、依赖图、整文件
+   diff 评审页（radian-tui 今天只有 tool card 里的局部 edit diff；syntect 高亮可复用）。lead 在旁边的终端
+   pane 跑，不嵌终端。同一个二进制，没有两边版本要对齐的问题。
 3. **GUI 是 v1** 的桌面端，与 iOS / web 同列。gpui 的终端适配器与组件库版本互锁，先做 spike 再选。
    TUI 最先吃亏的是界面三的 diff 评审；到那时若受不了，可以只给界面三提前上 GUI。
 
