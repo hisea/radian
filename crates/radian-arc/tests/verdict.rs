@@ -119,6 +119,78 @@ fn extra_stages_cannot_drop_a_required_stage() {
 }
 
 #[test]
+fn a_newer_attempt_decides_whether_a_required_stage_passed() {
+    let profile = Profile {
+        stages: vec![required(Stage::Commands), required(Stage::Human)],
+        commands: Vec::new(),
+        key_commands: Vec::new(),
+    };
+    let sha = "aaaa";
+    let human = verdict(
+        Stage::Human,
+        sha,
+        VerdictResult::Pass,
+        "2026-10-22T01:00:00.000000Z",
+    );
+    let old_pass = verdict(
+        Stage::Commands,
+        sha,
+        VerdictResult::Pass,
+        "2026-10-22T01:00:00.000000Z",
+    );
+    let new_fail = verdict(
+        Stage::Commands,
+        sha,
+        VerdictResult::Fail,
+        "2026-10-22T02:00:00.000000Z",
+    );
+
+    assert!(
+        !required_passed(
+            &profile,
+            &[],
+            &[old_pass.clone(), human.clone(), new_fail.clone()],
+            sha
+        ),
+        "a newer failing attempt was counted as a pass"
+    );
+    assert!(
+        !required_passed(
+            &profile,
+            &[],
+            &[new_fail.clone(), human.clone(), old_pass.clone()],
+            sha
+        ),
+        "the check depends on the order the verdicts are passed in"
+    );
+
+    // The other way round: an older failure, a newer pass.
+    let new_pass = verdict(
+        Stage::Commands,
+        sha,
+        VerdictResult::Pass,
+        "2026-10-22T03:00:00.000000Z",
+    );
+    assert!(
+        required_passed(
+            &profile,
+            &[],
+            &[new_fail, human.clone(), new_pass.clone()],
+            sha
+        ),
+        "a newer passing attempt did not count"
+    );
+    assert!(
+        required_passed(&profile, &[], &[new_pass, human.clone()], sha),
+        "one passing verdict per required stage must be enough"
+    );
+    assert!(
+        !required_passed(&profile, &[], &[human], sha),
+        "the required commands stage passed without a verdict"
+    );
+}
+
+#[test]
 fn the_digest_changes_when_a_verdict_of_the_same_sha_is_replaced_by_a_new_attempt() {
     let sha = "aaaa";
     let first = verdict(

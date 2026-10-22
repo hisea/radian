@@ -216,6 +216,10 @@ pub fn valid_verdicts<'a>(verdicts: &'a [Verdict], head_sha: &str) -> Vec<&'a Ve
 
 /// Whether every required stage of the effective profile passed for `sha`.
 ///
+/// The check reads the same counted set as [`verdict_set_digest`]: the newest verdict per
+/// stage for that sha. A newer attempt that failed a stage therefore outweighs the pass of
+/// an older attempt, and a caller may pass every attempt's verdicts in any order.
+///
 /// `integration` is not part of this check: it always runs at merge, after the owner's
 /// approval, not before `review.awaiting_human`.
 #[must_use]
@@ -225,13 +229,14 @@ pub fn required_passed(
     verdicts: &[Verdict],
     sha: &str,
 ) -> bool {
+    let counted = counted_verdicts(verdicts, sha);
     effective_stages(profile, extra)
         .iter()
         .filter(|spec| spec.required)
         .all(|spec| {
-            verdicts.iter().any(|verdict| {
-                verdict.stage == spec.stage && verdict.sha == sha && verdict.is_pass()
-            })
+            counted
+                .iter()
+                .any(|verdict| verdict.stage == spec.stage && verdict.is_pass())
         })
 }
 
