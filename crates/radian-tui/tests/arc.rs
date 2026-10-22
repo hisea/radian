@@ -310,12 +310,12 @@ fn add_list_and_show_work_and_json_parses() {
     );
     assert_eq!(task.code, Some(0), "{task:?}");
     let task = task.out.trim().to_owned();
-    assert_eq!(task, "0001-work");
+    assert_eq!(task, "0002-work");
 
     let list = run(&scratch, &["arc", "list"], "");
     assert_eq!(list.code, Some(0), "{list:?}");
     assert!(list.out.contains("0001-first"), "{}", list.out);
-    assert!(list.out.contains("0001-work"), "{}", list.out);
+    assert!(list.out.contains("0002-work"), "{}", list.out);
     assert!(list.out.contains("todo.ready"), "{}", list.out);
     assert!(list.out.contains("attempt 0"), "{}", list.out);
 
@@ -324,7 +324,7 @@ fn add_list_and_show_work_and_json_parses() {
     let value: serde_json::Value = serde_json::from_str(&json.out).expect("list --json parses");
     assert_eq!(value[0]["id"], "0001-first");
     assert_eq!(value[0]["status"], "draft");
-    assert_eq!(value[0]["tasks"][0]["id"], "0001-work");
+    assert_eq!(value[0]["tasks"][0]["id"], "0002-work");
     assert_eq!(value[0]["tasks"][0]["state"], "todo");
     assert_eq!(value[0]["tasks"][0]["phase"], "ready");
 
@@ -343,7 +343,7 @@ fn add_list_and_show_work_and_json_parses() {
 
     let human = run(&scratch, &["arc", "show", &task], "");
     assert_eq!(human.code, Some(0), "{human:?}");
-    for text in ["task 0001-work", "state: todo", "phase: ready", "the brief"] {
+    for text in ["task 0002-work", "state: todo", "phase: ready", "the brief"] {
         assert!(human.out.contains(text), "missing `{text}`:\n{}", human.out);
     }
     assert!(
@@ -416,7 +416,7 @@ fn a_task_cannot_be_added_to_a_confirmed_plan() {
     assert!(
         !scratch
             .repo()
-            .join(".radian/arc/tasks/0001-late.md")
+            .join(".radian/arc/tasks/0002-late.md")
             .exists()
     );
 }

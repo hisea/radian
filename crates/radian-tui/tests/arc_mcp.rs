@@ -282,7 +282,7 @@ async fn add_plan_add_task_and_list_work() {
             }),
         )
         .await;
-    assert_eq!(task["id"], "0001-work");
+    assert_eq!(task["id"], "0002-work");
 
     // The optional arguments may be left out.
     let second = session
@@ -296,7 +296,7 @@ async fn add_plan_add_task_and_list_work() {
             }),
         )
         .await;
-    assert_eq!(second["id"], "0002-more");
+    assert_eq!(second["id"], "0003-more");
 
     let list = session.ok("list", json!({})).await;
     assert_eq!(list[0]["id"], plan["id"]);

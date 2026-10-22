@@ -51,7 +51,7 @@ arc has four objects.
 
 ### 4. Identities
 
-- `plan_id` and `task_id` have the form `NNNN-<slug>`, like ADR file names. The lead gives the slug: `[a-z0-9-]`, 1 to 48 characters. arc gives the number: the next free four-digit number, one sequence for plans and one for tasks. The id is the file name and never changes.
+- `plan_id` and `task_id` have the form `NNNN-<slug>`, like ADR file names. The lead gives the slug: `[a-z0-9-]`, 1 to 48 characters. arc gives the number: the next free four-digit number, one sequence shared by plans and tasks, so no two items ever share a number whatever their slugs. An id names one item: every command that takes a plan or task id refuses (exit 3) an id that names both a plan file and a task file, naming both paths, and changes nothing. The id is the file name and never changes.
 - `session_id` equals `task_id`: one task has one worker session. The first attempt that reaches the model creates it; every later attempt (a retry or a rework) resumes it (`--resume`). It does not fork (ADR 0022).
 - `attempt_id` is `<task_id>-<n>`. Each attempt records its host, a random token, the worker process identity (pid and start time), its worktree, its branch, `base_sha`, `head_sha`, its start and end time, and its session id. arc refuses a result whose token does not match the current attempt.
 - When a session cannot continue (for example `Result.outcome = poisoned`), the task goes to `failed` with phase `irrecoverable`. A new task replaces it and names the old one in `supersedes`. The old session does not change.

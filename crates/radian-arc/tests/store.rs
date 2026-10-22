@@ -253,7 +253,7 @@ fn a_slug_outside_the_rules_is_a_usage_error() {
 }
 
 #[test]
-fn the_number_is_the_next_free_one_per_kind() {
+fn the_number_is_the_next_free_one_over_both_kinds() {
     let scratch = fixture("numbers");
     let store = initialized(&scratch);
     let first = store.add_plan("a", "A", "request").unwrap();
@@ -263,11 +263,91 @@ fn the_number_is_the_next_free_one_per_kind() {
     let task = store
         .add_task(&first, "t", "T", Vec::new(), false, Vec::new(), "brief")
         .unwrap();
-    assert_eq!(task, "0001-t", "tasks count in their own sequence");
+    assert_eq!(
+        task, "0003-t",
+        "a task takes the next number above every plan"
+    );
     // A plan file removed by hand frees its number only if the ledger entry is gone too.
     fs::remove_file(scratch.repo().join(".radian/arc/plans/0002-b.md")).unwrap();
     let third = store.add_plan("c", "C", "request").unwrap();
-    assert_eq!(third, "0003-c", "the ledger keeps 0002 reserved");
+    assert_eq!(
+        third, "0004-c",
+        "the ledger keeps 0002 and the task keeps 0003 reserved"
+    );
+}
+
+/// The defect the shared sequence fixes: a plan `0001-x` and a task with the same slug used
+/// to get the same id, and every command that takes either could not reach the task.
+#[test]
+fn plans_and_tasks_share_one_number_sequence() {
+    let scratch = fixture("shared-numbers");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("x", "X", "request").unwrap();
+    assert_eq!(plan, "0001-x");
+    let task = store
+        .add_task(&plan, "x", "T", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    assert_eq!(
+        task, "0002-x",
+        "the task takes the next number above the plan"
+    );
+    let second = store.add_plan("x", "X", "request").unwrap();
+    assert_eq!(
+        second, "0003-x",
+        "the next plan takes the number above the task"
+    );
+}
+
+/// An id a person made name both a plan and a task: every command that takes either refuses
+/// it (exit 3, naming both files) and changes neither file.
+#[test]
+fn an_id_that_names_both_a_plan_and_a_task_is_refused() {
+    let scratch = fixture("ambiguous-id");
+    let store = initialized(&scratch);
+    let id = store.add_plan("x", "X", "request").unwrap();
+    assert_eq!(id, "0001-x");
+    // A person writes a task file with the plan's id.
+    let task = TaskFile::new(
+        id.clone(),
+        id.clone(),
+        "T".to_owned(),
+        Vec::new(),
+        false,
+        Vec::new(),
+        "brief",
+    );
+    scratch.write(&format!("repo/.radian/arc/tasks/{id}.md"), &task.to_text());
+    let plan_path = scratch
+        .repo()
+        .join(".radian/arc/plans")
+        .join(format!("{id}.md"));
+    let task_path = scratch
+        .repo()
+        .join(".radian/arc/tasks")
+        .join(format!("{id}.md"));
+    let plan_before = read(&plan_path);
+    let task_before = read(&task_path);
+
+    let show = store.show(&id).expect_err("show refuses an ambiguous id");
+    assert_eq!(show.exit(), Exit::State, "{}", show.message());
+    for path in [&plan_path, &task_path] {
+        assert!(
+            show.message().contains(&path.display().to_string()),
+            "{} names {}",
+            show.message(),
+            path.display()
+        );
+    }
+
+    let adopt = store.adopt(&id).expect_err("adopt refuses an ambiguous id");
+    assert_eq!(adopt.exit(), Exit::State, "{}", adopt.message());
+
+    let reset = store::attempt_ops::reset_budget(&store, &id)
+        .expect_err("reset-budget refuses an ambiguous id");
+    assert_eq!(reset.exit(), Exit::State, "{}", reset.message());
+
+    assert_eq!(read(&plan_path), plan_before, "the plan file is unchanged");
+    assert_eq!(read(&task_path), task_before, "the task file is unchanged");
 }
 
 #[test]

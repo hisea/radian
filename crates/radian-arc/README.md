@@ -386,8 +386,9 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 - The integration stage has its own lock file, separate from the exclusive lock of `commands`
   and `mutation`, so an integration run and a `commands` stage may run at the same time.
 - `init` records `origin` as the remote; it is the only name it knows before a config exists.
-- A stored plan and a stored task use separate id sequences, so `0001-x` can name both. `show`
-  and `adopt` look among the plans first, then the tasks.
+- Plans and tasks share one id sequence, so no two items ever share a number. An id that
+  names both a plan and a task is refused by `show`, `adopt` and `reset-budget` (exit `3`,
+  naming both paths); nothing resolves it by preferring the plan.
 
 ## Not here yet
 

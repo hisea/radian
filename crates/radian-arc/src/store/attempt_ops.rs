@@ -740,63 +740,65 @@ pub struct BudgetReset {
 /// `radian arc reset-budget <id>`: moves the paused task, or every paused task of the plan,
 /// back to `todo.ready`, and resets the counted cost to zero from now on.
 ///
-/// A plan is looked up first, then a task, as `show` does.
+/// The id resolves to the plan or the task as `show` does; an id that names both is refused.
 pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
-    if store.plan_exists(id) {
-        let plan = store.load_plan(id)?;
-        require_unchanged(id, plan.changed_outside_arc)?;
-        let mut moved = Vec::new();
-        for task_id in &plan.item.tasks {
-            let task = store.load_task(task_id)?;
-            if task.changed_outside_arc {
-                // arc does not act on a file that changed outside it.
-                continue;
-            }
-            let paused = task.item.state == TaskState::Todo && task.item.phase == "paused_budget";
-            // The plan's counted cost is every task's, so every task resets even when only
-            // some of them are paused.
-            store.change_task(task_id, |task| {
-                task.cost_usd = Some(0.0);
-                if paused {
-                    task.state = TaskState::Todo;
-                    task.phase = "ready".to_owned();
-                    task.retry_at = None;
+    match store.resolve_kind(id)? {
+        Kind::Plan => {
+            let plan = store.load_plan(id)?;
+            require_unchanged(id, plan.changed_outside_arc)?;
+            let mut moved = Vec::new();
+            for task_id in &plan.item.tasks {
+                let task = store.load_task(task_id)?;
+                if task.changed_outside_arc {
+                    // arc does not act on a file that changed outside it.
+                    continue;
                 }
+                let paused =
+                    task.item.state == TaskState::Todo && task.item.phase == "paused_budget";
+                // The plan's counted cost is every task's, so every task resets even when
+                // only some of them are paused.
+                store.change_task(task_id, |task| {
+                    task.cost_usd = Some(0.0);
+                    if paused {
+                        task.state = TaskState::Todo;
+                        task.phase = "ready".to_owned();
+                        task.retry_at = None;
+                    }
+                    Ok(())
+                })?;
+                if paused {
+                    moved.push(task_id.clone());
+                }
+            }
+            Ok(BudgetReset {
+                id: id.to_owned(),
+                kind: "plan",
+                tasks: moved,
+            })
+        }
+        Kind::Task => {
+            let task = store.load_task(id)?;
+            if task.item.state != TaskState::Todo || task.item.phase != "paused_budget" {
+                return Err(Error::Refused(format!(
+                    "task `{id}` is `{}.{}`; only a `todo.paused_budget` task has a budget to reset",
+                    task.item.state.as_str(),
+                    task.item.phase
+                )));
+            }
+            store.change_task(id, |task| {
+                task.state = TaskState::Todo;
+                task.phase = "ready".to_owned();
+                task.retry_at = None;
+                task.cost_usd = Some(0.0);
                 Ok(())
             })?;
-            if paused {
-                moved.push(task_id.clone());
-            }
+            Ok(BudgetReset {
+                id: id.to_owned(),
+                kind: "task",
+                tasks: vec![id.to_owned()],
+            })
         }
-        return Ok(BudgetReset {
-            id: id.to_owned(),
-            kind: "plan",
-            tasks: moved,
-        });
     }
-    if store.task_exists(id) {
-        let task = store.load_task(id)?;
-        if task.item.state != TaskState::Todo || task.item.phase != "paused_budget" {
-            return Err(Error::Refused(format!(
-                "task `{id}` is `{}.{}`; only a `todo.paused_budget` task has a budget to reset",
-                task.item.state.as_str(),
-                task.item.phase
-            )));
-        }
-        store.change_task(id, |task| {
-            task.state = TaskState::Todo;
-            task.phase = "ready".to_owned();
-            task.retry_at = None;
-            task.cost_usd = Some(0.0);
-            Ok(())
-        })?;
-        return Ok(BudgetReset {
-            id: id.to_owned(),
-            kind: "task",
-            tasks: vec![id.to_owned()],
-        });
-    }
-    Err(Error::Failed(format!("no plan or task `{id}`")))
 }
 
 // ---- automatic rework ------------------------------------------------------------------

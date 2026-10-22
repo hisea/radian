@@ -75,6 +75,7 @@ claude mcp add arc -- radian arc mcp
 
 `add` creates one plan or one task from standard input.
 The new id is printed on stdout, one line.
+Plans and tasks share one number sequence, so a new id never matches an existing plan or task (see Plan and task files below).
 
 ### `radian arc add plan --slug <SLUG> --title <TITLE>`
 
@@ -123,12 +124,12 @@ Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `atte
 
 Prints one plan or task: every field, whether it changed outside arc, then its body.
 
-The id is looked up among the plans first, then among the tasks.
-A plan and a task can carry the same `NNNN-slug` id because they count in separate sequences, and `show` then prints the plan; `list --plan <id>` always reads the plan.
+The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see Plan and task files below).
+`list --plan <id>` always reads the plan.
 
 | Argument | Value | What it does |
 |---|---|---|
-| `<ID>` | a plan or task id | Required. The plan is looked up first, then the task. |
+| `<ID>` | a plan or task id | Required. An id that names both a plan and a task is refused (`3`). |
 
 | Flag | Value | What it does |
 |---|---|---|
@@ -150,7 +151,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 |---|---|---|
 | `<ID>` | a plan or task id | Required. The item whose current file becomes arc's own. |
 
-It refuses with exit `3` when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
+It refuses with exit `3` when the id names both a plan and a task (see Plan and task files below), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
 - a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `auto_rework`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
 - a plan: `status`, `auto`.
@@ -300,7 +301,7 @@ It exits `0` when it stopped the task or left it `doing.reconciling`, `3` for a 
 ## `radian arc reset-budget <ID>`
 
 `reset-budget` returns budget-paused tasks to `todo.ready` and resets the counted cost to zero from now on.
-The id is looked up among the plans first, then the tasks, as `show` does.
+The id names one plan or task; an id that names both is refused with exit `3` (see Plan and task files below).
 
 | Argument | Value | What it does |
 |---|---|---|
@@ -519,6 +520,7 @@ A tool that cannot do its work answers with `isError: true` and one text line: t
 That line is the same text the CLI prints for the same refusal, so a plan or task that changed outside arc says `changed outside arc` and names `radian arc adopt`.
 An argument of the wrong type, a missing required argument, and an argument the tool does not take are errors that name the argument.
 The arc exit codes below belong to the CLI; a tool error carries no code.
+An id that names both a plan and a task is a tool error that names both files (see Plan and task files below); the CLI exits `3` for it.
 
 ## Exit codes
 
@@ -572,8 +574,9 @@ Both are front matter between two `---` lines, then a body.
 arc is the only writer; you change them with the subcommands above, and `adopt` after a hand edit.
 
 An id is a four-digit number, a dash, and a slug (`0001-first`).
-Plans count in one sequence and tasks in another, so a plan and a task can share an id.
+Plans and tasks share one number sequence, so no two items ever share an id, whatever their slugs.
 The number is the next free one and is never reused while its ledger entry exists; the id is the file name and never changes.
+An id names one item: `show`, `adopt`, `reset-budget`, and the MCP `show` tool refuse an id that names both a plan file and a task file with exit `3` (the MCP tool: a tool error), name both files, and change nothing.
 
 ### Plan fields
 

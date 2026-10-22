@@ -189,7 +189,7 @@ pub const TOOLS: &[ToolDef] = &[
   "properties": {
     "id": {
       "type": "string",
-      "description": "The plan or task id. A plan is looked up first."
+      "description": "The plan or task id. An id that names both a plan and a task is refused."
     }
   },
   "required": ["id"],
