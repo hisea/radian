@@ -145,10 +145,10 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     // `workspace` sandbox (the common git directory's refs are writable, ADR 0038), and with
     // a matching tree every delivery check would pass; so this check runs before the child,
     // and nothing is recorded for the next attempt when it fails.
-    if let Some(last) = last_head(&arc, &o.task) {
-        if let Err(reason) = check_start(&repo, &worktree, &branch, &last) {
-            return refuse(o, &runs, &attempt_dir, &base_sha, &reason);
-        }
+    if let Some(last) = last_head(&arc, &o.task)
+        && let Err(reason) = check_start(&repo, &worktree, &branch, &last)
+    {
+        return refuse(o, &runs, &attempt_dir, &base_sha, &reason);
     }
     let start_sha = branch_tip(&repo, &branch)
         .ok_or_else(|| Failure::error(format!("cannot read {branch} in {}", repo.display())))?;
@@ -215,16 +215,16 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     if outcome != "completed" {
         failure = Some(format!("outcome {outcome}"));
     } else {
-        let check = check_delivery(
-            &repo,
-            &worktree,
-            &branch,
-            &base_sha,
-            &start_sha,
-            head_sha.as_deref(),
-            &status_paths,
-            o.allow_noop,
-        );
+        let check = check_delivery(&Delivery {
+            repo: &repo,
+            worktree: &worktree,
+            branch: &branch,
+            base: &base_sha,
+            start: &start_sha,
+            head: head_sha.as_deref(),
+            status_paths: &status_paths,
+            allow_noop: o.allow_noop,
+        });
         match check {
             Err(reason) => failure = Some(reason),
             Ok(()) => {
@@ -633,45 +633,53 @@ fn spawn_child(
     Ok(child)
 }
 
+/// What the delivery checks read (ADR 0048 decisions 7.4 and 8).
+struct Delivery<'a> {
+    repo: &'a Path,
+    worktree: &'a Path,
+    branch: &'a str,
+    base: &'a str,
+    /// The `work/<task>` tip this attempt started from.
+    start: &'a str,
+    head: Option<&'a str>,
+    status_paths: &'a Result<Vec<String>, String>,
+    allow_noop: bool,
+}
+
 /// The checks of ADR 0048 decisions 7.4 and 8, in order. The first failure names its
 /// reason; nothing is pushed when one fails.
-fn check_delivery(
-    repo: &Path,
-    worktree: &Path,
-    branch: &str,
-    base: &str,
-    start: &str,
-    head: Option<&str>,
-    status_paths: &Result<Vec<String>, String>,
-    allow_noop: bool,
-) -> Result<(), String> {
+fn check_delivery(d: &Delivery<'_>) -> Result<(), String> {
+    let branch = d.branch;
     let branch_ref = format!("refs/heads/{branch}");
-    let exists = git_raw(repo, &["rev-parse", "--verify", "--quiet", &branch_ref])
+    let exists = git_raw(d.repo, &["rev-parse", "--verify", "--quiet", &branch_ref])
         .map_err(|error| error.message)?;
     if !exists.status.success() {
         return Err(format!("branch {branch} does not exist"));
     }
-    let head = head.ok_or_else(|| "cannot read the worktree HEAD".to_owned())?;
-    let ancestor = git_raw(repo, &["merge-base", "--is-ancestor", base, head])
+    let head = d
+        .head
+        .ok_or_else(|| "cannot read the worktree HEAD".to_owned())?;
+    let ancestor = git_raw(d.repo, &["merge-base", "--is-ancestor", d.base, head])
         .map_err(|error| error.message)?;
     if !ancestor.status.success() {
-        return Err(format!("head {head} does not descend from base {base}"));
+        return Err(format!("head {head} does not descend from base {}", d.base));
     }
     // The child may have rewritten its own branch. It must still contain the tip this
     // attempt started from; otherwise the attempt would deliver a rollback.
-    let from_start = git_raw(repo, &["merge-base", "--is-ancestor", start, head])
+    let from_start = git_raw(d.repo, &["merge-base", "--is-ancestor", d.start, head])
         .map_err(|error| error.message)?;
     if !from_start.status.success() {
         return Err(format!(
-            "head {head} does not descend from the start {start}"
+            "head {head} does not descend from the start {}",
+            d.start
         ));
     }
     let head_ref =
-        git_raw(worktree, &["symbolic-ref", "--short", "HEAD"]).map_err(|error| error.message)?;
+        git_raw(d.worktree, &["symbolic-ref", "--short", "HEAD"]).map_err(|error| error.message)?;
     if !head_ref.status.success() || head_ref.stdout.trim() != branch {
         return Err(format!("the worktree HEAD is not on {branch}"));
     }
-    let dirty = match status_paths {
+    let dirty = match d.status_paths {
         Ok(paths) => paths,
         Err(reason) => return Err(reason.clone()),
     };
@@ -681,9 +689,9 @@ fn check_delivery(
             dirty.join(", ")
         ));
     }
-    let changed = changed_paths(repo, base, head)?;
-    if changed.is_empty() && !allow_noop {
-        return Err(format!("no change: {head} adds nothing to {base}"));
+    let changed = changed_paths(d.repo, d.base, head)?;
+    if changed.is_empty() && !d.allow_noop {
+        return Err(format!("no change: {head} adds nothing to {}", d.base));
     }
     let arc_paths: Vec<&str> = changed
         .iter()
