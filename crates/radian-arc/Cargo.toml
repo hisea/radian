@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "arc: the plan and task orchestrator's storage layer and its CLI subcommands"
+description = "arc (ADR 0048): the plan and task store with its CLI subcommands, and the gate library"
 publish = false
 
 [dependencies]
@@ -17,13 +17,18 @@ radian-coding = { version = "0.1.3", path = "../radian-coding" }
 # The `workspace` tier probe `init` runs: the same `Sandbox::new` a session uses, so a
 # repository whose sandbox cannot start is reported.
 radian-sandbox = { version = "0.1.3", path = "../radian-sandbox" }
-# `state.lock` and `runner.lock` are flock(2) locks; `fs2` is the same crate the memory
-# store's single-writer lock uses.
+# Verdict timestamps use the same RFC 3339 UTC form as `radian-session` and `radian-memory`.
+chrono = "0.4"
+# `state.lock` and `runner.lock` are flock(2) locks; the gate's exclusive stage lock is
+# the same primitive.
 fs2 = "0.4"
-# The ledger's content hash.
+# `kill(-pid, SIGKILL)` for a command that runs past its timeout.
+libc = "0.2"
+# The ledger's content hash and `verdict_set_digest` (ADR 0048 decision 11).
 sha2 = "0.10"
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 # `config.toml` (ADR 0048 decision 15) has the same TOML shape as the radian configuration
 # file (ADR 0008), and the docs drift test renders its defaults from the same parser.
 toml = "0.8"
