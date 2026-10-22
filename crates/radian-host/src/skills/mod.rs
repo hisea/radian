@@ -28,10 +28,11 @@ pub const SECTION_BUDGET_TOKENS: u64 = 1000;
 /// discover every skill once per worktree.
 pub const IGNORED_DIRS: &[&str] = &[".git", ".radian-sandbox", ".radian-worktrees"];
 
-/// arc's worker worktrees (ADR 0048 decision 15): one full checkout per task. Like
-/// `.radian-worktrees/`, discovery never descends into it, or every task's copy of a project
-/// skill would be discovered.
-pub const ARC_WORKTREES: &str = ".radian/arc/worktrees";
+/// arc's own checkout roots (ADR 0048 decision 15): one full worker checkout per task under
+/// `worktrees/` and one per gate stage under `gates/`. Like `.radian-worktrees/`, discovery
+/// never descends into either, or every checkout's copy of a project skill would be
+/// discovered.
+pub const ARC_CHECKOUT_ROOTS: &[&str] = &[".radian/arc/worktrees", ".radian/arc/gates"];
 
 /// The longest `name` (Agent Skills spec, via pi; ADR 0025 S1).
 pub const MAX_NAME_CHARS: usize = 64;
@@ -344,17 +345,17 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Some(name) = child.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if IGNORED_DIRS.contains(&name) || is_arc_worktrees(&child) || !child.is_dir() {
+        if IGNORED_DIRS.contains(&name) || is_arc_checkout_root(&child) || !child.is_dir() {
             continue;
         }
         walk(&child, out);
     }
 }
 
-/// Whether `path` is arc's worker worktree root: the tail components are what matters, so
+/// Whether `path` is one of arc's checkout roots: the tail components are what matter, so
 /// the same test works for a project root, a user skill root, or an `extra_paths` root.
-fn is_arc_worktrees(path: &Path) -> bool {
-    path.ends_with(ARC_WORKTREES)
+fn is_arc_checkout_root(path: &Path) -> bool {
+    ARC_CHECKOUT_ROOTS.iter().any(|root| path.ends_with(root))
 }
 
 /// Collects the built-in skills (ADR 0025), last in the discovery order. A name in
@@ -969,6 +970,33 @@ mod tests {
             .unwrap();
         }
         // The positive control: `.radian/` outside the worktree root is still walked.
+        let kept = scratch.root.join(".radian/agent-skills/kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join(SKILL_FILE_NAME), frontmatter("kept", "Kept.")).unwrap();
+
+        let discovery = discover(&scratch.root);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["kept", "real"], "{:?}", discovery.warnings);
+    }
+
+    /// Arc's gate checkouts are skipped by path too, and the rest of `.radian/arc/` is not.
+    #[test]
+    fn discovery_skips_arc_gates_but_not_the_rest_of_dot_radian() {
+        let scratch = Scratch::new("arc-gates");
+        scratch.skill("real", &frontmatter("real", "Real."));
+        for dir in [
+            ".radian/arc/gates/commands/.agents/skills/gated",
+            ".radian/arc/gates/commands/skills/gated",
+        ] {
+            let path = scratch.root.join(dir);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join(SKILL_FILE_NAME),
+                frontmatter("from-a-gate", "Leaked."),
+            )
+            .unwrap();
+        }
+        // The positive control: `.radian/` outside the gate root is still walked.
         let kept = scratch.root.join(".radian/agent-skills/kept");
         std::fs::create_dir_all(&kept).unwrap();
         std::fs::write(kept.join(SKILL_FILE_NAME), frontmatter("kept", "Kept.")).unwrap();

@@ -732,7 +732,8 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 Every change is one transaction under `state.lock`:
 take the lock (waiting up to 5 seconds, then exit `4`), compare the file with the ledger, write a temporary file, flush it to disk, rename it over the old one, flush the directory, record the new version and hash in the ledger, release.
 
-Search skips `worktrees/`: `grep`, `glob`, skill discovery, and `@` completion do not enter it.
+Search skips `worktrees/` and `gates/`: `grep`, `glob`, skill discovery, and `@` completion do not enter them.
+Both are full checkouts of the tree, so searching them would return every file once per task and once per gate stage.
 They skipped `.radian-worktrees/` for the same reason.
 A worker never reads the rest of `.radian/arc/` from inside its checkout: the worker wrapper denies every entry except `worktrees/`.
 

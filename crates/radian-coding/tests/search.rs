@@ -182,6 +182,38 @@ async fn the_arc_worktrees_directory_is_skipped_by_both_tools() {
     assert!(body.contains("kept.txt:1:needle"), "{body}");
 }
 
+/// `.radian/arc/gates/` (arc's one checkout per gate stage) is pruned by path like the worker
+/// worktrees: the rest of `.radian/arc/` stays searchable.
+#[tokio::test]
+async fn the_arc_gates_directory_is_skipped_by_both_tools() {
+    let dir = TempDir::new("search-arc-gates");
+    let root = dir.file("ws");
+    // No `.gitignore` at all: the skip must not depend on one.
+    dir.write("ws/.radian/arc/gates/commands/leak.txt", "needle");
+    dir.write("ws/.radian/arc/plans/0001-a.md", "needle");
+    dir.write("ws/kept.txt", "needle");
+    let tools = tools(&root);
+
+    let out = call(&tools, "glob", json!({"pattern": "**/*.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(text(&out), "kept.txt\n");
+
+    let out = call(&tools, "grep", json!({"pattern": "needle"}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(
+        !body.contains("gates"),
+        "arc's gate checkouts are not searched: {body}"
+    );
+    assert!(
+        body.contains(".radian/arc/plans/0001-a.md:1:needle"),
+        "the rest of .radian/arc/ is searched: {body}"
+    );
+    assert!(body.contains("kept.txt:1:needle"), "{body}");
+}
+
 /// A symlink out of the workspace is never followed: the linked file is not a match and the
 /// linked directory is not descended, so its contents are never read.
 #[tokio::test]

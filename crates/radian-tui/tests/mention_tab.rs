@@ -78,6 +78,17 @@ fn arc_worktrees_are_not_offered_but_the_rest_of_dot_radian_is() {
 }
 
 #[test]
+fn arc_gates_are_not_offered_but_the_rest_of_dot_radian_is() {
+    let dir = TempDir::new("arc-gates");
+    dir.write(".radian/arc/gates/commands/notes.txt", "x");
+    dir.write(".radian/arc/plans/0001-a.md", "x");
+    let text = "@.radian/arc/";
+    let completion =
+        radian_tui::mention::complete(text, text.chars().count(), dir.path()).expect("a reference");
+    assert_eq!(completion.candidates, [".radian/arc/plans/"]);
+}
+
+#[test]
 fn a_unique_file_candidate_completes_and_adds_a_space() {
     let dir = TempDir::new("unique");
     dir.write("notes.txt", "x");

@@ -24,9 +24,10 @@
 //! - the `.git` directory is pruned, not merely hidden;
 //! - `.radian-worktrees/` is pruned too: it can hold one git worktree per checkout, each a
 //!   full tree, so descending into it would return every file once per worktree (and search
-//!   other branches' contents). `.radian/arc/worktrees/` is pruned for the same reason: arc
-//!   keeps one full worker checkout per task there (ADR 0048 decision 15). The rule is
-//!   structural, not a `.gitignore` coincidence;
+//!   other branches' contents). arc's own checkout roots are pruned for the same reason: arc
+//!   keeps one full worker checkout per task under `.radian/arc/worktrees/` and one per gate
+//!   stage under `.radian/arc/gates/` (ADR 0048 decision 15). The rule is structural, not a
+//!   `.gitignore` coincidence;
 //! - symlinks are never followed: a symlinked file is not a match and a symlinked directory is
 //!   not descended, so a link pointing out of the workspace is never read;
 //! - dot-files other than `.git` are included: the model asked for a tree, not for hidden-file
@@ -54,10 +55,11 @@ pub(crate) const SKIPPED_DIR_NAMES: &[&str] = &[".git", RADIAN_WORKTREES];
 /// `read` omits the entry, so a listing is not cluttered by N full checkouts of the same tree.
 pub(crate) const RADIAN_WORKTREES: &str = ".radian-worktrees";
 
-/// arc's worker worktrees, relative to the workspace (ADR 0048 decision 15). One full
-/// checkout per task, so the walk prunes it by path, not by name: `.radian/` itself and
+/// arc's own checkout roots, relative to the workspace (ADR 0048 decision 15): one full
+/// worker checkout per task under `worktrees/` and one per gate stage under `gates/`. Each is
+/// a whole tree, so the walk prunes them by path, not by name: `.radian/` itself and
 /// everything else under it stay searchable.
-pub(crate) const ARC_WORKTREES: &str = ".radian/arc/worktrees";
+pub(crate) const ARC_CHECKOUT_ROOTS: &[&str] = &[".radian/arc/worktrees", ".radian/arc/gates"];
 
 /// One regular file the walk found: its workspace-relative path and the open, read-only fd
 /// (`O_NOFOLLOW`; the entry was a regular file at `fstatat` time and the open refuses a link
@@ -134,7 +136,7 @@ fn walk_dir(
         }
         let is_dir = entry.kind == EntryKind::Dir;
         let entry_rel = rel.join(&entry.name);
-        if is_dir && (is_pruned(&entry.name) || is_arc_worktrees(&entry_rel)) {
+        if is_dir && (is_pruned(&entry.name) || is_arc_checkout_root(&entry_rel)) {
             continue;
         }
         if ignored(matchers, &entry_rel, is_dir) {
@@ -177,10 +179,12 @@ fn is_pruned(name: &OsStr) -> bool {
         .any(|skip| name == OsStr::new(skip))
 }
 
-/// Whether `path` (relative to the workspace root) is arc's worker worktree root. Only a
-/// workspace walk has this path; a read-only root's walk starts at its own root.
-fn is_arc_worktrees(path: &Path) -> bool {
-    path == Path::new(ARC_WORKTREES)
+/// Whether `path` (relative to the workspace root) is one of arc's checkout roots. Only a
+/// workspace walk has these paths; a read-only root's walk starts at its own root.
+fn is_arc_checkout_root(path: &Path) -> bool {
+    ARC_CHECKOUT_ROOTS
+        .iter()
+        .any(|root| path == Path::new(root))
 }
 
 /// Whether any matcher, deepest first, ignores `path` (a whitelist match stops the search
