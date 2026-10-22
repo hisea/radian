@@ -10,6 +10,7 @@ not a separate program. This crate is its control plane, in these modules:
   the applied result, cancel, and the reconcile step.
 - `gate` — a fixed sequence of stages against one commit: each stage's separate checkout, the
   `commands` stage, verdicts and their digest, and the integration candidate.
+- `review` — verification of a pushed attempt, the owner's approval and merge, and reject.
 - `work` — `radian arc work`, the trusted wrapper around one worker attempt. It is internal:
   arc runs it, a person does not.
 
@@ -274,8 +275,54 @@ plans, tasks, the ledger, the runs, the gate checkouts or another attempt's reco
 credential is in the wrapper's environment only; in v0 the wrapper and the model are the same
 OS user, so that is not isolation.
 
+## Verification
+
+`radian arc start` continues into verification after a pushed attempt (`review::verify`):
+the remote's `work/<task>` must still equal the task's `head_sha`, then the effective stages
+of the profile plus the task's extra stages run in order, except `human`, each through the
+gate. This build runs only `commands`; a profile or task that lists `mutation`, `review` or
+`ci` is refused with `stage <name> is not built yet` and the task stays in
+`review.verifying`. An existing verdict for the current attempt and stage is reused.
+
+Any failing stage moves the task to `review.rework_pending`. When every required non-`human`
+stage passed, the task records `verified_sha` and `verdict_set_digest` and moves to
+`review.awaiting_human`. The digest covers the verification verdicts for `verified_sha`
+without the `human` and `integration` verdicts, which are written later.
+
+`review::rework_reason` is what `show` prints for a task in `review.verifying` or
+`review.rework_pending`: the owner's reject note (`reject.md`) or the last verify/merge
+reason (`review.json`).
+
+## Merge and reject
+
+`radian arc merge <task>` requires `review.awaiting_human`, the remote `work/<task>` still at
+`verified_sha`, and the recomputed digest equal to the recorded one. It writes the owner's
+`human` pass verdict and moves to `review.integrating`, runs `IntegrationRun` with the
+profile's `key_commands`, moves to `review.ready_to_merge`, and pushes
+`<candidate>:refs/heads/<main>` without force. A main that moved after integration, or a
+rejected push, makes it integrate again, at most three runs per command. On success the task
+is `done.merged` and its worktree is removed; the branch stays.
+
+Each integration run writes its own verdict, under
+`runs/<task>/attempts/<attempt id>[.i<n>]/verdicts/integration.json`, so no verdict is ever
+rewritten when main moves.
+
+`radian arc reject <task> --note <text>` requires `review.awaiting_human`, writes the note to
+the attempt's `reject.md`, and moves to `review.rework_pending`.
+
 ## Decisions where the ADR is silent
 
+- The verification digest excludes the `human` and `integration` verdicts because both are
+  written after verification, at merge; otherwise the recorded digest could never match
+  again.
+- `merge` resumes from `review.integrating` and `review.ready_to_merge`: a command that ran
+  out of integration runs leaves the task there, and the next `merge` continues instead of
+  asking for a new approval.
+- `list` and `show` never use the network; only `merge` checks a moved branch.
+- A reject note that is empty after trimming is a usage error.
+- The gate's verdict and reason paths use the attempt id (`<task>-<n>`) as the run
+  directory, as the gate's own tests and verdict example do; the wrapper's `runs/` and
+  `attempts/` records still use the numeric attempt.
 - The remote is always a parameter, never the literal `origin`: the caller passes
   `[repository] remote`.
 - A checkout that exists and is not a linked worktree is an error, unless it is an empty
@@ -295,4 +342,5 @@ OS user, so that is not isolation.
 
 ## Not here yet
 
-The scheduling loop, merge, reject, the arc TUI, and the gate's subcommands.
+The scheduling loop, `radian arc run`, and the arc TUI. The gate stages `mutation`, `review`
+and `ci` are refused until they are built.

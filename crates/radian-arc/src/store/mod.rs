@@ -935,6 +935,9 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             if last.verified_sha != current.verified_sha {
                 touched.push("verified_sha");
             }
+            if last.verdict_set_digest != current.verdict_set_digest {
+                touched.push("verdict_set_digest");
+            }
         }
     }
     Ok(touched)

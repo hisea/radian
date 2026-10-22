@@ -23,11 +23,16 @@ pub use crate::store::attempt_ops::FAILURE_CLASSES;
 /// How often the monitor looks at the child and its jsonl stream.
 const POLL: Duration = Duration::from_millis(100);
 
-/// What one `start` did: the reconcile results it applied first, then its own attempt.
+/// What one `start` did: the reconcile results it applied first, then its own attempt, then
+/// the verification of a pushed attempt when the task reached `review.verifying`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Started {
     pub reconciled: Vec<Applied>,
     pub applied: Applied,
+    /// The verification that followed the attempt. `None` when the task did not reach
+    /// `review.verifying`; the inner error is a refusal that left the task there (a moved
+    /// branch, a stage this build does not run yet).
+    pub verification: Option<Result<crate::review::Verified, Error>>,
 }
 
 /// What one `cancel` did.
@@ -140,9 +145,18 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
         signal,
         status.code(),
     )?;
+    // A pushed attempt continues into the gate in the same process (ADR 0048 decision 6):
+    // one `start` takes the task from `todo.ready` to `review.awaiting_human` or
+    // `review.rework_pending`. A refused verification leaves the task in `review.verifying`
+    // and is reported after the attempt's own line.
+    let verification = (applied.ignored.is_none()
+        && applied.state == model::TaskState::Review.as_str()
+        && applied.phase == "verifying")
+        .then(|| crate::review::verify(store, task_id));
     Ok(Started {
         reconciled,
         applied,
+        verification,
     })
 }
 
@@ -436,5 +450,8 @@ pub fn lines(started: &Started) -> Vec<String> {
         .map(|applied| format!("reconciled: {}", applied.line()))
         .collect();
     lines.push(started.applied.line());
+    if let Some(Ok(verified)) = &started.verification {
+        lines.push(verified.line());
+    }
     lines
 }

@@ -265,6 +265,9 @@ pub struct TaskFile {
     pub base_sha: Option<String>,
     pub head_sha: Option<String>,
     pub verified_sha: Option<String>,
+    /// The digest of the verdict set that made the task `review.awaiting_human`
+    /// (ADR 0048 decision 11). A merge must recompute the same digest.
+    pub verdict_set_digest: Option<String>,
     /// An absolute UTC time, `YYYY-MM-DDTHH:MM:SSZ`.
     pub retry_at: Option<String>,
     /// The brief.
@@ -305,6 +308,7 @@ impl TaskFile {
             base_sha: None,
             head_sha: None,
             verified_sha: None,
+            verdict_set_digest: None,
             retry_at: None,
             body: brief_body(brief),
         }
@@ -355,6 +359,12 @@ impl TaskFile {
         }
         if let Some(sha) = &self.verified_sha {
             out.push_str(&format!("verified_sha: {}\n", frontmatter::scalar(sha)));
+        }
+        if let Some(digest) = &self.verdict_set_digest {
+            out.push_str(&format!(
+                "verdict_set_digest: {}\n",
+                frontmatter::scalar(digest)
+            ));
         }
         if let Some(retry_at) = &self.retry_at {
             out.push_str(&format!("retry_at: {}\n", frontmatter::scalar(retry_at)));
@@ -425,6 +435,7 @@ impl TaskFile {
         let base_sha = fields.optional_string("base_sha")?;
         let head_sha = fields.optional_string("head_sha")?;
         let verified_sha = fields.optional_string("verified_sha")?;
+        let verdict_set_digest = fields.optional_string("verdict_set_digest")?;
         let retry_at = fields.optional_string("retry_at")?;
         if let Some(retry_at) = &retry_at
             && !valid_utc(retry_at)
@@ -456,6 +467,7 @@ impl TaskFile {
             base_sha,
             head_sha,
             verified_sha,
+            verdict_set_digest,
             retry_at,
             body: document.body,
         })
@@ -640,6 +652,7 @@ mod tests {
             base_sha: Some("a".repeat(40)),
             head_sha: Some("b".repeat(40)),
             verified_sha: Some("c".repeat(40)),
+            verdict_set_digest: Some("d".repeat(64)),
             retry_at: Some("2026-10-22T10:00:00Z".to_owned()),
             body: brief_body("do it"),
         }

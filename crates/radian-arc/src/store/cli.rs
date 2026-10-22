@@ -23,12 +23,14 @@ pub const SUBCOMMANDS: &[&str] = &[
     "start",
     "cancel",
     "reset-budget",
+    "merge",
+    "reject",
     "mcp",
 ];
 
 /// The subcommands ADR 0048 names that this build does not have. `work` is not here: it
 /// exists as the hidden wrapper a scheduling loop runs, and a person does not run it.
-pub const NOT_BUILT: &[&str] = &["merge", "reject", "run"];
+pub const NOT_BUILT: &[&str] = &["run"];
 
 /// One `radian arc` invocation, without clap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +66,10 @@ pub enum Command {
     Cancel { task: String },
     /// `radian arc reset-budget <id>`: a task or a plan.
     ResetBudget { id: String },
+    /// `radian arc merge <task>`: the owner's approval and the merge into main.
+    Merge { task: String },
+    /// `radian arc reject <task> --note <text>`: send a task back to rework.
+    Reject { task: String, note: String },
     /// `radian arc mcp`: the lead's MCP server on standard input and output.
     Mcp,
 }
@@ -92,6 +98,8 @@ pub fn run(command: Option<&Command>) -> u8 {
         Some(Command::Start { task }) => start(task),
         Some(Command::Cancel { task }) => cancel(task),
         Some(Command::ResetBudget { id }) => reset_budget(id),
+        Some(Command::Merge { task }) => merge(task),
+        Some(Command::Reject { task, note }) => reject(task, note),
         Some(Command::Mcp) => mcp(),
     };
     match result {
@@ -135,7 +143,8 @@ fn bare() -> Result<u8, Error> {
         "in this build: `radian arc init`, `radian arc add plan|task`, `radian arc list`, \
          `radian arc show`, `radian arc adopt`, `radian arc confirm`, `radian arc auto`, \
          `radian arc pause`, `radian arc start`, `radian arc cancel`, \
-         `radian arc reset-budget`, `radian arc mcp`\n{}",
+         `radian arc reset-budget`, `radian arc merge`, `radian arc reject`, \
+         `radian arc mcp`\n{}",
         arc_dir_line(&store)
     ));
     let code = emit(out);
@@ -395,9 +404,17 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
             );
             field(
                 &mut out,
+                "verdict_set_digest",
+                &optional_text(item.verdict_set_digest.as_deref()),
+            );
+            field(
+                &mut out,
                 "retry_at",
                 &optional_text(item.retry_at.as_deref()),
             );
+            if let Some(reason) = crate::review::rework_reason(&store, item) {
+                field(&mut out, "rework_reason", &reason);
+            }
             field(
                 &mut out,
                 "changed outside arc",
@@ -462,6 +479,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "base_sha": item.base_sha,
         "head_sha": item.head_sha,
         "verified_sha": item.verified_sha,
+        "verdict_set_digest": item.verdict_set_digest,
         "retry_at": item.retry_at,
         "changed_outside_arc": task.changed_outside_arc,
     });
@@ -529,7 +547,8 @@ fn pause(plan: &str) -> Result<String, Error> {
     Ok(format!("{plan} auto off\n"))
 }
 
-/// `radian arc start <task>`: claim the task, run one attempt, apply the result.
+/// `radian arc start <task>`: claim the task, run one attempt, apply the result, and
+/// continue into the gate when the attempt was pushed.
 fn start(task: &str) -> Result<u8, Error> {
     let store = open()?;
     let started = crate::attempt::start(&store, task)?;
@@ -537,6 +556,12 @@ fn start(task: &str) -> Result<u8, Error> {
     let code = emit(text);
     if code != Exit::Ok.code() {
         return Ok(code);
+    }
+    // The attempt's own line is printed even when verification refuses; the refusal follows
+    // on stderr with its own exit code, and the task is left in `review.verifying`.
+    if let Some(Err(error)) = &started.verification {
+        eprintln!("radian arc: {}", error.message());
+        return Ok(error.exit().code());
     }
     Ok(if started.applied.left_doing() {
         Exit::Ok.code()
@@ -558,6 +583,24 @@ fn reset_budget(id: &str) -> Result<u8, Error> {
     let store = open()?;
     let reset = super::attempt_ops::reset_budget(&store, id)?;
     Ok(emit(format!("{id}: {} task(s) ready\n", reset.tasks.len())))
+}
+
+/// `radian arc merge <task>`: the owner's approval, integration, and the push to main.
+fn merge(task: &str) -> Result<u8, Error> {
+    let store = open()?;
+    let merged = crate::review::merge(&store, task)?;
+    let mut text = format!("{}\n", merged.line());
+    if let Some(warning) = &merged.warning {
+        text.push_str(&format!("warning: {warning}\n"));
+    }
+    Ok(emit(text))
+}
+
+/// `radian arc reject <task> --note <text>`: the owner's note, and back to rework.
+fn reject(task: &str, note: &str) -> Result<u8, Error> {
+    let store = open()?;
+    let rejected = crate::review::reject(&store, task, note)?;
+    Ok(emit(format!("{}\n", rejected.line())))
 }
 
 /// `radian arc mcp`: the lead's MCP server, until its client closes the connection. Without
@@ -583,7 +626,16 @@ pub fn list_json(store: &Store, plan: Option<&str>) -> Result<serde_json::Value,
 pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
     Ok(match store.show(id)? {
         Item::Plan(view) => plan_json(&view, true),
-        Item::Task(task) => task_json(&task, true),
+        Item::Task(task) => {
+            let mut value = task_json(&task, true);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "rework_reason".to_owned(),
+                    json!(crate::review::rework_reason(store, &task.item)),
+                );
+            }
+            value
+        }
     })
 }
 

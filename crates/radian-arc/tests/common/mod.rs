@@ -73,6 +73,31 @@ impl TestRepo {
         git(&self.repo, args)
     }
 
+    /// Runs one git command in another directory with the test's identity.
+    pub fn git_in(&self, dir: &Path, args: &[&str]) -> String {
+        git(dir, args)
+    }
+
+    /// The sha `origin` has for `refname`, read over the wire.
+    pub fn ls_remote(&self, refname: &str) -> Option<String> {
+        self.git(&["ls-remote", "origin", refname])
+            .split_whitespace()
+            .next()
+            .map(str::to_owned)
+    }
+
+    /// Whether `ancestor` is an ancestor of `descendant`, without asserting success (the
+    /// command's exit code is the answer).
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
+        Command::new("git")
+            .current_dir(&self.repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            .status()
+            .expect("git runs")
+            .success()
+    }
+
     pub fn rev(&self, revision: &str) -> String {
         self.git(&["rev-parse", revision])
     }
@@ -116,6 +141,13 @@ impl TestRepo {
             "origin",
             path(&self.origin.with_extension("gone")),
         ]);
+    }
+
+    /// A second clone of the bare remote, for a commit this clone has not fetched or pushed.
+    pub fn second_clone(&self, name: &str) -> PathBuf {
+        let dir = self.repo.with_file_name(name);
+        run(None, &["clone", path(&self.origin), path(&dir)]);
+        dir
     }
 }
 
@@ -622,6 +654,7 @@ fn write_hook(path: &Path, marker: &Path) {
     }
 }
 
+#[derive(Debug)]
 pub struct Run {
     pub code: i32,
     pub stdout: String,

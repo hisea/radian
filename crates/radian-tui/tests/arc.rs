@@ -200,6 +200,8 @@ fn without_setup_the_subcommands_name_init_and_exit_three() {
         vec!["arc", "start", "0001-a"],
         vec!["arc", "cancel", "0001-a"],
         vec!["arc", "reset-budget", "0001-a"],
+        vec!["arc", "merge", "0001-a"],
+        vec!["arc", "reject", "0001-a", "--note", "no"],
         vec!["arc", "mcp"],
     ] {
         let run = run(&scratch, &args, "");
@@ -650,6 +652,67 @@ fn a_retry_time_is_printed_by_list_and_show() {
         "{}",
         show.out
     );
+}
+
+#[test]
+fn a_review_task_shows_its_rework_reason() {
+    let scratch = fixture("rework-reason");
+    init(&scratch);
+    let plan = add_plan(&scratch, "rework");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+    let store = radian_arc::store::Store::at(scratch.repo());
+    let attempt = format!("{task}-1");
+    store
+        .change_task(&task, |task| {
+            task.state = radian_arc::store::model::TaskState::Review;
+            task.phase = "rework_pending".to_owned();
+            task.attempt = 1;
+            task.attempt_id = Some(attempt.clone());
+            Ok(())
+        })
+        .expect("the task is in review");
+    let dir = scratch
+        .repo()
+        .join(".radian/arc/runs")
+        .join(&task)
+        .join("attempts")
+        .join(&attempt);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("reject.md"), "not what the plan asked for\n").unwrap();
+
+    let shown = run(&scratch, &["arc", "show", &task], "");
+    assert_eq!(shown.code, Some(0), "{shown:?}");
+    assert!(
+        shown
+            .out
+            .contains("rework_reason: not what the plan asked for"),
+        "{}",
+        shown.out
+    );
+    let json = run(&scratch, &["arc", "show", &task, "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("show --json parses");
+    assert_eq!(value["rework_reason"], "not what the plan asked for");
+    assert_eq!(value["phase"], "rework_pending");
+}
+
+#[test]
+fn merge_and_reject_refuse_a_task_outside_review_and_a_missing_note() {
+    let scratch = fixture("merge-refuse");
+    init(&scratch);
+    let plan = add_plan(&scratch, "refuse");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+
+    let merged = run(&scratch, &["arc", "merge", &task], "");
+    assert_eq!(merged.code, Some(3), "{merged:?}");
+    assert!(merged.err.contains("awaiting_human"), "{merged:?}");
+
+    let rejected = run(&scratch, &["arc", "reject", &task, "--note", "no"], "");
+    assert_eq!(rejected.code, Some(3), "{rejected:?}");
+    assert!(rejected.err.contains("awaiting_human"), "{rejected:?}");
+
+    // `--note` is required: clap refuses the call before arc sees it.
+    let no_note = run(&scratch, &["arc", "reject", &task], "");
+    assert_eq!(no_note.code, Some(2), "{no_note:?}");
 }
 
 #[test]

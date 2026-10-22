@@ -555,6 +555,24 @@ enum ArcCommand {
         id: String,
     },
 
+    /// Approve a verified task, integrate it, and push the result to the remote main. A main
+    /// that moved makes the command integrate again.
+    Merge {
+        /// The task id. It must be `review.awaiting_human`.
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+
+    /// Refuse a task in `review.awaiting_human` with a note, and send it back to rework.
+    Reject {
+        /// The task id. It must be `review.awaiting_human`.
+        #[arg(value_name = "TASK")]
+        task: String,
+        /// Why the task is refused. `show` prints it as the rework reason.
+        #[arg(long, value_name = "TEXT")]
+        note: String,
+    },
+
     /// Serve the lead's MCP tools over standard input and output. A lead registers this
     /// command; a person does not run it.
     Mcp,
@@ -638,6 +656,8 @@ impl ArcCommand {
             ArcCommand::Start { task } => ArcRun::Start { task },
             ArcCommand::Cancel { task } => ArcRun::Cancel { task },
             ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
+            ArcCommand::Merge { task } => ArcRun::Merge { task },
+            ArcCommand::Reject { task, note } => ArcRun::Reject { task, note },
             ArcCommand::Mcp => ArcRun::Mcp,
             // `work` is the trusted wrapper, not a store operation: `run_arc` dispatches it
             // before this conversion.
@@ -2340,6 +2360,7 @@ mod tests {
             base_sha: Some("a".repeat(40)),
             head_sha: Some("b".repeat(40)),
             verified_sha: Some("c".repeat(40)),
+            verdict_set_digest: Some("d".repeat(64)),
             retry_at: Some("2026-01-01T00:00:00Z".to_owned()),
             body: String::new(),
         };

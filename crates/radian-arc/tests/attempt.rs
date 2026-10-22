@@ -500,10 +500,11 @@ fn kill(pid: u32, signal: &str) {
     let _ = status;
 }
 
-/// The owner's path: `radian arc start` claims, runs the wrapper, and applies a completed,
-/// pushed attempt. The start process waits until the attempt ends and prints its result.
+/// The owner's path: `radian arc start` claims, runs the wrapper, applies a completed,
+/// pushed attempt, and continues into the gate. The start process waits until the attempt
+/// ends and prints the attempt's line and the verification's line.
 #[test]
-fn start_runs_an_attempt_to_review_verifying() {
+fn start_runs_an_attempt_through_verification_to_awaiting_human() {
     let repo = Repo::new("start-ok");
     Store::init(&repo.clone, false).expect("arc init");
     let store = Store::open(&repo.clone).expect("open");
@@ -520,19 +521,52 @@ fn start_runs_an_attempt_to_review_verifying() {
 
     let run = repo.radian(&["arc", "start", task]);
     assert_eq!(run.code, 0, "start failed: {}", run.stderr);
-    let last = run.stdout.lines().last().expect("a result line");
-    assert!(last.contains("completed -> review.verifying"), "{last}");
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("completed -> review.verifying")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("verify -> review.awaiting_human")),
+        "{lines:?}"
+    );
     let stored = store.load_task(task).expect("the task reads").item;
     assert_eq!(
         (stored.state.as_str(), stored.phase.as_str()),
-        ("review", "verifying")
+        ("review", "awaiting_human")
     );
     assert!(stored.head_sha.is_some());
     assert_ne!(stored.head_sha, stored.base_sha, "the worker committed");
     assert_eq!(
+        stored.verified_sha, stored.head_sha,
+        "the gate verified head"
+    );
+    assert!(
+        stored
+            .verdict_set_digest
+            .as_deref()
+            .is_some_and(|digest| digest.len() == 64),
+        "the task records the verdict set digest: {stored:?}"
+    );
+    assert_eq!(
         repo.remote_branch(task).as_deref(),
         stored.head_sha.as_deref(),
         "the branch was pushed"
+    );
+    assert!(
+        store
+            .root()
+            .join("runs")
+            .join(task)
+            .join("attempts")
+            .join(format!("{task}-1"))
+            .join("verdicts/commands.json")
+            .is_file(),
+        "the commands verdict is in the attempt's directory"
     );
 }
 
