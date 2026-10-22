@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use common::*;
 use radian_arc::gate::{Stage, Verdict, effective_stages, required_passed, verdict_set_digest};
 use radian_arc::review;
-use radian_arc::store::attempt_ops::{self, Finish};
+use radian_arc::store::attempt_ops::{self, Class, Finish};
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Exit, Store, plan_ops};
 use serde_json::Value;
@@ -485,6 +485,217 @@ fn a_verification_merge_conflict_makes_rework_pending_with_the_path() {
             .as_deref(),
         Some(head.as_str()),
         "the task branch did not move"
+    );
+}
+
+// ---- reverify -------------------------------------------------------------------------
+
+/// The gate command was broken, the owner fixes it, and `reverify` re-runs the gate for the
+/// same commit: a new attempt without a worker, a pass to `review.awaiting_human`, and no
+/// retry used. Mutation: count the reverify attempt toward `max_attempts` and the next
+/// failure is `failed.exhausted` instead of a retry.
+#[test]
+fn reverify_reruns_the_gate_without_a_worker_and_does_not_use_an_attempt() {
+    let fixture = Fixture::new("verify-reverify");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    fixture.commands(&["false"]);
+    let first = fixture.verifying_with(&head);
+    assert_eq!(first.phase, "rework_pending", "{first:?}");
+    assert_eq!(fixture.attempt_label(), format!("{}-1", fixture.task));
+
+    // The gate command was wrong, not the commit: fix it and verify the same commit again.
+    fixture.tune("commands = [\"false\"]", "commands = [\"true\"]");
+    let reverified = review::reverify(&fixture.store, &fixture.task).expect("reverify");
+    let new_label = format!("{}-2", fixture.task);
+    assert_eq!(reverified.attempt, 2);
+    assert_eq!(reverified.attempt_id, new_label);
+    let verified = reverified
+        .verification
+        .expect("the verification runs after the claim");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    assert_eq!(verified.attempt_id, new_label);
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.attempt, 2);
+    assert_eq!(stored.attempt_id.as_deref(), Some(new_label.as_str()));
+    assert_eq!(
+        stored.head_sha.as_deref(),
+        Some(head.as_str()),
+        "the commit does not change"
+    );
+    assert_eq!(stored.verified_sha.as_deref(), Some(head.as_str()));
+    assert!(stored.verdict_set_digest.is_some());
+    assert_eq!(
+        stored.auto_rework, 0,
+        "a reverify is not an automatic rework"
+    );
+
+    // No worker ran: the new attempt has an attempt result but no result stream.
+    let run = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(&new_label);
+    assert!(
+        !run.join("result.jsonl").exists(),
+        "a reverify attempt runs no worker"
+    );
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(run.join("attempt_result.json")).expect("the attempt result"),
+    )
+    .expect("the attempt result parses");
+    assert_eq!(record["class"], "reverify");
+    assert_eq!(record["cost_usd"], 0.0, "a reverify costs nothing");
+
+    // The new attempt's verdict is its own; the old attempt's failing verdict is untouched.
+    let new = fixture.verdict(&new_label, Stage::Commands);
+    assert!(new.is_pass(), "{:?}", new.reason);
+    assert_eq!(new.sha, head);
+    let old = fixture.verdict(&fixture.attempt_label(), Stage::Commands);
+    assert!(!old.is_pass(), "the old verdict is never rewritten");
+
+    // `max_attempts` (3) is not used up by the reverify attempt: the next worker failure is
+    // attempt 3 but counts as the second attempt, so it retries.
+    plan_ops::add_rework(&fixture.store, &fixture.task, "try again").expect("a rework brief");
+    let claim = attempt_ops::claim(&fixture.store, &fixture.task).expect("the next attempt");
+    assert_eq!(claim.attempt, 3);
+    let finish = Finish {
+        attempt_id: claim.attempt_id.clone(),
+        token: claim.token.clone(),
+        exit_code: 1,
+        outcome: "failed".to_owned(),
+        base_sha: Some(fixture.base.clone()),
+        head_sha: None,
+        pushed: false,
+        failure: None,
+    };
+    let applied = attempt_ops::apply(
+        &fixture.store,
+        &fixture.task,
+        3,
+        Some(&finish),
+        None,
+        Some(1),
+    )
+    .expect("the failed attempt applies");
+    assert_eq!(applied.class, Some(Class::Model));
+    assert_eq!(
+        (applied.state.as_str(), applied.phase.as_str()),
+        ("todo", "retry_wait"),
+        "the reverify attempt did not consume a retry"
+    );
+}
+
+/// A reject note is the owner's decision about the work, not a wrong gate: `reverify` refuses
+/// it and claims nothing. Mutation: accept a reject-note task and this test sees attempt 2.
+#[test]
+fn reverify_refuses_a_reject_note() {
+    let fixture = Fixture::new("verify-reverify-reject");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    review::reject(&fixture.store, &fixture.task, "not what the plan asked for").expect("reject");
+
+    let error =
+        review::reverify(&fixture.store, &fixture.task).expect_err("a reject note is refused");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains("rejected"), "{error:?}");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.attempt, 1, "a refusal claims nothing");
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "rework_pending")
+    );
+}
+
+/// A failed delivery check is not a verification stage: `reverify` refuses it.
+#[test]
+fn reverify_refuses_a_delivery_failure() {
+    let fixture = Fixture::new("verify-reverify-delivery");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let claim = attempt_ops::claim(&fixture.store, &fixture.task).expect("the first claim");
+    let finish = Finish {
+        attempt_id: claim.attempt_id.clone(),
+        token: claim.token.clone(),
+        exit_code: 1,
+        outcome: "completed".to_owned(),
+        base_sha: Some(fixture.base.clone()),
+        head_sha: Some(head),
+        pushed: false,
+        failure: Some("uncommitted or untracked files: dirty.txt".to_owned()),
+    };
+    attempt_ops::apply(
+        &fixture.store,
+        &fixture.task,
+        claim.attempt,
+        Some(&finish),
+        None,
+        Some(1),
+    )
+    .expect("the delivery failure applies");
+    assert_state(&fixture, ("review", "rework_pending"));
+
+    let error =
+        review::reverify(&fixture.store, &fixture.task).expect_err("a delivery failure is refused");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains("delivery"), "{error:?}");
+    assert_eq!(
+        fixture.store.load_task(&fixture.task).unwrap().item.attempt,
+        1
+    );
+}
+
+/// The remote `work/<task>` moved after the verdict: the claim happens, verification refuses
+/// with the moved-branch reason, and the task stays in `review.verifying` (as verification
+/// leaves it).
+#[test]
+fn reverify_refuses_a_moved_branch() {
+    let fixture = Fixture::new("verify-reverify-moved");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    let later = fixture.repo.commit_on(
+        &format!("later-{}", fixture.task),
+        &head,
+        "later.txt",
+        "later\n",
+    );
+    fixture.repo.git(&[
+        "push",
+        "origin",
+        &format!("{later}:refs/heads/work/{}", fixture.task),
+    ]);
+
+    let reverified = review::reverify(&fixture.store, &fixture.task).expect("the claim runs");
+    let error = reverified
+        .verification
+        .expect_err("the moved branch is refused");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains(&later), "{error:?}");
+    assert_eq!(reverified.attempt, 2);
+    assert_state(&fixture, ("review", "verifying"));
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        stored.head_sha.as_deref(),
+        Some(head.as_str()),
+        "the task's commit does not change"
+    );
+    let reason = review::rework_reason(&fixture.store, &stored).expect("the moved-branch reason");
+    assert!(reason.contains(&later), "{reason}");
+}
+
+/// A task that never reached review is refused and nothing is claimed.
+#[test]
+fn reverify_refuses_a_task_that_never_reached_review() {
+    let fixture = Fixture::new("verify-reverify-todo");
+    let error =
+        review::reverify(&fixture.store, &fixture.task).expect_err("a todo task is refused");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains("todo.ready"), "{error:?}");
+    assert_state(&fixture, ("todo", "ready"));
+    assert_eq!(
+        fixture.store.load_task(&fixture.task).unwrap().item.attempt,
+        0
     );
 }
 

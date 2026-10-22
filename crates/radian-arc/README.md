@@ -5,15 +5,16 @@ not a separate program. This crate is its control plane, in these modules:
 
 - `store` — `<repository>/.radian/arc/`: `config.toml`, plans, tasks, the ledger, the locks
   and the transactions that change them, behind `radian arc init`, `add`, `list`, `show`,
-  `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, `reset-budget`, `merge`, `reject`
-  and `run`.
+  `adopt`, `confirm`, `auto`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`,
+  `reject` and `run`.
 - `attempt` — one attempt's life: the claim, the wrapper child, the stall and wall timers,
   the applied result, cancel, and the reconcile step.
 - `run` — `radian arc run`, the scheduling loop: reconcile, release retries, verify, start
   what the auto levels allow, and merge at auto level `merge`.
 - `gate` — a fixed sequence of stages against the verification candidate: each stage's separate
   checkout, the `commands` stage, verdicts and their digest, and the integration candidate.
-- `review` — verification of a pushed attempt, the owner's approval and merge, and reject.
+- `review` — verification of a pushed attempt, the owner's worker-less `reverify`, the
+  owner's approval and merge, and reject.
 - `work` — `radian arc work`, the trusted wrapper around one worker attempt. It is internal:
   arc runs it, a person does not.
 
@@ -115,9 +116,10 @@ the attempt record, waits for its `AttemptFinished`, and leaves a task that neve
 wrapper or `start` process alone, and turns a dead attempt without a result into an
 `infrastructure` retry.
 
-`store::attempt_ops` holds the store side (`claim`, `apply`, `release_retries`,
-`record_auto_rework`, `reset_budget`) and the two closed lists the manual's drift test reads:
-`FAILURE_CLASSES` and the backoff constants (10 s, doubling, capped at 5 minutes). Cost is the
+`store::attempt_ops` holds the store side (`claim`, `claim_reverify`, `apply`, `release_retries`,
+`record_auto_rework`, `reset_budget`), the closed `FAILURE_CLASSES` list the manual's drift test
+reads, `REVERIFY_CLASS` (the worker-less attempt's class), and the backoff constants (10 s,
+doubling, capped at 5 minutes). Cost is the
 `Result.cost` delta against the previous attempt (ADR 0044), added to the task's `cost_usd`; a
 reached task or plan budget pauses the task at `todo.paused_budget` instead of retrying, and a
 plan budget also sets the plan's `auto` to `off`. `record_auto_rework` counts a stage or
@@ -355,6 +357,13 @@ without the `human` and `integration` verdicts, which are written later.
 `review::rework_reason` is what `show` prints for a task in `review.verifying` or
 `review.rework_pending`: the owner's reject note (`reject.md`), the last verify/merge reason
 (`review.json`), or the automatic-rework pause (`paused.json`).
+
+`radian arc reverify <task>` (`review::reverify`) claims a new attempt without a worker
+(`attempt_ops::claim_reverify`) and calls the same `verify`: the attempt number goes up,
+`head_sha` stays, the attempt result's class is `REVERIFY_CLASS`, and no `result.jsonl` is
+written. It applies when the task is `review.rework_pending` or `review.awaiting_human` and its
+rework reason is a verification stage; a reject note and a delivery failure are refused. The
+reverify attempt is left out of `max_attempts`, costs nothing, and is not an automatic rework.
 
 ## Merge and reject
 

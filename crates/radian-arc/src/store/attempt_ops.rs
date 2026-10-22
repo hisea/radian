@@ -29,6 +29,9 @@ pub const START_FILE: &str = "start.json";
 pub const SIGNAL_FILE: &str = "signal.json";
 /// arc's record of the applied result: class, cost, and the state it wrote.
 pub const ATTEMPT_RESULT_FILE: &str = "attempt_result.json";
+/// The class a worker-less `radian arc reverify` attempt records (ADR 0048 decision 11). It is
+/// not a failure class: the attempt ran no worker and failed nothing.
+pub const REVERIFY_CLASS: &str = "reverify";
 /// The record that the plan paused because this task used its automatic reworks.
 pub const PAUSED_FILE: &str = "paused.json";
 
@@ -112,6 +115,14 @@ pub struct Claim {
     pub allow_noop: bool,
     /// The task body: the brief and every rework section.
     pub brief: String,
+}
+
+/// What one worker-less `radian arc reverify` claim created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReverifyClaim {
+    pub attempt: u32,
+    pub attempt_id: String,
+    pub token: String,
 }
 
 /// What one applied result did.
@@ -354,6 +365,189 @@ pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
     })
 }
 
+/// Claims a new attempt for `radian arc reverify` (ADR 0048 decision 11): no worker runs and
+/// nothing is pushed.
+///
+/// The task must be `review.rework_pending` or `review.awaiting_human`, and a rework reason
+/// must come from a verification stage: a reject note, a delivery failure and any other
+/// reason are refused (exit 3). The claim keeps `head_sha`, gives the attempt a new number,
+/// `attempt_id` and `token`, clears the old approval, and records an attempt result whose
+/// class is [`REVERIFY_CLASS`]. No `result.jsonl` is written: no worker ran.
+pub fn claim_reverify(store: &Store, task_id: &str) -> Result<ReverifyClaim, Error> {
+    let _lock = store.lock_state()?;
+    let loaded = store.load_task(task_id)?;
+    require_unchanged(task_id, loaded.changed_outside_arc)?;
+    let mut task = loaded.item;
+    if task.state != TaskState::Review
+        || !matches!(task.phase.as_str(), "rework_pending" | "awaiting_human")
+    {
+        return Err(Error::Refused(format!(
+            "task `{task_id}` is `{}.{}`; only a `review.rework_pending` or `review.awaiting_human` task is re-verified",
+            task.state.as_str(),
+            task.phase
+        )));
+    }
+    if task.attempt == 0 {
+        return Err(Error::Refused(format!(
+            "task `{task_id}` has no attempt to re-verify"
+        )));
+    }
+    if task.head_sha.as_deref().is_none_or(|sha| sha.is_empty()) {
+        return Err(Error::Refused(format!(
+            "task `{task_id}` has no `head_sha`"
+        )));
+    }
+    reverify_reason_allowed(store, &task)?;
+    let number = task.attempt + 1;
+    let token = random_token()?;
+    let attempt_id = format!("{task_id}-{number}");
+    task.attempt = number;
+    task.attempt_id = Some(attempt_id.clone());
+    task.token = Some(token.clone());
+    task.state = TaskState::Review;
+    task.phase = "verifying".to_owned();
+    // The new attempt's verdicts are its own: an old approval never carries over.
+    task.verified_sha = None;
+    task.verdict_set_digest = None;
+    task.retry_at = None;
+    let version = store.next_version(Kind::Task, task_id);
+    store.write_item(Kind::Task, task_id, &task.to_text(), version)?;
+    write_reverify_result(store, task_id, number, &attempt_id)?;
+    Ok(ReverifyClaim {
+        attempt: number,
+        attempt_id,
+        token,
+    })
+}
+
+/// Whether `radian arc reverify` may re-run the gate for `task`: its rework reason must be a
+/// failed verification stage. A reject note and a delivery failure are refused, and so is any
+/// other recorded reason; a task with no recorded reason is accepted (the decision's "if any").
+fn reverify_reason_allowed(store: &Store, task: &model::TaskFile) -> Result<(), Error> {
+    if task.phase == "awaiting_human" {
+        return Ok(());
+    }
+    let run = run_dir(store, &task.id, task.attempt);
+    if run.join(crate::review::REJECT_FILE).is_file() {
+        return Err(Error::Refused(format!(
+            "task `{}` was rejected with a note; `radian arc reverify` re-runs only a \
+             verification stage",
+            task.id
+        )));
+    }
+    if let Ok(text) = fs::read_to_string(run.join(crate::review::REVIEW_FILE))
+        && let Ok(value) = serde_json::from_str::<Value>(&text)
+    {
+        let action = value.get("action").and_then(Value::as_str);
+        let stage = value.get("stage").and_then(Value::as_str);
+        if action == Some("verify") && stage.is_some_and(is_verification_stage) {
+            return Ok(());
+        }
+        let reason = value
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("a gate reason");
+        return Err(Error::Refused(format!(
+            "task `{}` waits for rework from `{reason}`, which is not a verification stage",
+            task.id
+        )));
+    }
+    if run.join(PAUSED_FILE).is_file() {
+        return Err(Error::Refused(format!(
+            "task `{}` was paused by the automatic rework limit; `radian arc reverify` re-runs \
+             only a verification stage",
+            task.id
+        )));
+    }
+    if let Ok(text) = fs::read_to_string(run.join(ATTEMPT_RESULT_FILE))
+        && let Ok(value) = serde_json::from_str::<Value>(&text)
+        && value.get("class").and_then(Value::as_str) == Some(Class::Verification.as_str())
+    {
+        return Err(Error::Refused(format!(
+            "task `{}` failed its delivery check; `radian arc reverify` re-runs only a \
+             verification stage",
+            task.id
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `name` is a stage verification runs. `human` is the owner's approval and
+/// `integration` runs at merge; neither is a verification stage.
+fn is_verification_stage(name: &str) -> bool {
+    crate::gate::LISTED_STAGES
+        .iter()
+        .copied()
+        .find(|stage| stage.as_str() == name)
+        .is_some_and(|stage| stage != crate::gate::Stage::Human)
+}
+
+/// Writes the worker-less attempt's own result record: class [`REVERIFY_CLASS`], no cost, and
+/// the state the claim wrote. The next `apply` reads it to leave reverify attempts out of
+/// `max_attempts`.
+fn write_reverify_result(
+    store: &Store,
+    task: &str,
+    attempt: u32,
+    attempt_id: &str,
+) -> Result<(), Error> {
+    let record = json!({
+        "attempt_id": attempt_id,
+        "outcome": "reverify",
+        "class": REVERIFY_CLASS,
+        "reason": null,
+        "cost_usd": 0.0,
+        "session_cost_usd": null,
+        "state": "review",
+        "phase": "verifying",
+        "retry_at": null,
+        "applied_at": super::plan_ops::utc_now(),
+    });
+    let path = run_dir(store, task, attempt).join(ATTEMPT_RESULT_FILE);
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Failed(format!("{} has no directory", path.display())))?;
+    fs::create_dir_all(dir)
+        .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
+    let text = serde_json::to_string_pretty(&record)
+        .map_err(|error| Error::Failed(format!("cannot encode the attempt result: {error}")))?;
+    fs::write(&path, format!("{text}\n"))
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
+}
+
+/// The attempt number `max_attempts` counts: the stored attempt number minus the worker-less
+/// `reverify` attempts before it (ADR 0048 decision 11). A reverify attempt costs no worker
+/// and does not use up a retry, so it is invisible to the limit; for a task with no reverify
+/// attempt this is the attempt number itself, as before.
+fn counted_attempt(store: &Store, task: &str, attempt: u32) -> u32 {
+    attempt.saturating_sub(reverify_attempts(store, task))
+}
+
+/// How many `reverify` attempt results `task` has recorded so far. The current attempt's
+/// record is written after `apply` decides, so this counts only earlier attempts.
+fn reverify_attempts(store: &Store, task: &str) -> u32 {
+    let attempts = store.root().join("runs").join(task).join("attempts");
+    let Ok(entries) = fs::read_dir(attempts) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(entry.path().join(ATTEMPT_RESULT_FILE)) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if value.get("class").and_then(Value::as_str) == Some(REVERIFY_CLASS) {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// How many tasks are in `doing`.
 fn count_doing(store: &Store) -> Result<u64, Error> {
     let mut count = 0;
@@ -502,7 +696,7 @@ pub fn apply(
                     task.phase = "paused_budget".to_owned();
                     task.retry_at = None;
                     pause_plan = plan_reached;
-                } else if attempt < max_attempts {
+                } else if counted_attempt(store, task_id, attempt) < max_attempts {
                     task.state = TaskState::Todo;
                     task.phase = "retry_wait".to_owned();
                     let at = retry_at_after(attempt);

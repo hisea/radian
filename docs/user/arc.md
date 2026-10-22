@@ -7,7 +7,7 @@ description: Plan and task orchestration: setup, plans, tasks, the files arc kee
 arc is a plan and task orchestrator built into the same `radian` binary.
 It keeps a plan and its tasks as files in the repository, runs each task as a separate headless `radian` worker, and merges only what passes a fixed gate.
 
-This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
+This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and `run`.
 `radian arc run` is the scheduling loop; the arc terminal interface is **not built yet**, and a bare `radian arc` says so.
 
@@ -350,6 +350,52 @@ A task in `review.verifying` is checked against `verified_sha`, which is the pus
 `list` and `show` do not use the network: they do not check the remote and cannot see a branch that moved after the gate.
 `merge` checks the remote before it acts.
 
+## `radian arc reverify <TASK>`
+
+`reverify` re-runs the gate for a task's already pushed commit without running a worker.
+It is your action (there is no MCP tool for it), and it exists for a gate that was wrong: a missing build step, a flaky test, or a gate command fixed after the verdict was written.
+
+```text
+radian arc reverify <TASK>
+```
+
+| Argument | Value | What it does |
+|---|---|---|
+| `<TASK>` | `ID` | The task id. Required. It must be `review.rework_pending` or `review.awaiting_human`. |
+
+It applies only when the task's `rework_reason`, if there is one, comes from a verification stage (`commands`, `mutation`, `review`, or `ci`).
+A reject note, a failed delivery check, a failed integration, and every other state are refused with exit `3`.
+A plan paused by the automatic rework limit does not block `reverify` when the task's own reason is a failed verification stage.
+
+A reverify claims a new attempt without a worker:
+
+- `attempt` goes up by one, and `attempt_id` and `token` are new;
+- `head_sha` and `base_sha` stay the previous attempt's, and nothing is pushed;
+- the attempt result's class is `reverify`;
+- the task moves to `review.verifying` and is verified at once in the same command, as `start` does after a pushed attempt.
+
+The new attempt's verdicts are its own: an earlier attempt's verdict is not reused and no verdict is ever rewritten.
+The remote `work/<task>` must still equal `head_sha`; when it moved, `reverify` exits `3` with the moved-branch reason and the task stays in `review.verifying`, as verification does.
+
+A reverify attempt does not count toward `max_attempts`, costs nothing, and is not an automatic rework (`auto_rework` does not change).
+
+It prints the claim's line and then the verification's:
+
+```text
+<attempt id> reverify -> review.verifying
+<attempt id> verify -> <state>.<phase>
+```
+
+For example `0001-work-2 reverify -> review.verifying`, then `0001-work-2 verify -> review.awaiting_human`.
+A gate stage that fails again is a normal result: the task moves to `review.rework_pending`, the verification line carries the stage and its verdict, and `reverify` exits `0`.
+
+| Code | Meaning | When |
+|---|---|---|
+| `0` | success | The verification ran, whether it passed or a stage failed. |
+| `1` | an error | A git or file error. |
+| `3` | the state does not allow the operation | The task is in another state, its rework reason is not a verification stage, it has no `head_sha`, the branch moved, or a listed stage is not built in this build. |
+| `4` | a lock is held by another process | Another process holds `state.lock`. |
+
 ## `radian arc merge <TASK>`
 
 `merge` takes your approval, builds the integration candidate, pushes it to the remote main, and finishes the task.
@@ -665,6 +711,7 @@ A task leaves `doing` for `review.verifying` when a pushed attempt ends.
 | `review.ready_to_merge` | `done.merged` | Main is still the integration `base_sha`; the candidate was pushed to the remote main and contains `verified_sha`; the worktree is removed. |
 | `review.ready_to_merge` | `review.integrating` | Main moved after integration, or the push was rejected as non-fast-forward: integrate again. |
 | `review.awaiting_human` | `review.verifying` | The remote `work/<task>` is no longer `verified_sha`, or the verdict set no longer matches the recorded digest: every verdict and the approval of the old commit are invalid. |
+| `review.rework_pending`, `review.awaiting_human` | `review.verifying` | `radian arc reverify`: a new attempt is claimed without a worker; its verdicts are its own. |
 | `review.verifying` | `review.awaiting_human` (again) | `radian arc run` or `radian arc start` re-verifies a task a moved branch or a changed digest sent back. |
 | `review` (any phase) | `todo.ready` | The lead adds a rework brief (`add_rework`); the next claim starts the next attempt. |
 
@@ -689,6 +736,7 @@ The class is recorded in `runs/<task>/attempts/<attempt id>/attempt_result.json`
 | `stall` (arc sent SIGTERM) | `stall` | retry |
 | `wall_time` (arc sent SIGTERM) | `wall_time` | retry |
 | `cancelled` by `radian arc cancel` | `cancel` | `failed.cancelled` (never retries) |
+| `reverify` (no worker: `radian arc reverify`) | `reverify` | `review.verifying`, verified at once |
 
 A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 10 seconds for the first attempt, doubled for each later attempt, capped at 5 minutes.
 When `attempt` has reached the task's `max_attempts` (else `[limits] max_attempts`), the task goes to `failed.exhausted` instead.
@@ -702,6 +750,7 @@ A bad `worker.exec_args` entry no longer gets that far: `start`, `run` and `conf
 Cost is counted per attempt.
 `Result.cost` is the session total, so the attempt's cost is this attempt's session total minus the previous attempt's.
 The delta is added to the task's `cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
+A `reverify` attempt runs no worker and costs nothing: it adds nothing to `cost_usd`.
 
 When a retry is due and the budget is used up, the task goes to `todo.paused_budget` instead of `todo.retry_wait`:
 
