@@ -42,6 +42,18 @@
 - v1 要 desktop / iOS / web app：v0 冻结 identity、state、attempt、verification sha 四组字段并写
   `schema_version`；`run` 与 `serve` 共用状态机；UI 读 arc 存的 jsonl 流，不解析 attach。
 
+## 切片（ADR 0048 是规格）
+
+1. 包装器 `radian arc work`（Spike 0）：worktree、flock、attempt record、子 `radian exec`、检查、受控 push、`AttemptFinished`；内部 `radian exec --deny-read`。
+2. 存储：`init`、`add`、`list`、`show`、`adopt`；config.toml、plan/task 文件格式、ledger、两把锁、id 编号。
+3. gate 库：每个 stage 的独立 checkout、`commands` stage、verdict、`verdict_set_digest`、integration 候选。
+4. attempt 生命周期：起包装器、失败分类、退避重试、stall、预算、取消、reconcile。
+5. `start`、`merge`、`reject`、`cancel`、`reset-budget` 接到状态机。
+6. `run` 循环、`confirm`、`auto`、`pause`、plan 层、`radian arc mcp`。
+7. TUI（三个界面）。
+
+1–3 可并行；4 在 1+2 之后；5 在 3+4 之后；6 在 5 之后。
+
 ## 待决
 
 - brief 里 `mutations:` 的声明格式。

@@ -20,7 +20,8 @@ radian arc <subcommand>       run one CLI operation and exit
 ```
 
 - `radian arc` with no subcommand opens the TUI. A subcommand runs the CLI. This follows `radian` (TUI) and `radian exec` (headless).
-- The CLI subcommands are `add`, `list`, `show`, `start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `run`, `mcp`, and `work`.
+- The CLI subcommands are `init`, `add`, `list`, `show`, `adopt`, `start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `run`, `mcp`, and `work`.
+- Exit codes: 0 success; 1 error; 2 usage error; 3 the state does not allow the operation (this includes a file changed outside arc); 4 a lock is held by another process. `list` and `show` take `--json`.
 - `rad arc` is the same command through the `rad` alias.
 
 ### 2. Roles
@@ -44,12 +45,13 @@ arc has four objects.
 
 - A plan has `status` `draft` or `confirmed`. A plan is done when all its tasks are merged; `done` is not a stored status.
 - After a plan is confirmed, its request text can only get appended change records. The text is never rewritten, because rework briefs use it as context.
+- A confirmed plan gets no new tasks. To change a confirmed plan, the lead appends a change record (with any new tasks). The plan then returns to `draft` with `auto` `off`, and the owner confirms it again. Tasks that already started keep their state.
 - A task has a `plan` field and an `after` list. `after` can name tasks in the same plan or tasks that are already merged.
 - A plan has no branch. arc merges each task separately.
 
 ### 4. Identities
 
-- `task_id` is the task file name. It never changes.
+- `plan_id` and `task_id` have the form `NNNN-<slug>`, like ADR file names. The lead gives the slug: `[a-z0-9-]`, 1 to 48 characters. arc gives the number: the next free four-digit number, one sequence for plans and one for tasks. The id is the file name and never changes.
 - `session_id` equals `task_id`: one task has one worker session. A rework attempt resumes that session (`--resume`). It does not fork (ADR 0022).
 - `attempt_id` is `<task_id>-<n>`. Each attempt records its host, a random token, the worker process identity (pid and start time), its worktree, its branch, `base_sha`, `head_sha`, its start and end time, and its session id. arc refuses a result whose token does not match the current attempt.
 - When a session cannot continue (for example `Result.outcome = poisoned`), the task goes to `failed` with phase `irrecoverable`. A new task replaces it and names the old one in `supersedes`. The old session does not change.
@@ -67,6 +69,7 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
                                   approvals; verdict sets
   runs/<task>/attempts/<attempt>/ execution.json, result.jsonl, attempt_finished.json, stderr.log, verdicts
   attempts/<task>/<attempt>/      host-local attempt records (decision 7)
+  gates/<stage>/                  the separate checkout for each gate stage (decision 10)
   state.lock                      short lock for each state change
   runner.lock                     held for the life of one scheduling loop
   worktrees/<task>/               the worker workspace for each task (decision 15)
@@ -74,7 +77,7 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
 
 - A task file keeps its path for its whole life. Its `state` (`todo`, `doing`, `review`, `done`, `failed`) and its `phase` are front-matter fields. Phases: `todo` has `ready`, `blocked`, `retry_wait`, `paused_budget`; `doing` has `starting`, `running`, `reconciling`; `review` has `verifying`, `rework_pending`, `awaiting_human`, `integrating`, `ready_to_merge`; `done` has `merged`; `failed` has `exhausted`, `cancelled`, `irrecoverable`.
 - arc is the only writer. The lead changes plans and tasks only through the `radian arc mcp` tools. The owner changes them only through the arc TUI and CLI.
-- **Outside changes.** Each time arc writes a plan or task file, it records the file's `state_version` and content hash in the ledger. Before arc acts on a file, it compares the file with the ledger. When they differ, someone changed the file outside arc: arc does not act on that plan or task, and it shows it as changed outside arc until the owner resolves it. This finds mistakes and casual edits. It does not stop a lead that changes the ledger too (decision 11).
+- **Outside changes.** Each time arc writes a plan or task file, it records the file's `state_version` and content hash in the ledger. Before arc acts on a file, it compares the file with the ledger. When they differ, someone changed the file outside arc: arc does not act on that plan or task, and it shows it as changed outside arc until the owner resolves it. `radian arc adopt <id>` resolves it: arc records the current content as its own. `adopt` refuses (exit 3) when the outside change touched `state`, `phase`, an approval, or a verdict field. This finds mistakes and casual edits. It does not stop a lead that changes the ledger too (decision 11).
 - arc reads `config.toml`, plans, tasks, and the ledger only in the main checkout, never in a worktree.
 - Workers and gate stages do not read the backlog. A worker gets its brief as a copy on stdin. The wrapper adds every entry of `<repository>/.radian/arc/` except `worktrees/` to the worker's sandbox deny list.
 - Each state change is one transaction under `state.lock`: take the lock, check `state_version` and the hash, write a temporary file, fsync, rename on the same file system, fsync the parent directory, update the ledger the same way, release the lock. Git, ssh, and gate runs happen outside the lock.
@@ -96,7 +99,8 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
 | `review.verifying` | `review.rework_pending` | A `commands` or `mutation` stage failed. arc sends the result to the lead. |
 | `review.awaiting_human` | `review.integrating` | The owner merges (or the plan is at auto level `merge`) with the sha equal to `verified_sha` and the digest unchanged. |
 | `review.integrating` | `review.ready_to_merge` | The integration stage passed against the current main as `base_sha`. |
-| `review.ready_to_merge` | `done.merged` | Main is still `base_sha`, the fast-forward succeeds, and `origin/main` contains `head_sha`. |
+| `review.ready_to_merge` | `done.merged` | Main is still `base_sha`, main fast-forwards to `candidate_sha`, the push to `origin` succeeds, and `origin/main` contains `head_sha`. |
+| `review.awaiting_human` | `review.rework_pending` | The owner rejects the task with a note. |
 | `review.*` | `todo.ready` | The lead adds a rework brief. The attempt number goes up by one. |
 | any | `failed.*` | Retries or budget used up (`exhausted`), cancel (`cancelled`), or a session that cannot continue (`irrecoverable`). |
 
@@ -130,6 +134,7 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 ### 9. Failures, retries, stalls, and cancel
 
 - Failure classes are infrastructure, model, verification, and cancel. Only infrastructure and model failures retry, with exponential backoff from 10 seconds to 5 minutes, within `max_attempts`. A cancel does not retry. A verification failure goes to the lead for rework; arc never writes a brief.
+- Defaults: `max_attempts` 3, `stall_timeout` 15 minutes, `max_wall_time` 2 hours, `max_cost` not set (no limit), cancel grace period 10 seconds.
 - A stall is no new line on the jsonl stream for `stall_timeout`. arc sends SIGTERM. `max_wall_time` is an absolute limit on top of it. Both record a failure class.
 - A cancel applies to one attempt: SIGTERM, a grace period, then SIGKILL. arc waits for the wrapper to confirm the end. Without that confirmation the task goes to `reconciling`.
 - arc keeps no state in memory. After a restart it takes `runner.lock`, reads each attempt in `doing/` from its host-local record, and checks the token and the process identity.
@@ -141,12 +146,14 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 - `commands` runs only the fixed commands of the profile on a separate checkout of `verified_sha`. A brief cannot add a shell command.
 - `commands` and `mutation` are exclusive: one at a time, in separate trees, with no shared build state.
 - `review` is a read-only radian session. It is not the worker session.
-- `integration` merges `head_sha` onto the current main in a temporary tree and runs the key commands of the profile on the result. It records `base_sha` and `candidate_sha`.
-- The default profile is `commands` (required), then `human` (required). The radian repository profile is `commands` (required), `mutation` (required), `review`, then `human` (required).
+- `integration` merges `head_sha` onto the current main in a temporary tree and runs the key commands of the profile on the result. It records `base_sha` and `candidate_sha`. When main is still the task's `base_sha`, `candidate_sha` is `head_sha`. Otherwise it is a merge commit of `head_sha` onto main. arc never rebases a task branch, because a rebase changes the sha that the gate verified.
+- Each stage runs in its own checkout under `<repository>/.radian/arc/gates/<stage>/`.
+- The default profile is `commands` (required), then `human` (required). The radian repository profile is `commands` (required), `mutation`, `review`, then `human` (required).
 
 ### 11. Approval
 
 - The MCP tools for the lead are `add_plan`, `add_task`, `update_plan`, `add_rework`, `list`, and `show`. There is no MCP tool to confirm, start, merge, reject, change the auto level, or approve.
+- `reject <task> --note <text>` records the note in the task's run directory and moves the task to `review.rework_pending`. arc does not send it to the lead in v0: the lead reads it with the MCP `list` and `show` tools.
 - A merge binds to `verified_sha` and `verdict_set_digest`. A new review of the same sha changes the digest and makes an older approval invalid.
 - In v0 this is a process rule, not a security boundary: the lead and arc run as the same OS user, and the arc files are in the repository where the lead works. The lead can run the CLI from a shell or change the files. A real authorization boundary needs a separate identity and a separate store for arc. This ADR does not claim one.
 
@@ -173,7 +180,7 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 
 ### 14. v0 scope
 
-v0 runs on one host. Concurrency defaults to 1 task at a time. The host fields stay in the file format and are not used.
+v0 runs on one host. Concurrency defaults to 1 task at a time. The v0 gate stages are `commands`, `human`, and `integration`; `mutation`, `review`, and `ci` come later. The host fields stay in the file format and are not used.
 
 v0 does not have: a resident daemon; messages to a running worker (corrections go through rework); workers that read or write the backlog or hold the push credential; resume on a different host; more than one scheduling loop; a separate clone per task; automatic rework briefs written by arc; a gate language; load-based scheduling; worker kinds other than `radian exec`; plan branches or plan merges.
 
