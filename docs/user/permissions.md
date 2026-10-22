@@ -28,7 +28,12 @@ Use a workspace-relative path for everything the file tools do.
 Name a read-only root as an absolute path or with `~`, in either tier.
 Read-only roots are the cargo registry sources, every toolchain's sources, and each discovered skill's directory.
 Name any other absolute or `~` path only under `full`.
-The file tools never read the sandbox's deny set: credentials, sessions, memory, and trust stay out in both tiers.
+The file tools never read the sandbox's deny set, in either tier.
+The deny set is, under `$HOME`: `.ssh`, `.aws`, `.gnupg`, `.netrc`, `.npmrc`, `.config/gcloud`, `.docker/config.json`, `Library/Application Support/Google/Chrome`, `Library/Application Support/Firefox`, `Library/Safari`, and `Library/Cookies`.
+Under `~/.radian` (or `$RADIAN_HOME`) it is the sessions directory (or the one `--session-dir` names), `memory/`, `credentials/`, `trust/`, and `access/`.
+The check follows symbolic links, so a link that points into the deny set is refused too.
+A refused read says the path is in the sandbox's deny set.
+Under `full` the shell is not limited by the deny set; use `workspace` to keep it from the shell too.
 Writes stay in the workspace in every tier.
 
 Trust controls project resources.
