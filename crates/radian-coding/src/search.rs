@@ -24,7 +24,9 @@
 //! - the `.git` directory is pruned, not merely hidden;
 //! - `.radian-worktrees/` is pruned too: it can hold one git worktree per checkout, each a
 //!   full tree, so descending into it would return every file once per worktree (and search
-//!   other branches' contents). The rule is structural, not a `.gitignore` coincidence;
+//!   other branches' contents). `.radian/arc/worktrees/` is pruned for the same reason: arc
+//!   keeps one full worker checkout per task there (ADR 0048 decision 15). The rule is
+//!   structural, not a `.gitignore` coincidence;
 //! - symlinks are never followed: a symlinked file is not a match and a symlinked directory is
 //!   not descended, so a link pointing out of the workspace is never read;
 //! - dot-files other than `.git` are included: the model asked for a tree, not for hidden-file
@@ -51,6 +53,11 @@ pub(crate) const SKIPPED_DIR_NAMES: &[&str] = &[".git", RADIAN_WORKTREES];
 /// The workspace-local root of one-off git worktrees. The walk prunes it; a directory
 /// `read` omits the entry, so a listing is not cluttered by N full checkouts of the same tree.
 pub(crate) const RADIAN_WORKTREES: &str = ".radian-worktrees";
+
+/// arc's worker worktrees, relative to the workspace (ADR 0048 decision 15). One full
+/// checkout per task, so the walk prunes it by path, not by name: `.radian/` itself and
+/// everything else under it stay searchable.
+pub(crate) const ARC_WORKTREES: &str = ".radian/arc/worktrees";
 
 /// One regular file the walk found: its workspace-relative path and the open, read-only fd
 /// (`O_NOFOLLOW`; the entry was a regular file at `fstatat` time and the open refuses a link
@@ -126,10 +133,10 @@ fn walk_dir(
             continue;
         }
         let is_dir = entry.kind == EntryKind::Dir;
-        if is_dir && is_pruned(&entry.name) {
+        let entry_rel = rel.join(&entry.name);
+        if is_dir && (is_pruned(&entry.name) || is_arc_worktrees(&entry_rel)) {
             continue;
         }
-        let entry_rel = rel.join(&entry.name);
         if ignored(matchers, &entry_rel, is_dir) {
             continue;
         }
@@ -168,6 +175,12 @@ fn is_pruned(name: &OsStr) -> bool {
     SKIPPED_DIR_NAMES
         .iter()
         .any(|skip| name == OsStr::new(skip))
+}
+
+/// Whether `path` (relative to the workspace root) is arc's worker worktree root. Only a
+/// workspace walk has this path; a read-only root's walk starts at its own root.
+fn is_arc_worktrees(path: &Path) -> bool {
+    path == Path::new(ARC_WORKTREES)
 }
 
 /// Whether any matcher, deepest first, ignores `path` (a whitelist match stops the search
