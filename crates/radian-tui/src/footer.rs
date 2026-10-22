@@ -281,6 +281,28 @@ impl Footer {
             }),
         };
         let transparent = config.transparent.unwrap_or(false);
+        // An inline `command` (or `period`) in a row is not read: only
+        // `[tui.footer.items.<id>]` starts a command. Warn once per row item and do not mark
+        // the id as a command item through the inline table. When the items table sets
+        // `command` for the same id, that entry still marks it (a bare id takes the items
+        // table; an inline table is otherwise used as written).
+        for item in config
+            .rows
+            .iter()
+            .flat_map(|row| row.left.iter().chain(row.right.iter()))
+        {
+            if item
+                .params
+                .iter()
+                .any(|(key, _)| key == "command" || key == "period")
+            {
+                let id = &item.id;
+                warnings.push(format!(
+                    "tui.footer: item {id:?} sets `command` (or `period`) inline; inline \
+                     `command`/`period` is not read, move it to `[tui.footer.items.{id}]`"
+                ));
+            }
+        }
         // The ids configured as out-of-process `command` items (ADR 0027).
         // Such an id is not an unknown-id typo: until the background producer publishes a value
         // the item hides (never a raw id), and `{value}` is its one placeholder. Only an id no
@@ -290,14 +312,6 @@ impl Footer {
             .iter()
             .filter(|(id, item)| components::builtin(id).is_none() && is_command_item(item))
             .map(|(id, _)| id.clone())
-            .chain(
-                config
-                    .rows
-                    .iter()
-                    .flat_map(|row| row.left.iter().chain(row.right.iter()))
-                    .filter(|item| components::builtin(&item.id).is_none() && is_command_item(item))
-                    .map(|item| item.id.clone()),
-            )
             .collect();
         // The per-field `items` table, with an earlier version's usage ids canonicalized
         // (ADR 0027), so an old id written in `[tui.footer.items]` lands
