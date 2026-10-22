@@ -1,0 +1,149 @@
+//! `radian arc` with no subcommand: the arc TUI (ADR 0048 §1, §13).
+//!
+//! The view is read-only. This loop enters the terminal, draws one frame, reads one key at a
+//! time, re-reads the store every [`ARC_REFRESH`] seconds, and runs git (the remote main and a
+//! task's diff) on worker threads so a frame never waits on it. It holds no `runner.lock`:
+//! the header only reports whether another process does. `q` (or Ctrl-C) leaves through the
+//! same clean-exit path as `attach`.
+
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use radian_tui::arc::{ArcApp, ArcKey, render};
+
+use super::*;
+
+/// How often the view re-reads the store and the open task's journal.
+const ARC_REFRESH: Duration = Duration::from_secs(2);
+/// The input poll: a key, a resize or an idle tick, at the same granularity as the other
+/// full-screen views.
+const ARC_POLL: Duration = Duration::from_millis(100);
+
+/// One worker-thread reply.
+enum GitReply {
+    /// The remote main's short sha (`None` when the ref does not exist).
+    Main(Option<String>),
+    /// A task's diff.
+    Diff {
+        id: String,
+        attempt: u32,
+        result: Result<radian_arc::read::TaskDiff, String>,
+    },
+}
+
+/// `radian arc`: open the arc TUI. Without setup the refusal is one line on the normal screen
+/// (exit `3`); with it, the alternate screen is entered and restored on every exit path.
+pub(super) fn run_arc() -> ExitCode {
+    let dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("radian arc: cannot read the current directory: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let store = match radian_arc::store::Store::open(&dir) {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("radian arc: {}", error.message());
+            return ExitCode::from(error.exit().code());
+        }
+    };
+    let (mut guard, mut terminal) = match enter_terminal(false) {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("radian: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut app = ArcApp::open(store);
+    let (tx, rx) = mpsc::channel();
+    let mut main_pending = false;
+    let mut main_at = None;
+    let mut diff_pending: Option<(String, u32)> = None;
+    let mut refresh_at = Instant::now() + ARC_REFRESH;
+    let mut dirty = true;
+    loop {
+        // Replies from the git workers: a stale diff (another task or attempt) is dropped by
+        // the app.
+        while let Ok(reply) = rx.try_recv() {
+            match reply {
+                GitReply::Main(sha) => {
+                    app.apply_main(sha);
+                    main_pending = false;
+                    main_at = Some(Instant::now());
+                    dirty = true;
+                }
+                GitReply::Diff {
+                    id,
+                    attempt,
+                    result,
+                } => {
+                    diff_pending = None;
+                    if app.apply_diff(&id, attempt, result) {
+                        dirty = true;
+                    }
+                }
+            }
+        }
+        app.apply_pending_scroll();
+        if dirty {
+            if terminal
+                .draw(|frame| render::draw(frame, &mut app))
+                .is_err()
+            {
+                break;
+            }
+            dirty = false;
+        }
+        // The header's remote main: once at start, then every refresh. Never on the draw
+        // path.
+        if !main_pending && main_at.is_none_or(|at: Instant| at.elapsed() >= ARC_REFRESH) {
+            main_pending = true;
+            let store = app.store.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let sha = radian_arc::read::remote_main_short(&store).ok().flatten();
+                let _ = tx.send(GitReply::Main(sha));
+            });
+        }
+        // The diff tab's file list: one request at a time, off the UI thread.
+        if diff_pending.is_none()
+            && let Some((id, attempt)) = app.diff_request()
+        {
+            app.mark_diff_loading();
+            diff_pending = Some((id.clone(), attempt));
+            let store = app.store.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let result =
+                    radian_arc::read::task_diff(&store, &id, (attempt > 0).then_some(attempt))
+                        .map_err(|error| error.message());
+                let _ = tx.send(GitReply::Diff {
+                    id,
+                    attempt,
+                    result,
+                });
+            });
+            dirty = true;
+        }
+        let wait = ARC_POLL.min(refresh_at.saturating_duration_since(Instant::now()));
+        match read_input(wait) {
+            Input::Gone => break,
+            Input::Idle => {}
+            Input::Event(Event::Key(key)) => match app.on_key(&key) {
+                ArcKey::Quit => break,
+                ArcKey::Redraw => dirty = true,
+                ArcKey::Ignored => {}
+            },
+            Input::Event(Event::Resize(..)) => dirty = true,
+            Input::Event(_) => {}
+        }
+        if Instant::now() >= refresh_at {
+            app.refresh();
+            refresh_at = Instant::now() + ARC_REFRESH;
+            dirty = true;
+        }
+    }
+    guard.restore();
+    ExitCode::SUCCESS
+}

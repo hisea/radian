@@ -829,6 +829,17 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   adds the picker in front in the same terminal: do the rows and the filter feel like `--pick`
   (there is no `n new`), and does Esc leave cleanly before any choice is made? pty automation
   asserts the text and the one-second follow latency, not the feel.
+- **the arc TUI** (ADR 0048): with a repository arc is set up in, run `radian arc`. Is the plans
+  list scannable — does the state mark read at a glance, are the second line's `auto`, the
+  merged/total count and the cost lined up, and is the selected plan's frame title readable at
+  your width? Switch to the flat list (`g`): does `after` explain the order better than the
+  tree's connectors? On the task page: does the tree's `├─`/`└─` indentation line up, is
+  `also after`/`waits` obvious as an explanation, and does a row with a long phase keep its
+  columns? Open the conversation tab on a task whose worker ran: do the `❯`/thinking/tool blocks
+  match the main transcript, and do `j`/`k` and `f` move the way you expect? On the diff tab:
+  is the file list's `+N`/`-N` readable, is the second frame's title the path, and does the
+  syntax highlighting help at your width? pty automation asserts the pages, the keys and the
+  marks, not the feel.
 - **radian as a herdr agent** (ADR 0034, slice ④): the pty tests can only watch a fake
   socket, so the real herdr is yours. In a herdr pane (its env sets `HERDR_ENV=1`), start `radian`,
   then from another pane run `herdr agent list` — radian's entry must carry `agent_session` (the

@@ -136,7 +136,7 @@ radian exec --fork demo --at 12
 ## `radian arc`
 
 `radian arc` is the plan and task orchestrator.
-A bare `radian arc` would open its interface, which this build does not have yet.
+A bare `radian arc` opens its read-only TUI (plans and task pages); a subcommand runs one CLI operation.
 The subcommands are `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, `reset-budget`, and `mcp`; run `radian arc --help`.
 arc's exit codes are its own: `3` means the state does not allow the operation and `4`
 means a lock is held.

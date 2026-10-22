@@ -32,6 +32,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::terminal;
 
+mod arc;
 mod attach;
 mod herdr;
 mod loop_context;
@@ -45,6 +46,7 @@ mod session;
 mod tty;
 mod ui;
 
+use arc::run_arc as run_arc_tui;
 use attach::run_attach;
 use herdr::{HerdrReporter, herdr_reporter};
 use loop_context::LoopContext;
@@ -738,12 +740,15 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             }) as u8)
         }
         Some(command) => {
-            let command = command.into_store_command();
-            ExitCode::from(radian_arc::store::cli::run(command.as_ref()))
+            // `work` returned `None` above: every remaining subcommand has a store operation.
+            let command = command
+                .into_store_command()
+                .expect("`work` is dispatched above");
+            ExitCode::from(radian_arc::store::cli::run(&command))
         }
-        // A bare `radian arc`: without setup it refuses and names `radian arc init`; with
-        // setup, the TUI it would open does not exist in this build.
-        None => ExitCode::from(radian_arc::store::cli::run(None)),
+        // A bare `radian arc` opens the TUI (ADR 0048 §1). Without setup the one-line refusal
+        // names `radian arc init` before the terminal is entered.
+        None => run_arc_tui(),
     }
 }
 

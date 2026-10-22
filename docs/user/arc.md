@@ -9,12 +9,17 @@ It keeps a plan and its tasks as files in the repository, runs each task as a se
 
 This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and `run`.
-`radian arc run` is the scheduling loop; the arc terminal interface is **not built yet**, and a bare `radian arc` says so.
+`radian arc run` is the scheduling loop, and a bare `radian arc` opens the read-only TUI (see [The arc TUI](#the-arc-tui)).
 
 ## `radian arc`
 
-`radian arc` with no subcommand would open the arc interface.
-The interface does not exist yet: after setup the command says so, lists the subcommands, and exits `2`.
+`radian arc` with no subcommand opens the arc TUI: the plans page, where `Enter` opens a task's page, and from there its conversation, its diff and its attempts.
+The TUI is **read-only**: it reads the plans, the tasks, the attempt verdicts and a worker's journal, and writes nothing.
+It does not hold `runner.lock`; the header only says whether another process (`radian arc run --watch`) does.
+The `merge` tab is shown but disabled until the merge page exists.
+`q` quits; without setup the one-line refusal names `radian arc init` and exits `3`, and without a terminal it exits `2`.
+
+With setup, the pages and every key are in [The arc TUI](#the-arc-tui).
 
 Without setup, `radian arc` and every subcommand except `init` refuse with a line that names `radian arc init` and exit `3`.
 
@@ -853,11 +858,91 @@ Both are full checkouts of the tree, so searching them would return every file o
 They skipped `.radian-worktrees/` for the same reason.
 A worker never reads the rest of `.radian/arc/` from inside its checkout: the worker wrapper denies every entry except `worktrees/`.
 
+## The arc TUI
+
+A bare `radian arc` opens the TUI.
+It is a read-only view of what arc keeps: it writes no file, starts no worker, takes no lock, and never fetches from the remote.
+The one exception is a probe of `runner.lock`: the header takes it for an instant and releases it, so it can say whether another process is the scheduling loop.
+A missing `runner.lock` is not created.
+
+Every page has the same two rows at the top and bottom.
+The top row is `arc`, the page tabs `plans · task · merge` (the current page bold, the others weak; `merge` is always disabled), and on the right `main <8-character sha of origin/main>` and the loop state: `● running` while another process holds `runner.lock`, `◻ stopped` otherwise.
+The bottom row is a rule and the keys of the page.
+Colors are theme roles (ADR 0029); no page writes its own color.
+
+### Plans page
+
+The left column lists every plan, in the store's order.
+Each plan takes two rows: a state mark and the id, then `auto <level> · <merged>/<total> · <cost>` (a draft plan prefixes `draft · `).
+The mark is `✓` (green: every task merged), `●` (accent: confirmed with work left) or `◻` (weak: draft).
+The cost is the sum of the task costs, `$0.00` when a task recorded zero, and `—` when no task recorded a cost.
+
+A thin `│` separates the right column: the selected plan in an open frame, titled `<id> <status> · auto <level> · <merged>/<total> merged · <cost>`, with the plan title and its tasks.
+A task with `after` entries in the same plan is drawn under its **first** such parent, with `├─` for a branch and `└─` for the last child; its other parents are named `also after <ids>` on the row.
+Roots stay in plan order and every task appears once.
+Each task row is a state mark, the id, `state.phase` (in the mark's color), `#<attempt>` and the cost:
+
+| Mark | State | Color |
+|---|---|---|
+| `✓` | `done.merged` | green |
+| `×` | `failed.*` | red |
+| `●` | `doing.*`, or `review.verifying` / `review.integrating` / `review.ready_to_merge` | accent |
+| `!` | `review.awaiting_human` / `review.rework_pending` — you or the lead must act | accent bold |
+| `◻` | `todo.*` | weak |
+
+A `todo` task whose parents are not merged also shows `waits <ids>`.
+
+`g` switches the task list between the dependency tree and a flat list in plan order; the flat list shows `after <ids>` on each row instead of the tree edges.
+
+| Key | What it does |
+|---|---|
+| `↑` / `↓` | Move in the focused column: the plan list, or (after `Tab` or `→`) the plan's task list |
+| `→` | Move the focus to the task list |
+| `←` | Move the focus back to the plan list |
+| `Tab` | Open the selected task's page |
+| `Enter` | Open the selected task's page |
+| `g` | Switch the task list between the tree and the flat list |
+| `Esc`, `q`, `Ctrl-C` | Quit |
+
+### Task page
+
+One open frame is titled `<task id> <state.phase> · attempt <N> · <cost> · plan <plan id>`, then the task's title, a tab row (`conversation · diff · attempts`) and the attempt selector (`attempt 1 2 3`, the selected attempt bold).
+The page opens on the latest attempt; `[` and `]` switch attempts, and the choice sticks until you return to the latest one.
+
+- **conversation**: the worker's journal, `~/.radian/sessions/<task id>.jsonl` (the session id is the task id), rendered by the same read-only view `radian attach` uses: the user's `❯`, the assistant's text, thinking and tools folded as in the main transcript.
+  A task with no journal yet shows one weak line.
+  `j`/`k` scroll one line; `f` follows the end again.
+- **diff**: the task's own change.
+  For a merged task it is the first-parent diff of the merge commit (the integration verdict's `candidate_sha`), so a commit that main gained on its own never appears.
+  Otherwise it is `base_sha..head_sha` of the selected attempt.
+  The file list shows `+N` (green) and `-N` (red) per file with the `❯` cursor; the selected file's diff is drawn below in a second open frame titled with its path, with syntax highlighting.
+  `n`/`p` move to the next/previous file; `j`/`k` scroll the diff; `f` goes to its end.
+  A task with no commit yet shows `no change yet`; while the diff is read in a worker thread the page shows one weak `loading…` line.
+- **attempts**: one row per attempt with each stage verdict of that attempt: `✓ commands`, `× integration (conflict)`; the failure reason is in parentheses.
+
+| Key | What it does |
+|---|---|
+| `h` / `←` | Previous tab |
+| `l` / `→` | Next tab |
+| `[` / `]` | Previous / next attempt |
+| `j` / `↓`, `k` / `↑` | Scroll the conversation or the diff |
+| `f` | Follow the journal's end, or the diff's end |
+| `n` / `p` | Next / previous file (diff tab) |
+| `Tab`, `Esc` | Back to the plans page |
+| `q`, `Ctrl-C` | Quit |
+
+### Refresh
+
+The view re-reads the store every 2 seconds: plans, tasks, the open task's verdicts and its journal.
+Git runs only in worker threads: the header's remote main and the diff tab's file list and body.
+A frame therefore never waits for git; the diff tab says `loading…` until its data arrives, and a reply for another task or attempt is dropped.
+The TUI reads `origin/<main>` as the last fetch left it; it never fetches.
+
 ## Not built yet
 
-The arc terminal interface is not built: `radian arc` with no subcommand says so and lists the subcommands.
 The gate stages `mutation`, `review`, and `ci` are not built: verification refuses a profile or task that lists one, and the task stays in `review.verifying`.
-The arc TUI does not hold `runner.lock`: a scheduling loop runs only while `radian arc run` does, a one-shot pass or its `--watch` loop.
+The arc TUI's `merge` page is not built, and the TUI is not yet a scheduling loop: it does not hold `runner.lock`, and a scheduling loop runs only while `radian arc run` does, a one-shot pass or its `--watch` loop.
+The plans page lists plans and tasks and opens a task's page; the owner's actions (confirm, start, merge, reject, auto) are still the CLI's.
 
 ## See also
 

@@ -16,15 +16,18 @@
 //! - [`worker_args`]: the worker's `radian exec` command line, parsed with the `radian exec`
 //!   parser before `start`, a `run` pass or `confirm` acts.
 //! - [`mcp`]: the MCP server the lead writes plans and tasks through (`radian arc mcp`).
+//! - [`read`]: the read-only views the arc TUI draws (the remote main, attempts and their
+//!   verdicts, a task's diff). Nothing in it writes or fetches.
 //!
 //! Every git call of these modules is built by the private `git` module.
 //!
-//! The arc TUI is a later slice.
+//! The arc TUI lives in `radian-tui`; it reads through [`read`].
 pub mod attempt;
 pub mod gate;
 mod git;
 pub mod mcp;
 mod process;
+pub mod read;
 pub mod review;
 pub mod run;
 pub mod store;

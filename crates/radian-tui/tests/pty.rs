@@ -13871,6 +13871,135 @@ async fn pty_attach_without_an_id_and_no_sessions_says_so_without_a_screen() {
     assert!(!sessions.exists(), "attach created the session directory");
 }
 
+// ---------- ADR 0048: the arc TUI ----------
+
+/// A git repository `radian arc` is set up in: a `main` branch and arc's own store.
+fn arc_test_repo(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["symbolic-ref", "HEAD", "refs/heads/main"],
+    ] {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(&args)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    }
+    std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+    for args in [
+        vec!["add", "README.md"],
+        vec![
+            "-c",
+            "user.name=arc test",
+            "-c",
+            "user.email=arc@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "first",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(&args)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    }
+    let root = dir.join(".radian/arc");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        radian_arc::store::config::default_text("main"),
+    )
+    .unwrap();
+    let store = radian_arc::store::Store::at(dir);
+    let plan = store
+        .add_plan("tui", "the TUI plan", "a request\n")
+        .expect("the plan is created");
+    store
+        .add_task(
+            &plan,
+            "one",
+            "the first task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .expect("the task is created");
+}
+
+/// `radian arc` opens on the plans page, `Enter` opens the selected task, `Tab` switches
+/// between the plans and task pages, and `q` leaves with the terminal restored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_arc_opens_switches_pages_and_quits() {
+    let scratch = TempDir::new("arc-tui");
+    let repo = scratch.path().join("repo");
+    arc_test_repo(&repo);
+
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 120);
+    assert!(
+        pty.wait_for_screen("PLANS", wait_positive()),
+        "the plans page is not on screen:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("PL0001-tui", wait_positive()),
+        "the plan is not listed:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("loop ◻ stopped", wait_positive()),
+        "the header's loop state is missing:\n{}",
+        pty.screen()
+    );
+
+    // Enter opens the first task's page.
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("TK0001-one todo.ready", wait_positive()),
+        "Enter did not open the task page:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_until_gone("PLANS", wait_positive()),
+        "the task page still shows the plans list:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("conversation", wait_positive()),
+        "the task page tabs are missing:\n{}",
+        pty.screen()
+    );
+
+    // Tab goes back to the plans page, and Tab again reopens the task page.
+    pty.send(b"\t");
+    assert!(
+        pty.wait_for_screen("PLANS", wait_positive()),
+        "Tab did not return to the plans page:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\t");
+    assert!(
+        pty.wait_for_screen("conversation", wait_positive()),
+        "Tab did not reopen the task page:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"q");
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "q must quit the arc view:\n{}",
+        pty.screen()
+    );
+}
+
 // ---------- lost input: a resize must not eat a typed key ----------
 
 /// A printable key typed into an empty composer is text — including while a resize is being
