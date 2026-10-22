@@ -200,7 +200,8 @@ It exits `0` on a plan that is already `off`.
 
 ## `radian arc mcp`
 
-`mcp` serves the lead's tools over standard input and output, and exits when its client closes the connection.
+`mcp` serves the lead's tools over standard input and output, and exits `0` when its client closes the connection.
+A client that closes before the handshake finishes exits `1` and says which handshake request was cut off.
 Like every subcommand except `init` it refuses without setup (exit `3`) and names `radian arc init`.
 
 The server speaks MCP over stdio and is meant to be started by a lead, not by hand.
