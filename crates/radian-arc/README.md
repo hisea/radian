@@ -90,7 +90,13 @@ setup, naming `radian arc init`; with setup, this build has no TUI and says so.
 ## Attempts
 
 `radian arc start <task>` runs one task and waits; `radian arc run` is the scheduling loop and
-uses the same attempt path. `start` reconciles `doing`, releases a due retry, and claims the
+uses the same attempt path. Before `start`, each `run` pass and `confirm` act, `worker_args::check`
+parses the worker's command line — the wrapper's fixed arguments with placeholder values plus
+`[worker] exec_args` — with `radian-exec`'s own parser, and refuses (exit 3) a line that does not
+parse or that repeats an argument the wrapper sets (`worker_args::OWNED_EXEC_ARGS`, the closed list
+the manual's drift test reads). Nothing is claimed, started or written by the check.
+
+`start` reconciles `doing`, releases a due retry, and claims the
 task in one transaction (`todo.ready` → `doing.starting`, `attempt` + 1, `<task>-<n>`, a
 random token). A claim is refused (exit 3) when the task is not ready, its plan is not
 confirmed, an `after` task is not done, or `[limits] concurrency` tasks are already in

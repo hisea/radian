@@ -2263,9 +2263,11 @@ version = "0.2.0"
 dependencies = [
  "agent-provider-openai-compatible",
  "chrono",
+ "clap",
  "fs2",
  "libc",
  "radian-coding",
+ "radian-exec",
  "radian-host",
  "radian-sandbox",
  "rmcp",

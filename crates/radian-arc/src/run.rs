@@ -89,6 +89,10 @@ pub fn run(store: &Store) -> Result<Report, Error> {
 
 /// One pass. `true` when it changed a stored file, so the loop takes another pass.
 fn one_pass(store: &Store, report: &mut Report) -> Result<bool, Error> {
+    // Every pass that could claim a task checks the worker's command line first, so a
+    // rejected line refuses `run` before its first pass changes anything (ADR 0048
+    // decision 7).
+    crate::worker_args::check(&store.config()?.worker.exec_args)?;
     let mut changed = false;
 
     // 1. Doing: apply a finished attempt, leave a live one alone.

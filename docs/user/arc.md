@@ -169,7 +169,7 @@ A plan's `auto` level may only be other than `off` once it is confirmed.
 |---|---|---|
 | `<PLAN>` | `ID` | The plan id. Required. |
 
-It refuses with exit `3` when the plan has no tasks, when it is already confirmed, and when its file changed outside arc.
+It refuses with exit `3` when the plan has no tasks, when it is already confirmed, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and `worker.exec_args`).
 A refusal writes nothing.
 
 ## `radian arc auto <PLAN> <LEVEL>`
@@ -229,6 +229,9 @@ radian arc start <TASK>
 | Argument | Value | What it does |
 |---|---|---|
 | `<TASK>` | `ID` | The task id. Required. |
+
+Before it reconciles, claims or verifies anything, `start` parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args` (see the `worker.exec_args` row of `config.toml` below).
+A line `radian exec` would reject, or one that repeats an argument the wrapper sets, refuses the command with exit `3` and the parser's own message, names `worker.exec_args`, claims nothing, and changes no file.
 
 Before it claims anything it reconciles every task in `doing` (see below) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 
@@ -417,6 +420,7 @@ It exits `0` on success, `1` on an error, `2` for an empty note, `3` when the ta
 
 `run` is the scheduling loop without an interface.
 It takes `runner.lock`, makes every transition the auto levels allow now, saves the state, and exits when nothing more can happen now.
+Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see `worker.exec_args` below).
 Waiting for you, a `retry_at` in the future, or the lead's rework does not keep it running.
 A task of a plan at `auto` `off` is never started or merged by `run`; its verification still advances.
 
@@ -447,7 +451,7 @@ summary
 A file that changed outside arc is skipped and named in the summary; it does not stop the loop.
 A plan whose budget or automatic-rework limit paused it is named with its reason.
 
-It exits `0` when it ran to quiet, even when a task failed, `1` on a git or file error, and `4` when another process holds `runner.lock`. It never waits for the lock.
+It exits `0` when it ran to quiet, even when a task failed, `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
 
 ## `radian arc mcp`
 
@@ -562,7 +566,7 @@ A key you leave out takes its default.
 | `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
 | `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
 | `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. |
-| `worker.exec_args` | array of strings | `[]` | any `radian exec` argument | Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
+| `worker.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | Before `start`, each `run` pass and `confirm` act, the line the worker would get is parsed with the `radian exec` parser; a rejected line exits `3`. Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
 | `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
 | `gate.command_timeout_secs` | integer | `3600` | seconds | Per gate command line. |
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
@@ -692,7 +696,8 @@ When `attempt` has reached the task's `max_attempts` (else `[limits] max_attempt
 
 Every attempt of a task runs in one worker session, whose id is the task id.
 The first attempt that reaches the model creates the session; every later attempt, a retry or a rework, resumes it.
-An attempt that failed before the model started (a bad `worker.exec_args` entry, a missing credential) leaves no session, so the next attempt creates it.
+An attempt that failed before the model started (a missing credential, a worktree that could not be prepared) leaves no session, so the next attempt creates it.
+A bad `worker.exec_args` entry no longer gets that far: `start`, `run` and `confirm` refuse it before the claim.
 
 Cost is counted per attempt.
 `Result.cost` is the session total, so the attempt's cost is this attempt's session total minus the previous attempt's.

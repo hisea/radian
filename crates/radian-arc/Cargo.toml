@@ -17,6 +17,13 @@ radian-coding = { version = "0.2.0", path = "../radian-coding" }
 # The `workspace` tier probe `init` runs: the same `Sandbox::new` a session uses, so a
 # repository whose sandbox cannot start is reported.
 radian-sandbox = { version = "0.2.0", path = "../radian-sandbox" }
+# The parser `radian exec` runs: `worker_args::check` parses the worker's command line with
+# it before `start`, a `run` pass or `confirm` acts. `radian-exec` does not depend on
+# `radian-arc`, so this is not a cycle.
+radian-exec = { version = "0.2.0", path = "../radian-exec" }
+# The `Parser` trait alone: the check calls `radian_exec::Cli::try_parse_from` in-process
+# instead of starting a child process.
+clap = "4"
 # Attempt and verdict timestamps use the same RFC 3339 UTC form as `radian-session` and
 # `radian-memory`.
 chrono = "0.4"

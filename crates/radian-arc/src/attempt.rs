@@ -58,6 +58,10 @@ impl Canceled {
 /// A task already in `review.verifying` (one a moved branch or a changed digest sent back)
 /// resumes verification instead of being refused.
 pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
+    // The worker's command line is checked before anything is claimed or written: a wrong
+    // `[worker] exec_args` entry would otherwise fail every attempt the same way, after the
+    // claim (ADR 0048 decision 7).
+    crate::worker_args::check(&store.config()?.worker.exec_args)?;
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
