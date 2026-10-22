@@ -583,8 +583,9 @@ fn the_worker_cannot_read_the_arc_files_outside_its_worktree() {
     let secret_path = secret.to_str().unwrap().to_owned();
     let mock = Mock::start(vec![
         read_reply("c1", &secret_path),
-        write_reply("c2", "worker.txt", "ok"),
-        shell_reply("c3", "git add worker.txt && git commit -m worker"),
+        shell_reply("c2", &format!("cat '{secret_path}'")),
+        write_reply("c3", "worker.txt", "ok"),
+        shell_reply("c4", "git add worker.txt && git commit -m worker"),
         text_reply("done"),
     ]);
     let run = run(
@@ -604,7 +605,11 @@ fn the_worker_cannot_read_the_arc_files_outside_its_worktree() {
     );
     assert!(
         bodies.contains("outside the workspace"),
-        "the read was refused: {bodies}"
+        "the read tool was refused: {bodies}"
+    );
+    assert!(
+        bodies.contains("Operation not permitted"),
+        "the sandbox refused the shell's read: {bodies}"
     );
     let spec = format!("work/{task}:worker.txt");
     assert_eq!(
