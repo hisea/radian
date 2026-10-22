@@ -477,16 +477,13 @@ impl Store {
         Ok(PlanView { plan, tasks })
     }
 
-    /// `show <id>`: a plan when the id names one, otherwise a task.
+    /// `show <id>`: the plan or the task the id names. An id that names both is refused.
     pub fn show(&self, id: &str) -> Result<Item, Error> {
         check_id(id)?;
-        if self.path(Kind::Plan, id).is_file() {
-            return Ok(Item::Plan(self.plan_view(id)?));
+        match self.resolve_kind(id)? {
+            Kind::Plan => Ok(Item::Plan(self.plan_view(id)?)),
+            Kind::Task => Ok(Item::Task(self.load_task(id)?)),
         }
-        if self.path(Kind::Task, id).is_file() {
-            return Ok(Item::Task(self.load_task(id)?));
-        }
-        Err(Error::Failed(format!("no plan or task `{id}`")))
     }
 
     /// Whether a plan file with this id exists.
@@ -557,7 +554,7 @@ impl Store {
                 )));
             }
         }
-        let id = self.next_id(Kind::Task, slug)?;
+        let id = self.next_id(slug)?;
         let task = model::TaskFile::new(
             id.clone(),
             plan_id.to_owned(),
@@ -581,7 +578,7 @@ impl Store {
     pub fn add_plan(&self, slug: &str, title: &str, request: &str) -> Result<String, Error> {
         check_new(slug, title)?;
         let _lock = self.lock_state()?;
-        let id = self.next_id(Kind::Plan, slug)?;
+        let id = self.next_id(slug)?;
         let plan = model::PlanFile::new(id.clone(), title.trim().to_owned(), request);
         self.write_item(Kind::Plan, &id, &plan.to_text(), 1)?;
         Ok(id)
@@ -666,36 +663,47 @@ impl Store {
         })
     }
 
+    /// Which kind `id` names. An id that names both a plan and a task is refused (exit 3,
+    /// naming both files): an id names one item, and no command picks one of the two.
     fn resolve_kind(&self, id: &str) -> Result<Kind, Error> {
-        if self.path(Kind::Plan, id).is_file() {
-            return Ok(Kind::Plan);
+        let plan = self.path(Kind::Plan, id);
+        let task = self.path(Kind::Task, id);
+        match (plan.is_file(), task.is_file()) {
+            (true, true) => Err(Error::Refused(format!(
+                "`{id}` names both a plan and a task: {} and {}",
+                plan.display(),
+                task.display()
+            ))),
+            (true, false) => Ok(Kind::Plan),
+            (false, true) => Ok(Kind::Task),
+            (false, false) => Err(Error::Failed(format!("no plan or task `{id}`"))),
         }
-        if self.path(Kind::Task, id).is_file() {
-            return Ok(Kind::Task);
-        }
-        Err(Error::Failed(format!("no plan or task `{id}`")))
     }
 
-    /// The next free four-digit number for `kind` and `slug`. The caller holds
-    /// `state.lock`, so two processes never take the same number.
-    fn next_id(&self, kind: Kind, slug: &str) -> Result<String, Error> {
-        let number = self.next_number(kind)?;
+    /// The next free four-digit number and `slug`. The caller holds `state.lock`, so two
+    /// processes never take the same number.
+    fn next_id(&self, slug: &str) -> Result<String, Error> {
+        let number = self.next_number()?;
         Ok(model::format_id(number, slug))
     }
 
-    fn next_number(&self, kind: Kind) -> Result<u32, Error> {
-        let highest = self
-            .ids(kind)?
-            .iter()
-            .filter_map(|(id, _)| model::id_number(id))
+    /// The next free four-digit number, over the one sequence plans and tasks share: the
+    /// highest number any plan or task file or ledger entry uses, plus one.
+    fn next_number(&self) -> Result<u32, Error> {
+        let highest = [Kind::Plan, Kind::Task]
+            .into_iter()
+            .map(|kind| self.ids(kind))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, _)| model::id_number(&id))
             .max()
             .unwrap_or(0);
         let number = highest + 1;
         if number > MAX_ID_NUMBER {
-            return Err(Error::Failed(format!(
-                "no free four-digit {} number left",
-                kind.noun()
-            )));
+            return Err(Error::Failed(
+                "no free four-digit plan or task number left".to_owned(),
+            ));
         }
         Ok(number)
     }
