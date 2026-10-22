@@ -1638,6 +1638,38 @@ pub fn stdin_dash_notice(command: &MemoryCommand) -> Option<&'static str> {
     }
 }
 
+/// Reads a `/memory import` source the way `radian memory import` reads it, but against the
+/// session workspace: a relative path resolves against `workspace`, an absolute path may point
+/// anywhere. `Ok` is the file text; `Err` is already the one notice to show
+/// (`cannot read <path>: <error>`, the CLI's wording), and the caller writes nothing. Runs in
+/// the event loop (ADR 0023 U3), never in `update`, so the draw loop never blocks on disk.
+///
+/// ADR 0039: a workspace-relative read opens through the workspace root's directory fd
+/// (`openat(O_NOFOLLOW)` per component, never following a symlink); an absolute read uses the
+/// weaker leaf-only guard (`O_NOFOLLOW` on the file itself, the same guard host context and
+/// skill reads use). `..` never resolves through `RootDir`, and a symlink anywhere in a
+/// workspace-relative path is refused instead of followed.
+pub fn read_memory_import(workspace: &std::path::Path, source: &str) -> Result<String, String> {
+    let failed = |error: &dyn std::fmt::Display| format!("cannot read {source}: {error}");
+    let bytes = if std::path::Path::new(source).is_absolute() {
+        radian_coding::safe_fs::read_nofollow(std::path::Path::new(source))
+            .map_err(|error| failed(&error))?
+    } else {
+        let root = std::fs::canonicalize(workspace).map_err(|error| failed(&error))?;
+        let dir = radian_coding::safe_fs::RootDir::open(&root).map_err(|error| failed(&error))?;
+        let file = dir
+            .file(
+                std::path::Path::new(source),
+                radian_coding::safe_fs::OpenMode::Read,
+            )
+            .map_err(|error| failed(&error))?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut &file, &mut bytes).map_err(|error| failed(&error))?;
+        bytes
+    };
+    String::from_utf8(bytes).map_err(|error| failed(&error))
+}
+
 /// The lines one command output becomes: the diagnostics note, then the text's lines. An
 /// output with neither becomes one `(no output)` line.
 pub fn output_notices(output: &CommandOutput) -> Vec<String> {

@@ -35,7 +35,7 @@ the project against another directory.
 | `purge [--global\|--project] [--yes]` | Rewrite the log, removing forgotten content. Asks first. |
 | `confirm [--global] --revision <N> <id>` | Confirm a record. Keeps its original source. |
 | `export [--global\|--project]` | Print one scope as editable Markdown. |
-| `import [--global\|--project] <source>` | Import an edited Markdown export. A bare `-` imports nothing and shows `` `-` reads stdin only in `radian memory`; give a file path here``. On the command line, `-` reads it from stdin. |
+| `import [--global\|--project] <source>` | Import an edited Markdown export from the file at `<source>`: a relative path resolves against the workspace in the interface and against the current directory on the command line; an absolute path may point anywhere. A bare `-` imports nothing and shows `` `-` reads stdin only in `radian memory`; give a file path here``. On the command line, `-` reads it from stdin. A file that cannot be read imports nothing and shows `cannot read <path>: <error>`. |
 | `project [--json] [new]` | Show this workspace's identity key and project state, or register it with `new`. |
 | `relink <project-id>` | Attach this workspace's identity key to an existing project. |
 | `split [--yes] <from> <to> <id>...` | Move records between projects. Asks first. |
@@ -45,12 +45,16 @@ A usage or refusal error exits 2 on the command line; a conflict or a
 missing record exits 1. In the interface, `forget`, `purge`, `split` and
 `merge` ask first: `y` runs, `n` or `esc` cancels. A read command
 (`list`, `search`, `show`, `export`, `project`) runs while a turn runs and
-does not interrupt it. A write takes effect at the next model request. In the interface, `add`, `edit` and `import` take
-their text literally: `-` for stdin and file paths only resolve on the command
-line. A bare `-` in the interface writes nothing and shows the stdin notice:
+does not interrupt it. A write takes effect at the next model request. In the interface, `add` and `edit` take
+their text literally: `-` reads stdin only on the command line. A bare `-` in the interface writes nothing and shows the stdin notice:
 `` `-` reads stdin only in `radian memory`; type the text here`` for `add` and
 `edit`, `` `-` reads stdin only in `radian memory`; give a file path here``
-for `import`.
+for `import`. `/memory import <source>` reads the file at `<source>` in both:
+a relative path resolves against the workspace in the interface and against
+the current directory on the command line; an absolute path may point
+anywhere. On the command line, `-` reads the Markdown from stdin instead of
+a file. A file that cannot be read imports nothing and shows
+`cannot read <path>: <error>`.
 
 ## A worked example
 

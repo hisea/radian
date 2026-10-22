@@ -117,7 +117,7 @@ type into the message box.
 | `/memory purge` | `/memory purge [--global\|--project] [--yes]` | Rewrite the log, removing forgotten content. Asks first. |
 | `/memory confirm` | `/memory confirm [--global] --revision <N> <id>` | Confirm a record. Keeps its original source. |
 | `/memory export` | `/memory export [--global\|--project]` | Print one scope as editable Markdown. |
-| `/memory import` | `/memory import [--global\|--project] <source>` | Import an edited Markdown export. A bare `-` imports nothing and shows `` `-` reads stdin only in `radian memory`; give a file path here``. On the command line `-` reads it from stdin. |
+| `/memory import` | `/memory import [--global\|--project] <source>` | Import an edited Markdown export from the file at `<source>`: a relative path resolves against the workspace in the interface and against the current directory on the command line; an absolute path may point anywhere. A bare `-` imports nothing and shows `` `-` reads stdin only in `radian memory`; give a file path here``. On the command line `-` reads it from stdin. A file that cannot be read imports nothing and shows `cannot read <path>: <error>`. |
 | `/memory project` | `/memory project [--json] [new]` | Show this workspace's identity key and project state, or register it with `new`. |
 | `/memory relink` | `/memory relink <project-id>` | Attach this workspace's identity key to an existing project. |
 | `/memory split` | `/memory split [--yes] <from> <to> <id>...` | Move records between projects. Asks first. |

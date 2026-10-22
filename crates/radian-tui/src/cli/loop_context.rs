@@ -456,6 +456,33 @@ impl LoopContext<'_> {
                 Ok(())
             }
             Effect::RunMemoryCommand { command, confirmed } => {
+                // `/memory import <path>` reads the file here in the loop (ADR 0023 U3),
+                // never in `update`: a relative path resolves against the session workspace,
+                // an absolute path may point anywhere. A file that cannot be read writes
+                // nothing and shows the CLI's `cannot read <path>: <error>` notice. The
+                // bare `-` never reaches the read: `update` keeps it with its stdin notice.
+                let command = match command {
+                    radian_host::memory::commands::MemoryCommand::Import {
+                        global,
+                        project,
+                        source,
+                    } if source != "-" => {
+                        match radian_tui::command::read_memory_import(self.workspace, &source) {
+                            Ok(text) => radian_host::memory::commands::MemoryCommand::Import {
+                                global,
+                                project,
+                                source: text,
+                            },
+                            Err(notice) => {
+                                self.send(AppInput::MemoryCommandDone(MemoryResult::Failed(
+                                    notice,
+                                )));
+                                return Ok(());
+                            }
+                        }
+                    }
+                    other => other,
+                };
                 let result = match self.memory {
                     Some(service) => {
                         let json = command.json();
@@ -1220,6 +1247,228 @@ mod tests {
         assert!(
             !hooks.loop_active(),
             "the stopped mode reaches the session hooks"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/memory import <path>` reads the file in the loop (ADR 0023 U3), never in `update`:
+    /// a relative path resolves against the session workspace. Removing the loop's read hands
+    /// the path string to `import` as literal Markdown and this fails.
+    #[test]
+    fn memory_import_reads_a_relative_path_in_the_loop() {
+        let dir = std::env::temp_dir().join(format!("radian-loop-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let service = MemoryService::open(&ws, dir.join("memory"));
+        service.create_project().unwrap();
+        let memory = Some(service);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let inbox = Arc::new(radian_runtime::Inbox::new(64));
+        let hooks = Arc::new(radian_host::CommandHooks::new(
+            &Default::default(),
+            &Default::default(),
+            &ws,
+            "sid",
+            radian_sandbox::SandboxSlot::empty(),
+            &inbox,
+            rt.handle(),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+        ));
+        let journal = Arc::new(
+            radian_session::SessionJournal::create(
+                dir.join("s.jsonl"),
+                "sid",
+                radian_session::SessionCreatedData::new("/work/example", serde_json::json!({})),
+            )
+            .unwrap(),
+        );
+        let host = SessionHost {
+            dir: dir.clone(),
+            workspace: ws.to_string_lossy().into_owned(),
+            session_id: "sid".to_owned(),
+            secrets: Arc::new(std::sync::RwLock::new(Vec::new())),
+            journal,
+            config_snapshot: serde_json::json!({}),
+            theme_colors: Vec::new(),
+            theme_write_path: None,
+            config_read_only: false,
+            started_without_model: false,
+        };
+        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade);
+        let queue = radian_host::SessionQueue::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let app = crate::app::App::new("m", "s");
+        let mut ctx = LoopContext {
+            startup_route: ("p".to_owned(), "m".to_owned()),
+            route_price: Arc::new(|_: &str, _: &str| None),
+            config_providers: Default::default(),
+            current_thinking: String::new(),
+            current_theme: None,
+            thinking_max_tokens: 0,
+            workspace: &ws,
+            runtime: &rt,
+            session: &facade,
+            memory: &memory,
+            host: &host,
+            tx: &tx,
+            queue: &queue,
+            signal: None,
+            clipboard: app.clipboard,
+            bell_rang: false,
+            herdr: None,
+            bash_sandbox: None,
+            bash_cancel: None,
+            side_cancel: None,
+            usage_gate: None,
+            chatgpt_usage_gate: None,
+            model_writeback_done: false,
+            command_hooks: Some(Arc::clone(&hooks)),
+        };
+        std::fs::write(
+            ws.join("mem.md"),
+            "---\nid: loop-relative\nrevision: 1\n---\nhello from import\n",
+        )
+        .unwrap();
+        ctx.execute(Effect::RunMemoryCommand {
+            command: radian_host::memory::commands::MemoryCommand::Import {
+                global: false,
+                project: false,
+                source: "mem.md".into(),
+            },
+            confirmed: false,
+        })
+        .unwrap();
+        match rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap() {
+            UiEvent::Command(AppInput::MemoryCommandDone(MemoryResult::Output(notices))) => {
+                assert!(
+                    notices.iter().any(|n| n.contains("created 1")),
+                    "{notices:?}"
+                );
+            }
+            _ => panic!("expected the import output, got another event"),
+        }
+        let records = memory
+            .as_ref()
+            .unwrap()
+            .list(radian_host::memory::ScopeSelection::ProjectOnly, false)
+            .unwrap();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].content, "hello from import");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing import file in the loop writes nothing and shows the CLI's `cannot read`
+    /// notice. Without the loop's read the path string reaches `import` as literal Markdown
+    /// and this shows the export-format error instead.
+    #[test]
+    fn memory_import_missing_file_writes_nothing_and_shows_cannot_read() {
+        let dir =
+            std::env::temp_dir().join(format!("radian-loop-import-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let service = MemoryService::open(&ws, dir.join("memory"));
+        service.create_project().unwrap();
+        let memory = Some(service);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let inbox = Arc::new(radian_runtime::Inbox::new(64));
+        let hooks = Arc::new(radian_host::CommandHooks::new(
+            &Default::default(),
+            &Default::default(),
+            &ws,
+            "sid",
+            radian_sandbox::SandboxSlot::empty(),
+            &inbox,
+            rt.handle(),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+        ));
+        let journal = Arc::new(
+            radian_session::SessionJournal::create(
+                dir.join("s.jsonl"),
+                "sid",
+                radian_session::SessionCreatedData::new("/work/example", serde_json::json!({})),
+            )
+            .unwrap(),
+        );
+        let host = SessionHost {
+            dir: dir.clone(),
+            workspace: ws.to_string_lossy().into_owned(),
+            session_id: "sid".to_owned(),
+            secrets: Arc::new(std::sync::RwLock::new(Vec::new())),
+            journal,
+            config_snapshot: serde_json::json!({}),
+            theme_colors: Vec::new(),
+            theme_write_path: None,
+            config_read_only: false,
+            started_without_model: false,
+        };
+        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade);
+        let queue = radian_host::SessionQueue::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let app = crate::app::App::new("m", "s");
+        let mut ctx = LoopContext {
+            startup_route: ("p".to_owned(), "m".to_owned()),
+            route_price: Arc::new(|_: &str, _: &str| None),
+            config_providers: Default::default(),
+            current_thinking: String::new(),
+            current_theme: None,
+            thinking_max_tokens: 0,
+            workspace: &ws,
+            runtime: &rt,
+            session: &facade,
+            memory: &memory,
+            host: &host,
+            tx: &tx,
+            queue: &queue,
+            signal: None,
+            clipboard: app.clipboard,
+            bell_rang: false,
+            herdr: None,
+            bash_sandbox: None,
+            bash_cancel: None,
+            side_cancel: None,
+            usage_gate: None,
+            chatgpt_usage_gate: None,
+            model_writeback_done: false,
+            command_hooks: Some(Arc::clone(&hooks)),
+        };
+        ctx.execute(Effect::RunMemoryCommand {
+            command: radian_host::memory::commands::MemoryCommand::Import {
+                global: false,
+                project: false,
+                source: "no-such-file.md".into(),
+            },
+            confirmed: false,
+        })
+        .unwrap();
+        match rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap() {
+            UiEvent::Command(AppInput::MemoryCommandDone(MemoryResult::Failed(notice))) => {
+                assert!(
+                    notice.starts_with("cannot read no-such-file.md: "),
+                    "{notice}"
+                );
+            }
+            _ => panic!("expected the cannot-read failure, got another event"),
+        }
+        assert!(
+            memory
+                .as_ref()
+                .unwrap()
+                .list(radian_host::memory::ScopeSelection::ProjectOnly, true)
+                .unwrap()
+                .is_empty(),
+            "nothing was written"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
