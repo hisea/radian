@@ -4,7 +4,9 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use common::TestRepo;
-use radian_arc::gate::{CommandRun, GateError, Stage, Verdict, VerdictResult, verdict_path};
+use radian_arc::gate::{
+    CommandRun, ExclusiveLock, GateError, Stage, Verdict, VerdictResult, verdict_path,
+};
 
 #[test]
 fn a_passing_profile_runs_every_command_in_order() {
@@ -144,6 +146,64 @@ fn two_exclusive_stages_in_two_threads_never_overlap() {
         lines,
         vec!["start", "end", "start", "end"],
         "two exclusive stages overlapped"
+    );
+}
+
+#[test]
+fn a_commands_stage_waits_for_the_exclusive_lock() {
+    let repo = TestRepo::new("commands-waits");
+    let base = repo.rev("main");
+    let head = repo.commit_on("work/waits", &base, "waits.txt", "waits\n");
+    let marker = repo.repo.join("stage-ran");
+    let line = format!("touch {}", marker.display());
+
+    let lock = ExclusiveLock::acquire(&repo.repo).unwrap();
+    let (repository, sha, commands) = (repo.repo.clone(), head.clone(), vec![line]);
+    let handle = std::thread::spawn(move || {
+        CommandRun {
+            repository: &repository,
+            task: "0001-waits",
+            attempt: "0001-waits-1",
+            sha: &sha,
+            commands: &commands,
+            timeout: Duration::from_secs(30),
+        }
+        .run()
+        .unwrap()
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !marker.exists(),
+        "a commands stage ran while another exclusive stage held the lock"
+    );
+    drop(lock);
+    let verdict = handle.join().unwrap();
+    assert!(verdict.is_pass());
+    assert!(marker.exists());
+}
+
+#[test]
+fn a_timeout_kills_the_whole_command_group() {
+    let repo = TestRepo::new("commands-group");
+    let base = repo.rev("main");
+    let head = repo.commit_on("work/group", &base, "group.txt", "group\n");
+    let commands = vec!["(sleep 2; touch after-group-timeout) & wait".to_string()];
+    let run = CommandRun {
+        repository: &repo.repo,
+        task: "0001-group",
+        attempt: "0001-group-1",
+        sha: &head,
+        commands: &commands,
+        timeout: Duration::from_secs(1),
+    };
+
+    let verdict = run.run().unwrap();
+    assert_eq!(verdict.reason.as_deref(), Some("timeout"));
+    std::thread::sleep(Duration::from_millis(2200));
+    let checkout = repo.repo.join(".radian/arc/gates/commands");
+    assert!(
+        !checkout.join("after-group-timeout").exists(),
+        "a grandchild of the timed-out command survived the kill"
     );
 }
 
