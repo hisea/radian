@@ -915,7 +915,8 @@ mod tests {
     /// Mutation: drop one value from a row (or change one default cell) → this fails
     /// naming the key. Why the code is the source that cannot drift: each value list is the
     /// `pub const` the parser's own guard reads, and each default is a `Default` impl or an
-    /// `as_str` spelling from the same code.
+    /// `as_str` spelling from the same code. The table is located by its `## `[tui]``
+    /// heading; a row in another table never counts.
     #[test]
     fn footer_closed_sets_and_defaults_appear_in_configuration_md() {
         use crate::app::config::{
@@ -932,19 +933,18 @@ mod tests {
             "/../../docs/user/configuration.md"
         ))
         .expect("configuration.md exists");
-        fn row<'a>(doc: &'a str, key: &str) -> Vec<&'a str> {
-            let rows: Vec<&str> = doc
-                .lines()
-                .filter(|line| {
-                    line.starts_with('|')
-                        && line
-                            .split('|')
-                            .nth(1)
-                            .is_some_and(|cell| cell.contains(key))
-                })
+        let rows: Vec<Vec<String>> =
+            radian_coding::drift::tables_under(&doc, "configuration.md", "## `[tui]`")
+                .into_iter()
+                .flatten()
                 .collect();
-            assert!(!rows.is_empty(), "{key} has no row in configuration.md");
-            rows
+        fn row<'a>(rows: &'a [Vec<String>], key: &str) -> Vec<&'a Vec<String>> {
+            let keyed: Vec<&Vec<String>> = rows
+                .iter()
+                .filter(|row| row.first().is_some_and(|cell| cell.contains(key)))
+                .collect();
+            assert!(!keyed.is_empty(), "{key} has no row in configuration.md");
+            keyed
         }
         // Each value of a closed set appears in its key's row, not just anywhere.
         let sets: &[(&str, &[&str])] = &[
@@ -966,43 +966,24 @@ mod tests {
             ),
         ];
         for (key, values) in sets {
-            for line in row(&doc, key) {
+            for row in row(&rows, key) {
                 for value in *values {
                     assert!(
-                        line.contains(value),
-                        "{key} row is missing value {value}: {line}"
+                        row.iter().any(|cell| cell.contains(value)),
+                        "{key} row is missing value {value}: {row:?}"
                     );
                 }
             }
         }
         // Each default is the code's own: `Default` impls, `as_str` spellings, shared consts.
         // The default must sit in the row's Default cell (not just anywhere in the row: the
-        // Allowed cell would mask a changed default). Three-column rows (the memory table)
-        // and four-column rows carry the default inline or not at all: there the whole row
-        // must contain it.
-        // Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
-        fn split_cells(row: &str) -> Vec<String> {
-            let mut cells = vec![String::new()];
-            let mut chars = row.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c == '\\' && chars.peek() == Some(&'|') {
-                    cells.last_mut().expect("a cell is open").push('|');
-                    chars.next();
-                } else if c == '|' {
-                    cells.push(String::new());
-                } else {
-                    cells.last_mut().expect("a cell is open").push(c);
-                }
-            }
-            cells
-        }
-        fn default_in_row(row: &str, default: &str) -> bool {
-            let cells = split_cells(row);
-            let inner = &cells[1..cells.len() - 1];
-            if inner.len() >= 5 {
-                inner[2].contains(default)
+        // Allowed cell would mask a changed default). Rows without a Default column carry the
+        // default inline or not at all: there the whole row must contain it.
+        fn default_in_row(row: &[String], default: &str) -> bool {
+            if row.len() >= 5 {
+                row[2].contains(default)
             } else {
-                row.contains(default)
+                row.iter().any(|cell| cell.contains(default))
             }
         }
         let defaults: &[(&str, String)] = &[
@@ -1072,11 +1053,10 @@ mod tests {
             ),
         ];
         for (key, default) in defaults {
-            let lines = row(&doc, key);
+            let lines = row(&rows, key);
             assert!(
                 lines.iter().any(|line| default_in_row(line, default)),
-                "{key} row misses its default {default}: {}",
-                lines.join("\n")
+                "{key} row misses its default {default}: {lines:?}"
             );
         }
     }

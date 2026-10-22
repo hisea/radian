@@ -9,8 +9,10 @@
 //! user-configured names (MCP `inherit_env` entries, hook environments, `auth.json` entry
 //! `env` keys) are not literals, so they stay out: the manual documents them through the
 //! rules that read them, not by name. Test-only names are excluded by name with the reason
-//! beside each. Mutation: delete one variable row from `environment.md` → this fails
-//! naming it.
+//! beside each. Rows are read only from the variable tables under the section headings the
+//! test names; the `## Files that change behavior` table names variables in passing and
+//! never satisfies a check. Mutation: delete one variable row from `environment.md` → this
+//! fails naming it.
 
 use std::path::{Path, PathBuf};
 
@@ -85,11 +87,33 @@ const TEST_ONLY: &[(&str, &str)] = &[
     ),
 ];
 
+/// The headings whose tables list environment variables. Each heading is an anchor: a row
+/// in another table on the page (the paths table, prose that names a variable in passing)
+/// never satisfies a check.
+const VARIABLE_HEADINGS: &[&str] = &[
+    "## Home and paths",
+    "## Credentials",
+    "## Catalog and model",
+    "## Terminal",
+    "## Sandboxed children",
+    "## Herdr",
+];
+
 #[test]
 fn every_env_var_appears_in_environment_md() {
     let root = workspace_root();
     let doc = std::fs::read_to_string(root.join("docs/user/environment.md"))
         .expect("environment.md exists");
+    // Every table under the variable headings, flattened into one row list. The headings
+    // are the anchors; the `## Files that change behavior` table names variables only in
+    // passing and is never read.
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for heading in VARIABLE_HEADINGS {
+        for table in radian_coding::drift::tables_under(&doc, "environment.md", heading) {
+            rows.extend(table);
+        }
+    }
+    assert!(!rows.is_empty(), "environment.md has no variable tables");
     let mut files = Vec::new();
     let crates = std::fs::read_dir(root.join("crates")).expect("crates dir reads");
     for entry in crates.flatten() {
@@ -112,13 +136,11 @@ fn every_env_var_appears_in_environment_md() {
     }
     assert!(!names.is_empty(), "no env reads found");
     let mut missing: Vec<String> = Vec::new();
-    // The "Files that change behavior" table names variables in passing; a variable's
-    // own entry lives in the tables above it.
-    let mut sections = doc.split("## Files that change behavior");
-    let vars_doc = sections.next().unwrap_or(&doc);
+    // The Files section stays a separate table: a variable's own entry lives in the
+    // variable sections above it, never in this one.
     assert!(
-        sections.next().is_some(),
-        "environment.md lost its Files section; the drift test scopes rows above it"
+        doc.contains("## Files that change behavior"),
+        "environment.md lost its Files section"
     );
     for name in &names {
         if TEST_ONLY.iter().any(|(only, _)| only == name) {
@@ -126,13 +148,9 @@ fn every_env_var_appears_in_environment_md() {
         }
         // The variable needs its own table row (first cell), not just a mention in
         // another row's prose: a dropped row must fail here.
-        let has_row = vars_doc.lines().any(|line| {
-            line.starts_with('|')
-                && line
-                    .split('|')
-                    .nth(1)
-                    .is_some_and(|cell| cell.contains(name.as_str()))
-        });
+        let has_row = rows
+            .iter()
+            .any(|row| row.first().is_some_and(|cell| cell.contains(name.as_str())));
         if !has_row {
             missing.push(name.clone());
         }

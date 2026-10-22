@@ -265,3 +265,74 @@ fn the_table_matches_docs_user_on_disk() {
         assert_eq!(disk_text, tab_text, "page {disk_name} text matches");
     }
 }
+
+/// The drift reader the manual checks share anchors a table to its heading: a decoy table in
+/// an earlier section is never read, a table under a deeper `###` subheading still belongs to
+/// its parent `##` heading, and a `|` line inside a fenced block is not a table.
+#[test]
+fn the_drift_reader_anchors_tables_to_their_heading() {
+    let doc = "\
+## Before
+
+| Key | Value |
+|---|---|
+| `decoy` | a |
+
+## Config
+
+| Key | Value |
+|---|---|
+| `real` | b |
+
+```text
+| Key | Value |
+|---|---|
+| `fenced` | c |
+```
+
+### Nested
+
+| Key | Value |
+|---|---|
+| `nested` | d |
+
+## After
+
+| Key | Value |
+|---|---|
+| `after` | e |
+";
+    let tables = radian_coding::drift::tables_under(doc, "test.md", "## Config");
+    let rows: Vec<&Vec<String>> = tables.iter().flatten().collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0].first().map(String::as_str), Some("`real`"));
+    assert_eq!(rows[1].first().map(String::as_str), Some("`nested`"));
+    for ignored in ["`decoy`", "`fenced`", "`after`"] {
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.first().is_some_and(|cell| cell == ignored)),
+            "{ignored} is outside the anchor but was read: {rows:?}"
+        );
+    }
+    let first = radian_coding::drift::table_under(doc, "test.md", "## Config");
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(first[0].first().map(String::as_str), Some("`real`"));
+    assert_eq!(
+        radian_coding::drift::split_cells("| `a` | `b\\|c` |"),
+        vec!["`a`".to_string(), "`b|c`".to_string()],
+        "an escaped `|` stays inside its cell"
+    );
+}
+
+/// A missing heading fails with the page and the heading, so a renamed section cannot silently
+/// stop checking.
+#[test]
+#[should_panic(expected = "test.md has no heading `## Gone`")]
+fn the_drift_reader_names_a_missing_anchor() {
+    radian_coding::drift::tables_under(
+        "## Present\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "test.md",
+        "## Gone",
+    );
+}

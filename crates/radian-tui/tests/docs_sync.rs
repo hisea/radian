@@ -374,52 +374,9 @@ fn footer_field_rows(footer_md: &str) -> Vec<Vec<String>> {
 /// another table never satisfies a check. A missing heading or table fails with the page and
 /// the heading.
 fn footer_rows_under(footer_md: &str, heading: &str) -> Vec<Vec<String>> {
-    let start = footer_md.find(heading).unwrap_or_else(|| {
-        panic!("footer.md has no `{heading}` heading; the check's table anchor is missing")
-    });
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for line in footer_md[start + heading.len()..].lines() {
-        if line.starts_with("## ") || line.starts_with("### ") {
-            break;
-        }
-        if line.starts_with('|') {
-            rows.push(split_cells(line));
-        } else if !rows.is_empty() {
-            break;
-        }
-    }
-    // The first row is the header and the second the separator.
-    rows.drain(..2.min(rows.len()));
-    assert!(
-        !rows.is_empty(),
-        "footer.md's `{heading}` heading has no table"
-    );
-    rows
-}
-
-/// Split a table row on unescaped `|` only, trimmed, without the outer empty cells.
-fn split_cells(row: &str) -> Vec<String> {
-    let mut cells = vec![String::new()];
-    let mut chars = row.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' && chars.peek() == Some(&'|') {
-            cells.last_mut().expect("a cell is open").push('|');
-            chars.next();
-        } else if c == '|' {
-            cells.push(String::new());
-        } else {
-            cells.last_mut().expect("a cell is open").push(c);
-        }
-    }
-    if cells.first().is_some_and(|cell| cell.trim().is_empty()) {
-        cells.remove(0);
-    }
-    if cells.last().is_some_and(|cell| cell.trim().is_empty()) {
-        cells.pop();
-    }
-    cells
+    radian_coding::drift::tables_under(footer_md, "footer.md", heading)
         .into_iter()
-        .map(|cell| cell.trim().to_owned())
+        .flatten()
         .collect()
 }
 

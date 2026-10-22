@@ -523,6 +523,14 @@ mod tests {
         );
     }
 
+    /// The `cli.md` headings whose tables list `radian exec` flags. Each heading is an
+    /// anchor: a table elsewhere on the page is never read.
+    const CLI_FLAG_HEADINGS: &[&str] = &[
+        "## `radian exec`",
+        "## `radian memory`",
+        "## `radian trust`",
+    ];
+
     /// Every closed `radian exec` value set appears in its option's rows of
     /// `docs/user/cli.md`, and every defaulted option's default appears in its row.
     /// Mutation: drop one value from a `--format` row → this fails naming the flag.
@@ -530,49 +538,33 @@ mod tests {
     /// from the clap tree itself (the parser); `--kind` and `--include-usage` read the
     /// parsers' own consts, and the login choices come from the descriptor list. Hidden
     /// flags are test seams, not user surface, so they are not required; clap's own
-    /// `--help`/`--version` are documented once in the TUI table.
+    /// `--help`/`--version` are documented once in the TUI table. Each flag's rows are read
+    /// only from the `radian exec` sections; a row in another table never counts.
     #[test]
     fn cli_option_values_and_defaults_appear_in_cli_md() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let cli_md = std::fs::read_to_string(manifest.join("../../docs/user/cli.md"))
             .expect("cli.md exists");
-        fn table_rows<'a>(doc: &'a str, flag: &str) -> Vec<&'a str> {
-            doc.lines()
-                .filter(|line| {
-                    line.starts_with('|')
-                        && line
-                            .split('|')
-                            .nth(1)
-                            .is_some_and(|cell| cell.contains(flag))
-                })
+        // Every table under the flag headings, flattened into one row list. The headings
+        // are the anchors; a table in any other section is never read.
+        let rows: Vec<Vec<String>> = CLI_FLAG_HEADINGS
+            .iter()
+            .flat_map(|heading| radian_coding::drift::tables_under(&cli_md, "cli.md", heading))
+            .flatten()
+            .collect();
+        fn table_rows<'a>(rows: &'a [Vec<String>], flag: &str) -> Vec<&'a Vec<String>> {
+            rows.iter()
+                .filter(|row| row.first().is_some_and(|cell| cell.contains(flag)))
                 .collect()
         }
         // The default must sit in the row's Default cell (the Allowed/Value cells would
         // mask a changed default). Tables without a Default column fall back to the whole
         // row.
-        // Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
-        fn split_cells(row: &str) -> Vec<String> {
-            let mut cells = vec![String::new()];
-            let mut chars = row.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c == '\\' && chars.peek() == Some(&'|') {
-                    cells.last_mut().expect("a cell is open").push('|');
-                    chars.next();
-                } else if c == '|' {
-                    cells.push(String::new());
-                } else {
-                    cells.last_mut().expect("a cell is open").push(c);
-                }
-            }
-            cells
-        }
-        fn default_in_row(row: &str, default: &str) -> bool {
-            let cells = split_cells(row);
-            let inner = &cells[1..cells.len() - 1];
-            if inner.len() >= 4 {
-                inner[2].contains(default)
+        fn default_in_row(row: &[String], default: &str) -> bool {
+            if row.len() >= 4 {
+                row[2].contains(default)
             } else {
-                row.contains(default)
+                row.iter().any(|cell| cell.contains(default))
             }
         }
         fn collect(
@@ -629,8 +621,8 @@ mod tests {
         collect(&Cli::command(), &mut options);
         assert!(!options.is_empty(), "the tree has options");
         for (flag, _id, values, defaults) in &options {
-            let rows = table_rows(&cli_md, flag);
-            if rows.is_empty() {
+            let table = table_rows(&rows, flag);
+            if table.is_empty() {
                 // Prose-documented flags (config import, memory `--workspace`): presence
                 // only, no value set to check.
                 assert!(
@@ -639,17 +631,17 @@ mod tests {
                 );
                 continue;
             }
-            for row in &rows {
+            for row in &table {
                 for value in values {
                     assert!(
-                        row.contains(value.as_str()),
-                        "{flag} row is missing value {value}: {row}"
+                        row.iter().any(|cell| cell.contains(value.as_str())),
+                        "{flag} row is missing value {value}: {row:?}"
                     );
                 }
                 for default in defaults {
                     assert!(
                         default_in_row(row, default),
-                        "{flag} row is missing default {default}: {row}"
+                        "{flag} row is missing default {default}: {row:?}"
                     );
                 }
             }
