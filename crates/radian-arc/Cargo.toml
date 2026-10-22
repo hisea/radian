@@ -19,3 +19,7 @@ serde_json.workspace = true
 # `verdict_set_digest` (ADR 0048 decision 11).
 sha2 = "0.10"
 thiserror.workspace = true
+
+[dev-dependencies]
+# The configuration shape is read with the same crate the host reads `config.toml` with.
+toml = "0.8"

@@ -175,9 +175,7 @@ impl Verdict {
 ///
 /// # Errors
 ///
-/// A `task` or `attempt` that is not one safe path component, or an I/O-free build failure
-/// for a path that is not valid UTF-8 is not possible here: the result is a [`PathBuf`] and
-/// callers may convert it when they need a string.
+/// A `task` or `attempt` that is not one safe path component.
 pub fn attempt_dir(repository: &Path, task: &str, attempt: &str) -> Result<PathBuf, GateError> {
     check_component(task)?;
     check_component(attempt)?;

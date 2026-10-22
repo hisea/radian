@@ -109,7 +109,8 @@ not depend on input order, and a new attempt's verdict for the same sha and stag
 - still `base_sha`: the candidate is `head_sha`, and the key commands run in the
   `integration` checkout at `head_sha`;
 - moved: the checkout goes to the remote main and `git merge --no-ff` creates
-  `Merge work/<task> (<short head>)` with the fixed identity `arc <arc@localhost>`. The
+  `Merge work/<task> (<short head>)` (the first seven characters of the head sha) with the
+  fixed identity `arc <arc@localhost>`. The
   candidate is that merge commit. There is no rebase: a rebase changes the sha the gate
   verified. A conflict aborts the merge and writes a `fail` verdict with reason `conflict`,
   the sorted paths, and no candidate.
