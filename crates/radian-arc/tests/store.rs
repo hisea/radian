@@ -1,0 +1,703 @@
+//! The store against a real git repository: `init`, the exclude lines, the ids, the
+//! transactions, the ledger, outside changes, and `adopt`.
+//!
+//! Every test builds a throwaway repository with a throwaway bare `origin` under the
+//! system temp directory, and removes it at the end.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use radian_arc::store::model::{self, TaskFile};
+use radian_arc::store::{self, Error, Exit, Store, config};
+
+/// A temp directory that removes itself.
+struct Scratch {
+    dir: PathBuf,
+}
+
+impl Scratch {
+    fn new(label: &str) -> Self {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "radian-arc-store-{label}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("the temp dir is creatable");
+        Self { dir }
+    }
+
+    fn path(&self, rel: &str) -> PathBuf {
+        self.dir.join(rel)
+    }
+
+    fn repo(&self) -> PathBuf {
+        self.dir.join("repo")
+    }
+
+    fn write(&self, rel: &str, text: &str) {
+        let path = self.path(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("the parent is creatable");
+        }
+        fs::write(&path, text).expect("the file is writable");
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "arc test")
+        .env("GIT_AUTHOR_EMAIL", "arc@example.com")
+        .env("GIT_COMMITTER_NAME", "arc test")
+        .env("GIT_COMMITTER_EMAIL", "arc@example.com")
+        .args(["-c", "core.hooksPath="])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A repository with one commit on `main`, pushed to a local bare `origin`.
+fn fixture(label: &str) -> Scratch {
+    let scratch = Scratch::new(label);
+    git(&scratch.dir, &["init", "-q", "--bare", "origin.git"]);
+    git(
+        &scratch.path("origin.git"),
+        &["symbolic-ref", "HEAD", "refs/heads/main"],
+    );
+    git(&scratch.dir, &["init", "-q", "repo"]);
+    git(
+        &scratch.repo(),
+        &["symbolic-ref", "HEAD", "refs/heads/main"],
+    );
+    scratch.write("repo/README.md", "hello\n");
+    git(&scratch.repo(), &["add", "README.md"]);
+    git(&scratch.repo(), &["commit", "-q", "-m", "first"]);
+    let origin = scratch.path("origin.git");
+    git(
+        &scratch.repo(),
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&scratch.repo(), &["push", "-q", "-u", "origin", "main"]);
+    git(&scratch.repo(), &["remote", "set-head", "origin", "main"]);
+    scratch
+}
+
+fn initialized(scratch: &Scratch) -> Store {
+    Store::init(&scratch.repo(), false).expect("init succeeds");
+    Store::at(scratch.repo())
+}
+
+fn read(path: &Path) -> String {
+    fs::read_to_string(path).expect("the file reads")
+}
+
+#[test]
+fn init_creates_the_layout_and_writes_the_config() {
+    let scratch = fixture("init");
+    let report = Store::init(&scratch.repo(), false).expect("init succeeds");
+
+    assert_eq!(report.repository, fs::canonicalize(scratch.repo()).unwrap());
+    assert_eq!(report.remote, "origin");
+    assert_eq!(report.main_branch, "main");
+    assert!(report.config_created);
+    assert!(!report.exclude_added.is_empty());
+    assert_eq!(report.checks.len(), 4);
+    for name in [
+        "provider credential",
+        "`origin` reachable",
+        "push to `origin` `main`",
+        "workspace sandbox",
+    ] {
+        assert!(
+            report.checks.iter().any(|check| check.name == name),
+            "missing check {name}"
+        );
+    }
+    // A local bare remote is reachable and accepts a dry-run push; the sandbox probe is a
+    // real one, so its outcome is whatever this machine allows.
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "`origin` reachable" && check.passed())
+    );
+
+    let root = scratch.repo().join(".radian/arc");
+    for sub in [
+        "plans",
+        "tasks",
+        "ledger/plans",
+        "ledger/tasks",
+        "runs",
+        "attempts",
+        "gates",
+        "worktrees",
+    ] {
+        assert!(root.join(sub).is_dir(), "{sub} is created");
+    }
+    let config = config::load(&root.join("config.toml")).expect("the config parses");
+    assert_eq!(config.repository.main_branch, "main");
+    assert_eq!(config.repository.remote, "origin");
+    assert!(
+        report.remote_url.ends_with("origin.git"),
+        "{}",
+        report.remote_url
+    );
+}
+
+#[test]
+fn a_second_init_keeps_the_config_and_adds_no_exclude_line_twice() {
+    let scratch = fixture("init-twice");
+    Store::init(&scratch.repo(), false).expect("init succeeds");
+    let config_path = scratch.repo().join(".radian/arc/config.toml");
+    fs::write(
+        &config_path,
+        "# a hand-edited config\n".to_owned() + &read(&config_path),
+    )
+    .expect("the config is writable");
+    let before = read(&config_path);
+
+    let report = Store::init(&scratch.repo(), false).expect("the second init succeeds");
+    assert!(!report.config_created);
+    assert!(
+        report.exclude_added.is_empty(),
+        "{:?}",
+        report.exclude_added
+    );
+    assert_eq!(read(&config_path), before, "the config file is untouched");
+
+    let exclude = read(&report.exclude_path);
+    for line in store::exclude_lines(false) {
+        assert_eq!(
+            exclude.lines().filter(|present| *present == line).count(),
+            1,
+            "`{line}` appears exactly once in:\n{exclude}"
+        );
+    }
+}
+
+#[test]
+fn the_track_variant_keeps_config_plans_and_tasks_visible_to_git() {
+    let scratch = fixture("init-track");
+    let report = Store::init(&scratch.repo(), true).expect("init succeeds");
+    let exclude = read(&report.exclude_path);
+    for line in store::exclude_lines(true) {
+        assert!(exclude.contains(&line), "`{line}` is excluded");
+    }
+    for line in [
+        "/.radian/arc/config.toml",
+        "/.radian/arc/plans/",
+        "/.radian/arc/tasks/",
+    ] {
+        assert!(!exclude.contains(line), "`{line}` stays tracked");
+    }
+    assert!(exclude.contains("/.radian/arc/gates/"), "gates are local");
+}
+
+#[test]
+fn without_setup_every_open_names_init_and_exits_three() {
+    let scratch = fixture("no-setup");
+    let error = Store::open(&scratch.repo()).expect_err("no config yet");
+    assert_eq!(error, Error::NotInitialized);
+    assert_eq!(error.exit(), Exit::State);
+    assert!(
+        error.message().contains("radian arc init"),
+        "{}",
+        error.message()
+    );
+}
+
+#[test]
+fn an_unknown_config_key_stops_the_store() {
+    let scratch = fixture("bad-config");
+    initialized(&scratch);
+    let config_path = scratch.repo().join(".radian/arc/config.toml");
+    let text = read(&config_path).replace("[limits]\n", "[limits]\nbudget = 3\n");
+    fs::write(&config_path, text).expect("the config is writable");
+    let error = Store::open(&scratch.repo()).expect_err("an unknown key fails");
+    assert_eq!(error.exit(), Exit::Error);
+    assert!(error.message().contains("budget"), "{}", error.message());
+}
+
+#[test]
+fn a_slug_outside_the_rules_is_a_usage_error() {
+    let scratch = fixture("slugs");
+    let store = initialized(&scratch);
+    for slug in ["", "Upper", "a_b", "-a", "a-", &"a".repeat(49)] {
+        let error = store
+            .add_plan(slug, "title", "request")
+            .expect_err("a bad slug is refused");
+        assert_eq!(error.exit(), Exit::Usage, "{slug}");
+    }
+    let error = store
+        .add_plan("ok", "  ", "request")
+        .expect_err("an empty title is refused");
+    assert_eq!(error.exit(), Exit::Usage);
+    assert!(store.add_plan("ok", "title", "request").is_ok());
+}
+
+#[test]
+fn the_number_is_the_next_free_one_per_kind() {
+    let scratch = fixture("numbers");
+    let store = initialized(&scratch);
+    let first = store.add_plan("a", "A", "request").unwrap();
+    let second = store.add_plan("b", "B", "request").unwrap();
+    assert_eq!(first, "0001-a");
+    assert_eq!(second, "0002-b");
+    let task = store
+        .add_task(&first, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    assert_eq!(task, "0001-t", "tasks count in their own sequence");
+    // A plan file removed by hand frees its number only if the ledger entry is gone too.
+    fs::remove_file(scratch.repo().join(".radian/arc/plans/0002-b.md")).unwrap();
+    let third = store.add_plan("c", "C", "request").unwrap();
+    assert_eq!(third, "0003-c", "the ledger keeps 0002 reserved");
+}
+
+#[test]
+fn concurrent_writers_never_take_the_same_number() {
+    let scratch = fixture("concurrent");
+    initialized(&scratch);
+    let repo = scratch.repo();
+    let mut handles = Vec::new();
+    for n in 0..4 {
+        let repo = repo.clone();
+        handles.push(std::thread::spawn(move || {
+            let store = Store::at(repo);
+            store
+                .add_plan("same", "title", &format!("request {n}"))
+                .expect("the plan is added")
+        }));
+    }
+    let mut ids: Vec<String> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("the thread finishes"))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 4, "four distinct ids: {ids:?}");
+    // The same slug in every writer: only the number can tell them apart.
+    let numbers: Vec<String> = ids
+        .iter()
+        .map(|id| id.split_once('-').expect("an id").0.to_owned())
+        .collect();
+    assert_eq!(
+        numbers,
+        vec!["0001", "0002", "0003", "0004"],
+        "the numbers are sequential"
+    );
+    let store = Store::at(scratch.repo());
+    for id in &ids {
+        let loaded = store.load_plan(id).expect("the plan reads");
+        assert!(!loaded.changed_outside_arc, "{id} matches its ledger");
+        let ledger = read(
+            &scratch
+                .repo()
+                .join(".radian/arc/ledger/plans")
+                .join(format!("{id}.json")),
+        );
+        let ledger: serde_json::Value = serde_json::from_str(&ledger).expect("the ledger parses");
+        assert_eq!(ledger["state_version"], 1);
+        assert_eq!(
+            ledger["sha256"].as_str().expect("a hash").len(),
+            64,
+            "{ledger}"
+        );
+    }
+}
+
+#[test]
+fn a_hand_edited_brief_is_shown_as_changed_and_blocks_a_change() {
+    let scratch = fixture("outside");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    let task = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "the brief")
+        .unwrap();
+    let task_path = scratch
+        .repo()
+        .join(".radian/arc/tasks")
+        .join(format!("{task}.md"));
+    let text = read(&task_path);
+    fs::write(&task_path, text.replace("the brief", "a different brief")).unwrap();
+
+    let loaded = store.load_task(&task).expect("the task reads");
+    assert!(loaded.changed_outside_arc, "the edit is seen");
+    let view = store.plan_view(&plan).expect("the plan reads");
+    assert!(view.tasks[0].changed_outside_arc);
+
+    let error = store
+        .change_task(&task, |task| {
+            task.attempt += 1;
+            Ok(())
+        })
+        .expect_err("a changed file is not changed further");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains("changed outside arc"));
+
+    // The plan itself is untouched, so a new task on it still works.
+    store
+        .add_task(&plan, "u", "U", Vec::new(), false, Vec::new(), "brief")
+        .expect("the plan did not change outside arc");
+}
+
+#[test]
+fn adopt_accepts_a_brief_edit_and_refuses_a_state_edit() {
+    let scratch = fixture("adopt");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    let task = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "the brief")
+        .unwrap();
+    let task_path = scratch
+        .repo()
+        .join(".radian/arc/tasks")
+        .join(format!("{task}.md"));
+
+    // A brief edit is arc's to accept.
+    let text = read(&task_path);
+    fs::write(&task_path, text.replace("the brief", "a better brief")).unwrap();
+    let report = store.adopt(&task).expect("a brief edit is adoptable");
+    assert!(report.changed);
+    assert_eq!(report.kind, "task");
+    assert!(!store.load_task(&task).unwrap().changed_outside_arc);
+    assert!(
+        !store
+            .adopt(&task)
+            .expect("a second adopt is a no-op")
+            .changed
+    );
+
+    // A state edit is not.
+    let text = read(&task_path);
+    let edited = text
+        .replace("state: todo", "state: doing")
+        .replace("phase: ready", "phase: running");
+    fs::write(&task_path, edited).unwrap();
+    let error = store.adopt(&task).expect_err("a state edit is refused");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains("state"), "{}", error.message());
+    assert!(error.message().contains("phase"), "{}", error.message());
+    // Nothing was recorded: the file is still outside arc.
+    assert!(store.load_task(&task).unwrap().changed_outside_arc);
+
+    // An attempt edit is refused too.
+    let text = read(&task_path);
+    fs::write(
+        &task_path,
+        text.replace("state: doing", "state: todo")
+            .replace("phase: running", "phase: ready")
+            .replace("attempt: 0", "attempt: 1"),
+    )
+    .unwrap();
+    let error = store.adopt(&task).expect_err("an attempt edit is refused");
+    assert!(error.message().contains("attempt"), "{}", error.message());
+}
+
+#[test]
+fn a_plan_file_follows_the_same_rules() {
+    let scratch = fixture("plan-adopt");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "the request").unwrap();
+    let plan_path = scratch
+        .repo()
+        .join(".radian/arc/plans")
+        .join(format!("{plan}.md"));
+
+    let text = read(&plan_path);
+    fs::write(&plan_path, text.replace("the request", "a better request")).unwrap();
+    assert!(store.load_plan(&plan).unwrap().changed_outside_arc);
+    store.adopt(&plan).expect("a request edit is adoptable");
+
+    let text = read(&plan_path);
+    fs::write(
+        &plan_path,
+        text.replace("status: draft", "status: confirmed"),
+    )
+    .unwrap();
+    let error = store.adopt(&plan).expect_err("a status edit is refused");
+    assert!(error.message().contains("status"), "{}", error.message());
+}
+
+#[test]
+fn add_task_to_a_confirmed_plan_is_refused() {
+    let scratch = fixture("confirmed");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            Ok(())
+        })
+        .expect("a confirmed plan is one state change");
+    assert_eq!(store.load_plan(&plan).unwrap().item.status, "confirmed");
+    let error = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .expect_err("a confirmed plan gets no new tasks");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains("confirmed"), "{}", error.message());
+}
+
+#[test]
+fn after_may_name_a_task_of_the_plan_or_a_done_task() {
+    let scratch = fixture("after");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    let other = store.add_plan("o", "O", "request").unwrap();
+    let first = store
+        .add_task(&plan, "first", "F", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    let second_of_other = store
+        .add_task(&other, "other", "O", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+
+    // Same plan: fine.
+    let added = store
+        .add_task(
+            &plan,
+            "second",
+            "S",
+            vec![first.clone()],
+            true,
+            vec!["mutation".into()],
+            "brief",
+        )
+        .expect("a task of the same plan is a valid dependency");
+    let task = store.load_task(&added).unwrap().item;
+    assert_eq!(task.after, vec![first]);
+    assert!(task.allow_noop);
+    assert_eq!(task.extra_stages, vec!["mutation".to_owned()]);
+
+    // Another plan's task that is not done: refused.
+    let error = store
+        .add_task(
+            &plan,
+            "x",
+            "X",
+            vec![second_of_other.clone()],
+            false,
+            Vec::new(),
+            "brief",
+        )
+        .expect_err("a task of another plan that is not done is refused");
+    assert_eq!(error.exit(), Exit::State);
+
+    // Once it is done: allowed.
+    store
+        .change_task(&second_of_other, |task| {
+            task.state = model::TaskState::Done;
+            task.phase = "merged".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    store
+        .add_task(
+            &plan,
+            "y",
+            "Y",
+            vec![second_of_other],
+            false,
+            Vec::new(),
+            "brief",
+        )
+        .expect("a done task is a valid dependency");
+
+    // A missing task: refused.
+    let error = store
+        .add_task(
+            &plan,
+            "z",
+            "Z",
+            vec!["0042-missing".into()],
+            false,
+            Vec::new(),
+            "brief",
+        )
+        .expect_err("a missing dependency is refused");
+    assert_eq!(error.exit(), Exit::State);
+}
+
+#[test]
+fn an_unknown_stage_in_add_task_is_a_usage_error() {
+    let scratch = fixture("stage");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    let error = store
+        .add_task(
+            &plan,
+            "t",
+            "T",
+            Vec::new(),
+            false,
+            vec!["integration".into()],
+            "brief",
+        )
+        .expect_err("integration is not a profile stage");
+    assert_eq!(error.exit(), Exit::Usage);
+}
+
+#[test]
+fn a_change_replaces_the_file_in_one_rename() {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = fixture("rename");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    let task = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    let path = scratch
+        .repo()
+        .join(".radian/arc/tasks")
+        .join(format!("{task}.md"));
+    let before = fs::metadata(&path).unwrap().ino();
+    store
+        .change_task(&task, |task| {
+            task.attempt += 1;
+            Ok(())
+        })
+        .unwrap();
+    let after = fs::metadata(&path).unwrap().ino();
+    assert_ne!(
+        before, after,
+        "a change replaces the file with a rename, never writes it in place"
+    );
+    let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp."))
+        .collect();
+    assert!(leftovers.is_empty(), "no temp file is left: {leftovers:?}");
+}
+
+#[test]
+fn the_ledger_and_the_last_copy_are_written_for_every_file() {
+    let scratch = fixture("ledger");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    let task = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    let root = scratch.repo().join(".radian/arc/ledger");
+    for path in [
+        root.join("plans").join(format!("{plan}.json")),
+        root.join("plans").join(format!("{plan}.last.md")),
+        root.join("tasks").join(format!("{task}.json")),
+        root.join("tasks").join(format!("{task}.last.md")),
+    ] {
+        assert!(path.is_file(), "{} is written", path.display());
+    }
+    let ledger: serde_json::Value =
+        serde_json::from_str(&read(&root.join("tasks").join(format!("{task}.json")))).unwrap();
+    assert_eq!(ledger["state_version"], 1);
+    let last = read(&root.join("tasks").join(format!("{task}.last.md")));
+    assert_eq!(
+        last,
+        read(
+            &scratch
+                .repo()
+                .join(".radian/arc/tasks")
+                .join(format!("{task}.md"))
+        )
+    );
+    // The plan's state version moved when the task was appended to it.
+    let plan_ledger: serde_json::Value =
+        serde_json::from_str(&read(&root.join("plans").join(format!("{plan}.json")))).unwrap();
+    assert_eq!(plan_ledger["state_version"], 2);
+}
+
+#[test]
+fn the_runner_lock_is_exclusive_within_one_host() {
+    let scratch = fixture("runner");
+    let store = initialized(&scratch);
+    let held = store.try_runner_lock().expect("the lock file opens");
+    assert!(held.is_some(), "the first taker gets it");
+    let other = Store::at(scratch.repo());
+    assert!(
+        other.try_runner_lock().unwrap().is_none(),
+        "a second scheduling loop does not"
+    );
+    drop(held);
+    assert!(
+        other.try_runner_lock().unwrap().is_some(),
+        "and it is free again"
+    );
+}
+
+#[test]
+fn a_changed_plan_blocks_adding_a_task() {
+    let scratch = fixture("changed-plan");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "the request").unwrap();
+    let path = scratch
+        .repo()
+        .join(".radian/arc/plans")
+        .join(format!("{plan}.md"));
+    let text = read(&path);
+    fs::write(&path, text.replace("the request", "a hand edit")).unwrap();
+
+    let error = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .expect_err("a plan changed outside arc is not acted on");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains("changed outside arc"));
+    assert!(store.plans().unwrap()[0].plan.changed_outside_arc);
+
+    // Adopting the edit makes the plan usable again.
+    store.adopt(&plan).expect("a request edit is adoptable");
+    store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .expect("the plan matches its ledger again");
+}
+
+#[test]
+fn init_refuses_outside_a_repository_and_without_an_origin_remote() {
+    let scratch = Scratch::new("init-errors");
+    let error = Store::init(&scratch.path("plain"), false).expect_err("no repository");
+    assert_eq!(error.exit(), Exit::Error);
+    assert!(error.message().contains("git"), "{}", error.message());
+
+    fs::create_dir_all(scratch.repo()).unwrap();
+    git(&scratch.repo(), &["init", "-q"]);
+    let error = Store::init(&scratch.repo(), false).expect_err("no origin remote");
+    assert_eq!(error.exit(), Exit::Error);
+    assert!(error.message().contains("origin"), "{}", error.message());
+    assert!(!scratch.repo().join(".radian/arc/config.toml").exists());
+}
+
+#[test]
+fn a_task_file_parses_through_the_model() {
+    let scratch = fixture("model");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    let task = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    let text = read(
+        &scratch
+            .repo()
+            .join(".radian/arc/tasks")
+            .join(format!("{task}.md")),
+    );
+    let parsed = TaskFile::from_text(&text).expect("the file parses");
+    assert_eq!(parsed.state, model::TaskState::Todo);
+    assert_eq!(parsed.phase, "ready");
+    assert_eq!(parsed.attempt, 0);
+    assert_eq!(&parsed.body, "brief\n");
+}

@@ -1,0 +1,29 @@
+[package]
+name = "radian-arc"
+version = "0.1.3"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "arc: the plan and task orchestrator's storage layer and its CLI subcommands"
+publish = false
+
+[dependencies]
+# The stored credential check `init` runs, the stdout helpers every subcommand writes
+# through (a closed pipe is a normal stop, not a failure), and the one host `git` command
+# builder: every git call arc makes carries the shared no-filter/no-hook overrides.
+radian-host = { version = "0.1.3", path = "../radian-host" }
+radian-coding = { version = "0.1.3", path = "../radian-coding" }
+# The `workspace` tier probe `init` runs: the same `Sandbox::new` a session uses, so a
+# repository whose sandbox cannot start is reported.
+radian-sandbox = { version = "0.1.3", path = "../radian-sandbox" }
+# `state.lock` and `runner.lock` are flock(2) locks; `fs2` is the same crate the memory
+# store's single-writer lock uses.
+fs2 = "0.4"
+# The ledger's content hash.
+sha2 = "0.10"
+serde.workspace = true
+serde_json.workspace = true
+# `config.toml` (ADR 0048 decision 15) has the same TOML shape as the radian configuration
+# file (ADR 0008), and the docs drift test renders its defaults from the same parser.
+toml = "0.8"

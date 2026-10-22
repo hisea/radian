@@ -82,3 +82,5 @@ See `mcp` and `configuration` for those rules.
 | `<workspace>/.radian/config.toml` | May only narrow the tier (`[permissions] profile = "workspace"`). Wider values, `[sandbox]` keys, and other keys are refused or skipped by name. |
 | `<workspace>/.mcp.json` | Project MCP servers. Loads only when you trust the project; `--trust` or `--no-trust` overrides for one run. Credential variables are blanked wherever they appear in it. |
 | `~/.radian/themes/` | Theme files `tui.theme` names. Missing names warn and fall back to `dark`. |
+| `<repository>/.radian/arc/config.toml` | arc's settings: the remote, the main branch, the limits, and the gate profiles. Written by `radian arc init`, which keeps an existing file. See `arc`. |
+| `<repository>/.radian/arc/plans/`, `tasks/` | The plan and task files every arc subcommand reads. You change them through `radian arc`, or with `radian arc adopt` after a hand edit. See `arc`. |

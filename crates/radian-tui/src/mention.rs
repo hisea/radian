@@ -47,8 +47,12 @@ const TRAILING_PUNCTUATION: &[char] = &[
 ];
 
 /// Entries never offered by completion (nor, in practice, attached: they are directories).
-/// `.radian-worktrees/` is the workspace-local worktree root.
+/// `.radian-worktrees/` is the workspace-local worktree root; `.radian/arc/worktrees/` is
+/// the same thing for arc's workers, so only that directory is hidden and the rest of
+/// `.radian/` stays offerable.
 const ALWAYS_HIDDEN: &[&str] = &[".git", ".radian-sandbox", ".radian-worktrees"];
+/// arc's worker worktree root, workspace-relative (ADR 0048 decision 15).
+const ARC_WORKTREES: &str = ".radian/arc/worktrees";
 
 /// One attached file: its workspace-relative path and its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +460,9 @@ fn list_candidates(workspace: &Path, dir: &str, file_prefix: &str) -> Vec<String
             continue;
         }
         let mut candidate = format!("{dir}{name}");
+        if candidate == ARC_WORKTREES {
+            continue;
+        }
         if entry.path().is_dir() {
             candidate.push('/');
         }
