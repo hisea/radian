@@ -1,6 +1,6 @@
 # arc flows：一个仓库里按任务种类选 worker 配置与 gate
 
-- 状态：decided（第 1、2 步）；idea（第 3、4 步）
+- 状态：已落地（第 1 步）；decided（第 2 步）；idea（第 3、4 步）
 - 涉及 ADR：0048（§10 gate profile、§14 v0 范围、§15 `config.toml`）、0043（单会话、`subagent` 子进程先例）、0044（`Result` 回传契约）、0025（skill）、0008（配置 schema）
 - 来源：owner 问题 2026-10-22（一个项目同时跑 coding、game art、marketing content 等流程）；mattpocock/skills PR #1316（software-factory 术语表：trigger、三道刹车、每个 task 的五个问题、ratchet / retro / fix 三个示例 task）
 
@@ -18,9 +18,11 @@ arc 今天一个仓库只有一套流程，三个地方锁死：
 
 一个 **flow** 是一个命名的配置捆绑：worker 怎么起、gate 用哪个 profile、交付的缺省怎么判。它**不是**新的 worker kind，也不是新的 agent 运行时：每个 flow 的 worker 仍然是 `radian exec`，wrapper（0048 §7）、delivery check（§8）、状态机（§6）、ledger 全部不变。只有 §14 那句"没有 worker kinds 之外的东西"改措辞：worker kind 仍只有一种，flow 只是参数。
 
-### 第 1 步：`review` stage 落地
+### 第 1 步：`review` stage 落地（已落地）
 
-非代码 flow 的 gate 只有 `review` 和 `human` 有意义（`commands` 对美术和文案几乎无用）。`review` 在 0048 §10 已定（只读 radian 会话，不是 worker 会话），但今天列出它的 profile 会被拒。先把它建出来，否则 art / marketing flow 的 gate 只剩 `human`，等于没有自动验证。这一步独立于 flow，可以先派。
+`review` 已在 `BUILT_STAGES` 里；`[gate.review]` 的 `exec_args`、`prompt_file`、`timeout_secs` 已实现（ADR 0048 §10、§15），`docs/user/arc.md` 有手册条目。`prompt_file` 同时给了第 3 步“评审标准从哪里来”一个 repository 级的答案；per-flow 的 `review_prompt_file` 仍未定。
+
+非代码 flow 的 gate 只有 `review` 和 `human` 有意义（`commands` 对美术和文案几乎无用）。这一步独立于 flow，所以先落。
 
 ### 第 2 步：`[flows.<name>]` 表与 task 的 `flow` 字段
 
@@ -49,7 +51,7 @@ allow_noop = false
 ## 待决（第 3 步：非代码交付物）
 
 - 交付物仍必须是 git commit（0048 §8：`head_sha` 是 `base_sha` 后代、树干净）。文案没问题；美术二进制资产要么走 git LFS，要么 worker 只提交引用（路径、hash、生成参数），资产放外部存储。哪一种、以及 delivery check 是否要认 LFS 指针，未定。
-- `review` stage 对非代码 flow 的评审标准从哪里来：profile 一段固定 prompt，还是 flow 节一个 `review_prompt_file`。未定。
+- `review` stage 对非代码 flow 的评审标准从哪里来：现在有 repository 级的 `[gate.review] prompt_file`（第 1 步已落），但 per-flow 的 `review_prompt_file` 仍未有。未定。
 - 是否需要每个 flow 自己的 `limits`（美术任务更贵、更慢）。未定，先用 task 级覆盖。
 
 ## 待决（第 4 步：trigger，idea）
