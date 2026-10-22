@@ -774,6 +774,114 @@ fn pause_sets_auto_off_and_leaves_a_started_task_alone() {
     assert_eq!(value[0]["tasks"][0]["phase"], "running");
 }
 
+/// A path under the checkout's `scripts/`.
+fn repo_script(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts")
+        .join(name)
+}
+
+/// `git rev-parse HEAD` in `dir`.
+fn head_sha(dir: &Path) -> String {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git runs");
+    assert!(output.status.success(), "git rev-parse HEAD: {output:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// The gate script has no argument surprise: no argument is a usage error (`2`),
+/// and `--help` prints the usage (`0`).
+#[test]
+fn arc_gate_without_arguments_exits_two_and_help_exits_zero() {
+    let script = repo_script("arc-gate.sh");
+    let none = Command::new("bash")
+        .arg(&script)
+        .output()
+        .expect("bash runs");
+    assert_eq!(none.status.code(), Some(2), "{none:?}");
+    let err = String::from_utf8_lossy(&none.stderr);
+    assert!(err.contains("usage: arc-gate.sh"), "{err}");
+    assert!(err.contains("quick") && err.contains("full"), "{err}");
+
+    let help = Command::new("bash")
+        .arg(&script)
+        .arg("--help")
+        .output()
+        .expect("bash runs");
+    assert_eq!(help.status.code(), Some(0), "{help:?}");
+    let out = String::from_utf8_lossy(&help.stdout);
+    assert!(out.contains("usage: arc-gate.sh"), "{out}");
+    assert!(out.contains("quick") && out.contains("full"), "{out}");
+}
+
+/// `quick` runs nextest for the crates the checkout changed since its merge base
+/// with `origin/main`, and always for `radian-tui`. A fake `cargo` records the
+/// arguments, so the test never builds or reaches the network.
+#[test]
+fn quick_tests_the_changed_crates_and_radian_tui() {
+    let scratch = Scratch::new("gate-crates");
+    let repo = scratch.repo();
+    fs::create_dir_all(&repo).expect("the repo is creatable");
+    git(&repo, &["init", "-q"]);
+    scratch.write("repo/README.md", "base\n");
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    let base = head_sha(&repo);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &base]);
+
+    scratch.write("repo/crates/a/x", "a\n");
+    scratch.write("repo/crates/b/y", "b\n");
+    git(&repo, &["add", "crates"]);
+    git(&repo, &["commit", "-q", "-m", "change two crates"]);
+
+    let bin = scratch.path("bin");
+    fs::create_dir_all(&bin).expect("the stub dir is creatable");
+    let cargo = bin.join("cargo");
+    fs::write(
+        &cargo,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CARGO_CALLS\"\nexit 0\n",
+    )
+    .expect("the stub is writable");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
+            .expect("the stub is executable");
+    }
+
+    let calls = scratch.path("calls.txt");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg(repo_script("arc-gate.sh"))
+        .arg("quick")
+        .current_dir(&repo)
+        .env("PATH", path)
+        .env("CARGO_CALLS", &calls)
+        .output()
+        .expect("the gate runs");
+    assert!(
+        out.status.success(),
+        "code {:?}, stderr {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = fs::read_to_string(&calls).expect("the fake cargo was called");
+    let nextest = calls
+        .lines()
+        .find(|line| line.starts_with("nextest run"))
+        .unwrap_or_else(|| panic!("nextest ran: {calls}"));
+    assert!(
+        nextest.contains("-p a -p b -p radian-tui"),
+        "the changed crates and radian-tui: {nextest}"
+    );
+}
+
 fn stored_task(scratch: &Scratch, task: &str) -> radian_arc::store::model::TaskFile {
     radian_arc::store::Store::at(scratch.repo())
         .load_task(task)
