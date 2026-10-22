@@ -11,8 +11,8 @@ not a separate program. This crate is its control plane, in these modules:
   the applied result, cancel, and the reconcile step.
 - `run` — `radian arc run`, the scheduling loop: reconcile, release retries, verify, start
   what the auto levels allow, and merge at auto level `merge`.
-- `gate` — a fixed sequence of stages against one commit: each stage's separate checkout, the
-  `commands` stage, verdicts and their digest, and the integration candidate.
+- `gate` — a fixed sequence of stages against the verification candidate: each stage's separate
+  checkout, the `commands` stage, verdicts and their digest, and the integration candidate.
 - `review` — verification of a pushed attempt, the owner's approval and merge, and reject.
 - `work` — `radian arc work`, the trusted wrapper around one worker attempt. It is internal:
   arc runs it, a person does not.
@@ -162,9 +162,9 @@ still `GateError::CheckoutOccupied`.
 ## Stage locks
 
 `commands` and `mutation` hold `<repository>/.radian/arc/gates/exclusive.lock` for the whole
-stage (`ExclusiveLock`, a blocking `flock`). `CommandRun::run` takes it before `prepare` and
-drops it after the verdict is written, so a second exclusive stage waits. A crashed process
-releases the lock when its descriptor closes.
+stage (`ExclusiveLock`, a blocking `flock`). `CommandRun::run` takes it before building the
+candidate and drops it after the verdict is written, so a second exclusive stage waits. A
+crashed process releases the lock when its descriptor closes.
 
 `integration` holds its own `<repository>/.radian/arc/gates/integration.lock` for its whole
 stage, so two integration runs never work in the shared `gates/integration/` checkout at the
@@ -172,12 +172,18 @@ same time.
 
 ## `commands`
 
-`CommandRun` takes the exclusive lock, prepares the `commands` checkout at `sha` (fetching
-`remote`), runs the profile's lines with `sh -c` in order, and stops at the first failure. Each
-command gets its own process group, its own log file (`<attempt>/logs/commands-<n>.log`,
-absolute when the repository path is), and the profile's timeout; a timeout sends `SIGKILL` to
-the whole group and records `exit_code: null` and reason `timeout`. A non-zero exit records
-reason `command_failed`.
+`CommandRun` takes the exclusive lock, builds the verification candidate for `sha` in the
+`commands` checkout (fetching `remote` and its main), runs the profile's lines with `sh -c` on
+it in order, and stops at the first failure. The candidate is `sha` when the remote main is an
+ancestor of it; otherwise it is a `--no-ff` merge of `sha` onto the remote main, created in
+the checkout with the fixed identity `arc <arc@localhost>` and never pushed. A conflicted
+merge aborts, writes a `fail` verdict with reason `conflict` and the sorted paths, and runs no
+command.
+
+Each command gets its own process group, its own log file
+(`<attempt>/logs/commands-<n>.log`, absolute when the repository path is), and the profile's
+timeout; a timeout sends `SIGKILL` to the whole group and records `exit_code: null` and reason
+`timeout`. A non-zero exit records reason `command_failed`.
 
 ## Verdict
 
@@ -190,6 +196,7 @@ write for the same path is `GateError::VerdictExists`; a verdict is never change
   "schema_version": 1,
   "stage": "commands",
   "sha": "0123456789abcdef0123456789abcdef01234567",
+  "main_sha": "fedcba9876543210fedcba9876543210fedcba98",
   "result": "fail",
   "reason": "command_failed",
   "commands": [
@@ -201,13 +208,17 @@ write for the same path is `GateError::VerdictExists`; a verdict is never change
     }
   ],
   "started_at": "2026-01-01T00:00:00.000000Z",
-  "ended_at": "2026-01-01T00:04:12.000000Z"
+  "ended_at": "2026-01-01T00:04:12.000000Z",
+  "candidate_sha": "fedcba9876543210fedcba9876543210fedcba98"
 }
 ```
 
-`result` is `pass` or `fail`; `reason` is always present and `null` on a pass. An
-`integration` verdict also carries `base_sha` (the main it used) and `candidate_sha`, and a
-conflicted merge carries `conflict_paths` (sorted). `Verdict::human` builds the owner's `human`
+`result` is `pass` or `fail`; `reason` is always present and `null` on a pass. A verification
+stage's `sha` is the task's `verified_sha`; `main_sha` is the remote main its candidate was
+built on and `candidate_sha` is the commit the stage ran on (`sha` itself when main had not
+moved, a merge commit otherwise, absent when the merge conflicted). `conflict_paths` (sorted)
+is present when the candidate's merge conflicted. An `integration` verdict carries `base_sha`
+(the main it used) and `candidate_sha` instead. `Verdict::human` builds the owner's `human`
 record; it has no commands and carries the owner's note as `reason`.
 
 `valid_verdicts(verdicts, head_sha)` keeps only verdicts for that commit, so a moved branch
@@ -323,13 +334,15 @@ OS user, so that is not isolation.
 `radian arc start`, and `radian arc run` for every plan, run verification after a pushed
 attempt (`review::verify`): the remote's `work/<task>` must still equal the task's
 `head_sha`, then the effective stages of the profile plus the task's extra stages run in
-order, except `human`, each through the gate. This build runs only `commands`; a profile or
-task that lists `mutation`, `review` or `ci` is refused with `stage <name> is not built yet`
-and the task stays in `review.verifying`. An existing verdict for the current attempt and
-stage is reused.
+order, except `human`, each through the gate on the verification candidate (`candidate_for`:
+`verified_sha` when the remote main is its ancestor, else a merge of `verified_sha` onto the
+remote main). This build runs only `commands`; a profile or task that lists `mutation`,
+`review` or `ci` is refused with `stage <name> is not built yet` and the task stays in
+`review.verifying`. An existing verdict for the current attempt and stage is reused.
 
-Any failing stage moves the task to `review.rework_pending`. When every required non-`human`
-stage passed, the task records `verified_sha` and `verdict_set_digest` and moves to
+Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
+such a failure, with reason `conflict` and the paths. When every required non-`human` stage
+passed, the task records `verified_sha` and `verdict_set_digest` and moves to
 `review.awaiting_human`. The digest covers the verification verdicts for `verified_sha`
 without the `human` and `integration` verdicts, which are written later.
 

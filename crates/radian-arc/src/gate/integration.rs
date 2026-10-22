@@ -9,6 +9,11 @@
 //! and the candidate. [`merge_ready`] re-reads the remote main: the merge may only fast
 //! forward main when main is still that `base_sha`.
 //!
+//! [`candidate_for`] builds the same kind of candidate for a verification stage: `sha` itself
+//! when the remote main is an ancestor of it, else a merge of `sha` onto the remote main. A
+//! verification verdict keeps `sha` as the task's `verified_sha` and records the main it used
+//! and the commit the stage ran on.
+//!
 //! The stage holds its own `gates/integration.lock` for its whole run, so two integration
 //! runs never work in the shared `gates/integration/` checkout at the same time.
 
@@ -100,26 +105,14 @@ impl IntegrationRun<'_> {
         } else {
             // Main moved: merge head onto the current main, never the other way around.
             checkout.prepare(&remote_main)?;
-            let message = merge_message(self.task, &head);
-            let output = git::run(
-                &checkout.path(),
-                &[
-                    "-c",
-                    "user.name=arc",
-                    "-c",
-                    "user.email=arc@localhost",
-                    "merge",
-                    "--no-ff",
-                    "--no-edit",
-                    "-m",
-                    message.as_str(),
-                    head.as_str(),
-                ],
-            )?;
-            if output.success() {
-                let merge_commit = git::ok(&checkout.path(), &["rev-parse", "HEAD"])?;
-                candidate = Some(merge_commit);
-                let (records, outcome) = run_series(
+            let outcome = merge_onto(&checkout, self.task, &head)?;
+            conflict_paths = outcome.conflict_paths;
+            candidate = outcome.candidate_sha;
+            if let Some(failure) = outcome.failure {
+                result = VerdictResult::Fail;
+                reason = Some(failure);
+            } else {
+                let (records, series) = run_series(
                     &checkout.path(),
                     self.key_commands,
                     self.timeout,
@@ -127,20 +120,10 @@ impl IntegrationRun<'_> {
                     Stage::Integration,
                 )?;
                 commands = records;
-                if outcome != SeriesOutcome::Passed {
+                if series != SeriesOutcome::Passed {
                     result = VerdictResult::Fail;
-                    reason = outcome.reason();
+                    reason = series.reason();
                 }
-            } else {
-                conflict_paths = conflicted_paths(&checkout.path())?;
-                let _ = git::run(&checkout.path(), &["merge", "--abort"]);
-                candidate = None;
-                result = VerdictResult::Fail;
-                reason = Some(if conflict_paths.is_empty() {
-                    format!("merge_failed: {}", output.stderr.trim())
-                } else {
-                    "conflict".to_string()
-                });
             }
         }
 
@@ -153,6 +136,7 @@ impl IntegrationRun<'_> {
             commands,
             started_at,
             ended_at: now_utc(),
+            main_sha: None,
             base_sha: Some(remote_main),
             candidate_sha: candidate,
             conflict_paths,
@@ -194,6 +178,119 @@ pub fn merge_ready(
     git::fetch_main(repository, remote, main_branch)?;
     let current = git::resolve_commit(repository, main_ref)?;
     Ok(current == *base)
+}
+
+/// The verification candidate of one stage for `sha` (ADR 0048 decision 10).
+///
+/// `sha` stays the task's `verified_sha`; `candidate_sha` is the commit the stage runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Candidate {
+    /// The resolved `verified_sha`.
+    pub sha: String,
+    /// The remote main the candidate was built on.
+    pub main_sha: String,
+    /// The commit the stage runs on, or `None` when the merge failed.
+    pub candidate_sha: Option<String>,
+    /// The conflicted paths of a failed merge, sorted.
+    pub conflict_paths: Vec<String>,
+    /// Why the merge failed: `conflict`, or `merge_failed: <git's message>`.
+    pub failure: Option<String>,
+}
+
+/// Builds the verification candidate for `sha` in `checkout` (ADR 0048 decision 10).
+///
+/// It fetches `remote` and its main branch first. When the remote main is an ancestor of
+/// `sha`, the candidate is `sha` itself. Otherwise `checkout` goes to the remote main, where
+/// a `--no-ff` merge of `sha` builds the candidate with arc's own identity; that commit is
+/// never pushed. The checkout is left on the candidate.
+///
+/// A conflict aborts the merge, leaves no candidate, and reports reason `conflict` with the
+/// sorted paths. A merge that fails for another reason reports `merge_failed: <message>`.
+///
+/// # Errors
+///
+/// The fetch, the resolution of a commit, or a git command failed.
+pub(crate) fn candidate_for(
+    repository: &Path,
+    remote: &str,
+    main_ref: &str,
+    sha: &str,
+    task: &str,
+    checkout: &GateCheckout,
+) -> Result<Candidate, GateError> {
+    let main_branch = git::main_branch_of(remote, main_ref)?;
+    git::fetch_remote(repository, remote)?;
+    git::fetch_main(repository, remote, main_branch)?;
+    let head = git::resolve_commit(repository, sha)?;
+    let remote_main = git::resolve_commit(repository, main_ref)?;
+    if git::is_ancestor(repository, &remote_main, &head)? {
+        checkout.prepare(&head)?;
+        return Ok(Candidate {
+            sha: head.clone(),
+            main_sha: remote_main,
+            candidate_sha: Some(head),
+            conflict_paths: Vec::new(),
+            failure: None,
+        });
+    }
+    checkout.prepare(&remote_main)?;
+    let outcome = merge_onto(checkout, task, &head)?;
+    Ok(Candidate {
+        sha: head,
+        main_sha: remote_main,
+        candidate_sha: outcome.candidate_sha,
+        conflict_paths: outcome.conflict_paths,
+        failure: outcome.failure,
+    })
+}
+
+/// What one `--no-ff` merge in a checkout produced.
+struct MergeOutcome {
+    candidate_sha: Option<String>,
+    conflict_paths: Vec<String>,
+    failure: Option<String>,
+}
+
+/// Merges `sha` onto the checkout's current HEAD, with arc's fixed identity.
+///
+/// The checkout must already be prepared at the main commit. A conflict aborts the merge and
+/// leaves the checkout on that main commit, so the next run can reuse it.
+fn merge_onto(checkout: &GateCheckout, task: &str, sha: &str) -> Result<MergeOutcome, GateError> {
+    let message = merge_message(task, sha);
+    let output = git::run(
+        &checkout.path(),
+        &[
+            "-c",
+            "user.name=arc",
+            "-c",
+            "user.email=arc@localhost",
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            message.as_str(),
+            sha,
+        ],
+    )?;
+    if output.success() {
+        let candidate_sha = git::ok(&checkout.path(), &["rev-parse", "HEAD"])?;
+        return Ok(MergeOutcome {
+            candidate_sha: Some(candidate_sha),
+            conflict_paths: Vec::new(),
+            failure: None,
+        });
+    }
+    let conflict_paths = conflicted_paths(&checkout.path())?;
+    let _ = git::run(&checkout.path(), &["merge", "--abort"]);
+    Ok(MergeOutcome {
+        failure: Some(if conflict_paths.is_empty() {
+            format!("merge_failed: {}", output.stderr.trim())
+        } else {
+            "conflict".to_string()
+        }),
+        conflict_paths,
+        candidate_sha: None,
+    })
 }
 
 fn merge_message(task: &str, head: &str) -> String {

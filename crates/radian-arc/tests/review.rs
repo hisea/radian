@@ -376,6 +376,118 @@ fn a_verdict_is_reused_after_a_crash_between_stages() {
     );
 }
 
+// ---- verification candidate (main merged in) -----------------------------------------
+
+/// Main unchanged since the task's base: the candidate is `verified_sha` itself, and the
+/// verdict says so beside the sha it is for.
+#[test]
+fn verification_uses_verified_sha_when_main_has_not_moved() {
+    let fixture = Fixture::new("verify-candidate-same");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let verified = fixture.verifying_with(&head);
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Commands);
+    assert!(verdict.is_pass(), "{:?}", verdict.reason);
+    assert_eq!(verdict.sha, head, "the verdict belongs to verified_sha");
+    assert_eq!(verdict.main_sha.as_deref(), Some(fixture.base.as_str()));
+    assert_eq!(verdict.candidate_sha.as_deref(), Some(head.as_str()));
+}
+
+/// Main gained a commit that breaks a gate command: the task's own commit alone would pass,
+/// so only running the command on the candidate can send it to rework.
+#[test]
+fn main_that_breaks_a_gate_command_sends_the_task_to_rework() {
+    let fixture = Fixture::new("verify-main-breaks");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    // Passes on the task's commit, fails once main's file is merged in.
+    fixture.commands(&["test ! -f main-only.txt"]);
+    fixture.repo.advance_main("main-only.txt", "main\n");
+
+    let verified = fixture.verifying_with(&head);
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Commands);
+    assert!(!verdict.is_pass());
+    assert_eq!(verdict.reason.as_deref(), Some("command_failed"));
+    assert_eq!(
+        verdict.sha, head,
+        "the verdict still belongs to verified_sha"
+    );
+    assert!(
+        verdict.candidate_sha.as_deref() != Some(head.as_str()),
+        "the command ran on verified_sha alone: {verdict:?}"
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    let reason = review::rework_reason(&fixture.store, &stored).expect("a reason");
+    assert!(reason.contains("command_failed"), "{reason}");
+}
+
+/// Main gained a commit a gate command needs: `verified_sha` alone fails the command, the
+/// candidate passes it.
+#[test]
+fn main_that_a_gate_command_needs_makes_the_task_pass() {
+    let fixture = Fixture::new("verify-main-needed");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    fixture.commands(&["test -f needed.txt"]);
+    let moved = fixture.repo.advance_main("needed.txt", "needed\n");
+
+    let verified = fixture.verifying_with(&head);
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Commands);
+    assert!(verdict.is_pass(), "{:?}", verdict.reason);
+    assert_eq!(verdict.sha, head);
+    assert_eq!(verdict.main_sha.as_deref(), Some(moved.as_str()));
+    let candidate = verdict.candidate_sha.clone().expect("a candidate");
+    assert_ne!(candidate, head, "the command ran on verified_sha alone");
+    assert!(fixture.repo.is_ancestor(&moved, &candidate));
+    assert!(fixture.repo.is_ancestor(&head, &candidate));
+}
+
+/// A conflicting commit on main: building the candidate is the failed stage. The task goes to
+/// rework with reason `conflict`, the path is listed, and nothing is pushed.
+#[test]
+fn a_verification_merge_conflict_makes_rework_pending_with_the_path() {
+    let fixture = Fixture::new("verify-conflict");
+    let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
+    fixture.commands(&["true"]);
+    let moved = fixture.repo.advance_main("file.txt", "main side\n");
+
+    let verified = fixture.verifying_with(&head);
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Commands);
+    assert!(!verdict.is_pass());
+    assert_eq!(verdict.reason.as_deref(), Some("conflict"));
+    assert_eq!(verdict.conflict_paths, vec!["file.txt".to_owned()]);
+    assert!(
+        verdict.candidate_sha.is_none(),
+        "a conflicting merge has no candidate"
+    );
+    assert_eq!(
+        verdict.sha, head,
+        "the verdict still belongs to verified_sha"
+    );
+    assert_eq!(verdict.main_sha.as_deref(), Some(moved.as_str()));
+    assert!(
+        verdict.commands.is_empty(),
+        "commands ran on a conflicted tree"
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    let reason = review::rework_reason(&fixture.store, &stored).expect("a reason");
+    assert!(reason.contains("conflict: file.txt"), "{reason}");
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/main").as_deref(),
+        Some(moved.as_str()),
+        "verification never pushes to main"
+    );
+    assert_eq!(
+        fixture
+            .repo
+            .ls_remote(&format!("refs/heads/work/{}", fixture.task))
+            .as_deref(),
+        Some(head.as_str()),
+        "the task branch did not move"
+    );
+}
+
 // ---- merge ---------------------------------------------------------------------------
 
 /// Main unchanged: the candidate is `head_sha`; the remote main becomes it, the task is
