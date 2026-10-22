@@ -12,12 +12,23 @@ use super::{Error, Exit, Item, Loaded, PlanView, Store};
 
 /// The subcommands this build has, in the order `radian arc` lists them.
 pub const SUBCOMMANDS: &[&str] = &[
-    "init", "add", "list", "show", "adopt", "confirm", "auto", "pause", "mcp",
+    "init",
+    "add",
+    "list",
+    "show",
+    "adopt",
+    "confirm",
+    "auto",
+    "pause",
+    "start",
+    "cancel",
+    "reset-budget",
+    "mcp",
 ];
 
 /// The subcommands ADR 0048 names that this build does not have. `work` is not here: it
 /// exists as the hidden wrapper a scheduling loop runs, and a person does not run it.
-pub const NOT_BUILT: &[&str] = &["start", "merge", "reject", "reset-budget", "cancel", "run"];
+pub const NOT_BUILT: &[&str] = &["merge", "reject", "run"];
 
 /// One `radian arc` invocation, without clap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +58,12 @@ pub enum Command {
     Auto { plan: String, level: String },
     /// `radian arc pause <plan>`.
     Pause { plan: String },
+    /// `radian arc start <task>`.
+    Start { task: String },
+    /// `radian arc cancel <task>`.
+    Cancel { task: String },
+    /// `radian arc reset-budget <id>`: a task or a plan.
+    ResetBudget { id: String },
     /// `radian arc mcp`: the lead's MCP server on standard input and output.
     Mcp,
 }
@@ -72,6 +89,9 @@ pub fn run(command: Option<&Command>) -> u8 {
         Some(Command::Confirm { plan }) => confirm(plan).map(emit),
         Some(Command::Auto { plan, level }) => set_auto(plan, level).map(emit),
         Some(Command::Pause { plan }) => pause(plan).map(emit),
+        Some(Command::Start { task }) => start(task),
+        Some(Command::Cancel { task }) => cancel(task),
+        Some(Command::ResetBudget { id }) => reset_budget(id),
         Some(Command::Mcp) => mcp(),
     };
     match result {
@@ -114,7 +134,8 @@ fn bare() -> Result<u8, Error> {
     out.push_str(&format!(
         "in this build: `radian arc init`, `radian arc add plan|task`, `radian arc list`, \
          `radian arc show`, `radian arc adopt`, `radian arc confirm`, `radian arc auto`, \
-         `radian arc pause`, `radian arc mcp`\n{}",
+         `radian arc pause`, `radian arc start`, `radian arc cancel`, \
+         `radian arc reset-budget`, `radian arc mcp`\n{}",
         arc_dir_line(&store)
     ));
     let code = emit(out);
@@ -238,13 +259,20 @@ fn list(plan: Option<&str>, json: bool) -> Result<String, Error> {
             changed_marker(view.plan.changed_outside_arc)
         ));
         for task in &view.tasks {
+            let retry = task
+                .item
+                .retry_at
+                .as_deref()
+                .map(|at| format!("  retry at {at}"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "  {}  {}.{}  attempt {}  {}{}\n",
+                "  {}  {}.{}  attempt {}  {}{}{}\n",
                 task.item.id,
                 task.item.state.as_str(),
                 task.item.phase,
                 task.item.attempt,
                 task.item.title,
+                retry,
                 changed_marker(task.changed_outside_arc)
             ));
         }
@@ -489,6 +517,37 @@ fn pause(plan: &str) -> Result<String, Error> {
     let store = open()?;
     super::plan_ops::pause(&store, plan)?;
     Ok(format!("{plan} auto off\n"))
+}
+
+/// `radian arc start <task>`: claim the task, run one attempt, apply the result.
+fn start(task: &str) -> Result<u8, Error> {
+    let store = open()?;
+    let started = crate::attempt::start(&store, task)?;
+    let text = format!("{}\n", crate::attempt::lines(&started).join("\n"));
+    let code = emit(text);
+    if code != Exit::Ok.code() {
+        return Ok(code);
+    }
+    Ok(if started.applied.left_doing() {
+        Exit::Ok.code()
+    } else {
+        Exit::Error.code()
+    })
+}
+
+/// `radian arc cancel <task>`: stop a task, or end a todo one.
+fn cancel(task: &str) -> Result<u8, Error> {
+    let store = open()?;
+    let canceled = crate::attempt::cancel(&store, task)?;
+    Ok(emit(format!("{}\n", canceled.line(task))))
+}
+
+/// `radian arc reset-budget <id>`: a paused task, or every paused task of a plan, back to
+/// `todo.ready`, with the counted cost reset to zero.
+fn reset_budget(id: &str) -> Result<u8, Error> {
+    let store = open()?;
+    let reset = super::attempt_ops::reset_budget(&store, id)?;
+    Ok(emit(format!("{id}: {} task(s) ready\n", reset.tasks.len())))
 }
 
 /// `radian arc mcp`: the lead's MCP server, until its client closes the connection. Without

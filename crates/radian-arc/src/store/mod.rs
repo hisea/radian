@@ -16,6 +16,7 @@
 //! [`Store::init`] and written by the gate (`crate::gate`) and the worker wrapper
 //! (`crate::work`).
 
+pub mod attempt_ops;
 pub mod cli;
 pub mod config;
 mod frontmatter;
@@ -480,6 +481,25 @@ impl Store {
         Err(Error::Failed(format!("no plan or task `{id}`")))
     }
 
+    /// Whether a plan file with this id exists.
+    pub fn plan_exists(&self, id: &str) -> bool {
+        check_id(id).is_ok() && self.path(Kind::Plan, id).is_file()
+    }
+
+    /// Whether a task file with this id exists.
+    pub fn task_exists(&self, id: &str) -> bool {
+        check_id(id).is_ok() && self.path(Kind::Task, id).is_file()
+    }
+
+    /// Every stored task's id, sorted: the retry release and the reconcile walk them.
+    pub fn task_ids(&self) -> Result<Vec<String>, Error> {
+        Ok(self
+            .ids(Kind::Task)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
+    }
+
     // ---- writing ----------------------------------------------------------------------
 
     /// Appends one task to a plan, in one transaction: the task file, its ledger entry, and
@@ -891,6 +911,18 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             }
             if last.attempt != current.attempt {
                 touched.push("attempt");
+            }
+            if last.attempt_id != current.attempt_id {
+                touched.push("attempt_id");
+            }
+            if last.token != current.token {
+                touched.push("token");
+            }
+            if last.cost_usd != current.cost_usd {
+                touched.push("cost_usd");
+            }
+            if last.retry_at != current.retry_at {
+                touched.push("retry_at");
             }
             if last.base_sha != current.base_sha {
                 touched.push("base_sha");

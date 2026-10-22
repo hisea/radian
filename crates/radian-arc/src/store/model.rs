@@ -248,6 +248,12 @@ pub struct TaskFile {
     pub after: Vec<String>,
     pub supersedes: Option<String>,
     pub attempt: u32,
+    /// The current attempt's id, `<task>-<attempt>`, written by the claim.
+    pub attempt_id: Option<String>,
+    /// The current attempt's random token: a result is applied only when it matches.
+    pub token: Option<String>,
+    /// What the task has cost so far, in US dollars, summed over its attempts.
+    pub cost_usd: Option<f64>,
     pub allow_noop: bool,
     /// Gate stages this brief adds to the profile's.
     pub extra_stages: Vec<String>,
@@ -287,6 +293,9 @@ impl TaskFile {
             after,
             supersedes: None,
             attempt: 0,
+            attempt_id: None,
+            token: None,
+            cost_usd: None,
             allow_noop,
             extra_stages,
             max_attempts: None,
@@ -315,6 +324,15 @@ impl TaskFile {
             out.push_str(&format!("supersedes: {}\n", frontmatter::scalar(id)));
         }
         out.push_str(&format!("attempt: {}\n", self.attempt));
+        if let Some(id) = &self.attempt_id {
+            out.push_str(&format!("attempt_id: {}\n", frontmatter::scalar(id)));
+        }
+        if let Some(token) = &self.token {
+            out.push_str(&format!("token: {}\n", frontmatter::scalar(token)));
+        }
+        if let Some(cost) = self.cost_usd {
+            out.push_str(&format!("cost_usd: {cost}\n"));
+        }
         out.push_str(&format!("allow_noop: {}\n", self.allow_noop));
         out.push_str(&frontmatter::list_field("extra_stages", &self.extra_stages));
         if let Some(limit) = self.max_attempts {
@@ -387,6 +405,9 @@ impl TaskFile {
         let after = fields.optional_list("after")?;
         let supersedes = fields.optional_string("supersedes")?;
         let attempt = fields.optional_u32("attempt")?.unwrap_or(0);
+        let attempt_id = fields.optional_string("attempt_id")?;
+        let token = fields.optional_string("token")?;
+        let cost_usd = fields.optional_f64("cost_usd")?;
         let allow_noop = fields.optional_bool("allow_noop")?.unwrap_or(false);
         let extra_stages = fields.optional_list("extra_stages")?;
         for stage in &extra_stages {
@@ -423,6 +444,9 @@ impl TaskFile {
             after,
             supersedes,
             attempt,
+            attempt_id,
+            token,
+            cost_usd,
             allow_noop,
             extra_stages,
             max_attempts,
@@ -604,6 +628,9 @@ mod tests {
             after: vec!["0001-one".to_owned()],
             supersedes: Some("0009-old".to_owned()),
             attempt: 2,
+            attempt_id: Some("0002-two-2".to_owned()),
+            token: Some("a-token".to_owned()),
+            cost_usd: Some(1.25),
             allow_noop: true,
             extra_stages: vec!["mutation".to_owned(), "review".to_owned()],
             max_attempts: Some(2),

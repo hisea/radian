@@ -34,6 +34,8 @@ pub struct Config {
     pub repository: Repository,
     #[serde(default)]
     pub limits: Limits,
+    #[serde(default)]
+    pub worker: Worker,
     #[serde(default = "default_gate")]
     pub gate: GateConfig,
 }
@@ -44,6 +46,7 @@ impl Default for Config {
             schema_version: SCHEMA_VERSION,
             repository: Repository::default(),
             limits: Limits::default(),
+            worker: Worker::default(),
             gate: default_gate(),
         }
     }
@@ -103,6 +106,23 @@ impl Default for Limits {
     }
 }
 
+/// `[worker]`: how arc starts the model process of one attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Worker {
+    /// Extra `radian exec` arguments, after the wrapper's fixed ones. Empty: the worker uses
+    /// the host's normal model configuration.
+    pub exec_args: Vec<String>,
+}
+
+impl Default for Worker {
+    fn default() -> Self {
+        Self {
+            exec_args: Vec::new(),
+        }
+    }
+}
+
 /// The `[gate]` table the file starts with: profile `default`, `commands` then `human`, both
 /// required. The gate's [`GateConfig::default`] has no profiles (a library that is handed one);
 /// the file has to be usable as written, so the file's default is this.
@@ -150,6 +170,9 @@ max_wall_time_secs = 7200
 # max_cost_usd = 5.0          # not set = no limit
 cancel_grace_secs = 10
 max_auto_rework = 2
+
+[worker]
+exec_args = []                 # extra `radian exec` arguments for the worker
 
 [gate]
 profile = "default"

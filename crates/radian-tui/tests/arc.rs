@@ -197,6 +197,9 @@ fn without_setup_the_subcommands_name_init_and_exit_three() {
         vec!["arc", "confirm", "0001-a"],
         vec!["arc", "auto", "0001-a", "run"],
         vec!["arc", "pause", "0001-a"],
+        vec!["arc", "start", "0001-a"],
+        vec!["arc", "cancel", "0001-a"],
+        vec!["arc", "reset-budget", "0001-a"],
         vec!["arc", "mcp"],
     ] {
         let run = run(&scratch, &args, "");
@@ -592,6 +595,62 @@ fn auto_needs_a_confirmed_plan_and_a_level_from_the_set() {
     let value: serde_json::Value = serde_json::from_str(&json.out).expect("list --json parses");
     assert_eq!(value[0]["auto"], "merge");
     assert_eq!(value[0]["status"], "confirmed");
+}
+
+#[test]
+fn start_refuses_a_draft_plan_and_writes_no_attempt() {
+    let scratch = fixture("start-draft");
+    init(&scratch);
+    let plan = add_plan(&scratch, "draft");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+
+    let run = run(&scratch, &["arc", "start", &task], "");
+    assert_eq!(run.code, Some(3), "{run:?}");
+    assert!(run.err.contains("confirm"), "{}", run.err);
+    let stored = radian_arc::store::Store::at(scratch.repo())
+        .load_task(&task)
+        .expect("the task reads")
+        .item;
+    assert_eq!((stored.state.as_str(), stored.phase.as_str()), ("todo", "ready"));
+    assert_eq!(stored.attempt, 0, "a refusal writes nothing");
+    assert!(
+        !scratch
+            .repo()
+            .join(".radian/arc/runs")
+            .join(&task)
+            .exists(),
+        "a refused start runs no wrapper"
+    );
+}
+
+#[test]
+fn a_retry_time_is_printed_by_list_and_show() {
+    let scratch = fixture("retry-list");
+    init(&scratch);
+    let plan = add_plan(&scratch, "retry");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+    radian_arc::store::Store::at(scratch.repo())
+        .change_task(&task, |task| {
+            task.phase = "retry_wait".to_owned();
+            task.retry_at = Some("2026-10-22T10:11:12Z".to_owned());
+            Ok(())
+        })
+        .expect("the task waits for a retry");
+
+    let list = run(&scratch, &["arc", "list"], "");
+    assert_eq!(list.code, Some(0), "{list:?}");
+    assert!(
+        list.out.contains("retry at 2026-10-22T10:11:12Z"),
+        "{}",
+        list.out
+    );
+    let show = run(&scratch, &["arc", "show", &task], "");
+    assert_eq!(show.code, Some(0), "{show:?}");
+    assert!(
+        show.out.contains("retry_at: 2026-10-22T10:11:12Z"),
+        "{}",
+        show.out
+    );
 }
 
 #[test]

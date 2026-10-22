@@ -534,6 +534,27 @@ enum ArcCommand {
         plan: String,
     },
 
+    /// Claim a task and run one attempt of it, waiting until it ends.
+    Start {
+        /// The task id.
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+
+    /// Stop a task: a `todo` task ends, a `doing` task's wrapper is signalled.
+    Cancel {
+        /// The task id.
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+
+    /// Move a budget-paused task, or every paused task of a plan, back to `todo.ready`.
+    ResetBudget {
+        /// The task id, or the plan id to reset every paused task of the plan.
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+
     /// Serve the lead's MCP tools over standard input and output. A lead registers this
     /// command; a person does not run it.
     Mcp,
@@ -614,6 +635,9 @@ impl ArcCommand {
             ArcCommand::Confirm { plan } => ArcRun::Confirm { plan },
             ArcCommand::Auto { plan, level } => ArcRun::Auto { plan, level },
             ArcCommand::Pause { plan } => ArcRun::Pause { plan },
+            ArcCommand::Start { task } => ArcRun::Start { task },
+            ArcCommand::Cancel { task } => ArcRun::Cancel { task },
+            ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
             ArcCommand::Mcp => ArcRun::Mcp,
             // `work` is the trusted wrapper, not a store operation: `run_arc` dispatches it
             // before this conversion.
@@ -2231,6 +2255,19 @@ mod tests {
         }
     }
 
+    /// Every attempt failure class appears in arc.md's failure table. The source is
+    /// `radian_arc::attempt::FAILURE_CLASSES`.
+    #[test]
+    fn every_attempt_failure_class_appears_in_arc_md() {
+        let doc = arc_md();
+        for class in radian_arc::attempt::FAILURE_CLASSES {
+            assert!(
+                doc.contains(&format!("`{class}`")),
+                "the failure class `{class}` is missing from arc.md"
+            );
+        }
+    }
+
     /// Every plan status, auto level, stage, task state, and each state's phases appear in
     /// arc.md: the state rows are the phase table's.
     #[test]
@@ -2291,6 +2328,9 @@ mod tests {
             after: vec!["0002-c".to_owned()],
             supersedes: Some("0003-d".to_owned()),
             attempt: 0,
+            attempt_id: Some("0001-b-1".to_owned()),
+            token: Some("a-token".to_owned()),
+            cost_usd: Some(0.5),
             allow_noop: false,
             extra_stages: vec!["mutation".to_owned()],
             max_attempts: Some(2),

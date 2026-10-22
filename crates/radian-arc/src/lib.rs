@@ -14,8 +14,10 @@
 //! Every git call of these modules is built by the private `git` module.
 //!
 //! The scheduling loop, merge, and the TUI are later slices.
+pub mod attempt;
 pub mod gate;
 mod git;
 pub mod mcp;
+mod process;
 pub mod store;
 pub mod work;

@@ -585,6 +585,12 @@ impl Repo {
         }
     }
 
+    /// Runs one `radian` command in the clone and returns the running child: a test that needs
+    /// to signal the process, or to run something else while it blocks, uses this.
+    pub fn spawn(&self, args: &[&str]) -> std::process::Child {
+        self.radian_command(args).spawn().expect("spawn radian")
+    }
+
     /// The `radian` binary in the clone, with the environment isolated from the machine: the
     /// home, the session directory and the model catalog are the test's own.
     fn radian_command(&self, args: &[&str]) -> Command {

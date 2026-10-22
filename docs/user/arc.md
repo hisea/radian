@@ -7,10 +7,10 @@ description: Plan and task orchestration: setup, plans, tasks, the files arc kee
 arc is a plan and task orchestrator built into the same `radian` binary.
 It keeps a plan and its tasks as files in the repository, runs each task as a separate headless `radian` worker, and merges only what passes a fixed gate.
 
-This build has the storage layer and the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, and `pause`.
-It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through.
-The gate and the worker wrapper exist as internal parts of the binary; no subcommand runs them yet.
-The scheduling loop, attempts, merge, and the arc terminal interface are **not built yet**, so the `run` and `merge` auto levels are stored and nothing acts on them yet.
+This build has the storage layer and the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, and `reset-budget`.
+It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, and the attempt runner behind `start` and `cancel`.
+The gate library and the worker wrapper are internal parts of the binary; no subcommand runs the gate yet.
+The scheduling loop, merge, and the arc terminal interface are **not built yet**, so the `run` and `merge` auto levels are stored and nothing acts on them in the background.
 
 ## `radian arc`
 
@@ -108,7 +108,7 @@ An `--after` id must name a task of the same plan or a task whose state is `done
 ## `radian arc list [--plan <ID>] [--json]`
 
 Lists plans, each with its tasks in the plan's order.
-Each task line shows `state.phase` and the attempt number.
+Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
 
 | Flag | Value | What it does |
 |---|---|---|
@@ -145,7 +145,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 
 It refuses with exit `3` when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
-- a task: `state`, `phase`, `attempt`, `base_sha`, `head_sha`, `verified_sha`;
+- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`;
 - a plan: `status`, `auto`.
 
 A file that already matches the ledger is a no-op and prints so.
@@ -198,6 +198,89 @@ A value outside the set is a usage error (`2`).
 This build has no scheduling loop, so nothing is running: `pause` only writes the level.
 A task that is already started keeps its state, and a later loop reads the level before it starts anything.
 It exits `0` on a plan that is already `off`.
+
+## `radian arc start <TASK>`
+
+`start` runs one attempt of one task and waits until it ends.
+It is how v0 runs a task: there is no scheduling loop yet, so the owner starts one task at a time.
+
+```text
+radian arc start <TASK>
+```
+
+| Argument | Value | What it does |
+|---|---|---|
+| `<TASK>` | `ID` | The task id. Required. |
+
+Before it claims anything it reconciles every task in `doing` (see below) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
+
+A claim is refused with exit `3` and changes nothing when:
+
+- the task is not `todo.ready`;
+- its plan is not `confirmed`;
+- an `after` task is not `done`;
+- `[limits] concurrency` tasks are already in `doing`.
+
+The claim is one transaction: the task's `attempt` goes up by one, `attempt_id` becomes `<task>-<attempt>`, a random `token` is written, and the task moves to `doing.starting`.
+arc then runs the hidden `radian arc work` wrapper as a child, with the brief on its stdin; the wrapper moves the task to `doing.running`.
+
+While the wrapper runs, arc watches `runs/<task>/attempts/<attempt>/result.jsonl`:
+
+- no new line for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the wrapper;
+- `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the attempt started does the same;
+- after `[limits] cancel_grace_secs` arc sends SIGKILL.
+
+The wrapper forwards SIGTERM to its worker, waits for it, and still writes its `AttemptFinished` record.
+A limit of `0` means no limit for that timer.
+
+When the attempt ends, arc applies the result in one transaction (the table below) and prints one line:
+
+```text
+<attempt id> <outcome> -> <state>.<phase>
+<attempt id> <outcome> -> <state>.<phase> (retry at <UTC time>)
+<attempt id> <outcome> -> <state>.<phase> (<reason>)
+```
+
+For example `0001-work-1 completed -> review.verifying`.
+A result whose token is not the task's current attempt prints `<attempt id> ignored: <why>` and changes nothing.
+Before its own line, `start` prints `reconciled: <line>` for each task the reconcile step changed.
+
+`start` exits `0` when the task left `doing`, `1` when it is still in `doing` after the attempt (or on an internal error), `3` when the claim is refused, and `4` when another process holds `state.lock`.
+
+## `radian arc cancel <TASK>`
+
+`cancel` stops one task.
+It reconciles `doing` tasks first, as `start` does.
+
+| Argument | Value | What it does |
+|---|---|---|
+| `<TASK>` | `ID` | The task id. Required. |
+
+| The task is | What `cancel` does |
+|---|---|
+| `todo` (any phase) | moves it to `failed.cancelled` |
+| `doing`, starting or running | SIGTERM to the wrapper, then SIGKILL after `[limits] cancel_grace_secs`; when the wrapper's `AttemptFinished` arrives the task goes to `failed.cancelled`; when it never arrives the task goes to `doing.reconciling` |
+| `doing.reconciling` | checks the wrapper's pid and start time; signals it if it is still that process; moves the task to `failed.cancelled` |
+| `review`, `done`, `failed` | refused with exit `3` |
+
+The wrapper's pid and its start time both come from the attempt record, so a pid the operating system reused is never signalled.
+`cancel` prints `<task> <state>.<phase>`, for example `0001-work failed.cancelled`.
+It exits `0` when it stopped the task or left it `doing.reconciling`, `3` for a refused state, and `4` when another process holds `state.lock`.
+
+## `radian arc reset-budget <ID>`
+
+`reset-budget` returns budget-paused tasks to `todo.ready` and resets the counted cost to zero from now on.
+The id is looked up among the plans first, then the tasks, as `show` does.
+
+| Argument | Value | What it does |
+|---|---|---|
+| `<ID>` | a plan or task id | Required. A plan id resets every paused task of that plan. |
+
+- Task form: the task must be `todo.paused_budget`; it moves to `todo.ready` and its `cost_usd` becomes `0`. Any other state is refused (`3`).
+- Plan form: every task of the plan that is `todo.paused_budget` moves to `todo.ready`; every task of the plan gets `cost_usd` `0`, because the plan's budget counts all of them. The plan's `auto` level is not changed.
+
+It prints `<id>: <n> task(s) ready` and exits `0`.
+An id that names no plan or task exits `1`.
 
 ## `radian arc mcp`
 
@@ -309,6 +392,7 @@ A key you leave out takes its default.
 | `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
 | `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
 | `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. |
+| `worker.exec_args` | array of strings | `[]` | any `radian exec` argument | Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
 | `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
 | `gate.command_timeout_secs` | integer | `3600` | seconds | Per gate command line. |
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
@@ -360,6 +444,9 @@ A confirmed plan gains records only; a draft plan may have its request text repl
 | `after` | list of ids | yes | tasks that must be merged first (`[]` when there are none) |
 | `supersedes` | string | no | the id of a task this one replaces |
 | `attempt` | integer | yes | 0 or more; `0` when the task is new |
+| `attempt_id` | string | no | the current attempt's `<task>-<n>`, written by the claim |
+| `token` | string | no | the current attempt's random token; a result is applied only when it matches |
+| `cost_usd` | number | no | the task's counted cost in US dollars, summed over its attempts; `reset-budget` makes it `0` |
 | `allow_noop` | boolean | yes | `true`, `false`; `false` when the task is new |
 | `extra_stages` | list of strings | yes | gate stages added to the profile (`[]` when there are none) |
 | `max_attempts` | integer | no | 1 or more; overrides `limits.max_attempts` for this task |
@@ -386,6 +473,55 @@ The body is the brief.
 A new task is `todo` / `ready`.
 A plan is done when all of its tasks are merged; `done` is not a stored plan status.
 
+## Failures, retries and the budget
+
+One attempt's result maps to one class and one next state.
+The class is recorded in `runs/<task>/attempts/<attempt>/attempt_result.json`.
+
+| Result | Class | Next state |
+|---|---|---|
+| `completed` and pushed | — | `review.verifying`, with `base_sha` and `head_sha` |
+| `completed`, but the wrapper's delivery check failed | `verification` | `review.rework_pending`; the reason is in the attempt result, arc writes no brief |
+| `poisoned` | `model` | `failed.irrecoverable` (never retries) |
+| `refused` | `model` | retry |
+| `failed` | `model` | retry |
+| `incomplete` | `model` | retry |
+| `budget_exceeded` | `model` | retry |
+| `cancelled` from inside the worker (not your `cancel`) | `model` | retry |
+| `terminated` (no `Result`, a crash or a kill) | `infrastructure` | retry |
+| an outcome this build does not know | `infrastructure` | retry |
+| a wrapper exit `4` (the worktree lock is held) | `infrastructure` | retry |
+| `stall` (arc sent SIGTERM) | `stall` | retry |
+| `wall_time` (arc sent SIGTERM) | `wall_time` | retry |
+| `cancelled` by `radian arc cancel` | `cancel` | `failed.cancelled` (never retries) |
+
+A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 10 seconds for the first attempt, doubled for each later attempt, capped at 5 minutes.
+When `attempt` has reached the task's `max_attempts` (else `[limits] max_attempts`), the task goes to `failed.exhausted` instead.
+`todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; `start` does this before it claims.
+
+Cost is counted per attempt.
+ADR 0044's `Result.cost` is the session total, so the attempt's cost is this attempt's session total minus the previous attempt's.
+The delta is added to the task's `cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
+
+When a retry is due and the budget is used up, the task goes to `todo.paused_budget` instead of `todo.retry_wait`:
+
+- the task's `max_cost_usd`, else `[limits] max_cost_usd`;
+- the plan's `max_cost_usd`, counted over every task of the plan. A plan budget also sets the plan's `auto` to `off`.
+
+`reset-budget` is the only way back.
+
+## Reconcile
+
+arc keeps no attempt state in memory.
+Before `start` or `cancel` acts, and after a restart, it reconciles every task in `doing`:
+
+- the wrapper's `attempt_finished.json` is present and its token is current: the result is applied;
+- the wrapper process (its pid and start time) is alive, or the `start` process that claimed the attempt is: the task is left alone;
+- neither is alive and there is no result: the attempt is an `infrastructure` (terminated) failure and the retry rules above apply.
+
+Reconcile never starts a task again.
+`doing.reconciling` is left for you to resolve; `radian arc cancel` moves it to `failed.cancelled` after the same process check.
+
 ## The `.radian/arc/` layout
 
 Everything arc stores for one repository is in `<repository>/.radian/arc/`:
@@ -399,8 +535,8 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `ledger/plans/<id>.last.md` | The plan as arc last wrote it, for `adopt`. |
 | `ledger/tasks/<id>.json` | The same for a task. |
 | `ledger/tasks/<id>.last.md` | The task as arc last wrote it. |
-| `runs/<task>/…` | One attempt's output (the worker wrapper writes it). |
-| `attempts/<task>/…` | The host-local attempt records (the worker wrapper writes them). |
+| `runs/<task>/…` | One attempt's output: the worker's `result.jsonl`, `stderr.log`, `execution.json`, the wrapper's `attempt_finished.json`, `signal.json` when arc signalled it, and arc's `attempt_result.json`. |
+| `attempts/<task>/…` | The host-local attempt records: `base_sha`, `last_head`, and per attempt `start.json`, `identity.json`, `status.json`. |
 | `gates/<stage>/` | One checkout per gate stage (the gate library uses it; no subcommand runs the gate yet). |
 | `worktrees/<task>/` | The worker's checkout for that task (the worker wrapper creates it). |
 | `state.lock` | The short lock every change takes. |
@@ -418,9 +554,9 @@ A worker never reads the rest of `.radian/arc/` from inside its checkout: the wo
 These subcommands are named in the design and do not exist in this build.
 Do not rely on their flags: they have none yet.
 
-`start`, `merge`, `reject`, `reset-budget`, `cancel`, and `run`.
+`merge`, `reject`, and `run`.
 The arc terminal interface is not built either.
-The hidden `work` wrapper exists, but a person does not run it: the scheduling loop that would run it is not built.
+The scheduling loop that would call the gate and start tasks in the background is not built: `start` runs one task at a time, and `reconcile` is the restart step that loop will call.
 
 ## See also
 

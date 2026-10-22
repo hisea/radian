@@ -1,17 +1,19 @@
 # radian-arc
 
 arc is the plan and task orchestrator (ADR 0048). It is part of the `radian` binary; it is
-not a separate program. This crate is its control plane, in three modules:
+not a separate program. This crate is its control plane, in these modules:
 
 - `store` — `<repository>/.radian/arc/`: `config.toml`, plans, tasks, the ledger, the locks
-  and the transactions that change them, behind `radian arc init`, `add`, `list`, `show` and
-  `adopt`.
+  and the transactions that change them, behind `radian arc init`, `add`, `list`, `show`,
+  `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel` and `reset-budget`.
+- `attempt` — one attempt's life: the claim, the wrapper child, the stall and wall timers,
+  the applied result, cancel, and the reconcile step.
 - `gate` — a fixed sequence of stages against one commit: each stage's separate checkout, the
   `commands` stage, verdicts and their digest, and the integration candidate.
 - `work` — `radian arc work`, the trusted wrapper around one worker attempt. It is internal:
   arc runs it, a person does not.
 
-Every git call of the three modules is built in the private `git` module.
+Every git call of these modules is built in the private `git` module.
 
 ## The git helper
 
@@ -40,6 +42,9 @@ The `store` owns parsing `config.toml`; the `gate` owns these types, and the fie
 the file's names.
 
 ```toml
+[worker]
+exec_args = []               # extra `radian exec` arguments, after the wrapper's own
+
 [gate]
 profile = "default"
 command_timeout_secs = 3600
@@ -77,6 +82,34 @@ outside change to a field only arc or the owner may set.
 `init` creates the layout, writes `config.toml` once, appends the local exclude lines to
 `.git/info/exclude` once, and runs its requirement checks. A bare `radian arc` refuses without
 setup, naming `radian arc init`; with setup, this build has no TUI and says so.
+
+## Attempts
+
+`radian arc start <task>` is the v0 runner: there is no scheduling loop yet, so the owner
+runs one task at a time. It reconciles `doing`, releases a due retry, and claims the task in
+one transaction (`todo.ready` → `doing.starting`, `attempt` + 1, `<task>-<n>`, a random
+token). A claim is refused (exit 3) when the task is not ready, its plan is not confirmed, an
+`after` task is not done, or `[limits] concurrency` tasks are already in `doing`.
+
+It then runs the current executable as `arc work --task … --attempt … --token … --remote …
+--main-branch … [--resume] [--allow-noop] -- <[worker] exec_args>`, with the task body on
+stdin, and moves the task to `doing.running`. While the wrapper runs, no growth in
+`result.jsonl` for the stall timeout, or `max_wall_time_secs` in total, sends SIGTERM (then
+SIGKILL after `cancel_grace_secs`); the reason is in `signal.json`.
+
+The result is applied in one transaction, and only when its token and attempt id are the
+task's current ones. `radian arc cancel` signals the wrapper by the pid **and** start time in
+the attempt record, waits for its `AttemptFinished`, and leaves a task that never confirms in
+`doing.reconciling`. `attempt::reconcile` applies a result that is there, leaves a live
+wrapper or `start` process alone, and turns a dead attempt without a result into an
+`infrastructure` retry.
+
+`store::attempt_ops` holds the store side (`claim`, `apply`, `release_retries`,
+`reset_budget`) and the two closed lists the manual's drift test reads: `FAILURE_CLASSES` and
+the backoff constants (10 s, doubling, capped at 5 minutes). Cost is the `Result.cost`
+delta against the previous attempt (ADR 0044), added to the task's `cost_usd`; a reached task
+or plan budget pauses the task at `todo.paused_budget` instead of retrying, and a plan budget
+also sets the plan's `auto` to `off`.
 
 ## Gate checkout
 
@@ -262,5 +295,4 @@ OS user, so that is not isolation.
 
 ## Not here yet
 
-The scheduling loop, merge, reject, cancel, the state machine, the arc TUI and
-`radian arc mcp`.
+The scheduling loop, merge, reject, the arc TUI, and the gate's subcommands.

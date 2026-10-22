@@ -137,7 +137,7 @@ radian exec --fork demo --at 12
 
 `radian arc` is the plan and task orchestrator.
 A bare `radian arc` would open its interface, which this build does not have yet.
-The subcommands are `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, and `mcp`; run `radian arc --help`.
+The subcommands are `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, `reset-budget`, and `mcp`; run `radian arc --help`.
 arc's exit codes are its own: `3` means the state does not allow the operation and `4`
 means a lock is held.
 See [`arc`](arc.md) for every subcommand, flag, file field, and exit code.
@@ -148,6 +148,9 @@ radian arc add plan --slug first --title "First plan" < request.txt
 radian arc list --json
 radian arc confirm 0001-first
 radian arc auto 0001-first run
+radian arc start 0001-first-work
+radian arc cancel 0001-first-work
+radian arc reset-budget 0001-first-work
 ```
 
 ## `radian login` and `radian logout`

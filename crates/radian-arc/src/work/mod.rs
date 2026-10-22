@@ -33,11 +33,13 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use fs2::FileExt;
 use serde_json::{Value, json};
 
 use crate::git::GitOutput;
+use crate::process;
 
 /// The `radian arc work` flags. `radian-tui`'s `arc work` subcommand fills this.
 pub struct Options {
@@ -85,6 +87,32 @@ const DENIED_ENTRIES: &[&str] = &[
     "runner.lock",
 ];
 
+/// The worker's pid, while a child runs. The SIGTERM handler reads it to forward the signal.
+static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+/// Whether a SIGTERM arrived before the child existed (or after it exited).
+static TERM_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The SIGTERM handler: remember the request and forward it to the worker. Both the atomic
+/// stores and `kill(2)` are async-signal-safe.
+extern "C" fn forward_sigterm(_signal: libc::c_int) {
+    TERM_REQUESTED.store(true, Ordering::SeqCst);
+    let pid = CHILD_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        process::signal(pid as u32, process::SIGTERM);
+    }
+}
+
+fn install_sigterm_handler() {
+    // SAFETY: the handler only touches atomics and calls `kill(2)`; both are
+    // async-signal-safe. `signal` with a positive handler installs it for the process.
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            forward_sigterm as *const () as libc::sighandler_t,
+        );
+    }
+}
+
 /// Runs one attempt and returns the process exit code.
 pub fn run(options: Options) -> i32 {
     match run_inner(&options) {
@@ -120,6 +148,10 @@ impl Failure {
 
 fn run_inner(o: &Options) -> Result<i32, Failure> {
     validate(o)?;
+    // ADR 0048 decision 9: arc cancels an attempt with SIGTERM and expects the wrapper to
+    // pass it on, wait for the worker, and still write `AttemptFinished`. Without a handler
+    // the wrapper would die at once and leave no record for arc to apply.
+    install_sigterm_handler();
     let repo = repo_root()?;
     let arc = repo.join(".radian").join("arc");
     let worktree = arc.join("worktrees").join(&o.task);
@@ -161,14 +193,25 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     let deny = deny_paths(&arc);
     let mut child = spawn_child(o, &worktree, &deny, &result_path, &stderr_path, &brief)?;
     let pid = child.id();
-    let process_started_at = process_start(pid).unwrap_or_else(|| started_at.clone());
+    CHILD_PID.store(pid as i32, Ordering::SeqCst);
+    // A SIGTERM that arrived during the worktree setup is forwarded as soon as there is a
+    // child to forward it to.
+    if TERM_REQUESTED.load(Ordering::SeqCst) {
+        process::signal(pid, process::SIGTERM);
+    }
+    let processor_started_at = process_start(pid).unwrap_or_else(|| started_at.clone());
+    let wrapper_pid = std::process::id();
     write_json(
         &attempt_dir.join("identity.json"),
         &json!({
             "attempt_id": format!("{}-{}", o.task, o.attempt),
             "token": o.token,
             "pid": pid,
-            "process_started_at": process_started_at,
+            "process_started_at": processor_started_at,
+            // The scheduling side signals the wrapper, not the worker, so the attempt
+            // record carries the wrapper's own identity too (decision 9).
+            "wrapper_pid": wrapper_pid,
+            "wrapper_process_started_at": process::start_time(wrapper_pid),
             "session_id": o.task,
             "worktree": worktree.display().to_string(),
             "branch": branch,
@@ -178,6 +221,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     let status = child
         .wait()
         .map_err(|error| Failure::error(format!("cannot wait for the worker: {error}")))?;
+    CHILD_PID.store(0, Ordering::SeqCst);
     let ended_at = now();
     let exit_code = exit_code_of(&status);
 
@@ -201,7 +245,8 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
             "host": hostname(),
             "token": o.token,
             "pid": pid,
-            "process_started_at": process_started_at,
+            "process_started_at": processor_started_at,
+            "wrapper_pid": wrapper_pid,
             "session_id": o.task,
             "worktree": worktree.display().to_string(),
             "branch": branch,
@@ -843,12 +888,7 @@ fn exit_code_of(status: &ExitStatus) -> i32 {
 /// The worker's process start time, for the host-local identity record (ADR 0048 decision 4).
 /// `ps`'s own spelling is recorded verbatim; a failure falls back to the wrapper's spawn time.
 fn process_start(pid: u32) -> Option<String> {
-    let output = Command::new("ps")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!text.is_empty()).then_some(text)
+    process::start_time(pid)
 }
 
 fn hostname() -> Option<String> {
