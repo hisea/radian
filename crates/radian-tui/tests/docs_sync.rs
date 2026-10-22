@@ -149,6 +149,225 @@ fn every_theme_role_appears_in_the_manual() {
     }
 }
 
+/// Every footer item id the component registry lists appears in `docs/user/footer.md`.
+///
+/// The source is [`radian_tui::footer::footer_item_ids`], the registry order itself, so a new
+/// built-in fails this test until the manual gives it a section.
+#[test]
+fn every_footer_item_id_appears_in_the_manual() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let footer_md =
+        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    for id in radian_tui::footer::footer_item_ids() {
+        assert!(
+            footer_md.contains(&format!("`{id}`")),
+            "item `{id}` is missing from footer.md"
+        );
+    }
+    // The command item is no built-in: its section is pinned by name.
+    assert!(
+        footer_md.contains("### Command items"),
+        "the command item section is missing from footer.md"
+    );
+}
+
+/// Every parameter each footer item reads appears in that item's section of
+/// `docs/user/footer.md`.
+///
+/// The source is [`radian_tui::footer::footer_item_params`]: each component reads from its own
+/// entry there (`context`'s `width`/`fill`/`empty`, `status`'s `keys`), so the test cannot drift
+/// from the behavior. A command item's `command`/`period` come from
+/// [`radian_host::command_footer::COMMAND_ITEM_PARAMS`], the same list `command_specs` reads.
+#[test]
+fn every_footer_item_parameter_appears_in_its_section() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let footer_md =
+        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    for id in radian_tui::footer::footer_item_ids() {
+        let section = item_section(&footer_md, id);
+        for param in radian_tui::footer::footer_item_params(id).unwrap_or(&[]) {
+            assert!(
+                section.contains(&format!("`{param}`")),
+                "item `{id}` reads `{param}` but its section does not name it"
+            );
+        }
+    }
+    let commands = item_section(&footer_md, "Command items");
+    for param in radian_host::command_footer::COMMAND_ITEM_PARAMS {
+        assert!(
+            commands.contains(&format!("`{param}`")),
+            "a command item reads `{param}` but its section does not name it"
+        );
+    }
+}
+
+/// Every placeholder each footer item offers appears in its section of
+/// `docs/user/footer.md`.
+///
+/// The source is [`radian_tui::footer::footer_item_placeholders`], the registry's own table, so
+/// a new placeholder fails this test until the manual documents it.
+#[test]
+fn every_footer_item_placeholder_appears_in_its_section() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let footer_md =
+        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    for id in radian_tui::footer::footer_item_ids() {
+        let section = item_section(&footer_md, id);
+        for placeholder in radian_tui::footer::footer_item_placeholders(id).unwrap_or(&[]) {
+            assert!(
+                section.contains(&format!("`{placeholder}`")),
+                "item `{id}` offers `{placeholder}` but its section does not name it"
+            );
+        }
+    }
+}
+
+/// Each preset's fenced block in `docs/user/footer.md` equals `radian footer export <preset>`
+/// byte for byte.
+///
+/// The source is [`radian_tui::footer::export_preset`], the same function the CLI prints, so the
+/// embedded TOML cannot drift from the shipped presets.
+#[test]
+fn every_footer_preset_block_matches_its_export() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let footer_md =
+        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    for preset in radian_tui::footer::Preset::NAMES {
+        let section = item_section(&footer_md, &format!("Preset `{preset}`"));
+        let block = fenced_toml(&section);
+        let exported = radian_tui::footer::export_preset(preset).expect("a built-in preset");
+        assert_eq!(
+            block, exported,
+            "the `{preset}` block in footer.md differs from `radian footer export {preset}`"
+        );
+    }
+}
+
+/// Every allowed value of `position`, `glyphs`, `context_line` and `preset` appears in that
+/// field's own `[tui.footer]` row of `docs/user/footer.md`.
+///
+/// Each source is the one `pub const` list its parser matches on, so a new value fails this test
+/// until the manual names it. Each value is asserted in its key's row, so a mention elsewhere on
+/// the page does not satisfy it.
+#[test]
+fn every_footer_closed_set_value_appears_in_its_row() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let footer_md =
+        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    for (key, values) in [
+        ("position", radian_tui::footer::RowPosition::NAMES),
+        ("glyphs", radian_tui::footer::Glyphs::NAMES),
+        ("context_line", radian_tui::footer::ContextLine::NAMES),
+        ("preset", radian_tui::footer::Preset::NAMES),
+    ] {
+        let row = footer_md
+            .lines()
+            .find(|line| line.starts_with(&format!("| `{key}` ")))
+            .unwrap_or_else(|| panic!("footer.md has no `| `{key}` |` row"));
+        for value in values {
+            assert!(
+                row.contains(&format!("`{value}`")),
+                "`{value}` is missing from the `{key}` row: `{row}`"
+            );
+        }
+    }
+}
+
+/// Every `[tui.footer]` default in `docs/user/footer.md` matches the code.
+///
+/// The source is an empty config through [`radian_tui::footer::Footer::from_config`]: the preset,
+/// glyphs, gap fill, transparency and separator the code falls back to. Each default is asserted
+/// in its key's own table row, so a value listed elsewhere on the page does not satisfy it.
+#[test]
+fn every_footer_default_matches_the_code() {
+    use radian_host::config::TuiFooterConfig;
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let footer_md =
+        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    let (footer, _) = radian_tui::footer::Footer::from_config(&TuiFooterConfig::default());
+    // The fixture parses an empty config, so the built footer carries the code defaults.
+    assert!(
+        !footer.transparent(),
+        "the empty config leaves transparency off"
+    );
+    for (key, expected) in [
+        (
+            "preset",
+            format!("`{}`", radian_tui::footer::Preset::default().as_str()),
+        ),
+        ("glyphs", format!("`{}`", radian_tui::footer::Glyphs::default().as_str())),
+        (
+            "context_line",
+            format!("`{}`", radian_tui::footer::ContextLine::default().as_str()),
+        ),
+        (
+            "transparent",
+            if footer.transparent() {
+                "`true`".to_string()
+            } else {
+                "`false`".to_string()
+            },
+        ),
+        // The page shows the separator quoted inside backticks: `" · "`.
+        (
+            "separator",
+            format!("`\"{}\"`", radian_tui::footer::DEFAULT_SEPARATOR),
+        ),
+        (
+            "separator_style",
+            format!(
+                "`{}`",
+                radian_tui::footer::DEFAULT_SEPARATOR_STYLE.as_str()
+            ),
+        ),
+    ] {
+        let row = footer_md
+            .lines()
+            .find(|line| line.starts_with(&format!("| `{key}` ")))
+            .unwrap_or_else(|| panic!("footer.md has no `| `{key}` |` row"));
+        let default_cell = row
+            .split('|')
+            .nth(3)
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("`{key}` row has no Default column: `{row}`"));
+        assert_eq!(
+            default_cell, expected,
+            "`{key}` row default is `{default_cell}` but the code default is `{expected}`"
+        );
+    }
+}
+
+/// The `### <name>` section of `footer.md`: from its heading to the next `### ` or `## ` heading.
+/// Item sections are backticked (`### `brand``); other sections are not.
+fn item_section<'a>(footer_md: &'a str, name: &str) -> &'a str {
+    let heading = format!("### `{name}`");
+    let (heading, start) = match footer_md.find(&heading) {
+        Some(index) => (heading, index),
+        None => {
+            let plain = format!("### {name}");
+            let index = footer_md
+                .find(&plain)
+                .unwrap_or_else(|| panic!("footer.md has no section `{plain}`"));
+            (plain, index)
+        }
+    };
+    let rest = &footer_md[start + heading.len()..];
+    let end = rest
+        .find("\n### ")
+        .or_else(|| rest.find("\n## "))
+        .map(|index| start + heading.len() + index)
+        .unwrap_or(footer_md.len());
+    &footer_md[start..end]
+}
+
+/// The first fenced `toml` block of a section, with its trailing newline restored.
+fn fenced_toml(section: &str) -> String {
+    let start = section.find("```toml").expect("the section has a toml block");
+    let after = &section[start + "```toml".len()..];
+    let after = after.strip_prefix('\n').unwrap_or(after);
+    let end = after.find("\n```").expect("the toml block is closed");
+    format!("{}\n", &after[..end])
+}
 /// `radian docs` and `read radian://docs/` share one table.
 #[test]
 fn docs_topics_match_embedded_pages() {

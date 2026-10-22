@@ -12,6 +12,11 @@ use super::{Component, ItemData};
 
 pub(crate) struct Context;
 
+/// The parameters `context` reads from its item (`crates/radian-tui/tests/docs_sync.rs`
+/// asserts the manual names each one): `width` cells, `fill` for the used part, `empty` for
+/// the rest.
+pub(crate) const PARAMS: &[&str] = &["width", "fill", "empty"];
+
 /// The context bar: `width` cells, `fill` for the used part and `empty` for the rest.
 fn render_bar(item: &Item, fraction: f64) -> String {
     let param = |key: &str| {
@@ -20,11 +25,11 @@ fn render_bar(item: &Item, fraction: f64) -> String {
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.as_str())
     };
-    let width: usize = param("width")
+    let width: usize = param(PARAMS[0])
         .and_then(|value| value.parse().ok())
         .unwrap_or(10);
-    let fill = param("fill").unwrap_or("━");
-    let empty = param("empty").unwrap_or("─");
+    let fill = param(PARAMS[1]).unwrap_or("━");
+    let empty = param(PARAMS[2]).unwrap_or("─");
     let used = ((fraction.clamp(0.0, 1.0)) * width as f64).round() as usize;
     let used = used.min(width);
     format!("{}{}", fill.repeat(used), empty.repeat(width - used))

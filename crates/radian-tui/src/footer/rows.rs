@@ -150,6 +150,10 @@ pub enum RowPosition {
 }
 
 impl RowPosition {
+    /// Every row position name. The single source for the `match` below and the manual's
+    /// drift test.
+    pub const NAMES: &[&str] = &["footer", "above_input", "below_input"];
+
     fn parse(name: &str) -> Option<Self> {
         match name {
             "footer" => Some(Self::Footer),

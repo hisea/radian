@@ -23,6 +23,20 @@ pub enum Preset {
 }
 
 impl Preset {
+    /// Every preset name, in parse order. The single source for the `match` below and the
+    /// manual's drift test: adding a preset means adding it here first.
+    pub const NAMES: &[&str] = &["deck", "full", "pi", "classic"];
+
+    /// The config-file spelling of this preset.
+    pub fn as_str(self) -> &'static str {
+        Self::NAMES[match self {
+            Self::Deck => 0,
+            Self::Full => 1,
+            Self::Pi => 2,
+            Self::Classic => 3,
+        }]
+    }
+
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "deck" => Some(Self::Deck),

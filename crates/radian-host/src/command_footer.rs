@@ -82,6 +82,11 @@ const SPAWN_BUSY_PAUSE: Duration = Duration::from_millis(10);
 /// command gets. Everything else is cleared; the host environment never leaks in.
 pub const INHERITED_ENV: &[&str] = &["RADIAN_SESSION_ID", "RADIAN_CWD"];
 
+/// The item parameters a footer `command` item reads (`crates/radian-tui/tests/docs_sync.rs`
+/// asserts the manual names each one): `command` is the command line, `period` the refresh
+/// period in seconds.
+pub const COMMAND_ITEM_PARAMS: &[&str] = &["command", "period"];
+
 /// The display-safe facts a command item receives on stdin (ADR 0027).
 /// `None` means "unknown": a missing fact is `null`, never a zero that looks measured.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -173,7 +178,7 @@ pub fn command_specs(footer: &TuiFooterConfig) -> (Vec<CommandSpec>, Vec<String>
     let mut specs = Vec::new();
     let mut warnings = Vec::new();
     for (id, item) in &footer.items {
-        let Some(command) = param(item, "command") else {
+        let Some(command) = param(item, COMMAND_ITEM_PARAMS[0]) else {
             continue;
         };
         // A disabled item is hidden everywhere, so its command is never run.
@@ -187,7 +192,7 @@ pub fn command_specs(footer: &TuiFooterConfig) -> (Vec<CommandSpec>, Vec<String>
                 continue;
             }
         };
-        let period = match param(item, "period") {
+        let period = match param(item, COMMAND_ITEM_PARAMS[1]) {
             None => Some(Duration::from_secs(DEFAULT_PERIOD_SECS)),
             Some(text) => match text.parse::<u64>() {
                 Ok(secs) => period_from_secs(secs),

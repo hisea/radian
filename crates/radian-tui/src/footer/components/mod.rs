@@ -148,9 +148,27 @@ pub(crate) fn builtin(id: &str) -> Option<&'static dyn Component> {
 }
 
 /// Every registered id, in registry order (tests only: the render path never needs the list).
+/// Kept for the unit tests; the manual's drift test reads [`ids_all`] instead.
 #[cfg(test)]
 pub(crate) fn ids() -> Vec<&'static str> {
+    ids_all()
+}
+
+/// Every registered id, in registry order. The single source for the manual's drift test:
+/// a new built-in means a new entry here first.
+pub(crate) fn ids_all() -> Vec<&'static str> {
     COMPONENTS.iter().map(|component| component.id()).collect()
+}
+
+/// The parameters one built-in id reads from its item, or `None` for an id no component
+/// claims. Each component reads from its own entry here, so the manual's drift test cannot
+/// drift from the behavior.
+pub(crate) fn params_of(id: &str) -> Option<&'static [&'static str]> {
+    Some(match id {
+        "context" => context::PARAMS,
+        "status" => status::PARAMS,
+        _ => return builtin(id).map(|_| &[] as &'static [&'static str]),
+    })
 }
 
 /// The placeholders a built-in id declares; `None` for an id no component claims.

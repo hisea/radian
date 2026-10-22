@@ -34,6 +34,23 @@ pub(crate) use rows::{
 };
 pub use rows::{RowPosition, fold_legacy_widgets};
 
+/// Every built-in footer item id, in registry order. The single source for the manual's
+/// drift test: a new built-in means a new entry in the component registry first.
+pub fn footer_item_ids() -> Vec<&'static str> {
+    components::ids_all()
+}
+
+/// The `{placeholder}`s one built-in id offers, or `None` when no component claims the id.
+pub fn footer_item_placeholders(id: &str) -> Option<&'static [&'static str]> {
+    components::placeholders(id)
+}
+
+/// The parameters one built-in id reads from its item (an empty list when it reads none),
+/// or `None` when no component claims the id. Each component reads from its own entry here.
+pub fn footer_item_params(id: &str) -> Option<&'static [&'static str]> {
+    components::params_of(id)
+}
+
 /// The brand mark for a glyph set (ADR 0027): the Nerd Font `md-alpha_r_circle_
 /// outline`, the plain bold-accent `R` (the same font as the body, so it sits on the baseline),
 /// or the ASCII word `rad`. `㎭` (U+33AD) is East-Asian-Wide and its fallback glyph sits off the
@@ -65,6 +82,10 @@ pub enum Glyphs {
 }
 
 impl Glyphs {
+    /// Every glyph set name, in parse order. The single source for the `match` below and the
+    /// manual's drift test: adding a set means adding it here first.
+    pub const NAMES: &[&str] = &["unicode", "nerd", "ascii", "emoji"];
+
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "unicode" => Some(Self::Unicode),
@@ -73,6 +94,16 @@ impl Glyphs {
             "emoji" => Some(Self::Emoji),
             _ => None,
         }
+    }
+
+    /// The config-file spelling of this set.
+    pub fn as_str(self) -> &'static str {
+        Self::NAMES[match self {
+            Self::Unicode => 0,
+            Self::Nerd => 1,
+            Self::Ascii => 2,
+            Self::Emoji => 3,
+        }]
     }
 
     /// The card frame's characters (ADR 0028 rule 2): unicode box drawing for the
@@ -158,6 +189,10 @@ pub enum ContextLine {
 }
 
 impl ContextLine {
+    /// Every gap-fill name. The single source for the `match` below and the manual's drift
+    /// test.
+    pub const NAMES: &[&str] = &["off", "percentage"];
+
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "off" => Some(Self::Off),
@@ -190,7 +225,10 @@ pub struct FrameGlyphs {
     pub bracket_right: &'static str,
 }
 
-/// The session's footer.
+/// The separator between two items when neither the footer nor the row sets one.
+pub const DEFAULT_SEPARATOR: &str = " · ";
+/// The separator's style when none is set: the `footer_separator` theme role.
+pub const DEFAULT_SEPARATOR_STYLE: Role = Role::FooterSeparator;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Footer {
     preset: Preset,
@@ -233,9 +271,9 @@ impl Footer {
         let separator = config
             .separator
             .clone()
-            .unwrap_or_else(|| " · ".to_string());
+            .unwrap_or_else(|| DEFAULT_SEPARATOR.to_string());
         let separator_style = match config.separator_style.as_deref() {
-            None => ItemStyle::Role(Role::FooterSeparator),
+            None => ItemStyle::Role(DEFAULT_SEPARATOR_STYLE),
             Some(name) => parse_item_style(name).unwrap_or_else(|error| {
                 warnings.push(format!("tui.footer: bad separator_style {name:?}: {error}"));
                 ItemStyle::Role(Role::FooterSeparator)
@@ -317,6 +355,16 @@ impl Footer {
 
     pub fn preset(&self) -> Preset {
         self.preset
+    }
+
+    /// The gap fill between a row's left and right groups.
+    pub fn context_line(&self) -> ContextLine {
+        self.context_line
+    }
+
+    /// Whether every footer cell's background is cleared.
+    pub fn transparent(&self) -> bool {
+        self.transparent
     }
 
     /// The configured glyph set (the renderer reads it for other chrome too).

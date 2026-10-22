@@ -11,6 +11,10 @@ use super::{Component, ItemData};
 
 pub(crate) struct Status;
 
+/// The parameters `status` reads from its item (`crates/radian-tui/tests/docs_sync.rs`
+/// asserts the manual names each one): `keys` filters `status.*` contributions.
+pub(crate) const PARAMS: &[&str] = &["keys"];
+
 impl Component for Status {
     fn id(&self) -> &str {
         "status"
@@ -32,7 +36,7 @@ impl Component for Status {
         let keys: Option<Vec<&str>> = item
             .params
             .iter()
-            .find(|(name, _)| name == "keys")
+            .find(|(name, _)| name == PARAMS[0])
             .map(|(_, value)| value.split(',').map(str::trim).collect());
         let mut parts = Vec::new();
         let mut stale = false;
