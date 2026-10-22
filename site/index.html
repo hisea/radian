@@ -194,6 +194,9 @@ h2 + p { color: var(--muted); margin: 14px 0 0; max-width: 26em; }
 .host pre .c { color: var(--muted); }
 .host .note { margin: 12px 0 0; font-size: 13px; color: var(--muted); }
 .host .note a { color: var(--accent); }
+.install-notes { margin: 14px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+.install-notes li + li { margin-top: 4px; }
+.install-notes a { color: var(--accent); }
 .shared { grid-column: 1 / -1; border-top: 1px solid var(--rule); padding: 12px 20px; font: 400 12px var(--mono); color: var(--muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .shared b { color: var(--ink); font-weight: 400; }
 .provs { grid-column: 1 / -1; border-top: 1px solid var(--rule); padding: 14px 20px; font-size: 13.5px; color: var(--muted); }
@@ -515,17 +518,40 @@ footer a:hover { color: var(--ink); }
       <div class="label"><i>/04</i> <span class="en">install</span><span class="zh">安装</span></div>
       <div class="sec-grid">
         <div>
+          <h2><span class="en">Install.</span><span class="zh">安装。</span></h2>
+          <p><span class="en">Homebrew on macOS and Linux, a release tarball, or Cargo from source.</span><span class="zh">macOS 和 Linux 都能用 Homebrew，也可以下载 release 安装包，或者用 Cargo 从源码装。</span></p>
+        </div>
+        <div>
+          <div class="install">
+            <div class="install-row"><pre><span class="p">$ </span>brew install hisea/tap/radian</pre><button type="button" class="copy" data-copy="brew install hisea/tap/radian"><span class="en">copy</span><span class="zh">复制</span></button></div>
+            <div class="install-row"><pre><span class="p">$ </span>cargo install --git https://github.com/hisea/radian radian-tui</pre><button type="button" class="copy" data-copy="cargo install --git https://github.com/hisea/radian radian-tui"><span class="en">copy</span><span class="zh">复制</span></button></div>
+            <div class="install-row"><pre><a href="https://github.com/hisea/radian/releases">github.com/hisea/radian/releases</a> <span class="c"><span class="en">signed macOS and static Linux tarballs</span><span class="zh">签名的 macOS 包和静态 Linux 包</span></span></pre><button type="button" class="copy" data-copy="https://github.com/hisea/radian/releases"><span class="en">copy</span><span class="zh">复制</span></button></div>
+          </div>
+          <ul class="install-notes">
+            <li><span class="en">Homebrew links only <code>radian</code>: homebrew-core already has a <code>rad</code> formula. The tarball and Cargo also give you the <code>rad</code> alias.</span><span class="zh">Homebrew 只链接 <code>radian</code>，因为 homebrew-core 里已经有一个叫 <code>rad</code> 的包；安装包和 Cargo 还会带上 <code>rad</code> 这个别名。</span></li>
+            <li><span class="en">On Linux the <code>workspace</code> profile needs <code>bubblewrap</code>.</span><span class="zh">Linux 上 <code>workspace</code> 等级需要先装 <code>bubblewrap</code>。</span></li>
+            <li><span class="en">Then <code>radian login</code> and <code>radian</code>. Full steps: <a href="/docs/quickstart.html">quickstart</a>.</span><span class="zh">装好后运行 <code>radian login</code>，再运行 <code>radian</code>。完整步骤见<a href="/docs/quickstart.html">快速开始</a>。</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="row">
+    <section class="sec" id="run">
+      <div class="label"><i>/05</i> <span class="en">run</span><span class="zh">运行</span></div>
+      <div class="sec-grid">
+        <div>
           <h2><span class="en">One binary, two ways in.</span><span class="zh">一个二进制，两种用法。</span></h2>
           <p><span class="en">Full screen at the keyboard. Headless for scripts, CI and other orchestrators.</span><span class="zh">坐在键盘前用全屏界面；脚本、CI 和别的编排器用无头命令。</span></p>
         </div>
         <div class="hosts">
           <div class="host">
             <h3>radian</h3>
-            <p><span class="en">The full-screen terminal app. <code>rad</code> works too.</span><span class="zh">全屏终端界面，也可以敲 <code>rad</code>。</span></p>
+            <p><span class="en">The full-screen terminal app.</span><span class="zh">全屏终端界面。</span></p>
             <pre>radian
 <span class="c"><span class="en"># sandbox</span><span class="zh"># 沙箱</span></span>
 radian --profile workspace</pre>
-            <p class="note"><span class="en">On Linux the <code>workspace</code> profile needs <code>bubblewrap</code>.</span><span class="zh">Linux 上 <code>workspace</code> 等级需要先装 <code>bubblewrap</code>。</span></p>
           </div>
           <div class="host">
             <h3>radian exec</h3>
@@ -533,7 +559,6 @@ radian --profile workspace</pre>
             <pre>radian exec --resume demo \
   --output jsonl \
   -p <span class="c">"now read docs/"</span></pre>
-            <p class="note"><span class="en">Release tarballs, building from source and the full steps: <a href="/docs/quickstart.html">quickstart</a>.</span><span class="zh">release 安装包、从源码编译和完整步骤见<a href="/docs/quickstart.html">快速开始</a>。</span></p>
           </div>
           <div class="provs"><span class="en"><strong>Providers:</strong> Anthropic, OpenAI, ChatGPT (browser OAuth sign-in), opencode-go, and any OpenAI-compatible endpoint. <code>/login</code> stores the key in <code>~/.radian/credentials/auth.json</code>.</span><span class="zh"><strong>模型来源：</strong>Anthropic、OpenAI、ChatGPT（浏览器 OAuth 登录）、opencode-go，以及任何兼容 OpenAI 的端点。<code>/login</code> 把凭据存进 <code>~/.radian/credentials/auth.json</code>。</span></div>
           <div class="shared"><span class="en">same session file</span><span class="zh">同一个会话文件</span><b>~/.radian/sessions/demo.jsonl</b></div>
