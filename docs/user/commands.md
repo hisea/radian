@@ -59,7 +59,7 @@ first, so a `ctrl-c` exit saves the cleared line. A panic writes nothing.
 | Command | Syntax | What it does |
 |---|---|---|
 | `/trust` | `/trust` (no arguments) or `/trust status` | Show the current directory's trust decision and its source: `saved for`, `inherited from`, `command line`, `this session only`, or no saved decision. A pure read: no disk write. Applies at once. |
-| `/trust` | `/trust on` | Trust the current directory for every future session. Only the disk changes: loaded resources stay as they are, so the notice says it takes effect at the next start. Applies at once. Example: `/trust on`. |
+| `/trust` | `/trust on` | Trust the current directory for every future session. Only the disk changes: loaded resources and the git safety keys the session carries stay as they are, so the notice says it takes effect at the next start. Applies at once. Example: `/trust on`. |
 | `/trust` | `/trust off` | Distrust the current directory, saving `false`. Like `on`, disk state only: the next start never loads. Applies at once. |
 | `/trust` | `/trust forget` | Remove the current directory's saved decision. An ancestor's decision then applies, or none at all; with none, the untrusted hint returns. Applies at once. |
 

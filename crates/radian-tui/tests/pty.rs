@@ -12786,6 +12786,106 @@ async fn pty_bang_is_audited_in_the_journal() {
     );
 }
 
+/// ADR 0031 T3 effect timing + ADR 0039 decision 5: `!` carries the git safety keys the
+/// session **started** with, exactly like the `shell` tool. `/trust on` in an
+/// untrusted-at-start session keeps them for the rest of that session, and `/trust off` in a
+/// trusted-at-start session adds none. Reading the decision when the command runs (the old
+/// behaviour) swaps both outcomes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_bang_keeps_the_session_start_git_hardening_after_trust_changes() {
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let dir = TempDir::new("bang-trust-session");
+    let home = TempDir::new("bang-trust-home");
+    let ws = TempDir::new("bang-trust-ws");
+    // The printed word is not a substring of the command text, so the wait can never match
+    // the echoed input line (the `!` audit-test flake).
+    const BANG: &str = "!if [ -n \"$GIT_CONFIG_COUNT\" ]; then printf 'HARDENED-%s\\n' ON; \
+                        else printf 'HARDENED-%s\\n' OFF; fi";
+
+    // Untrusted at start; `/trust on` changes disk state only.
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "bang-trust-untrusted-start",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        200,
+    );
+    assert!(
+        pty.wait_for_screen("/trust to trust it", wait_positive()),
+        "the untrusted hint is missing:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/trust on\r\r");
+    assert!(
+        pty.wait_for_screen("takes effect at the next start", wait_positive()),
+        "the takes-effect line is missing:\n{}",
+        pty.screen()
+    );
+    pty.send(format!("{BANG}\r").as_bytes());
+    assert!(
+        pty.wait_for_screen("HARDENED-ON", wait_positive()),
+        "an untrusted-at-start `!` must keep the git keys after `/trust on`:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    // Trusted at start (`--trust` is this process only); `/trust off` also changes disk state
+    // only, so this session keeps running unhardened.
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "bang-trust-trusted-start",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--trust",
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        200,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "the session did not start:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("/trust to trust it"),
+        "a trusted-at-start session shows no hint:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/trust off\r\r");
+    assert!(
+        pty.wait_for_screen("takes effect at the next start", wait_positive()),
+        "the takes-effect line is missing:\n{}",
+        pty.screen()
+    );
+    pty.send(format!("{BANG}\r").as_bytes());
+    assert!(
+        pty.wait_for_screen("HARDENED-OFF", wait_positive()),
+        "a trusted-at-start `!` must carry no git keys after `/trust off`:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// ADR 0033: only one `!` at a time (a second is refused) and Esc cancels the running one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_bang_is_single_and_escapable() {

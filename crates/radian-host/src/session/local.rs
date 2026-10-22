@@ -128,6 +128,12 @@ pub struct LocalSession {
     /// The project-trust state (ADR 0031 T3). Interior mutability: the startup prompt resolves
     /// it after `open_session` and the startup line reads it.
     pub(super) trust: Mutex<trust::Setup>,
+    /// The session-start git hardening decision (ADR 0039 decision 5), computed once at open
+    /// from the same value the job registry was built with. The `shell` tool reads the
+    /// registry's copy and `!`/`!!` read this one through [`SessionFacade::git_hardening`];
+    /// neither is ever updated, so a `/trust` write cannot move them (ADR 0031 T3 effect
+    /// timing: the decision applies at the next start).
+    pub(super) git_hardening: bool,
     pub(super) runtime: tokio::runtime::Handle,
     pub(super) driver: DriverTask,
     pub(super) capabilities: Vec<SessionCapability>,
@@ -439,6 +445,13 @@ impl LocalSession {
         self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Whether shell children harden git (ADR 0039 decision 5), as decided at open. `!`/`!!`
+    /// run through the same session-start decision as the `shell` tool; `/trust` changes disk
+    /// state only, so this never moves mid-session (ADR 0031 T3 effect timing).
+    pub fn git_hardening(&self) -> bool {
+        self.git_hardening
+    }
+
     /// Applies a startup trust choice (ADR 0031 T3): the persistent choices write `trust.json`
     /// through `trust::apply` and journal one `ProjectTrustChanged` per write (non-critical);
     /// the session-only ones change nothing on disk. Returns the new state for the startup line.
@@ -693,6 +706,10 @@ impl SessionFacade for LocalSession {
 
     fn trust(&self) -> trust::Setup {
         LocalSession::trust(self)
+    }
+
+    fn git_hardening(&self) -> bool {
+        LocalSession::git_hardening(self)
     }
 
     fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String> {

@@ -80,8 +80,8 @@ Nothing in the transcript warns you.
 
 Trust the project to remove the keys: the startup prompt, `--trust`, `radian trust on`,
 or `/trust on`.
-The `shell` tool reads the decision when the session starts, so it keeps the keys until
-the next start; a `!` command reads it when it runs.
+The `shell` tool and `!`/`!!` read the decision when the session starts, so all of them keep
+the keys until the next start: `/trust on` saves the choice but changes nothing until then.
 A trusted project gets no keys, and the hooks and filters you installed run as usual.
 
 Approval controls questions.
