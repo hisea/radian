@@ -80,8 +80,16 @@ pub trait SessionFacade: Send + Sync {
     fn expand_skill(&self, name: &str, args: &str) -> Result<String, String>;
 
     /// The project-trust state (ADR 0031 T3): what the session starts with, and the source the
-    /// startup line shows.
+    /// startup line shows. The `/trust` status line and the startup lines read it; a
+    /// behaviour read (does a shell child harden git?) goes through
+    /// [`SessionFacade::git_hardening`] instead, because `/trust` changes disk state only.
     fn trust(&self) -> trust::Setup;
+
+    /// Whether every shell child hardens git (ADR 0039 decision 5): the decision fixed when
+    /// the session opened, the same one the job registry carries. `!`/`!!` read this, exactly
+    /// like the `shell` tool does, so a `/trust` write mid-session never changes it
+    /// (ADR 0031 T3 effect timing).
+    fn git_hardening(&self) -> bool;
 
     /// Applies a startup trust choice (ADR 0031 T3): writes `trust.json` for the persistent
     /// choices and journals `ProjectTrustChanged`, or changes only this session's state.

@@ -218,9 +218,10 @@ impl LoopContext<'_> {
                 let sandbox = self.bash_sandbox.clone();
                 let workspace = self.workspace.to_path_buf();
                 // ADR 0039 decision 5: a `!` command hardens git exactly like the `shell`
-                // tool when the project is not trusted. Read at call time: `/trust` can
-                // change the decision mid-session.
-                let harden_git = !self.session.trust().resolved.decision.as_bool();
+                // tool when the project is not trusted. Both read the decision the session
+                // started with: `/trust` writes disk state only and applies at the next start
+                // (ADR 0031 T3 effect timing), so this never changes mid-session.
+                let harden_git = self.session.git_hardening();
                 let cancel = radian_core::CancellationToken::new();
                 self.bash_cancel = Some(cancel.clone());
                 self.runtime.spawn(async move {
@@ -1046,10 +1047,13 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// A facade that is never called: the loop-ownership sync reads the app and the
-    /// hooks handle, never the session. Every method panics, so a future wiring that
-    /// touches the facade fails loudly here instead of silently passing.
-    struct NeverFacade;
+    /// A facade the loop must not ask anything except [`SessionFacade::git_hardening`], whose
+    /// value a `!` run reads (ADR 0039 decision 5). Every other method panics — `trust()`
+    /// included — so a future wiring that reads the live trust state fails loudly here instead
+    /// of silently passing.
+    struct NeverFacade {
+        hardening: bool,
+    }
 
     impl radian_host::SessionFacade for NeverFacade {
         fn id(&self) -> &radian_host::SessionId {
@@ -1121,6 +1125,9 @@ mod tests {
         }
         fn trust(&self) -> radian_host::trust::Setup {
             todo!()
+        }
+        fn git_hardening(&self) -> bool {
+            self.hardening
         }
         fn record_trust(
             &self,
@@ -1233,7 +1240,7 @@ mod tests {
             config_read_only: false,
             started_without_model: false,
         };
-        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade);
+        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade { hardening: true });
         let queue = radian_host::SessionQueue::new();
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new("m", "s");
@@ -1333,7 +1340,7 @@ mod tests {
             config_read_only: false,
             started_without_model: false,
         };
-        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade);
+        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade { hardening: true });
         let queue = radian_host::SessionQueue::new();
         let (tx, rx) = std::sync::mpsc::channel();
         let app = crate::app::App::new("m", "s");
@@ -1446,7 +1453,7 @@ mod tests {
             config_read_only: false,
             started_without_model: false,
         };
-        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade);
+        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade { hardening: true });
         let queue = radian_host::SessionQueue::new();
         let (tx, rx) = std::sync::mpsc::channel();
         let app = crate::app::App::new("m", "s");
@@ -1504,5 +1511,143 @@ mod tests {
             "nothing was written"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Runs one `!` command through the loop with the facade's session-start git hardening
+    /// and returns what `$GIT_CONFIG_COUNT` held inside the child (`""` when unset).
+    ///
+    /// The facade answers only `git_hardening`; `trust()` panics, so a loop that reads the
+    /// live trust state at call time fails here instead of silently passing.
+    fn bang_hardening(hardening: bool) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "radian-loop-bang-{}-{hardening}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let inbox = Arc::new(radian_runtime::Inbox::new(64));
+        let hooks = Arc::new(radian_host::CommandHooks::new(
+            &Default::default(),
+            &Default::default(),
+            &ws,
+            "sid",
+            radian_sandbox::SandboxSlot::empty(),
+            &inbox,
+            rt.handle(),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
+        ));
+        let journal = Arc::new(
+            radian_session::SessionJournal::create(
+                dir.join("s.jsonl"),
+                "sid",
+                radian_session::SessionCreatedData::new("/work/example", serde_json::json!({})),
+            )
+            .unwrap(),
+        );
+        let host = SessionHost {
+            dir: dir.clone(),
+            workspace: ws.to_string_lossy().into_owned(),
+            session_id: "sid".to_owned(),
+            secrets: Arc::new(std::sync::RwLock::new(Vec::new())),
+            journal,
+            config_snapshot: serde_json::json!({}),
+            theme_colors: Vec::new(),
+            theme_write_path: None,
+            config_read_only: false,
+            started_without_model: false,
+        };
+        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade { hardening });
+        let queue = radian_host::SessionQueue::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let app = crate::app::App::new("m", "s");
+        // ADR 0033: `!` runs in the coding tools' sandbox. `full` needs no backend, so this
+        // test does not depend on the machine's sandbox.
+        let sandbox = radian_sandbox::Sandbox::from_policy(
+            radian_sandbox::SandboxPolicy::new(radian_sandbox::SandboxMode::FullAccess, &ws)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut ctx = LoopContext {
+            startup_route: ("p".to_owned(), "m".to_owned()),
+            route_price: Arc::new(|_: &str, _: &str| None),
+            config_providers: Default::default(),
+            current_thinking: String::new(),
+            current_theme: None,
+            thinking_max_tokens: 0,
+            workspace: &ws,
+            runtime: &rt,
+            session: &facade,
+            memory: &None,
+            host: &host,
+            tx: &tx,
+            queue: &queue,
+            signal: None,
+            clipboard: app.clipboard,
+            bell_rang: false,
+            herdr: None,
+            bash_sandbox: Some(sandbox),
+            bash_cancel: None,
+            side_cancel: None,
+            usage_gate: None,
+            chatgpt_usage_gate: None,
+            model_writeback_done: false,
+            command_hooks: Some(Arc::clone(&hooks)),
+        };
+        ctx.execute(Effect::RunBash {
+            command: "printf '%s' \"$GIT_CONFIG_COUNT\" > count.txt".to_owned(),
+            exclude_from_context: true,
+        })
+        .unwrap();
+        let event = rt.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    match rx.try_recv() {
+                        Ok(event) => break event,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await
+                        }
+                        Err(_) => panic!("the loop's event channel closed"),
+                    }
+                }
+            })
+            .await
+            .expect("the `!` command finished")
+        });
+        match event {
+            UiEvent::Command(AppInput::BashDone { result, .. }) => {
+                result.expect("the `!` command ran");
+            }
+            _ => panic!("expected BashDone, got another event"),
+        }
+        let output =
+            std::fs::read_to_string(ws.join("count.txt")).expect("the command wrote count.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        output
+    }
+
+    /// ADR 0031 T3 effect timing + ADR 0039 decision 5: `!` carries the git safety keys the
+    /// session **started** with, exactly like the `shell` tool. The facade's `trust()` panics,
+    /// so reading the (mutable) trust state at call time — the old behaviour — fails here.
+    #[test]
+    fn a_bang_command_uses_the_session_start_git_hardening() {
+        let untrusted_at_start = bang_hardening(true);
+        assert!(
+            untrusted_at_start
+                .parse::<u32>()
+                .is_ok_and(|count| count > 0),
+            "an untrusted-at-start session must keep the keys, got {untrusted_at_start:?}"
+        );
+        let trusted_at_start = bang_hardening(false);
+        assert_eq!(
+            trusted_at_start, "",
+            "a trusted-at-start session must carry none"
+        );
     }
 }

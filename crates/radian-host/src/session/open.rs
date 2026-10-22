@@ -298,7 +298,9 @@ pub async fn open_session(
     let shared_skills = Arc::new(skills);
 
     // The built-in coding tools are built here. `harden_git` is the trust decision
-    // (ADR 0039 decision 5): an untrusted project hardens git in every shell child.
+    // (ADR 0039 decision 5): an untrusted project hardens git in every shell child. The
+    // session keeps the same value (`LocalSession::git_hardening`), so `!`/`!!` read it
+    // instead of re-asking disk mid-session (ADR 0031 T3 effect timing).
     // Skill roots are the discovered filesystem skills' directories (built-ins are
     // embedded and have no directory); the deny set is the host's deny-read list, the same
     // source the sandbox policy uses (ADR 0039 decision 4). The tools also hold the shared
@@ -737,6 +739,7 @@ pub async fn open_session(
         hooks_config,
         project_hooks_config,
         trust: Mutex::new(trust),
+        git_hardening: harden_git,
         runtime,
         driver: DriverTask {
             stop: Mutex::new(Some(stop_tx)),
