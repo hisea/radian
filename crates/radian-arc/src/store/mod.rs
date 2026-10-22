@@ -16,11 +16,13 @@
 //! [`Store::init`] and written by the gate (`crate::gate`) and the worker wrapper
 //! (`crate::work`).
 
+pub mod attempt_ops;
 pub mod cli;
 pub mod config;
 mod frontmatter;
 mod git;
 pub mod model;
+pub mod plan_ops;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -178,7 +180,9 @@ pub struct PlanView {
     pub tasks: Vec<Loaded<model::TaskFile>>,
 }
 
-/// What `show <id>` found.
+/// What `show <id>` found. The task variant is the larger one (a task file has the attempt
+/// fields); `show` returns one at a time, so the difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Plan(PlanView),
@@ -477,6 +481,25 @@ impl Store {
             return Ok(Item::Task(self.load_task(id)?));
         }
         Err(Error::Failed(format!("no plan or task `{id}`")))
+    }
+
+    /// Whether a plan file with this id exists.
+    pub fn plan_exists(&self, id: &str) -> bool {
+        check_id(id).is_ok() && self.path(Kind::Plan, id).is_file()
+    }
+
+    /// Whether a task file with this id exists.
+    pub fn task_exists(&self, id: &str) -> bool {
+        check_id(id).is_ok() && self.path(Kind::Task, id).is_file()
+    }
+
+    /// Every stored task's id, sorted: the retry release and the reconcile walk them.
+    pub fn task_ids(&self) -> Result<Vec<String>, Error> {
+        Ok(self
+            .ids(Kind::Task)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
     }
 
     // ---- writing ----------------------------------------------------------------------
@@ -891,6 +914,21 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             if last.attempt != current.attempt {
                 touched.push("attempt");
             }
+            if last.attempt_id != current.attempt_id {
+                touched.push("attempt_id");
+            }
+            if last.token != current.token {
+                touched.push("token");
+            }
+            if last.cost_usd != current.cost_usd {
+                touched.push("cost_usd");
+            }
+            if last.auto_rework != current.auto_rework {
+                touched.push("auto_rework");
+            }
+            if last.retry_at != current.retry_at {
+                touched.push("retry_at");
+            }
             if last.base_sha != current.base_sha {
                 touched.push("base_sha");
             }
@@ -899,6 +937,9 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             }
             if last.verified_sha != current.verified_sha {
                 touched.push("verified_sha");
+            }
+            if last.verdict_set_digest != current.verdict_set_digest {
+                touched.push("verdict_set_digest");
             }
         }
     }

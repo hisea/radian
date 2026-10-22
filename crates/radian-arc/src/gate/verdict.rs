@@ -76,6 +76,11 @@ pub struct Verdict {
     /// Integration only: the conflicted paths that made a merge fail, sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflict_paths: Vec<String>,
+    /// A `human` verdict only: who approved it. `auto` is the scheduling loop at auto level
+    /// `merge`; absent means the owner approved it with `radian arc merge` (ADR 0048
+    /// decision 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver: Option<String>,
 }
 
 impl Verdict {
@@ -102,7 +107,16 @@ impl Verdict {
             base_sha: None,
             candidate_sha: None,
             conflict_paths: Vec::new(),
+            approver: None,
         }
+    }
+
+    /// A passing `human` verdict written by the scheduling loop at auto level `merge`.
+    #[must_use]
+    pub fn approved_by(sha: impl Into<String>, approver: &str) -> Self {
+        let mut verdict = Self::human(sha, true, None);
+        verdict.approver = Some(approver.to_owned());
+        verdict
     }
 
     /// Whether this verdict is a pass.

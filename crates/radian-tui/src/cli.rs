@@ -502,7 +502,88 @@ enum ArcCommand {
             hide = true
         )]
         extra: Vec<String>,
+        /// Test-only: run this shell command as the worker instead of `radian exec`.
+        /// The wrapper's forwarding test starts a plain process with a child of its own.
+        #[arg(long, value_name = "SHELL-COMMAND", hide = true)]
+        worker_command: Option<String>,
     },
+
+    /// Confirm a draft plan. A plan with no tasks is refused, and so is a second confirm.
+    Confirm {
+        /// The plan id.
+        #[arg(value_name = "PLAN")]
+        plan: String,
+    },
+
+    /// Set a plan's auto level. Only a confirmed plan can use a level other than `off`.
+    Auto {
+        /// The plan id.
+        #[arg(value_name = "PLAN")]
+        plan: String,
+        /// The level: `off` starts nothing, `run` starts tasks and the gate, `merge` also
+        /// merges what passed.
+        #[arg(
+            value_name = "LEVEL",
+            value_parser = clap::builder::PossibleValuesParser::new(
+                radian_arc::store::AUTO_LEVELS.iter().copied()
+            )
+        )]
+        level: String,
+    },
+
+    /// Set a plan's auto level back to `off`. Tasks that already started are not touched.
+    Pause {
+        /// The plan id.
+        #[arg(value_name = "PLAN")]
+        plan: String,
+    },
+
+    /// Claim a task and run one attempt of it, waiting until it ends.
+    Start {
+        /// The task id.
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+
+    /// Stop a task: a `todo` task ends, a `doing` task's wrapper is signalled.
+    Cancel {
+        /// The task id.
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+
+    /// Move a budget-paused task, or every paused task of a plan, back to `todo.ready`.
+    ResetBudget {
+        /// The task id, or the plan id to reset every paused task of the plan.
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+
+    /// Approve a verified task, integrate it, and push the result to the remote main. A main
+    /// that moved makes the command integrate again.
+    Merge {
+        /// The task id. It must be `review.awaiting_human`.
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+
+    /// Refuse a task in `review.awaiting_human` with a note, and send it back to rework.
+    Reject {
+        /// The task id. It must be `review.awaiting_human`.
+        #[arg(value_name = "TASK")]
+        task: String,
+        /// Why the task is refused. `show` prints it as the rework reason.
+        #[arg(long, value_name = "TEXT")]
+        note: String,
+    },
+
+    /// Make every transition the auto levels allow now, then exit: reconcile, release due
+    /// retries, verify, start ready tasks, and merge what passed at auto level `merge`.
+    Run,
+
+    /// Serve the lead's MCP tools over standard input and output. A lead registers this
+    /// command; a person does not run it.
+    Mcp,
 }
 
 /// The `radian arc add` subcommands.
@@ -577,6 +658,16 @@ impl ArcCommand {
             ArcCommand::List { plan, json } => ArcRun::List { plan, json },
             ArcCommand::Show { id, json } => ArcRun::Show { id, json },
             ArcCommand::Adopt { id } => ArcRun::Adopt { id },
+            ArcCommand::Confirm { plan } => ArcRun::Confirm { plan },
+            ArcCommand::Auto { plan, level } => ArcRun::Auto { plan, level },
+            ArcCommand::Pause { plan } => ArcRun::Pause { plan },
+            ArcCommand::Start { task } => ArcRun::Start { task },
+            ArcCommand::Cancel { task } => ArcRun::Cancel { task },
+            ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
+            ArcCommand::Merge { task } => ArcRun::Merge { task },
+            ArcCommand::Reject { task, note } => ArcRun::Reject { task, note },
+            ArcCommand::Run => ArcRun::Run,
+            ArcCommand::Mcp => ArcRun::Mcp,
             // `work` is the trusted wrapper, not a store operation: `run_arc` dispatches it
             // before this conversion.
             ArcCommand::Work { .. } => return None,
@@ -599,6 +690,7 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             remote,
             main_branch,
             extra,
+            worker_command,
         }) => {
             let (remote, main_branch) = work_remote_and_main(remote, main_branch);
             ExitCode::from(radian_arc::work::run(radian_arc::work::Options {
@@ -610,6 +702,7 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
                 remote,
                 main_branch,
                 extra_args: extra,
+                worker_command,
             }) as u8)
         }
         Some(command) => {
@@ -2193,6 +2286,19 @@ mod tests {
         }
     }
 
+    /// Every attempt failure class appears in arc.md's failure table. The source is
+    /// `radian_arc::attempt::FAILURE_CLASSES`.
+    #[test]
+    fn every_attempt_failure_class_appears_in_arc_md() {
+        let doc = arc_md();
+        for class in radian_arc::attempt::FAILURE_CLASSES {
+            assert!(
+                doc.contains(&format!("`{class}`")),
+                "the failure class `{class}` is missing from arc.md"
+            );
+        }
+    }
+
     /// Every plan status, auto level, stage, task state, and each state's phases appear in
     /// arc.md: the state rows are the phase table's.
     #[test]
@@ -2253,6 +2359,10 @@ mod tests {
             after: vec!["0002-c".to_owned()],
             supersedes: Some("0003-d".to_owned()),
             attempt: 0,
+            attempt_id: Some("0001-b-1".to_owned()),
+            token: Some("a-token".to_owned()),
+            cost_usd: Some(0.5),
+            auto_rework: 2,
             allow_noop: false,
             extra_stages: vec!["mutation".to_owned()],
             max_attempts: Some(2),
@@ -2262,6 +2372,7 @@ mod tests {
             base_sha: Some("a".repeat(40)),
             head_sha: Some("b".repeat(40)),
             verified_sha: Some("c".repeat(40)),
+            verdict_set_digest: Some("d".repeat(64)),
             retry_at: Some("2026-01-01T00:00:00Z".to_owned()),
             body: String::new(),
         };
@@ -2271,6 +2382,38 @@ mod tests {
                     doc.lines()
                         .any(|line| line.starts_with(&format!("| `{key}` |"))),
                     "front-matter field `{key}` has no row in arc.md"
+                );
+            }
+        }
+    }
+
+    /// Every MCP tool of `radian arc mcp` and every parameter of every tool appears in
+    /// arc.md's tools table, with the required or optional word the schema declares. The
+    /// source is `radian_arc::mcp::TOOLS`, the same list `tools/list` answers from, so a
+    /// renamed tool or parameter fails here and a tool added without a page entry fails too.
+    /// Mutation: drop one tool from the page's table → this fails naming it.
+    #[test]
+    fn every_mcp_tool_appears_in_arc_md() {
+        let doc = arc_md();
+        assert!(!radian_arc::mcp::TOOLS.is_empty(), "the server has tools");
+        for tool in radian_arc::mcp::TOOLS {
+            let row = doc
+                .lines()
+                .find(|line| line.starts_with(&format!("| `{}` |", tool.name)))
+                .unwrap_or_else(|| panic!("arc.md has no tools-table row for `{}`", tool.name));
+            for (name, required) in tool.parameters() {
+                let marker = if required { "required" } else { "optional" };
+                let at = row.find(&format!("`{name}`")).unwrap_or_else(|| {
+                    panic!(
+                        "`{}`'s parameter `{name}` is missing from its row: {row}",
+                        tool.name
+                    )
+                });
+                let rest = row[at + name.len() + 2..].split(')').next().unwrap_or("");
+                assert!(
+                    rest.contains(marker),
+                    "`{}`'s `{name}` must be marked `{marker}` in its row: {row}",
+                    tool.name
                 );
             }
         }

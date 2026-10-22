@@ -7,6 +7,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use agent_provider_openai_compatible::testing::Reply;
 use common::*;
 use serde_json::{Value, json};
 
@@ -667,6 +668,55 @@ fn a_second_wrapper_for_the_same_task_fails_on_the_flock() {
         assert_eq!(first.code, 0, "{}", first.stderr);
         assert_eq!(first.finished()["pushed"], json!(true));
     });
+}
+
+/// ADR 0048 decision 9: `arc` cancels an attempt with SIGTERM on the wrapper. The wrapper
+/// forwards it to the worker, waits, and still writes `AttemptFinished` (outcome `cancelled`
+/// or `terminated`), with nothing pushed.
+#[test]
+fn a_sigterm_is_forwarded_and_the_wrapper_still_writes_its_record() {
+    let repo = Repo::new("sigterm");
+    let task = "0016-sigterm";
+    let mock = Mock::start(vec![Reply::SseThenHang { pieces: Vec::new() }]);
+    let args = work_args(task, 1, "tok-term", &[], &model_args(mock.base_url()));
+    let run = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            repo.work(&refs, "wait for the signal")
+        });
+        let identity = wait_for_pid(&repo.attempt_dir(task, 1).join("identity.json"));
+        assert!(identity > 0);
+        let record: Value = serde_json::from_str(
+            &std::fs::read_to_string(repo.attempt_dir(task, 1).join("identity.json")).unwrap(),
+        )
+        .unwrap();
+        let wrapper = record["wrapper_pid"].as_u64().expect("the wrapper pid") as u32;
+        let worker_pid = record["pid"].as_u64().expect("the worker pid") as u32;
+        let sent = std::process::Command::new("kill")
+            .args(["-TERM", &wrapper.to_string()])
+            .status()
+            .expect("kill");
+        assert!(sent.success(), "kill -TERM {wrapper}");
+        let run = worker.join().expect("the wrapper thread");
+        let finished = run.finished();
+        (run, finished, worker_pid)
+    });
+    let (run, finished, worker_pid) = run;
+    let outcome = finished["outcome"].as_str().unwrap_or_default();
+    assert!(
+        outcome == "cancelled" || outcome == "terminated",
+        "the SIGTERM path ends cancelled or terminated: {finished}"
+    );
+    assert_eq!(finished["pushed"], json!(false), "{finished}");
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &worker_pid.to_string()])
+        .status()
+        .expect("kill -0");
+    assert!(
+        !alive.success(),
+        "the forwarded SIGTERM ended the worker too (code {})",
+        run.code
+    );
 }
 
 /// The worker cannot read the arc files outside its worktree (the deny list reaches both the

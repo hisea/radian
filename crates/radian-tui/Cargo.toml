@@ -86,6 +86,10 @@ libc = "0.2"
 [dev-dependencies]
 radian-core = { path = "../radian-core" }
 radian-memory = { path = "../radian-memory" }
+# The `radian arc mcp` tests drive the real server through a real MCP client over the
+# server's own stdio, as `agent-extensions` drives a server. Pinned to the version the
+# server side uses.
+rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-async-rw"] }
 # The `radian arc` lock test holds `state.lock` from the test process, the same flock the
 # store takes.
 fs2 = "0.4"

@@ -64,7 +64,11 @@ impl IntegrationRun<'_> {
     pub fn run(&self) -> Result<Verdict, GateError> {
         let _lock = DirLock::acquire(self.repository, INTEGRATION_LOCK)?;
         let started_at = now_utc();
+        let main_branch = git::main_branch_of(self.remote, self.main_ref)?;
+        // The work branch comes with the ordinary fetch; main needs its own refspec so a
+        // clone whose fetch configuration leaves main out still reads the current main.
         git::fetch_remote(self.repository, self.remote)?;
+        git::fetch_main(self.repository, self.remote, main_branch)?;
         let head = git::resolve_commit(self.repository, self.head_sha)?;
         let task_base = git::resolve_commit(self.repository, self.base_sha)?;
         let remote_main = git::resolve_commit(self.repository, self.main_ref)?;
@@ -152,6 +156,7 @@ impl IntegrationRun<'_> {
             base_sha: Some(remote_main),
             candidate_sha: candidate,
             conflict_paths,
+            approver: None,
         };
         verdict.write_new(&verdict_path(
             self.repository,
@@ -185,7 +190,8 @@ pub fn merge_ready(
     let (Some(base), Some(_candidate)) = (&verdict.base_sha, &verdict.candidate_sha) else {
         return Ok(false);
     };
-    git::fetch_remote(repository, remote)?;
+    let main_branch = git::main_branch_of(remote, main_ref)?;
+    git::fetch_main(repository, remote, main_branch)?;
     let current = git::resolve_commit(repository, main_ref)?;
     Ok(current == *base)
 }

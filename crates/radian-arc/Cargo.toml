@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "arc, the plan and task orchestrator (ADR 0048)"
+description = "arc, the plan and task orchestrator: storage, gate, worker wrapper, and the lead's MCP server"
 publish = false
 
 [dependencies]
@@ -32,8 +32,17 @@ thiserror.workspace = true
 # `config.toml` (ADR 0048 decision 15) has the same TOML shape as the radian configuration
 # file (ADR 0008), and the docs drift test renders its defaults from the same parser.
 toml = "0.8"
+# `radian arc mcp` (ADR 0048 decision 11) is an MCP server. Pinned like `agent-extensions`:
+# the lifecycle and wire behavior were verified against this exact version. `server` adds
+# the handler traits and `tools/list`; `transport-io` adds the stdio transport the server
+# speaks over. The feature set is deliberately narrower than `agent-extensions`' (client
+# side only): this crate never acts as an MCP client.
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io"] }
+# The async runtime the MCP server runs on; the binary is synchronous and builds one.
+tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util"] }
 
 [dev-dependencies]
 # The mock model `radian arc work` runs against in `tests/work.rs`.
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
+# The tests drive the asynchronous MCP server and the mock model's tokio tasks.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

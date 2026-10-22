@@ -21,6 +21,11 @@ copy.
 | M11a | an empty leftover directory at the checkout path is refused instead of cleared | `checkout::an_empty_leftover_checkout_directory_is_cleared` | ✅ failed |
 | M11b | clear any directory at the checkout path, empty or not (`remove_dir_all`, no emptiness check) | `checkout::a_non_empty_checkout_directory_is_refused` | ✅ failed |
 | M12 | drop the `gates/integration.lock` from `IntegrationRun::run` | `integration::two_integration_runs_never_overlap` | ✅ failed |
+| M13 | `run` starts a `todo.ready` task of an `auto` `off` plan | `run::auto_off_starts_nothing_but_still_verifies` | ✅ failed |
+| M14 | `run` merges a plan at `auto` `run` (only `off` is skipped) | `run::one_run_takes_a_chain_to_awaiting_human_and_stops` | ✅ failed |
+| M15 | `max_auto_rework` never pauses (`max = u32::MAX`) | `run::max_auto_rework_pauses_the_plan_and_sets_auto_off` | ✅ failed |
+| M16 | `run` does not take `runner.lock` | `run::a_second_run_while_one_holds_the_lock_exits_four` | ✅ failed |
+| M17 | the wrapper forwards SIGTERM to the worker pid only, not its process group | `run::a_cancelled_attempt_whose_worker_started_sleep_leaves_no_sleep_process` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -36,3 +41,13 @@ one.
 
 None of the listed mutations survived. A stale remote-tracking ref after a successful fetch is
 not covered: every test pushes through the same clone, so the local ref is already current.
+
+M13–M17 were run against `47616937` (the scheduling-loop commit), each from a copy under
+`.radian/mutation-backup/` restored with `cp` and compared with `cmp`.
+
+The old stale-main test (`a_rejected_push_never_overwrites_the_remote_main`) cannot survive
+the explicit main refspec: a main moved on the remote is now visible before the push, so the
+push is a fast-forward. Its replacement, `a_main_that_keeps_moving_is_never_overwritten`,
+proves main keeps every commit the other writer pushed, but a `--force` push is no longer
+distinguishable there (the only non-fast-forward now needs a race between `merge_ready` and
+the push). The code still never forces.
