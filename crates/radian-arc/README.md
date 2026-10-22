@@ -147,8 +147,13 @@ task stays in `rework_pending`. A merge refusal that changed the task back to
 on the next pass; a refusal that changed nothing is a summary note, not a spin.
 
 At quiet, the report lists each open plan and task with what it waits on (a person, an
-`after` task, a retry time, a rework brief, a free concurrency slot). `run::run` returns the
-report; `radian arc run` prints it.
+`after` task, a retry time, a rework brief, a free concurrency slot). `run::run` hands every
+transition line to its sink as it makes it and returns the report; `radian arc run` prints the
+summary with `Report::render_summary`.
+
+`run::watch` repeats the pass every `--interval` seconds (default 30, 5 to 3600) until SIGINT
+or SIGTERM; it holds `runner.lock` for the whole loop, prints the summary only when it changed,
+and lets a running attempt finish before it returns. A signal starts no new pass.
 
 ## Gate checkout
 
