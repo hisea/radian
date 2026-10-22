@@ -946,11 +946,25 @@ mod tests {
         // Allowed cell would mask a changed default). Three-column rows (the memory table)
         // and four-column rows carry the default inline or not at all: there the whole row
         // must contain it.
+        // Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
+        fn split_cells(row: &str) -> Vec<String> {
+            let mut cells = vec![String::new()];
+            let mut chars = row.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\' && chars.peek() == Some(&'|') {
+                    cells.last_mut().expect("a cell is open").push('|');
+                    chars.next();
+                } else if c == '|' {
+                    cells.push(String::new());
+                } else {
+                    cells.last_mut().expect("a cell is open").push(c);
+                }
+            }
+            cells
+        }
         fn default_in_row(row: &str, default: &str) -> bool {
-            let inner: Vec<&str> = {
-                let cells: Vec<&str> = row.split('|').collect();
-                cells[1..cells.len() - 1].to_vec()
-            };
+            let cells = split_cells(row);
+            let inner = &cells[1..cells.len() - 1];
             if inner.len() >= 5 {
                 inner[2].contains(default)
             } else {

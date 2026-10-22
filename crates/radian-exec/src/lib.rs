@@ -533,8 +533,24 @@ mod tests {
         // The default must sit in the row's Default cell (the Allowed/Value cells would
         // mask a changed default). Tables without a Default column fall back to the whole
         // row.
+        // Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
+        fn split_cells(row: &str) -> Vec<String> {
+            let mut cells = vec![String::new()];
+            let mut chars = row.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\' && chars.peek() == Some(&'|') {
+                    cells.last_mut().expect("a cell is open").push('|');
+                    chars.next();
+                } else if c == '|' {
+                    cells.push(String::new());
+                } else {
+                    cells.last_mut().expect("a cell is open").push(c);
+                }
+            }
+            cells
+        }
         fn default_in_row(row: &str, default: &str) -> bool {
-            let cells: Vec<&str> = row.split('|').collect();
+            let cells = split_cells(row);
             let inner = &cells[1..cells.len() - 1];
             if inner.len() >= 4 {
                 inner[2].contains(default)
