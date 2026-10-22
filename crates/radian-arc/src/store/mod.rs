@@ -180,7 +180,9 @@ pub struct PlanView {
     pub tasks: Vec<Loaded<model::TaskFile>>,
 }
 
-/// What `show <id>` found.
+/// What `show <id>` found. The task variant is the larger one (a task file has the attempt
+/// fields); `show` returns one at a time, so the difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Plan(PlanView),

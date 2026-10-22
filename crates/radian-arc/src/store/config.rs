@@ -107,20 +107,12 @@ impl Default for Limits {
 }
 
 /// `[worker]`: how arc starts the model process of one attempt.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Worker {
     /// Extra `radian exec` arguments, after the wrapper's fixed ones. Empty: the worker uses
     /// the host's normal model configuration.
     pub exec_args: Vec<String>,
-}
-
-impl Default for Worker {
-    fn default() -> Self {
-        Self {
-            exec_args: Vec::new(),
-        }
-    }
 }
 
 /// The `[gate]` table the file starts with: profile `default`, `commands` then `human`, both
