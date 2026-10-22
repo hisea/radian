@@ -14,6 +14,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::gate::{DEFAULT_COMMAND_TIMEOUT_SECS, GateConfig, Profile, Stage, StageSpec};
+use crate::store::model::{PREFIX_MAX_CHARS, valid_prefix};
 
 pub use crate::gate::STAGE_NAMES;
 
@@ -36,6 +37,8 @@ pub struct Config {
     pub limits: Limits,
     #[serde(default)]
     pub worker: Worker,
+    #[serde(default)]
+    pub ids: Ids,
     #[serde(default = "default_gate")]
     pub gate: GateConfig,
 }
@@ -47,6 +50,7 @@ impl Default for Config {
             repository: Repository::default(),
             limits: Limits::default(),
             worker: Worker::default(),
+            ids: Ids::default(),
             gate: default_gate(),
         }
     }
@@ -115,6 +119,25 @@ pub struct Worker {
     pub exec_args: Vec<String>,
 }
 
+/// `[ids]`: the prefix every new plan and task id starts with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Ids {
+    /// The first letters of a new plan id, before its four-digit number.
+    pub plan_prefix: String,
+    /// The first letters of a new task id, before its four-digit number.
+    pub task_prefix: String,
+}
+
+impl Default for Ids {
+    fn default() -> Self {
+        Self {
+            plan_prefix: "PL".to_owned(),
+            task_prefix: "TK".to_owned(),
+        }
+    }
+}
+
 /// The `[gate]` table the file starts with: profile `default`, `commands` then `human`, both
 /// required. The gate's [`GateConfig::default`] has no profiles (a library that is handed one);
 /// the file has to be usable as written, so the file's default is this.
@@ -166,6 +189,10 @@ max_auto_rework = 2
 [worker]
 exec_args = []                 # extra `radian exec` arguments for the worker
 
+[ids]
+plan_prefix = "PL"             # 1 to 4 uppercase letters; the first letters of a new plan id
+task_prefix = "TK"             # 1 to 4 uppercase letters; the first letters of a new task id
+
 [gate]
 profile = "default"
 command_timeout_secs = 3600
@@ -179,8 +206,9 @@ key_commands = []             # what the integration stage runs on the merge can
 }
 
 /// Parses the file's text. Unknown keys, an unknown schema version, an unknown stage
-/// name, a profile that lists `integration` or a stage twice, and a `gate.profile` that
-/// names no profile are errors that name the offender.
+/// name, a profile that lists `integration` or a stage twice, a `gate.profile` that names
+/// no profile, and an id prefix that is not 1 to 4 uppercase letters (or is the same for
+/// both kinds) are errors that name the offender.
 pub fn parse(text: &str) -> Result<Config, String> {
     let config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
     if config.schema_version != SCHEMA_VERSION {
@@ -202,7 +230,25 @@ pub fn parse(text: &str) -> Result<Config, String> {
             config.gate.profile, config.gate.profile
         ));
     }
+    check_prefix("ids.plan_prefix", &config.ids.plan_prefix)?;
+    check_prefix("ids.task_prefix", &config.ids.task_prefix)?;
+    if config.ids.plan_prefix == config.ids.task_prefix {
+        return Err(format!(
+            "`ids.plan_prefix` and `ids.task_prefix` are both `{}`; they must differ",
+            config.ids.plan_prefix
+        ));
+    }
     Ok(config)
+}
+
+/// A prefix must be 1 to 4 ASCII uppercase letters; the error names the key.
+fn check_prefix(key: &str, prefix: &str) -> Result<(), String> {
+    if valid_prefix(prefix) {
+        return Ok(());
+    }
+    Err(format!(
+        "`{key}` is `{prefix}`; it must be 1 to {PREFIX_MAX_CHARS} ASCII uppercase letters"
+    ))
 }
 
 /// Reads and parses a `config.toml`.
@@ -296,5 +342,67 @@ mod tests {
             crate::gate::LISTED_STAGES.map(|stage| stage.as_str()),
             STAGE_NAMES
         );
+    }
+
+    /// `init` writes the default prefixes, a file without the section gets the defaults, and a
+    /// file with the section keeps what it says.
+    #[test]
+    fn the_ids_section_has_the_default_prefixes() {
+        assert_eq!(Ids::default().plan_prefix, "PL");
+        assert_eq!(Ids::default().task_prefix, "TK");
+        let text = default_text("main");
+        assert!(
+            text.contains("[ids]\n")
+                && text.contains("plan_prefix = \"PL\"")
+                && text.contains("task_prefix = \"TK\""),
+            "{text}"
+        );
+        assert_eq!(
+            parse(&text).expect("the default text parses").ids,
+            Ids::default()
+        );
+        assert_eq!(
+            parse("schema_version = 1\n").expect("an empty file").ids,
+            Ids::default(),
+            "a missing [ids] section takes the defaults"
+        );
+        let custom = parse("schema_version = 1\n[ids]\nplan_prefix = \"P\"\ntask_prefix = \"T\"\n")
+            .expect("a custom section parses");
+        assert_eq!(custom.ids.plan_prefix, "P");
+        assert_eq!(custom.ids.task_prefix, "T");
+    }
+
+    /// An empty, lowercase, five-letter or equal prefix is refused, and the error names the
+    /// key.
+    #[test]
+    fn a_bad_prefix_is_refused_by_name() {
+        let base = default_text("main");
+        for (key, value) in [
+            ("plan_prefix", ""),
+            ("plan_prefix", "pl"),
+            ("plan_prefix", "TOOLS"),
+            ("task_prefix", "t"),
+        ] {
+            let text = if key == "plan_prefix" {
+                base.replace(
+                    "plan_prefix = \"PL\"",
+                    &format!("plan_prefix = \"{value}\""),
+                )
+            } else {
+                base.replace(
+                    "task_prefix = \"TK\"",
+                    &format!("task_prefix = \"{value}\""),
+                )
+            };
+            let error = parse(&text).expect_err("a bad prefix must fail");
+            assert!(
+                error.contains(&format!("ids.{key}")),
+                "the error names `ids.{key}`: {error}"
+            );
+        }
+        let equal = base.replace("task_prefix = \"TK\"", "task_prefix = \"PL\"");
+        let error = parse(&equal).expect_err("equal prefixes must fail");
+        assert!(error.contains("ids.plan_prefix"), "{error}");
+        assert!(error.contains("ids.task_prefix"), "{error}");
     }
 }

@@ -3,7 +3,7 @@
 //! The subset is the one `radian-host`'s skill reader parses (`crates/radian-host/src/skills`):
 //! top-level `key: value` scalars, quoted scalars, `>`/`|` block scalars, blank lines and
 //! `#` comments. arc adds the two list spellings its own files use: a flow list
-//! (`tasks: [0001-a, 0002-b]`) and one `- id` line per entry under the key.
+//! (`tasks: [TK0001-a, TK0002-b]`) and one `- id` line per entry under the key.
 //!
 //! Unknown keys are not this layer's business: the typed reader in [`super::model`] rejects
 //! them by name, so a hand-edited file names its bad key instead of loading silently.
@@ -218,13 +218,13 @@ mod tests {
 
     #[test]
     fn scalars_lists_and_the_body_round_trip() {
-        let text = "---\nid: 0001-a\ntitle: \"a: b\"\ntasks:\n  - 0002-b\n  - 0003-c\nempty: []\n---\nthe body\nsecond line\n";
+        let text = "---\nid: PL0001-a\ntitle: \"a: b\"\ntasks:\n  - TK0001-b\n  - TK0002-c\nempty: []\n---\nthe body\nsecond line\n";
         let document = parse(text).unwrap();
-        assert_eq!(document.fields["id"], Value::Scalar("0001-a".into()));
+        assert_eq!(document.fields["id"], Value::Scalar("PL0001-a".into()));
         assert_eq!(document.fields["title"], Value::Scalar("a: b".into()));
         assert_eq!(
             document.fields["tasks"],
-            Value::List(vec!["0002-b".into(), "0003-c".into()])
+            Value::List(vec!["TK0001-b".into(), "TK0002-c".into()])
         );
         assert_eq!(document.fields["empty"], Value::List(Vec::new()));
         assert_eq!(document.body, "the body\nsecond line\n");
@@ -232,10 +232,10 @@ mod tests {
 
     #[test]
     fn a_flow_list_parses() {
-        let document = parse("---\ntasks: [0001-a, 0002-b]\n---\n").unwrap();
+        let document = parse("---\ntasks: [TK0001-a, TK0002-b]\n---\n").unwrap();
         assert_eq!(
             document.fields["tasks"],
-            Value::List(vec!["0001-a".into(), "0002-b".into()])
+            Value::List(vec!["TK0001-a".into(), "TK0002-b".into()])
         );
         let document = parse("---\ntasks: []\n---\n").unwrap();
         assert_eq!(document.fields["tasks"], Value::List(Vec::new()));
@@ -267,8 +267,8 @@ mod tests {
     fn list_fields_are_written_in_block_form() {
         assert_eq!(list_field("tasks", &[]), "tasks: []\n");
         assert_eq!(
-            list_field("tasks", &["0001-a".into(), "0002-b".into()]),
-            "tasks:\n  - 0001-a\n  - 0002-b\n"
+            list_field("tasks", &["TK0001-a".into(), "TK0002-b".into()]),
+            "tasks:\n  - TK0001-a\n  - TK0002-b\n"
         );
     }
 }

@@ -50,6 +50,10 @@ the file's names.
 [worker]
 exec_args = []               # extra `radian exec` arguments, after the wrapper's own
 
+[ids]
+plan_prefix = "PL"           # 1 to 4 uppercase letters; the first letters of a new plan id
+task_prefix = "TK"           # 1 to 4 uppercase letters; the first letters of a new task id
+
 [gate]
 profile = "default"
 command_timeout_secs = 3600
@@ -217,7 +221,7 @@ write for the same path is `GateError::VerdictExists`; a verdict is never change
       "line": "cargo nextest run --workspace",
       "exit_code": 101,
       "duration_ms": 4210,
-      "log": "/repo/.radian/arc/runs/0001-x/attempts/0001-x-1/logs/commands-01.log"
+      "log": "/repo/.radian/arc/runs/TK0001-x/attempts/TK0001-x-1/logs/commands-01.log"
     }
   ],
   "started_at": "2026-01-01T00:00:00.000000Z",
@@ -419,9 +423,13 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 - The integration stage has its own lock file, separate from the exclusive lock of `commands`
   and `mutation`, so an integration run and a `commands` stage may run at the same time.
 - `init` records `origin` as the remote; it is the only name it knows before a config exists.
-- Plans and tasks share one id sequence, so no two items ever share a number. An id that
-  names both a plan and a task is refused by `show`, `adopt` and `reset-budget` (exit `3`,
-  naming both paths); nothing resolves it by preferring the plan.
+- Plans and tasks count in separate id sequences, and each new id carries its kind's
+  configured prefix (`[ids] plan_prefix`, default `PL`; `task_prefix`, default `TK`), then
+  the next number above every item of that kind regardless of the item's own prefix. An id
+  without a prefix is malformed (exit `2`); the kind comes from the directory, so an item
+  created under an older prefix still works. An id that names both a plan and a task is
+  refused by `show`, `adopt` and `reset-budget` (exit `3`, naming both paths); nothing
+  resolves it by preferring the plan.
 
 ## Not here yet
 

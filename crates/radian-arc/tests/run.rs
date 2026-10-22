@@ -664,7 +664,7 @@ fn a_cancelled_attempt_whose_worker_started_sleep_leaves_no_sleep_process() {
     let repo = Repo::new("run-sleep");
     setup(&repo);
     let sleeper = repo.root.join("sleeper.pid");
-    let task = "0001-sleep";
+    let task = "TK0001-sleep";
     let worker = format!("sleep 300 & echo $! > '{}'; wait", sleeper.display());
     let mut child = repo.spawn(&[
         "arc",

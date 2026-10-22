@@ -75,7 +75,7 @@ claude mcp add arc -- radian arc mcp
 
 `add` creates one plan or one task from standard input.
 The new id is printed on stdout, one line.
-Plans and tasks share one number sequence, so a new id never matches an existing plan or task (see Plan and task files below).
+Plans and tasks count in separate number sequences, so a plan and a task may carry the same number; the prefix tells them apart (see Plan and task files below).
 
 ### `radian arc add plan --slug <SLUG> --title <TITLE>`
 
@@ -83,7 +83,7 @@ Reads the request text from stdin to end of input, writes `plans/<id>.md`, and p
 
 | Flag | Value | What it does |
 |---|---|---|
-| `--slug` | `SLUG` | The part of the id after the number: 1 to 48 characters from `a-z`, `0-9`, `-`, with no leading or trailing `-`. Required. |
+| `--slug` | `SLUG` | The part of the id after the prefix and number: 1 to 48 characters from `a-z`, `0-9`, `-`, with no leading or trailing `-`. Required. |
 | `--title` | `TITLE` | The plan's title. Required. It may not be empty. |
 
 The body is the request text, then a `## Change records` section.
@@ -262,7 +262,7 @@ When the attempt ends, arc applies the result in one transaction (the table belo
 <attempt id> <outcome> -> <state>.<phase> (<reason>)
 ```
 
-For example `0001-work-1 completed -> review.verifying`.
+For example `TK0001-work-1 completed -> review.verifying`.
 A result whose token is not the task's current attempt prints `<attempt id> ignored: <why>` and changes nothing.
 Before its own line, `start` prints `reconciled: <line>` for each task the reconcile step changed.
 
@@ -274,7 +274,7 @@ The verification prints its own line:
 <attempt id> verify -> <state>.<phase> (<stage>: <reason> (verdict <path>))
 ```
 
-For example `0001-work-1 verify -> review.awaiting_human`, or `0001-work-1 verify -> review.rework_pending (commands: command_failed (verdict /…/verdicts/commands.json))`.
+For example `TK0001-work-1 verify -> review.awaiting_human`, or `TK0001-work-1 verify -> review.rework_pending (commands: command_failed (verdict /…/verdicts/commands.json))`.
 When verification cannot run (a moved branch, a stage this build does not have), the task stays in `review.verifying`, `start` prints the attempt's own line and then the reason on stderr, and exits `3`.
 
 `start` exits `0` when the task left `doing`, `1` when it is still in `doing` after the attempt (or on an internal error), `3` when the claim is refused or verification refuses, and `4` when another process holds `state.lock`.
@@ -298,7 +298,7 @@ It reconciles `doing` tasks first, as `start` does.
 | `review`, `done`, `failed` | refused with exit `3` |
 
 The wrapper's pid and its start time both come from the attempt record, so a pid the operating system reused is never signalled.
-`cancel` prints `<task> <state>.<phase>`, for example `0001-work failed.cancelled`.
+`cancel` prints `<task> <state>.<phase>`, for example `TK0001-work failed.cancelled`.
 It exits `0` when it stopped the task or left it `doing.reconciling`, `3` for a refused state, and `4` when another process holds `state.lock`.
 
 ## `radian arc reset-budget <ID>`
@@ -417,7 +417,7 @@ It prints the claim's line and then the verification's:
 <attempt id> verify -> <state>.<phase>
 ```
 
-For example `0001-work-2 reverify -> review.verifying`, then `0001-work-2 verify -> review.awaiting_human`.
+For example `TK0001-work-2 reverify -> review.verifying`, then `TK0001-work-2 verify -> review.awaiting_human`.
 A gate stage that fails again is a normal result: the task moves to `review.rework_pending`, the verification line carries the stage and its verdict, and `reverify` exits `0`.
 
 | Code | Meaning | When |
@@ -522,12 +522,12 @@ A stage this build does not run, or a branch that moved, is reported in the summ
 `run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end. When a pass changes nothing, a summary of what waits on whom ends the pass:
 
 ```text
-0001-a-1 completed -> review.verifying
-0001-a-1 verify -> review.awaiting_human
+TK0001-a-1 completed -> review.verifying
+TK0001-a-1 verify -> review.awaiting_human
 summary
-0001-plan (auto run)
-  0001-a review.awaiting_human: waiting for you to merge or reject it
-  0002-b todo.ready: waiting for 0001-a to merge
+PL0001-plan (auto run)
+  TK0001-a review.awaiting_human: waiting for you to merge or reject it
+  TK0002-b todo.ready: waiting for TK0001-a to merge
 ```
 
 A pass that wrote no transition line starts its summary with `no transition`.
@@ -660,6 +660,8 @@ A key you leave out takes its default.
 | `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
 | `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. |
 | `worker.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | Before `start`, each `run` pass and `confirm` act, the line the worker would get is parsed with the `radian exec` parser; a rejected line exits `3`. Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
+| `ids.plan_prefix` | string | `"PL"` | 1 to 4 ASCII uppercase letters; must differ from `ids.task_prefix` | When a plan id is created. |
+| `ids.task_prefix` | string | `"TK"` | 1 to 4 ASCII uppercase letters; must differ from `ids.plan_prefix` | When a task id is created. |
 | `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
 | `gate.command_timeout_secs` | integer | `3600` | seconds | Per gate command line. |
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
@@ -677,9 +679,12 @@ A plan file is `plans/<id>.md`; a task file is `tasks/<id>.md`.
 Both are front matter between two `---` lines, then a body.
 arc is the only writer; you change them with the subcommands above, and `adopt` after a hand edit.
 
-An id is a four-digit number, a dash, and a slug (`0001-first`).
-Plans and tasks share one number sequence, so no two items ever share an id, whatever their slugs.
-The number is the next free one and is never reused while its ledger entry exists; the id is the file name and never changes.
+An id is a prefix of 1 to 4 uppercase ASCII letters, a four-digit number, a dash, and a slug (`PL0001-first`, `TK0001-work`).
+`[ids] plan_prefix` (default `PL`) and `[ids] task_prefix` (default `TK`) set the two prefixes; they must differ, and a prefix that is empty, not 1 to 4 uppercase letters, or equal to the other is refused by name when `config.toml` is read.
+Plans and tasks count in separate number sequences: a new id takes the next free number above the highest number any item of that kind (a file or a ledger entry) uses, whatever prefix that item carries, and the number is never reused while its ledger entry exists.
+An id without a prefix is not an id (exit `2`).
+Any prefix of 1 to 4 uppercase letters is a well-formed id, and the kind comes from the directory it is looked up in (`plans/` or `tasks/`), not from the prefix: an item created under an earlier prefix keeps working after the prefix changes.
+The id is the file name and never changes.
 An id names one item: `show`, `adopt`, `reset-budget`, and the MCP `show` tool refuse an id that names both a plan file and a task file with exit `3` (the MCP tool: a tool error), name both files, and change nothing.
 
 ### Plan fields
@@ -687,7 +692,7 @@ An id names one item: `show`, `adopt`, `reset-budget`, and the MCP `show` tool r
 | Field | Type | Required | Allowed values |
 |---|---|---|---|
 | `schema_version` | integer | yes | `1` |
-| `id` | string | yes | `NNNN-<slug>` |
+| `id` | string | yes | `<PREFIX><NNNN>-<slug>`, prefix `PL` by default |
 | `title` | string | yes | any text |
 | `status` | string | yes | `draft`, `confirmed` |
 | `auto` | string | yes | `off`, `run`, `merge`; only a `confirmed` plan may use `run` or `merge` |
@@ -704,7 +709,7 @@ A confirmed plan gains records only; a draft plan may have its request text repl
 | Field | Type | Required | Allowed values |
 |---|---|---|---|
 | `schema_version` | integer | yes | `1` |
-| `id` | string | yes | `NNNN-<slug>` |
+| `id` | string | yes | `<PREFIX><NNNN>-<slug>`, prefix `TK` by default |
 | `plan` | string | yes | the plan's id |
 | `title` | string | yes | any text |
 | `state` | string | yes | `todo`, `doing`, `review`, `done`, `failed` |

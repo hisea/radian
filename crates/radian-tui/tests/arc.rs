@@ -223,17 +223,17 @@ fn without_setup_the_subcommands_name_init_and_exit_three() {
     for args in [
         vec!["arc"],
         vec!["arc", "list"],
-        vec!["arc", "show", "0001-a"],
-        vec!["arc", "adopt", "0001-a"],
-        vec!["arc", "confirm", "0001-a"],
-        vec!["arc", "auto", "0001-a", "run"],
-        vec!["arc", "pause", "0001-a"],
-        vec!["arc", "start", "0001-a"],
-        vec!["arc", "reverify", "0001-a"],
-        vec!["arc", "cancel", "0001-a"],
-        vec!["arc", "reset-budget", "0001-a"],
-        vec!["arc", "merge", "0001-a"],
-        vec!["arc", "reject", "0001-a", "--note", "no"],
+        vec!["arc", "show", "PL0001-a"],
+        vec!["arc", "adopt", "PL0001-a"],
+        vec!["arc", "confirm", "PL0001-a"],
+        vec!["arc", "auto", "PL0001-a", "run"],
+        vec!["arc", "pause", "PL0001-a"],
+        vec!["arc", "start", "TK0001-a"],
+        vec!["arc", "reverify", "TK0001-a"],
+        vec!["arc", "cancel", "TK0001-a"],
+        vec!["arc", "reset-budget", "PL0001-a"],
+        vec!["arc", "merge", "TK0001-a"],
+        vec!["arc", "reject", "TK0001-a", "--note", "no"],
         vec!["arc", "run"],
         vec!["arc", "mcp"],
     ] {
@@ -321,7 +321,7 @@ fn add_list_and_show_work_and_json_parses() {
     let scratch = fixture("list");
     init(&scratch);
     let plan = add_plan(&scratch, "first");
-    assert_eq!(plan, "0001-first");
+    assert_eq!(plan, "PL0001-first");
     let task = run(
         &scratch,
         &[
@@ -342,40 +342,45 @@ fn add_list_and_show_work_and_json_parses() {
     );
     assert_eq!(task.code, Some(0), "{task:?}");
     let task = task.out.trim().to_owned();
-    assert_eq!(task, "0002-work");
+    assert_eq!(task, "TK0001-work");
 
     let list = run(&scratch, &["arc", "list"], "");
     assert_eq!(list.code, Some(0), "{list:?}");
-    assert!(list.out.contains("0001-first"), "{}", list.out);
-    assert!(list.out.contains("0002-work"), "{}", list.out);
+    assert!(list.out.contains("PL0001-first"), "{}", list.out);
+    assert!(list.out.contains("TK0001-work"), "{}", list.out);
     assert!(list.out.contains("todo.ready"), "{}", list.out);
     assert!(list.out.contains("attempt 0"), "{}", list.out);
 
     let json = run(&scratch, &["arc", "list", "--json"], "");
     assert_eq!(json.code, Some(0), "{json:?}");
     let value: serde_json::Value = serde_json::from_str(&json.out).expect("list --json parses");
-    assert_eq!(value[0]["id"], "0001-first");
+    assert_eq!(value[0]["id"], "PL0001-first");
     assert_eq!(value[0]["status"], "draft");
-    assert_eq!(value[0]["tasks"][0]["id"], "0002-work");
+    assert_eq!(value[0]["tasks"][0]["id"], "TK0001-work");
     assert_eq!(value[0]["tasks"][0]["state"], "todo");
     assert_eq!(value[0]["tasks"][0]["phase"], "ready");
 
     let shown = run(&scratch, &["arc", "show", &plan, "--json"], "");
     assert_eq!(shown.code, Some(0), "{shown:?}");
     let value: serde_json::Value = serde_json::from_str(&shown.out).expect("show --json parses");
-    assert_eq!(value["id"], "0001-first");
+    assert_eq!(value["id"], "PL0001-first");
     assert!(value["body"].as_str().unwrap().contains("the request"));
 
     let shown = run(&scratch, &["arc", "show", &task, "--json"], "");
     let value: serde_json::Value = serde_json::from_str(&shown.out).expect("task json parses");
-    assert_eq!(value["plan"], "0001-first");
+    assert_eq!(value["plan"], "PL0001-first");
     assert_eq!(value["allow_noop"], true);
     assert_eq!(value["extra_stages"][0], "mutation");
     assert!(value["body"].as_str().unwrap().contains("the brief"));
 
     let human = run(&scratch, &["arc", "show", &task], "");
     assert_eq!(human.code, Some(0), "{human:?}");
-    for text in ["task 0002-work", "state: todo", "phase: ready", "the brief"] {
+    for text in [
+        "task TK0001-work",
+        "state: todo",
+        "phase: ready",
+        "the brief",
+    ] {
         assert!(human.out.contains(text), "missing `{text}`:\n{}", human.out);
     }
     assert!(
@@ -448,7 +453,7 @@ fn a_task_cannot_be_added_to_a_confirmed_plan() {
     assert!(
         !scratch
             .repo()
-            .join(".radian/arc/tasks/0002-late.md")
+            .join(".radian/arc/tasks/TK0001-late.md")
             .exists()
     );
 }
@@ -556,7 +561,7 @@ fn an_unknown_config_key_and_a_bad_slug_use_their_own_exit_codes() {
             "add",
             "task",
             "--plan",
-            "0001-p",
+            "PL0001-p",
             "--slug",
             "t",
             "--title",
@@ -569,9 +574,25 @@ fn an_unknown_config_key_and_a_bad_slug_use_their_own_exit_codes() {
     assert_eq!(bad_stage.code, Some(2), "{bad_stage:?}");
 
     // An unknown id is an error, not a state refusal.
-    let missing = run(&scratch, &["arc", "show", "0099-missing"], "");
+    let missing = run(&scratch, &["arc", "show", "TK0099-missing"], "");
     assert_eq!(missing.code, Some(1), "{missing:?}");
     assert!(missing.err.contains("no plan or task"), "{}", missing.err);
+}
+
+/// An id without a prefix is malformed: a usage error (`2`), not a missing item (`1`).
+#[test]
+fn an_id_without_a_prefix_exits_two() {
+    let scratch = fixture("no-prefix");
+    init(&scratch);
+    for args in [
+        vec!["arc", "show", "0001-a"],
+        vec!["arc", "adopt", "0001-a"],
+        vec!["arc", "start", "0001-a"],
+    ] {
+        let run = run(&scratch, &args, "");
+        assert_eq!(run.code, Some(2), "{args:?}: {run:?}");
+        assert!(run.err.contains("prefix"), "{args:?}: {run:?}");
+    }
 }
 
 #[test]
