@@ -125,9 +125,11 @@ pub(crate) fn schema() -> serde_json::Value {
             "path": {
                 "type": "string",
                 "description": "Directory or file to search. Default: the workspace root. \
-                                A read-only absolute directory or `~` directory under the cargo \
-                                registry sources or a toolchain `lib/rustlib/src` is also \
-                                accepted. Its results are absolute."
+                                A read-only absolute or `~` directory under a read-only root \
+                                (cargo registry or Rust toolchain sources, or a discovered \
+                                skill's directory) is also accepted; in the `full` tier any other \
+                                absolute or `~` path is searched too, except the sandbox's deny \
+                                set. Its results are absolute."
             },
             "glob": {
                 "type": "string",

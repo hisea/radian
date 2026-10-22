@@ -2248,6 +2248,8 @@ async fn built_in_read_outside_the_workspace_is_refused_and_the_turn_continues()
                 &server.base_url,
                 "--workspace",
                 ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
                 "--yes",
                 "-p",
                 "read a file",
@@ -2264,6 +2266,57 @@ async fn built_in_read_outside_the_workspace_is_refused_and_the_turn_continues()
     assert!(
         result.contains("absolute path") && result.contains("/etc/passwd"),
         "the model sees the refusal: {result}"
+    );
+}
+
+/// ADR 0039 decision 4: the `full` tier reads an outside path through the file tools. The
+/// model reads a scratch file outside the workspace by absolute path, and the turn
+/// continues with its content.
+#[tokio::test]
+async fn built_in_read_outside_the_workspace_reads_in_the_full_tier() {
+    let dir = scratch("builtin-full-read");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let outside = dir.join("outside.txt");
+    std::fs::write(&outside, "FULL-TIER-SENTINEL\n").unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "read",
+            &format!(
+                r#"{{"path":{}}}"#,
+                serde_json::to_string(outside.to_str().unwrap()).unwrap()
+            ),
+        ),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "read a file",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "the turn continues: {stdout}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.contains("FULL-TIER-SENTINEL"),
+        "the model sees the outside file: {result}"
     );
 }
 

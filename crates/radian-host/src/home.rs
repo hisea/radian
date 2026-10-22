@@ -161,6 +161,27 @@ pub fn catalog_cache() -> Option<PathBuf> {
     Some(catalog_cache_for(&radian_home()?))
 }
 
+/// The list the sandbox policy and the file tools' `full`-tier deny set share (ADR 0039
+/// decision 4): the actual sessions directory plus `memory/`, `credentials/` and `trust/`
+/// under `$RADIAN_HOME` (ADR 0020's unreadable directories, ADR 0026 D4, ADR 0031 T2). A
+/// host builds its sandbox deny-read list from this and appends anything the sandbox alone
+/// denies (the remembered-tier store, ADR 0038 decision 3); it passes this same list to the
+/// coding tools as their file-tool deny set. One function, so the two can never differ.
+/// Each entry is created owner-only first (0700), so Linux's bwrap can mask it.
+pub fn file_tool_deny_read(session_dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![session_dir.to_path_buf()];
+    if let Some(memory) = memory_dir() {
+        out.push(memory);
+    }
+    if let Some(credentials) = credentials_dir() {
+        out.push(credentials);
+    }
+    if let Some(trust) = trust_dir() {
+        out.push(trust);
+    }
+    out
+}
+
 /// Creates `dir` (and its parents) owner-only (0700), warning once if an existing one is
 /// group/world-accessible. The hosts call this for the **actual** sessions directory (which
 /// `--session-dir` may have moved) before denying it, so Linux's bwrap can mask it (ADR 0020).

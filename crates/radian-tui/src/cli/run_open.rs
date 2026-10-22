@@ -72,23 +72,13 @@ pub(super) fn build_session_inputs(
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
     // The tier and its source were resolved above (ADR 0038 decision 3).
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
-    // the memory directory. The directory was created owner-only before the terminal was
-    // entered (`ensure_private_dir` above); Linux's bwrap can only mask paths that exist.
+    // the memory directory (plus the credential and trust stores, ADR 0026 D4 / ADR 0031
+    // T2). The shared helper builds that list — the same list the file tools deny in the
+    // `full` tier — so the two can never differ (ADR 0039 decision 4). The directories were
+    // created owner-only before the terminal was entered (`ensure_private_dir` above);
+    // Linux's bwrap can only mask paths that exist.
     let memory_root = radian_host::memory_dir();
-    let mut sandbox_deny_read = vec![dir.to_path_buf()];
-    if let Some(memory) = &memory_root {
-        sandbox_deny_read.push(memory.clone());
-    }
-    // ADR 0026 D4: the credential store is denied read in every enforced tier. Creating it
-    // first (0700) lets Linux's bwrap mask a path that exists.
-    if let Some(credentials) = radian_host::credentials_dir() {
-        sandbox_deny_read.push(credentials);
-    }
-    // ADR 0031 T2: the trust store is denied read in every enforced tier (it is the user's map
-    // of trusted directories). Creating it first (0700) lets Linux's bwrap mask it.
-    if let Some(trust) = radian_host::trust_dir() {
-        sandbox_deny_read.push(trust);
-    }
+    let mut sandbox_deny_read = radian_host::file_tool_deny_read(dir);
     // ADR 0038 decision 3: the remembered-tier store is denied read like trust/ — it is the
     // user's map of which projects run unsandboxed. Creating it first lets bwrap mask it.
     if let Some(access) = radian_host::access::access_dir() {

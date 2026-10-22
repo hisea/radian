@@ -4,10 +4,12 @@ use std::sync::Arc;
 
 use radian_core::ToolFailure;
 
+use crate::deny::DenySet;
 use crate::docs;
-use crate::read_roots::{ReadRoots, normalise_absolute, user_home};
+use crate::read_roots::{READ_ROOTS_DESCRIPTION, ReadRoots, normalise_absolute, user_home};
 use crate::safe_fs::{self, EntryKind, OpenMode, RootDir, SafeFsError, Stat};
 use crate::{CODE_OUTSIDE, fail};
+use radian_sandbox::{SandboxMode, SandboxSlot};
 
 /// Why a workspace root could not be used.
 #[derive(Debug, thiserror::Error)]
@@ -26,13 +28,27 @@ pub enum WorkspaceError {
 /// later open walks from this fd and never re-opens a path string.
 ///
 /// Alongside the workspace it holds the read-only roots (ADR 0039: the cargo
-/// registry and toolchain sources). `read`/`grep`/`glob` resolve an absolute or `~`
-/// path against those roots; every other tool uses the workspace only.
-#[derive(Debug, Clone)]
+/// registry and toolchain sources, plus each discovered skill's directory), the `full`-tier
+/// deny set (ADR 0039 decision 4), and the tier source: the shared [`SandboxSlot`] the host
+/// swaps on `/access`, so the file tools read the current tier at every call, not the
+/// startup one. `read`/`grep`/`glob` resolve an absolute or `~` path against the roots in
+/// both tiers, and against any other path in the `full` tier except the deny set; every
+/// other tool uses the workspace only.
+#[derive(Clone)]
 pub struct WorkspaceRoot {
     root: PathBuf,
     dir: Arc<RootDir>,
     read_roots: Arc<ReadRoots>,
+    /// The `full`-tier deny set: the sandbox's deny-read entries plus the host's denied
+    /// `$RADIAN_HOME` paths. Consulted only when the tier is `full`.
+    deny: Arc<DenySet>,
+    /// The tier in force, read at every call (ADR 0038): the host's shared slot, so a
+    /// mid-session tier switch changes what the file tools read at the next call.
+    tier: SandboxSlot,
+    /// The filesystem root's directory fd, for `full`-tier reads outside every other root.
+    /// A canonical outside path is walked from here with the same per-component
+    /// `O_NOFOLLOW` walk the workspace uses.
+    fs: Arc<RootDir>,
 }
 
 /// An open workspace file with the facts the tools check before using it.
@@ -75,21 +91,41 @@ enum Resolved {
         relative: PathBuf,
         prefix: PathBuf,
     },
+    /// A `full`-tier path outside every other root: `relative` is the `realpath`ed path
+    /// without its leading `/`, walked from the filesystem root's fd (ADR 0039 decision 4).
+    /// The deny set was already checked on the `realpath`ed path.
+    Free { relative: PathBuf },
     /// A bundled docs page (`radian://docs/`). `None` is the root (a listing);
     /// `Some` is one page by file name.
     Embedded { page: Option<String> },
 }
 
 impl WorkspaceRoot {
-    /// The workspace only, with no read-only roots.
+    /// The workspace only, with no read-only roots and no deny set. The tier source is
+    /// empty, which reads as the `workspace` tier (outside paths refuse).
     pub fn new(root: impl AsRef<Path>) -> Result<Self, WorkspaceError> {
         Self::with_read_roots(root, ReadRoots::none())
     }
 
-    /// The workspace plus the read-only roots the file tools may read (ADR 0039).
+    /// The workspace plus the read-only roots the file tools may read (ADR 0039). No deny
+    /// set and no tier source: outside paths outside the roots refuse, as in the
+    /// `workspace` tier. For tests and embedders.
     pub fn with_read_roots(
         root: impl AsRef<Path>,
         read_roots: ReadRoots,
+    ) -> Result<Self, WorkspaceError> {
+        Self::with_access(root, read_roots, DenySet::empty(), SandboxSlot::empty())
+    }
+
+    /// The workspace plus the read-only roots, the `full`-tier deny set and the tier source
+    /// (ADR 0039 decision 4): the host passes the skill roots from its skill discovery, its
+    /// deny-read list, and its shared sandbox slot, so a tier switch changes what the file
+    /// tools read at the next call.
+    pub fn with_access(
+        root: impl AsRef<Path>,
+        read_roots: ReadRoots,
+        deny: DenySet,
+        tier: SandboxSlot,
     ) -> Result<Self, WorkspaceError> {
         let path = root.as_ref().to_path_buf();
         let canonical = std::fs::canonicalize(&path).map_err(|source| WorkspaceError::Io {
@@ -103,11 +139,27 @@ impl WorkspaceRoot {
             path: canonical.clone(),
             source,
         })?;
+        let fs = RootDir::open(Path::new("/")).map_err(|source| WorkspaceError::Io {
+            path: PathBuf::from("/"),
+            source,
+        })?;
         Ok(Self {
             root: canonical,
             dir: Arc::new(dir),
             read_roots: Arc::new(read_roots),
+            deny: Arc::new(deny),
+            tier,
+            fs: Arc::new(fs),
         })
+    }
+
+    /// Whether the file tools are in the `full` tier right now: the shared slot holds a
+    /// `FullAccess` sandbox. Read at every call (ADR 0038), so a mid-session tier switch
+    /// changes the answer at the next call. An empty slot (no sandbox) reads as `workspace`.
+    fn is_full_tier(&self) -> bool {
+        self.tier
+            .get()
+            .is_some_and(|sandbox| sandbox.mode() == SandboxMode::FullAccess)
     }
 
     pub fn root(&self) -> &Path {
@@ -166,7 +218,9 @@ impl WorkspaceRoot {
 
     /// Opens `user` for reading through the fd walk and reports what it is. A relative path
     /// is workspace-relative; an absolute or `~` path is resolved against the read-only roots
-    /// (ADR 0039) and refused when it is under none of them. `radian://docs/`
+    /// (ADR 0039) and refused when it is under none of them — except in the `full` tier,
+    /// where any other absolute or `~` path reads too, unless the deny set denies it.
+    /// `radian://docs/`
     /// names the bundled manual and is read from memory. Any symlink component
     /// is refused; the caller checks `stat.kind`.
     pub(crate) fn open_read(&self, user: &str) -> Result<OpenedFile, ToolFailure> {
@@ -175,6 +229,7 @@ impl WorkspaceRoot {
             Resolved::Root {
                 index, relative, ..
             } => self.open_root_file(user, index, &relative),
+            Resolved::Free { relative } => self.open_free_file(user, &relative),
             Resolved::Embedded { page } => self.open_embedded_file(user, page),
         }
     }
@@ -188,6 +243,7 @@ impl WorkspaceRoot {
             Resolved::Root {
                 index, relative, ..
             } => self.open_root_dir(user, index, &relative),
+            Resolved::Free { relative } => self.open_free_dir(user, &relative),
             Resolved::Embedded { page } => Err(docs_dir_failure(user, page)),
         }
     }
@@ -224,6 +280,19 @@ impl WorkspaceRoot {
                     ancestors,
                 })
             }
+            Resolved::Free { relative } => {
+                let dir = self.open_free_dir(user, &relative)?;
+                // No above-base ignore matchers: they would be loaded by walking from the
+                // filesystem root (e.g. listing the system temp directory, which can hold
+                // hundreds of thousands of entries) for every search. Ignore files at and
+                // below the base still apply through the walk itself.
+                Ok(ReadBase {
+                    dir,
+                    relative,
+                    prefix: Some(PathBuf::from("/")),
+                    ancestors: Vec::new(),
+                })
+            }
             Resolved::Embedded { .. } => Err(docs_search_failure(user)),
         }
     }
@@ -240,15 +309,18 @@ impl WorkspaceRoot {
             Resolved::Root {
                 relative, prefix, ..
             } => Ok((relative, Some(prefix))),
+            Resolved::Free { relative } => Ok((relative, Some(PathBuf::from("/")))),
             Resolved::Embedded { .. } => Err(docs_search_failure(user)),
         }
     }
 
-    /// Resolves a read tool's `path` to the bundled manual, the workspace or one of the
-    /// read-only roots (ADR 0039). `radian://docs/` is checked before the
+    /// Resolves a read tool's `path` to the bundled manual, the workspace, one of the
+    /// read-only roots, or — in the `full` tier — any other absolute or `~` path outside the
+    /// deny set (ADR 0039 decision 4). `radian://docs/` is checked before the
     /// absolute/`~` check. A relative path is workspace-relative and keeps the existing
-    /// checks; an absolute path, or one written with `~`, is refused unless it falls under
-    /// a read-only root, and the refusal names the readable roots.
+    /// checks; an absolute path, or one written with `~`, is refused outside the roots in
+    /// the `workspace` tier (the refusal lists the readable roots, now including skill
+    /// directories), and `realpath`ed and deny-checked in the `full` tier.
     fn resolve_read(&self, user: &str) -> Result<Resolved, ToolFailure> {
         if docs::is_root(user) {
             return Ok(Resolved::Embedded { page: None });
@@ -271,18 +343,84 @@ impl WorkspaceRoot {
         if is_absolute_or_home(user) {
             let candidate = expand_home(user)
                 .and_then(|path| normalise_absolute(&path))
-                .ok_or_else(|| outside_read_failure(user))?;
-            let found = self
-                .read_roots
-                .lookup(&candidate)
-                .ok_or_else(|| outside_read_failure(user))?;
-            return Ok(Resolved::Root {
-                index: found.index,
-                relative: found.relative,
-                prefix: found.prefix,
-            });
+                .ok_or_else(|| outside_read_failure(user, &self.skill_dirs()))?;
+            if let Some(found) = self.read_roots.lookup(&candidate) {
+                return Ok(Resolved::Root {
+                    index: found.index,
+                    relative: found.relative,
+                    prefix: found.prefix,
+                });
+            }
+            // ADR 0039 decision 4: in the `full` tier any other absolute or `~` path reads
+            // too, except the deny set. The tier is read now, not at startup, so `/access`
+            // changes the answer at the next call.
+            if self.is_full_tier() {
+                return self.resolve_free(user, &candidate);
+            }
+            return Err(outside_read_failure(user, &self.skill_dirs()));
         }
         Ok(Resolved::Workspace(self.checked_relative(user)?))
+    }
+
+    /// The skill roots' canonical paths, for the refusal that lists them.
+    fn skill_dirs(&self) -> Vec<&Path> {
+        self.read_roots.skill_dirs()
+    }
+
+    /// Resolves a `full`-tier path outside every other root: `realpath` it (a symlink into
+    /// a denied directory refuses, even through several links or a missing tail), deny-check
+    /// the result, and walk what is left from the filesystem root's fd.
+    fn resolve_free(&self, user: &str, candidate: &Path) -> Result<Resolved, ToolFailure> {
+        let real = std::fs::canonicalize(candidate)
+            .ok()
+            .or_else(|| radian_sandbox::canonicalize_existing_prefix(candidate))
+            .ok_or_else(|| outside_read_failure(user, &self.skill_dirs()))?;
+        if let Some(denied) = self.deny.denies(&real) {
+            return Err(fail(
+                CODE_OUTSIDE,
+                format!(
+                    "`{user}` is in the sandbox's deny set (`{}` is not readable by the file tools)",
+                    denied.display()
+                ),
+            ));
+        }
+        let relative = real
+            .strip_prefix("/")
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| real.clone());
+        Ok(Resolved::Free { relative })
+    }
+
+    /// Opens a `full`-tier path outside every other root through the filesystem root's
+    /// fd. The path was `realpath`ed before the deny check, so the walk below meets no
+    /// symlink short of a concurrent swap (which the `O_NOFOLLOW` walk still refuses).
+    fn open_free_file(&self, user: &str, relative: &Path) -> Result<OpenedFile, ToolFailure> {
+        let file = self
+            .fs
+            .file(relative, OpenMode::Read)
+            .map_err(|error| self.map_free_error(user, error))?;
+        opened_file(user, file, true)
+    }
+
+    /// Opens a `full`-tier directory outside every other root through the filesystem
+    /// root's fd.
+    fn open_free_dir(&self, user: &str, relative: &Path) -> Result<File, ToolFailure> {
+        self.fs
+            .dir(relative)
+            .map_err(|error| self.map_free_error(user, error))
+    }
+
+    /// Maps a free-path walk error to the tool failure the model sees. An io error names the
+    /// absolute path (the walk's filesystem-relative component would drop its leading `/`);
+    /// any other error maps like a readable-root error against the filesystem root.
+    fn map_free_error(&self, user: &str, error: SafeFsError) -> ToolFailure {
+        match error {
+            SafeFsError::Io { component, source } => {
+                let absolute = Path::new("/").join(component);
+                io_failure(&absolute.to_string_lossy(), source)
+            }
+            error => self.map_error_at(Path::new("/"), "filesystem", user, error),
+        }
     }
 
     /// Opens a workspace-relative path for reading (the existing boundary, unchanged).
@@ -549,22 +687,30 @@ impl WorkspaceRoot {
 
 /// Where a read tool's path came from, for the message that refuses an absolute/`~` path under
 /// no readable root (ADR 0039). It keeps naming the path kind, as the
-/// workspace-only refusal did, and lists the readable roots including the bundled manual.
-fn outside_read_failure(user: &str) -> ToolFailure {
+/// workspace-only refusal did, and lists the readable roots including the bundled manual
+/// and, when any skill roots exist, their paths.
+fn outside_read_failure(user: &str, skills: &[&Path]) -> ToolFailure {
     let kind = if user.starts_with('~') {
         "a `~` path"
     } else {
         "an absolute path"
     };
-    fail(
-        CODE_OUTSIDE,
-        format!(
-            "`{user}` is {kind} outside the workspace; the file tools also read, read-only, {}; \
-             the bundled manual lives at `radian://docs/` ({}), read with `read`",
-            crate::read_roots::READ_ROOTS_DESCRIPTION,
-            docs::names().join(", ")
-        ),
-    )
+    let mut message = format!(
+        "`{user}` is {kind} outside the workspace; the file tools also read, read-only, {READ_ROOTS_DESCRIPTION}; ",
+    );
+    if !skills.is_empty() {
+        let list = skills
+            .iter()
+            .map(|path| format!("`{}`", path.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!("skill directories: {list}; "));
+    }
+    message.push_str(&format!(
+        "the bundled manual lives at `radian://docs/` ({}), read with `read`",
+        docs::names().join(", ")
+    ));
+    fail(CODE_OUTSIDE, message)
 }
 
 /// The bundled manual root has no directory fd; `read` lists it directly.

@@ -61,27 +61,16 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     let workspace_path = setup.workspace.clone();
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
     // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
-    // paths that exist) can hide them.
+    // paths that exist) can hide them. The shared helper builds that list — the same list
+    // the file tools deny in the `full` tier — so the two can never differ (ADR 0039
+    // decision 4).
     let sessions_for_deny = super::inspect::session_dir(&cli)?;
     let _ = radian_host::ensure_private_dir(&sessions_for_deny);
     // ADR 0021: the memory root is under `~/.radian/` (ADR 0020), sandbox-denied, and the
     // service is the same one `radian memory` uses. `None` only when neither `RADIAN_HOME` nor
     // `HOME` is set; then memory is simply off for this run.
     let memory_root = radian_host::memory_dir();
-    let mut sandbox_deny_read = vec![sessions_for_deny.clone()];
-    if let Some(memory) = &memory_root {
-        sandbox_deny_read.push(memory.clone());
-    }
-    // ADR 0026 D4: the credential store is denied read in every enforced tier. Creating it
-    // first (0700) lets Linux's bwrap mask a path that exists.
-    if let Some(credentials) = radian_host::credentials_dir() {
-        sandbox_deny_read.push(credentials);
-    }
-    // ADR 0031 T2: the trust store is denied read in every enforced tier (it is the user's map
-    // of trusted directories). Creating it first (0700) lets Linux's bwrap mask it.
-    if let Some(trust) = radian_host::trust_dir() {
-        sandbox_deny_read.push(trust);
-    }
+    let sandbox_deny_read = radian_host::file_tool_deny_read(&sessions_for_deny);
     // ADR 0016: the whitelisted Unix sockets (resolved in `setup`).
     let sandbox = profile::build_sandbox(
         profile_arg,
