@@ -1,5 +1,5 @@
 ---
-description: Plan and task orchestration: setup, plans, tasks, the files arc keeps, and its exit codes.
+description: Plan and task orchestration: setup, plans, tasks, the files arc keeps, the lead's MCP server, and its exit codes.
 ---
 
 # arc
@@ -7,8 +7,9 @@ description: Plan and task orchestration: setup, plans, tasks, the files arc kee
 arc is a plan and task orchestrator built into the same `radian` binary.
 It keeps a plan and its tasks as files in the repository, runs each task as a separate headless `radian` worker, and merges only what passes a fixed gate.
 
-This build has the storage layer and the five subcommands that read and write it: `init`, `add`, `list`, `show`, and `adopt`.
-The scheduling loop, attempts, the gate, merge, the arc terminal interface, and the MCP server are **not built yet**.
+This build has the storage layer and the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, and `pause`.
+It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through.
+The scheduling loop, attempts, the gate, merge, and the arc terminal interface are **not built yet**, so the `run` and `merge` auto levels are stored and nothing acts on them yet.
 
 ## `radian arc`
 
@@ -149,6 +150,130 @@ It refuses with exit `3` when the outside change touched a field only arc (for a
 A file that already matches the ledger is a no-op and prints so.
 Without a recorded version to compare against, `adopt` refuses: it cannot tell which fields changed.
 
+## `radian arc confirm <PLAN>`
+
+`confirm` moves a plan from `draft` to `confirmed`.
+A confirmed plan gets no new tasks, and its request text can only gain change records (below).
+A plan's `auto` level may only be other than `off` once it is confirmed.
+
+| Argument | Value | What it does |
+|---|---|---|
+| `<PLAN>` | `ID` | The plan id. Required. |
+
+It refuses with exit `3` when the plan has no tasks, when it is already confirmed, and when its file changed outside arc.
+A refusal writes nothing.
+
+## `radian arc auto <PLAN> <LEVEL>`
+
+`auto` sets a plan's `auto` level.
+
+```text
+radian arc auto <PLAN> <LEVEL>
+```
+
+| Argument | Value | What it does |
+|---|---|---|
+| `<PLAN>` | `ID` | The plan id. Required. |
+| `<LEVEL>` | `off`, `run`, `merge` | The level. Required. |
+
+| Level | What arc would do | Where it would stop |
+|---|---|---|
+| `off` | Nothing by itself. You start and merge each task. | Each step |
+| `run` | Start each task when its `after` tasks are merged, and run the gate. | `review.awaiting_human` |
+| `merge` | `run`, and merge when every required stage and the integration passed. | Failure, budget, or conflict |
+
+This build has no scheduling loop, so `run` and `merge` are stored and no task starts from them yet.
+`off` is accepted on any plan; `run` and `merge` need a `confirmed` plan and otherwise exit `3`.
+A value outside the set is a usage error (`2`).
+
+## `radian arc pause <PLAN>`
+
+`pause` sets the plan's `auto` level to `off`.
+
+| Argument | Value | What it does |
+|---|---|---|
+| `<PLAN>` | `ID` | The plan id. Required. |
+
+This build has no scheduling loop, so nothing is running: `pause` only writes the level.
+A task that is already started keeps its state, and a later loop reads the level before it starts anything.
+It exits `0` on a plan that is already `off`.
+
+## `radian arc mcp`
+
+`mcp` serves the lead's tools over standard input and output, and exits when its client closes the connection.
+Like every subcommand except `init` it refuses without setup (exit `3`) and names `radian arc init`.
+
+The server speaks MCP over stdio and is meant to be started by a lead, not by hand.
+It starts in the working directory it is given, so register it from inside the repository (or with that directory as its working directory): arc reads the repository that contains the current directory.
+
+Register it with Claude Code:
+
+```sh
+claude mcp add arc -- radian arc mcp
+```
+
+Or add it to a project `.mcp.json`, in the shared form every MCP client reads:
+
+```json
+{
+  "mcpServers": {
+    "arc": {"command": "radian", "args": ["arc", "mcp"]}
+  }
+}
+```
+
+Radian's own form is the same server with an `id`:
+
+```json
+{
+  "servers": [
+    {"id": "arc", "command": "radian", "args": ["arc", "mcp"]}
+  ]
+}
+```
+
+See `mcp` for both forms and how a project file is trusted.
+A tool from a project `.mcp.json` asks before running under the `workspace` tier, like any other MCP tool.
+
+The server takes only `state.lock`, never `runner.lock`, so the lead can add tasks while a scheduling loop runs.
+Every tool is one of the store's transactions: a plan or task file that changed outside arc is refused with that reason, and the tool call fails without writing anything.
+
+### The tools
+
+| Tool | Parameters | Result |
+|---|---|---|
+| `add_plan` | `slug` (string, required), `title` (string, required), `request` (string, required) | `{"id": "<plan id>"}` |
+| `add_task` | `plan` (string, required), `slug` (string, required), `title` (string, required), `brief` (string, required), `after` (list of ids, optional), `allow_noop` (boolean, optional, default `false`), `extra_stages` (list of stage names, optional) | `{"id": "<task id>"}` |
+| `update_plan` | `plan` (string, required), `title` (string, optional), `request` (string, optional), `change_record` (string, optional) | the plan, as `radian arc show <plan> --json` |
+| `add_rework` | `task` (string, required), `brief` (string, required) | the task, as `radian arc show <task> --json` |
+| `list` | `plan` (string, optional: only this plan) | the JSON array `radian arc list --json` prints |
+| `show` | `id` (string, required) | the JSON object `radian arc show --json` prints |
+
+There is no tool to confirm a plan, start a task, merge, reject, change `auto`, or approve: those are yours (see `confirm`, `auto`, and `pause` above).
+
+`add_plan` creates a `draft` plan with `auto` `off`.
+The `slug` rule and the title rule are the ones on this page; an empty title is refused.
+
+`add_task` keeps the rules of `radian arc add task`: the plan must be `draft`, each `after` id must name a task of the same plan or a task whose state is `done`, and each `extra_stages` name must be a gate stage.
+
+`update_plan` depends on the plan's state:
+
+- on a `draft` plan, `title` and `request` replace the plan's; a `change_record` is refused (`3`);
+- on a `confirmed` plan, `title` and `request` are refused (`3`) because the request text is never rewritten, and `change_record` is required: it is appended under the plan's `## Change records` heading with the UTC time, and the plan returns to `draft` with `auto` `off`, keeping its tasks' state. New tasks can be added again.
+
+A call with no field at all is refused: it would change nothing.
+
+`add_rework` applies only to a task whose state is `review` (any phase); anything else is refused (`3`).
+The brief is appended under `## Rework <n>`, where `n` is the task's `attempt` plus one, and the task moves to `todo.ready`.
+It does not change `attempt`: the attempt number belongs to the claim that starts the next run.
+
+### Tool errors
+
+A tool that cannot do its work answers with `isError: true` and one text line: the reason.
+That line is the same text the CLI prints for the same refusal, so a plan or task that changed outside arc says `changed outside arc` and names `radian arc adopt`.
+An argument of the wrong type, a missing required argument, and an argument the tool does not take are errors that name the argument.
+The arc exit codes below belong to the CLI; a tool error carries no code.
+
 ## Exit codes
 
 Every subcommand of this page uses these codes.
@@ -216,6 +341,8 @@ The number is the next free one and is never reused while its ledger entry exist
 | `tasks` | list of ids | yes | the plan's tasks, in display order (`[]` when there are none) |
 
 The body is the request text, then a `## Change records` section.
+Each change record is a `### <UTC time>` line (the shape `YYYY-MM-DDTHH:MM:SSZ`), a blank line, and the text of the change.
+A confirmed plan gains records only; a draft plan may have its request text replaced, which keeps the records below it.
 
 ### Task fields
 
@@ -288,7 +415,7 @@ A worker also never reads the rest of `.radian/arc/` from inside its checkout; a
 These subcommands are named in the design and do not exist in this build.
 Do not rely on their flags: they have none yet.
 
-`start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `run`, `mcp`, and the hidden `work` wrapper.
+`start`, `merge`, `reject`, `reset-budget`, `cancel`, `run`, and the hidden `work` wrapper.
 The arc terminal interface is not built either.
 
 ## See also
