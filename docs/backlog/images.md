@@ -49,6 +49,12 @@
 - 目录快照保留 models.dev 的 `modalities.input`；模型不收图时，`read` 跟 pi 一样加一行说明并**不发**图 part（provider 的 `[image omitted]` 占位是兜底，不是主路径）。目录里没这个模型时视为支持。
 - 压缩（ADR 0018）：用户原话里的图变一行 `[image: W×H]`，和附件 `[file: P, N lines]` 一个形状；工具结果里的图随结果一起进摘要。不做「旧图自动换占位」（那是 `context-pruning.md` 的事，等它定规则时把图算进去）。
 
+**Q7 拖拽与 Mac 截屏（owner 2026-10-22 问）。** 两条路机制不同：
+
+- 拖拽（Finder 文件、截屏后的浮动缩略图）：终端只把路径当文本插进输入框（Terminal.app、iTerm2、kitty、Ghostty 都这样，转义写法不同：反斜杠转义空格或整段加引号，常带结尾空格），图片字节不经过终端。composer 规则：光标处一个指向**现有图片文件的绝对路径**（魔数判定）就变成附件，显示 `[image: <文件名>, W×H, N KB]`，Backspace 删掉。路径在工作区外也收：由 host 直接读字节，模型拿到图不拿路径，不经过沙箱，0039 读根不动。并进 v0，和 `@path` 同一条管道。
+- 剪贴板截屏（Cmd-Ctrl-Shift-4、预览里 Cmd-C）：Cmd-V 由终端处理，剪贴板是图像时什么都不发，所以 pi 和 Claude Code 都绑 Ctrl-V。radian 自己读系统剪贴板（`arboard`：macOS NSPasteboard，Linux X11/Wayland），键绑定建议 Ctrl-V，读到字节当场做 `Image` part，不落盘（同 Q2）。这就是 Q1 的 v1；owner 要可并进 v0。
+- 限制：SSH 到远端跑 TUI 时拖拽插的是本机路径，远端不存在，留作文字并提示；剪贴板读的是远端的，读不到。tmux / herdr 里两条路都透传，正常。exec worker 不受影响，走 `--image PATH`。
+
 **不做**：终端内渲染图（kitty / iTerm2 / sixel 图形协议，`ratatui-image`）。transcript 只显示一行占位，v1 以后看需求；0028 R5 加一句。
 
 ## 涉及的输入（手册要写）
