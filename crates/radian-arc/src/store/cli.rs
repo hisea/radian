@@ -12,7 +12,7 @@ use super::{Error, Exit, Item, Loaded, PlanView, Store};
 
 /// The subcommands this build has, in the order `radian arc` lists them.
 pub const SUBCOMMANDS: &[&str] = &[
-    "init", "add", "list", "show", "adopt", "confirm", "auto", "pause",
+    "init", "add", "list", "show", "adopt", "confirm", "auto", "pause", "mcp",
 ];
 
 /// The subcommands ADR 0048 names that this build does not have. `work` is the wrapper a
@@ -24,7 +24,6 @@ pub const NOT_BUILT: &[&str] = &[
     "reset-budget",
     "cancel",
     "run",
-    "mcp",
     "work",
 ];
 
@@ -56,6 +55,8 @@ pub enum Command {
     Auto { plan: String, level: String },
     /// `radian arc pause <plan>`.
     Pause { plan: String },
+    /// `radian arc mcp`: the lead's MCP server on standard input and output.
+    Mcp,
 }
 
 /// Runs one invocation and returns the process exit code. `None` is a bare `radian arc`:
@@ -79,6 +80,7 @@ pub fn run(command: Option<&Command>) -> u8 {
         Some(Command::Confirm { plan }) => confirm(plan).map(emit),
         Some(Command::Auto { plan, level }) => set_auto(plan, level).map(emit),
         Some(Command::Pause { plan }) => pause(plan).map(emit),
+        Some(Command::Mcp) => mcp(),
     };
     match result {
         Ok(code) => code,
@@ -120,7 +122,7 @@ fn bare() -> Result<u8, Error> {
     out.push_str(&format!(
         "in this build: `radian arc init`, `radian arc add plan|task`, `radian arc list`, \
          `radian arc show`, `radian arc adopt`, `radian arc confirm`, `radian arc auto`, \
-         `radian arc pause`\n{}",
+         `radian arc pause`, `radian arc mcp`\n{}",
         arc_dir_line(&store)
     ));
     let code = emit(out);
@@ -497,6 +499,14 @@ fn pause(plan: &str) -> Result<String, Error> {
     Ok(format!("{plan} auto off\n"))
 }
 
+/// `radian arc mcp`: the lead's MCP server, until its client closes the connection. Without
+/// setup `open` refuses with the same line and exit code as every other subcommand.
+fn mcp() -> Result<u8, Error> {
+    let store = open()?;
+    crate::mcp::run(store).map_err(Error::Failed)?;
+    Ok(Exit::Ok.code())
+}
+
 /// `radian arc list --json`'s document, for the CLI and the MCP `list` tool.
 pub fn list_json(store: &Store, plan: Option<&str>) -> Result<serde_json::Value, Error> {
     let views = match plan {
@@ -527,7 +537,7 @@ mod tests {
             assert!(!NOT_BUILT.contains(name), "{name} is in both lists");
         }
         assert!(SUBCOMMANDS.contains(&"init"));
-        assert!(NOT_BUILT.contains(&"mcp"));
+        assert!(SUBCOMMANDS.contains(&"mcp"));
         assert!(NOT_BUILT.contains(&"work"));
     }
 

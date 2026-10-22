@@ -197,6 +197,7 @@ fn without_setup_the_subcommands_name_init_and_exit_three() {
         vec!["arc", "confirm", "0001-a"],
         vec!["arc", "auto", "0001-a", "run"],
         vec!["arc", "pause", "0001-a"],
+        vec!["arc", "mcp"],
     ] {
         let run = run(&scratch, &args, "");
         assert_eq!(run.code, Some(3), "{args:?}: {run:?}");
