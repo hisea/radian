@@ -345,6 +345,12 @@ fn two_concurrent_add_task_processes_get_different_numbers() {
     let one = one.out.trim().to_owned();
     let two = two.out.trim().to_owned();
     assert_ne!(one, two, "two writers never share a number");
+    let number = |id: &str| id.split_once('-').expect("an id").0.to_owned();
+    assert_ne!(
+        number(&one),
+        number(&two),
+        "the numbers differ, not only the slugs: {one} {two}"
+    );
     let store = radian_arc::store::Store::at(scratch.repo());
     for id in [&one, &two] {
         let task = store.load_task(id).expect("the task reads");

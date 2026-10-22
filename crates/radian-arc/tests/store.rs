@@ -281,7 +281,7 @@ fn concurrent_writers_never_take_the_same_number() {
         handles.push(std::thread::spawn(move || {
             let store = Store::at(repo);
             store
-                .add_plan(&format!("p{n}"), "title", "request")
+                .add_plan("same", "title", &format!("request {n}"))
                 .expect("the plan is added")
         }));
     }
@@ -292,6 +292,16 @@ fn concurrent_writers_never_take_the_same_number() {
     ids.sort();
     ids.dedup();
     assert_eq!(ids.len(), 4, "four distinct ids: {ids:?}");
+    // The same slug in every writer: only the number can tell them apart.
+    let numbers: Vec<String> = ids
+        .iter()
+        .map(|id| id.split_once('-').expect("an id").0.to_owned())
+        .collect();
+    assert_eq!(
+        numbers,
+        vec!["0001", "0002", "0003", "0004"],
+        "the numbers are sequential"
+    );
     let store = Store::at(scratch.repo());
     for id in &ids {
         let loaded = store.load_plan(id).expect("the plan reads");
