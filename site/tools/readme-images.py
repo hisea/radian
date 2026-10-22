@@ -16,6 +16,27 @@ src = SITE.read_text()
 style = re.search(r"<style>(.*?)</style>", src, re.S).group(1)
 fonts = "\n".join(re.findall(r'<link rel="stylesheet"[^>]*>', src))
 mark = re.search(r'<svg class="mark-a".*?</svg>', src, re.S).group(0)
+
+
+def accent(thin: float, thick: float) -> str:
+    """The accent of the mark as a filled annular sector: its outer edge is flush with the outline's
+    outer edge (18 + thin/2), it is `thick` wide, and both ends are cut flat along the outer edge of
+    the radius they meet (the base line and the radius at one radian): the accent covers the end of
+    that radius and nothing crosses the outline.
+    The page draws the outline 1.5 wide and the accent 2.6; the banner draws them 1.1 and 2.2."""
+    import math
+    cx, cy, r = 3, 21, 18
+    ro, ri, off = r + thin / 2, r + thin / 2 - thick, -thin / 2
+    pt = lambda rad, t: (cx + rad * math.cos(t), cy - rad * math.sin(t))
+    a = lambda rad: math.asin(off / rad)
+    b = lambda rad: 1 - math.asin(off / rad)
+    f = lambda p: f"{p[0]:.2f} {p[1]:.2f}"
+    return (f"M{f(pt(ri, a(ri)))} L{f(pt(ro, a(ro)))} A{ro:g} {ro:g} 0 0 0 {f(pt(ro, b(ro)))} "
+            f"L{f(pt(ri, b(ri)))} A{ri:g} {ri:g} 0 0 1 {f(pt(ri, a(ri)))} Z")
+
+
+assert accent(1.5, 2.6) in mark
+mark = mark.replace(accent(1.5, 2.6), accent(1.1, 2.2))
 figure = re.search(r'(<div class="term">.*?)\s*<figcaption', src, re.S).group(1)
 
 
@@ -40,7 +61,6 @@ body {{ margin: 0; width: 960px; height: 260px; display: flex; align-items: cent
 .b {{ display: flex; align-items: center; gap: 36px; color: var(--ink); }}
 .b .mark-a {{ width: 150px; height: auto; }}
 .b .mark-a path:first-child {{ stroke-width: 1.1; }}
-.b .mark-a path:last-child {{ stroke-width: 2.2; }}
 .word {{ font: 600 124px/1 "Sora", sans-serif; letter-spacing: -0.045em; margin: 0 0 14px -4px; }}
 .rule {{ height: 2px; background: var(--accent); width: 520px; }}
 .sub {{ font: 600 19px/1 "JetBrains Mono", monospace; letter-spacing: 0.14em; color: var(--accent); margin-top: 16px; text-transform: uppercase; }}
