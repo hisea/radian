@@ -412,9 +412,9 @@ enum RadianCommand {
 /// wrapper; the CLI operations (`init`, `add`, `list`, …) arrive with their own slices.
 #[derive(clap::Subcommand, Debug)]
 enum ArcCommand {
-    /// Internal: run one attempt of one task. arc runs it, a person does not (ADR 0048
-    /// decision 7); it is hidden and has no manual page. The brief is read from stdin; the
-    /// last stdout line is the `AttemptFinished` record.
+    /// Internal: run one attempt of one task. arc runs it, a person does not; it is hidden
+    /// and has no manual page. The brief is read from stdin; the last stdout line is the
+    /// `AttemptFinished` record.
     #[command(hide = true)]
     Work {
         /// The task id: the session id, the branch suffix and the worktree name.
