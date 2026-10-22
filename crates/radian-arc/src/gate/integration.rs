@@ -8,6 +8,9 @@
 //! The key commands run on the candidate. The verdict records the main it used (`base_sha`)
 //! and the candidate. [`merge_ready`] re-reads the remote main: the merge may only fast
 //! forward main when main is still that `base_sha`.
+//!
+//! The stage holds its own `gates/integration.lock` for its whole run, so two integration
+//! runs never work in the shared `gates/integration/` checkout at the same time.
 
 use std::path::Path;
 use std::time::Duration;
@@ -16,19 +19,25 @@ use super::checkout::GateCheckout;
 use super::commands::{SeriesOutcome, run_series};
 use super::config::Stage;
 use super::error::GateError;
+use super::exclusive::DirLock;
 use super::git;
 use super::verdict::{
     VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, attempt_dir, now_utc, verdict_path,
 };
 
+/// The lock file of the integration stage under `gates/`.
+pub(crate) const INTEGRATION_LOCK: &str = "integration.lock";
+
 /// The `integration` stage for one attempt.
 ///
-/// `main_ref` is the ref that names the remote main after a fetch, typically
-/// `refs/remotes/origin/main`.
+/// `remote` is the repository's remote name and `main_ref` the ref that names the remote
+/// main after a fetch, typically `refs/remotes/<remote>/main`.
 #[derive(Debug, Clone)]
 pub struct IntegrationRun<'a> {
     /// The repository root.
     pub repository: &'a Path,
+    /// The repository's remote name, for the fetches and the main ref.
+    pub remote: &'a str,
     /// The task id (one path component); it names the merged branch `work/<task>`.
     pub task: &'a str,
     /// The attempt id (one path component).
@@ -53,12 +62,13 @@ impl IntegrationRun<'_> {
     /// The fetch, the checkout, a command's log file, or the verdict write failed. A
     /// conflict or a failing key command is a `fail` verdict, not an error.
     pub fn run(&self) -> Result<Verdict, GateError> {
+        let _lock = DirLock::acquire(self.repository, INTEGRATION_LOCK)?;
         let started_at = now_utc();
-        git::fetch_origin(self.repository)?;
+        git::fetch_remote(self.repository, self.remote)?;
         let head = git::resolve_commit(self.repository, self.head_sha)?;
         let task_base = git::resolve_commit(self.repository, self.base_sha)?;
         let remote_main = git::resolve_commit(self.repository, self.main_ref)?;
-        let checkout = GateCheckout::new(self.repository, Stage::Integration);
+        let checkout = GateCheckout::new(self.repository, Stage::Integration, self.remote);
         let log_dir = attempt_dir(self.repository, self.task, self.attempt)?.join("logs");
 
         let mut commands = Vec::new();
@@ -153,10 +163,11 @@ impl IntegrationRun<'_> {
     }
 }
 
-/// Whether the merge may proceed: the remote main must still equal the integration
-/// verdict's recorded `base_sha` (ADR 0048 decision 6, "Main is still `base_sha`").
+/// Whether the merge may proceed: the remote main (`remote`'s `main_ref`) must still equal
+/// the integration verdict's recorded `base_sha` (ADR 0048 decision 6, "Main is still
+/// `base_sha`").
 ///
-/// It fetches `origin` and compares the ref again, so a main that moved after integration
+/// It fetches `remote` and compares the ref again, so a main that moved after integration
 /// makes this false. A verdict that is not a passing integration verdict is never ready.
 ///
 /// # Errors
@@ -164,6 +175,7 @@ impl IntegrationRun<'_> {
 /// The fetch or the resolution of `main_ref` failed.
 pub fn merge_ready(
     repository: &Path,
+    remote: &str,
     main_ref: &str,
     verdict: &Verdict,
 ) -> Result<bool, GateError> {
@@ -173,7 +185,7 @@ pub fn merge_ready(
     let (Some(base), Some(_candidate)) = (&verdict.base_sha, &verdict.candidate_sha) else {
         return Ok(false);
     };
-    git::fetch_origin(repository)?;
+    git::fetch_remote(repository, remote)?;
     let current = git::resolve_commit(repository, main_ref)?;
     Ok(current == *base)
 }

@@ -1,9 +1,10 @@
 # `radian-arc` mutation record (gate slice, ADR 0048)
 
 Base: `201f1bc6` for M1–M5; `0352b129` for M6–M7 (the environment-isolation change landed
-between them). Each mutation was applied to the committed file, run with
-`cargo nextest run -p radian-arc --no-fail-fast`, restored from a copy under `.radian/`, and
-`git status --short` was empty afterwards.
+between them); the fix-round commits for M8–M12. Each mutation was applied to the committed
+file, run with `cargo nextest run -p radian-arc --no-fail-fast`, restored from a copy under
+`.radian/fix1-backup/`, and the restored file was compared byte for byte (`cmp`) with the
+copy.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
@@ -14,6 +15,12 @@ between them). Each mutation was applied to the committed file, run with
 | M5 | `git rebase <head>` instead of `git merge --no-ff <head>` | `integration::integration_with_main_moved_merges_and_runs_key_commands_on_the_merge` (candidate has one parent, not two); `integration::a_conflict_gives_a_fail_verdict_with_the_path` (the checkout is left inside the rebase) | ✅ 2 failed |
 | M6 | drop `-c core.hooksPath=` from the git helper | `checkout::a_core_hooks_path_hook_never_runs` | ✅ failed after the environment fix below |
 | M7 | `kill(pid, SIGKILL)` instead of `kill(-pid, SIGKILL)` (only the direct child) | `commands::a_timeout_kills_the_whole_command_group` | ✅ failed |
+| M8 | `required_passed` back to "any passing verdict for the sha", ignoring which attempt is newest | `verdict::a_newer_attempt_decides_whether_a_required_stage_passed` | ✅ failed |
+| M9 | `fetch_remote` ignores its remote argument and fetches the literal `origin` | `checkout::prepare_fetches_the_named_remote`, `integration::integration_uses_the_named_remote` | ✅ 2 failed |
+| M10 | drop the `GIT_DIR`/`GIT_WORK_TREE`/… clearing from the git helper | `checkout::an_inherited_git_dir_does_not_redirect_prepare` | ✅ failed |
+| M11a | an empty leftover directory at the checkout path is refused instead of cleared | `checkout::an_empty_leftover_checkout_directory_is_cleared` | ✅ failed |
+| M11b | clear any directory at the checkout path, empty or not (`remove_dir_all`, no emptiness check) | `checkout::a_non_empty_checkout_directory_is_refused` | ✅ failed |
+| M12 | drop the `gates/integration.lock` from `IntegrationRun::run` | `integration::two_integration_runs_never_overlap` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -27,7 +34,5 @@ one.
 
 ## Not caught
 
-None of the listed mutations survived. Two behaviors are deliberately not covered by a test:
-an inherited `GIT_DIR`/`GIT_WORK_TREE` (the gate is not a security boundary in v0), and the
-difference between `fetch origin` succeeding and a stale remote-tracking ref (every test
-pushes through the same clone, so the local ref is already current).
+None of the listed mutations survived. A stale remote-tracking ref after a successful fetch is
+not covered: every test pushes through the same clone, so the local ref is already current.

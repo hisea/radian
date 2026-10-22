@@ -21,12 +21,14 @@ use super::verdict::{
 /// The `commands` stage for one attempt and one sha.
 ///
 /// The stage holds the exclusive lock for its whole run, prepares
-/// `<repository>/.radian/arc/gates/commands/` at `sha`, runs the lines and writes the
-/// verdict. `timeout` of zero waits forever for a command.
+/// `<repository>/.radian/arc/gates/commands/` at `sha` (fetching from `remote`), runs the
+/// lines and writes the verdict. `timeout` of zero waits forever for a command.
 #[derive(Debug, Clone)]
 pub struct CommandRun<'a> {
     /// The repository root.
     pub repository: &'a Path,
+    /// The repository's remote name, for the fetch before the checkout.
+    pub remote: &'a str,
     /// The task id (one path component).
     pub task: &'a str,
     /// The attempt id (one path component).
@@ -49,7 +51,7 @@ impl CommandRun<'_> {
     pub fn run(&self) -> Result<Verdict, GateError> {
         let _lock = ExclusiveLock::acquire(self.repository)?;
         let started_at = now_utc();
-        let checkout = GateCheckout::new(self.repository, Stage::Commands);
+        let checkout = GateCheckout::new(self.repository, Stage::Commands, self.remote);
         let sha = checkout.prepare(self.sha)?;
         let log_dir = attempt_dir(self.repository, self.task, self.attempt)?.join("logs");
         let (commands, outcome) = run_series(

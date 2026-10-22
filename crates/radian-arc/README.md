@@ -29,35 +29,47 @@ key_commands = []    # shell command lines, run on the merge candidate by `integ
 
 ## Gate checkout
 
-`GateCheckout::new(repository, stage)` owns
+`GateCheckout::new(repository, stage, remote)` owns
 `<repository>/.radian/arc/gates/<stage>/`, a detached linked worktree of the main checkout.
-`prepare(sha)` fetches `origin`, resolves `sha` to a full commit (failing when it does not
-exist), creates the worktree when it is missing, otherwise detaches it, then runs
-`reset --hard` and `clean -ffdx -e target`. Each stage keeps its own `target/` between runs;
-trees of different stages never share build state. A path that exists but is not a linked
-worktree is refused, never deleted.
+`remote` is the repository's remote name, the `[repository] remote` of `config.toml`; the gate
+never assumes `origin`. `prepare(sha)` fetches that remote, resolves `sha` to a full commit
+(failing when it does not exist), creates the worktree when it is missing, otherwise detaches
+it, then runs `reset --hard` and `clean -ffdx -e target`. Each stage keeps its own `target/`
+between runs; trees of different stages never share build state.
+
+A path that exists but is not a linked worktree is refused, never deleted — with one
+exception: an **empty** directory directly inside `gates/` (what a failed `worktree add` leaves
+behind) is removed and the worktree is added again. A directory with any content in it is
+still `GateError::CheckoutOccupied`.
 
 Every git command of this crate runs as `git -c core.hooksPath= …` with `GIT_CONFIG_NOSYSTEM=1`
 and `GIT_TERMINAL_PROMPT=0`, so a repository `core.hooksPath` never runs a hook for a gate
 operation and an unattended fetch fails instead of prompting. The inherited `GIT_CONFIG_COUNT`
 and `GIT_CONFIG_PARAMETERS` channels are cleared: they are a caller's injected configuration,
-and an injected `core.hooksPath` would otherwise replace the empty one. Configuration files
-are unaffected.
+and an injected `core.hooksPath` would otherwise replace the empty one. The inherited repository
+locators `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`
+and `GIT_ALTERNATE_OBJECT_DIRECTORIES` are cleared as well, so a caller's environment can never
+point a gate command at another repository or object store. Configuration files are unaffected.
 
-## Exclusive stages
+## Stage locks
 
 `commands` and `mutation` hold `<repository>/.radian/arc/gates/exclusive.lock` for the whole
 stage (`ExclusiveLock`, a blocking `flock`). `CommandRun::run` takes it before `prepare` and
 drops it after the verdict is written, so a second exclusive stage waits. A crashed process
 releases the lock when its descriptor closes.
 
+`integration` holds its own `<repository>/.radian/arc/gates/integration.lock` for its whole
+stage, so two integration runs never work in the shared `gates/integration/` checkout at the
+same time.
+
 ## `commands`
 
-`CommandRun` prepares the `commands` checkout at `sha`, runs the profile's lines with `sh -c`
-in order, and stops at the first failure. Each command gets its own process group, its own log
-file (`<attempt>/logs/commands-<n>.log`, absolute when the repository path is), and the
-profile's timeout; a timeout sends `SIGKILL` to the whole group and records `exit_code: null`
-and reason `timeout`. A non-zero exit records reason `command_failed`.
+`CommandRun` takes the exclusive lock, prepares the `commands` checkout at `sha` (fetching
+`remote`), runs the profile's lines with `sh -c` in order, and stops at the first failure. Each
+command gets its own process group, its own log file (`<attempt>/logs/commands-<n>.log`,
+absolute when the repository path is), and the profile's timeout; a timeout sends `SIGKILL` to
+the whole group and records `exit_code: null` and reason `timeout`. A non-zero exit records
+reason `command_failed`.
 
 ## Verdict
 
@@ -95,6 +107,10 @@ invalidates the old set. `required_passed(profile, extra, verdicts, sha)` is tru
 required stage of the effective profile has a passing verdict for that sha; `integration` is
 not part of it, because integration runs at merge after the approval.
 
+The newest verdict per stage decides. `required_passed` reads the same counted set as the
+digest, so a newer attempt that failed a stage outweighs an older attempt's pass, and the order
+of the input does not matter.
+
 `verdict_set_digest(verdicts, sha)` is the SHA-256 of the compact JSON array of the counted
 verdicts, sorted by stage name, in the struct's field order (the declaration order above).
 When a stage appears more than once for the same sha (several attempts), the newest by
@@ -103,8 +119,8 @@ not depend on input order, and a new attempt's verdict for the same sha and stag
 
 ## Integration
 
-`IntegrationRun` fetches `origin`, then compares `main_ref` (after the fetch, for example
-`refs/remotes/origin/main`) with the task's `base_sha`:
+`IntegrationRun` takes `gates/integration.lock`, fetches `remote`, then compares `main_ref`
+(after the fetch, for example `refs/remotes/<remote>/main`) with the task's `base_sha`:
 
 - still `base_sha`: the candidate is `head_sha`, and the key commands run in the
   `integration` checkout at `head_sha`;
@@ -118,13 +134,16 @@ not depend on input order, and a new attempt's verdict for the same sha and stag
 The key commands run on the candidate under the same rules as `commands` (order, stop at the
 first failure, own timeout, own logs). The verdict records the main it used as `base_sha`.
 
-`merge_ready(repository, main_ref, verdict)` fetches again and is true only for a passing
-integration verdict with a candidate whose recorded `base_sha` is still the remote main. A
-main that moved after integration makes it false (ADR 0048 decision 6).
+`merge_ready(repository, remote, main_ref, verdict)` fetches `remote` again and is true only for
+a passing integration verdict with a candidate whose recorded `base_sha` is still the remote
+main. A main that moved after integration makes it false (ADR 0048 decision 6).
 
 ## Decisions where the ADR is silent
 
-- A checkout that exists and is not a linked worktree is an error, not a directory to clear.
+- The remote is always a parameter, never the literal `origin`: the caller passes
+  `[repository] remote`.
+- A checkout that exists and is not a linked worktree is an error, unless it is an empty
+  directory directly inside `gates/`; only that leftover is cleared.
 - `checkout --detach --force` is used before `reset --hard`, so a modified tracked file from a
   previous command cannot block the prepare.
 - `0` seconds means no command timeout.
@@ -133,8 +152,11 @@ main that moved after integration makes it false (ADR 0048 decision 6).
 - `GIT_TERMINAL_PROMPT=0` is set with the two variables the ADR names, so an unattended fetch
   cannot block on a prompt.
 - The inherited `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS` channels are cleared: only the
-  helper's own `-c` settings, the repository config and the user/system files apply.
-- The newest verdict per stage is what a digest counts, so passing every attempt's verdicts in
-  any order is safe.
+  helper's own `-c` settings, the repository config and the user/system files apply. The
+  inherited repository locators (`GIT_DIR` and five more) are cleared too.
+- The newest verdict per stage is what both the digest and `required_passed` count, so passing
+  every attempt's verdicts in any order is safe.
+- The integration stage has its own lock file, separate from the exclusive lock of `commands`
+  and `mutation`, so an integration run and a `commands` stage may run at the same time.
 
 No user-visible input is added by this slice, so the manual has no page for it.

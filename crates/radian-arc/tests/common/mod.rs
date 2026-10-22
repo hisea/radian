@@ -76,19 +76,36 @@ impl TestRepo {
         self.rev("HEAD")
     }
 
-    /// Commits one file on `main`, pushes it and returns the commit id.
-    pub fn advance_main(&self, file: &str, content: &str) -> String {
+    /// Commits one file on `main`, pushes it to the given remote and returns the commit id.
+    pub fn advance_main_on(&self, remote: &str, file: &str, content: &str) -> String {
         self.git(&["checkout", "main"]);
         write(&self.repo.join(file), content);
         self.git(&["add", file]);
         self.git(&["commit", "-m", &format!("main: {file}")]);
         let sha = self.rev("HEAD");
-        self.git(&["push", "origin", "main"]);
+        self.git(&["push", remote, "main"]);
         sha
+    }
+
+    /// Commits one file on `main`, pushes it to `origin` and returns the commit id.
+    pub fn advance_main(&self, file: &str, content: &str) -> String {
+        self.advance_main_on("origin", file, content)
     }
 
     pub fn push(&self, refspec: &str) {
         self.git(&["push", "origin", refspec]);
+    }
+
+    /// Renames `origin` to `remote` and leaves a breaking `origin` behind, so a command that
+    /// still fetches the hardcoded name fails instead of quietly succeeding.
+    pub fn rename_origin_to(&self, remote: &str) {
+        self.git(&["remote", "rename", "origin", remote]);
+        self.git(&[
+            "remote",
+            "add",
+            "origin",
+            path(&self.origin.with_extension("gone")),
+        ]);
     }
 }
 

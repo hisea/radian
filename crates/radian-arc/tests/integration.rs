@@ -1,5 +1,6 @@
 mod common;
 
+use std::fs;
 use std::time::Duration;
 
 use common::TestRepo;
@@ -22,6 +23,7 @@ fn integration_with_main_unchanged_gives_candidate_head() {
     ];
     let run = IntegrationRun {
         repository: &repo.repo,
+        remote: "origin",
         task: "0001-feature",
         attempt: "0001-feature-1",
         head_sha: &head,
@@ -63,6 +65,7 @@ fn integration_with_main_moved_merges_and_runs_key_commands_on_the_merge() {
     ];
     let run = IntegrationRun {
         repository: &repo.repo,
+        remote: "origin",
         task: "0001-feature",
         attempt: "0001-feature-1",
         head_sha: &head,
@@ -116,6 +119,7 @@ fn a_conflict_gives_a_fail_verdict_with_the_path() {
     let moved = repo.advance_main("file.txt", "main side\n");
     let run = IntegrationRun {
         repository: &repo.repo,
+        remote: "origin",
         task: "0001-conflict",
         attempt: "0001-conflict-1",
         head_sha: &head,
@@ -146,6 +150,7 @@ fn merge_ready_is_false_after_main_moves_again() {
     let (repo, base, head) = setup("integration-ready");
     let run = IntegrationRun {
         repository: &repo.repo,
+        remote: "origin",
         task: "0001-feature",
         attempt: "0001-feature-1",
         head_sha: &head,
@@ -158,13 +163,101 @@ fn merge_ready_is_false_after_main_moves_again() {
     assert!(verdict.is_pass());
 
     let main_ref = "refs/remotes/origin/main";
-    assert!(merge_ready(&repo.repo, main_ref, &verdict).unwrap());
+    assert!(merge_ready(&repo.repo, "origin", main_ref, &verdict).unwrap());
     repo.advance_main("later.txt", "later\n");
     assert!(
-        !merge_ready(&repo.repo, main_ref, &verdict).unwrap(),
+        !merge_ready(&repo.repo, "origin", main_ref, &verdict).unwrap(),
         "merge_ready stayed true after main moved"
     );
 
     let human = Verdict::human(&head, true, None);
-    assert!(!merge_ready(&repo.repo, main_ref, &human).unwrap());
+    assert!(!merge_ready(&repo.repo, "origin", main_ref, &human).unwrap());
+}
+
+#[test]
+fn integration_uses_the_named_remote() {
+    let repo = TestRepo::new("integration-remote");
+    let base = repo.rev("main");
+    let head = repo.commit_on("work/0001-remote", &base, "remote.txt", "remote\n");
+    repo.push("work/0001-remote");
+    // The repository's remote is `upstream`; a leftover `origin` points nowhere.
+    repo.rename_origin_to("upstream");
+    let moved = repo.advance_main_on("upstream", "other.txt", "other\n");
+
+    let main_ref = "refs/remotes/upstream/main";
+    let key_commands = vec![
+        "test -f remote.txt".to_string(),
+        "test -f other.txt".to_string(),
+    ];
+    let run = IntegrationRun {
+        repository: &repo.repo,
+        remote: "upstream",
+        task: "0001-remote",
+        attempt: "0001-remote-1",
+        head_sha: &head,
+        base_sha: &base,
+        main_ref,
+        key_commands: &key_commands,
+        timeout: Duration::from_secs(30),
+    };
+
+    let verdict = run.run().unwrap();
+    assert_eq!(verdict.result, VerdictResult::Pass, "{:?}", verdict.reason);
+    assert_eq!(verdict.base_sha.as_deref(), Some(moved.as_str()));
+    assert!(
+        verdict.candidate_sha.as_deref() != Some(head.as_str()),
+        "integration used head instead of a merge"
+    );
+
+    assert!(merge_ready(&repo.repo, "upstream", main_ref, &verdict).unwrap());
+    repo.advance_main_on("upstream", "later.txt", "later\n");
+    assert!(
+        !merge_ready(&repo.repo, "upstream", main_ref, &verdict).unwrap(),
+        "merge_ready stayed true after main moved"
+    );
+}
+
+#[test]
+fn two_integration_runs_never_overlap() {
+    let (repo, base, head) = setup("integration-lock");
+    let order = repo.repo.join("integration-order.log");
+    let line = format!(
+        "echo start >> {path}; sleep 0.3; echo end >> {path}",
+        path = order.display()
+    );
+
+    let mut handles = Vec::new();
+    for (task, attempt) in [("0001-a", "0001-a-1"), ("0002-b", "0002-b-1")] {
+        let repository = repo.repo.clone();
+        let sha = head.clone();
+        let base_sha = base.clone();
+        let key_commands = vec![line.clone()];
+        handles.push(std::thread::spawn(move || {
+            IntegrationRun {
+                repository: &repository,
+                remote: "origin",
+                task,
+                attempt,
+                head_sha: &sha,
+                base_sha: &base_sha,
+                main_ref: "refs/remotes/origin/main",
+                key_commands: &key_commands,
+                timeout: Duration::from_secs(30),
+            }
+            .run()
+            .unwrap()
+        }));
+    }
+    for handle in handles {
+        let verdict = handle.join().unwrap();
+        assert!(verdict.is_pass(), "{:?}", verdict.reason);
+    }
+
+    let log = fs::read_to_string(&order).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["start", "end", "start", "end"],
+        "two integration runs overlapped"
+    );
 }

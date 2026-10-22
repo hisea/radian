@@ -20,6 +20,7 @@ fn a_passing_profile_runs_every_command_in_order() {
     ];
     let run = CommandRun {
         repository: &repo.repo,
+        remote: "origin",
         task: "0001-pass",
         attempt: "0001-pass-1",
         sha: &head,
@@ -54,6 +55,7 @@ fn a_failing_command_stops_the_stage() {
     let commands = vec!["exit 3".to_string(), "touch should-not-run".to_string()];
     let run = CommandRun {
         repository: &repo.repo,
+        remote: "origin",
         task: "0001-fail",
         attempt: "0001-fail-1",
         sha: &head,
@@ -82,6 +84,7 @@ fn a_timeout_kills_the_sleep_and_records_it() {
     let commands = vec!["sleep 5; touch after-timeout".to_string()];
     let run = CommandRun {
         repository: &repo.repo,
+        remote: "origin",
         task: "0001-timeout",
         attempt: "0001-timeout-1",
         sha: &head,
@@ -126,6 +129,7 @@ fn two_exclusive_stages_in_two_threads_never_overlap() {
         handles.push(std::thread::spawn(move || {
             CommandRun {
                 repository: &repository,
+                remote: "origin",
                 task,
                 attempt,
                 sha: &sha,
@@ -162,6 +166,7 @@ fn a_commands_stage_waits_for_the_exclusive_lock() {
     let handle = std::thread::spawn(move || {
         CommandRun {
             repository: &repository,
+            remote: "origin",
             task: "0001-waits",
             attempt: "0001-waits-1",
             sha: &sha,
@@ -190,6 +195,7 @@ fn a_timeout_kills_the_whole_command_group() {
     let commands = vec!["(sleep 2; touch after-group-timeout) & wait".to_string()];
     let run = CommandRun {
         repository: &repo.repo,
+        remote: "origin",
         task: "0001-group",
         attempt: "0001-group-1",
         sha: &head,
@@ -215,6 +221,7 @@ fn a_verdict_cannot_be_written_twice() {
     let commands = vec!["true".to_string()];
     let run = CommandRun {
         repository: &repo.repo,
+        remote: "origin",
         task: "0001-twice",
         attempt: "0001-twice-1",
         sha: &head,

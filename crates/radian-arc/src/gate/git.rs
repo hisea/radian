@@ -9,6 +9,12 @@
 //! a caller's injected configuration, and a `core.hooksPath` there would silently replace the
 //! empty one this helper asks for. The repository, global and system configuration files are
 //! unaffected.
+//!
+//! The inherited repository locators are cleared too (`GIT_DIR`, `GIT_WORK_TREE`,
+//! `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`,
+//! `GIT_ALTERNATE_OBJECT_DIRECTORIES`): a caller that has one of them set would otherwise run
+//! every gate command against another repository, or read objects from one. Each command names
+//! its repository by its working directory, so none of them may leak in.
 
 use std::path::Path;
 use std::process::{Command, ExitStatus};
@@ -31,6 +37,16 @@ impl GitOutput {
     }
 }
 
+/// The environment variables that would point git at another repository or object store.
+const REPOSITORY_ENV: [&str; 6] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
 /// Runs a git command in `dir` without checking the exit status.
 pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<GitOutput, GateError> {
     run_with_env(dir, args, &[])
@@ -51,6 +67,9 @@ pub(crate) fn run_with_env(
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env_remove("GIT_CONFIG_COUNT");
     cmd.env_remove("GIT_CONFIG_PARAMETERS");
+    for name in REPOSITORY_ENV {
+        cmd.env_remove(name);
+    }
     for (key, value) in env {
         cmd.env(key, value);
     }
@@ -90,9 +109,9 @@ pub(crate) fn command_line(args: &[&str]) -> String {
         .join(" ")
 }
 
-/// Fetches from `origin`. The gate never trusts a local ref alone; the remote is the truth.
-pub(crate) fn fetch_origin(repository: &Path) -> Result<(), GateError> {
-    ok(repository, &["fetch", "origin"])?;
+/// Fetches `remote`. The gate never trusts a local ref alone; the remote is the truth.
+pub(crate) fn fetch_remote(repository: &Path, remote: &str) -> Result<(), GateError> {
+    ok(repository, &["fetch", remote])?;
     Ok(())
 }
 
