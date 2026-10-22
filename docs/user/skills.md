@@ -23,17 +23,20 @@ Use paths relative to this file: `./checks/style.md`.
 
 The frontmatter holds the `name` and the `description`. Without a
 frontmatter `name`, the directory name is the name. Without a `description`,
-the skill is skipped with one warning. The name holds at most 64 characters;
-the description at most 1024. An invalid name or a duplicate name is skipped
-with one warning each.
+the skill is skipped with one warning. The name holds 1 to 64 characters of
+letters, digits, `-` and `_`; the description holds 1 to 1024 characters
+with no control characters. An invalid name or description, or a duplicate
+name, is skipped with one warning each.
 
 The body is Markdown the model follows. `$ARGUMENTS` in the body fills with
 the caller's arguments; without the placeholder, the arguments append to the
 body verbatim. Relative paths in the body resolve from the skill's own
 directory. The body is limited to 64 KiB: a longer body fails the call with
-an error naming the size. Set `disable_model_invocation: true` in the
+an error naming the size. Set `disable-model-invocation: true` in the
 frontmatter to keep a skill out of the system prompt while leaving it
-runnable by name.
+runnable by name. An `allowed-tools` field is read and ignored with one
+warning per session: it has no effect, and any other unknown frontmatter
+field is ignored silently.
 
 ## Where skills live
 

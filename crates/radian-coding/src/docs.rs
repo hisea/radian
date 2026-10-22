@@ -36,6 +36,7 @@ pub const DOCS: &[(&str, &str)] = &[
         "extensions.md",
         include_str!("../../../docs/user/extensions.md"),
     ),
+    ("footer.md", include_str!("../../../docs/user/footer.md")),
     ("hooks.md", include_str!("../../../docs/user/hooks.md")),
     ("index.md", include_str!("../../../docs/user/index.md")),
     (

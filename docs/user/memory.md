@@ -85,9 +85,9 @@ Export the project scope, edit the Markdown, read it back:
 One record prints on two lines: the first line carries `id`, `revision`,
 `scope`, `kind`, `key`, `source` and `verification`, and the content follows.
 The model uses the `memory_search` tool. It passes `query` to search by
-keyword or `ids` to read records in full, never both. `scope` narrows the
-search; the default `all` searches project first, then global. `max_results`
-caps the count. New matches in later turns arrive as a system message.
+keyword or `ids` to read records in full, never both. `scope` is one of
+`project`, `global` or `all`; the default `all` searches project first,
+then global. `limit` caps the count. New matches in later turns arrive as a system message.
 
 Results arrive ordered by scope (project first), trust (your records before
 the model's), match, recency and id. A low-trust note marks model-written
@@ -95,4 +95,5 @@ content the tool returns, so the model treats your records as the ones to
 trust.
 
 Set `[memory.injection] additions = false` to turn those follow-up notes
-off. The fixed block of records in the prompt stays.
+off. The fixed block of records in the prompt stays. `[memory.injection]
+addition_budget` caps one turn's addition at 500 tokens by default.

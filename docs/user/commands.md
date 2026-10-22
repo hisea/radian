@@ -14,6 +14,14 @@ message to the model.
 Command output shows as transcript notices. Type `/help` to print the
 command list.
 
+Some arguments come from host data, not fixed words. `tab` completes them:
+`/model` offers provider and model pairs from the catalog and your logins;
+`/login` offers the provider ids (`providers.md` lists them) plus `custom`;
+`/logout` offers the providers with a stored credential; `/theme` offers the
+built-ins plus your theme files; `/skill:<name>` offers the discovered skill
+names (`/skills` lists them with descriptions); `/memory` id arguments offer
+record ids. When nothing matches, `tab` does nothing.
+
 While a turn runs, `/queue` still works and `Enter` steers the turn. Everything
 else waits or is refused. See "While a turn runs" below.
 
@@ -24,7 +32,7 @@ else waits or is refused. See "While a turn runs" below.
 | `/sessions` | `/sessions [query]` | Open the session picker overlay for this workspace. With a query, filter first. Selecting shows a copyable `--resume <id>` line; it never switches sessions in place. Applies at once. |
 | `/fork` | `/fork` (no arguments) | Fork this session at its last turn boundary into a child session. Only idle sessions fork. It does not switch to the child; the notice names it. Applies at once. |
 | `/new` | `/new` (no arguments) | End this session and open a fresh one in the same workspace. The old session stays resumable. Refused while a turn runs, while jobs run, or after the session ended. Applies at once. |
-| `/export` | `/export [md\|json] [path] [--force]` | Export this session. The default format is `md`; the default path is `<workspace>/radian-<id>.<ext>`. A relative path resolves against the workspace; an absolute path may point anywhere. Refuses to overwrite without `--force`. Applies at once. Example: `/export md notes.md --force`. Related: `/sessions`. |
+| `/export` | `/export [md\|markdown\|json] [path] [--force]` | Export this session. `markdown` is an alias of `md`. The default format is `md`; the default path is `<workspace>/radian-<id>.<ext>`. A relative path resolves against the workspace; an absolute path may point anywhere. Refuses to overwrite without `--force`. Applies at once. Example: `/export md notes.md --force`. Related: `/sessions`. |
 | `/login` | `/login [provider]` | Open the credential wizard. With a provider id or `custom`, skip the provider choice. `custom` names a new endpoint (name, protocol, base URL, key). Applies at once. |
 | `/logout` | `/logout <provider>` (exactly one) | Remove one stored credential. Asks first: `y` removes, `n` or `esc` cancels. Applies at once. |
 
@@ -40,7 +48,7 @@ first, so a `ctrl-c` exit saves the cleared line. A panic writes nothing.
 | Command | Syntax | What it does |
 |---|---|---|
 | `/model` | `/model <provider>/<model>` or `/model <provider> <model>` | Switch the model. Takes effect at the next turn boundary. Either switches directly or asks first when the switch needs confirmation. Example: `/model openai/gpt-5`. Related: `/thinking`, `/usage`. |
-| `/thinking` | `/thinking <level>` (exactly one) | Set the thinking level. The level clamps to what the current model supports. Takes effect at the next turn boundary. Example: `/thinking high`. |
+| `/thinking` | `/thinking <level>` (exactly one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) | Set the thinking level. `tab` completes only the levels the current model supports. An unknown level behaves like an unsupported one: the level clamps to what the current model supports. Takes effect at the next turn boundary. Example: `/thinking high`. |
 | `/usage` | `/usage` (no arguments) | Show the current provider's usage snapshot, every window of it, one line each. A pure read: no network, works any time. The footer shows the short form of the same snapshot. |
 | `/auto` | `/auto on\|off` | Approve tool questions without asking, for this session (`on`), or ask again (`off`). Deny rules and the sandbox still apply. Applies at once. |
 | `/yolo` | `/yolo on\|off` | Alias of `/auto` with the same two words. |
@@ -63,7 +71,7 @@ first, so a `ctrl-c` exit saves the cleared line. A panic writes nothing.
 | `/goal` | `/goal resume` | Continue a paused goal. A resumed session starts with the goal paused; resume restarts it. |
 | `/goal` | `/goal drop` | Forget the goal entirely. |
 | `/goal` | `/goal budget [<N> turns\|turn] [<dur>] [<N> tokens\|token]` | Cap the goal. Durations look like `30s`, `5m`, `2h`. With no pairs, show the budget. When a cap runs out the goal stops and names the cap; raise the budget to continue. Example: `/goal budget 10 turns 1h`. |
-| `/loop` | `/loop [--every <dur>] [--times N] [--for <dur>] [prompt]` | Repeat the prompt every turn until `--times` or `--for` (default 20 turns or 1 hour). `--every` waits between turns. Flags come before the prompt. A bare `/loop` toggles: when off, it arms and the next message becomes the prompt. A bare number or duration needs its flag. Example: `/loop --every 30s --times 5 check the build`. Related: `/goal`. |
+| `/loop` | `/loop [--every <dur>] [--times N] [--for <dur>] [prompt]` | Repeat the prompt every turn until `--times` or `--for` (default 20 turns or 1 hour). `--every` waits between turns. Flags come before the prompt. A bare `/loop` toggles: when off, it arms and the next message becomes the prompt. A bare number or duration needs its flag. `--times 0`, a zero or unknown-unit duration, an unknown flag, or a flag after the prompt started is a usage notice. Example: `/loop --every 30s --times 5 check the build`. Related: `/goal`. |
 | `/queue` | `/queue <text>` (required) | Queue a message for the next turn as a followup, even while a turn runs. Idle, it opens a turn at once. The `@` references expand first, like a send. Example: `/queue check the build next`. Related: `/retry`. |
 | `/retry` | `/retry` (no arguments) | Resend the last user message, but only when idle and the previous turn ended in a model error. The text goes as-is, with no `@` expansion. Anything else is a `nothing to retry` notice. |
 
@@ -154,6 +162,7 @@ the waiting count.
 the running turn. `ctrl-c` cancels the running turn. A second `ctrl-c`
 within 2 seconds on an empty input quits; any other key disarms it. There is
 no quit command. A side question (`/btw`) and a read command (`/context`,
-`/usage`, `/memory list`, `/memory search`, `/memory show`) run while a turn
+`/usage`, `/memory list`, `/memory search`, `/memory show`, `/memory export`,
+`/memory project`) run while a turn
 runs without interrupting it. Writes take effect at the next turn boundary:
 `/model`, `/thinking`, `/access`, `/compact`, `/memory` writes.

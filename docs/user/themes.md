@@ -251,7 +251,9 @@ existing output without `--force`.
 
 What converts: pi's text levels and semantic colors map onto the matching
 roles (user message text to `user`, thinking text to `reasoning`, tool title
-to `tool_call`, and so on). What does not convert: pi roles nothing consumes
+to `tool_call`). The import report names every mapped value, every pi key it
+drops, and every role that keeps the built-in value: read it for the full
+mapping of your file. What does not convert: pi roles nothing consumes
 yet (panel roles and several Markdown, diff and syntax families) are dropped
 and reported. The result is a starting point: tune it with `[tui.colors]`
 or by editing the file.
@@ -357,64 +359,11 @@ a tuned override pastes straight into `[roles]`.
 
 ## The footer
 
-The footer is the status area under the input box. It is data, not code:
-`[tui.footer]` in the config file sets the preset, the glyphs and the rows.
-`radian footer export <preset>` prints one built-in preset's TOML exactly,
-so pasting the output as `[tui.footer]` and editing it customizes from that
-preset. An unknown preset names the four on stderr and exits 2.
+The footer is the status line under the input box. It follows the theme
+roles above and is configured separately: `footer.md` lists every preset,
+row, item and command item, including the `loop` item, each item's own
+parameters, the per-preset rows, and `tui.widgets`.
 
-Four presets ship: `deck` (the default: three rows), `full` (two rows plus
-the `jobs` item), `pi` (two rows), `classic` (the old one line). `deck`
-shows the provider usage line when the provider reports one, then
-model/worktree with context and reasoning, then tokens and cost.
-
-Each row holds a `left` and a `right` group and a `position`: `footer` (the
-default), `above_input` or `below_input`. An item is a bare id or a table
-with `item`, `icon`/`symbol`, `format`, `style`, `symbol_style`,
-`priority`, `thresholds` such as `{ at = 70, style = "warn" }`, and the
-item's own parameters. One row may set its own `separator` (default
-`" · "`); `separator_style` styles it. `glyphs` is `unicode` (the default),
-`nerd`, `ascii` or `emoji`. `context_line = "percentage"` turns the gap
-between a row's groups into a rule showing the used share of the context
-window; `off` (the default) leaves spaces. `transparent = true` clears every
-footer cell background so the terminal's own background shows.
-
-Every footer field and segment:
-
-| Item | Placeholders | Default |
-|---|---|---|
-| `brand` | `{brand}` | The brand mark: `R`, `󰰠` or `rad` by glyph set. Set `tui.brand` to replace it (at most 4 display columns). |
-| `host` | `{host}` | The machine's hostname, read once at startup. |
-| `model` | `{display_name}`, `{id}`, `{provider}` | The model's display name (or id). |
-| `reasoning` | `{level}` | The thinking level, one theme role per level. |
-| `tier` | `{tier}` | The permission tier. |
-| `cwd` | `{path}`, `{path_home}`, `{basename}`, `{repo}`, `{worktree}` | `{path_home}` (`$HOME` becomes `~`). `{repo}` falls back to the directory name. |
-| `git_branch` | `{branch}`, `{dirty}`, `{modified}`, `{untracked}` | `{branch}`. `{dirty}` shows the change count while the tree is dirty. |
-| `session` | `{id}` | The session id. |
-| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`. `{bar}` is a 10-cell bar (`{auto}` is `~` while auto-compaction is on). |
-| `tokens` | `{in}`, `{out}`, `{cache}`, `{cache_write}`, `{in_arrow}`, `{out_arrow}` | Arrows plus counts, compact (`15M`, `2.6M`), `-` when a provider never reported one. |
-| `cost` | `{usd}` | The session's accumulated fee. Hidden until some call bills and the catalog has a price: never a fabricated number. |
-| `speed` | `{speed}` | The last finished generation's tokens per second. |
-| `elapsed` | `{elapsed}` | Live while a generation runs, the last one when idle, empty after a resume. |
-| `pending` | `{count}` | Shown only while a request waits. |
-| `queued` | `{count}` | Shown only while `/queue` or a steered `Enter` waits. |
-| `mcp` | `{mcp}` | The configured and connected servers and tools. |
-| `scroll` | `{position}`, `{mode}` | The viewport position and follow mode. |
-| `worktree` | `{worktree}` | Shown only inside a worktree. |
-| `status` | `{status}` | Contributor text, filterable with `keys = ["…"]`. |
-| `usage` | `{value}` | The current provider's usage snapshot: each window's remaining share and reset countdown. Only providers with a usage source show it. `/usage` prints the same snapshot in full. |
-| `jobs` | `{count}`, `{age}` | This session's running background jobs with the oldest one's age. Shown only while jobs run; only in the `full` preset's rows unless added elsewhere. |
-| command item | `{value}` | An item with `command = "…"`: the command runs as you, unsandboxed, every `period` seconds (`15`–`3600`; `0` = once at startup; default `60`). Its stdout's first line (at most 256 bytes) is the value, or a JSON line `{"text","style","symbol"}`. A timeout (5 s), a spawn failure, a non-zero exit or a bad line keeps the last value and draws it stale. |
-
-A `style` (or a `[text](style)` span inside `format`) is a theme role or a
-fixed color: `red`, `bright_blue`, `#rrggbb`, a `0`–`255` number, with
-`bold`/`italic`/`dimmed`. A role follows the theme; a fixed color does not.
-`[tui.footer.items.<id>]` gives one item its `symbol`/`style`/
-`symbol_style`/`format`/`disabled`; a bare id in a row takes the preset, an
-inline table wins. `disabled = true` hides the item everywhere it is named.
-An unknown item id, placeholder or parameter shows raw with one warning.
-Narrow terminals drop the `right` group first, then the `left` group from its
-end, lowest `priority` first. Numbers render compact (`15M`, `$14.510`,
-`41.3%`).
-
-A `[tui.colors]` key, a theme file role, and a footer item `style` all name one slot each in the same table the renderer uses, so the footer follows the theme.
+A `[tui.colors]` key, a theme file role, and a footer item `style` all name
+one slot each in the same table the renderer uses, so the footer follows
+the theme.

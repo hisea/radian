@@ -81,7 +81,10 @@ form rejects unknown fields, so a typo cannot silently drop a setting.
 
 Timeouts that the file cannot set keep built-in defaults: 30 seconds to
 spawn and list tools, 2 seconds of grace before a cancelled call kills the
-server.
+server. Two more internals stay fixed: a server's `readOnlyHint: true`
+annotation never makes a tool shareable on its own (only `shared_tools`
+names do), and a server starts in the session's working directory (no field
+sets another).
 
 ## Environment and secrets
 

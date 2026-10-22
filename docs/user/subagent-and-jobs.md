@@ -20,12 +20,13 @@ tell it what to do and what to report.
 | Field | Required | What it does |
 |---|---|---|
 | `task` | yes | The helper's first input. |
-| `agent` | no | `explore` for read-only work, `general` for full work. Omit it to run `general`. Unknown values fail the call. |
+| `agent` | no | `explore` for read-only work, `general` for full work. Omit it (or pass `""`) to run `general`. Unknown values fail the call. |
 
 The `explore` helper mounts only `read`, `glob` and `grep`. The `general`
 helper mounts the parent tools minus `subagent`: a helper never mounts
 `subagent`, so helpers never nest. An `explore` child also skips the project
-MCP sources. A parent in automatic mode approves helper questions at once; a
+MCP sources. `explore` fails when the session has no workspace: it needs the
+read tools rooted at one. A parent in automatic mode approves helper questions at once; a
 parent outside automatic mode denies them, and the denial is noted in the
 helper result.
 
