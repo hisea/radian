@@ -444,6 +444,42 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 已更新（diff 里的临时目录编号变化来自重跑本身）。**Linux 未跑**（VM 暂停中）：待 VM 恢复后重跑补齐
 `trust_unreadable`，`escape-linux.{txt,json}` 不要手改。
 
+## 在沙箱内跑测试（nextest profile `sandbox`）
+
+arc worker 在 `workspace` 档位里跑。有一部分测试只因为这个环境而失败：它们不是被测代码
+的回归，但会让每份 worker 报告都多出一串红色失败，真正的回归藏在这串失败里。`.config/nextest.toml` 的
+`profile.sandbox` 就是给这个环境用的：它跑默认 profile 跑的**全部**测试，只减去一张**精确测试名**清单。
+
+```sh
+cargo nextest run --profile sandbox --workspace --locked --no-fail-fast
+# 或只跑本次改动的 crate：
+cargo nextest run --profile sandbox -p radian-host -p radian-arc -p radian-tui \
+  -p radian-exec -p radian-coding --locked --no-fail-fast
+```
+
+- **默认 profile 与 gate 不变**：清单只在 `sandbox` profile 里生效；默认 profile（以及 `cargo test`）
+  仍然跑每一条测试，所以这不是放宽门禁。`crates/radian-host/tests/nextest_profile.rs` 钉住两点：
+  `profile.default` 不带 `default-filter`；清单里每个 `test(=名字)` 都还对应一条存在的测试（改名或删除
+  测试就必须同时改清单）。
+- **清单只收沙箱限制**：某条测试因为产品 bug 在沙箱里失败时，不往清单里加，先修 bug。清单里每一条都
+  是 `test(=名字)`（子串匹配不算，也不允许按模块/二进制通配，除非该模块的每条测试都在清单里）。
+- **增量规则**：新测试在 `sandbox` profile 下失败时，先读失败原因。确实是下面这些环境限制，就把精确
+  测试名加到对应组（并更新计数）；否则按回归处理。
+
+本机（macOS 27，`workspace` = seatbelt）在 `--workspace` 下第一次跑时，266 条测试实例（265 个不同名字，
+`profile::tests::…` 在 `radian-exec` 与 `radian-tui` 同名）因为下列原因失败（只跑五个 crate 时是 259 条，
+不含 `radian-sandbox` 里那 7 条需要自建沙箱的后端测试）：
+
+| 组 | 原因 | 条数 | 对应限制 |
+|---|---|---|---|
+| 1 | 在 `/tmp` 下建测试目录（`create_dir_all` 被拒，`EPERM`）：工作区外不可写 | 231 | 本文“表述约束”（工作区外不可写）；这些 harness 用 `/tmp` 是因为工作区内的 `TMPDIR` 太长，会让 Unix socket 路径越过 `SUN_LEN`（第 5 组） |
+| 2 | `ps -o lstart=` 被拒（exit 126），取不到进程启动时间；arc 把“没有启动时间”当成进程已死 | 3 | 本节；`ps` 的进程信息读取不在当前放开清单里 |
+| 3 | 嵌套 Seatbelt：外层已约束时 `sandbox-exec` 无法再套一层，探测失败、后端退化为 `inherited`（只有外层规则） | 13 | 本文“嵌套：已在沙箱内的 radian 沿用外层” |
+| 4 | `TMPDIR` 在仓库里：`std::env::temp_dir()` 的临时目录落在仓库内，git/规范工作区/上下文文件/skill 发现会看到外层仓库，外层 `AGENTS.md` 也会进入测试工作区 | 12 | 本文“在沙箱内跑测试”本节 |
+| 5 | 同一个过长的 `TMPDIR` 让 Unix socket 路径越过 `SUN_LEN`（`bind` 报 path must be shorter than SUN_LEN），还没轮到沙箱规则 | 6 | 本文“嵌套”节的 `TMPDIR` 说明 |
+
+清单本身在 `.config/nextest.toml` 的注释里按这五组排列，组与组之间用空行分开。
+
 ## 未验证 / 已知边界
 
 - **只在 macOS 27.0.1（arm64）、一台 aarch64 Arch ARM VM（内核 7.2.6、bwrap 0.12.0、git 2.55.0）
