@@ -450,7 +450,9 @@ fn plan_json(view: &PlanView, with_body: bool) -> serde_json::Value {
         "tasks": view
             .tasks
             .iter()
-            .map(|task| task_json(task, with_body))
+            // A task's own body is only in `show <task> --json`; the plan's JSON names the
+            // tasks, it does not repeat every brief.
+            .map(|task| task_json(task, false))
             .collect::<Vec<_>>(),
         "changed_outside_arc": view.plan.changed_outside_arc,
     });
