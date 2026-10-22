@@ -111,6 +111,9 @@ h1 em { font-style: normal; color: var(--accent); }
 .tag { font: 500 10px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--rule); padding: 2px 6px; white-space: nowrap; }
 .install-row button { font: 500 10px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); background: none; border: 0; padding: 4px 0 4px 8px; cursor: pointer; }
 .install-row button:hover { color: var(--accent); }
+.install-row pre a { color: var(--accent); }
+.oss { margin: 14px 0 0; font: 400 12.5px var(--mono); color: var(--muted); }
+.oss a { color: var(--accent); }
 
 /* figure 1: the real frame */
 .fig { padding-block: 0 56px; }
@@ -189,6 +192,8 @@ h2 + p { color: var(--muted); margin: 14px 0 0; max-width: 26em; }
 .host p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
 .host pre { margin: 0; padding: 14px 16px; background: var(--term); border: 1px solid var(--rule); overflow-x: auto; line-height: 1.7; }
 .host pre .c { color: var(--muted); }
+.host .note { margin: 12px 0 0; font-size: 13px; color: var(--muted); }
+.host .note a { color: var(--accent); }
 .shared { grid-column: 1 / -1; border-top: 1px solid var(--rule); padding: 12px 20px; font: 400 12px var(--mono); color: var(--muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .shared b { color: var(--ink); font-weight: 400; }
 .provs { grid-column: 1 / -1; border-top: 1px solid var(--rule); padding: 14px 20px; font-size: 13.5px; color: var(--muted); }
@@ -234,6 +239,8 @@ footer a:hover { color: var(--ink); }
         <a class="opt-link" href="#why"><span class="en">why</span><span class="zh">为什么</span></a>
         <a class="opt-link" href="#headless"><span class="en">headless</span><span class="zh">无头</span></a>
         <a class="opt-link" href="#install"><span class="en">install</span><span class="zh">安装</span></a>
+        <a href="/docs/"><span class="en">Docs</span><span class="zh">文档</span></a>
+        <a href="https://github.com/hisea/radian">GitHub ↗</a>
         <div class="lang" role="group" aria-label="Language">
           <button type="button" id="lang-en" data-lang="en" aria-pressed="true">EN</button>
           <button type="button" id="lang-zh" data-lang="zh" aria-pressed="false">中</button>
@@ -252,13 +259,15 @@ footer a:hover { color: var(--ink); }
         </h1>
         <div>
           <p class="lede">
-            <span class="en">radian is <strong>one Rust binary</strong>. It reaches the prompt in about 100 ms and spends context on the lines a task needs. Its headless command prints every step as a JSON line and exits with a code that says how it ended.</span>
-            <span class="zh">radian 是<strong>一个 Rust 二进制</strong>。大约 100 ms 就到输入框，上下文只花在任务需要的那几行上；无头命令把每一步按 JSON 逐行输出，退出码说明它是怎么结束的。</span>
+            <span class="en">radian is <strong>one Rust binary</strong>. It starts with no runtime to boot and spends context on the lines a task needs. Its headless command prints every step as a JSON line and exits with a code that says how it ended.</span>
+            <span class="zh">radian 是<strong>一个 Rust 二进制</strong>。启动不用先拉起运行时，上下文只花在任务需要的那几行上；无头命令把每一步按 JSON 逐行输出，退出码说明它是怎么结束的。</span>
           </p>
           <div class="install">
-            <div class="install-row"><pre><span class="p">$ </span>brew install radian</pre><span class="tag"><span class="en">soon</span><span class="zh">即将</span></span></div>
-            <div class="install-row"><pre><span class="p">$ </span>cargo build --release --locked</pre><button type="button" id="copy-build"><span class="en">copy</span><span class="zh">复制</span></button></div>
+            <div class="install-row"><pre><span class="p">$ </span>brew install hisea/tap/radian</pre><button type="button" class="copy" data-copy="brew install hisea/tap/radian"><span class="en">copy</span><span class="zh">复制</span></button></div>
+            <div class="install-row"><pre><span class="p">$ </span>cargo install --git https://github.com/hisea/radian radian-tui</pre><button type="button" class="copy" data-copy="cargo install --git https://github.com/hisea/radian radian-tui"><span class="en">copy</span><span class="zh">复制</span></button></div>
+            <div class="install-row"><pre><a href="https://github.com/hisea/radian/releases">github.com/hisea/radian/releases</a> <span class="c"><span class="en">signed macOS and static Linux tarballs</span><span class="zh">签名的 macOS 包和静态 Linux 包</span></span></pre><button type="button" class="copy" data-copy="https://github.com/hisea/radian/releases"><span class="en">copy</span><span class="zh">复制</span></button></div>
           </div>
+          <p class="oss"><span class="en">Open source under MIT or Apache-2.0: <a href="https://github.com/hisea/radian">github.com/hisea/radian</a>.</span><span class="zh">开源，MIT 或 Apache-2.0 协议：<a href="https://github.com/hisea/radian">github.com/hisea/radian</a>。</span></p>
         </div>
       </div>
     </header>
@@ -435,8 +444,8 @@ footer a:hover { color: var(--ink); }
         <div class="pillar">
           <span class="g">◜ <span class="en">speed</span><span class="zh">快</span></span>
           <h3><span class="en">Quick to start, quick to come back.</span><span class="zh">启动快，回来也快。</span></h3>
-          <p><span class="en">A native binary with no runtime to boot. A command that runs past 120 s moves to the background, and the model is told when it finishes, so it keeps working.</span><span class="zh">原生二进制，不用先拉起一个运行时。前台命令跑过 120 秒就转到后台，跑完会通知模型，模型不用干等。</span></p>
-          <div class="meta"><b>~100 ms</b> <span class="en">to the prompt</span><span class="zh">到输入框</span><br><b>~160 ms</b> <span class="en">to resume 10k messages</span><span class="zh">恢复 1 万条消息的会话</span></div>
+          <p><span class="en">A native binary with no runtime to boot. A foreground command never moves to the background on its own: only <code>background: true</code> starts a job, and a finished job's notice reaches the model, so it keeps working.</span><span class="zh">原生二进制，不用先拉起一个运行时。前台命令不会自己转到后台：只有 <code>background: true</code> 才会起一个 job，跑完的通知会送到模型那里，模型不用干等。</span></p>
+          <div class="meta"><span class="en">no runtime to boot · one file per session</span><span class="zh">无运行时启动 · 每个会话一个文件</span></div>
         </div>
         <div class="pillar">
           <span class="g">◝ <span class="en">efficiency</span><span class="zh">高效</span></span>
@@ -447,7 +456,7 @@ footer a:hover { color: var(--ink); }
         <div class="pillar">
           <span class="g">◞ <span class="en">orchestration</span><span class="zh">编排</span></span>
           <h3><span class="en">Built to be orchestrated.</span><span class="zh">为被编排而生。</span></h3>
-          <p><span class="en">radian does not run other agents; it is built to be run by them. One prompt in through <code>radian exec</code>, every step out as a JSON line, and an exit code that tells completed from failed from out of budget. Inside herdr it reports working, idle or blocked by itself, and <code>radian attach</code> watches any session read-only. Parallel work stays inside one reply: several <code>subagent</code> calls run side by side.</span><span class="zh">radian 不去调度别的 agent，它是为了被调度而做的。一句话从 <code>radian exec</code> 进去，每一步按 JSON 逐行出来，退出码分得清完成、失败和超出预算。在 herdr 里它自己报告 working、idle、blocked；<code>radian attach</code> 可以只读地看任何一个会话。并行只发生在一条回复之内：几个 <code>subagent</code> 调用同时跑。</span></p>
+          <p><span class="en">radian runs no outside agents; it is built to be run by them. One prompt in through <code>radian exec</code>, every step out as a JSON line, and an exit code that tells completed from failed from out of budget. Inside herdr it reports working, idle or blocked by itself, and <code>radian attach</code> watches any session read-only. Parallel work stays inside one reply: several <code>subagent</code> calls run side by side.</span><span class="zh">radian 不调度外部 agent，它是为了被调度而做的。一句话从 <code>radian exec</code> 进去，每一步按 JSON 逐行出来，退出码分得清完成、失败和超出预算。在 herdr 里它自己报告 working、idle、blocked；<code>radian attach</code> 可以只读地看任何一个会话。并行只发生在一条回复之内：几个 <code>subagent</code> 调用同时跑。</span></p>
           <div class="meta">exec --output jsonl · exit codes by outcome<br>herdr-ready · attach · control socket</div>
         </div>
       </div>
@@ -455,7 +464,6 @@ footer a:hover { color: var(--ink); }
         <span class="en"><strong>Under all three:</strong> every step goes to a journal you can resume and fork, the sandbox is a switch (one flag, or saved per project, and it can only narrow), and only you can approve.</span>
         <span class="zh"><strong>三者底下：</strong>每一步都写进可恢复、可 fork 的会话日志，沙箱是一个开关（一个参数，或按项目保存，只能收窄），审批只能由你来给。</span>
       </p></div>
-      <p class="footnote"><span class="en">Timings: Apple M4, release build, measured 2026-10-16 with the sandbox check included, no network.</span><span class="zh">时间数据：Apple M4，release 构建，2026-10-16 测得，含沙箱检查，不走网络。</span></p>
     </section>
   </div>
 
@@ -519,6 +527,7 @@ footer a:hover { color: var(--ink); }
             <pre>radian
 <span class="c"><span class="en"># sandbox</span><span class="zh"># 沙箱</span></span>
 radian --profile workspace</pre>
+            <p class="note"><span class="en">On Linux the <code>workspace</code> profile needs <code>bubblewrap</code>.</span><span class="zh">Linux 上 <code>workspace</code> 等级需要先装 <code>bubblewrap</code>。</span></p>
           </div>
           <div class="host">
             <h3>radian exec</h3>
@@ -526,8 +535,9 @@ radian --profile workspace</pre>
             <pre>radian exec --resume demo \
   --output jsonl \
   -p <span class="c">"now read docs/"</span></pre>
+            <p class="note"><span class="en">Full steps in the <a href="/docs/quickstart.html">quickstart</a>.</span><span class="zh">完整步骤见<a href="/docs/quickstart.html">快速开始</a>。</span></p>
           </div>
-          <div class="provs"><span class="en"><strong>Providers:</strong> Anthropic, OpenAI, ChatGPT subscription (browser sign-in), opencode-go, and any OpenAI-compatible endpoint. <code>/login</code> stores the key; keys never enter a session file.</span><span class="zh"><strong>模型来源：</strong>Anthropic、OpenAI、ChatGPT 订阅（浏览器登录）、opencode-go，以及任何兼容 OpenAI 的端点。<code>/login</code> 存凭据；key 不会进会话文件。</span></div>
+          <div class="provs"><span class="en"><strong>Providers:</strong> Anthropic, OpenAI, ChatGPT (browser OAuth sign-in), opencode-go, and any OpenAI-compatible endpoint. <code>/login</code> stores the key in <code>~/.radian/credentials/auth.json</code>.</span><span class="zh"><strong>模型来源：</strong>Anthropic、OpenAI、ChatGPT（浏览器 OAuth 登录）、opencode-go，以及任何兼容 OpenAI 的端点。<code>/login</code> 把凭据存进 <code>~/.radian/credentials/auth.json</code>。</span></div>
           <div class="shared"><span class="en">same session file</span><span class="zh">同一个会话文件</span><b>~/.radian/sessions/demo.jsonl</b></div>
         </div>
       </div>
@@ -559,8 +569,10 @@ radian --profile workspace</pre>
     <footer>
       <span>getrad.dev</span>
       <nav aria-label="Footer">
+        <a href="/docs/"><span class="en">Docs</span><span class="zh">文档</span></a>
         <a href="https://github.com/hisea/radian">GitHub ↗</a>
         <a href="https://github.com/hisea/radian/tree/main/docs/adr"><span class="en">decisions</span><span class="zh">设计决定</span> ↗</a>
+        <a href="https://github.com/hisea/radian/releases">Releases ↗</a>
       </nav>
       <span><span class="en">no telemetry by default</span><span class="zh">默认无遥测</span> · MIT / Apache-2.0</span>
     </footer>
@@ -586,11 +598,14 @@ radian --profile workspace</pre>
     b.addEventListener('click', function () { setLang(b.dataset.lang); put('rad-lang', b.dataset.lang); });
   });
 
-  document.getElementById('copy-build').addEventListener('click', function (e) {
-    var btn = e.currentTarget, pre = btn.previousElementSibling;
-    function selectPre() { var r = document.createRange(); r.selectNodeContents(pre); var s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }
-    function done() { btn.style.color = 'var(--accent)'; setTimeout(function () { btn.style.color = ''; }, 1400); }
-    try { navigator.clipboard.writeText('cargo build --release --locked').then(done, selectPre); } catch (err) { selectPre(); }
+  document.querySelectorAll('.install-row button').forEach(function (b) {
+    b.addEventListener('click', function (e) {
+      var btn = e.currentTarget, pre = btn.previousElementSibling;
+      var text = btn.getAttribute('data-copy') || '';
+      function selectPre() { var r = document.createRange(); r.selectNodeContents(pre); var s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }
+      function done() { btn.style.color = 'var(--accent)'; setTimeout(function () { btn.style.color = ''; }, 1400); }
+      try { navigator.clipboard.writeText(text).then(done, selectPre); } catch (err) { selectPre(); }
+    });
   });
 })();
 </script>
