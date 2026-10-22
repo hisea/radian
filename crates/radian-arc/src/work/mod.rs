@@ -14,8 +14,9 @@
 //!    starts from the fetched tip;
 //! 2. write the host-local attempt record under `<repository>/.radian/arc/attempts/`;
 //! 3. run `radian exec -p - --session-id <task> --workspace <worktree> --profile workspace
-//!    --yes --output jsonl` (with `--resume <task>` for a rework attempt and the caller's
-//!    extra arguments), the brief on its stdin, stdout into `runs/…/result.jsonl`;
+//!    --yes --output jsonl` (with `--resume <task>` when the task's session already
+//!    exists, and the caller's extra arguments), the brief on its stdin, stdout into
+//!    `runs/…/result.jsonl`;
 //! 4. after the child exits, read the `Result` line and the exit code, read `head_sha`,
 //!    list uncommitted and untracked files, and run the delivery checks;
 //! 5. push `work/<task>` only when the outcome is `completed` and every check passed, then
@@ -49,7 +50,9 @@ pub struct Options {
     pub attempt: u32,
     /// The random token the scheduling loop expects back in `AttemptFinished`.
     pub token: String,
-    /// Continue the task's existing session (`--resume <task>`) instead of starting one.
+    /// A later attempt: continue the task's session (`--resume <task>`) when it exists. An
+    /// earlier attempt that failed before the model started left no session, and this one
+    /// then starts it with `--session-id <task>` (ADR 0048 decision 7.2).
     pub resume: bool,
     /// Let a branch with no change past `base_sha` pass the delivery check (ADR 0048
     /// decision 8: a brief can allow a no-op).
@@ -652,6 +655,29 @@ fn deny_paths(arc: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// Whether the worker's session directory holds `<task>.jsonl`, the file `radian exec
+/// --resume <task>` opens. The directory is the one the worker resolves: a `--session-dir`
+/// among the extra arguments, else `RADIAN_SESSION_DIR`, else the user's data directory.
+fn session_exists(task: &str, extra_args: &[String]) -> bool {
+    let flag = session_dir_arg(extra_args);
+    radian_host::session_dir(flag.as_deref())
+        .is_ok_and(|dir| dir.join(format!("{task}.jsonl")).is_file())
+}
+
+/// The last `--session-dir` value in `args` (`--session-dir <dir>` or `--session-dir=<dir>`).
+fn session_dir_arg(args: &[String]) -> Option<PathBuf> {
+    let mut found = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--session-dir" {
+            found = args.next().map(PathBuf::from);
+        } else if let Some(dir) = arg.strip_prefix("--session-dir=") {
+            found = Some(PathBuf::from(dir));
+        }
+    }
+    found
+}
+
 fn spawn_child(
     o: &Options,
     worktree: &Path,
@@ -676,8 +702,10 @@ fn spawn_child(
             let mut command = Command::new(executable);
             command.arg("exec");
             // `--session-id` and `--resume` are exclusive in `radian exec` (ADR 0022/0023): a
-            // rework attempt resumes the task's session, a first attempt names it.
-            if o.resume {
+            // later attempt resumes the task's session, and the attempt that creates it names
+            // it. The attempt number alone does not say which: a first attempt that failed
+            // before the model started (a bad worker argument) created nothing to resume.
+            if o.resume && session_exists(&o.task, &o.extra_args) {
                 command.arg("--resume").arg(&o.task);
             } else {
                 command.arg("--session-id").arg(&o.task);
@@ -991,5 +1019,40 @@ mod tests {
             "the worker's own workspace is not denied"
         );
         assert_eq!(DENIED_ENTRIES.len(), 9, "one entry per layout item");
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    /// Decision 7.2: a later attempt resumes only a session that exists. A first attempt
+    /// that failed on a bad worker argument created no session file, and resuming it would
+    /// fail every remaining attempt with `no session`.
+    #[test]
+    fn a_session_exists_only_when_its_file_is_in_the_worker_session_dir() {
+        let dir = std::env::temp_dir().join(format!("radian-arc-session-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("session dir");
+        let path = dir.to_str().expect("utf-8 path");
+        let args = strings(&["--model", "m", "--session-dir", path]);
+        assert!(!session_exists("0001-task", &args), "no file yet");
+        fs::write(dir.join("0001-task.jsonl"), "").expect("write session");
+        assert!(session_exists("0001-task", &args));
+        assert!(!session_exists("0002-other", &args), "another task's file");
+        let equals = strings(&[&format!("--session-dir={path}")]);
+        assert!(session_exists("0001-task", &equals));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_last_session_dir_argument_wins() {
+        assert_eq!(session_dir_arg(&strings(&["--model", "m"])), None);
+        assert_eq!(
+            session_dir_arg(&strings(&["--session-dir", "/a", "--session-dir=/b"])),
+            Some(PathBuf::from("/b"))
+        );
+        assert_eq!(
+            session_dir_arg(&strings(&["--session-dir=/a", "--session-dir", "/b"])),
+            Some(PathBuf::from("/b"))
+        );
     }
 }

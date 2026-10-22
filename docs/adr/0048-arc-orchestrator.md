@@ -52,7 +52,7 @@ arc has four objects.
 ### 4. Identities
 
 - `plan_id` and `task_id` have the form `NNNN-<slug>`, like ADR file names. The lead gives the slug: `[a-z0-9-]`, 1 to 48 characters. arc gives the number: the next free four-digit number, one sequence shared by plans and tasks, so no two items ever share a number whatever their slugs. An id names one item: every command that takes a plan or task id refuses (exit 3) an id that names both a plan file and a task file, naming both paths, and changes nothing. The id is the file name and never changes.
-- `session_id` equals `task_id`: one task has one worker session. A rework attempt resumes that session (`--resume`). It does not fork (ADR 0022).
+- `session_id` equals `task_id`: one task has one worker session. The first attempt that reaches the model creates it; every later attempt (a retry or a rework) resumes it (`--resume`). It does not fork (ADR 0022).
 - `attempt_id` is `<task_id>-<n>`. Each attempt records its host, a random token, the worker process identity (pid and start time), its worktree, its branch, `base_sha`, `head_sha`, its start and end time, and its session id. arc refuses a result whose token does not match the current attempt.
 - When a session cannot continue (for example `Result.outcome = poisoned`), the task goes to `failed` with phase `irrecoverable`. A new task replaces it and names the old one in `supersedes`. The old session does not change.
 
@@ -118,7 +118,7 @@ For each attempt, the scheduling loop runs `radian arc work`. `radian arc work` 
    radian exec -p - --session-id <task> --workspace <worktree> --profile workspace --yes --output jsonl
    ```
 
-   A rework attempt passes `--resume <task>` in place of `--session-id <task>` (the two flags exclude each other); the resumed session's id is the task id. The `workspace` tier is required: unattended work never runs in `full`.
+   When the task's session file exists in the worker's session directory, the wrapper passes `--resume <task>` in place of `--session-id <task>` (the two flags exclude each other); the resumed session's id is the task id. The wrapper decides from the file, not from the attempt number: an attempt that failed before the model started (a bad worker argument, a missing credential) leaves no session, and the next attempt starts it with `--session-id`. The `workspace` tier is required: unattended work never runs in `full`.
 3. After the model exits, the wrapper (not the model) reads the `Result` and the exit code, reads `head_sha`, and lists uncommitted and untracked files. It pushes `work/<task>` only when `outcome` is `completed` and the change is valid. After the push, it checks the remote ref with `ls-remote`. Every git command of the wrapper sets `core.hooksPath` to empty and `GIT_CONFIG_NOSYSTEM`, so no file the model can write changes what the wrapper runs.
 4. Before the push, it checks that `work/<task>` exists, that `head_sha` descends from `base_sha`, that the worktree HEAD is on that branch, and that the tree is clean. If one check fails, the attempt fails, nothing is pushed, and the worktree stays for inspection.
 5. Its last stdout line is its own `AttemptFinished` record: attempt id, token, exit code, outcome, `base_sha`, `head_sha`, dirty files, pushed, and remote sha. The radian `Result` is kept unchanged in `result.jsonl`.

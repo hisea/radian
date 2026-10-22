@@ -89,9 +89,11 @@ async fn the_server_process_starts_in_the_configured_directory() {
             _ => None,
         })
         .collect();
+    // The server reports its working directory as the OS resolves it; on macOS the temp
+    // directory under `/var` is a symlink to `/private/var`, so both sides are resolved.
     assert_eq!(
-        Path::new(&text),
-        work.as_path(),
+        std::fs::canonicalize(Path::new(&text)).expect("the reported cwd exists"),
+        std::fs::canonicalize(&work).unwrap(),
         "the server must run in the configured cwd"
     );
     session.close().await.expect("the fixture closes");
