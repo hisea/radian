@@ -4,6 +4,11 @@
 //! `core.hooksPath` written in the repository (or in the system config) never runs a hook
 //! for a gate operation (ADR 0048 decisions 7 and 10). Unattended commands also set
 //! `GIT_TERMINAL_PROMPT=0`, so a missing credential fails the fetch instead of prompting.
+//!
+//! The inherited `GIT_CONFIG_COUNT` / `GIT_CONFIG_PARAMETERS` channels are cleared: they are
+//! a caller's injected configuration, and a `core.hooksPath` there would silently replace the
+//! empty one this helper asks for. The repository, global and system configuration files are
+//! unaffected.
 
 use std::path::Path;
 use std::process::{Command, ExitStatus};
@@ -44,6 +49,8 @@ pub(crate) fn run_with_env(
     cmd.current_dir(dir);
     cmd.env("GIT_CONFIG_NOSYSTEM", "1");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env_remove("GIT_CONFIG_COUNT");
+    cmd.env_remove("GIT_CONFIG_PARAMETERS");
     for (key, value) in env {
         cmd.env(key, value);
     }

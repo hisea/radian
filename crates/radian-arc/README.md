@@ -39,7 +39,10 @@ worktree is refused, never deleted.
 
 Every git command of this crate runs as `git -c core.hooksPath= …` with `GIT_CONFIG_NOSYSTEM=1`
 and `GIT_TERMINAL_PROMPT=0`, so a repository `core.hooksPath` never runs a hook for a gate
-operation and an unattended fetch fails instead of prompting.
+operation and an unattended fetch fails instead of prompting. The inherited `GIT_CONFIG_COUNT`
+and `GIT_CONFIG_PARAMETERS` channels are cleared: they are a caller's injected configuration,
+and an injected `core.hooksPath` would otherwise replace the empty one. Configuration files
+are unaffected.
 
 ## Exclusive stages
 
@@ -128,6 +131,8 @@ main that moved after integration makes it false (ADR 0048 decision 6).
   merge that already contains `head_sha` yields the current main as the candidate.
 - `GIT_TERMINAL_PROMPT=0` is set with the two variables the ADR names, so an unattended fetch
   cannot block on a prompt.
+- The inherited `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS` channels are cleared: only the
+  helper's own `-c` settings, the repository config and the user/system files apply.
 - The newest verdict per stage is what a digest counts, so passing every attempt's verdicts in
   any order is safe.
 
