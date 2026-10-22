@@ -2,11 +2,14 @@
 //! two concurrent writers, a held lock, and a file changed outside arc.
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
+use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use fs2::FileExt;
 
 /// A temp directory that removes itself.
@@ -866,4 +869,307 @@ fn a_valid_worker_argument_line_passes_the_check() {
     // `run` claims nothing at auto `off`, so it also checks the line and exits 0.
     let ran = run(&scratch, &["arc", "run"], "");
     assert_eq!(ran.code, Some(0), "{ran:?}");
+}
+
+/// A child killed and reaped when a test ends before it waited, so a failed assertion does not
+/// leave a `run --watch` loop behind.
+struct ChildGuard(std::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn spawn_arc(scratch: &Scratch, args: &[&str]) -> ChildGuard {
+    ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_radian"))
+            .current_dir(scratch.repo())
+            .env("RADIAN_HOME", scratch.path("home"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("radian runs"),
+    )
+}
+
+/// The child's stdout, read line by line on its own thread, so a test sees a line while the
+/// child still runs.
+struct Lines {
+    rx: mpsc::Receiver<String>,
+    seen: Vec<String>,
+}
+
+impl Lines {
+    fn new(stdout: std::process::ChildStdout) -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            rx,
+            seen: Vec::new(),
+        }
+    }
+
+    fn next_line(&mut self, timeout: Duration) -> Option<String> {
+        let line = self.rx.recv_timeout(timeout).ok()?;
+        self.seen.push(line.clone());
+        Some(line)
+    }
+
+    /// The next line that contains `needle`, within `timeout`.
+    fn until(&mut self, needle: &str, timeout: Duration) -> Option<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let line = self.next_line(left)?;
+            if line.contains(needle) {
+                return Some(line);
+            }
+        }
+    }
+}
+
+fn drain_stderr(child: &mut ChildGuard) -> std::thread::JoinHandle<String> {
+    let mut stderr = child.0.stderr.take().expect("stderr is piped");
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    })
+}
+
+fn wait_within(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("the child's status") {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A mock model on its own runtime: the test thread blocks on the child, so the server serves
+/// from worker threads while the test reads its stdout.
+struct Mock {
+    server: MockServer,
+    _runtime: tokio::runtime::Runtime,
+}
+
+impl Mock {
+    fn start(replies: Vec<Reply>) -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("the mock runtime");
+        let server = runtime.block_on(MockServer::start(replies));
+        Self {
+            server,
+            _runtime: runtime,
+        }
+    }
+
+    fn base_url(&self) -> &str {
+        &self.server.base_url
+    }
+
+    fn requests(&self) -> usize {
+        self.server.requests().len()
+    }
+}
+
+/// A model reply whose stream is not finished until `pause` has passed: the worker waits
+/// inside the HTTP response, so `run` is alive while a test reads its stdout.
+fn waiting_reply(pause: Duration) -> Reply {
+    let content = chunk(
+        serde_json::json!({"role": "assistant", "content": "done"}),
+        None,
+    );
+    let stop = chunk(serde_json::json!({}), Some("stop"));
+    Reply::Sse {
+        pieces: vec![
+            format!("data: {content}\n\n").into_bytes(),
+            format!("data: {stop}\n\n").into_bytes(),
+            b"data: [DONE]\n\n".to_vec(),
+        ],
+        pause,
+        headers: Vec::new(),
+    }
+}
+
+/// Moves a task to `todo.retry_wait` with a `retry_at` that is already past.
+fn wait_for_a_retry(scratch: &Scratch, task: &str) {
+    radian_arc::store::Store::at(scratch.repo())
+        .change_task(task, |task| {
+            task.phase = "retry_wait".to_owned();
+            task.retry_at = Some("2026-01-01T00:00:00Z".to_owned());
+            Ok(())
+        })
+        .expect("the task waits for an already-due retry");
+}
+
+/// A transition line is on stdout while `run` still runs: the loop flushes it when it happens,
+/// not when the command ends. The worker waits inside the mock's stream, so the child is alive
+/// while the test reads.
+///
+/// Mutation: collect the lines and print them at the end, and the line does not arrive within
+/// the one-second read while the worker waits.
+#[test]
+fn run_writes_a_transition_line_before_it_exits() {
+    let scratch = fixture("streaming");
+    init(&scratch);
+    let (plan, task) = confirmed_task(&scratch);
+    assert_eq!(
+        run(&scratch, &["arc", "auto", &plan, "run"], "").code,
+        Some(0)
+    );
+    wait_for_a_retry(&scratch, &task);
+    let mock = Mock::start(vec![waiting_reply(Duration::from_secs(1))]);
+    set_exec_args(
+        &scratch,
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            mock.base_url(),
+            "--offline-catalog",
+        ],
+    );
+
+    let mut child = spawn_arc(&scratch, &["arc", "run"]);
+    let mut lines = Lines::new(child.0.stdout.take().expect("stdout is piped"));
+    let stderr = drain_stderr(&mut child);
+
+    let line = lines.until(
+        "released: todo.retry_wait -> todo.ready",
+        Duration::from_secs(1),
+    );
+    let alive = child.0.try_wait().expect("the child's status").is_none();
+    assert!(
+        line.is_some(),
+        "no transition line while run ran: {:?}",
+        lines.seen
+    );
+    assert!(
+        alive,
+        "run must still be running when the line arrives: {:?}",
+        lines.seen
+    );
+
+    let status = child.0.wait().expect("run finishes");
+    let err = stderr.join().expect("the stderr reader");
+    assert_eq!(status.code(), Some(0), "{err}");
+    assert!(
+        lines.until("summary", Duration::from_secs(2)).is_some(),
+        "the pass ends with a summary: {:?}",
+        lines.seen
+    );
+    assert!(mock.requests() >= 1, "the worker reached the mock model");
+}
+
+/// `--watch` runs another pass on its own: a retry that becomes due between passes is released
+/// with no second command, and SIGTERM stops the loop with exit `0` and the lock released.
+///
+/// Mutations: buffer the lines again and the released line misses its deadline; keep the lock
+/// (and the process) on SIGTERM and the child does not exit within five seconds.
+#[test]
+fn watch_runs_another_pass_and_exits_zero_on_sigterm() {
+    let scratch = fixture("watch");
+    init(&scratch);
+    let plan = add_plan(&scratch, "watch");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+
+    let mut child = spawn_arc(&scratch, &["arc", "run", "--watch", "--interval", "5"]);
+    let mut lines = Lines::new(child.0.stdout.take().expect("stdout is piped"));
+    let stderr = drain_stderr(&mut child);
+
+    assert!(
+        lines.until("summary", Duration::from_secs(5)).is_some(),
+        "the first pass ends quiet with a summary: {:?}",
+        lines.seen
+    );
+
+    // The loop holds the lock between passes: a second one-shot run exits `4`.
+    let blocked = run(&scratch, &["arc", "run"], "");
+    assert_eq!(blocked.code, Some(4), "{blocked:?}");
+
+    // No second command runs: the loop's own next pass releases the retry.
+    wait_for_a_retry(&scratch, &task);
+    assert!(
+        lines
+            .until(
+                "released: todo.retry_wait -> todo.ready",
+                Duration::from_secs(15)
+            )
+            .is_some(),
+        "a later pass did not release the retry: {:?}",
+        lines.seen
+    );
+    assert!(
+        lines.until("summary", Duration::from_secs(5)).is_some(),
+        "the releasing pass prints its summary: {:?}",
+        lines.seen
+    );
+
+    let pid = child.0.id() as libc::pid_t;
+    assert_eq!(
+        unsafe { libc::kill(pid, libc::SIGTERM) },
+        0,
+        "SIGTERM reaches run --watch"
+    );
+    let status = wait_within(&mut child.0, Duration::from_secs(5));
+    let Some(status) = status else {
+        let _ = child.0.kill();
+        let _ = child.0.wait();
+        let err = stderr.join().unwrap_or_default();
+        panic!("run --watch did not exit on SIGTERM: {err}");
+    };
+    let err = stderr.join().expect("the stderr reader");
+    assert_eq!(status.code(), Some(0), "SIGTERM is not an error: {err}");
+
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(scratch.repo().join(".radian/arc/runner.lock"))
+        .expect("runner.lock exists");
+    assert!(
+        lock.try_lock_exclusive().is_ok(),
+        "run --watch releases runner.lock"
+    );
+}
+
+/// The interval is a closed range, and it only means something with `--watch`.
+#[test]
+fn a_watch_interval_outside_five_to_3600_is_a_usage_error() {
+    let scratch = fixture("interval");
+    init(&scratch);
+    for args in [
+        vec!["arc", "run", "--watch", "--interval", "4"],
+        vec!["arc", "run", "--watch", "--interval", "3601"],
+        vec!["arc", "run", "--interval", "5"],
+    ] {
+        let run = run(&scratch, &args, "");
+        assert_eq!(run.code, Some(2), "{args:?}: {run:?}");
+    }
 }

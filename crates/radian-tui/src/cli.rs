@@ -579,7 +579,24 @@ enum ArcCommand {
 
     /// Make every transition the auto levels allow now, then exit: reconcile, release due
     /// retries, verify, start ready tasks, and merge what passed at auto level `merge`.
-    Run,
+    /// With `--watch`, repeat after `--interval` seconds until SIGINT or SIGTERM.
+    Run {
+        /// Keep running: after a pass that ends quiet, wait `--interval` seconds and run
+        /// another pass, until SIGINT or SIGTERM. Holds `runner.lock` the whole time.
+        #[arg(long)]
+        watch: bool,
+        /// Seconds between passes of `--watch`: 5 to 3600. Only with `--watch`; without it
+        /// this is a usage error. The default is 30.
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            requires = "watch",
+            value_parser = clap::value_parser!(u64).range(
+                radian_arc::run::MIN_INTERVAL_SECS..=radian_arc::run::MAX_INTERVAL_SECS
+            )
+        )]
+        interval: Option<u64>,
+    },
 
     /// Serve the lead's MCP tools over standard input and output. A lead registers this
     /// command; a person does not run it.
@@ -666,7 +683,10 @@ impl ArcCommand {
             ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
             ArcCommand::Merge { task } => ArcRun::Merge { task },
             ArcCommand::Reject { task, note } => ArcRun::Reject { task, note },
-            ArcCommand::Run => ArcRun::Run,
+            ArcCommand::Run { watch, interval } => ArcRun::Run {
+                watch,
+                interval: interval.unwrap_or(radian_arc::run::DEFAULT_INTERVAL_SECS),
+            },
             ArcCommand::Mcp => ArcRun::Mcp,
             // `work` is the trusted wrapper, not a store operation: `run_arc` dispatches it
             // before this conversion.
