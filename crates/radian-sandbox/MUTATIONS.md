@@ -220,3 +220,19 @@ worktree `<worktree>/s0b-gitdir`，分支 `dogfood/s0b-gitdir`。每个变异
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | HE-1 | 白名单不含 `HERDR_ENV/HERDR_PANE_ID/HERDR_TAB_ID/HERDR_WORKSPACE_ID/HERDR_SOCKET_PATH/HERDR_BIN_PATH` | `the_shell_environment_carries_herdr_and_allow_env`（`left: "\|foo-value\|"`，`pane-9` 为空） | ✅ 1 failed |
+
+## Linux 上的 ADR 0038 carve-out（2026-10-22）
+
+把 `crates/radian-sandbox/src/bwrap.rs` 的修复临时改回修复前的形态（`git_access` 被忽略），
+跑完从 `.radian/bwrap.rs.orig` 还原，`sha256sum` 前后一致。跑
+`cargo test -p radian-sandbox --lib`、`cargo nextest run -p radian-sandbox --test arc_worker`，
+以及（重新构建 `radian` 后）`cargo nextest run -p radian-arc --test work`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| LX-1 | 恢复修复前行为：`WritableExceptExec` 也走整块 `--ro-bind-try`，且 `git_writable_except_exec` 恒 `false` | `bwrap::tests::the_effective_git_access_follows_the_policy`、`bwrap::tests::writable_except_exec_binds_git_writable_then_the_exec_entries_read_only`、`arc_worker::a_worker_commits_in_a_linked_worktree_nested_inside_its_repository`，以及 `radian-arc` `work` 的 12 个用例 | ✅ 2 unit + 1 integration + 12 work FAILED |
+| LX-2 | 只忽略挂载部分、保留后端回答真值（文案说 `.git` 可写，实际仍整块只读） | `arc_worker` 在 commit 步失败：`fatal: Unable to create '…/.git/worktrees/0001-task/index.lock': Read-only file system` | ✅ 1 integration FAILED |
+
+修复后的回归测试是 `crates/radian-sandbox/tests/arc_worker.rs`（两平台）与 `bwrap` 的两个单测；
+`radian-arc` 的 `work` 集合在 Linux 上从 12 个失败变为 16/16 通过。
+

@@ -142,9 +142,11 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
   `git_access` 覆盖 git 元数据（`ReadOnly` 整块拒写；`WritableExceptExec` 只拒执行入口，见下；
   哪个**真正生效**由后端回答，面向模型的文案见"切片④"）；默认不加 `(allow network*)`；`/dev/null` 放行；`TMPDIR` 指向工作区内 `.radian-sandbox/tmp`。
 - **Linux**：`--unshare-all`（网络关闭）或部分隔离（开启）；宿主根 `--ro-bind / /` + 工作区
-  `--bind`；git 元数据 `--ro-bind` 覆盖（**未改 Linux**：无论 `git_access` 取何值
-  都整块只读）；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
-  `--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内 `.radian-sandbox/{home,tmp}`。
+  `--bind`；git 元数据按 `git_access` 处理：`ReadOnly` 整块 `--ro-bind-try`；
+  `WritableExceptExec` 先 `--bind` 每个发现到的 git 目录（工作区、per-worktree gitdir、
+  共享 common dir），再把可执行入口 `--ro-bind-try` 回去（见下节）；敏感目录 `--tmpfs`
+  （目录）或 `/dev/null`（文件）；`--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内
+  `.radian-sandbox/{home,tmp}`。
 
 ## Linux seccomp 过滤器（片 0，2026-10-20）
 
@@ -195,7 +197,7 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 （根是只读的），因此只 mask 已存在的 deny 路径；SBPL 可以给未来才会创建的路径写规则。默认 deny
 列表里不存在的项在 Linux 上暂不 mask。
 
-## `workspace` 档位下 `.git` 可写、只留执行入口只读（macOS）
+## `workspace` 档位下 `.git` 可写、只留执行入口只读（macOS 与 Linux）
 
 **背景**：通用（general）与项目主管（lead）会话在 `workspace` 档位下要能直接用原生 git 提交
 （commit、branch、checkout、stash、rebase、merge），否则"在 main 上和一个通用 agent 协作"这条最
@@ -261,13 +263,28 @@ per-worktree gitdir 就嵌在 common dir 之下——若某条 allow 跟在 deny
 `worktrees/<name>/{gitdir,config.worktree}`、worktree 的 `.git` 指针文件，以及 **host 仓库工作树里的
 文件**全被拒）。
 
-**未验证 / Linux**：本节的改动**只在 macOS 上实施**。Linux（bwrap）无论 `git_access` 取何值都
-保持今天的整块 `--ro-bind` 只读（`bwrap.rs` 里带注释）；任何"Linux 也只留执行入口只读"的说法都要等
-VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。**linked worktree在 Linux 上
-也照旧只读**：per-worktree gitdir 与 common dir 即使在工作区之外也保持 `--ro-bind`，沙箱里原生
-`git commit`（含 worktree 里的）仍按设计失败。当前状态：**Linux pending，未改、未验证**。
+**Linux（bwrap，已实现）**：同一个策略参数在 bwrap 上用**挂载顺序**实现，而不是 regex：
+每个发现到的 git **目录**先 `--bind` 成可写（这些 mount 全在 exec 的 deny 之前，后挂载的
+覆盖先挂载的），然后用 `--ro-bind-try` 把可执行入口盖回只读。工作树的 `.git` 是**指针文件**，
+照旧整块 `--ro-bind-try`。可执行入口由 `git_exec.rs` 的同一份常量与
+`bwrap.rs::git_exec_entries` 枚举：`config`、`config.worktree`、`hooks/`、每个已存在的
+子模块 gitdir（递归，含嵌套）的 `config` 与 `hooks/`、以及每个已存在 linked worktree 的
+`worktrees/<name>/{gitdir,commondir,config.worktree}`。
 
-## 面向模型的文案按会话说真话（macOS）
+**Linux 的已知差异**：bwrap 没有 regex 规则，所以只枚举**建命令时已存在**的入口。
+会话中新建的子模块或 worktree 的 `config`/`hooks` 不会被这次挂载覆盖（macOS 的 regex
+覆盖它们）。不存在的路径不挂载：bwrap 会为缺失的挂载点**在宿主文件系统上创建目录**
+（实测），所以 `hooks/`/`config.worktree` 缺失时跳过，和 `deny_read` 跳过缺失路径同一理由。
+`git init` 总会创建 `hooks/`，现有子模块同样如此，所以常规仓库与 arc 工作树布局不受影响。
+
+**Linux 行为测试**：`crates/radian-sandbox/tests/arc_worker.rs`（两平台）：workspace 是
+`<repository>/.radian/arc/worktrees/<task>` 的 linked worktree，common dir 就是
+`<repository>/.git`，`deny_read` 覆盖 `.radian/arc/` 的其余条目。沙箱内 `git add`/`git commit`
+成功，`config`、`hooks/`、`.git` 指针文件被拒，denied 的 arc 路径读不到；每条都在第二个相同的
+`FullAccess` 树上对照。修复前 Linux 上的失败是 `git add` 的
+`fatal: Unable to create '…/.git/worktrees/<task>/index.lock': Read-only file system`。
+
+## 面向模型的文案按会话说真话（macOS 与 Linux）
 
 切片①之后，macOS 的通用/lead 会话能写 `.git`，但 `shell` 的工具描述与启动行仍写着"`.git` 只读、
 `git commit` 按设计失败"。切片④让这段文案按**实际生效**的 git 权限说：
@@ -280,9 +297,9 @@ VM 恢复、`sandbox-escape` 矩阵在 VM 上重跑之后才算数。**linked wo
 - **`shell` 的工具描述与 `<runtime>` 的工具行**按后端实际是否放开 `.git` 写权限来写；没有 `git_commit` 工具，提交用原生 git。
 
 **判据不是 policy 里的 `git_access`，而是后端实际是否实施**：`Sandbox::git_writable_except_exec`
-（由 `SandboxBackend::git_writable_except_exec` 回答）给出**生效**的答案。`macos-seatbelt` 返回
-policy 的值（它实现了切片①的 carve-out）；Linux（bwrap）沿用安全的默认 `false`，因为切片①未改
-Linux、整块 `--ro-bind` 只读，文案也随之保持只读。忘了接线的宿主退回只读文案，不会谎报可写。
+（由 `SandboxBackend::git_writable_except_exec` 回答）给出**生效**的答案。`macos-seatbelt` 与
+`linux-bwrap` 都返回 policy 的值（两者都实现了本节的 carve-out）；忘了接线的宿主退回只读文案，
+不会谎报可写。
 
 **工具列表每个会话只算一次**：`/access` 换档后，本会话的 `shell` 描述
 与启动行**不变**，`/access` 的提示据此说明；下一次会话（含 resume）才显示新档位的文案。切片④的
