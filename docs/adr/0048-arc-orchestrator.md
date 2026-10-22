@@ -201,7 +201,7 @@ The gate commands in `config.toml` are empty or the default profile. The owner w
 - **Tracking is the owner's choice.** With `--track`, git sees `config.toml`, `plans/`, and `tasks/`, and the owner commits them when the owner wants. arc never commits them. A checkout or pull that changes a plan or task file is an outside change (decision 5). The ledger, the runs, the attempt records, the locks, and the worktrees are always local.
 - The worktrees are inside the repository directory, so they get the repository's trust decision (ADR 0031) and need no extra flag.
 - A worktree is created on the first attempt of a task and removed when the task is merged.
-- `.radian-worktrees/` is not a radian location. Search (`grep`, `glob`), skill discovery, and `@` completion skip `.radian/arc/worktrees/` (they skipped `.radian-worktrees/` before).
+- `.radian-worktrees/` is not a radian location. Search (`grep`, `glob`), skill discovery, and `@` completion skip `.radian/arc/worktrees/` and `.radian/arc/gates/` (they skipped `.radian-worktrees/` before). Both are arc's own full-tree checkouts, one per worker task and one per gate stage.
 
 ## Constraints and Costs
 
@@ -219,5 +219,5 @@ The gate commands in `config.toml` are empty or the default profile. The owner w
 - Gate: a verdict counts only for its sha. A moved branch removes it. A new review of the same sha makes an older approval invalid. Task B is verified on a candidate that contains merged task A. A merge fails when main is no longer `base_sha`.
 - Auto: one plan with three tasks and dependencies runs at level `off` with one start and one merge each, at level `run` to `awaiting_human` for each task, and at level `merge` to `done` with no person. A task that fails its gate `max_auto_rework + 1` times pauses the whole plan and sets `auto` to `off`.
 - Approval: the MCP tool list contains no tool to confirm, start, merge, reject, change `auto`, or approve.
-- Setup: `radian arc init` in a repository creates the files above, and adds the exclude lines once (without `config.toml`, `plans/`, and `tasks/` under `--track`). Without setup, `radian arc` names `radian arc init`. A worker cannot read the arc files outside its worktree. A task branch that changes a file under `.radian/arc/` fails its delivery check. `grep` from the repository root does not enter `.radian/arc/worktrees/`.
+- Setup: `radian arc init` in a repository creates the files above, and adds the exclude lines once (without `config.toml`, `plans/`, and `tasks/` under `--track`). Without setup, `radian arc` names `radian arc init`. A worker cannot read the arc files outside its worktree. A task branch that changes a file under `.radian/arc/` fails its delivery check. `grep` from the repository root does not enter `.radian/arc/worktrees/` or `.radian/arc/gates/`.
 - Commands: `radian arc` opens the TUI. Each subcommand runs and exits with a documented code. `docs/user/` documents every subcommand, option, and file field (`AGENTS.md`).
