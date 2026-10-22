@@ -199,6 +199,7 @@ pub enum Role {
     CtxAssistant,
     CtxReasoning,
     CtxResults,
+    CtxImages,
     CtxFree,
     CtxBuffer,
     Selection,
@@ -244,7 +245,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 82] = [
+    pub const ALL: [Role; 83] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -292,6 +293,7 @@ impl Role {
         Role::CtxAssistant,
         Role::CtxReasoning,
         Role::CtxResults,
+        Role::CtxImages,
         Role::CtxFree,
         Role::CtxBuffer,
         Role::Selection,
@@ -379,6 +381,7 @@ impl Role {
             Role::CtxAssistant => "ctx_assistant",
             Role::CtxReasoning => "ctx_reasoning",
             Role::CtxResults => "ctx_results",
+            Role::CtxImages => "ctx_images",
             Role::CtxFree => "ctx_free",
             Role::CtxBuffer => "ctx_buffer",
             Role::Selection => "selection",
@@ -472,6 +475,7 @@ impl Role {
             Role::CtxAssistant => &mut theme.ctx_assistant,
             Role::CtxReasoning => &mut theme.ctx_reasoning,
             Role::CtxResults => &mut theme.ctx_results,
+            Role::CtxImages => &mut theme.ctx_images,
             Role::CtxFree => &mut theme.ctx_free,
             Role::CtxBuffer => &mut theme.ctx_buffer,
             Role::Selection => &mut theme.selection,
@@ -571,8 +575,8 @@ pub struct Theme {
     pub status_error: Style,
     /// The `/context` grid's per-category cell colors (spec `tui-context-grid`):
     /// system prompt, context files, memory, built-in tool definitions, skills,
-    /// MCP tools, user messages, assistant text, reasoning, tool results, free
-    /// space and the compaction buffer.
+    /// MCP tools, user messages, assistant text, reasoning, tool results, images,
+    /// free space and the compaction buffer.
     pub ctx_system: Style,
     pub ctx_files: Style,
     pub ctx_memory: Style,
@@ -583,6 +587,8 @@ pub struct Theme {
     pub ctx_assistant: Style,
     pub ctx_reasoning: Style,
     pub ctx_results: Style,
+    /// An image part's pixel estimate (ADR 0015 C2), one `/context` line.
+    pub ctx_images: Style,
     pub ctx_free: Style,
     pub ctx_buffer: Style,
     /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
@@ -853,8 +859,8 @@ impl Theme {
             // The `/context` grid's category colors (spec `tui-context-grid`): system
             // prompt = muted, tool definitions = dim, context files = gold, memory =
             // red-orange, skills = yellow, MCP = green, user = accent, assistant =
-            // blue, tool results = cyan, reasoning = the thinking channel, free =
-            // the frame line color, buffer = yellow.
+            // blue, tool results = cyan, reasoning = the thinking channel, images =
+            // gold (input attachments), free = the frame line color, buffer = yellow.
             ctx_system: muted,
             ctx_files: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
             ctx_memory: spec(pi::RED, Modifier::empty(), truecolor),
@@ -865,6 +871,7 @@ impl Theme {
             ctx_assistant: spec(pi::BLUE, Modifier::empty(), truecolor),
             ctx_reasoning: spec(pi::THINKING, Modifier::empty(), truecolor),
             ctx_results: spec(pi::SYNTAX_VARIABLE, Modifier::empty(), truecolor),
+            ctx_images: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
             ctx_free: dim,
             ctx_buffer: spec(pi::YELLOW, Modifier::empty(), truecolor),
             // The unified-diff lines: pi's own toolDiff* roles.
@@ -975,8 +982,8 @@ impl Theme {
             // The `/context` grid's category colors (spec `tui-context-grid`): system
             // prompt = muted, tool definitions = dim, context files = gold, memory =
             // red-orange, skills = yellow, MCP = green, user = accent, assistant =
-            // blue, tool results = cyan, reasoning = the thinking channel, free =
-            // the frame line color, buffer = yellow.
+            // blue, tool results = cyan, reasoning = the thinking channel, images =
+            // gold (input attachments), free = the frame line color, buffer = yellow.
             ctx_system: muted,
             ctx_files: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
             ctx_memory: spec(pi::RED, Modifier::empty(), truecolor),
@@ -987,6 +994,7 @@ impl Theme {
             ctx_assistant: spec(pi::BLUE, Modifier::empty(), truecolor),
             ctx_reasoning: spec(pi::THINKING, Modifier::empty(), truecolor),
             ctx_results: spec(pi::SYNTAX_VARIABLE, Modifier::empty(), truecolor),
+            ctx_images: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
             ctx_free: dim,
             ctx_buffer: spec(pi::YELLOW, Modifier::empty(), truecolor),
             // The unified-diff lines: pi's own toolDiff* roles.
@@ -1062,6 +1070,7 @@ impl Theme {
             ctx_assistant: style(None, Modifier::empty()),
             ctx_reasoning: style(None, Modifier::empty()),
             ctx_results: style(None, Modifier::empty()),
+            ctx_images: style(None, Modifier::empty()),
             ctx_free: style(None, Modifier::empty()),
             ctx_buffer: style(None, Modifier::empty()),
             // No color at all: a selection is the reversed video, as the terminal itself
@@ -1142,7 +1151,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 55] {
+    pub fn styles(&self) -> [Style; 56] {
         [
             self.reasoning,
             self.interrupted,
@@ -1190,6 +1199,7 @@ impl Theme {
             self.ctx_assistant,
             self.ctx_reasoning,
             self.ctx_results,
+            self.ctx_images,
             self.ctx_free,
             self.ctx_buffer,
             self.diff_added,

@@ -652,6 +652,87 @@ fn an_attachment_becomes_a_placeholder() {
     assert!(!kept[0].text.contains("secret"), "{:?}", kept[0].text);
 }
 
+/// A minimal PNG header with these dimensions, base64-encoded (`imagesize` reads
+/// the 24-byte header only).
+fn png_base64(width: u32, height: u32) -> String {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes.extend_from_slice(&[0, 0, 0, 0]);
+    base64_encode(&bytes)
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[(((b0 & 0b11) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(((b1 & 0b1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(b2 & 0b111111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn image_part(data: &str) -> ContentPart {
+    ContentPart::Image {
+        mime_type: "image/png".to_owned(),
+        data: data.to_owned(),
+        annotations: None,
+        meta: None,
+    }
+}
+
+/// ADR 0018: an image in the user's words folds to one `[image: W×H]` line, never
+/// its base64, and the text around it stays.
+#[test]
+fn an_image_becomes_a_placeholder() {
+    use radian_core::select_user_messages;
+    let message = Message::User {
+        content: vec![
+            ContentPart::text("look at this"),
+            image_part(&png_base64(4000, 3000)),
+        ],
+        meta: MessageMeta {
+            source: Some(InputSource::User),
+            ..MessageMeta::default()
+        },
+    };
+    let kept = select_user_messages(&[], &[message], None);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].text, "look at this\n[image: 4000×3000]");
+    assert!(!kept[0].text.contains("iVBOR"), "{:?}", kept[0].text);
+}
+
+/// Unreadable dimensions drop the size: `[image]`.
+#[test]
+fn an_unreadable_image_becomes_a_bare_placeholder() {
+    use radian_core::select_user_messages;
+    let message = Message::User {
+        content: vec![image_part("AAAA")],
+        meta: MessageMeta {
+            source: Some(InputSource::User),
+            ..MessageMeta::default()
+        },
+    };
+    let kept = select_user_messages(&[], &[message], None);
+    assert_eq!(kept[0].text, "[image]");
+}
+
 /// The first message is always kept, and over `U₁` it is cut with the middle marked.
 #[test]
 fn the_first_message_is_kept_and_cut_to_u1() {

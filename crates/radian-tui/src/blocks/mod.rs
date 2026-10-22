@@ -393,8 +393,8 @@ pub struct MdPiece {
 
 /// A `/context` grid category's own color (spec `tui-context-grid`): system
 /// prompt, context files, memory, built-in tool definitions, skills, MCP
-/// tools, user messages, assistant text, reasoning, tool results, free space
-/// and the compaction buffer.
+/// tools, user messages, assistant text, reasoning, tool results, images, free
+/// space and the compaction buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtxTone {
     System,
@@ -407,6 +407,7 @@ pub enum CtxTone {
     Assistant,
     Reasoning,
     Results,
+    Images,
     Free,
     Buffer,
 }

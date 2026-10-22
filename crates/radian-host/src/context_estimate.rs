@@ -16,6 +16,7 @@
 //! numbers (`categories` + `free` + `buffer` = `window`) and the per-item
 //! detail (context files, skills, MCP/built-in tools, memory records).
 
+use radian_core::budget::{ImageContribution, image_contributions};
 use radian_core::{ContentPart, Message, ModelRequest, ToolSpec};
 
 /// One estimated category, in display order.
@@ -293,8 +294,10 @@ fn size_of_str(text: &str) -> Size {
 
 /// The JSON contribution of one message, minus host `meta` (ADR 0005, like
 /// `budget::request_size_with`). When `count_reasoning` is false an
-/// assistant's `reasoning` field is subtracted too (ADR 0014 R6).
-fn message_size(message: &Message, count_reasoning: bool) -> Size {
+/// assistant's `reasoning` field is subtracted too (ADR 0014 R6). Image parts
+/// are removed from the text size and returned as their pixel estimate (ADR
+/// 0015 C2), so the second element is the images category.
+fn message_size(message: &Message, count_reasoning: bool) -> (Size, u64) {
     let mut size = Size::default();
     size.add_json(message);
     if !message.meta().is_empty() {
@@ -314,7 +317,28 @@ fn message_size(message: &Message, count_reasoning: bool) -> Size {
             size.remove_str(inner);
         }
     }
-    size
+    let image_tokens = remove_images(&mut size, message);
+    (size, image_tokens)
+}
+
+/// Subtracts every image part's JSON and separator commas from `size` and returns
+/// their pixel token estimate (ADR 0015 C2). The same bytes are removed from the
+/// array serialization, so the framing difference stays exact.
+fn remove_images(size: &mut Size, message: &Message) -> u64 {
+    let mut tokens = 0u64;
+    for ImageContribution {
+        json,
+        tokens: image_tokens,
+        commas,
+    } in image_contributions(message)
+    {
+        size.remove_str(&json);
+        for _ in 0..commas {
+            size.remove_str(",");
+        }
+        tokens += image_tokens;
+    }
+    tokens
 }
 
 /// The `,"reasoning":…` fragment's size inside an assistant message: the part
@@ -381,8 +405,10 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     let mut reasoning_size = Size::default();
     let mut tool_results_size = Size::default();
     let mut per_message_total = Size::default();
+    let mut image_tokens = 0u64;
     for message in &request.messages {
-        let full = message_size(message, count_reasoning);
+        let (full, images) = message_size(message, count_reasoning);
+        image_tokens += images;
         per_message_total = per_message_total.plus(full);
         match message {
             Message::User { .. } => {
@@ -412,6 +438,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     // Remove the metas/reasoning from the array size the same way the
     // per-message sizes did, so the framing difference is exact.
     for message in &request.messages {
+        remove_images(&mut messages_array_size, message);
         if !message.meta().is_empty() {
             let field = serde_json::json!({ "meta": message.meta() }).to_string();
             if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
@@ -490,17 +517,22 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         parts.push(("reasoning", reasoning_size));
     }
     parts.push(("tool results", tool_results_size));
+    // The image pixel estimate is its own line (ADR 0015 C6): it is not a byte
+    // category, so it joins the sum below directly.
+    let images_index = parts.len();
+    parts.push(("images", Size::default()));
 
     // One ceil for the total; distribute the remainder to the largest
     // fractional parts so the tokens sum exactly.
     let total_ascii: u64 = parts.iter().map(|(_, s)| s.ascii).sum();
     let total_non_ascii: u64 = parts.iter().map(|(_, s)| s.non_ascii_chars).sum();
-    let total_tokens = total_ascii.div_ceil(bpt) + total_non_ascii;
+    let total_tokens = total_ascii.div_ceil(bpt) + total_non_ascii + image_tokens;
 
-    let floors: Vec<u64> = parts
+    let mut floors: Vec<u64> = parts
         .iter()
         .map(|(_, s)| s.ascii / bpt + s.non_ascii_chars)
         .collect();
+    floors[images_index] = image_tokens;
     let floor_sum: u64 = floors.iter().sum();
     let mut remainder = total_tokens.saturating_sub(floor_sum) as usize;
     let mut order: Vec<usize> = (0..parts.len()).collect();
@@ -765,6 +797,52 @@ mod tests {
             description: format!("does {name}"),
             input_schema: json!({"type": "object"}),
             concurrency: ToolConcurrency::Exclusive,
+        }
+    }
+
+    /// A minimal PNG header with these dimensions, base64-encoded (`imagesize`
+    /// reads only the 24-byte header).
+    fn png_base64(width: u32, height: u32) -> String {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        base64_encode(&bytes)
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = *chunk.get(1).unwrap_or(&0);
+            let b2 = *chunk.get(2).unwrap_or(&0);
+            out.push(ALPHABET[(b0 >> 2) as usize] as char);
+            out.push(ALPHABET[(((b0 & 0b11) << 4) | (b1 >> 4)) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(ALPHABET[(((b1 & 0b1111) << 2) | (b2 >> 6)) as usize] as char);
+            } else {
+                out.push('=');
+            }
+            if chunk.len() > 2 {
+                out.push(ALPHABET[(b2 & 0b111111) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    fn image_part(data: &str) -> ContentPart {
+        ContentPart::Image {
+            mime_type: "image/png".to_owned(),
+            data: data.to_owned(),
+            annotations: None,
+            meta: None,
         }
     }
 
@@ -1111,7 +1189,8 @@ mod tests {
                 "MCP tools",
                 "user messages",
                 "assistant text",
-                "tool results"
+                "tool results",
+                "images"
             ],
             "{breakdown:?}"
         );
@@ -1127,5 +1206,42 @@ mod tests {
         assert!(text.contains("free until auto-compact"), "{text}");
         assert!(text.contains("compaction buffer"), "{text}");
         assert!(text.contains("window"), "{text}");
+    }
+
+    /// ADR 0015 C2/C6: an image is its own `images` line, counted by pixels, and
+    /// the category sum still equals the budget estimator's total.
+    #[test]
+    fn images_are_their_own_line_and_never_their_bytes() {
+        let system = system();
+        let mut req = request(&system);
+        req.messages.push(Message::User {
+            content: vec![image_part(&png_base64(1200, 800))],
+            meta: MessageMeta::default(),
+        });
+        let blocks = [ContextBlock {
+            path: "AGENTS.md".to_owned(),
+            block: system.context_files.clone(),
+        }];
+        let breakdown = estimate(&input(&req, &system, &blocks));
+        let images = breakdown
+            .categories
+            .iter()
+            .find(|category| category.name == "images")
+            .expect("the images line");
+        assert_eq!(images.tokens, 1_280, "ceil(1200 × 800 ÷ 750)");
+        let sum: u64 = breakdown.categories.iter().map(|c| c.tokens).sum();
+        assert_eq!(sum, breakdown.total_tokens, "{breakdown:?}");
+        assert_eq!(
+            breakdown.total_tokens,
+            total_of(&req, 4, false),
+            "the host total is the estimator's total"
+        );
+        let lines = notice_lines(&report_of(&breakdown, None));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.trim_start().starts_with("images:")),
+            "{lines:?}"
+        );
     }
 }

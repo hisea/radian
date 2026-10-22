@@ -851,6 +851,7 @@ fn md_style(style: blocks::MdStyle, body_style: Style, theme: &Theme) -> Style {
             blocks::CtxTone::Assistant => theme.ctx_assistant,
             blocks::CtxTone::Reasoning => theme.ctx_reasoning,
             blocks::CtxTone::Results => theme.ctx_results,
+            blocks::CtxTone::Images => theme.ctx_images,
             blocks::CtxTone::Free => theme.ctx_free,
             blocks::CtxTone::Buffer => theme.ctx_buffer,
         },
