@@ -31,7 +31,8 @@ name, is skipped with one warning each.
 The body is Markdown the model follows. `$ARGUMENTS` in the body fills with
 the caller's arguments; without the placeholder, the arguments append to the
 body verbatim. Relative paths in the body resolve from the skill's own
-directory. The body is limited to 64 KiB: a longer body fails the call with
+directory. A skill's directory is a read-only root for the file tools: the
+model reads bundled files with `read`, `grep`, and `glob`, in both tiers. The body is limited to 64 KiB: a longer body fails the call with
 an error naming the size. Set `disable-model-invocation: true` in the
 frontmatter to keep a skill out of the system prompt while leaving it
 runnable by name. An `allowed-tools` field is read and ignored with one
