@@ -14,10 +14,10 @@
 //! - [`Verdict`] and [`verdict_set_digest`] — the records and the digest of an approval.
 //! - [`IntegrationRun`] and [`merge_ready`] — the merge candidate and the main check.
 //!
-//! Git runs through a private helper that always passes `-c core.hooksPath=` with
-//! `GIT_CONFIG_NOSYSTEM=1` and clears every inherited `GIT_*` variable that could point a
-//! command at another repository, so a repository hook never runs for a gate operation and
-//! a caller's environment never redirects it.
+//! Git runs through the crate's private helper (`crate::git`), which always passes
+//! `-c core.hooksPath=`, sets `GIT_CONFIG_NOSYSTEM=1` and clears every inherited `GIT_*`
+//! variable that could point a command at another repository, so a repository hook never
+//! runs for a gate operation and a caller's environment never redirects it.
 
 mod checkout;
 mod commands;

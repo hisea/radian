@@ -1,7 +1,8 @@
 //! The `[gate]` table of `config.toml` (ADR 0048 decisions 10 and 15).
 //!
-//! arc-store owns parsing `config.toml`; these types are the shape it hands to the gate. The
-//! names of the profile fields (`stages`, `commands`, `key_commands`) are the file's names.
+//! These are the one set of types for the `[gate]` table: the store parses `config.toml`
+//! into them (and supplies the file's defaults), and the gate's stages read them. The names
+//! of the profile fields (`stages`, `commands`, `key_commands`) are the file's names.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

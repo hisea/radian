@@ -13,7 +13,8 @@
 //!   only arc may set.
 //!
 //! Everything else arc stores (`runs/`, `attempts/`, `gates/`, `worktrees/`) is created by
-//! [`Store::init`] and belongs to later slices.
+//! [`Store::init`] and written by the gate (`crate::gate`) and the worker wrapper
+//! (`crate::work`).
 
 pub mod cli;
 pub mod config;
