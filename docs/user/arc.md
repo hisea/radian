@@ -303,7 +303,7 @@ An id that names no plan or task exits `1`.
 ## The gate run
 
 A task in `review.verifying` is checked against `verified_sha`, which is the pushed `head_sha` of the task's current attempt.
-`start` runs the gate in the same process after a pushed attempt.
+`start` runs the gate in the same process after a pushed attempt, and `radian arc run` verifies every task in `review.verifying` on each pass (including one a moved branch or a changed digest sent back).
 
 - arc fetches `[repository] remote` first.
   The remote's `work/<task>` must still be `head_sha`.
