@@ -1,6 +1,6 @@
 [package]
 name = "agent-extensions"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ description = "MCP stdio tool servers for radian-core"
 publish = false
 
 [dependencies]
-radian-core = { version = "0.1.2", path = "../radian-core" }
+radian-core = { version = "0.1.3", path = "../radian-core" }
 # Pinned: lifecycle and wire behavior were verified against this exact version.
 rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-async-rw"] }
 serde_json.workspace = true

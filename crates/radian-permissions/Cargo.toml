@@ -1,6 +1,6 @@
 [package]
 name = "radian-permissions"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,9 @@ repository.workspace = true
 description = "Permission layer: ApprovalPolicy + ToolRuleSet as a Hooks implementation (ADR 0012)"
 
 [dependencies]
-radian-core = { version = "0.1.2", path = "../radian-core" }
-radian-sandbox = { version = "0.1.2", path = "../radian-sandbox" }
-radian-session = { version = "0.1.2", path = "../radian-session" }
+radian-core = { version = "0.1.3", path = "../radian-core" }
+radian-sandbox = { version = "0.1.3", path = "../radian-sandbox" }
+radian-session = { version = "0.1.3", path = "../radian-session" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true

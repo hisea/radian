@@ -1,6 +1,6 @@
 [package]
 name = "agent-provider-contract"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,6 @@ description = "Adapter-neutral provider contract suite: every Model implementati
 publish = false
 
 [dependencies]
-radian-core = { version = "0.1.2", path = "../radian-core" }
+radian-core = { version = "0.1.3", path = "../radian-core" }
 serde_json.workspace = true
 tokio.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "agent-provider-openai-responses"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ publish = false
 testing = ["tokio/net", "tokio/io-util"]
 
 [dependencies]
-radian-core = { version = "0.1.2", path = "../radian-core" }
+radian-core = { version = "0.1.3", path = "../radian-core" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
 serde_json.workspace = true
 thiserror.workspace = true
