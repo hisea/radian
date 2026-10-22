@@ -641,6 +641,47 @@ fn the_runner_lock_is_exclusive_within_one_host() {
 }
 
 #[test]
+fn a_changed_plan_blocks_adding_a_task() {
+    let scratch = fixture("changed-plan");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "the request").unwrap();
+    let path = scratch
+        .repo()
+        .join(".radian/arc/plans")
+        .join(format!("{plan}.md"));
+    let text = read(&path);
+    fs::write(&path, text.replace("the request", "a hand edit")).unwrap();
+
+    let error = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .expect_err("a plan changed outside arc is not acted on");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains("changed outside arc"));
+    assert!(store.plans().unwrap()[0].plan.changed_outside_arc);
+
+    // Adopting the edit makes the plan usable again.
+    store.adopt(&plan).expect("a request edit is adoptable");
+    store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .expect("the plan matches its ledger again");
+}
+
+#[test]
+fn init_refuses_outside_a_repository_and_without_an_origin_remote() {
+    let scratch = Scratch::new("init-errors");
+    let error = Store::init(&scratch.path("plain"), false).expect_err("no repository");
+    assert_eq!(error.exit(), Exit::Error);
+    assert!(error.message().contains("git"), "{}", error.message());
+
+    fs::create_dir_all(scratch.repo()).unwrap();
+    git(&scratch.repo(), &["init", "-q"]);
+    let error = Store::init(&scratch.repo(), false).expect_err("no origin remote");
+    assert_eq!(error.exit(), Exit::Error);
+    assert!(error.message().contains("origin"), "{}", error.message());
+    assert!(!scratch.repo().join(".radian/arc/config.toml").exists());
+}
+
+#[test]
 fn a_task_file_parses_through_the_model() {
     let scratch = fixture("model");
     let store = initialized(&scratch);

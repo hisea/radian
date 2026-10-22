@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -769,6 +769,7 @@ fn open_lock_file(path: &Path) -> Result<File, Error> {
 /// Writes `bytes` to `path` the way every arc write happens: a temporary file in the same
 /// directory, fsync, rename over the target, fsync the parent directory.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let parent = path
         .parent()
         .ok_or_else(|| Error::Failed(format!("{} has no directory", path.display())))?;
@@ -778,11 +779,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".to_owned());
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
-    let temp = parent.join(format!(".{name}.tmp.{}.{nanos}", std::process::id()));
+    let sequence = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = parent.join(format!(".{name}.tmp.{}.{sequence}", std::process::id()));
     let write = || -> std::io::Result<()> {
         let mut file = OpenOptions::new()
             .create_new(true)

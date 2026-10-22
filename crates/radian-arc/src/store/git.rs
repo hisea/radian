@@ -45,7 +45,10 @@ pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
 pub(crate) fn repository_root(dir: &Path) -> Result<PathBuf, String> {
     let root = run(dir, &["rev-parse", "--show-toplevel"])?;
     if root.is_empty() {
-        return Err(format!("{} is not inside a git working tree", dir.display()));
+        return Err(format!(
+            "{} is not inside a git working tree",
+            dir.display()
+        ));
     }
     std::fs::canonicalize(&root)
         .map_err(|error| format!("cannot resolve the repository root `{root}`: {error}"))
