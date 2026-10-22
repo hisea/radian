@@ -70,23 +70,18 @@ through its id. Old entries leave when the registry fills.
 |---|---|
 | `op: read` | Read output. Returns the increment since the last read plus the settle state when done. The read window is 64 KiB per job; the file keeps the full history for the host. |
 | `op: wait` | Wait for completion, default 30 seconds, at most 600. Returns the increment and the settle. |
-| `op: kill` | Stop the process group. |
+| `op: kill` | Stop the whole session: SIGTERM, then SIGKILL after 2 seconds. |
 
 At most 4 background jobs run at once in one session. A fifth start fails
 with an error naming the limit. One approval covers a job's whole life.
 
 Type `/jobs` to open the jobs page. It lists the running background jobs in
 registry order. Type `/jobs kill <id>` to stop one job, `/jobs kill all` to
-stop every job. The kill sends SIGTERM to the process group, then SIGKILL
-after 2 seconds. A settle the model has not seen arrives as a system
+stop every job. The kill signals the job's whole session with SIGTERM,
+then SIGKILL after 2 seconds. A settle the model has not seen arrives as a system
 message: on a busy lane it joins the running turn, on an idle lane it opens
 a follow-up turn that wakes it. After three wake-started turns with no user
 input, a settle is injected only.
-
-Run `!<command>` to run a command in the tier shell, under the sandbox when
-one is enforced. Run `!!<command>` to keep its output out of model context;
-the block draws dimmer so the exclusion reads. A second `!` while one runs
-is refused, and `esc` cancels the running command.
 
 ## A worked job example
 
@@ -111,3 +106,29 @@ Wait for it to settle, or stop it:
 
 Ask the model through `ask_user` when you own the trade-off between waiting
 and killing. The question tool only appears when a human can answer.
+
+## Shell commands
+
+Run `!<command>` to run a command in the tier shell, under the sandbox when
+one is enforced. Run `!!<command>` to keep its output out of model context;
+the block draws dimmer so the exclusion reads. A second `!` while one runs
+is refused, and `esc` cancels the running command.
+
+Every command the `shell` tool runs, foreground or background, and every `!`
+or `!!` command, runs as `/bin/sh -c` in its own session, with an empty
+stdin and its output captured.
+That has three consequences:
+
+- It has no controlling terminal, so a program that needs one fails: an
+  editor, a pager, a password prompt on `/dev/tty`, an `isatty` check.
+  Pass the program the input it wants (for example `git commit -m`).
+- A signal sent to radian's process group never reaches the command.
+- A stop (`timeout_secs`, `esc` or `ctrl-c`, `job kill`, session exit) signals
+  the command's whole session: SIGTERM, then SIGKILL after 2 seconds.
+  A child that changed its own process group is still reached (GNU `timeout`
+  does that); one that starts a new session is not.
+
+Nothing you can set changes this: not a flag, a configuration key, or a tier.
+No notice is printed.
+In an untrusted project every command also carries the git safety keys; see
+[`permissions`](permissions.md) for the keys and values.

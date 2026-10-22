@@ -27,6 +27,8 @@ The `workspace` tier confines writes to the workspace.
 Switch to `full` only for a trusted project.
 Check trust when project skills are missing.
 Confirm the trust prompt once.
+See `permissions.md` when a git hook or filter does not run in `shell` or `!`.
+See `subagent-and-jobs.md` when a command wants a terminal or reads stdin.
 
 Find crash logs under `~/.radian/cache/diagnostics`.
 Files stay for 7 days.

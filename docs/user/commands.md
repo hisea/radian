@@ -155,6 +155,11 @@ not an unknown command. The rest of the line is the shell command verbatim;
 only surrounding whitespace is trimmed. It runs in the tier's shell, under
 the sandbox when one is enforced, and it never opens an approval box. A
 second `!` while one runs is refused. `esc` cancels a running `!` command.
+It runs exactly like a `shell` tool command: its own session, no terminal,
+an empty stdin, and a stop that signals the whole session (see
+[`subagent-and-jobs`](subagent-and-jobs.md)).
+In an untrusted project it also carries the git safety keys (see
+[`permissions`](permissions.md)).
 
 | Command | Syntax | What it does |
 |---|---|---|
