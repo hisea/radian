@@ -427,7 +427,9 @@ A client that closes before the handshake finishes exits `1` and says which hand
 Like every subcommand except `init` it refuses without setup (exit `3`) and names `radian arc init`.
 
 The server speaks MCP over stdio and is meant to be started by a lead, not by hand.
-It starts in the working directory it is given, so register it from inside the repository (or with that directory as its working directory): arc reads the repository that contains the current directory.
+It reads the repository that contains its working directory.
+Set `cwd` so it works whatever directory the session started in: in a project file at the repository root, `"cwd": "."` is that root (a relative `cwd` resolves against the file that declares it).
+Without `cwd`, register it from inside the repository, or give that directory as its working directory.
 
 Register it with Claude Code:
 
@@ -440,7 +442,7 @@ Or add it to a project `.mcp.json`, in the shared form every MCP client reads:
 ```json
 {
   "mcpServers": {
-    "arc": {"command": "radian", "args": ["arc", "mcp"]}
+    "arc": {"command": "radian", "args": ["arc", "mcp"], "cwd": "."}
   }
 }
 ```
@@ -450,7 +452,7 @@ Radian's own form is the same server with an `id`:
 ```json
 {
   "servers": [
-    {"id": "arc", "command": "radian", "args": ["arc", "mcp"]}
+    {"id": "arc", "command": "radian", "args": ["arc", "mcp"], "cwd": "."}
   ]
 }
 ```

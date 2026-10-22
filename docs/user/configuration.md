@@ -270,12 +270,12 @@ right = ["usage"]
 
 ## `[mcp]`
 
-Two spellings, same servers as `--mcp-config`: `mcp.servers` entries (`id`, `command`, `args`, `inherit_env`), or `mcp.mcpServers.<name>` tables (`command` plus `args` or a `url`).
+Two spellings, same servers as `--mcp-config`: `mcp.servers` entries (`id`, `command`, `args`, `cwd`, `inherit_env`), or `mcp.mcpServers.<name>` tables (`command` plus `args` or a `url`, and `cwd`).
 Remote entries warn and never start.
 `mcpServers` entries inherit `HOME` unless `inherit_env` says otherwise.
 Both spellings together are an error; duplicate ids are refused.
 The command line `--mcp-config` merges with this section; a shared id uses the command line entry with one warning.
-See `mcp` for the server rules.
+See `mcp` for the server rules, including `cwd`.
 
 ```toml
 [[mcp.servers]]

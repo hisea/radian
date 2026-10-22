@@ -67,7 +67,7 @@ Everything else, including every key, is removed.
 ## Child processes you start
 
 MCP servers and hook commands receive the environment their own rules describe, not this table.
-MCP servers inherit `HOME` by default plus the `inherit_env` names; `${VAR}` and `${VAR:-default}` in `command`, `args`, and `env` expand from the process environment.
+MCP servers inherit `HOME` by default plus the `inherit_env` names; `${VAR}` and `${VAR:-default}` in `command`, `args`, `cwd`, and `env` expand from the process environment.
 Hook commands run under the session sandbox when one is enforced.
 See `mcp` and `configuration` for those rules.
 
