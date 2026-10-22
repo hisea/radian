@@ -13,7 +13,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::gate::{DEFAULT_COMMAND_TIMEOUT_SECS, GateConfig, Profile, Stage, StageSpec};
+use crate::gate::{
+    DEFAULT_COMMAND_TIMEOUT_SECS, GateConfig, Profile, ReviewConfig, Stage, StageSpec,
+};
 use crate::store::model::{PREFIX_MAX_CHARS, valid_prefix};
 
 pub use crate::gate::STAGE_NAMES;
@@ -23,7 +25,11 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 /// Keys whose default is "not set" rather than a value. The manual's table names each
 /// one, and the drift test checks that it does.
-pub const OPTIONAL_KEYS: &[&str] = &["limits.max_cost_usd"];
+pub const OPTIONAL_KEYS: &[&str] = &[
+    "limits.max_cost_usd",
+    "gate.review.exec_args",
+    "gate.review.prompt_file",
+];
 
 /// The whole file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,6 +154,7 @@ fn default_gate() -> GateConfig {
         profile: "default".to_owned(),
         command_timeout_secs: DEFAULT_COMMAND_TIMEOUT_SECS,
         profiles,
+        review: ReviewConfig::default(),
     }
 }
 
@@ -197,6 +204,11 @@ task_prefix = "TK"             # 1 to 4 uppercase letters; the first letters of 
 profile = "default"
 command_timeout_secs = 3600
 
+[gate.review]
+# exec_args = ["--model", "m"]   # not set: the same as [worker] exec_args
+timeout_secs = 900              # wall-time limit of one review session; 0 waits forever
+# prompt_file = "review.md"      # not set: the built-in prompt only
+
 [gate.profiles.default]
 stages = [{{ stage = "commands", required = true }}, {{ stage = "human", required = true }}]
 commands = []                 # shell command lines, run in order on the gate checkout
@@ -210,6 +222,7 @@ key_commands = []             # what the integration stage runs on the merge can
 /// no profile, and an id prefix that is not 1 to 4 uppercase letters (or is the same for
 /// both kinds) are errors that name the offender.
 pub fn parse(text: &str) -> Result<Config, String> {
+    check_review_shape(text)?;
     let config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
     if config.schema_version != SCHEMA_VERSION {
         return Err(format!(
@@ -238,7 +251,49 @@ pub fn parse(text: &str) -> Result<Config, String> {
             config.ids.plan_prefix
         ));
     }
+    if let Some(file) = &config.gate.review.prompt_file {
+        check_prompt_file(file)?;
+    }
     Ok(config)
+}
+
+/// Names a `gate.review.exec_args` that is not an array of strings before the TOML
+/// deserializer reports a position without the key. A non-array value is refused by name.
+fn check_review_shape(text: &str) -> Result<(), String> {
+    let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
+    let Some(review) = document.get("gate").and_then(|gate| gate.get("review")) else {
+        return Ok(());
+    };
+    if let Some(exec_args) = review.get("exec_args")
+        && !exec_args
+            .as_array()
+            .is_some_and(|items| items.iter().all(toml::Value::is_str))
+    {
+        return Err(
+            "`gate.review.exec_args` must be an array of strings (the `radian exec` arguments \
+             of the review session)"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// `gate.review.prompt_file` is read from the repository root: it must be a relative path
+/// that does not climb out of it.
+fn check_prompt_file(file: &str) -> Result<(), String> {
+    let path = Path::new(file);
+    if file.trim().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "`gate.review.prompt_file` is `{file}`; it must be a path relative to the \
+             repository root without `..`"
+        ));
+    }
+    Ok(())
 }
 
 /// A prefix must be 1 to 4 ASCII uppercase letters; the error names the key.

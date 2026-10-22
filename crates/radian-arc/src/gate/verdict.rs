@@ -44,6 +44,23 @@ pub struct CommandRecord {
     pub log: String,
 }
 
+/// The findings a `review` session reported (ADR 0048 decision 10).
+///
+/// Field order is the serialized order. A review verdict records all four fields, empty
+/// lists included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewReport {
+    /// 2 to 6 sentences on what the change does.
+    pub summary: String,
+    /// What must change before the change can merge. Empty: the stage passes.
+    pub blocking: Vec<String>,
+    /// Improvements that do not block.
+    pub suggestions: Vec<String>,
+    /// What the session checked and found correct.
+    pub verified: Vec<String>,
+}
+
 /// The verdict of one stage for one commit.
 ///
 /// Field order is the serialized order and is part of the canonical form the digest hashes.
@@ -85,11 +102,22 @@ pub struct Verdict {
     /// sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflict_paths: Vec<String>,
-    /// A `human` verdict only: who approved it. `auto` is the scheduling loop at auto level
+    /// A `review` verdict only: who approved it. `auto` is the scheduling loop at auto level
     /// `merge`; absent means the owner approved it with `radian arc merge` (ADR 0048
     /// decision 12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approver: Option<String>,
+    /// A `review` verdict only: the findings the session reported (ADR 0048 decision 10).
+    /// Absent when the stage ran no session (a candidate conflict) or its output was unusable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewReport>,
+    /// A `review` verdict only: the session id of every run the stage made, in order. Two
+    /// entries mean the first run's output was unusable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_session_ids: Vec<String>,
+    /// A `review` verdict only: the summed cost of the runs, in micros of a US dollar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_cost_micros: Option<u64>,
 }
 
 impl Verdict {
@@ -118,6 +146,9 @@ impl Verdict {
             candidate_sha: None,
             conflict_paths: Vec::new(),
             approver: None,
+            review: None,
+            review_session_ids: Vec::new(),
+            review_cost_micros: None,
         }
     }
 

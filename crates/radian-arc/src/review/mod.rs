@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::gate::{
-    CommandRun, IntegrationRun, Stage, StageSpec, Verdict, attempt_dir, effective_stages,
-    merge_ready, required_passed, verdict_path, verdict_set_digest,
+    CommandRun, IntegrationRun, ReviewRun, Stage, StageSpec, Verdict, attempt_dir,
+    effective_stages, merge_ready, required_passed, verdict_path, verdict_set_digest,
 };
 use crate::store::{Error, Store, model};
 
@@ -42,7 +42,7 @@ pub const REJECT_FILE: &str = "reject.md";
 pub const MAX_INTEGRATION_ROUNDS: u32 = 3;
 /// The stages this build can run in verification. A listed stage outside it refuses with
 /// "stage <name> is not built yet".
-pub const BUILT_STAGES: [Stage; 1] = [Stage::Commands];
+pub const BUILT_STAGES: [Stage; 2] = [Stage::Commands, Stage::Review];
 
 /// Why a verify or merge did not advance the task: a stage that failed, a branch that
 /// moved, or a stage this build does not run yet.
@@ -224,8 +224,8 @@ impl Rejected {
 /// `review.verifying` and the reason is recorded. A verdict that already exists for this
 /// attempt and stage is reused, so a crash between stages resumes instead of rerunning.
 ///
-/// A `commands` failure moves the task to `review.rework_pending`. Every required stage
-/// passing moves it to `review.awaiting_human`, with `verified_sha` and
+/// A `commands`, `mutation` or `review` failure moves the task to `review.rework_pending`.
+/// Every required stage passing moves it to `review.awaiting_human`, with `verified_sha` and
 /// `verdict_set_digest` recorded.
 ///
 /// # Errors
@@ -233,6 +233,19 @@ impl Rejected {
 /// The task is not `review.verifying`, the remote moved, a listed stage is not built in
 /// this build, a verdict for another sha exists, or the gate could not run.
 pub fn verify(store: &Store, task_id: &str) -> Result<Verified, Error> {
+    verify_with(store, task_id, None)
+}
+
+/// [`verify`] with an optional review program (test-only; see [`ReviewRun::program`]).
+///
+/// # Errors
+///
+/// As [`verify`].
+pub fn verify_with(
+    store: &Store,
+    task_id: &str,
+    review_program: Option<&Path>,
+) -> Result<Verified, Error> {
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
@@ -315,24 +328,70 @@ pub fn verify(store: &Store, task_id: &str) -> Result<Verified, Error> {
             }
             continue;
         }
-        let Stage::Commands = spec.stage else {
-            // `effective_stages` cannot produce an unbuilt stage here: it was refused above.
-            return Err(Error::Failed(format!(
-                "stage {} is not built yet",
-                spec.stage
-            )));
+        let verdict = match spec.stage {
+            Stage::Commands => CommandRun {
+                repository: store.repo(),
+                remote: &remote,
+                task: task_id,
+                attempt: &label,
+                sha: &head,
+                main_ref: &main_ref,
+                commands: &profile.commands,
+                timeout: config.gate.command_timeout(),
+            }
+            .run()
+            .map_err(gate_error)?,
+            Stage::Review => {
+                // The diff the session reviews is the task's own change (ADR 0048 decision
+                // 10), so the task must still carry the base it started from.
+                let base = task
+                    .base_sha
+                    .clone()
+                    .filter(|sha| !sha.is_empty())
+                    .ok_or_else(|| Error::Refused(format!("task `{task_id}` has no `base_sha`")))?;
+                let review = &config.gate.review;
+                let (exec_args, key) = match &review.exec_args {
+                    Some(args) => (args.as_slice(), "gate.review.exec_args"),
+                    None => (config.worker.exec_args.as_slice(), "worker.exec_args"),
+                };
+                // The stage owns the read-only mount and the session flags: an argument that
+                // repeated one would overrule them (ADR 0048 decision 10).
+                if let Some(owned) = exec_args
+                    .iter()
+                    .find_map(|arg| crate::gate::owned_name(arg))
+                {
+                    return Err(Error::Refused(format!(
+                        "`{key}` must not repeat `{owned}`: the review stage sets it on the \
+                         review session's `radian exec` line"
+                    )));
+                }
+                let prompt_file = review
+                    .prompt_file
+                    .as_ref()
+                    .map(|file| store.repo().join(file));
+                ReviewRun {
+                    repository: store.repo(),
+                    remote: &remote,
+                    task: task_id,
+                    attempt: &label,
+                    sha: &head,
+                    base_sha: &base,
+                    brief: &task.body,
+                    main_ref: &main_ref,
+                    exec_args,
+                    prompt_file: prompt_file.as_deref(),
+                    timeout: review.timeout(),
+                    program: review_program,
+                }
+                .run()
+                .map_err(gate_error)?
+            }
+            other => {
+                // `effective_stages` cannot produce an unbuilt stage here: it was refused
+                // above.
+                return Err(Error::Failed(format!("stage {other} is not built yet")));
+            }
         };
-        let run = CommandRun {
-            repository: store.repo(),
-            remote: &remote,
-            task: task_id,
-            attempt: &label,
-            sha: &head,
-            main_ref: &main_ref,
-            commands: &profile.commands,
-            timeout: config.gate.command_timeout(),
-        };
-        let verdict = run.run().map_err(gate_error)?;
         if !verdict.is_pass() {
             return failed_stage(store, &task, &label, &head, &verdict, path);
         }
@@ -387,8 +446,21 @@ pub fn verify(store: &Store, task_id: &str) -> Result<Verified, Error> {
 /// The claim is refused, or the task file changed outside arc. A refused verification is in
 /// [`Reverified::verification`], not in the outer result.
 pub fn reverify(store: &Store, task_id: &str) -> Result<Reverified, Error> {
+    reverify_with(store, task_id, None)
+}
+
+/// [`reverify`] with an optional review program (test-only; see [`ReviewRun::program`]).
+///
+/// # Errors
+///
+/// As [`reverify`].
+pub fn reverify_with(
+    store: &Store,
+    task_id: &str,
+    review_program: Option<&Path>,
+) -> Result<Reverified, Error> {
     let claim = crate::store::attempt_ops::claim_reverify(store, task_id)?;
-    let verification = verify(store, task_id);
+    let verification = verify_with(store, task_id, review_program);
     Ok(Reverified {
         attempt: claim.attempt,
         attempt_id: claim.attempt_id,
@@ -707,16 +779,23 @@ fn approve(
 }
 
 /// The text of a failed stage: its reason, and the conflicted paths when it is `conflict`.
+/// A `review_blocking` failure lists its blocking items, because the rework reason is how the
+/// lead learns what to fix.
 fn failure_text(verdict: &Verdict) -> String {
     let reason = verdict
         .reason
         .clone()
         .unwrap_or_else(|| "failed".to_owned());
     if reason == "conflict" && !verdict.conflict_paths.is_empty() {
-        format!("conflict: {}", verdict.conflict_paths.join(", "))
-    } else {
-        reason
+        return format!("conflict: {}", verdict.conflict_paths.join(", "));
     }
+    if reason == "review_blocking"
+        && let Some(review) = &verdict.review
+        && !review.blocking.is_empty()
+    {
+        return format!("review_blocking: {}", review.blocking.join("; "));
+    }
+    reason
 }
 
 fn integration_verdict(store: &Store, task: &str, label: &str) -> Result<PathBuf, Error> {
@@ -908,8 +987,8 @@ fn clear_reason(store: &Store, task: &str, label: &str) {
     let _ = fs::remove_file(dir.join(REVIEW_FILE));
 }
 
-/// Every verdict file of every attempt of `task`, in attempt order.
-fn task_verdicts(store: &Store, task: &str) -> Result<Vec<Verdict>, Error> {
+/// Every verdict file of every attempt of `task`, in attempt order, with its path.
+fn task_verdict_files(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict)>, Error> {
     let attempts = store.root().join("runs").join(task).join("attempts");
     let mut verdicts = Vec::new();
     let Ok(entries) = fs::read_dir(&attempts) else {
@@ -933,10 +1012,29 @@ fn task_verdicts(store: &Store, task: &str) -> Result<Vec<Verdict>, Error> {
             .collect();
         files.sort();
         for path in files {
-            verdicts.push(Verdict::read(&path).map_err(gate_error)?);
+            verdicts.push((path.clone(), Verdict::read(&path).map_err(gate_error)?));
         }
     }
     Ok(verdicts)
+}
+
+/// Every verdict of every attempt of `task`, in attempt order.
+fn task_verdicts(store: &Store, task: &str) -> Result<Vec<Verdict>, Error> {
+    Ok(task_verdict_files(store, task)?
+        .into_iter()
+        .map(|(_, verdict)| verdict)
+        .collect())
+}
+
+/// The task's newest `review` verdict and its path, across every attempt: what `show`
+/// reports as the review's summary and findings. A later review (a rework, a `reverify`)
+/// replaces an earlier one.
+#[must_use]
+pub fn latest_review_verdict(store: &Store, task: &str) -> Option<(PathBuf, Verdict)> {
+    task_verdict_files(store, task)
+        .ok()?
+        .into_iter()
+        .rfind(|(_, verdict)| verdict.stage == Stage::Review)
 }
 
 /// The digest of the verification set for `sha`: every counted verdict except the owner's
