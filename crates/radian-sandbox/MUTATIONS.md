@@ -221,7 +221,7 @@ worktree `<worktree>/s0b-gitdir`，分支 `dogfood/s0b-gitdir`。每个变异
 |---|---|---|---|
 | HE-1 | 白名单不含 `HERDR_ENV/HERDR_PANE_ID/HERDR_TAB_ID/HERDR_WORKSPACE_ID/HERDR_SOCKET_PATH/HERDR_BIN_PATH` | `the_shell_environment_carries_herdr_and_allow_env`（`left: "\|foo-value\|"`，`pane-9` 为空） | ✅ 1 failed |
 
-## Linux 上的 ADR 0038 carve-out（2026-10-22）
+## Linux 上的 ADR 0038 carve-out
 
 把 `crates/radian-sandbox/src/bwrap.rs` 的修复临时改回修复前的形态（`git_access` 被忽略），
 跑完从 `.radian/bwrap.rs.orig` 还原，`sha256sum` 前后一致。跑
