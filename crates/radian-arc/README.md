@@ -5,9 +5,12 @@ not a separate program. This crate is its control plane, in these modules:
 
 - `store` — `<repository>/.radian/arc/`: `config.toml`, plans, tasks, the ledger, the locks
   and the transactions that change them, behind `radian arc init`, `add`, `list`, `show`,
-  `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel` and `reset-budget`.
+  `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, `reset-budget`, `merge`, `reject`
+  and `run`.
 - `attempt` — one attempt's life: the claim, the wrapper child, the stall and wall timers,
   the applied result, cancel, and the reconcile step.
+- `run` — `radian arc run`, the scheduling loop: reconcile, release retries, verify, start
+  what the auto levels allow, and merge at auto level `merge`.
 - `gate` — a fixed sequence of stages against one commit: each stage's separate checkout, the
   `commands` stage, verdicts and their digest, and the integration candidate.
 - `review` — verification of a pushed attempt, the owner's approval and merge, and reject.
@@ -86,11 +89,12 @@ setup, naming `radian arc init`; with setup, this build has no TUI and says so.
 
 ## Attempts
 
-`radian arc start <task>` is the v0 runner: there is no scheduling loop yet, so the owner
-runs one task at a time. It reconciles `doing`, releases a due retry, and claims the task in
-one transaction (`todo.ready` → `doing.starting`, `attempt` + 1, `<task>-<n>`, a random
-token). A claim is refused (exit 3) when the task is not ready, its plan is not confirmed, an
-`after` task is not done, or `[limits] concurrency` tasks are already in `doing`.
+`radian arc start <task>` runs one task and waits; `radian arc run` is the scheduling loop and
+uses the same attempt path. `start` reconciles `doing`, releases a due retry, and claims the
+task in one transaction (`todo.ready` → `doing.starting`, `attempt` + 1, `<task>-<n>`, a
+random token). A claim is refused (exit 3) when the task is not ready, its plan is not
+confirmed, an `after` task is not done, or `[limits] concurrency` tasks are already in
+`doing`. A task already in `review.verifying` resumes verification instead of being claimed.
 
 It then runs the current executable as `arc work --task … --attempt … --token … --remote …
 --main-branch … [--resume] [--allow-noop] -- <[worker] exec_args>`, with the task body on
@@ -106,11 +110,39 @@ wrapper or `start` process alone, and turns a dead attempt without a result into
 `infrastructure` retry.
 
 `store::attempt_ops` holds the store side (`claim`, `apply`, `release_retries`,
-`reset_budget`) and the two closed lists the manual's drift test reads: `FAILURE_CLASSES` and
-the backoff constants (10 s, doubling, capped at 5 minutes). Cost is the `Result.cost`
-delta against the previous attempt (ADR 0044), added to the task's `cost_usd`; a reached task
-or plan budget pauses the task at `todo.paused_budget` instead of retrying, and a plan budget
-also sets the plan's `auto` to `off`.
+`record_auto_rework`, `reset_budget`) and the two closed lists the manual's drift test reads:
+`FAILURE_CLASSES` and the backoff constants (10 s, doubling, capped at 5 minutes). Cost is the
+`Result.cost` delta against the previous attempt (ADR 0044), added to the task's `cost_usd`; a
+reached task or plan budget pauses the task at `todo.paused_budget` instead of retrying, and a
+plan budget also sets the plan's `auto` to `off`. `record_auto_rework` counts a stage or
+integration failure while the plan is not `off` in the task's `auto_rework`; past
+`[limits] max_auto_rework` it writes `paused.json` and sets the plan's `auto` to `off`.
+
+## The scheduling loop
+
+`run::run` takes `runner.lock` without waiting (a held lock is exit 4). One pass repeats until
+a pass changes nothing, in this order:
+
+1. `attempt::reconcile` for every task in `doing`;
+2. `attempt_ops::release_retries` for every due `todo.retry_wait`;
+3. `review::verify` for every task in `review.verifying`, for every plan (a plan at `auto`
+   `off` is verified too);
+4. for each confirmed plan at `auto` `run` or `merge`, claim every `todo.ready` task whose
+   `after` tasks are merged, up to `[limits] concurrency` claims, then run them on one thread
+   per claim (`attempt::run_claim`);
+5. for each confirmed plan at `auto` `merge`, `review::merge_as(store, task, Some("auto"))`
+   for every task in `review.awaiting_human`, and for a task an earlier merge left in
+   `integrating` or `ready_to_merge`.
+
+A stage failure or a failed integration counts one automatic rework
+(`attempt_ops::record_auto_rework`); past the limit the plan's `auto` becomes `off` and the
+task stays in `rework_pending`. A merge refusal that changed the task back to
+`review.verifying` (a moved branch, a changed digest) is a transition, so the loop verifies it
+on the next pass; a refusal that changed nothing is a summary note, not a spin.
+
+At quiet, the report lists each open plan and task with what it waits on (a person, an
+`after` task, a retry time, a rework brief, a free concurrency slot). `run::run` returns the
+report; `radian arc run` prints it.
 
 ## Gate checkout
 
@@ -195,8 +227,10 @@ not depend on input order, and a new attempt's verdict for the same sha and stag
 
 ## Integration
 
-`IntegrationRun` takes `gates/integration.lock`, fetches `remote`, then compares `main_ref`
-(after the fetch, for example `refs/remotes/<remote>/main`) with the task's `base_sha`:
+`IntegrationRun` takes `gates/integration.lock`, fetches `remote` for the work branch and
+fetches the remote main with an explicit refspec
+(`+refs/heads/<main>:refs/remotes/<remote>/<main>`), then compares `main_ref` (for example
+`refs/remotes/<remote>/main`) with the task's `base_sha`:
 
 - still `base_sha`: the candidate is `head_sha`, and the key commands run in the
   `integration` checkout at `head_sha`;
@@ -210,9 +244,11 @@ not depend on input order, and a new attempt's verdict for the same sha and stag
 The key commands run on the candidate under the same rules as `commands` (order, stop at the
 first failure, own timeout, own logs). The verdict records the main it used as `base_sha`.
 
-`merge_ready(repository, remote, main_ref, verdict)` fetches `remote` again and is true only for
-a passing integration verdict with a candidate whose recorded `base_sha` is still the remote
-main. A main that moved after integration makes it false (ADR 0048 decision 6).
+`merge_ready(repository, remote, main_ref, verdict)` fetches the remote main with the same
+explicit refspec and is true only for a passing integration verdict with a candidate whose
+recorded `base_sha` is still the remote main. A main that moved after integration makes it
+false (ADR 0048 decision 6). A clone whose configured fetch refspec leaves main out therefore
+still reads the current main.
 
 ## `work`: the trusted worker wrapper
 
@@ -226,10 +262,13 @@ internal too: `radian-tui` takes them from the repository's `[repository] remote
 One run:
 
 1. Creates or reuses the linked worktree `<repository>/.radian/arc/worktrees/<task>` on
-   branch `work/<task>`. A first attempt fetches `<remote> <main-branch>` and starts from the
-   fetched tip, recording `base_sha` in `<repository>/.radian/arc/attempts/<task>/base_sha`;
-   a later attempt reuses that base. A flock on the worktree directory keeps two attempts of
-   one task apart (a second wrapper exits 4).
+   branch `work/<task>`. Creation takes a blocking flock on `worktrees/` itself, because two
+   attempts that start together would otherwise both write `.git/config` (`config.lock`). A
+   first attempt fetches `<remote> <main-branch>` with an explicit refspec and starts from
+   the fetched tip, recording `base_sha` in
+   `<repository>/.radian/arc/attempts/<task>/base_sha`; a later attempt reuses that base. A
+   flock on the worktree directory keeps two attempts of one task apart (a second wrapper
+   exits 4).
 2. Before a reused worktree's child runs, checks that `work/<task>` still points at the tip
    the previous attempt recorded in `attempts/<task>/last_head` and that the worktree HEAD
    is still on that branch. A ref that moved outside this task (another worker can move it
@@ -241,9 +280,13 @@ One run:
 4. Runs the current executable as `radian exec -p - --session-id <task> --workspace
    <worktree> --profile workspace --yes --output jsonl` (a rework attempt passes
    `--resume <task>` instead of `--session-id`), with the caller's extra arguments and one
-   hidden `--deny-read <path>` per entry of `.radian/arc/` except `worktrees/`. Its stdout
-   is `runs/<task>/attempts/<attempt>/result.jsonl`, its stderr `stderr.log`; the attempt
-   fields go to `execution.json`.
+   hidden `--deny-read <path>` per entry of `.radian/arc/` except `worktrees/`. The worker
+   runs in its own process group, so the SIGTERM the wrapper forwards from a cancel reaches
+   it and every child that stays in the group. Its stdout is
+   `runs/<task>/attempts/<task>-<n>/result.jsonl`, its stderr `stderr.log`; the attempt
+   fields go to `execution.json`. A hidden `--worker-command <shell command>` replaces the
+   `radian exec` child for the forwarding tests; it exists only for tests and is not a user
+   input.
 5. After the child exits, reads the last `Result` line and the exit code, reads
    `head_sha`, lists uncommitted and untracked paths, and checks: the branch exists,
    `head_sha` descends from `base_sha` and from the tip the attempt started on, the worktree
@@ -252,7 +295,7 @@ One run:
 6. Pushes `work/<task>` to the configured remote only when the outcome is `completed` and
    every check passed, then verifies the remote ref with `git ls-remote`.
 7. Prints one `AttemptFinished` JSON line as its last stdout line (and writes it to
-   `runs/<task>/attempts/<attempt>/attempt_finished.json` and
+   `runs/<task>/attempts/<task>-<n>/attempt_finished.json` and
    `attempts/<task>/<attempt>/status.json`):
 
    ```json
@@ -277,12 +320,13 @@ OS user, so that is not isolation.
 
 ## Verification
 
-`radian arc start` continues into verification after a pushed attempt (`review::verify`):
-the remote's `work/<task>` must still equal the task's `head_sha`, then the effective stages
-of the profile plus the task's extra stages run in order, except `human`, each through the
-gate. This build runs only `commands`; a profile or task that lists `mutation`, `review` or
-`ci` is refused with `stage <name> is not built yet` and the task stays in
-`review.verifying`. An existing verdict for the current attempt and stage is reused.
+`radian arc start`, and `radian arc run` for every plan, run verification after a pushed
+attempt (`review::verify`): the remote's `work/<task>` must still equal the task's
+`head_sha`, then the effective stages of the profile plus the task's extra stages run in
+order, except `human`, each through the gate. This build runs only `commands`; a profile or
+task that lists `mutation`, `review` or `ci` is refused with `stage <name> is not built yet`
+and the task stays in `review.verifying`. An existing verdict for the current attempt and
+stage is reused.
 
 Any failing stage moves the task to `review.rework_pending`. When every required non-`human`
 stage passed, the task records `verified_sha` and `verdict_set_digest` and moves to
@@ -290,18 +334,21 @@ stage passed, the task records `verified_sha` and `verdict_set_digest` and moves
 without the `human` and `integration` verdicts, which are written later.
 
 `review::rework_reason` is what `show` prints for a task in `review.verifying` or
-`review.rework_pending`: the owner's reject note (`reject.md`) or the last verify/merge
-reason (`review.json`).
+`review.rework_pending`: the owner's reject note (`reject.md`), the last verify/merge reason
+(`review.json`), or the automatic-rework pause (`paused.json`).
 
 ## Merge and reject
 
 `radian arc merge <task>` requires `review.awaiting_human`, the remote `work/<task>` still at
-`verified_sha`, and the recomputed digest equal to the recorded one. It writes the owner's
-`human` pass verdict and moves to `review.integrating`, runs `IntegrationRun` with the
-profile's `key_commands`, moves to `review.ready_to_merge`, and pushes
-`<candidate>:refs/heads/<main>` without force. A main that moved after integration, or a
-rejected push, makes it integrate again, at most three runs per command. On success the task
-is `done.merged` and its worktree is removed; the branch stays.
+`verified_sha`, every required stage passed for that sha, and the recomputed digest equal to
+the recorded one. A changed digest returns the task to `review.verifying` with the reason,
+like a moved branch, so `run` or `start` verifies it again. It writes the owner's `human`
+pass verdict (`approver` absent, or `auto` when `merge_as` was called by `run`) and moves to
+`review.integrating`, runs `IntegrationRun` with the profile's `key_commands`, moves to
+`review.ready_to_merge`, and pushes `<candidate>:refs/heads/<main>` without force. A main
+that moved after integration, or a rejected push, makes it integrate again, at most three
+runs per command. On success the task is `done.merged` and its worktree is removed; the
+branch stays.
 
 Each integration run writes its own verdict, under
 `runs/<task>/attempts/<attempt id>[.i<n>]/verdicts/integration.json`, so no verdict is ever
@@ -320,9 +367,9 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   asking for a new approval.
 - `list` and `show` never use the network; only `merge` checks a moved branch.
 - A reject note that is empty after trimming is a usage error.
-- The gate's verdict and reason paths use the attempt id (`<task>-<n>`) as the run
-  directory, as the gate's own tests and verdict example do; the wrapper's `runs/` and
-  `attempts/` records still use the numeric attempt.
+- The gate's verdict, reason and worker output paths all use the attempt id (`<task>-<n>`) as
+  the run directory; the host-local `attempts/<task>/<n>/` records keep the numeric attempt
+  (decision 7).
 - The merged task's worktree is removed with plain `git worktree remove`; a checkout with
   uncommitted files is left in place and reported as a warning, never forced away.
 - The remote is always a parameter, never the literal `origin`: the caller passes
@@ -344,5 +391,4 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 
 ## Not here yet
 
-The scheduling loop, `radian arc run`, and the arc TUI. The gate stages `mutation`, `review`
-and `ci` are refused until they are built.
+The arc TUI. The gate stages `mutation`, `review` and `ci` are refused until they are built.

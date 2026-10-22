@@ -64,6 +64,11 @@ pub struct Options {
     /// Extra `radian exec` arguments after `--` (the model route in tests: `--model`,
     /// `--base-url`).
     pub extra_args: Vec<String>,
+    /// Test-only: run this shell command as the worker instead of `radian exec`. It exists so
+    /// the forwarding tests can start a plain process that spawns a child of its own, which
+    /// a real `radian exec` does not (its tools run in their own sessions). Never set by
+    /// arc; an input that exists only for tests is not documented (AGENTS.md).
+    pub worker_command: Option<String>,
 }
 
 /// Exit codes (ADR 0048 decision 1): 0 success, 1 error, 2 usage, 4 a lock is held.
@@ -92,13 +97,13 @@ static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 /// Whether a SIGTERM arrived before the child existed (or after it exited).
 static TERM_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// The SIGTERM handler: remember the request and forward it to the worker. Both the atomic
-/// stores and `kill(2)` are async-signal-safe.
+/// The SIGTERM handler: remember the request and forward it to the worker's whole process
+/// group. Both the atomic stores and `killpg(2)` are async-signal-safe.
 extern "C" fn forward_sigterm(_signal: libc::c_int) {
     TERM_REQUESTED.store(true, Ordering::SeqCst);
     let pid = CHILD_PID.load(Ordering::SeqCst);
     if pid > 0 {
-        process::signal(pid as u32, process::SIGTERM);
+        process::signal_group(pid as u32, process::SIGTERM);
     }
 }
 
@@ -164,7 +169,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         .join("runs")
         .join(&o.task)
         .join("attempts")
-        .join(o.attempt.to_string());
+        .join(format!("{}-{}", o.task, o.attempt));
     let attempt_dir = arc
         .join("attempts")
         .join(&o.task)
@@ -197,7 +202,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     // A SIGTERM that arrived during the worktree setup is forwarded as soon as there is a
     // child to forward it to.
     if TERM_REQUESTED.load(Ordering::SeqCst) {
-        process::signal(pid, process::SIGTERM);
+        process::signal_group(pid, process::SIGTERM);
     }
     let processor_started_at = process_start(pid).unwrap_or_else(|| started_at.clone());
     let wrapper_pid = std::process::id();
@@ -409,11 +414,28 @@ fn ensure_worktree(
     remote: &str,
     main_branch: &str,
 ) -> Result<bool, Failure> {
-    if let Some(parent) = worktree.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            Failure::error(format!("cannot create {}: {error}", parent.display()))
-        })?;
-    }
+    let parent = worktree
+        .parent()
+        .ok_or_else(|| Failure::error(format!("{} has no directory", worktree.display())))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| Failure::error(format!("cannot create {}: {error}", parent.display())))?;
+    // Attempts that start together (`[limits] concurrency` above one) must not run
+    // `git worktree add` at the same time: git writes the branch's configuration, and two
+    // writers collide on `.git/config.lock` and make the second attempt fail. The
+    // `worktrees/` directory's own flock makes creation (and the fetch behind it) one at a
+    // time; the guard lives until this function returns, before the worker starts.
+    let _setup = File::open(parent).map_err(|error| {
+        Failure::error(format!(
+            "cannot open {} for the setup lock: {error}",
+            parent.display()
+        ))
+    })?;
+    _setup.lock_exclusive().map_err(|error| {
+        Failure::error(format!(
+            "cannot lock {} for the setup: {error}",
+            parent.display()
+        ))
+    })?;
     if worktree.join(".git").exists() {
         let top = git(worktree, &["rev-parse", "--show-toplevel"]).map_err(|error| {
             Failure::error(format!(
@@ -638,30 +660,52 @@ fn spawn_child(
     stderr_path: &Path,
     brief: &str,
 ) -> Result<Child, Failure> {
-    let executable = std::env::current_exe()
-        .map_err(|error| Failure::error(format!("cannot find the current executable: {error}")))?;
-    let mut command = Command::new(executable);
-    command.arg("exec");
-    // `--session-id` and `--resume` are exclusive in `radian exec` (ADR 0022/0023): a
-    // rework attempt resumes the task's session, a first attempt names it.
-    if o.resume {
-        command.arg("--resume").arg(&o.task);
-    } else {
-        command.arg("--session-id").arg(&o.task);
+    let mut command = match &o.worker_command {
+        Some(shell) => {
+            // Test-only (see [`Options::worker_command`]). `sh` starts in the wrapper's own
+            // working directory and its background children stay in its process group, so
+            // the group signal this module forwards can be observed.
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(shell);
+            command
+        }
+        None => {
+            let executable = std::env::current_exe().map_err(|error| {
+                Failure::error(format!("cannot find the current executable: {error}"))
+            })?;
+            let mut command = Command::new(executable);
+            command.arg("exec");
+            // `--session-id` and `--resume` are exclusive in `radian exec` (ADR 0022/0023): a
+            // rework attempt resumes the task's session, a first attempt names it.
+            if o.resume {
+                command.arg("--resume").arg(&o.task);
+            } else {
+                command.arg("--session-id").arg(&o.task);
+            }
+            command
+                .arg("--workspace")
+                .arg(worktree)
+                .arg("--profile")
+                .arg("workspace")
+                .arg("--yes")
+                .arg("--output")
+                .arg("jsonl");
+            for path in deny {
+                command.arg("--deny-read").arg(path);
+            }
+            command.args(&o.extra_args);
+            command.arg("-p").arg("-");
+            command
+        }
+    };
+    // The worker gets its own process group, so the SIGTERM the wrapper forwards reaches it
+    // (and every child that stays in the group) and never the wrapper or the scheduling
+    // process above it (ADR 0048 decision 9).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
-    command
-        .arg("--workspace")
-        .arg(worktree)
-        .arg("--profile")
-        .arg("workspace")
-        .arg("--yes")
-        .arg("--output")
-        .arg("jsonl");
-    for path in deny {
-        command.arg("--deny-read").arg(path);
-    }
-    command.args(&o.extra_args);
-    command.arg("-p").arg("-");
     let stdout = File::create(result_path).map_err(|error| {
         Failure::error(format!("cannot create {}: {error}", result_path.display()))
     })?;

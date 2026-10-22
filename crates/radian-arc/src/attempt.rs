@@ -6,8 +6,9 @@
 //! wrapper's result in one transaction. `radian arc cancel <task>` stops a running attempt
 //! the same way: SIGTERM to the wrapper, a grace period, then SIGKILL.
 //!
-//! There is no scheduling loop yet. [`reconcile`] is the restart step a later loop calls, and
-//! `start` and `cancel` call it first as a hidden step (decision 9, last bullet).
+//! There is no in-process scheduling loop here: [`crate::run`] owns the loop and calls
+//! [`run_claim`] for every attempt it claims. [`reconcile`] is the restart step the loop and
+//! `start` and `cancel` call (decision 9, last bullet).
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -15,7 +16,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use super::process;
-use crate::store::attempt_ops::{self, Applied, Class};
+use crate::store::attempt_ops::{self, Applied, Claim, Class};
 use crate::store::{Error, Store, model};
 
 pub use crate::store::attempt_ops::FAILURE_CLASSES;
@@ -28,7 +29,9 @@ const POLL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Started {
     pub reconciled: Vec<Applied>,
-    pub applied: Applied,
+    /// The attempt this call ran. `None` when the task was already `review.verifying` and
+    /// the call only resumed verification.
+    pub applied: Option<Applied>,
     /// The verification that followed the attempt. `None` when the task did not reach
     /// `review.verifying`; the inner error is a refusal that left the task there (a moved
     /// branch, a stage this build does not run yet).
@@ -51,15 +54,56 @@ impl Canceled {
 }
 
 /// `radian arc start <task>`: reconcile, release due retries, claim, run one attempt, apply.
+///
+/// A task already in `review.verifying` (one a moved branch or a changed digest sent back)
+/// resumes verification instead of being refused.
 pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
+    let loaded = store.load_task(task_id)?;
+    if loaded.changed_outside_arc {
+        return Err(Error::ChangedOutsideArc(task_id.to_owned()));
+    }
+    let task = loaded.item;
+    if task.state == model::TaskState::Review && task.phase == "verifying" {
+        return Ok(Started {
+            reconciled: Vec::new(),
+            applied: None,
+            verification: Some(crate::review::verify(store, task_id)),
+        });
+    }
     let reconciled = reconcile(store)?;
-    // The loop that would release a due retry does not exist yet; the owner starts the task,
-    // so `start` releases a retry whose time has come.
+    // The loop releases a due retry on every pass; `start` is the owner's one task, so it
+    // does the same before it claims.
     attempt_ops::release_retries(store, &crate::store::plan_ops::utc_now())?;
-    let claim = attempt_ops::claim(store, task_id)?;
     let config = store.config()?;
-    let (remote, main_branch) = store.repository_names()?;
+    let claim = attempt_ops::claim(store, task_id)?;
     let task = store.load_task(task_id)?.item;
+    let applied = run_claim(store, &claim, &task, &config)?;
+    // A pushed attempt continues into the gate in the same process (ADR 0048 decision 6):
+    // one `start` takes the task from `todo.ready` to `review.awaiting_human` or
+    // `review.rework_pending`. A refused verification leaves the task in `review.verifying`
+    // and is reported after the attempt's own line.
+    let verification = (applied.ignored.is_none()
+        && applied.state == model::TaskState::Review.as_str()
+        && applied.phase == "verifying")
+        .then(|| crate::review::verify(store, task_id));
+    Ok(Started {
+        reconciled,
+        applied: Some(applied),
+        verification,
+    })
+}
+
+/// Runs one claimed attempt: the wrapper child, its monitor, and the result transaction.
+/// The scheduling loop claims several tasks and calls this for each, from one thread per
+/// attempt when `[limits] concurrency` is greater than one.
+pub fn run_claim(
+    store: &Store,
+    claim: &Claim,
+    task: &model::TaskFile,
+    config: &crate::store::config::Config,
+) -> Result<Applied, Error> {
+    let task_id = claim.task.as_str();
+    let (remote, main_branch) = store.repository_names()?;
     let run_dir = attempt_ops::run_dir(store, task_id, claim.attempt);
     fs::create_dir_all(&run_dir)
         .map_err(|error| Error::Failed(format!("cannot create {}: {error}", run_dir.display())))?;
@@ -125,7 +169,7 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
         return Err(error);
     }
 
-    let limits = Limits::of(&task, &config);
+    let limits = Limits::of(task, config);
     let status = monitor(
         store,
         task_id,
@@ -137,27 +181,14 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
     )?;
     let signal = attempt_ops::read_signal(store, task_id, claim.attempt);
     let finish = attempt_ops::read_finish(store, task_id, claim.attempt);
-    let applied = attempt_ops::apply(
+    attempt_ops::apply(
         store,
         task_id,
         claim.attempt,
         finish.as_ref(),
         signal,
         status.code(),
-    )?;
-    // A pushed attempt continues into the gate in the same process (ADR 0048 decision 6):
-    // one `start` takes the task from `todo.ready` to `review.awaiting_human` or
-    // `review.rework_pending`. A refused verification leaves the task in `review.verifying`
-    // and is reported after the attempt's own line.
-    let verification = (applied.ignored.is_none()
-        && applied.state == model::TaskState::Review.as_str()
-        && applied.phase == "verifying")
-        .then(|| crate::review::verify(store, task_id));
-    Ok(Started {
-        reconciled,
-        applied,
-        verification,
-    })
+    )
 }
 
 /// One attempt's time limits.
@@ -442,14 +473,17 @@ fn cancel_running(store: &Store, task_id: &str, task: &model::TaskFile) -> Resul
     })
 }
 
-/// The line `radian arc start` prints for its own attempt, after any reconcile lines.
+/// The lines `radian arc start` prints: any reconcile lines, then its own attempt's line, then
+/// the verification's when the task reached `review.verifying`.
 pub fn lines(started: &Started) -> Vec<String> {
     let mut lines: Vec<String> = started
         .reconciled
         .iter()
         .map(|applied| format!("reconciled: {}", applied.line()))
         .collect();
-    lines.push(started.applied.line());
+    if let Some(applied) = &started.applied {
+        lines.push(applied.line());
+    }
     if let Some(Ok(verified)) = &started.verification {
         lines.push(verified.line());
     }

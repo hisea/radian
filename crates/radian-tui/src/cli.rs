@@ -502,6 +502,10 @@ enum ArcCommand {
             hide = true
         )]
         extra: Vec<String>,
+        /// Test-only: run this shell command as the worker instead of `radian exec`.
+        /// The wrapper's forwarding test starts a plain process with a child of its own.
+        #[arg(long, value_name = "SHELL-COMMAND", hide = true)]
+        worker_command: Option<String>,
     },
 
     /// Confirm a draft plan. A plan with no tasks is refused, and so is a second confirm.
@@ -572,6 +576,10 @@ enum ArcCommand {
         #[arg(long, value_name = "TEXT")]
         note: String,
     },
+
+    /// Make every transition the auto levels allow now, then exit: reconcile, release due
+    /// retries, verify, start ready tasks, and merge what passed at auto level `merge`.
+    Run,
 
     /// Serve the lead's MCP tools over standard input and output. A lead registers this
     /// command; a person does not run it.
@@ -658,6 +666,7 @@ impl ArcCommand {
             ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
             ArcCommand::Merge { task } => ArcRun::Merge { task },
             ArcCommand::Reject { task, note } => ArcRun::Reject { task, note },
+            ArcCommand::Run => ArcRun::Run,
             ArcCommand::Mcp => ArcRun::Mcp,
             // `work` is the trusted wrapper, not a store operation: `run_arc` dispatches it
             // before this conversion.
@@ -681,6 +690,7 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             remote,
             main_branch,
             extra,
+            worker_command,
         }) => {
             let (remote, main_branch) = work_remote_and_main(remote, main_branch);
             ExitCode::from(radian_arc::work::run(radian_arc::work::Options {
@@ -692,6 +702,7 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
                 remote,
                 main_branch,
                 extra_args: extra,
+                worker_command,
             }) as u8)
         }
         Some(command) => {
@@ -2351,6 +2362,7 @@ mod tests {
             attempt_id: Some("0001-b-1".to_owned()),
             token: Some("a-token".to_owned()),
             cost_usd: Some(0.5),
+            auto_rework: 2,
             allow_noop: false,
             extra_stages: vec!["mutation".to_owned()],
             max_attempts: Some(2),

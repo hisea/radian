@@ -923,6 +923,9 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             if last.cost_usd != current.cost_usd {
                 touched.push("cost_usd");
             }
+            if last.auto_rework != current.auto_rework {
+                touched.push("auto_rework");
+            }
             if last.retry_at != current.retry_at {
                 touched.push("retry_at");
             }

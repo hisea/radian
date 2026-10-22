@@ -420,6 +420,13 @@ fn extra_stages(task: &model::TaskFile) -> Vec<StageSpec> {
 /// The state does not allow the merge, the branch moved, the digest changed, the push was
 /// not a fast-forward after every integration run, or a git call failed.
 pub fn merge(store: &Store, task_id: &str) -> Result<Merged, Error> {
+    merge_as(store, task_id, None)
+}
+
+/// [`merge`] with the approver to record in the `human` verdict: `None` is the owner's own
+/// `radian arc merge`, `Some("auto")` is the scheduling loop at auto level `merge` (ADR 0048
+/// decision 12).
+pub fn merge_as(store: &Store, task_id: &str, approver: Option<&str>) -> Result<Merged, Error> {
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
@@ -483,14 +490,33 @@ pub fn merge(store: &Store, task_id: &str) -> Result<Merged, Error> {
     let verdicts = task_verdicts(store, task_id)?;
     let actual = verification_digest(&verdicts, &head);
     if actual != expected {
-        return Err(Error::Refused(format!(
-            "the verdict set of {head} changed since it was verified (recorded {expected}, \
-             now {actual}); the approval is invalid"
-        )));
+        // The approval no longer matches what the gate recorded for this commit. As with a
+        // moved branch, every verdict for the old approval is stale, so the task goes back to
+        // verification instead of waiting for a merge that can never happen.
+        let reason = Reason::new(
+            "merge",
+            None,
+            format!(
+                "the verdict set of {head} changed since it was verified (recorded {expected}, \
+                 now {actual}); the approval is invalid"
+            ),
+        );
+        reason.record(store, task_id, &label);
+        return_to_verifying(store, task_id)?;
+        return Err(Error::Refused(reason.text()));
     }
 
     if task.phase == "awaiting_human" {
-        approve(store, task_id, &label, &head)?;
+        if !required_stages_passed(store, task_id, &head)? {
+            let reason = Reason::new(
+                "merge",
+                None,
+                format!("every required stage must pass for {head} before the approval"),
+            );
+            reason.record(store, task_id, &label);
+            return Err(Error::Refused(reason.text()));
+        }
+        approve(store, task_id, &label, &head, approver)?;
         store.change_task(task_id, |task| {
             if task.state == model::TaskState::Review && task.phase == "awaiting_human" {
                 task.phase = "integrating".to_owned();
@@ -613,7 +639,13 @@ pub fn merge(store: &Store, task_id: &str) -> Result<Merged, Error> {
 }
 
 /// Writes the owner's `human` pass verdict for `sha` (once), or reuses the one a crash left.
-fn approve(store: &Store, task: &str, label: &str, sha: &str) -> Result<(), Error> {
+fn approve(
+    store: &Store,
+    task: &str,
+    label: &str,
+    sha: &str,
+    approver: Option<&str>,
+) -> Result<(), Error> {
     let path = verdict_path(store.repo(), task, label, Stage::Human).map_err(gate_error)?;
     if path.is_file() {
         let verdict = Verdict::read(&path).map_err(gate_error)?;
@@ -625,9 +657,11 @@ fn approve(store: &Store, task: &str, label: &str, sha: &str) -> Result<(), Erro
         }
         return Ok(());
     }
-    Verdict::human(sha, true, None)
-        .write_new(&path)
-        .map_err(gate_error)
+    let verdict = match approver {
+        Some(approver) => Verdict::approved_by(sha, approver),
+        None => Verdict::human(sha, true, None),
+    };
+    verdict.write_new(&path).map_err(gate_error)
 }
 
 fn integration_failure(verdict: &Verdict) -> String {
@@ -757,9 +791,37 @@ pub fn reject(store: &Store, task_id: &str, note: &str) -> Result<Rejected, Erro
 
 // ---- reasons and verdicts ------------------------------------------------------------
 
+/// Whether every required stage of the task's effective profile passed for `head`. This is
+/// the owner's part of an approval (ADR 0048 decisions 11 and 12): a merge binds to the
+/// verified sha and the digest only when the gate really passed every required stage.
+fn required_stages_passed(store: &Store, task_id: &str, head: &str) -> Result<bool, Error> {
+    let task = store.load_task(task_id)?.item;
+    let config = store.config()?;
+    let Some(profile) = config.gate.selected_profile().cloned() else {
+        return Ok(false);
+    };
+    let extra = extra_stages(&task);
+    let verdicts = task_verdicts(store, task_id)?;
+    let mut check_profile = profile;
+    check_profile
+        .stages
+        .retain(|spec| spec.stage != Stage::Human);
+    let check_extra: Vec<StageSpec> = extra
+        .into_iter()
+        .filter(|spec| spec.stage != Stage::Human)
+        .collect();
+    Ok(required_passed(
+        &check_profile,
+        &check_extra,
+        &verdicts,
+        head,
+    ))
+}
+
 /// What `show` prints for a task in `review.verifying` or `review.rework_pending`: the
 /// owner's reject note, or the last verify/merge reason (a failed stage and its verdict, a
-/// moved branch, a stage this build does not run yet).
+/// moved branch, a stage this build does not run yet), plus why the plan paused when an
+/// automatic rework limit was reached.
 #[must_use]
 pub fn rework_reason(store: &Store, task: &model::TaskFile) -> Option<String> {
     if task.state != model::TaskState::Review
@@ -769,19 +831,31 @@ pub fn rework_reason(store: &Store, task: &model::TaskFile) -> Option<String> {
     }
     let label = attempt_label(task).ok()?;
     let dir = attempt_dir(store.repo(), &task.id, &label).ok()?;
+    let mut parts = Vec::new();
     if let Ok(note) = fs::read_to_string(dir.join(REJECT_FILE)) {
         let note = note.trim();
         if !note.is_empty() {
-            return Some(note.to_owned());
+            parts.push(note.to_owned());
         }
     }
-    let text = fs::read_to_string(dir.join(REVIEW_FILE)).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    value
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
+    if parts.is_empty()
+        && let Ok(text) = fs::read_to_string(dir.join(REVIEW_FILE))
+        && let Ok(value) = serde_json::from_str::<Value>(&text)
+        && let Some(text) = value.get("text").and_then(Value::as_str)
+        && !text.is_empty()
+    {
+        parts.push(text.to_owned());
+    }
+    // The automatic rework limit: the task stays in `rework_pending` and `show` says why the
+    // plan stopped (ADR 0048 decision 12).
+    if let Ok(text) = fs::read_to_string(dir.join(crate::store::attempt_ops::PAUSED_FILE))
+        && let Ok(value) = serde_json::from_str::<Value>(&text)
+        && let Some(text) = value.get("text").and_then(Value::as_str)
+        && !text.is_empty()
+    {
+        parts.push(text.to_owned());
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 fn clear_reason(store: &Store, task: &str, label: &str) {

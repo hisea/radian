@@ -57,6 +57,28 @@ pub(crate) fn fetch_remote(repository: &Path, remote: &str) -> Result<(), GateEr
     Ok(())
 }
 
+/// Fetches the remote's `main_branch` into its tracking ref with an explicit refspec. A clone
+/// whose configured fetch refspec leaves main out would otherwise keep a stale
+/// `refs/remotes/<remote>/<main>`; the wrapper fetches its start commit the same way
+/// (ADR 0048 decisions 7 and 10).
+pub(crate) fn fetch_main(
+    repository: &Path,
+    remote: &str,
+    main_branch: &str,
+) -> Result<(), GateError> {
+    let refspec = format!("+refs/heads/{main_branch}:refs/remotes/{remote}/{main_branch}");
+    ok(repository, &["fetch", remote, &refspec])?;
+    Ok(())
+}
+
+/// The branch a `refs/remotes/<remote>/<branch>` ref names.
+pub(crate) fn main_branch_of<'a>(remote: &str, main_ref: &'a str) -> Result<&'a str, GateError> {
+    main_ref
+        .strip_prefix(&format!("refs/remotes/{remote}/"))
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| GateError::MainRef(main_ref.to_owned()))
+}
+
 /// Resolves `revision` to a full commit id, or fails with [`GateError::UnknownCommit`].
 pub(crate) fn resolve_commit(repository: &Path, revision: &str) -> Result<String, GateError> {
     let object = format!("{revision}^{{commit}}");

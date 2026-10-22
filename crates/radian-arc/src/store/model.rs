@@ -254,6 +254,9 @@ pub struct TaskFile {
     pub token: Option<String>,
     /// What the task has cost so far, in US dollars, summed over its attempts.
     pub cost_usd: Option<f64>,
+    /// How many reworks arc counted while the plan's `auto` level was not `off`
+    /// (`[limits] max_auto_rework`).
+    pub auto_rework: u32,
     pub allow_noop: bool,
     /// Gate stages this brief adds to the profile's.
     pub extra_stages: Vec<String>,
@@ -299,6 +302,7 @@ impl TaskFile {
             attempt_id: None,
             token: None,
             cost_usd: None,
+            auto_rework: 0,
             allow_noop,
             extra_stages,
             max_attempts: None,
@@ -336,6 +340,9 @@ impl TaskFile {
         }
         if let Some(cost) = self.cost_usd {
             out.push_str(&format!("cost_usd: {cost}\n"));
+        }
+        if self.auto_rework > 0 {
+            out.push_str(&format!("auto_rework: {}\n", self.auto_rework));
         }
         out.push_str(&format!("allow_noop: {}\n", self.allow_noop));
         out.push_str(&frontmatter::list_field("extra_stages", &self.extra_stages));
@@ -418,6 +425,7 @@ impl TaskFile {
         let attempt_id = fields.optional_string("attempt_id")?;
         let token = fields.optional_string("token")?;
         let cost_usd = fields.optional_f64("cost_usd")?;
+        let auto_rework = fields.optional_u32("auto_rework")?.unwrap_or(0);
         let allow_noop = fields.optional_bool("allow_noop")?.unwrap_or(false);
         let extra_stages = fields.optional_list("extra_stages")?;
         for stage in &extra_stages {
@@ -458,6 +466,7 @@ impl TaskFile {
             attempt_id,
             token,
             cost_usd,
+            auto_rework,
             allow_noop,
             extra_stages,
             max_attempts,
@@ -643,6 +652,7 @@ mod tests {
             attempt_id: Some("0002-two-2".to_owned()),
             token: Some("a-token".to_owned()),
             cost_usd: Some(1.25),
+            auto_rework: 2,
             allow_noop: true,
             extra_stages: vec!["mutation".to_owned(), "review".to_owned()],
             max_attempts: Some(2),

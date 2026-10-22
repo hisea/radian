@@ -47,6 +47,18 @@ pub fn signal(pid: u32, signal: i32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, signal) == 0 }
 }
 
+/// Sends `signal` to the process group whose id is `pgid`. `false` when the signal could
+/// not be sent. The caller must know that `pgid` is still a live group: a group id is the
+/// leader's pid, and the operating system can reuse it once the group is empty.
+pub fn signal_group(pgid: u32, signal: i32) -> bool {
+    if pgid == 0 {
+        return false;
+    }
+    // SAFETY: `killpg(2)` takes plain integers and has no memory-safety preconditions. A
+    // negative pid would name a group; the caller passes the leader's own pid.
+    unsafe { libc::killpg(pgid as libc::pid_t, signal) == 0 }
+}
+
 /// The signal numbers the attempt lifecycle uses.
 pub const SIGTERM: i32 = libc::SIGTERM;
 pub const SIGKILL: i32 = libc::SIGKILL;
@@ -75,5 +87,6 @@ mod tests {
         // A freshly used pid is very unlikely to be alive again; `signal` must not panic.
         let _ = signal(0, SIGTERM);
         assert!(!signal(0, SIGTERM));
+        assert!(!signal_group(0, SIGTERM));
     }
 }

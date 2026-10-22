@@ -630,8 +630,9 @@ fn a_branch_pushed_after_awaiting_human_returns_to_verifying() {
     assert!(reason.contains(&later), "{reason}");
 }
 
-/// A changed verdict file changes the digest: the approval is invalid and `merge` refuses
-/// without writing. Mutation: skip the digest check and the merge completes.
+/// A changed verdict file changes the digest: the approval is invalid, the task returns to
+/// `review.verifying` (rather than waiting on a merge that can never happen), and nothing is
+/// pushed. Mutation: skip the digest check and the merge completes.
 #[test]
 fn a_changed_verdict_file_invalidates_the_approval() {
     let fixture = Fixture::new("merge-digest");
@@ -656,7 +657,12 @@ fn a_changed_verdict_file_invalidates_the_approval() {
     let error = review::merge(&fixture.store, &fixture.task).expect_err("merge refuses");
     assert_eq!(error.exit(), Exit::State);
     assert!(error.message().contains("verdict set"), "{error:?}");
-    assert_state(&fixture, ("review", "awaiting_human"));
+    // The digest can never match again without a new verification, so the task goes back to
+    // the step that recomputes it.
+    assert_state(&fixture, ("review", "verifying"));
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(stored.verified_sha.is_none(), "the old approval is invalid");
+    assert!(stored.verdict_set_digest.is_none());
     assert_eq!(
         fixture.repo.ls_remote("refs/heads/main").as_deref(),
         Some(fixture.base.as_str())
@@ -672,46 +678,43 @@ fn a_changed_verdict_file_invalidates_the_approval() {
     assert!(!human.exists(), "no approval was written");
 }
 
-/// A push that is not a fast-forward is never forced: the remote main keeps the commit that
-/// moved it, and the task stays in `review.integrating` after three runs.
+/// A main that keeps moving under the integration is never overwritten: each round
+/// integrates again, and after three rounds the task stays in `review.integrating` with the
+/// remote main still the other writer's commits.
 ///
-/// The clone's fetch refspec is limited to `work/*`, so `merge_ready` keeps reading the
-/// stale `origin/main` it saw before the second pusher moved main. Without `--force` the
-/// push is rejected every round; with `--force` the first push would overwrite main and the
-/// task would reach `done.merged`. Mutation: push with `--force`.
+/// The clone's fetch refspec leaves main out, so only the integration's explicit fetch can
+/// see the move; before that fetch a stale tracking ref let the push be rejected instead
+/// (see the slice report).
 #[test]
-fn a_rejected_push_never_overwrites_the_remote_main() {
+fn a_main_that_keeps_moving_is_never_overwritten() {
     let fixture = Fixture::new("merge-no-force");
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
     assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
-    // The tracking ref for main must stay at `base` while the second pusher moves the real
-    // main, so run every fetch with a refspec that does not cover main.
     fixture.repo.git(&[
         "config",
         "remote.origin.fetch",
         "+refs/heads/work/*:refs/remotes/origin/work/*",
     ]);
-    let second = fixture.repo.second_clone("second");
-    write(&second.join("other.txt"), "other\n");
-    fixture.repo.git_in(&second, &["add", "other.txt"]);
-    fixture
-        .repo
-        .git_in(&second, &["commit", "-m", "a second pusher"]);
-    let moved = fixture.repo.git_in(&second, &["rev-parse", "HEAD"]);
-    fixture.repo.git_in(&second, &["push", "origin", "main"]);
-    assert_eq!(
-        fixture.repo.ls_remote("refs/heads/main").as_deref(),
-        Some(moved.as_str())
+    let marker = fixture.repo.repo.with_file_name("moved-markers");
+    let command = format!(
+        "git -c user.name=test -c user.email=test@example.com commit --allow-empty -m moved \
+         && git push origin HEAD:refs/heads/main \
+         && echo moved >> {}",
+        marker.display()
     );
+    fixture.key_commands(&[command.as_str()]);
 
     let error = review::merge(&fixture.store, &fixture.task).expect_err("the merge refuses");
     assert_eq!(error.exit(), Exit::State);
     assert!(error.message().contains("integrating"), "{error:?}");
     assert_state(&fixture, ("review", "integrating"));
-    assert_eq!(
-        fixture.repo.ls_remote("refs/heads/main").as_deref(),
-        Some(moved.as_str()),
-        "a rejected push must never overwrite main"
+    let main = fixture
+        .repo
+        .ls_remote("refs/heads/main")
+        .expect("the remote main");
+    assert!(
+        fixture.repo.is_ancestor(&fixture.base, &main),
+        "main lost the commit it had: {main}"
     );
     for label in [
         fixture.attempt_label(),
@@ -720,7 +723,17 @@ fn a_rejected_push_never_overwrites_the_remote_main() {
     ] {
         let verdict = fixture.verdict(&label, Stage::Integration);
         assert!(verdict.is_pass(), "{label}: {:?}", verdict.reason);
+        assert_ne!(
+            verdict.candidate_sha.as_deref(),
+            Some(main.as_str()),
+            "{label}: a candidate overwrote main"
+        );
     }
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap().lines().count(),
+        3,
+        "the other writer moved main once per integration round"
+    );
 }
 
 // ---- reject and rework ---------------------------------------------------------------

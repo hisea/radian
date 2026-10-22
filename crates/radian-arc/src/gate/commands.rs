@@ -74,6 +74,7 @@ impl CommandRun<'_> {
             base_sha: None,
             candidate_sha: None,
             conflict_paths: Vec::new(),
+            approver: None,
         };
         verdict.write_new(&verdict_path(
             self.repository,

@@ -25,12 +25,14 @@ pub const SUBCOMMANDS: &[&str] = &[
     "reset-budget",
     "merge",
     "reject",
+    "run",
     "mcp",
 ];
 
-/// The subcommands ADR 0048 names that this build does not have. `work` is not here: it
-/// exists as the hidden wrapper a scheduling loop runs, and a person does not run it.
-pub const NOT_BUILT: &[&str] = &["run"];
+/// The subcommands ADR 0048 names that this build does not have. Every subcommand exists now;
+/// the arc TUI (a bare `radian arc`) is what is still missing. `work` is not here: it exists
+/// as the hidden wrapper a scheduling loop runs, and a person does not run it.
+pub const NOT_BUILT: &[&str] = &[];
 
 /// One `radian arc` invocation, without clap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +72,8 @@ pub enum Command {
     Merge { task: String },
     /// `radian arc reject <task> --note <text>`: send a task back to rework.
     Reject { task: String, note: String },
+    /// `radian arc run`: make every transition that can happen now, then exit.
+    Run,
     /// `radian arc mcp`: the lead's MCP server on standard input and output.
     Mcp,
 }
@@ -100,6 +104,7 @@ pub fn run(command: Option<&Command>) -> u8 {
         Some(Command::ResetBudget { id }) => reset_budget(id),
         Some(Command::Merge { task }) => merge(task),
         Some(Command::Reject { task, note }) => reject(task, note),
+        Some(Command::Run) => run_loop(),
         Some(Command::Mcp) => mcp(),
     };
     match result {
@@ -143,8 +148,7 @@ fn bare() -> Result<u8, Error> {
         "in this build: `radian arc init`, `radian arc add plan|task`, `radian arc list`, \
          `radian arc show`, `radian arc adopt`, `radian arc confirm`, `radian arc auto`, \
          `radian arc pause`, `radian arc start`, `radian arc cancel`, \
-         `radian arc reset-budget`, `radian arc merge`, `radian arc reject`, \
-         `radian arc mcp`\n{}",
+         `radian arc reset-budget`, `radian arc merge`, `radian arc reject`, `radian arc run`, `radian arc mcp`\n{}",
         arc_dir_line(&store)
     ));
     let code = emit(out);
@@ -359,6 +363,7 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
             );
             field(&mut out, "token", &optional_text(item.token.as_deref()));
             field(&mut out, "cost_usd", &optional_number(item.cost_usd));
+            field(&mut out, "auto_rework", &item.auto_rework.to_string());
             field(&mut out, "after", &joined(&item.after));
             field(
                 &mut out,
@@ -468,6 +473,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "attempt_id": item.attempt_id,
         "token": item.token,
         "cost_usd": item.cost_usd,
+        "auto_rework": item.auto_rework,
         "after": item.after,
         "supersedes": item.supersedes,
         "allow_noop": item.allow_noop,
@@ -563,11 +569,17 @@ fn start(task: &str) -> Result<u8, Error> {
         eprintln!("radian arc: {}", error.message());
         return Ok(error.exit().code());
     }
-    Ok(if started.applied.left_doing() {
-        Exit::Ok.code()
-    } else {
-        Exit::Error.code()
-    })
+    Ok(
+        if started
+            .applied
+            .as_ref()
+            .is_none_or(|applied| applied.left_doing())
+        {
+            Exit::Ok.code()
+        } else {
+            Exit::Error.code()
+        },
+    )
 }
 
 /// `radian arc cancel <task>`: stop a task, or end a todo one.
@@ -601,6 +613,14 @@ fn reject(task: &str, note: &str) -> Result<u8, Error> {
     let store = open()?;
     let rejected = crate::review::reject(&store, task, note)?;
     Ok(emit(format!("{}\n", rejected.line())))
+}
+
+/// `radian arc run`: the scheduling loop without a TUI. It makes every transition it can
+/// make now and exits when nothing more can happen now.
+fn run_loop() -> Result<u8, Error> {
+    let store = open()?;
+    let report = crate::run::run(&store)?;
+    Ok(emit(report.render()))
 }
 
 /// `radian arc mcp`: the lead's MCP server, until its client closes the connection. Without

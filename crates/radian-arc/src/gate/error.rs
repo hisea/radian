@@ -62,6 +62,10 @@ pub enum GateError {
     #[error("path {0} is not valid UTF-8")]
     NonUtf8Path(PathBuf),
 
+    /// The main ref does not have the shape `refs/remotes/<remote>/<branch>`.
+    #[error("{0} is not a `refs/remotes/<remote>/<branch>` ref")]
+    MainRef(String),
+
     /// A command could not be started.
     #[error("could not run {program}: {source}")]
     Spawn {
@@ -75,7 +79,6 @@ pub enum GateError {
     /// A profile lists a stage that profiles cannot list.
     #[error("stage {0} cannot be listed in a profile: it always runs at merge")]
     UnlistedStage(crate::gate::Stage),
-
     /// A profile lists the same stage twice.
     #[error("stage {0} is listed twice")]
     DuplicateStage(crate::gate::Stage),

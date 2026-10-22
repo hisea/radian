@@ -429,7 +429,7 @@ impl Repo {
             .join("runs")
             .join(task)
             .join("attempts")
-            .join(attempt.to_string())
+            .join(format!("{task}-{attempt}"))
     }
 
     /// Runs one git command in the clone with the test's isolated environment.

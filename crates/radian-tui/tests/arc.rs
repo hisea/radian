@@ -202,6 +202,7 @@ fn without_setup_the_subcommands_name_init_and_exit_three() {
         vec!["arc", "reset-budget", "0001-a"],
         vec!["arc", "merge", "0001-a"],
         vec!["arc", "reject", "0001-a", "--note", "no"],
+        vec!["arc", "run"],
         vec!["arc", "mcp"],
     ] {
         let run = run(&scratch, &args, "");

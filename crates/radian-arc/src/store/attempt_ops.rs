@@ -29,6 +29,8 @@ pub const START_FILE: &str = "start.json";
 pub const SIGNAL_FILE: &str = "signal.json";
 /// arc's record of the applied result: class, cost, and the state it wrote.
 pub const ATTEMPT_RESULT_FILE: &str = "attempt_result.json";
+/// The record that the plan paused because this task used its automatic reworks.
+pub const PAUSED_FILE: &str = "paused.json";
 
 /// The failure classes of decision 9, as one closed list the manual's drift test reads.
 /// `stall` and `wall_time` are written by arc when it signalled the wrapper; the other four
@@ -199,14 +201,15 @@ fn sha_field(value: &Value, key: &str) -> Option<String> {
 
 // ---- paths ---------------------------------------------------------------------------
 
-/// `runs/<task>/attempts/<attempt>/`.
+/// `runs/<task>/attempts/<task>-<attempt>/`: the attempt id names the directory, the same
+/// label the gate writes its verdicts under (ADR 0048 decisions 5 and 10).
 pub fn run_dir(store: &Store, task: &str, attempt: u32) -> PathBuf {
     store
         .root()
         .join("runs")
         .join(task)
         .join("attempts")
-        .join(attempt.to_string())
+        .join(format!("{task}-{attempt}"))
 }
 
 /// `attempts/<task>/<attempt>/`.
@@ -794,6 +797,83 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
         });
     }
     Err(Error::Failed(format!("no plan or task `{id}`")))
+}
+
+// ---- automatic rework ------------------------------------------------------------------
+
+/// What one automatic rework did to the plan: the pause, when the task went past its limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paused {
+    pub task: String,
+    pub plan: String,
+    /// How many reworks the task has now had while the plan was not `off`.
+    pub count: u32,
+    pub max_auto_rework: u32,
+    /// The one line `run` prints and `show` reports.
+    pub text: String,
+}
+
+/// Counts one automatic rework for a task that just reached `review.rework_pending` (a failed
+/// stage or a failed integration). Nothing happens while the task's plan is at `auto` `off`.
+///
+/// When the count would go past `[limits] max_auto_rework`, arc pauses the whole plan: its
+/// `auto` becomes `off`, the task stays in `review.rework_pending`, and the reason is written
+/// next to the attempt so `show` can print it.
+pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>, Error> {
+    let loaded = store.load_task(task_id)?;
+    if loaded.changed_outside_arc {
+        return Ok(None);
+    }
+    let task = loaded.item;
+    if task.state != TaskState::Review || task.phase != "rework_pending" {
+        return Ok(None);
+    }
+    let plan = store.load_plan(&task.plan)?;
+    if plan.changed_outside_arc || plan.item.auto == "off" {
+        // A person, or a plan budget, already paused the plan: this rework is not automatic.
+        return Ok(None);
+    }
+    let max = store.config()?.limits.max_auto_rework;
+    let mut count = task.auto_rework;
+    store.change_task(task_id, |task| {
+        task.auto_rework += 1;
+        count = task.auto_rework;
+        Ok(())
+    })?;
+    if count <= max {
+        return Ok(None);
+    }
+    let text = format!(
+        "the plan paused: task {task_id} used {count} automatic reworks and the auto rework \
+         limit is {max}"
+    );
+    let record = json!({
+        "kind": "auto_rework",
+        "task": task_id,
+        "plan": plan.item.id,
+        "count": count,
+        "max_auto_rework": max,
+        "text": text,
+        "at": super::plan_ops::utc_now(),
+    });
+    let dir = run_dir(store, task_id, task.attempt);
+    if fs::create_dir_all(&dir).is_ok()
+        && let Ok(body) = serde_json::to_string_pretty(&record)
+    {
+        let _ = fs::write(dir.join(PAUSED_FILE), format!("{body}\n"));
+    }
+    let plan_id = plan.item.id.clone();
+    store.change_plan(&plan_id, |plan| {
+        plan.auto = "off".to_owned();
+        Ok(())
+    })?;
+    Ok(Some(Paused {
+        task: task_id.to_owned(),
+        plan: plan_id,
+        count,
+        max_auto_rework: max,
+        text,
+    }))
 }
 
 #[cfg(test)]
