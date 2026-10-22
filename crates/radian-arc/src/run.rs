@@ -15,7 +15,13 @@
 //! the loop ends at the first pass that changes nothing. A task of a plan at `auto` `off` is
 //! never started or merged by `run`; its verification still advances.
 //!
-//! The loop prints one line per transition and a final summary of what waits on whom.
+//! Every transition line is written through the caller's sink and flushed when the loop makes
+//! it; the summary of what waits on whom prints when the pass ends. `watch` repeats a pass
+//! after `--interval` seconds until SIGINT or SIGTERM, holds `runner.lock` the whole time, and
+//! prints the summary only when it changed.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::store::attempt_ops::{self, Applied, Claim};
 use crate::store::model::{self, TaskState};
@@ -24,6 +30,18 @@ use crate::store::{Error, Store, plan_ops};
 /// A hard stop on the pass count. Every pass that continues changes at least one task; this
 /// only keeps a store that something else keeps rewriting from looping forever.
 pub const MAX_PASSES: u32 = 1000;
+
+/// The default wait between passes of `run --watch`, and the closed range it may have.
+pub const DEFAULT_INTERVAL_SECS: u64 = 30;
+pub const MIN_INTERVAL_SECS: u64 = 5;
+pub const MAX_INTERVAL_SECS: u64 = 3600;
+
+/// How often an `--interval` wait looks at the stop flag: a signal must end the loop promptly,
+/// not after the whole interval.
+const STOP_POLL: Duration = Duration::from_millis(100);
+
+/// Set by the SIGINT/SIGTERM handler a `watch` loop installs.
+static STOP: AtomicBool = AtomicBool::new(false);
 
 /// What one `run` did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,13 +56,11 @@ pub struct Report {
 }
 
 impl Report {
-    /// The text `radian arc run` prints: the transitions, then the summary.
-    pub fn render(&self) -> String {
+    /// The text `radian arc run` prints at the end of a pass: the summary, with `no transition`
+    /// when the pass wrote none. The transition lines are written as they happen, through the
+    /// sink [`run`] and [`watch`] take.
+    pub fn render_summary(&self) -> String {
         let mut out = String::new();
-        for line in &self.transitions {
-            out.push_str(line);
-            out.push('\n');
-        }
         if self.transitions.is_empty() {
             out.push_str("no transition\n");
         }
@@ -60,26 +76,84 @@ impl Report {
     }
 }
 
-/// Runs the loop until nothing more can happen now.
+/// Runs one pass to quiet, holding `runner.lock` for its lifetime. `emit` receives each
+/// transition line with its newline, as the loop makes it.
 ///
 /// # Errors
 ///
 /// Another process holds `runner.lock` ([`Error::Locked`], exit 4), a file arc needs cannot be
 /// read or written, or the store did not settle within [`MAX_PASSES`] passes.
-pub fn run(store: &Store) -> Result<Report, Error> {
-    let _lock = store
+pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
+    let _lock = take_lock(store)?;
+    run_quiet(store, emit, None)
+}
+
+/// Runs a pass, then waits `interval_secs` and runs another, until SIGINT or SIGTERM. Holds
+/// `runner.lock` for the whole loop. `emit` receives each transition line with its newline as
+/// it happens, and a pass's summary block when it differs from the last one printed.
+///
+/// A signal starts no new work: a running attempt is a separate process and is left alone (the
+/// next `run` reconciles it). The loop then prints the summary, releases the lock and returns
+/// [`Exit`](crate::store::Exit) `0` through the caller.
+///
+/// # Errors
+///
+/// The same as [`run`].
+pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> Result<(), Error> {
+    let _lock = take_lock(store)?;
+    STOP.store(false, Ordering::SeqCst);
+    catch_stop_signals();
+    let mut last: Option<String> = None;
+    loop {
+        if stop_requested() {
+            break;
+        }
+        let report = run_quiet(store, emit, Some(&STOP))?;
+        let summary = report.render_summary();
+        if last.as_deref() != Some(summary.as_str()) {
+            emit(&summary);
+            last = Some(summary);
+        }
+        if stop_requested() || !wait_interval(interval_secs) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn take_lock(store: &Store) -> Result<crate::store::RunnerLock, Error> {
+    store
         .try_runner_lock()?
-        .ok_or(Error::Locked(crate::store::RUNNER_LOCK))?;
+        .ok_or(Error::Locked(crate::store::RUNNER_LOCK))
+}
+
+/// The passes of one `run` or one `watch` pass, until a pass changes nothing. When `stop` is
+/// set, no further pass starts: work already running inside a pass still ends normally.
+fn run_quiet(
+    store: &Store,
+    emit: &mut dyn FnMut(&str),
+    stop: Option<&AtomicBool>,
+) -> Result<Report, Error> {
     let mut report = Report::default();
     let mut passes = 0;
     loop {
+        if stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            break;
+        }
         passes += 1;
         if passes > MAX_PASSES {
             return Err(Error::Failed(format!(
                 "the scheduling loop did not settle within {MAX_PASSES} passes"
             )));
         }
-        if !one_pass(store, &mut report)? {
+        let changed = {
+            let mut transitions = Transitions {
+                report: &mut report,
+                emit: &mut *emit,
+            };
+            one_pass(store, &mut transitions, stop)?
+        };
+        if !changed {
             break;
         }
     }
@@ -87,8 +161,72 @@ pub fn run(store: &Store) -> Result<Report, Error> {
     Ok(report)
 }
 
-/// One pass. `true` when it changed a stored file, so the loop takes another pass.
-fn one_pass(store: &Store, report: &mut Report) -> Result<bool, Error> {
+/// The transitions of one pass: their text goes to the caller's sink at once, and the report
+/// keeps them for [`Report::render_summary`]'s `no transition` line.
+struct Transitions<'a> {
+    report: &'a mut Report,
+    emit: &'a mut dyn FnMut(&str),
+}
+
+impl Transitions<'_> {
+    fn push(&mut self, line: String) {
+        (self.emit)(&format!("{line}\n"));
+        self.report.transitions.push(line);
+    }
+
+    fn note(&mut self, line: String) {
+        self.report.notes.push(line);
+    }
+}
+
+/// Installs the SIGINT and SIGTERM handler of a watch loop. The handler only stores to an
+/// atomic, which is async-signal-safe.
+fn catch_stop_signals() {
+    // SAFETY: `request_stop` has the C ABI `signal` expects, and its body only stores to an
+    // `AtomicBool`. The previous handler is not needed.
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            request_stop as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            request_stop as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+extern "C" fn request_stop(_signal: libc::c_int) {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+fn stop_requested() -> bool {
+    STOP.load(Ordering::SeqCst)
+}
+
+/// Waits `interval_secs` in [`STOP_POLL`] slices. `false` when a stop signal arrived first.
+fn wait_interval(interval_secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(interval_secs);
+    loop {
+        if stop_requested() {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        std::thread::sleep((deadline - now).min(STOP_POLL));
+    }
+}
+
+/// One pass. `true` when it changed a stored file, so the loop takes another pass. `stop`
+/// (the `--watch` signal flag) keeps the pass from starting an attempt or a merge once it is
+/// set; work already running when it was set still ends normally.
+fn one_pass(
+    store: &Store,
+    transitions: &mut Transitions,
+    stop: Option<&AtomicBool>,
+) -> Result<bool, Error> {
     // Every pass that could claim a task checks the worker's command line first, so a
     // rejected line refuses `run` before its first pass changes anything (ADR 0048
     // decision 7).
@@ -97,17 +235,13 @@ fn one_pass(store: &Store, report: &mut Report) -> Result<bool, Error> {
 
     // 1. Doing: apply a finished attempt, leave a live one alone.
     for applied in crate::attempt::reconcile(store)? {
-        report
-            .transitions
-            .push(format!("reconciled: {}", applied.line()));
+        transitions.push(format!("reconciled: {}", applied.line()));
         changed = true;
     }
 
     // 2. A retry whose time has come.
     for id in attempt_ops::release_retries(store, &plan_ops::utc_now())? {
-        report
-            .transitions
-            .push(format!("{id} released: todo.retry_wait -> todo.ready"));
+        transitions.push(format!("{id} released: todo.retry_wait -> todo.ready"));
         changed = true;
     }
 
@@ -115,14 +249,12 @@ fn one_pass(store: &Store, report: &mut Report) -> Result<bool, Error> {
     for id in verifying_tasks(store)? {
         match crate::review::verify(store, &id) {
             Ok(verified) => {
-                report.transitions.push(verified.line());
+                transitions.push(verified.line());
                 changed = true;
                 if verified.phase == "rework_pending"
                     && let Some(paused) = attempt_ops::record_auto_rework(store, &id)?
                 {
-                    report
-                        .transitions
-                        .push(format!("{} paused: {}", paused.plan, paused.text));
+                    transitions.push(format!("{} paused: {}", paused.plan, paused.text));
                     changed = true;
                 }
             }
@@ -133,11 +265,12 @@ fn one_pass(store: &Store, report: &mut Report) -> Result<bool, Error> {
         }
     }
 
-    // 4. Start what the auto levels allow.
-    changed |= start_ready(store, report)?;
-
-    // 5. Merge what passed, at auto level `merge`.
-    changed |= merge_auto(store, report)?;
+    // 4. Start what the auto levels allow, and 5. merge what passed, unless a stop signal
+    // arrived while steps 1-3 ran: no new attempt and no merge starts after it.
+    if !stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        changed |= start_ready(store, transitions)?;
+        changed |= merge_auto(store, transitions)?;
+    }
 
     Ok(changed)
 }
@@ -159,7 +292,7 @@ fn verifying_tasks(store: &Store) -> Result<Vec<String>, Error> {
 
 /// Claims and runs ready tasks of plans at `auto` `run` or `merge`. `true` when it ran at
 /// least one attempt.
-fn start_ready(store: &Store, report: &mut Report) -> Result<bool, Error> {
+fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
     let config = store.config()?;
     let concurrency = u64::from(config.limits.concurrency.max(1));
     let doing = count_doing(store)?;
@@ -205,7 +338,7 @@ fn start_ready(store: &Store, report: &mut Report) -> Result<bool, Error> {
         return Ok(false);
     }
     for applied in execute(store, &claims, &config)? {
-        report.transitions.push(applied.line());
+        transitions.push(applied.line());
     }
     Ok(true)
 }
@@ -241,7 +374,7 @@ fn execute(
 }
 
 /// Merges every finished task of a plan at `auto` `merge`. `true` when a task changed state.
-fn merge_auto(store: &Store, report: &mut Report) -> Result<bool, Error> {
+fn merge_auto(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
     let mut changed = false;
     for view in store.plans()? {
         if view.plan.changed_outside_arc
@@ -260,14 +393,12 @@ fn merge_auto(store: &Store, report: &mut Report) -> Result<bool, Error> {
             }
             match crate::review::merge_as(store, &task.item.id, Some("auto")) {
                 Ok(merged) => {
-                    report.transitions.push(merged.line());
+                    transitions.push(merged.line());
                     changed = true;
                     if merged.phase == "rework_pending"
                         && let Some(paused) = attempt_ops::record_auto_rework(store, &task.item.id)?
                     {
-                        report
-                            .transitions
-                            .push(format!("{} paused: {}", paused.plan, paused.text));
+                        transitions.push(format!("{} paused: {}", paused.plan, paused.text));
                         changed = true;
                     }
                 }
@@ -276,7 +407,7 @@ fn merge_auto(store: &Store, report: &mut Report) -> Result<bool, Error> {
                     // `review.verifying`; that is a transition and the next pass verifies.
                     let after = store.load_task(&task.item.id)?.item;
                     if after.state != TaskState::Review || after.phase != phase {
-                        report.transitions.push(format!(
+                        transitions.push(format!(
                             "{} merge -> {}.{}: {reason}",
                             task.item.id,
                             after.state.as_str(),
@@ -286,9 +417,7 @@ fn merge_auto(store: &Store, report: &mut Report) -> Result<bool, Error> {
                     } else {
                         // The state allows no merge and nothing moved: the summary says why
                         // instead of the loop spinning on it.
-                        report
-                            .notes
-                            .push(format!("{} cannot merge: {reason}", task.item.id));
+                        transitions.note(format!("{} cannot merge: {reason}", task.item.id));
                     }
                 }
                 Err(error) => return Err(error),
@@ -433,6 +562,21 @@ mod tests {
             waiting: vec!["nothing waits".to_owned()],
             notes: Vec::new(),
         };
-        assert_eq!(report.render(), "no transition\nsummary\nnothing waits\n");
+        assert_eq!(
+            report.render_summary(),
+            "no transition\nsummary\nnothing waits\n"
+        );
+    }
+
+    /// The transitions were already written when they happened; the summary does not repeat
+    /// them.
+    #[test]
+    fn a_summary_after_a_transition_holds_only_the_summary() {
+        let report = Report {
+            transitions: vec!["0001-work-1 completed -> review.verifying".to_owned()],
+            waiting: vec!["nothing waits".to_owned()],
+            notes: Vec::new(),
+        };
+        assert_eq!(report.render_summary(), "summary\nnothing waits\n");
     }
 }

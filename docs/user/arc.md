@@ -452,8 +452,13 @@ It exits `0` on success, `1` on an error, `2` for an empty note, `3` when the ta
 `run` is the scheduling loop without an interface.
 It takes `runner.lock`, makes every transition the auto levels allow now, saves the state, and exits when nothing more can happen now.
 Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see `worker.exec_args` below).
-Waiting for you, a `retry_at` in the future, or the lead's rework does not keep it running.
+Waiting for you, a `retry_at` in the future, or the lead's rework does not keep a one-shot `run` running; `--watch` does.
 A task of a plan at `auto` `off` is never started or merged by `run`; its verification still advances.
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--watch` | — | off | Repeat the loop: after a pass that ends quiet, wait `--interval` seconds and run another pass, until SIGINT or SIGTERM. Holds `runner.lock` the whole time. |
+| `--interval` | `SECONDS` | `30` | Whole seconds between passes, 5 to 3600. Only with `--watch`: without it, or with a value outside 5 to 3600, the command is a usage error (`2`). |
 
 One pass repeats until a pass changes nothing, in this order:
 
@@ -468,7 +473,7 @@ One pass repeats until a pass changes nothing, in this order:
 A merge whose main moved continues in the same command, up to 3 integration runs, as `merge` does.
 A stage this build does not run, or a branch that moved, is reported in the summary; it is not retried in a loop.
 
-`run` prints one line per transition, in order, then a summary of what waits on whom:
+`run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end. When a pass changes nothing, a summary of what waits on whom ends the pass:
 
 ```text
 0001-a-1 completed -> review.verifying
@@ -479,10 +484,21 @@ summary
   0002-b todo.ready: waiting for 0001-a to merge
 ```
 
+A pass that wrote no transition line starts its summary with `no transition`.
 A file that changed outside arc is skipped and named in the summary; it does not stop the loop.
 A plan whose budget or automatic-rework limit paused it is named with its reason.
 
-It exits `0` when it ran to quiet, even when a task failed, `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
+### `--watch`
+
+`radian arc run --watch` repeats the pass. After every pass (which always ends quiet) it waits `--interval` seconds, then runs another pass; it holds `runner.lock` for the whole loop, so a second `run` exits `4` as usual.
+It is a foreground loop that you start and stop, not a daemon: while it is not running, nothing advances.
+
+With `--watch`, the summary is printed only when it differs from the summary the loop printed last, so a quiet loop does not repeat the same lines every interval. Every transition line is still printed when it happens.
+
+On SIGINT or SIGTERM the loop starts no new work and lets a running attempt finish; an attempt is a separate worker process with its own record, and the next `run` reconciles it.
+It then prints the summary, releases `runner.lock`, and exits `0`.
+
+It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or SIGTERM with `--watch`; `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
 
 ## `radian arc mcp`
 
@@ -787,7 +803,7 @@ A worker never reads the rest of `.radian/arc/` from inside its checkout: the wo
 
 The arc terminal interface is not built: `radian arc` with no subcommand says so and lists the subcommands.
 The gate stages `mutation`, `review`, and `ci` are not built: verification refuses a profile or task that lists one, and the task stays in `review.verifying`.
-The arc TUI does not hold `runner.lock`: a scheduling loop runs only while `radian arc run` does.
+The arc TUI does not hold `runner.lock`: a scheduling loop runs only while `radian arc run` does, a one-shot pass or its `--watch` loop.
 
 ## See also
 
