@@ -114,8 +114,8 @@ merge prints one warning.
    `[mcp.mcpServers.<name>]` tables for the shared form. See
    `configuration.md` for the file path.
 3. The project file `<workspace>/.mcp.json`, in either form. It loads only
-   when the directory is trusted. Pass `--no-config-mcp` to skip it, or
-   `--trust` to load it this run without trusting the directory.
+   when the directory is trusted. Pass `--trust` to load it this run without
+   trusting the directory.
 
 The project file never breaks startup: a missing file loads nothing with no
 lines, an unreadable file warns once, and an untrusted directory prints one
