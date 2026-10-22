@@ -263,14 +263,59 @@ pub async fn open_session(
     }
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
+    // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. It
+    // runs before the coding tools are built so their read-only roots include each
+    // discovered skill's directory (ADR 0039 decision 4): the same set discovery loads, so an
+    // untrusted project's skills are never roots (ADR 0031 T1). The section is appended
+    // after the memory section, so the tuple below is ((perm, memory), skills) and the
+    // prompt order is basic prompt, memory, skills (ADR 0025 S6).
+    let skills = {
+        // The two user levels first (`$RADIAN_HOME/skills`, then the Agent Skills standard
+        // `$HOME/.agents/skills`), then `[skills] extra_paths`, then the trusted project's
+        // `.agents/skills` from the workspace up to the repository root (ADR 0025 S1): the
+        // first discovery of a name wins, so `$RADIAN_HOME/skills` beats `~/.agents/skills`
+        // and a user-level skill beats a project one. An untrusted project's roots are empty,
+        // so its skills are never read (ADR 0031 T1).
+        let discovery = skills::discover_with_project(
+            skills_dir().as_deref(),
+            agents_skills_dir().as_deref(),
+            &skills_extra_paths,
+            &skills::project_roots_for(&workspace, trust.resolved.decision.as_bool()),
+            skills_builtin,
+            &skills_disabled,
+        );
+        for warning in &discovery.warnings {
+            memory_warning(warning);
+        }
+        // The session's skill allow-list keeps only the named skills in this session's catalog.
+        // `None` is every discovered skill.
+        match &skills_allow {
+            Some(allow) => skills::restrict_to(discovery.skills, allow),
+            None => discovery.skills,
+        }
+    };
+    let shared_skills = Arc::new(skills);
+
     // The built-in coding tools are built here. `harden_git` is the trust decision
     // (ADR 0039 decision 5): an untrusted project hardens git in every shell child.
+    // Skill roots are the discovered filesystem skills' directories (built-ins are
+    // embedded and have no directory); the deny set is the host's deny-read list, the same
+    // source the sandbox policy uses (ADR 0039 decision 4). The tools also hold the shared
+    // sandbox slot as their tier source, so a tier switch changes their reads at the next
+    // call (ADR 0038).
     let harden_git = !trust.resolved.decision.as_bool();
+    let skill_dirs: Vec<std::path::PathBuf> = shared_skills
+        .iter()
+        .filter(|skill| skill.body.is_none())
+        .map(|skill| skill.dir.clone())
+        .collect();
     let (coding, jobs) = build_coding_tools(
         coding_root.as_deref(),
         sandbox_slot.clone(),
         &jobs_dir,
         harden_git,
+        &skill_dirs,
+        &crate::home::file_tool_deny_read(&session_dir),
     )?;
     // ADR 0037 §6: a resumed session clears its jobs directory. The registry is built empty
     // above, so at this point no file in the directory can belong to it and nothing is
@@ -319,32 +364,6 @@ pub async fn open_session(
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
-    let skills = {
-        // The two user levels first (`$RADIAN_HOME/skills`, then the Agent Skills standard
-        // `$HOME/.agents/skills`), then `[skills] extra_paths`, then the trusted project's
-        // `.agents/skills` from the workspace up to the repository root (ADR 0025 S1): the
-        // first discovery of a name wins, so `$RADIAN_HOME/skills` beats `~/.agents/skills`
-        // and a user-level skill beats a project one. An untrusted project's roots are empty,
-        // so its skills are never read (ADR 0031 T1).
-        let discovery = skills::discover_with_project(
-            skills_dir().as_deref(),
-            agents_skills_dir().as_deref(),
-            &skills_extra_paths,
-            &skills::project_roots_for(&workspace, trust.resolved.decision.as_bool()),
-            skills_builtin,
-            &skills_disabled,
-        );
-        for warning in &discovery.warnings {
-            memory_warning(warning);
-        }
-        // The session's skill allow-list keeps only the named skills in this session's catalog.
-        // `None` is every discovered skill.
-        match &skills_allow {
-            Some(allow) => skills::restrict_to(discovery.skills, allow),
-            None => discovery.skills,
-        }
-    };
-    let shared_skills = Arc::new(skills);
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
     // ADR 0021: one injection object per session. The fixed block is computed once
     // (by whichever of the two seams runs first) and the driver's per-turn seam appends later

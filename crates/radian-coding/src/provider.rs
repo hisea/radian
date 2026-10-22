@@ -7,6 +7,7 @@ use radian_core::{
 };
 use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
 
+use crate::deny::DenySet;
 use crate::read_roots::ReadRoots;
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
 use crate::{fail, foreground, glob, grep, jobs, patch, read, shell, write};
@@ -164,8 +165,19 @@ impl CodingTools {
         root: impl AsRef<std::path::Path>,
         read_roots: ReadRoots,
     ) -> Result<Self, WorkspaceError> {
+        Self::with_read_roots_and_deny(root, read_roots, DenySet::empty())
+    }
+
+    /// [`CodingTools::with_read_roots`] with an explicit `full`-tier deny set. The tier source
+    /// is empty, which reads as the `workspace` tier (outside paths outside the roots refuse).
+    /// For tests of the `workspace`-tier boundary.
+    pub fn with_read_roots_and_deny(
+        root: impl AsRef<std::path::Path>,
+        read_roots: ReadRoots,
+        deny: DenySet,
+    ) -> Result<Self, WorkspaceError> {
         Ok(Self::from_root(
-            WorkspaceRoot::with_read_roots(root, read_roots)?,
+            WorkspaceRoot::with_access(root, read_roots, deny, SandboxSlot::empty())?,
             SandboxSlot::empty(),
             None,
         ))
@@ -188,11 +200,28 @@ impl CodingTools {
     /// advertised whenever the slot currently holds a sandbox; the tool set is fixed at
     /// `open_session`, so a session that starts without `shell` does not gain it mid-session
     /// (switching to a *narrower* tier still denies it through the permission rules).
+    ///
+    /// The file tools read the same slot at every call, so a tier switch changes what they
+    /// read at the next call (ADR 0039 decision 4). The deny set defaults to empty.
     pub fn with_sandbox_slot(
         root: impl AsRef<std::path::Path>,
         sandbox: SandboxSlot,
     ) -> Result<Self, CodingToolsError> {
-        let root = WorkspaceRoot::with_read_roots(root, ReadRoots::from_env())?;
+        Self::with_sandbox_slot_and_access(root, sandbox, ReadRoots::from_env(), DenySet::empty())
+    }
+
+    /// [`CodingTools::with_sandbox_slot`] with explicit read-only roots (the host passes the
+    /// skill roots from its skill discovery) and the `full`-tier deny set (the host passes
+    /// its deny-read list). The slot is both the `shell` source and the file tools' tier
+    /// source: `FullAccess` reads any absolute or `~` path except the deny set, any other
+    /// mode (or an empty slot) keeps outside paths to the roots.
+    pub fn with_sandbox_slot_and_access(
+        root: impl AsRef<std::path::Path>,
+        sandbox: SandboxSlot,
+        read_roots: ReadRoots,
+        deny: DenySet,
+    ) -> Result<Self, CodingToolsError> {
+        let root = WorkspaceRoot::with_access(root, read_roots, deny, sandbox.clone())?;
         if let Some(current) = sandbox.get()
             && current.policy().workspace != root.root()
         {

@@ -4,10 +4,10 @@
 //!
 //! Split from `session/mod.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use radian_coding::CodingTools;
+use radian_coding::{CodingTools, DenySet, ReadRoots};
 use radian_core::Hooks;
 use radian_permissions::{PermissionHooks, Preset};
 #[cfg(test)]
@@ -101,19 +101,32 @@ pub(super) fn build_coding_tools(
     sandbox: SandboxSlot,
     jobs_dir: &Path,
     harden_git: bool,
+    skill_dirs: &[PathBuf],
+    deny_read: &[PathBuf],
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
     match workspace {
         Some(dir) => {
+            // ADR 0039 decision 4: the file tools' read-only roots are the cargo and toolchain
+            // sources plus each discovered skill's directory (project skills only when
+            // trusted — the same set discovery loads); their `full`-tier deny set is the
+            // host's deny-read list, the same source the sandbox policy uses.
+            let read_roots = ReadRoots::from_env_and_skills(skill_dirs);
+            let deny = DenySet::from_home_and_extra(crate::home::user_home(), deny_read);
             // The slot decides whether `shell` exists: an empty slot means no shell
             // advertised, a non-empty one is a sandbox the shell can run under. The
             // tool set is fixed here at `open_session`; a later switch to a *narrower* tier
-            // still denies `shell` through the permission rules (ADR 0038 slice 2).
+            // still denies `shell` through the permission rules (ADR 0038 slice 2). The same
+            // slot is the file tools' tier source: `full` reads any absolute or `~` path
+            // except the deny set at every call, `workspace` keeps outside paths to the
+            // roots (ADR 0039 decision 4).
             let tools = if sandbox.is_some() {
-                CodingTools::with_sandbox_slot(dir, sandbox).map_err(|error| {
-                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
-                })?
+                CodingTools::with_sandbox_slot_and_access(dir, sandbox, read_roots, deny).map_err(
+                    |error| {
+                        SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+                    },
+                )?
             } else {
-                CodingTools::new(dir).map_err(|error| {
+                CodingTools::with_read_roots_and_deny(dir, read_roots, deny).map_err(|error| {
                     SessionError::Message(format!("--workspace {}: {error}", dir.display()))
                 })?
             };
@@ -226,7 +239,8 @@ mod tests {
         let jobs_dir = root.join("sessions/sid.jobs");
 
         let slot = SandboxSlot::from_option(Some(full_access(&ws)));
-        let (_coding, jobs) = build_coding_tools(Some(&ws), slot, &jobs_dir, false).expect("tools");
+        let (_coding, jobs) =
+            build_coding_tools(Some(&ws), slot, &jobs_dir, false, &[], &[]).expect("tools");
         let jobs = jobs.expect("a registry");
 
         assert_eq!(

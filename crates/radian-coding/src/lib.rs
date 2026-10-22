@@ -9,12 +9,15 @@
 //! not enforce.
 //!
 //! - paths are workspace-relative; absolute paths and `..` escapes are refused;
-//! - `read` additionally reads the bundled manual (`radian://docs/`); `read`, `grep` and `glob` additionally read two **read-only** roots outside the
+//! - `read` additionally reads the bundled manual (`radian://docs/`); `read`, `grep` and `glob` additionally read read-only roots outside the
 //!   workspace (ADR 0039): the cargo registry sources, `$CARGO_HOME/registry/src`,
-//!   and every toolchain's `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`. A model names one as an
-//!   absolute path or with `~`; it is opened from that root's fd with the same per-component
-//!   `O_NOFOLLOW` walk, and a path under neither root is refused with a message naming them.
-//!   `write`, `patch` and `shell`'s working directory never accept them;
+//!   every toolchain's `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`, and each discovered
+//!   skill's directory. In the `full` tier they also read any other absolute or `~` path,
+//!   except the sandbox's deny set (credential and session files). A model names a root or
+//!   a `full`-tier path as an absolute path or with `~`; it is opened from its root's fd
+//!   with the same per-component `O_NOFOLLOW` walk, and a path under no root is refused
+//!   with a message naming them. `write`, `patch` and `shell`'s working directory never
+//!   accept them;
 //! - the target is canonicalized and must stay under the canonical workspace root, which
 //!   catches symlink escapes, including a symlinked parent directory;
 //! - `write`/`patch` never follow a symlink at the destination (`O_NOFOLLOW` on Unix) and
@@ -57,6 +60,7 @@
 
 mod args;
 mod ask;
+mod deny;
 pub mod docs;
 mod foreground;
 mod glob;
@@ -80,6 +84,7 @@ pub use ask::{
     MAX_PROMPT_CHARS, MAX_QUESTIONS, PromptError, Prompter, Question, QuestionAnswer, QuestionKind,
     QuestionOption, QuestionReply, QuestionRequest,
 };
+pub use deny::DenySet;
 pub use jobs::{
     JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,
     SweepSummary,

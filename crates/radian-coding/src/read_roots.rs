@@ -1,6 +1,7 @@
 //! The read-only roots outside the workspace that `read`, `grep` and `glob` may also
-//! open (ADR 0039): the cargo registry sources, `$CARGO_HOME/registry/src`, and the
-//! sources of every installed toolchain, `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`.
+//! open (ADR 0039): the cargo registry sources, `$CARGO_HOME/registry/src`, the
+//! sources of every installed toolchain, `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`, and
+//! each discovered skill's directory (the directory holding its `SKILL.md`).
 //!
 //! A model names one of them as an absolute path or with `~`. A path that falls under a root is
 //! opened from that root's own directory fd with the same per-component `O_NOFOLLOW` walk the
@@ -30,6 +31,9 @@ pub(crate) struct ReadRoot {
     /// written the way the user set `CARGO_HOME`/`RUSTUP_HOME` still matches when
     /// canonicalization rewrites it (e.g. `/tmp` → `/private/tmp` on macOS).
     prefixes: Vec<PathBuf>,
+    /// Whether this root is a discovered skill's directory (ADR 0039 decision 4). Skill
+    /// roots are listed by path in the `workspace`-tier refusal.
+    skill: bool,
 }
 
 /// A path that resolved under one of the [`ReadRoots`].
@@ -49,9 +53,11 @@ pub struct ReadRoots {
     roots: Vec<ReadRoot>,
 }
 
-/// The two readable roots as one phrase, for the boundary refusal message (ADR 0039).
+/// The readable roots as one phrase, for the boundary refusal message (ADR 0039). Skill
+/// directories are named by path after this phrase (see [`ReadRoots::skill_dirs`]).
 pub(crate) const READ_ROOTS_DESCRIPTION: &str = "the cargo registry sources (`$CARGO_HOME/registry/src`) and every toolchain's \
-     `lib/rustlib/src` (`$RUSTUP_HOME/toolchains/*/lib/rustlib/src`), named as an absolute or \
+     `lib/rustlib/src` (`$RUSTUP_HOME/toolchains/*/lib/rustlib/src`), and each discovered \
+     skill's directory (the directory holding its `SKILL.md`), named as an absolute or \
      `~` path (read-only)";
 
 impl ReadRoots {
@@ -66,18 +72,42 @@ impl ReadRoots {
     /// relative). A root that does not exist, is not a directory, or cannot be opened is
     /// skipped.
     pub fn from_env() -> Self {
+        Self::from_env_and_skills(&[])
+    }
+
+    /// [`ReadRoots::from_env`] plus one read-only root per discovered skill directory: the
+    /// directory holding its `SKILL.md`, never its parent (ADR 0039 decision 4). The caller
+    /// passes the session's skill discovery result (project skills only when trusted — the
+    /// same set discovery loads). A missing, non-directory or unopenable skill directory
+    /// is skipped, like every other root.
+    pub fn from_env_and_skills(skill_dirs: &[PathBuf]) -> Self {
         let mut roots = Vec::new();
         if let Some(cargo) = cargo_registry_src()
-            && let Some(root) = ReadRoot::at(&cargo)
+            && let Some(root) = ReadRoot::at(&cargo, false)
         {
             roots.push(root);
         }
         for toolchain in rustup_toolchain_srcs() {
-            if let Some(root) = ReadRoot::at(&toolchain) {
+            if let Some(root) = ReadRoot::at(&toolchain, false) {
+                roots.push(root);
+            }
+        }
+        for dir in skill_dirs {
+            if let Some(root) = ReadRoot::at(dir, true) {
                 roots.push(root);
             }
         }
         Self { roots }
+    }
+
+    /// The canonical paths of the skill roots, for the `workspace`-tier refusal (ADR 0039:
+    /// the error lists the roots, now including skill roots).
+    pub(crate) fn skill_dirs(&self) -> Vec<&Path> {
+        self.roots
+            .iter()
+            .filter(|root| root.skill)
+            .map(|root| root.canonical())
+            .collect()
     }
 
     pub(crate) fn roots(&self) -> &[ReadRoot] {
@@ -116,7 +146,7 @@ impl ReadRoot {
     /// Opens `configured` as a readable root, or `None` when it is missing or not a directory.
     /// The configured spelling is canonicalized once here; the root's parent is not writable by
     /// the model, so following a link at the root itself is intended.
-    fn at(configured: &Path) -> Option<Self> {
+    fn at(configured: &Path, skill: bool) -> Option<Self> {
         let canonical = std::fs::canonicalize(configured).ok()?;
         if !canonical.is_dir() {
             return None;
@@ -132,6 +162,7 @@ impl ReadRoot {
             dir,
             canonical,
             prefixes,
+            skill,
         })
     }
 

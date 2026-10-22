@@ -45,6 +45,7 @@ pub use git_exec::{
 };
 pub use policy::{
     DEFAULT_ALLOW_ENV, DEFAULT_DENY_READ, GitAccess, SandboxMode, SandboxPolicy,
+    canonicalize_existing_prefix, default_deny_read_for_home, deny_read_match,
     discover_git_metadata,
 };
 pub use slot::SandboxSlot;

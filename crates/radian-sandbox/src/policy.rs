@@ -229,11 +229,7 @@ impl SandboxPolicy {
 /// workspace allow. Both sides were canonicalized when the policy was built; comparison is by
 /// path components, so `/a/bc` is not inside `/a/b`.
 pub(crate) fn deny_read_covers_workspace(policy: &SandboxPolicy) -> Option<&Path> {
-    policy
-        .deny_read
-        .iter()
-        .find(|denied| is_ancestor_or_same(denied, &policy.workspace))
-        .map(PathBuf::as_path)
+    deny_read_match(&policy.deny_read, &policy.workspace).map(PathBuf::as_path)
 }
 
 /// Whether `ancestor` is `descendant` or a strict ancestor of it, by path components.
@@ -272,8 +268,10 @@ pub(crate) fn canonical_dir(path: &Path) -> Result<PathBuf, SandboxError> {
 /// a deny rule for `~/.ssh` still binds before the directory has been created.
 ///
 /// The denial classifier also uses this to resolve the paths a failed command spells: the
-/// shell prints `/var/...` while the policy holds `/private/var/...`.
-pub(crate) fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+/// shell prints `/var/...` while the policy holds `/private/var/...`. The file tools use the
+/// same helper for their `full`-tier deny check, so the two can never differ (ADR 0039
+/// decision 4).
+pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     // Resolve symlinks in the part that exists and keep the missing tail: a deny rule for a
     // not-yet-created `~/.netrc` must name `~/.netrc`, never stop at `$HOME` (which would
     // deny the whole home directory).
@@ -301,6 +299,14 @@ fn default_deny_read() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
     };
+    default_deny_read_for_home(&home)
+}
+
+/// [`default_deny_read`] for an explicit home directory: the same expansion the sandbox
+/// policy builds at startup. The file tools build their `full`-tier deny set from this plus
+/// the `$RADIAN_HOME` paths the host denies, so the two lists share one source (ADR 0039
+/// decision 4). Pure, so tests pin it without touching the process environment.
+pub fn default_deny_read_for_home(home: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for rel in DEFAULT_DENY_READ {
         let p = home.join(rel);
@@ -313,6 +319,16 @@ fn default_deny_read() -> Vec<PathBuf> {
     out.sort();
     out.dedup();
     out
+}
+
+/// The first entry of `deny_read` that is `path` itself or an ancestor of it, if any. The
+/// sandbox policy uses this for the workspace check; the file tools use it for their
+/// `full`-tier deny check on a `realpath`ed path. One function, so the match rule can never
+/// differ between the two.
+pub fn deny_read_match<'a>(deny_read: &'a [PathBuf], path: &Path) -> Option<&'a PathBuf> {
+    deny_read
+        .iter()
+        .find(|denied| is_ancestor_or_same(denied, path))
 }
 
 /// Finds `.git` entries under the workspace (bounded depth) and returns the paths that must

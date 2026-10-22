@@ -23,7 +23,7 @@ Status: accepted
 
 ### S3 Call: one built-in tool plus `/skill:`
 
-1. **Model automatic**: built-in tool `skill(name, args?)`, implemented by the host (`radian-host`). It looks up the discovered skill by name, reads `SKILL.md`, strips frontmatter, and returns the body plus one line "relative paths use <skill directory> as base". Unknown name, read failure, directory traversal (`../`), and body over budget are all **errors in the tool result**, not turn failures.
+1. **Model automatic**: built-in tool `skill(name, args?)`, implemented by the host (`radian-host`). It looks up the discovered skill by name, reads `SKILL.md`, strips frontmatter, and returns the body plus one line "relative paths use <skill directory> as base". Each discovered skill directory is a read-only root for `read`, `grep`, and `glob` in both tiers (ADR 0039 decision 4), so the model reads a skill's bundled files with the file tools. Unknown name, read failure, directory traversal (`../`), and body over budget are all **errors in the tool result**, not turn failures.
 2. **User explicit**: TUI `/skill:<name> [args]`. The host reads the body and sends `<skill name=…>…</skill>` plus args as **one user message** into the inbox. `/skills` (no arguments) lists discovered skills (name plus description). `/skill:` has TUI completion; candidates are discovered skill names.
 3. **Argument fill**: when the body holds `$ARGUMENTS`, each occurrence is replaced by actual arguments (empty when none), with no append. A body without a placeholder stays as-is with append. `$1` style positional placeholders do not replace (only `$ARGUMENTS`). The `skill` tool `args` and `/skill:` share the same rule, except the tool-side append shape is an `Arguments:` line.
 
