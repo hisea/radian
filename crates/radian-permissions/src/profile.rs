@@ -6,7 +6,16 @@ use radian_sandbox::{Sandbox, SandboxMode};
 
 use crate::rule::{Action, ResourceMatcher, Rule, ToolMatcher};
 
-/// How `ask` is resolved.
+/// The `--profile` tier names, in documentation order. The parsers and the manual's drift
+/// test both read this list.
+pub const TIER_NAMES: &[&str] = &["workspace", "full"];
+/// The `--profile` aliases, accepted but hidden from `--help`.
+pub const TIER_ALIASES: &[&str] = &["workspace-write", "full-access"];
+///
+/// The `--approval` / `[permissions] approval` values, in documentation order. The parser
+/// and the manual's drift test both read this list.
+pub const APPROVAL_POLICIES: &[&str] = &["on-ask", "never", "always", "auto"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalPolicy {
     /// Ask the approver when a rule says `ask` (the default).
@@ -24,6 +33,9 @@ pub enum ApprovalPolicy {
 impl ApprovalPolicy {
     /// The `--approval` / `[permissions] approval` name (ADR 0012, ADR 0026 D9).
     pub fn parse(name: &str) -> Option<Self> {
+        if !APPROVAL_POLICIES.contains(&name) {
+            return None;
+        }
         match name {
             "on-ask" => Some(Self::OnAsk),
             "never" => Some(Self::Never),

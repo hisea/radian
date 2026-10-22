@@ -253,16 +253,26 @@ pub struct CommandOutput {
     pub note: Option<String>,
 }
 
+/// The `--kind` values, in documentation order. The parser and the manual's drift test
+/// both read this list.
+pub const KIND_NAMES: &[&str] = &["preference", "decision", "fact", "lesson"];
+
 /// The `--kind` grammar (clap `value_parser`). A value this version does not know is a usage
 /// error, not a silently stored `Unknown` (ADR 0021 D4).
 pub fn parse_kind(raw: &str) -> Result<Kind, String> {
+    if !KIND_NAMES.contains(&raw) {
+        return Err(format!(
+            "unknown kind {raw:?}; expected preference|decision|fact|lesson"
+        ));
+    }
     match raw {
         "preference" => Ok(Kind::Preference),
         "decision" => Ok(Kind::Decision),
         "fact" => Ok(Kind::Fact),
         "lesson" => Ok(Kind::Lesson),
-        other => Err(format!(
-            "unknown kind {other:?}; expected preference|decision|fact|lesson"
+        _ => Err(format!(
+            "unknown kind {raw:?}; expected {}",
+            KIND_NAMES.join("|")
         )),
     }
 }

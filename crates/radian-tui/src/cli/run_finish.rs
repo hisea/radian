@@ -216,7 +216,11 @@ pub(super) fn build_startup_screen(
     for warning in config_warnings {
         safety.push(format!("config: {warning}"));
     }
-    let banner = if config.tui.banner.unwrap_or(true) {
+    let banner = if config
+        .tui
+        .banner
+        .unwrap_or(crate::app::config::DEFAULT_BANNER)
+    {
         let path = radian_tui::workspace::display_coding_root(workspace_root, home.as_deref());
         // ADR 0008 §2: the banner names the missing model instead of a blank.
         let banner_model = if has_model { model_name } else { "no model" };
@@ -227,7 +231,7 @@ pub(super) fn build_startup_screen(
     let tip = config
         .tui
         .tips
-        .unwrap_or(true)
+        .unwrap_or(crate::app::config::DEFAULT_TIPS)
         .then(|| radian_tui::startup::tip_for(session_id).to_string());
     mark("before-startup");
     app.set_startup(radian_tui::startup::StartupScreen {

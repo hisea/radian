@@ -37,12 +37,13 @@ use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
 pub use hooks::{
-    DEFAULT_HOOK_TIMEOUT_SECS, HOOK_EVENTS, HookCommand, HookMatcher, HooksConfig, POST_TOOL_USE,
-    PRE_TOOL_USE, STOP, matcher_effective,
+    DEFAULT_HOOK_TIMEOUT_SECS, DEFAULT_INTENT_STOP, HOOK_EVENTS, HookCommand, HookMatcher,
+    HooksConfig, POST_TOOL_USE, PRE_TOOL_USE, STOP, matcher_effective,
 };
-pub use model::{ModelConfig, SmolConfig};
+pub use model::{ModelConfig, PROVIDER_KINDS, SmolConfig};
 pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets, unix_sockets_ignored_warning};
 pub use tui::{
+    BELL_MODES, CLIPBOARD_MODES, DISPLAY_REASONING_MODES, DISPLAY_TOOL_OUTPUT_MODES,
     TuiColorOverride, TuiColorValue, TuiConfig, TuiFooterConfig, TuiFooterItemConfig,
     TuiFooterRowConfig, TuiWidgetsConfig,
 };
@@ -81,6 +82,15 @@ pub struct PermissionsConfig {
     /// `permissions` rule).
     pub approval: Option<String>,
 }
+
+/// The `[compaction] auto` default: compact past the input budget unless turned off.
+pub const DEFAULT_COMPACTION_AUTO: bool = true;
+
+/// The `[compaction] thinking` default: the summary call's reasoning level.
+pub const DEFAULT_COMPACTION_THINKING: &str = "low";
+
+/// The `[skills] builtin` default: built-in skills are on unless turned off.
+pub const DEFAULT_SKILLS_BUILTIN: bool = true;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompactionConfig {
@@ -1999,6 +2009,198 @@ future_option = "alpha"
                     fixture.display()
                 );
             }
+        }
+    }
+
+    /// Every closed value set the reader enforces appears in its key's own row of
+    /// `docs/user/configuration.md`, and every documented default matches the code.
+    /// Mutation: drop one value from a row (or change one default cell) → this fails
+    /// naming the key. Why the code is the source that cannot drift: each value list is the
+    /// `pub const` the parser's own guard reads, and each default is the effective value the
+    /// host computes from an empty config.
+    #[test]
+    fn closed_value_sets_and_defaults_appear_in_configuration_md() {
+        use crate::model::COMPACTION_THINKING_CURRENT;
+        use crate::{GENERIC_ID, THINKING_LEVELS};
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let doc = std::fs::read_to_string(manifest.join("../../docs/user/configuration.md"))
+            .expect("configuration.md exists");
+        fn row<'a>(doc: &'a str, key: &str) -> Vec<&'a str> {
+            let rows: Vec<&str> = doc
+                .lines()
+                .filter(|line| {
+                    line.starts_with('|')
+                        && line
+                            .split('|')
+                            .nth(1)
+                            .is_some_and(|cell| cell.contains(key))
+                })
+                .collect();
+            assert!(!rows.is_empty(), "{key} has no row in configuration.md");
+            rows
+        }
+        // Each value of a closed set appears in its key's row, not just anywhere.
+        let sets: &[(&str, Vec<String>)] = &[
+            (
+                "tui.clipboard",
+                tui::CLIPBOARD_MODES.iter().map(|s| s.to_string()).collect(),
+            ),
+            (
+                "tui.bell",
+                tui::BELL_MODES.iter().map(|s| s.to_string()).collect(),
+            ),
+            (
+                "tui.display.reasoning",
+                tui::DISPLAY_REASONING_MODES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "tui.display.tool_output",
+                tui::DISPLAY_TOOL_OUTPUT_MODES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "providers.<name>.kind",
+                model::PROVIDER_KINDS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "permissions.approval",
+                radian_permissions::APPROVAL_POLICIES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+        ];
+        for (key, values) in sets {
+            for line in row(&doc, key) {
+                for value in values {
+                    assert!(
+                        line.contains(value.as_str()),
+                        "{key} row is missing value {value}: {line}"
+                    );
+                }
+            }
+        }
+        // `compaction.thinking` is the seven levels plus `current`.
+        for line in row(&doc, "compaction.thinking") {
+            for level in THINKING_LEVELS {
+                assert!(
+                    line.contains(level),
+                    "compaction.thinking row misses {level}: {line}"
+                );
+            }
+            assert!(
+                line.contains(COMPACTION_THINKING_CURRENT),
+                "compaction.thinking row misses current: {line}"
+            );
+        }
+        // `permissions.profile` is the tier names and their aliases (plus the ignored ADR
+        // names, which the row names as ignored).
+        for line in row(&doc, "permissions.profile") {
+            for name in KNOWN_PROFILES {
+                assert!(
+                    line.contains(name),
+                    "permissions.profile row misses {name}: {line}"
+                );
+            }
+        }
+        // Every hook event has its own row.
+        for event in HOOK_EVENTS {
+            let key = format!("hooks.{event}");
+            assert!(
+                row(&doc, &key).iter().any(|line| line.contains(event)),
+                "{key} row misses {event}"
+            );
+        }
+        // Each default is the code's effective value for an empty config. The default must
+        // sit in the row's Default cell (not just anywhere: the Allowed cell would mask a
+        // changed default). The four-column `schema_version` row carries no Default cell:
+        // there the whole row must contain it.
+        // Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
+        fn split_cells(row: &str) -> Vec<String> {
+            let mut cells = vec![String::new()];
+            let mut chars = row.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\' && chars.peek() == Some(&'|') {
+                    cells.last_mut().expect("a cell is open").push('|');
+                    chars.next();
+                } else if c == '|' {
+                    cells.push(String::new());
+                } else {
+                    cells.last_mut().expect("a cell is open").push(c);
+                }
+            }
+            cells
+        }
+        fn default_in_row(row: &str, default: &str) -> bool {
+            let cells = split_cells(row);
+            let inner = &cells[1..cells.len() - 1];
+            if inner.len() >= 5 {
+                inner[2].contains(default)
+            } else {
+                row.contains(default)
+            }
+        }
+        let empty = parse(
+            std::path::Path::new("/tmp/test/config.toml"),
+            "schema_version = 1\n",
+        )
+        .expect("empty config parses");
+        let defaults: &[(&str, String)] = &[
+            ("schema_version", SUPPORTED_SCHEMA_VERSION.to_string()),
+            ("model.provider", GENERIC_ID.to_string()),
+            (
+                "model.retries",
+                radian_core::DEFAULT_MODEL_RETRIES.to_string(),
+            ),
+            ("compaction.auto", DEFAULT_COMPACTION_AUTO.to_string()),
+            (
+                "compaction.thinking",
+                DEFAULT_COMPACTION_THINKING.to_string(),
+            ),
+            ("skills.builtin", DEFAULT_SKILLS_BUILTIN.to_string()),
+            ("hooks.intent_stop", DEFAULT_INTENT_STOP.to_string()),
+            (
+                "memory.injection.additions",
+                empty.memory.injection().additions.to_string(),
+            ),
+            (
+                "memory.injection.addition_budget",
+                empty.memory.injection().addition_budget.to_string(),
+            ),
+            (
+                "integrations.herdr",
+                IntegrationsConfig::default().herdr.to_string(),
+            ),
+            (
+                "control.enabled",
+                ControlConfig::default().enabled.to_string(),
+            ),
+            (
+                "permissions.profile",
+                radian_permissions::Preset::FullAccess.as_str().to_string(),
+            ),
+            (
+                "permissions.approval",
+                radian_permissions::ApprovalPolicy::OnAsk
+                    .as_str()
+                    .to_string(),
+            ),
+        ];
+        for (key, default) in defaults {
+            let lines = row(&doc, key);
+            assert!(
+                lines.iter().any(|line| default_in_row(line, default)),
+                "{key} row misses its default {default}: {}",
+                lines.join("\n")
+            );
         }
     }
 }

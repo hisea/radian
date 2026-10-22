@@ -38,6 +38,10 @@ pub struct SmolConfig {
     pub model: String,
 }
 
+/// The `[providers.<name>] kind` values (the two wire protocols). The parser and the
+/// manual's drift test both read this list.
+pub const PROVIDER_KINDS: &[&str] = &["openai-compatible", "anthropic"];
+
 pub(super) fn parse_providers(
     value: &Value,
     path: &Path,
@@ -64,9 +68,7 @@ pub(super) fn parse_providers(
         };
         for (field, value) in spec {
             match (field.as_str(), value) {
-                ("kind", Value::String(kind))
-                    if matches!(kind.as_str(), "openai-compatible" | "anthropic") =>
-                {
+                ("kind", Value::String(kind)) if PROVIDER_KINDS.contains(&kind.as_str()) => {
                     decl.kind = kind.clone();
                 }
                 // D10: only the two wire protocols exist in this build; anything else is a

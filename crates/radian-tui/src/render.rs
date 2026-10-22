@@ -27,7 +27,9 @@ use input::{
     BOX_PROMPT, BoxGlyphs, FIND_BOX_HEIGHT, INPUT_HINT, INPUT_HINT_NO_MODEL, INPUT_PROMPT,
     input_height, input_inner_width, input_status_spans, input_visible_rows, prompt_width,
 };
-pub use input::{COMPLETION_MAX_LINES, InputStyle, completion_rows, completion_visible_rows};
+pub use input::{
+    COMPLETION_MAX_LINES, INPUT_STYLES, InputStyle, completion_rows, completion_visible_rows,
+};
 pub use panels::{
     QUESTION_KEYS, access_panel, login_panel, logout_panel, question_panel, trust_panel,
 };

@@ -190,7 +190,9 @@ impl CommandHooks {
             degraded: Arc::new(AtomicU32::new(0)),
             pending: Arc::new(AtomicU64::new(0)),
             pending_signal: Arc::new(Notify::new()),
-            intent_stop: config.intent_stop.unwrap_or(true),
+            intent_stop: config
+                .intent_stop
+                .unwrap_or(crate::config::DEFAULT_INTENT_STOP),
             jobs: Arc::new(std::sync::Mutex::new(None)),
             goal: Arc::new(std::sync::Mutex::new(None)),
             loop_active: Arc::new(AtomicBool::new(false)),

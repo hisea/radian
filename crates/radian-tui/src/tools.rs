@@ -96,6 +96,9 @@ pub enum ToolFold {
 
 impl ToolFold {
     pub fn parse(name: &str) -> Option<Self> {
+        if !radian_host::config::DISPLAY_TOOL_OUTPUT_MODES.contains(&name) {
+            return None;
+        }
         match name {
             "collapsed" => Some(Self::Collapsed),
             "expanded" => Some(Self::Expanded),
@@ -106,9 +109,9 @@ impl ToolFold {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Collapsed => "collapsed",
-            Self::Expanded => "expanded",
-            Self::Errors => "errors",
+            Self::Collapsed => radian_host::config::DISPLAY_TOOL_OUTPUT_MODES[0],
+            Self::Expanded => radian_host::config::DISPLAY_TOOL_OUTPUT_MODES[1],
+            Self::Errors => radian_host::config::DISPLAY_TOOL_OUTPUT_MODES[2],
         }
     }
 }

@@ -14,11 +14,12 @@ Run `radian logout <provider>` to remove one key.
 Removal asks first.
 Every other entry stays untouched.
 
-Choose the provider with `--provider`.
-Use `openai-compatible` for the default wire format.
-Use `anthropic` for the Anthropic message format.
+Choose the provider with `--provider`: a built-in id (`opencode-go`, `chatgpt`, `anthropic`, `openai`, `openai-compatible`) or a `[providers.<name>]` name.
+An unknown provider is refused.
+Omit it to use `openai-compatible`.
 Choose the endpoint with `--base-url`.
 Omit `--base-url` to use the provider public endpoint.
+A custom `--base-url` or `--header` is refused for every non-generic provider.
 Choose the model with `--model <name>`.
 Use a bare model name.
 Never use `<provider>/<model>` on the command line.

@@ -116,8 +116,8 @@ Names here pass through to sandboxed children; values never do.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `sandbox.allow_unix_sockets` | array of strings | none | Unix sockets the sandbox may connect to. Only absolute paths; `~` expands from home. A path that does not resolve is skipped with a warning. Ignored on Linux with a warning: the filter there denies every Unix socket. |
-| `sandbox.allow_env` | array of strings | see below | Variable names passed to sandboxed children. Names only: no `=`, no whitespace, no value. A bad entry is refused. |
+| `sandbox.allow_unix_sockets` | array of strings | none (empty list) | absolute paths only | Unix sockets the sandbox may connect to. Only absolute paths; `~` expands from home. A path that does not resolve is skipped with a warning. Ignored on Linux with a warning: the filter there denies every Unix socket. |
+| `sandbox.allow_env` | array of strings | none beyond the fixed list | variable names only, no `=`, no whitespace, no value | Variable names passed to sandboxed children. Names only: no `=`, no whitespace, no value. A bad entry is refused. |
 
 Sandboxed children otherwise start from a fixed list: `PATH`, `HOME`, `LANG`, `TERM`, `TMPDIR`, `USER`, `LOGNAME`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and the six `HERDR_*` pane coordinates.
 No key or token reaches a child unless you name its variable here.
@@ -132,10 +132,9 @@ allow_env = ["MY_TOKEN_NAME"]
 ## `[hooks]`
 
 User-level command hooks: three events, each a list of `{ matcher, hooks }` entries.
-A matcher names Radian tool names with `|` alternatives: `shell|write`.
-`*`, an empty matcher, or a missing matcher matches every tool.
+A matcher is a regular expression over Radian tool names, anchored to the whole name (`shell|write` names two tools); `*`, an empty matcher, or a missing matcher matches every tool.
 Each hook is `{ type = "command", command, timeout }`.
-The command runs as `/bin/sh -c`; `timeout` is seconds (default `60`, `0` means the default).
+The command runs as `/bin/sh -c` inside the session sandbox when one is enforced; `timeout` is seconds (`60` when unset or `0`).
 `PreToolUse` exit `2` denies the call; other failures fail closed.
 
 | Key | Type | Default | What it does |
@@ -208,7 +207,7 @@ addition_budget = 500
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
-| `compaction.auto` | boolean | `true` | — | Compact past the input budget. `--no-auto-compact` turns the proactive path off; the overflow fallback still runs. |
+| `compaction.auto` | boolean | `true` | `true`, `false` | Turn automatic compaction off with `false`. `--no-auto-compact` turns the proactive path off; the overflow fallback still runs. |
 | `compaction.thinking` | string | `low` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `current` | The summary-call reasoning level. `current` follows the conversation level. The host clamps it to the route and converts it to the wire value. Unknown levels are refused. |
 
 ```toml
@@ -219,39 +218,39 @@ thinking = "low"
 
 ## `[tui]`
 
-Display preferences never refuse the file: unknown keys and wrong types warn and fall back, except an over-wide `brand`.
+Display preferences never refuse the file: unknown keys and wrong types warn and fall back, except an over-wide `brand`. They apply at startup: change the file and start a new session. The theme also switches at once through `/theme`, which writes the choice back to the file.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
-| `tui.theme` | string | `dark` | `dark`, `light`, `mono`, or a file under `~/.radian/themes/` | The startup theme. Unknown names warn and fall back. `NO_COLOR` forces `mono`. |
-| `tui.colors` | table | none | role names; a color, index, or `{ fg, bg, bold, italic, dim, underline }` | Per-role overrides. A malformed entry is skipped by name. |
-| `tui.keybindings` | table | built-in map | action names to key-string arrays | Custom keys. A bad entry is skipped by action. |
-| `tui.mouse` | boolean | `true` | — | Report the mouse wheel. `false` sends no mouse sequence. |
-| `tui.input_style` | string | `lines` | `lines`, `box` | The input frame. The removed `bar` warns and falls back to `lines`. |
-| `tui.clipboard` | string | `osc52` | `osc52`, `pbcopy`, `off` | How a copy reaches the system clipboard. `pbcopy` warns off macOS. |
-| `tui.bell` | string | `off` | `off`, `attention`, `all` | `attention` rings on questions and turn ends; `all` adds background job settles. At most one ring per event. |
-| `tui.tips` | boolean | `true` | — | One Tip line on the startup screen. |
-| `tui.banner` | boolean | `true` | — | The startup wordmark. |
-| `tui.brand` | string | glyph default | at most 4 display columns | Brand text for the footer and banner. Wider is refused. |
+| `tui.theme` | string | `dark` | `dark`, `light`, `mono`, or a file under `~/.radian/themes/` | The startup theme. The reader accepts any string; the TUI resolves a built-in name else a theme file, and an unknown name warns and falls back to `dark`. `NO_COLOR` forces `mono` and wins over the file and `/theme`. |
+| `tui.colors` | table | none | role names to a color literal, a `0`–`255` index, or a `{ fg, bg, bold, italic, dim, underline }` table | Per-role overrides applied after the theme. A bare string or a `0`–`255` integer sets the foreground; a table sets `fg`/`bg` (literal or `0`–`255`) plus the `bold`, `italic`, `dim`, `underline` forces. A malformed entry is skipped by name. A non-table value refuses the file. |
+| `tui.keybindings` | table of arrays of strings | the built-in map | action names to key-string arrays | Custom keys applied over the built-in map. A non-table value refuses the file; a non-array entry is skipped by action and an unparsable key is ignored. A key bound to two actions refuses startup. |
+| `tui.mouse` | boolean | `true` | `true`, `false` | Whether the terminal reports the mouse wheel. `false` sends no mouse sequence. A non-boolean warns and keeps `true`. |
+| `tui.input_style` | string | `lines` | `lines`, `box` | The input frame. The removed `bar` warns and falls back to `lines`; any other unknown value warns and keeps `lines`. |
+| `tui.clipboard` | string | `osc52` | `osc52`, `pbcopy`, `off` | How a copy reaches the system clipboard. `pbcopy` warns off macOS and uses `osc52`. `off` refuses a copy with a notice. At most 1 MiB per copy. An unknown value warns and keeps `osc52`. |
+| `tui.bell` | string | `off` | `off`, `attention`, `all` | `attention` rings on questions and turn ends; `all` adds background job settles. At most one ring per event. An unknown value warns and keeps `off`. |
+| `tui.tips` | boolean | `true` | `true`, `false` | One Tip line on the startup screen. A non-boolean warns and keeps `true`. |
+| `tui.banner` | boolean | `true` | `true`, `false` | The startup wordmark. A non-boolean warns and keeps `true`. |
+| `tui.brand` | string | per glyph set (`R` for `unicode`, the Nerd mark for `nerd`, `rad` for `ascii`, `⚡` for `emoji`) | any text at most 4 display columns wide | Brand text for the footer and the banner. Wider text refuses the file; a non-string warns and keeps the default. |
 | `tui.spinner` | string | `pulse` | `pulse`, `arc`, `quadrant`, `braille` | The spinner shape. Unknown names warn and use `pulse`. |
 | `tui.usage_period_secs` | integer | `60` | clamped to `15`–`600`; `0` disables | The usage refresh period. |
-| `tui.display` | table | defaults | see below | The transcript display shapes. A bad entry warns and keeps the default. |
+| `tui.display` | table | defaults below | the five keys below | The transcript display shapes. A bad entry warns and keeps the key default. |
 | `tui.display.reasoning` | string | `collapsed` | `collapsed`, `expanded`, `hidden` | The reasoning block shape. |
 | `tui.display.tool_output` | string | `errors` | `collapsed`, `expanded`, `errors` | The tool body shape. `errors` expands failures only. |
-| `tui.display.tool_preview_lines` | positive integer | `5` | — | Body lines a collapsed tool card shows. |
-| `tui.display.mermaid` | boolean | `true` | — | Draw closed `mermaid` blocks as diagrams. |
-| `tui.display.highlight` | boolean | `true` | — | Syntax-highlight fenced code blocks. |
-| `tui.footer` | table | preset rows | see below | The footer layout. A bad entry warns and keeps the default. |
-| `tui.footer.preset` | string | `full` | `full`, `pi`, `classic` | The footer layout. Unknown values warn. |
-| `tui.footer.separator` | string | preset default | — | Glyphs between items. A row may override it. |
-| `tui.footer.separator_style` | string | role default | a theme role or color | The separator style. |
-| `tui.footer.glyphs` | string | `unicode` | `unicode`, `nerd`, `ascii`, `emoji` | The glyph set. |
-| `tui.footer.context_line` | string | `off` | `off`, `percentage` | Fill the row gap with context usage. |
-| `tui.footer.transparent` | boolean | `false` | — | Inherit the terminal background in every footer cell. |
-| `tui.footer.items` | table | — | per-id tables, see below | Per-item defaults for a bare id. |
-| `tui.footer.items.<id>` | table | — | `symbol`, `symbol_style`, `format`, `style`, `disabled`, `priority`, `thresholds`, `command`, `period`, item params | One item defaults: `command` runs a contributor with `period` seconds between runs (`15`–`3600`, `0` runs once at startup). |
-| `tui.footer.rows` | array of tables | preset rows | `left`, `right`, `separator`, `position` | Footer rows. An item is a bare id or a `{ item, ... }` table. `position` is `footer`, `above_input`, or `below_input`. |
-| `tui.widgets` | table | none | see below | Contributor lines around the input box. |
+| `tui.display.tool_preview_lines` | positive integer | `5` | `1` and up | Body lines a collapsed tool card shows. A zero, negative, or non-integer value warns and keeps `5`. |
+| `tui.display.mermaid` | boolean | `true` | `true`, `false` | Draw closed `mermaid` blocks as diagrams. A non-boolean warns and keeps `true`. |
+| `tui.display.highlight` | boolean | `true` | `true`, `false` | Syntax-highlight fenced code blocks. A non-boolean warns and keeps `true`. |
+| `tui.footer` | table | the `deck` preset rows | the keys below | The footer layout. A bad entry warns and keeps the default. |
+| `tui.footer.preset` | string | `deck` | `deck`, `full`, `pi`, `classic` | The footer layout. An unknown value warns and uses `deck`. `classic` draws one status line and carries no rows. |
+| `tui.footer.separator` | string | `" · "` (the `deck` preset value) | any text | Glyphs between items. A row may override it. |
+| `tui.footer.separator_style` | string | the `footer_separator` theme role | a theme role or a color | The separator style. A bad value warns and keeps the role. |
+| `tui.footer.glyphs` | string | `unicode` | `unicode`, `nerd`, `ascii`, `emoji` | The glyph set. An unknown value warns and uses `unicode`. |
+| `tui.footer.context_line` | string | `off` | `off`, `percentage` | Fill the row gap with context usage. An unknown value warns and keeps `off`. |
+| `tui.footer.transparent` | boolean | `false` | `true`, `false` | Inherit the terminal background in every footer cell. |
+| `tui.footer.items` | table | none | per-id tables, each `{ icon` or `symbol`, `symbol_style`, `format`, `style`, `disabled`, `priority`, `thresholds`, `command`, `period`, item parameters `}` | Per-item defaults for a bare id. See `footer` for the item catalog, each item's parameters, and the preset contents. |
+| `tui.footer.items.<id>` | table | — | `icon` or `symbol` (string), `symbol_style` (string), `format` (string), `style` (string), `disabled` (boolean, default `false`), `priority` (integer), `thresholds` (array of `{ at, style }`), `command` (string), `period` (integer seconds) | One item default: `format` holds the item's placeholders; `disabled = true` hides the item everywhere it is named; `thresholds` restyle a numeric item at each `at` value; `command` runs a contributor with `period` seconds between runs (`0` runs once at startup, omitted means every `60` seconds, other values clamp to `15`–`3600`; a non-number warns and uses `60`). A known option with the wrong type is skipped. A contributor id needs no built-in: until it publishes, the item hides. |
+| `tui.footer.rows` | array of tables | the preset rows; a row's `position` defaults to `footer` | `left` (array), `right` (array), `separator` (string), `position` (`footer`, `above_input`, `below_input`) | Footer rows. An item is a bare id or a `{ item, ... }` inline table; a bare id takes the `[tui.footer.items.<id>]` defaults and an inline table is used as written. `position` defaults to `footer`; an unknown position warns and uses `footer`. When `rows` is empty the preset rows show with the per-id defaults on top. |
+| `tui.widgets` | table | none | `above_input` and `below_input`, each an array of item ids | Deprecated contributor lines around the input box. A non-empty slot warns once and folds into a footer row at that position: move the ids into `[[tui.footer.rows]]` with `position`. A bad entry warns and is skipped. |
 | `tui.widgets.above_input` | array of strings | none | item ids | Contributor items on a line above the input box. |
 | `tui.widgets.below_input` | array of strings | none | item ids | Contributor items on a line below the input box. |
 

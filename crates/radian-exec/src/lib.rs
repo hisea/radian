@@ -505,4 +505,154 @@ mod tests {
             "these long options are missing from docs/user/cli.md: {missing:?}"
         );
     }
+
+    /// Every closed `radian exec` value set appears in its option's rows of
+    /// `docs/user/cli.md`, and every defaulted option's default appears in its row.
+    /// Mutation: drop one value from a `--format` row → this fails naming the flag.
+    /// Why the code is the source that cannot drift: the possible values and defaults come
+    /// from the clap tree itself (the parser); `--kind` and `--include-usage` read the
+    /// parsers' own consts, and the login choices come from the descriptor list. Hidden
+    /// flags are test seams, not user surface, so they are not required; clap's own
+    /// `--help`/`--version` are documented once in the TUI table.
+    #[test]
+    fn cli_option_values_and_defaults_appear_in_cli_md() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cli_md = std::fs::read_to_string(manifest.join("../../docs/user/cli.md"))
+            .expect("cli.md exists");
+        fn table_rows<'a>(doc: &'a str, flag: &str) -> Vec<&'a str> {
+            doc.lines()
+                .filter(|line| {
+                    line.starts_with('|')
+                        && line
+                            .split('|')
+                            .nth(1)
+                            .is_some_and(|cell| cell.contains(flag))
+                })
+                .collect()
+        }
+        // The default must sit in the row's Default cell (the Allowed/Value cells would
+        // mask a changed default). Tables without a Default column fall back to the whole
+        // row.
+        // Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
+        fn split_cells(row: &str) -> Vec<String> {
+            let mut cells = vec![String::new()];
+            let mut chars = row.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\' && chars.peek() == Some(&'|') {
+                    cells.last_mut().expect("a cell is open").push('|');
+                    chars.next();
+                } else if c == '|' {
+                    cells.push(String::new());
+                } else {
+                    cells.last_mut().expect("a cell is open").push(c);
+                }
+            }
+            cells
+        }
+        fn default_in_row(row: &str, default: &str) -> bool {
+            let cells = split_cells(row);
+            let inner = &cells[1..cells.len() - 1];
+            if inner.len() >= 4 {
+                inner[2].contains(default)
+            } else {
+                row.contains(default)
+            }
+        }
+        fn collect(
+            command: &clap::Command,
+            out: &mut Vec<(String, String, Vec<String>, Vec<String>)>,
+        ) {
+            for arg in command.get_arguments() {
+                if arg.is_hide_set() {
+                    continue;
+                }
+                let id = arg.get_id().to_string();
+                if id == "help" || id == "version" {
+                    continue;
+                }
+                if let Some(long) = arg.get_long() {
+                    // Flags take no value: presence is the value. Options that take a
+                    // value report their closed sets and defaults.
+                    let takes_value = arg.get_action().takes_values();
+                    let mut values: Vec<String> = if takes_value {
+                        arg.get_possible_values()
+                            .iter()
+                            .map(|value| value.get_name().to_owned())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let defaults: Vec<String> = if takes_value {
+                        arg.get_default_values()
+                            .iter()
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    // `--kind` parses through `parse_kind`, not a `ValueEnum`.
+                    if id == "kind" {
+                        values = radian_host::memory::commands::KIND_NAMES
+                            .iter()
+                            .map(|name| name.to_string())
+                            .collect();
+                    }
+                    // `--include-usage` takes an optional boolean: both spellings work.
+                    if id == "include_usage" {
+                        values = vec!["true".to_string(), "false".to_string()];
+                    }
+                    out.push((format!("--{long}"), id, values, defaults));
+                }
+            }
+            for sub in command.get_subcommands() {
+                collect(sub, out);
+            }
+        }
+        let mut options = Vec::new();
+        collect(&Cli::command(), &mut options);
+        assert!(!options.is_empty(), "the tree has options");
+        for (flag, _id, values, defaults) in &options {
+            let rows = table_rows(&cli_md, flag);
+            if rows.is_empty() {
+                // Prose-documented flags (config import, memory `--workspace`): presence
+                // only, no value set to check.
+                assert!(
+                    cli_md.contains(flag.as_str()),
+                    "{flag} is missing from docs/user/cli.md"
+                );
+                continue;
+            }
+            for row in &rows {
+                for value in values {
+                    assert!(
+                        row.contains(value.as_str()),
+                        "{flag} row is missing value {value}: {row}"
+                    );
+                }
+                for default in defaults {
+                    assert!(
+                        default_in_row(row, default),
+                        "{flag} row is missing default {default}: {row}"
+                    );
+                }
+            }
+        }
+        // The login choices are the descriptor list: every id is offered in the login
+        // section, so a new built-in fails here until the page names it.
+        let login_start = cli_md
+            .find("## `radian login`")
+            .expect("the login section exists");
+        let login_end = cli_md[login_start..]
+            .find("\n## ")
+            .map(|index| login_start + index)
+            .unwrap_or(cli_md.len());
+        let login_section = &cli_md[login_start..login_end];
+        assert!(!login_section.is_empty(), "the login section is empty");
+        for (id, _description) in radian_host::login_choices() {
+            assert!(
+                login_section.contains(id.as_str()),
+                "the login section misses provider {id}"
+            );
+        }
+    }
 }

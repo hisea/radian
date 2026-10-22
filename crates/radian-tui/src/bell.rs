@@ -21,11 +21,23 @@ impl BellMode {
     /// The config spelling. `None` for anything else, so the caller warns and falls back to
     /// the default (the `tui.*` rule for a display preference, the way `tui.clipboard` does).
     pub fn parse(name: &str) -> Option<Self> {
+        if !radian_host::config::BELL_MODES.contains(&name) {
+            return None;
+        }
         match name {
             "off" => Some(Self::Off),
             "attention" => Some(Self::Attention),
             "all" => Some(Self::All),
             _ => None,
+        }
+    }
+
+    /// The config spelling of this mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => radian_host::config::BELL_MODES[0],
+            Self::Attention => radian_host::config::BELL_MODES[1],
+            Self::All => radian_host::config::BELL_MODES[2],
         }
     }
 

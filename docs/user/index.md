@@ -27,7 +27,8 @@ Each line names one page and what it covers.
 ## Configure
 
 - `configuration`: every key the configuration file accepts.
-- `environment`: every environment variable radian reads.
+- `environment`: every environment variable radian reads, and the files that change behavior.
+- `footer`: every footer item, its parameters and placeholders, and the preset contents.
 - `themes`: switch color themes and import themes from files.
 
 ## Extend

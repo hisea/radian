@@ -171,7 +171,10 @@ pub(super) fn startup_preamble(
     // The terminal is entered here **only** for `--pick`: the picker needs it before the
     // session exists. A plain run enters it later, after every fallible startup check and the
     // session itself, so a refusal leaves no alternate screen behind (dogfooding D2).
-    let mouse = config.tui.mouse.unwrap_or(true);
+    let mouse = config
+        .tui
+        .mouse
+        .unwrap_or(crate::app::config::DEFAULT_MOUSE);
     let mut startup_terminal = None;
     // Every startup diagnostic from here on goes through this: printed on the normal screen,
     // or collected for the transcript's startup block once the alternate screen is up (the

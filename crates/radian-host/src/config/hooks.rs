@@ -33,6 +33,9 @@ pub const STOP: &str = "Stop";
 /// may run before it counts as a hook error (fail closed).
 pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 60;
 
+/// The `[hooks] intent_stop` default: the built-in validator runs unless turned off.
+pub const DEFAULT_INTENT_STOP: bool = true;
+
 /// One `{ type = "command", command, timeout }` hook.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookCommand {
