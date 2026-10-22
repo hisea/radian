@@ -942,7 +942,7 @@ impl App {
                 // the find box are closed in `key_input`/`update` above; a non-empty input is
                 // cleared (kept in the history, so `Up` finds it); an empty one cancels the
                 // running `!` command or turn; otherwise it does nothing at all. Quitting is the
-                // two-press Ctrl-C (`cancel`) or `/quit`.
+                // two-press Ctrl-C (`cancel`).
                 if !self.input.is_empty() {
                     let text = std::mem::take(&mut self.input).text();
                     self.session.history.push(text);

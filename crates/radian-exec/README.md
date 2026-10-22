@@ -10,16 +10,15 @@ through `radian-runtime` / `radian-session`.
 `--provider` picks the wire protocol; the default is unchanged.
 
 - `openai-compatible` (default): `/chat/completions`. `--base-url` defaults to
-  `https://api.openai.com/v1`; the key comes from `$OPENAI_API_KEY` unless `--api-key-env`
-  names another variable.
+  `https://api.openai.com/v1`.
 - `anthropic`: the Messages API (`/v1/messages`). `--base-url` defaults to
-  `https://api.anthropic.com`; the key comes from `$ANTHROPIC_API_KEY` unless `--api-key-env`
-  names another variable. `--max-tokens` (default 16384) is sent because the Messages API
+  `https://api.anthropic.com`. `--max-tokens` (default 16384) is sent because the Messages API
   requires the field. `--thinking off|adaptive|enabled:<budget>` enables extended thinking
   (default `off`; `adaptive` is the recommended mode on Claude 4.6+); `enabled:<budget>`
   sends `{"type":"enabled","budget_tokens":N}`.
 
-The key is read only from the environment variable, never from the command line; it is never
+The key comes only from the credential store (`~/.radian/credentials/auth.json`, written by
+`radian login`); see `radian docs providers`. It is never passed on the command line, never
 printed and never written to the session file. The session's config snapshot records the
 provider name and the model, not the key or a header value.
 
@@ -54,8 +53,8 @@ creates or modifies a session file (`.jsonl`).
 - **`--export <id>`**: the session as Markdown on stdout by default;
   `--format json` gives the raw event document. `--out FILE` writes it to a file instead
   (refused if the file exists, unless `--force`).
-  - **Redaction cannot be turned off** (ADR 0013 T3): this process's key (from
-    `--api-key-env`) and every `--header` value are redacted, on top of the always-on
+  - **Redaction cannot be turned off** (ADR 0013 T3): every usable key in the credential
+    store and every `--header` value are redacted, on top of the always-on
     `sk-`/`Bearer`/`Authorization` patterns. Opting in to extra content never weakens it.
   - **Reasoning and raw provider payloads are omitted by default** (ADR 0014, ADR 0013);
     `--include-reasoning` and `--include-provider-payload` add them to this export only.
@@ -246,9 +245,9 @@ Read-only, read from `--config FILE`, else `RADIAN_CONFIG`, else
 an empty configuration and is never created. The file is a **default**; every flag wins.
 
 Wired here: `model.provider`, `model.base_url`, `model.model` (so `--model` is optional when it
-is set), `model.api_key` (a `{ from = "env", name = "…" }` reference, equivalent to
-`--api-key-env`), `model.headers` (equivalent to `--header`), `model.context_window`,
-`permissions.profile`, `compaction.auto`. `mcp.*` and `model.include_usage` are known and not
+is set), `model.headers` (equivalent to `--header`), `model.context_window`,
+`permissions.profile`, `compaction.auto`. `model.api_key` is refused: keys live only in the
+credential store (see `radian docs providers`). `mcp.*` and `model.include_usage` are known and not
 wired yet; the startup names every ignored key (never a value).
 
 A secret **value** is refused: a bare string on `api_key`/`token`/… and a secret-looking string

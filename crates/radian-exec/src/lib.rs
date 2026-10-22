@@ -6,9 +6,9 @@
 //! the same parser and dispatch, so the two entries cannot drift.
 //!
 //! stdout carries only what the model said (streamed); status, prompts, reasoning and
-//! errors go to stderr, so `radian exec -p "..."` can be piped. The API key is read from an
-//! environment variable only, and is redacted from everything this program prints — and
-//! from everything it writes to disk.
+//! errors go to stderr, so `radian exec -p "..."` can be piped. The API key comes only from
+//! the credential store (see `radian docs providers`), and is redacted from everything this
+//! program prints — and from everything it writes to disk.
 
 mod approval;
 mod chat;

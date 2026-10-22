@@ -115,7 +115,7 @@ fn ctrl_c_while_running_cancels() {
 
 /// `Esc` never quits: idle and empty it does nothing at all — no quit, no
 /// effect, no repaint, and it does not arm the Ctrl-C window. Quitting stays the two-press
-/// Ctrl-C (above), or `/quit`.
+/// Ctrl-C (above).
 #[test]
 fn esc_never_quits_when_idle_and_empty() {
     let mut app = App::new("m", "s");

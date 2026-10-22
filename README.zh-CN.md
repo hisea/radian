@@ -109,12 +109,12 @@ cargo build --workspace --locked --release
 
 ## 运行
 
-两种模式都**只**从环境变量读 API key，从不从命令行读，也从不打印它。`openai-compatible` 的默认变量是 `$OPENAI_API_KEY`，`anthropic` 的是 `$ANTHROPIC_API_KEY`；`--api-key-env` 可以指定别的变量。一个会话是一个 `<session-dir>/<session-id>.jsonl` 文件；会话目录依次取 `--session-dir`、`$RADIAN_SESSION_DIR`、`~/.radian/sessions`（设置了 `RADIAN_HOME` 时是 `$RADIAN_HOME/sessions`）。同一个 `~/.radian/` 根目录下还有 `config/`、`cache/` 和 `memory/`；沙箱拒绝读取 `sessions/` 和 `memory/`。
+两种模式都**只**从凭据存储（`~/.radian/credentials/auth.json`，由 `radian login` 写入）读 API key，从不从命令行读，也从不打印它。具体见 `radian docs providers`。一个会话是一个 `<session-dir>/<session-id>.jsonl` 文件；会话目录依次取 `--session-dir`、`$RADIAN_SESSION_DIR`、`~/.radian/sessions`（设置了 `RADIAN_HOME` 时是 `$RADIAN_HOME/sessions`）。同一个 `~/.radian/` 根目录下还有 `config/`、`cache/` 和 `memory/`；沙箱拒绝读取 `sessions/` 和 `memory/`。
 
 ### `radian exec`（行提示）
 
 ```sh
-export OPENAI_API_KEY=sk-...
+# 先存一个 key：`radian login`（见 `radian docs providers`）。
 
 # One turn, a new session named `demo`, provider and tier named explicitly.
 ./target/debug/radian exec \
@@ -128,7 +128,7 @@ export OPENAI_API_KEY=sk-...
   -p "summarize Cargo.toml"
 ```
 
-`--provider anthropic` 改用 Messages API：base URL 默认是 `https://api.anthropic.com`，key 来自 `$ANTHROPIC_API_KEY`，并且会发送 `--max-tokens`（默认 16384），因为这个 API 要求这个字段。`--thinking off|adaptive|enabled:<budget>` 控制 extended thinking（默认 `off`）。
+`--provider anthropic` 改用 Messages API：base URL 默认是 `https://api.anthropic.com`，并且会发送 `--max-tokens`（默认 16384），因为这个 API 要求这个字段。`--thinking off|adaptive|enabled:<budget>` 控制 extended thinking（默认 `off`）。
 
 恢复刚才保存的会话：`--resume` 取代 `--session-id`（两者冲突）：
 
@@ -191,7 +191,7 @@ provider = "openai-compatible"
 base_url = "https://api.openai.com/v1"
 model = "gpt-5"
 context_window = 200000
-api_key = { from = "env", name = "OPENAI_API_KEY" }   # a reference; never a value
+# 这里不放 key：key 只放在 ~/.radian/credentials/auth.json；见 `radian docs providers`。
 
 [model.headers]
 x-tenant = "team"

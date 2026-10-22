@@ -1331,7 +1331,7 @@ fn shell_arg(value: &str) -> String {
 
 /// The command a clean exit prints: the program, `--resume <id>`, and only the flags this run
 /// was given that must be repeated. A key or a header value is **never** in
-/// it — the key comes from the environment and the headers from the config file.
+/// it — the key comes from the credential store and the headers from the config file.
 fn resume_command(program: &str, session_id: &str, cli: &Cli, workspace: &Path) -> String {
     let mut parts = vec![
         program.to_owned(),

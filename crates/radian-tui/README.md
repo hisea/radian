@@ -124,15 +124,14 @@ opens **unfocused**, so the composer keeps the keys until the user navigates int
 `--provider` picks the wire protocol; the default is unchanged.
 
 - `openai-compatible` (default): `/chat/completions`; `--base-url` defaults to
-  `https://api.openai.com/v1`, the key comes from `$OPENAI_API_KEY` unless `--api-key-env`
-  names another variable.
+  `https://api.openai.com/v1`.
 - `anthropic`: the Messages API (`/v1/messages`); `--base-url` defaults to
-  `https://api.anthropic.com`, the key comes from `$ANTHROPIC_API_KEY` unless `--api-key-env`
-  names another variable. `--max-tokens` (default 16384) is required by the Messages API, and
+  `https://api.anthropic.com`. `--max-tokens` (default 16384) is required by the Messages API, and
   `--thinking off|adaptive|enabled:<budget>` enables extended thinking (default `off`).
 
-The key is read only from the environment variable and is redacted from the panic log along
-with every header value; it is never written to the session file. The config snapshot names
+The key comes only from the credential store (`~/.radian/credentials/auth.json`, written by
+`radian login`); see `radian docs providers`. It is redacted from the panic log along
+with every header value and is never written to the session file. The config snapshot names
 the provider and the model only.
 
 ## Layout and keys
@@ -192,7 +191,7 @@ bare arrow keys belong to the composer.
 | PageUp / PageDown | scroll the transcript a page |
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
-| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running `!` command or the running turn; otherwise do nothing — **Esc never quits a session** (quit with two Ctrl-Cs or `/quit`) |
+| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running `!` command or the running turn; otherwise do nothing — **Esc never quits a session** (quit with two Ctrl-Cs) |
 | Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
 | Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
 | Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key) |
@@ -546,7 +545,7 @@ with `[tui.colors]`.
 The history is this session's submitted lines (messages and `/…` commands). A resume rebuilds
 it from the journal's user messages. It is not persisted on its own.
 
-The **draft** is: on a clean exit (the two-press Ctrl-C quit or `/quit`, SIGTERM/SIGHUP) a non-empty input is written to
+The **draft** is: on a clean exit (the two-press Ctrl-C quit, SIGTERM/SIGHUP) a non-empty input is written to
 `<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
 once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit
 saves what was typed. A panic writes nothing (the panic path does no file I/O). `--list`
@@ -1267,14 +1266,14 @@ event loop, before any session exists: `Up`/`Down` select, type to filter by id/
 The common flags have short forms: `-m`/`--model`, `-w`/`--workspace`, `-r`/`--resume`,
 `-l`/`--list` and `-y`/`--yes`. `-V`/`--version` is clap's.
 
-`-m`/`--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
+`-m`/`--model`, `--base-url`, `--header NAME=VALUE`,
 `--system`, `--session-dir`, `--session-id`, `-r`/`--resume`, `-l`/`--list`, `--pick`,
 `--version`, `-w`/`--workspace DIR`, `--mcp-config FILE`,
 `--profile workspace|full` (default `full`, ADR 0043; the old `workspace-write`/`full-access`
 are accepted aliases but not listed),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
-`--context-window TOKENS`, `--offline-catalog`, `--catalog-provider PROVIDER`. The key is
-read only from the named environment variable and is never printed.
+`--context-window TOKENS`, `--offline-catalog`, `--catalog-provider PROVIDER`. The key comes
+only from the credential store (see `radian docs providers`) and is never printed.
 
 `--version` prints `radian <version>` and exits 0 before anything else runs: no
 `--model` is needed, no key is read, no session file is created, and the terminal is never
