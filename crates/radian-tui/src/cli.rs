@@ -432,6 +432,14 @@ enum ArcCommand {
         /// Let a branch with no change past the base pass the delivery check.
         #[arg(long, hide = true)]
         allow_noop: bool,
+        /// Internal: the remote to fetch the main branch from and push to. arc sets it from
+        /// the repository configuration; a person does not. Not in the manual.
+        #[arg(long, value_name = "NAME", default_value = "origin", hide = true)]
+        remote: String,
+        /// Internal: the main branch a first attempt starts from. arc sets it; a person does
+        /// not. Not in the manual.
+        #[arg(long, value_name = "NAME", default_value = "main", hide = true)]
+        main_branch: String,
         /// Extra `radian exec` arguments, after `--` (the model route in tests).
         #[arg(
             last = true,
@@ -533,6 +541,8 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
                 token,
                 resume,
                 allow_noop,
+                remote,
+                main_branch,
                 extra,
             }) => ExitCode::from(radian_arc::work::run(radian_arc::work::Options {
                 task,
@@ -540,6 +550,8 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
                 token,
                 resume,
                 allow_noop,
+                remote,
+                main_branch,
                 extra_args: extra,
             }) as u8),
             // ADR 0048 decision 15: without setup arc refuses and names `radian arc init`.

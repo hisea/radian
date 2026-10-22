@@ -10,7 +10,8 @@
 //!
 //! 1. create or reuse the linked worktree `<repository>/.radian/arc/worktrees/<task>` on
 //!    branch `work/<task>`, and take a flock on that directory (two attempts of one task
-//!    never run together);
+//!    never run together); a first attempt fetches the configured remote's main branch and
+//!    starts from the fetched tip;
 //! 2. write the host-local attempt record under `<repository>/.radian/arc/attempts/`;
 //! 3. run `radian exec -p - --session-id <task> --workspace <worktree> --profile workspace
 //!    --yes --output jsonl` (with `--resume <task>` for a rework attempt and the caller's
@@ -48,6 +49,13 @@ pub struct Options {
     /// Let a branch with no change past `base_sha` pass the delivery check (ADR 0048
     /// decision 8: a brief can allow a no-op).
     pub allow_noop: bool,
+    /// The remote the wrapper fetches the main branch from and pushes `work/<task>` to.
+    /// Internal: `arc` sets it from the repository configuration (default `origin`); a
+    /// person does not.
+    pub remote: String,
+    /// The main branch a first attempt starts from. Internal: `arc` sets it (default
+    /// `main`); a person does not.
+    pub main_branch: String,
     /// Extra `radian exec` arguments after `--` (the model route in tests: `--model`,
     /// `--base-url`).
     pub extra_args: Vec<String>,
@@ -111,8 +119,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     let arc = repo.join(".radian").join("arc");
     let worktree = arc.join("worktrees").join(&o.task);
     let branch = format!("work/{}", o.task);
-    let created = ensure_worktree(&repo, &worktree, &branch)?;
-    let base_sha = base_sha(&repo, &arc, o, &branch, created)?;
+    let created = ensure_worktree(&repo, &worktree, &branch, &o.remote, &o.main_branch)?;
     // Held until this function returns: one attempt of one task at a time.
     let _lock = lock_worktree(&worktree)?;
 
@@ -132,6 +139,19 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     let result_path = runs.join("result.jsonl");
     let stderr_path = runs.join("stderr.log");
     let brief = read_stdin()?;
+    let base_sha = base_sha(&repo, &arc, o, &branch, created)?;
+    // The moved-ref guard: a later attempt may only run when `work/<task>` still points at
+    // the tip the previous attempt ended on. Another worker can move the ref from inside its
+    // `workspace` sandbox (the common git directory's refs are writable, ADR 0038), and with
+    // a matching tree every delivery check would pass; so this check runs before the child,
+    // and nothing is recorded for the next attempt when it fails.
+    if let Some(last) = last_head(&arc, &o.task) {
+        if let Err(reason) = check_start(&repo, &worktree, &branch, &last) {
+            return refuse(o, &runs, &attempt_dir, &base_sha, &reason);
+        }
+    }
+    let start_sha = branch_tip(&repo, &branch)
+        .ok_or_else(|| Failure::error(format!("cannot read {branch} in {}", repo.display())))?;
     let started_at = now();
     let deny = deny_paths(&arc);
     let mut child = spawn_child(o, &worktree, &deny, &result_path, &stderr_path, &brief)?;
@@ -200,6 +220,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
             &worktree,
             &branch,
             &base_sha,
+            &start_sha,
             head_sha.as_deref(),
             &status_paths,
             o.allow_noop,
@@ -208,11 +229,11 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
             Err(reason) => failure = Some(reason),
             Ok(()) => {
                 let head = head_sha.as_deref().unwrap_or_default();
-                match push(&repo, &branch) {
+                match push(&repo, &o.remote, &branch) {
                     Err(reason) => failure = Some(reason),
                     Ok(()) => {
                         pushed = true;
-                        match remote_sha_of(&repo, &branch) {
+                        match remote_sha_of(&repo, &o.remote, &branch) {
                             Err(reason) => failure = Some(reason),
                             Ok(remote) => {
                                 if remote != head {
@@ -229,6 +250,13 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     }
 
     let attempt_failed = failure.is_some();
+    // Every attempt that ran records the branch tip it ended on (host-local): a later attempt
+    // must still find that tip on `work/<task>` before it starts (the guard above). A tip
+    // that cannot be read (the child removed the branch) leaves the previous record in
+    // place, so the next attempt refuses instead of running on a branch it cannot trust.
+    if let Some(tip) = branch_tip(&repo, &branch) {
+        write_text(&last_head_path(&arc, &o.task), &tip)?;
+    }
     let record = json!({
         "type": "AttemptFinished",
         "attempt_id": format!("{}-{}", o.task, o.attempt),
@@ -280,6 +308,20 @@ fn validate(o: &Options) -> Result<(), Failure> {
     if o.token.is_empty() {
         return Err(Failure::usage("--token needs a value"));
     }
+    // The internal remote and main-branch names end up as git arguments, so keep them to
+    // characters a ref name uses and refuse a leading `-` (an option in disguise).
+    for (flag, value) in [("--remote", &o.remote), ("--main-branch", &o.main_branch)] {
+        if value.is_empty()
+            || value.starts_with('-')
+            || !value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+        {
+            return Err(Failure::usage(format!(
+                "{flag} takes a name of ASCII letters, digits, `-`, `_`, `.` and `/`"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -307,9 +349,16 @@ fn repo_root() -> Result<PathBuf, Failure> {
     Ok(root)
 }
 
-/// Creates the worktree from `origin/main` when it is missing, or reuses it. Returns whether
-/// this run created it (the first attempt records `base_sha` from `origin/main`).
-fn ensure_worktree(repo: &Path, worktree: &Path, branch: &str) -> Result<bool, Failure> {
+/// Creates the worktree from the configured remote's main branch when it is missing, or
+/// reuses it. Returns whether this run created it (the first attempt records `base_sha` from
+/// the fetched main branch and starts there).
+fn ensure_worktree(
+    repo: &Path,
+    worktree: &Path,
+    branch: &str,
+    remote: &str,
+    main_branch: &str,
+) -> Result<bool, Failure> {
     if let Some(parent) = worktree.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Failure::error(format!("cannot create {}: {error}", parent.display()))
@@ -359,20 +408,33 @@ fn ensure_worktree(repo: &Path, worktree: &Path, branch: &str) -> Result<bool, F
     if branch_exists {
         git(repo, &["worktree", "add", &path, branch])?;
     } else {
-        git(repo, &["rev-parse", "--verify", "--quiet", "origin/main"]).map_err(|_| {
-            Failure::error("origin/main does not exist; the first attempt starts from origin/main")
+        // The first attempt starts from the current remote main, not from whatever this
+        // clone last fetched. The refspec names the tracking ref explicitly so a remote
+        // with a different fetch configuration cannot leave it stale.
+        let start = format!("{remote}/{main_branch}");
+        let refspec = format!("+refs/heads/{main_branch}:refs/remotes/{start}");
+        git(repo, &["fetch", remote, &refspec]).map_err(|error| {
+            Failure::error(format!(
+                "cannot fetch {remote} {main_branch}: {}",
+                error.message
+            ))
         })?;
-        git(
-            repo,
-            &["worktree", "add", "-b", branch, &path, "origin/main"],
-        )?;
+        if !git_raw(repo, &["rev-parse", "--verify", "--quiet", &start])?
+            .status
+            .success()
+        {
+            return Err(Failure::error(format!(
+                "{start} does not exist; a first attempt starts from the remote's main branch"
+            )));
+        }
+        git(repo, &["worktree", "add", "-b", branch, &path, &start])?;
     }
     Ok(true)
 }
 
-/// The task's base commit: `origin/main` when this run created the worktree, else the value
-/// the first attempt recorded. A worktree made outside the wrapper falls back to the
-/// merge-base with `origin/main`.
+/// The task's base commit: the fetched remote main branch when this run created the
+/// worktree, else the value the first attempt recorded. A worktree made outside the wrapper
+/// falls back to the merge-base with the configured remote's main branch.
 fn base_sha(
     repo: &Path,
     arc: &Path,
@@ -380,6 +442,7 @@ fn base_sha(
     branch: &str,
     created: bool,
 ) -> Result<String, Failure> {
+    let main = format!("{}/{}", o.remote, o.main_branch);
     let dir = arc.join("attempts").join(&o.task);
     fs::create_dir_all(&dir)
         .map_err(|error| Failure::error(format!("cannot create {}: {error}", dir.display())))?;
@@ -391,13 +454,89 @@ fn base_sha(
         }
     }
     let base = if created {
-        git(repo, &["rev-parse", "origin/main"])?
+        git(repo, &["rev-parse", &main])?
     } else {
-        git(repo, &["merge-base", "origin/main", branch])?
+        git(repo, &["merge-base", &main, branch])?
     };
     let base = base.trim().to_owned();
     write_text(&path, &base)?;
     Ok(base)
+}
+
+/// The branch tip the previous attempt ended on, if one is recorded.
+fn last_head(arc: &Path, task: &str) -> Option<String> {
+    let text = fs::read_to_string(last_head_path(arc, task)).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+fn last_head_path(arc: &Path, task: &str) -> PathBuf {
+    arc.join("attempts").join(task).join("last_head")
+}
+
+/// The start check: before a reused worktree's child runs, `work/<task>` must still point at
+/// the tip the previous attempt recorded, and the worktree HEAD must still be on that
+/// branch. Anything else means the ref moved outside this task, and this attempt does not
+/// run.
+fn check_start(repo: &Path, worktree: &Path, branch: &str, last: &str) -> Result<(), String> {
+    let reference = format!("refs/heads/{branch}");
+    let tip = git_raw(repo, &["rev-parse", "--verify", "--quiet", &reference])
+        .map_err(|error| error.message)?;
+    if !tip.status.success() || tip.stdout.trim() != last {
+        return Err(moved_outside(branch));
+    }
+    let head =
+        git_raw(worktree, &["symbolic-ref", "--short", "HEAD"]).map_err(|error| error.message)?;
+    if !head.status.success() || head.stdout.trim() != branch {
+        return Err(moved_outside(branch));
+    }
+    Ok(())
+}
+
+fn moved_outside(branch: &str) -> String {
+    format!("{branch} moved outside this task")
+}
+
+/// A start refusal: no child runs and nothing is pushed, but the attempt still ends with its
+/// `AttemptFinished` record so the scheduling loop reads the reason. The record is not
+/// written as `last_head`: the moved tip is exactly what a later attempt must keep refusing.
+fn refuse(
+    o: &Options,
+    runs: &Path,
+    attempt_dir: &Path,
+    base_sha: &str,
+    reason: &str,
+) -> Result<i32, Failure> {
+    let record = json!({
+        "type": "AttemptFinished",
+        "attempt_id": format!("{}-{}", o.task, o.attempt),
+        "token": o.token,
+        "exit_code": EXIT_ERROR,
+        "outcome": "terminated",
+        "base_sha": base_sha,
+        "head_sha": Value::Null,
+        "dirty": Vec::<String>::new(),
+        "pushed": false,
+        "remote_sha": Value::Null,
+        "failure": reason,
+    });
+    let line = serde_json::to_string(&record)
+        .map_err(|error| Failure::error(format!("cannot serialize AttemptFinished: {error}")))?;
+    write_text(&runs.join("attempt_finished.json"), &line)?;
+    write_text(&attempt_dir.join("status.json"), &line)?;
+    println!("{line}");
+    Ok(EXIT_ERROR)
+}
+
+/// `refs/heads/<branch>` in the main clone, when it exists.
+fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
+    let reference = format!("refs/heads/{branch}");
+    let out = git_raw(repo, &["rev-parse", "--verify", "--quiet", &reference]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = out.stdout.trim().to_owned();
+    (!sha.is_empty()).then_some(sha)
 }
 
 /// Takes the exclusive flock on the worktree directory. A second attempt of the same task
@@ -501,6 +640,7 @@ fn check_delivery(
     worktree: &Path,
     branch: &str,
     base: &str,
+    start: &str,
     head: Option<&str>,
     status_paths: &Result<Vec<String>, String>,
     allow_noop: bool,
@@ -516,6 +656,15 @@ fn check_delivery(
         .map_err(|error| error.message)?;
     if !ancestor.status.success() {
         return Err(format!("head {head} does not descend from base {base}"));
+    }
+    // The child may have rewritten its own branch. It must still contain the tip this
+    // attempt started from; otherwise the attempt would deliver a rollback.
+    let from_start = git_raw(repo, &["merge-base", "--is-ancestor", start, head])
+        .map_err(|error| error.message)?;
+    if !from_start.status.success() {
+        return Err(format!(
+            "head {head} does not descend from the start {start}"
+        ));
     }
     let head_ref =
         git_raw(worktree, &["symbolic-ref", "--short", "HEAD"]).map_err(|error| error.message)?;
@@ -599,18 +748,18 @@ fn dirty_paths(worktree: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-fn push(repo: &Path, branch: &str) -> Result<(), String> {
+fn push(repo: &Path, remote: &str, branch: &str) -> Result<(), String> {
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    let out = git_raw(repo, &["push", "origin", &refspec]).map_err(|error| error.message)?;
+    let out = git_raw(repo, &["push", remote, &refspec]).map_err(|error| error.message)?;
     if !out.status.success() {
         return Err(format!("push failed: {}", out.stderr.trim()));
     }
     Ok(())
 }
 
-fn remote_sha_of(repo: &Path, branch: &str) -> Result<String, String> {
+fn remote_sha_of(repo: &Path, remote: &str, branch: &str) -> Result<String, String> {
     let reference = format!("refs/heads/{branch}");
-    let out = git_raw(repo, &["ls-remote", "origin", &reference]).map_err(|error| error.message)?;
+    let out = git_raw(repo, &["ls-remote", remote, &reference]).map_err(|error| error.message)?;
     if !out.status.success() {
         return Err(format!("ls-remote failed: {}", out.stderr.trim()));
     }

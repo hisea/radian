@@ -143,10 +143,11 @@ fn the_happy_path_commits_pushes_and_records_the_attempt() {
 }
 
 /// While task B's worktree exists, task A's sandboxed worker moves B's ref back to the
-/// base commit. B's next attempt reads the moved ref and its tree no longer matches HEAD:
-/// the wrapper fails it and pushes nothing. B's remote ref stays where B left it.
+/// base commit. B's next attempt sees that `work/B` no longer points at the tip its last
+/// attempt ended on: the wrapper refuses it before the child runs and pushes nothing. B's
+/// remote ref stays where B left it.
 #[test]
-fn another_tasks_moved_ref_fails_the_owners_next_check_without_a_push() {
+fn another_tasks_moved_ref_fails_the_owners_next_attempt_at_start() {
     let repo = Repo::new("cross-ref");
     let base = repo.main_sha();
     let b_task = "0002-b";
@@ -207,19 +208,116 @@ fn another_tasks_moved_ref_fails_the_owners_next_check_without_a_push() {
     );
     let finished = b2.finished();
     assert_eq!(b2.code, 1, "{}", b2.stderr);
-    assert_eq!(finished["outcome"], json!("completed"));
     assert_eq!(finished["pushed"], json!(false));
+    assert_eq!(
+        finished["failure"],
+        json!(format!("work/{b_task} moved outside this task")),
+        "the start check names the moved ref: {finished}"
+    );
     assert!(
-        finished["failure"]
-            .as_str()
-            .unwrap()
-            .contains("uncommitted or untracked"),
-        "the moved ref left B's tree dirty: {finished}"
+        mock_b2.requests().is_empty(),
+        "no child ran for the refused attempt"
+    );
+    assert!(
+        !repo.run_dir(b_task, 2).join("result.jsonl").exists(),
+        "the refused attempt wrote no result stream"
+    );
+    assert!(
+        !repo.attempt_dir(b_task, 2).join("identity.json").exists(),
+        "the refused attempt started no worker"
     );
     assert_eq!(
         repo.remote_branch(b_task).as_deref(),
         Some(b_head.as_str()),
         "B's remote ref never moves"
+    );
+}
+
+/// The residual gap of finding 1: another task moves B's ref to an empty commit on top of
+/// B's head, so B's tree still matches the branch and `--allow-noop` would pass every
+/// delivery check. The start check refuses B's next attempt before its child runs.
+#[test]
+fn a_moved_ref_is_refused_before_the_next_attempt_runs() {
+    let repo = Repo::new("moved-ref");
+    let task = "0013-moved";
+    let branch = format!("work/{task}");
+    let mock_b1 = Mock::start(vec![
+        shell_reply("c1", "echo b > b.txt && git add b.txt && git commit -m b"),
+        text_reply("done"),
+    ]);
+    let b1 = run(
+        &repo,
+        task,
+        1,
+        "tok-m1",
+        &[],
+        &model_args(mock_b1.base_url()),
+        "b",
+    );
+    assert_eq!(b1.code, 0, "{}", b1.stderr);
+    let first_head = b1.finished()["head_sha"].as_str().unwrap().to_owned();
+    assert_eq!(
+        repo.remote_branch(task).as_deref(),
+        Some(first_head.as_str())
+    );
+
+    // A commit whose tree is B's tree and whose parent is B's head. Moving the ref to it
+    // leaves the worktree clean and the change past the base non-empty; only the sha B's
+    // attempt ended on is different. ADR 0038 lets another task's sandboxed worker do this
+    // (see the test above); here the test process does it so the case stays independent of
+    // the sandbox.
+    let tree = repo.git(&["rev-parse", &format!("refs/heads/{branch}^{{tree}}")]);
+    let moved = repo.git(&[
+        "commit-tree",
+        tree.trim(),
+        "-p",
+        &format!("refs/heads/{branch}"),
+        "-m",
+        "moved",
+    ]);
+    let moved = moved.trim().to_owned();
+    repo.git(&["update-ref", &format!("refs/heads/{branch}"), &moved]);
+    assert_ne!(moved, first_head, "the ref moved to a new empty commit");
+
+    let mock_b2 = Mock::start(vec![text_reply("nothing")]);
+    let b2 = run(
+        &repo,
+        task,
+        2,
+        "tok-m2",
+        &["--resume", "--allow-noop"],
+        &model_args(mock_b2.base_url()),
+        "nothing",
+    );
+    let finished = b2.finished();
+    assert_eq!(b2.code, 1, "{}", b2.stderr);
+    assert_eq!(finished["pushed"], json!(false));
+    assert_eq!(
+        finished["failure"],
+        json!(format!("{branch} moved outside this task")),
+        "{finished}"
+    );
+    assert!(
+        mock_b2.requests().is_empty(),
+        "no child ran for the refused attempt"
+    );
+    assert!(
+        !repo.attempt_dir(task, 2).join("identity.json").exists(),
+        "the refused attempt started no worker"
+    );
+    assert!(
+        repo.attempt_dir(task, 2).join("status.json").exists(),
+        "the refusal is recorded as the attempt's status"
+    );
+    assert_eq!(
+        repo.local_branch(task).as_deref(),
+        Some(moved.as_str()),
+        "the moved ref stays where the other task put it"
+    );
+    assert_eq!(
+        repo.remote_branch(task).as_deref(),
+        Some(first_head.as_str()),
+        "the moved sha is never pushed"
     );
 }
 
@@ -618,4 +716,127 @@ fn the_worker_cannot_read_the_arc_files_outside_its_worktree() {
         "the worker wrote and committed inside its worktree"
     );
     assert_eq!(run.finished()["pushed"], json!(true));
+}
+
+/// A worker that rewrites its own branch back behind the tip this attempt started from can
+/// never be delivered, even when `--allow-noop` would accept the now-empty change.
+#[test]
+fn a_worker_that_resets_behind_the_start_is_not_pushed() {
+    let repo = Repo::new("reset");
+    let task = "0014-reset";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m one",
+        ),
+        text_reply("done"),
+    ]);
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-r1",
+        &[],
+        &model_args(mock1.base_url()),
+        "one",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    let first_head = first.finished()["head_sha"].as_str().unwrap().to_owned();
+    assert_eq!(
+        repo.remote_branch(task).as_deref(),
+        Some(first_head.as_str())
+    );
+
+    let main_ref = format!("{}/{}", repo.remote, repo.main_branch);
+    let mock2 = Mock::start(vec![
+        shell_reply("c2", &format!("git reset --hard {main_ref}")),
+        text_reply("done"),
+    ]);
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-r2",
+        &["--resume", "--allow-noop"],
+        &model_args(mock2.base_url()),
+        "roll back",
+    );
+    assert_eq!(second.code, 1, "{}", second.stderr);
+    let finished = second.finished();
+    assert_eq!(finished["outcome"], json!("completed"));
+    assert_eq!(finished["pushed"], json!(false));
+    assert!(
+        finished["failure"]
+            .as_str()
+            .unwrap()
+            .contains("does not descend from the start"),
+        "{finished}"
+    );
+    assert_eq!(
+        repo.remote_branch(task).as_deref(),
+        Some(first_head.as_str()),
+        "the rollback is not pushed"
+    );
+}
+
+/// The wrapper uses the configured remote and main branch, never a hardcoded `origin`/`main`:
+/// `origin` points at a path with no repository, the real remote is `upstream`, its main
+/// branch is `trunk`, and another clone moved `trunk` after this clone's last fetch.
+#[test]
+fn the_wrapper_fetches_and_pushes_the_configured_remote_and_main_branch() {
+    let repo = Repo::with("upstream", "upstream", "trunk");
+    repo.dead_remote("origin");
+    let other = repo.second_clone("other");
+    repo.git_at(&other, &["config", "user.email", "arc@example.invalid"]);
+    repo.git_at(&other, &["config", "user.name", "arc test"]);
+    std::fs::write(other.join("later.txt"), "later\n").unwrap();
+    repo.git_at(&other, &["add", "later.txt"]);
+    repo.git_at(&other, &["commit", "-m", "later"]);
+    repo.git_at(&other, &["push", "origin", "trunk"]);
+    let newer = repo
+        .git_at(&other, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    assert_ne!(
+        repo.main_sha(),
+        newer,
+        "this clone's tracking ref is stale before the wrapper fetches"
+    );
+
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo change > change.txt && git add change.txt && git commit -m change",
+        ),
+        text_reply("done"),
+    ]);
+    let run = run(
+        &repo,
+        "0015-upstream",
+        1,
+        "tok-upstream",
+        &[],
+        &model_args(mock.base_url()),
+        "make a change",
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let finished = run.finished();
+    assert_eq!(finished["pushed"], json!(true));
+    assert_eq!(
+        finished["base_sha"],
+        json!(newer.as_str()),
+        "the first attempt starts from the fetched remote main: {finished}"
+    );
+    let head = finished["head_sha"].as_str().unwrap().to_owned();
+    assert_eq!(finished["remote_sha"], json!(head.as_str()));
+    assert_eq!(
+        repo.remote_branch("0015-upstream").as_deref(),
+        Some(head.as_str()),
+        "the push goes to the configured remote"
+    );
+    assert_eq!(
+        repo.main_sha(),
+        newer,
+        "the fetch updated the local tracking ref"
+    );
 }

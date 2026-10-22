@@ -170,17 +170,27 @@ impl Mock {
     }
 }
 
-/// One temp repository: a bare `origin` and a main clone with `origin/main`.
+/// One temp repository: a bare remote and a main clone with `<remote>/<main>` checked out.
 pub struct Repo {
     pub root: PathBuf,
     pub home: PathBuf,
     pub sessions: PathBuf,
     pub origin: PathBuf,
     pub clone: PathBuf,
+    /// The remote the wrapper fetches and pushes (`--remote`).
+    pub remote: String,
+    /// The main branch the wrapper starts from (`--main-branch`).
+    pub main_branch: String,
 }
 
 impl Repo {
     pub fn new(prefix: &str) -> Self {
+        Self::with(prefix, "origin", "main")
+    }
+
+    /// A repository whose remote and main branch are not the defaults, so a hardcoded
+    /// `origin`/`main` fails to find anything.
+    pub fn with(prefix: &str, remote: &str, main_branch: &str) -> Self {
         let root = scratch(prefix);
         let home = root.join("home");
         let sessions = root.join("sessions");
@@ -195,6 +205,8 @@ impl Repo {
             sessions,
             origin,
             clone,
+            remote: remote.to_owned(),
+            main_branch: main_branch.to_owned(),
         };
         repo.git_in(
             &repo.root,
@@ -202,20 +214,27 @@ impl Repo {
                 "init",
                 "--bare",
                 "-b",
-                "main",
+                main_branch,
                 repo.origin.to_str().unwrap(),
             ],
         );
-        repo.git(&["init", "-b", "main"]);
+        repo.git(&["init", "-b", main_branch]);
         std::fs::write(repo.clone.join("README.md"), "initial\n").unwrap();
         repo.git(&["config", "user.email", "arc@example.invalid"]);
         repo.git(&["config", "user.name", "arc test"]);
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-m", "initial"]);
-        repo.git(&["remote", "add", "origin", repo.origin.to_str().unwrap()]);
-        repo.git(&["push", "-u", "origin", "main"]);
-        repo.git(&["fetch", "origin"]);
+        repo.git(&["remote", "add", remote, repo.origin.to_str().unwrap()]);
+        repo.git(&["push", "-u", remote, main_branch]);
+        repo.git(&["fetch", remote]);
         repo
+    }
+
+    /// Adds a remote that points at a path with no repository, so a wrapper that used this
+    /// name instead of the configured remote would fail at the fetch or the push.
+    pub fn dead_remote(&self, name: &str) {
+        let path = self.root.join("nowhere.git");
+        self.git(&["remote", "add", name, path.to_str().unwrap()]);
     }
 
     pub fn arc(&self) -> PathBuf {
@@ -287,7 +306,11 @@ impl Repo {
     /// The sha `origin` has for `work/<task>`, if any.
     pub fn remote_branch(&self, task: &str) -> Option<String> {
         let output = Command::new("git")
-            .args(["ls-remote", "origin", &format!("refs/heads/work/{task}")])
+            .args([
+                "ls-remote",
+                &self.remote,
+                &format!("refs/heads/work/{task}"),
+            ])
             .current_dir(&self.clone)
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -301,9 +324,36 @@ impl Repo {
             .map(str::to_owned)
     }
 
-    /// The base commit the wrapper starts from (`origin/main` at fixture creation).
+    /// The base commit the wrapper starts from (`<remote>/<main>` at fixture creation).
     pub fn main_sha(&self) -> String {
-        self.git(&["rev-parse", "origin/main"]).trim().to_owned()
+        self.git(&[
+            "rev-parse",
+            &format!("{}/{}", self.remote, self.main_branch),
+        ])
+        .trim()
+        .to_owned()
+    }
+
+    /// The remote's current main tip, read over the wire (not the local tracking ref).
+    pub fn remote_main_sha(&self) -> String {
+        let output = Command::new("git")
+            .args([
+                "ls-remote",
+                &self.remote,
+                &format!("refs/heads/{}", self.main_branch),
+            ])
+            .current_dir(&self.clone)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &self.home)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "ls-remote failed");
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// Points `core.hooksPath` at a directory with `pre-push` and `post-checkout` hooks that
@@ -319,12 +369,47 @@ impl Repo {
         (pre_push, post_checkout)
     }
 
-    /// Runs `radian arc work` from the clone with an isolated environment.
+    /// A second clone of the bare remote, for a commit the main clone has not fetched yet.
+    pub fn second_clone(&self, name: &str) -> PathBuf {
+        let dir = self.root.join(name);
+        let output = Command::new("git")
+            .args([
+                "clone",
+                self.origin.to_str().unwrap(),
+                dir.to_str().unwrap(),
+            ])
+            .current_dir(&self.root)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &self.home)
+            .output()
+            .expect("run git clone");
+        assert!(
+            output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        dir
+    }
+
+    /// Runs one git command in `dir` with the test's isolated environment.
+    pub fn git_at(&self, dir: &Path, args: &[&str]) -> String {
+        self.git_in(dir, args)
+    }
+
+    /// Runs `radian arc work` from the clone with an isolated environment. A repository whose
+    /// remote or main branch is not the default passes its values as the wrapper's internal
+    /// flags; the defaults themselves stay the ones the other tests exercise.
     pub fn work(&self, args: &[&str], brief: &str) -> Run {
         let mut command = Command::new(radian_bin());
+        command.arg("arc").arg("work");
+        if self.remote != "origin" {
+            command.arg("--remote").arg(&self.remote);
+        }
+        if self.main_branch != "main" {
+            command.arg("--main-branch").arg(&self.main_branch);
+        }
         command
-            .arg("arc")
-            .arg("work")
             .args(args)
             .current_dir(&self.clone)
             .env_clear()
