@@ -299,6 +299,12 @@ pub struct Cli {
     /// is started with `read,glob,grep`; a name not listed is not mounted at all.
     #[arg(long = "tools", value_name = "NAME,...", hide = true)]
     tools: Option<String>,
+
+    /// Hidden: extra paths the sandbox denies reading, and the file tools deny in the `full`
+    /// tier (repeatable). Internal: `radian arc work` sets it on a worker so the arc files
+    /// outside its worktree stay unreadable (ADR 0048 decision 5). It is not a user input.
+    #[arg(long = "deny-read", value_name = "PATH", hide = true)]
+    deny_read: Vec<PathBuf>,
 }
 
 impl Cli {

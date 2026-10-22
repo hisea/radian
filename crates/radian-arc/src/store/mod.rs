@@ -268,6 +268,13 @@ impl Store {
         config::load(&self.root.join(CONFIG_FILE)).map_err(Error::Failed)
     }
 
+    /// The `[repository] remote` and `main_branch` from `config.toml`: the names the gate
+    /// fetches from and the wrapper pushes to when a caller has no explicit value.
+    pub fn repository_names(&self) -> Result<(String, String), Error> {
+        let config = self.config()?;
+        Ok((config.repository.remote, config.repository.main_branch))
+    }
+
     fn path(&self, kind: Kind, id: &str) -> PathBuf {
         self.root.join(kind.dir()).join(format!("{id}.md"))
     }
@@ -297,7 +304,7 @@ impl Store {
                 repository.display()
             ))
         })?;
-        let main_branch = git::main_branch(&repository);
+        let main_branch = git::main_branch(&repository, &remote);
         let root = repository.join(ARC_DIR);
         for sub in [
             "plans",
@@ -1029,6 +1036,9 @@ mod tests {
         assert!(untracked.contains(&"/.radian/arc/plans/".to_owned()));
         assert!(untracked.contains(&"/.radian/arc/tasks/".to_owned()));
         assert!(untracked.contains(&"/.radian/arc/gates/".to_owned()));
+        // The wrapper writes `attempts/<task>/{base_sha,last_head}`: the directory line
+        // covers both, so `git status` stays clean after a run.
+        assert!(untracked.contains(&"/.radian/arc/attempts/".to_owned()));
         let mut sorted = untracked.clone();
         sorted.sort();
         sorted.dedup();

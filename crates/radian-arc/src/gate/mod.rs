@@ -31,8 +31,8 @@ mod verdict;
 pub use checkout::{GateCheckout, gates_dir};
 pub use commands::CommandRun;
 pub use config::{
-    DEFAULT_COMMAND_TIMEOUT_SECS, GateConfig, LISTED_STAGES, Profile, Stage, StageSpec,
-    effective_stages,
+    DEFAULT_COMMAND_TIMEOUT_SECS, GateConfig, LISTED_STAGES, Profile, STAGE_NAMES, Stage,
+    StageSpec, effective_stages,
 };
 pub use error::GateError;
 pub use exclusive::ExclusiveLock;

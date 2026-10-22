@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "arc (ADR 0048): the plan and task store with its CLI subcommands, and the gate library"
+description = "arc, the plan and task orchestrator (ADR 0048)"
 publish = false
 
 [dependencies]
@@ -17,12 +17,12 @@ radian-coding = { version = "0.1.3", path = "../radian-coding" }
 # The `workspace` tier probe `init` runs: the same `Sandbox::new` a session uses, so a
 # repository whose sandbox cannot start is reported.
 radian-sandbox = { version = "0.1.3", path = "../radian-sandbox" }
-# Verdict timestamps use the same RFC 3339 UTC form as `radian-session` and `radian-memory`.
+# Attempt and verdict timestamps use the same RFC 3339 UTC form as `radian-session` and
+# `radian-memory`.
 chrono = "0.4"
-# `state.lock` and `runner.lock` are flock(2) locks; the gate's exclusive stage lock is
-# the same primitive.
+# `state.lock`, `runner.lock` and the gate's stage locks are flock(2) locks.
 fs2 = "0.4"
-# `kill(-pid, SIGKILL)` for a command that runs past its timeout.
+# `kill(-pid, SIGKILL)` for a gate command that runs past its timeout.
 libc = "0.2"
 # The ledger's content hash and `verdict_set_digest` (ADR 0048 decision 11).
 sha2 = "0.10"
@@ -32,3 +32,8 @@ thiserror.workspace = true
 # `config.toml` (ADR 0048 decision 15) has the same TOML shape as the radian configuration
 # file (ADR 0008), and the docs drift test renders its defaults from the same parser.
 toml = "0.8"
+
+[dev-dependencies]
+# The mock model `radian arc work` runs against in `tests/work.rs`.
+agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

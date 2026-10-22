@@ -1,12 +1,43 @@
 # radian-arc
 
-The gate library of arc (ADR 0048). It is a library, not a command: a later slice connects it
-to the state machine and the CLI. The only public module is `gate`.
+arc is the plan and task orchestrator (ADR 0048). It is part of the `radian` binary; it is
+not a separate program. This crate is its control plane, in three modules:
+
+- `store` — `<repository>/.radian/arc/`: `config.toml`, plans, tasks, the ledger, the locks
+  and the transactions that change them, behind `radian arc init`, `add`, `list`, `show` and
+  `adopt`.
+- `gate` — a fixed sequence of stages against one commit: each stage's separate checkout, the
+  `commands` stage, verdicts and their digest, and the integration candidate.
+- `work` — `radian arc work`, the trusted wrapper around one worker attempt. It is internal:
+  arc runs it, a person does not.
+
+Every git call of the three modules is built in the private `git` module.
+
+## The git helper
+
+The private `git` module is the one place arc builds a git command. It starts from
+`radian_coding::host_git::host_git_command`, the shared host builder (ADR 0039): every call
+carries `core.fsmonitor=false`, `core.hooksPath=/dev/null` and `core.attributesFile=/dev/null`,
+and the configured filter and diff driver commands neutralised, so no file a person or a worker
+can write changes what arc runs. On top of that the helper:
+
+- appends `-c core.hooksPath=`, which wins over the shared static value: hooks run none, and the
+  hooks path is empty rather than `/dev/null`;
+- sets `GIT_CONFIG_NOSYSTEM=1` (the system configuration does not take part) and
+  `GIT_TERMINAL_PROMPT=0` (an unattended fetch or push fails at once instead of prompting);
+- removes `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS`: a caller's injected configuration
+  could otherwise replace the empty hooks path;
+- removes `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
+  `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES`: every call names its
+  repository, so a caller's environment can never point it at another repository or object
+  store.
+
+The repository, global and system configuration files are otherwise unaffected.
 
 ## Configuration shape
 
-arc-store parses `config.toml`; these types are the shape it hands to the gate, and the field
-names are the file's names.
+The `store` owns parsing `config.toml`; the `gate` owns these types, and the field names are
+the file's names.
 
 ```toml
 [gate]
@@ -21,11 +52,31 @@ key_commands = []    # shell command lines, run on the merge candidate by `integ
 
 - `Stage` is the closed set `commands`, `mutation`, `review`, `ci`, `human` plus
   `integration`. `integration` always runs at merge and a profile cannot list it;
-  `Profile::validate` rejects it and duplicate stages.
+  `Profile::validate` rejects it and duplicate stages. `LISTED_STAGES` is the closed list the
+  parser, `Profile::validate` and the manual's drift test read; `STAGE_NAMES` is its names.
+- A profile stage's `required` defaults to `true` when the field is omitted.
 - `effective_stages(profile, extra)` adds a task's extra stages in their order. An existing
   stage merges into its profile entry and can only raise `required`: an extra stage can never
   remove or weaken a profile stage. An extra `integration` entry is ignored.
 - `command_timeout_secs` is per command for `commands` and `integration`; `0` waits forever.
+
+## Store
+
+Everything arc keeps for one repository is in `<repository>/.radian/arc/`. `Store::open` finds
+the repository from any directory inside it and refuses, naming `radian arc init`, when
+`config.toml` is missing or does not parse. `Store::repository_names()` returns the
+`[repository] remote` and `main_branch`; the internal `work` wrapper uses them when its own
+flags are absent.
+
+Every change is one transaction under `state.lock`: take the lock (waiting up to five seconds,
+then exit 4), compare the file with the ledger, write a temporary file, fsync, rename, fsync the
+directory, write the ledger entry the same way, release. A file that does not match its ledger
+entry changed outside arc; `adopt` records the current content as arc's own and refuses an
+outside change to a field only arc or the owner may set.
+
+`init` creates the layout, writes `config.toml` once, appends the local exclude lines to
+`.git/info/exclude` once, and runs its requirement checks. A bare `radian arc` refuses without
+setup, naming `radian arc init`; with setup, this build has no TUI and says so.
 
 ## Gate checkout
 
@@ -41,15 +92,6 @@ A path that exists but is not a linked worktree is refused, never deleted — wi
 exception: an **empty** directory directly inside `gates/` (what a failed `worktree add` leaves
 behind) is removed and the worktree is added again. A directory with any content in it is
 still `GateError::CheckoutOccupied`.
-
-Every git command of this crate runs as `git -c core.hooksPath= …` with `GIT_CONFIG_NOSYSTEM=1`
-and `GIT_TERMINAL_PROMPT=0`, so a repository `core.hooksPath` never runs a hook for a gate
-operation and an unattended fetch fails instead of prompting. The inherited `GIT_CONFIG_COUNT`
-and `GIT_CONFIG_PARAMETERS` channels are cleared: they are a caller's injected configuration,
-and an injected `core.hooksPath` would otherwise replace the empty one. The inherited repository
-locators `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`
-and `GIT_ALTERNATE_OBJECT_DIRECTORIES` are cleared as well, so a caller's environment can never
-point a gate command at another repository or object store. Configuration files are unaffected.
 
 ## Stage locks
 
@@ -138,6 +180,67 @@ first failure, own timeout, own logs). The verdict records the main it used as `
 a passing integration verdict with a candidate whose recorded `base_sha` is still the remote
 main. A main that moved after integration makes it false (ADR 0048 decision 6).
 
+## `work`: the trusted worker wrapper
+
+`radian arc work --task <id> --attempt <n> --token <token> [--resume] [--allow-noop]
+[--remote <name>] [--main-branch <name>] [-- <extra radian exec args>]` runs one attempt
+of one task, the brief on stdin. It is an **internal** subcommand: arc runs it, a person does
+not. It is hidden from `--help` and has no manual page. `--remote` and `--main-branch` are
+internal too: `radian-tui` takes them from the repository's `[repository] remote` and
+`main_branch` when they are absent, and from `origin`/`main` when there is no `config.toml`.
+
+One run:
+
+1. Creates or reuses the linked worktree `<repository>/.radian/arc/worktrees/<task>` on
+   branch `work/<task>`. A first attempt fetches `<remote> <main-branch>` and starts from the
+   fetched tip, recording `base_sha` in `<repository>/.radian/arc/attempts/<task>/base_sha`;
+   a later attempt reuses that base. A flock on the worktree directory keeps two attempts of
+   one task apart (a second wrapper exits 4).
+2. Before a reused worktree's child runs, checks that `work/<task>` still points at the tip
+   the previous attempt recorded in `attempts/<task>/last_head` and that the worktree HEAD
+   is still on that branch. A ref that moved outside this task (another worker can move it
+   from its `workspace` sandbox) fails the attempt with that reason before any child runs;
+   nothing is pushed. Every attempt that ran ends by recording its branch tip there again.
+3. Writes the host-local attempt record `attempts/<task>/<attempt>/identity.json` (token,
+   the worker's pid and process start time, the session id, the worktree, the branch, the
+   start time).
+4. Runs the current executable as `radian exec -p - --session-id <task> --workspace
+   <worktree> --profile workspace --yes --output jsonl` (a rework attempt passes
+   `--resume <task>` instead of `--session-id`), with the caller's extra arguments and one
+   hidden `--deny-read <path>` per entry of `.radian/arc/` except `worktrees/`. Its stdout
+   is `runs/<task>/attempts/<attempt>/result.jsonl`, its stderr `stderr.log`; the attempt
+   fields go to `execution.json`.
+5. After the child exits, reads the last `Result` line and the exit code, reads
+   `head_sha`, lists uncommitted and untracked paths, and checks: the branch exists,
+   `head_sha` descends from `base_sha` and from the tip the attempt started on, the worktree
+   HEAD is on the branch, the tree is clean, and the delivery check (a branch with no change
+   past the base fails unless `--allow-noop`; any changed path under `.radian/arc/` fails).
+6. Pushes `work/<task>` to the configured remote only when the outcome is `completed` and
+   every check passed, then verifies the remote ref with `git ls-remote`.
+7. Prints one `AttemptFinished` JSON line as its last stdout line (and writes it to
+   `runs/<task>/attempts/<attempt>/attempt_finished.json` and
+   `attempts/<task>/<attempt>/status.json`):
+
+   ```json
+   {"type": "AttemptFinished", "attempt_id": "<task>-<n>", "token": "…",
+    "exit_code": 0, "outcome": "completed", "base_sha": "…", "head_sha": "…",
+    "dirty": [], "pushed": true, "remote_sha": "…", "failure": null}
+   ```
+
+   `outcome` is the child's `Result.outcome`, or `terminated` when the child exited
+   without a `Result`. A start refusal (the moved-ref check) also ends with
+   `outcome: "terminated"`, `exit_code: 1` and its reason in `failure`; it runs no child
+   and does not update `last_head`.
+
+8. Exits with the child's exit code (ADR 0044 §3). A check that fails after a `completed`
+   child exits 1, with the reason in `failure`. A second attempt of the same task exits 4.
+
+The `workspace` tier is required: unattended work never runs in `full`. The worker's sandbox
+denies reading every entry of `.radian/arc/` except `worktrees/`, so the worker cannot read
+plans, tasks, the ledger, the runs, the gate checkouts or another attempt's records. The push
+credential is in the wrapper's environment only; in v0 the wrapper and the model are the same
+OS user, so that is not isolation.
+
 ## Decisions where the ADR is silent
 
 - The remote is always a parameter, never the literal `origin`: the caller passes
@@ -149,14 +252,15 @@ main. A main that moved after integration makes it false (ADR 0048 decision 6).
 - `0` seconds means no command timeout.
 - A merge that fails without conflicted paths writes reason `merge_failed: <git stderr>`; a
   merge that already contains `head_sha` yields the current main as the candidate.
-- `GIT_TERMINAL_PROMPT=0` is set with the two variables the ADR names, so an unattended fetch
-  cannot block on a prompt.
-- The inherited `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS` channels are cleared: only the
-  helper's own `-c` settings, the repository config and the user/system files apply. The
-  inherited repository locators (`GIT_DIR` and five more) are cleared too.
 - The newest verdict per stage is what both the digest and `required_passed` count, so passing
   every attempt's verdicts in any order is safe.
 - The integration stage has its own lock file, separate from the exclusive lock of `commands`
   and `mutation`, so an integration run and a `commands` stage may run at the same time.
+- `init` records `origin` as the remote; it is the only name it knows before a config exists.
+- A stored plan and a stored task use separate id sequences, so `0001-x` can name both. `show`
+  and `adopt` look among the plans first, then the tasks.
 
-No user-visible input is added by this slice, so the manual has no page for it.
+## Not here yet
+
+The scheduling loop, merge, reject, cancel, the state machine, the arc TUI and
+`radian arc mcp`.

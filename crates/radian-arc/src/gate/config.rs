@@ -34,7 +34,9 @@ pub enum Stage {
     Integration,
 }
 
-/// The stages a profile can list, in the order ADR 0048 decision 10 names them.
+/// The stages a profile can list, in the order ADR 0048 decision 10 names them. This is the
+/// one closed stage list: [`Profile::validate`], the `config.toml` parser and the manual's
+/// drift test all read it.
 pub const LISTED_STAGES: [Stage; 5] = [
     Stage::Commands,
     Stage::Mutation,
@@ -43,11 +45,21 @@ pub const LISTED_STAGES: [Stage; 5] = [
     Stage::Human,
 ];
 
+/// The names of [`LISTED_STAGES`], in the same order: what `config.toml`, a verdict and the
+/// manual spell.
+pub const STAGE_NAMES: [&str; 5] = [
+    LISTED_STAGES[0].as_str(),
+    LISTED_STAGES[1].as_str(),
+    LISTED_STAGES[2].as_str(),
+    LISTED_STAGES[3].as_str(),
+    LISTED_STAGES[4].as_str(),
+];
+
 impl Stage {
     /// The lower-case name used in `config.toml`, in verdict files and as the gate checkout
     /// directory name.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Stage::Commands => "commands",
             Stage::Mutation => "mutation",
@@ -61,7 +73,7 @@ impl Stage {
     /// Whether a profile may list this stage. `integration` is not listable.
     #[must_use]
     pub fn is_listed(self) -> bool {
-        self != Stage::Integration
+        LISTED_STAGES.contains(&self)
     }
 }
 
@@ -78,8 +90,13 @@ pub struct StageSpec {
     /// The stage to run.
     pub stage: Stage,
     /// Whether the stage must pass before the task can reach `review.awaiting_human`.
-    #[serde(default)]
+    /// Omitted, a listed stage is required.
+    #[serde(default = "default_required")]
     pub required: bool,
+}
+
+fn default_required() -> bool {
+    true
 }
 
 /// One gate profile: the stages, the acceptance commands and the merge-candidate commands.

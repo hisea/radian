@@ -5,20 +5,20 @@
 //! an explicit `schema_version`, rejects unknown keys, and every value set is one list the
 //! parser and the manual's drift test both read.
 //!
-//! The gate keys are shared with the gate worker; they are not renamed here.
+//! The `[gate]` table is [`crate::gate::GateConfig`]: the gate owns the profile types and the
+//! one closed stage list, and this module only supplies the file's defaults and validation.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::gate::{DEFAULT_COMMAND_TIMEOUT_SECS, GateConfig, Profile, Stage, StageSpec};
+
+pub use crate::gate::STAGE_NAMES;
+
 /// The configuration schema version this build writes and accepts.
 pub const SCHEMA_VERSION: u32 = 1;
-
-/// The stage names a gate profile may list, in the order the manual documents them.
-/// `integration` is deliberately absent: it always runs at merge, so a profile cannot
-/// select it (ADR 0048 decision 10).
-pub const STAGE_NAMES: &[&str] = &["commands", "mutation", "review", "ci", "human"];
 
 /// Keys whose default is "not set" rather than a value. The manual's table names each
 /// one, and the drift test checks that it does.
@@ -34,8 +34,8 @@ pub struct Config {
     pub repository: Repository,
     #[serde(default)]
     pub limits: Limits,
-    #[serde(default)]
-    pub gate: Gate,
+    #[serde(default = "default_gate")]
+    pub gate: GateConfig,
 }
 
 impl Default for Config {
@@ -44,7 +44,7 @@ impl Default for Config {
             schema_version: SCHEMA_VERSION,
             repository: Repository::default(),
             limits: Limits::default(),
-            gate: Gate::default(),
+            gate: default_gate(),
         }
     }
 }
@@ -103,74 +103,34 @@ impl Default for Limits {
     }
 }
 
-/// `[gate]`: which profile runs and how long one command may take.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Gate {
-    /// The profile name in `profiles`.
-    pub profile: String,
-    /// The limit on one gate command line.
-    pub command_timeout_secs: u64,
-    /// `[gate.profiles.<name>]` sections.
-    pub profiles: BTreeMap<String, Profile>,
-}
-
-impl Default for Gate {
-    fn default() -> Self {
-        let mut profiles = BTreeMap::new();
-        profiles.insert("default".to_owned(), Profile::default());
-        Self {
-            profile: "default".to_owned(),
-            command_timeout_secs: 3600,
-            profiles,
-        }
+/// The `[gate]` table the file starts with: profile `default`, `commands` then `human`, both
+/// required. The gate's [`GateConfig::default`] has no profiles (a library that is handed one);
+/// the file has to be usable as written, so the file's default is this.
+fn default_gate() -> GateConfig {
+    let mut profiles = BTreeMap::new();
+    profiles.insert("default".to_owned(), default_profile());
+    GateConfig {
+        profile: "default".to_owned(),
+        command_timeout_secs: DEFAULT_COMMAND_TIMEOUT_SECS,
+        profiles,
     }
 }
 
-/// One `[gate.profiles.<name>]` section.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Profile {
-    /// The stages this profile runs, in order, each with the name from [`STAGE_NAMES`].
-    pub stages: Vec<Stage>,
-    /// Shell command lines for the `commands` stage, in order, on its own checkout.
-    pub commands: Vec<String>,
-    /// What the integration stage runs on the merge candidate.
-    pub key_commands: Vec<String>,
-}
-
-impl Default for Profile {
-    fn default() -> Self {
-        Self {
-            stages: vec![
-                Stage {
-                    stage: "commands".to_owned(),
-                    required: true,
-                },
-                Stage {
-                    stage: "human".to_owned(),
-                    required: true,
-                },
-            ],
-            commands: Vec::new(),
-            key_commands: Vec::new(),
-        }
+fn default_profile() -> Profile {
+    Profile {
+        stages: vec![
+            StageSpec {
+                stage: Stage::Commands,
+                required: true,
+            },
+            StageSpec {
+                stage: Stage::Human,
+                required: true,
+            },
+        ],
+        commands: Vec::new(),
+        key_commands: Vec::new(),
     }
-}
-
-/// One entry of a profile's `stages`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Stage {
-    /// A [`STAGE_NAMES`] entry.
-    pub stage: String,
-    /// A required stage must pass for the task to reach `awaiting_human`.
-    #[serde(default = "yes")]
-    pub required: bool,
-}
-
-fn yes() -> bool {
-    true
 }
 
 /// The file `init` writes when none exists, with the main branch it found.
@@ -204,7 +164,8 @@ key_commands = []             # what the integration stage runs on the merge can
 }
 
 /// Parses the file's text. Unknown keys, an unknown schema version, an unknown stage
-/// name, and a `gate.profile` that names no profile are errors that name the offender.
+/// name, a profile that lists `integration` or a stage twice, and a `gate.profile` that
+/// names no profile are errors that name the offender.
 pub fn parse(text: &str) -> Result<Config, String> {
     let config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
     if config.schema_version != SCHEMA_VERSION {
@@ -213,16 +174,12 @@ pub fn parse(text: &str) -> Result<Config, String> {
             config.schema_version
         ));
     }
+    // One validation for every profile: `Profile::validate` reads the gate's one closed
+    // stage list, so the parser cannot drift from it.
     for (name, profile) in &config.gate.profiles {
-        for stage in &profile.stages {
-            if !STAGE_NAMES.contains(&stage.stage.as_str()) {
-                return Err(format!(
-                    "gate profile `{name}` names unknown stage `{}`; stages are {}",
-                    stage.stage,
-                    STAGE_NAMES.join(", ")
-                ));
-            }
-        }
+        profile
+            .validate()
+            .map_err(|error| format!("gate profile `{name}`: {error}"))?;
     }
     if !config.gate.profiles.contains_key(&config.gate.profile) {
         return Err(format!(
@@ -252,6 +209,14 @@ mod tests {
         assert_eq!(parsed, Config::default());
     }
 
+    /// A file with no `[gate]` table gets the profile `init` would have written.
+    #[test]
+    fn a_missing_gate_table_gets_the_default_profile() {
+        let parsed = parse("schema_version = 1\n").expect("the minimum file parses");
+        assert_eq!(parsed.gate, default_gate());
+        assert_eq!(parsed.gate.selected_profile(), Some(&default_profile()));
+    }
+
     /// Unknown keys are rejected at every level, and the error names the key.
     #[test]
     fn an_unknown_key_is_rejected() {
@@ -279,6 +244,17 @@ mod tests {
         assert!(!STAGE_NAMES.contains(&"integration"));
     }
 
+    /// A stage listed twice is refused by the same validation.
+    #[test]
+    fn a_duplicate_stage_is_rejected() {
+        let text = default_text("main").replace(
+            "{ stage = \"human\", required = true }",
+            "{ stage = \"commands\", required = false }",
+        );
+        let error = parse(&text).expect_err("a stage listed twice");
+        assert!(error.contains("twice"), "{error}");
+    }
+
     /// A newer schema version is refused, never half-read.
     #[test]
     fn a_higher_schema_version_is_refused() {
@@ -292,5 +268,18 @@ mod tests {
     fn a_profile_name_with_no_section_is_refused() {
         let text = default_text("main").replace("profile = \"default\"", "profile = \"strict\"");
         assert!(parse(&text).is_err());
+    }
+
+    /// The manual documents the closed stage list from the gate's one constant.
+    #[test]
+    fn the_stage_names_are_the_gate_list() {
+        assert_eq!(
+            STAGE_NAMES,
+            ["commands", "mutation", "review", "ci", "human"]
+        );
+        assert_eq!(
+            crate::gate::LISTED_STAGES.map(|stage| stage.as_str()),
+            STAGE_NAMES
+        );
     }
 }

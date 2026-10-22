@@ -1,86 +1,28 @@
-//! The gate's private git helper.
+//! The gate's git calls: the crate's one git helper (`crate::git`) with the gate's error type.
 //!
-//! Every git command runs as `git -c core.hooksPath= …` with `GIT_CONFIG_NOSYSTEM=1`, so a
-//! `core.hooksPath` written in the repository (or in the system config) never runs a hook
-//! for a gate operation (ADR 0048 decisions 7 and 10). Unattended commands also set
-//! `GIT_TERMINAL_PROMPT=0`, so a missing credential fails the fetch instead of prompting.
-//!
-//! The inherited `GIT_CONFIG_COUNT` / `GIT_CONFIG_PARAMETERS` channels are cleared: they are
-//! a caller's injected configuration, and a `core.hooksPath` there would silently replace the
-//! empty one this helper asks for. The repository, global and system configuration files are
-//! unaffected.
-//!
-//! The inherited repository locators are cleared too (`GIT_DIR`, `GIT_WORK_TREE`,
-//! `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`,
-//! `GIT_ALTERNATE_OBJECT_DIRECTORIES`): a caller that has one of them set would otherwise run
-//! every gate command against another repository, or read objects from one. Each command names
-//! its repository by its working directory, so none of them may leak in.
+//! The helper builds every command from `radian_coding::host_git::host_git_command`, adds an
+//! empty hooks path and `GIT_CONFIG_NOSYSTEM=1`, sets `GIT_TERMINAL_PROMPT=0`, and clears the
+//! inherited `GIT_CONFIG_*` channels and repository locators (see `crate::git`).
 
 use std::path::Path;
-use std::process::{Command, ExitStatus};
 
 use super::error::GateError;
+use crate::git::RunError;
 
-/// A finished git command.
-pub(crate) struct GitOutput {
-    /// The exit status.
-    pub(crate) status: ExitStatus,
-    /// Standard output, lossily decoded.
-    pub(crate) stdout: String,
-    /// Standard error, lossily decoded.
-    pub(crate) stderr: String,
-}
-
-impl GitOutput {
-    pub(crate) fn success(&self) -> bool {
-        self.status.success()
-    }
-}
-
-/// The environment variables that would point git at another repository or object store.
-const REPOSITORY_ENV: [&str; 6] = [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-];
+pub(crate) use crate::git::GitOutput;
 
 /// Runs a git command in `dir` without checking the exit status.
 pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<GitOutput, GateError> {
-    run_with_env(dir, args, &[])
-}
-
-/// Runs a git command in `dir` with extra environment variables, without checking the exit
-/// status.
-pub(crate) fn run_with_env(
-    dir: &Path,
-    args: &[&str],
-    env: &[(&str, &str)],
-) -> Result<GitOutput, GateError> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-c").arg("core.hooksPath=");
-    cmd.args(args);
-    cmd.current_dir(dir);
-    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    cmd.env_remove("GIT_CONFIG_COUNT");
-    cmd.env_remove("GIT_CONFIG_PARAMETERS");
-    for name in REPOSITORY_ENV {
-        cmd.env_remove(name);
-    }
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
-    let output = cmd.output().map_err(|source| GateError::Spawn {
-        program: "git".to_string(),
-        source,
-    })?;
-    Ok(GitOutput {
-        status: output.status,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    crate::git::run(dir, args).map_err(|error| match error {
+        RunError::Spawn(source) => GateError::Spawn {
+            program: "git".to_string(),
+            source,
+        },
+        RunError::Build(message) => GateError::Git {
+            dir: dir.to_path_buf(),
+            command: command_line(args),
+            stderr: message,
+        },
     })
 }
 

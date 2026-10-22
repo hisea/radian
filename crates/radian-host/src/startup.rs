@@ -340,6 +340,10 @@ pub struct LeadSetup {
     /// Only these built-in tools are mounted (`None` mounts every one the host has). The
     /// hidden `--tools` flag of a derived session uses it; an ordinary session passes `None`.
     pub tools_allow: Option<Vec<String>>,
+    /// Extra paths the file tools deny in the `full` tier (ADR 0048 decision 5). The host
+    /// also adds them to its sandbox deny-read list; internal (`radian arc work`), so an
+    /// ordinary session passes an empty list.
+    pub extra_deny_read: Vec<PathBuf>,
     /// The project-level hooks (`<workspace>/.radian/hooks.json`, ADR 0045 slice B), loaded
     /// once trust is resolved (untrusted means empty).
     pub project_hooks: crate::config::HooksConfig,
@@ -390,6 +394,7 @@ impl LeadSetup {
             skills_builtin: settings.skills_builtin,
             skills_disabled: settings.skills_disabled,
             tools_allow: self.tools_allow,
+            extra_deny_read: self.extra_deny_read,
             skills_allow: None,
             memory_injection: settings.memory_injection,
             hooks: settings.hooks,

@@ -21,7 +21,7 @@ key_commands = ["cargo test"]
 stages = [
   { stage = "commands", required = true },
   { stage = "mutation", required = true },
-  { stage = "review" },
+  { stage = "review", required = false },
   { stage = "human", required = true },
 ]
 commands = []
@@ -58,7 +58,10 @@ fn the_gate_table_has_the_config_file_shape() {
     assert_eq!(radian.stages.len(), 4);
     assert_eq!(radian.stages[0].stage, Stage::Commands);
     assert!(radian.stages[1].required, "mutation is required");
-    assert!(!radian.stages[2].required, "review is optional");
+    assert!(
+        !radian.stages[2].required,
+        "review is optional when it says so"
+    );
     assert!(radian.validate().is_ok());
 }
 
@@ -79,6 +82,16 @@ fn the_gate_table_defaults_match_the_adr() {
     assert!(default.stages[0].required);
     assert!(default.commands.is_empty());
     assert!(default.key_commands.is_empty());
+}
+
+#[test]
+fn an_omitted_required_is_true() {
+    let file: File =
+        toml::from_str("[gate.profiles.default]\nstages = [{ stage = \"ci\" }]\n").unwrap();
+    assert!(
+        file.gate.profiles["default"].stages[0].required,
+        "a listed stage is required unless it says otherwise"
+    );
 }
 
 #[test]

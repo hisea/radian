@@ -422,9 +422,8 @@ enum FooterCommand {
     },
 }
 
-/// The `radian arc` subcommands this build has. The grammar lives here so `radian arc
-/// --help` and the manual's drift test read one parser; everything the subcommands do is
-/// in `radian-arc`.
+/// The `radian arc` subcommands. The grammar lives here so `radian arc --help` and the
+/// manual's drift test read one parser; everything the subcommands do is in `radian-arc`.
 #[derive(clap::Subcommand, Debug)]
 enum ArcCommand {
     /// Set arc up for this repository and check its requirements.
@@ -465,6 +464,44 @@ enum ArcCommand {
         /// The plan or task id.
         #[arg(value_name = "ID")]
         id: String,
+    },
+
+    /// Internal: run one attempt of one task. arc runs it, a person does not; it is hidden
+    /// and has no manual page. The brief is read from stdin; the last stdout line is the
+    /// `AttemptFinished` record.
+    #[command(hide = true)]
+    Work {
+        /// The task id: the session id, the branch suffix and the worktree name.
+        #[arg(long, value_name = "TASK", hide = true)]
+        task: String,
+        /// The attempt number, 1-based.
+        #[arg(long, value_name = "N", hide = true)]
+        attempt: u32,
+        /// The random token the scheduling loop expects back in `AttemptFinished`.
+        #[arg(long, value_name = "TOKEN", hide = true)]
+        token: String,
+        /// Continue the task's session (`--resume <task>`) instead of starting one.
+        #[arg(long, hide = true)]
+        resume: bool,
+        /// Let a branch with no change past the base pass the delivery check.
+        #[arg(long, hide = true)]
+        allow_noop: bool,
+        /// Internal: the remote to fetch the main branch from and push to. arc sets it from
+        /// the repository configuration; a person does not. Not in the manual.
+        #[arg(long, value_name = "NAME", hide = true)]
+        remote: Option<String>,
+        /// Internal: the main branch a first attempt starts from. arc sets it; a person does
+        /// not. Not in the manual.
+        #[arg(long, value_name = "NAME", hide = true)]
+        main_branch: Option<String>,
+        /// Extra `radian exec` arguments, after `--` (the model route in tests).
+        #[arg(
+            last = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS",
+            hide = true
+        )]
+        extra: Vec<String>,
     },
 }
 
@@ -511,10 +548,10 @@ enum ArcAddCommand {
 }
 
 impl ArcCommand {
-    /// The same arguments as `radian-arc`'s own request type.
-    fn into_command(self) -> radian_arc::store::cli::Command {
+    /// The store operation, for every subcommand except the internal worker wrapper.
+    fn into_store_command(self) -> Option<radian_arc::store::cli::Command> {
         use radian_arc::store::cli::Command as ArcRun;
-        match self {
+        Some(match self {
             ArcCommand::Init { track } => ArcRun::Init { track },
             ArcCommand::Add {
                 command: ArcAddCommand::Plan { slug, title },
@@ -540,14 +577,64 @@ impl ArcCommand {
             ArcCommand::List { plan, json } => ArcRun::List { plan, json },
             ArcCommand::Show { id, json } => ArcRun::Show { id, json },
             ArcCommand::Adopt { id } => ArcRun::Adopt { id },
-        }
+            // `work` is the trusted wrapper, not a store operation: `run_arc` dispatches it
+            // before this conversion.
+            ArcCommand::Work { .. } => return None,
+        })
     }
 }
 
 /// Runs `radian arc`: the arguments are parsed here, the work is in `radian-arc`.
 fn run_arc(command: Option<ArcCommand>) -> ExitCode {
-    let command = command.map(ArcCommand::into_command);
-    ExitCode::from(radian_arc::store::cli::run(command.as_ref()))
+    match command {
+        // The wrapper is internal and has no store operation. `remote` and `main_branch`
+        // default to the repository's `config.toml`, which `radian arc init` wrote; the git
+        // defaults are the fallback for a repository arc is not set up in.
+        Some(ArcCommand::Work {
+            task,
+            attempt,
+            token,
+            resume,
+            allow_noop,
+            remote,
+            main_branch,
+            extra,
+        }) => {
+            let (remote, main_branch) = work_remote_and_main(remote, main_branch);
+            ExitCode::from(radian_arc::work::run(radian_arc::work::Options {
+                task,
+                attempt,
+                token,
+                resume,
+                allow_noop,
+                remote,
+                main_branch,
+                extra_args: extra,
+            }) as u8)
+        }
+        Some(command) => {
+            let command = command.into_store_command();
+            ExitCode::from(radian_arc::store::cli::run(command.as_ref()))
+        }
+        // A bare `radian arc`: without setup it refuses and names `radian arc init`; with
+        // setup, the TUI it would open does not exist in this build.
+        None => ExitCode::from(radian_arc::store::cli::run(None)),
+    }
+}
+
+/// The wrapper's internal remote and main branch: an explicit flag wins, then the
+/// repository's `config.toml`, then the git defaults.
+fn work_remote_and_main(remote: Option<String>, main_branch: Option<String>) -> (String, String) {
+    let names = std::env::current_dir()
+        .ok()
+        .and_then(|dir| radian_arc::store::Store::open(&dir).ok())
+        .and_then(|store| store.repository_names().ok());
+    let (config_remote, config_main) =
+        names.unwrap_or_else(|| ("origin".to_owned(), "main".to_owned()));
+    (
+        remote.unwrap_or(config_remote),
+        main_branch.unwrap_or(config_main),
+    )
 }
 
 /// The `radian theme` subcommands.
@@ -1985,12 +2072,19 @@ mod tests {
     fn every_arc_subcommand_appears_in_arc_md() {
         let doc = arc_md();
         let arc = arc_subcommand();
-        let mut parsed: Vec<&str> = arc.get_subcommands().map(|sub| sub.get_name()).collect();
+        // `work` is the internal wrapper: hidden from `--help` and not documented (AGENTS.md:
+        // an input that exists only for an internal child process is not in the manual).
+        let visible = |command: &&clap::Command| !command.is_hide_set();
+        let mut parsed: Vec<&str> = arc
+            .get_subcommands()
+            .filter(visible)
+            .map(|sub| sub.get_name())
+            .collect();
         parsed.sort();
         let mut listed: Vec<&str> = radian_arc::store::cli::SUBCOMMANDS.to_vec();
         listed.sort();
         assert_eq!(parsed, listed, "the parser and `SUBCOMMANDS` agree");
-        for sub in arc.get_subcommands() {
+        for sub in arc.get_subcommands().filter(visible) {
             let name = sub.get_name();
             assert!(
                 doc.contains(&format!("radian arc {name}")),

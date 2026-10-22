@@ -13,8 +13,8 @@ use super::{Error, Exit, Item, Loaded, PlanView, Store};
 /// The subcommands this build has, in the order `radian arc` lists them.
 pub const SUBCOMMANDS: &[&str] = &["init", "add", "list", "show", "adopt"];
 
-/// The subcommands ADR 0048 names that this build does not have. `work` is the wrapper a
-/// scheduling loop runs; a person does not run it, and it does not exist yet either.
+/// The subcommands ADR 0048 names that this build does not have. `work` is not here: it
+/// exists as the hidden wrapper a scheduling loop runs, and a person does not run it.
 pub const NOT_BUILT: &[&str] = &[
     "start",
     "merge",
@@ -26,7 +26,6 @@ pub const NOT_BUILT: &[&str] = &[
     "cancel",
     "run",
     "mcp",
-    "work",
 ];
 
 /// One `radian arc` invocation, without clap.
