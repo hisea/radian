@@ -184,16 +184,100 @@ fn run(dir: Option<&Path>, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// `/tmp` (not `$TMPDIR`): on macOS the latter can push a control socket path past `SUN_LEN`.
+/// The size of a `sun_path` buffer, its trailing NUL included: 104 bytes on macOS, 108 on
+/// Linux. The chooser below uses the smaller one on both, so one scratch layout fits either OS.
+const SUN_PATH_SIZE: usize = 104;
+
+/// The longest path any arc test puts under a scratch directory, appended to that directory's
+/// own path: the control socket of the `radian exec` worker (ADR 0043), which is
+/// `<RADIAN_HOME>/run/<pid>.sock`. The wrapper (`radian arc work`) runs the test's
+/// `RADIAN_HOME` — `<scratch>/home` — and the worker and a `subagent` child inherit it, so
+/// every hosting process under a scratch directory binds at this depth and no deeper.
+///
+/// Measured by hand on `crates/radian-host/src/control.rs` (`dir.join(format!("{}.sock",
+/// std::process::id()))` under `run_dir_for(root)`): `/home/` 6 bytes + `run/` 4 + `1234567`
+/// 7 + `.sock` 5 = 22. Seven digits is Linux's largest possible pid (`pid_max` tops out at
+/// 4194304); macOS stops at 99998, so this is the maximum on both.
+const LONGEST_SOCKET_SUFFIX: &str = "/home/run/1234567.sock";
+
+/// Whether a scratch directory at `dir` leaves room for [`LONGEST_SOCKET_SUFFIX`] in a
+/// `sun_path` buffer. The buffer holds the path and its NUL, so the path may be at most
+/// [`SUN_PATH_SIZE`] - 1 bytes.
+fn socket_fits(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    dir.as_os_str().as_bytes().len() + LONGEST_SOCKET_SUFFIX.len() < SUN_PATH_SIZE
+}
+
+/// The base for a scratch directory named `name`: `$TMPDIR` — the `workspace` sandbox sets it
+/// to its own writable temp directory, the only place a sandboxed test may create files —
+/// when the longest socket under it fits, else `/tmp`, which is short enough everywhere but
+/// writable only outside the sandbox.
+fn scratch_base_in(temp: PathBuf, name: &str) -> PathBuf {
+    if socket_fits(&temp.join(name)) {
+        temp
+    } else {
+        PathBuf::from("/tmp")
+    }
+}
+
+/// A unique scratch directory: under `$TMPDIR` when the workspace tier's temp directory is
+/// short enough for the control sockets inside it, else `/tmp`.
 pub fn scratch(prefix: &str) -> PathBuf {
     static DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = DIRS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = PathBuf::from("/tmp").join(format!(
-        "radian-arc-work-{prefix}-{}-{n}",
-        std::process::id()
-    ));
+    // The counter is zero-padded so the name has one length for the first 10 000 calls: the
+    // base must not change between two calls when the counter gains a digit.
+    let name = format!("radian-arc-work-{prefix}-{}-{n:04}", std::process::id());
+    let dir = scratch_base_in(std::env::temp_dir(), &name).join(name);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_base_keeps_the_socket_inside_sun_path() {
+        // Not `/tmp`: that is the fallback, and a base equal to it would pass even when the
+        // chooser never looks at the length.
+        let base = PathBuf::from("/tmp/radian-arc-test");
+        let name = "radian-arc-work-happy-12345-0000";
+        assert_eq!(scratch_base_in(base.clone(), name), base);
+    }
+
+    #[test]
+    fn a_base_that_would_push_the_socket_past_sun_path_falls_back_to_tmp() {
+        // An 80-byte base + the name (32) + `/home/run/1234567.sock` (22) = 135, past 103.
+        let base = PathBuf::from(format!("/{}", "x".repeat(79)));
+        let name = "radian-arc-work-happy-12345-0000";
+        assert_eq!(
+            base.join(name).as_os_str().len() + LONGEST_SOCKET_SUFFIX.len(),
+            135
+        );
+        assert_eq!(scratch_base_in(base, name), PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn the_socket_fits_up_to_one_byte_short_of_the_buffer_and_no_further() {
+        let name = "n";
+        // The whole socket path may be at most `SUN_PATH_SIZE - 1` bytes: the buffer holds a NUL.
+        let base_len = SUN_PATH_SIZE - 1 - LONGEST_SOCKET_SUFFIX.len() - name.len() - 1;
+        let base = format!("/{}", "x".repeat(base_len - 1));
+        let at_limit = PathBuf::from(format!("{base}/{name}"));
+        assert_eq!(
+            at_limit.as_os_str().len() + LONGEST_SOCKET_SUFFIX.len(),
+            SUN_PATH_SIZE - 1
+        );
+        assert!(socket_fits(&at_limit));
+        // One more byte does not fit: the buffer needs its NUL too.
+        let past = PathBuf::from(format!("{base}x/{name}"));
+        assert_eq!(
+            past.as_os_str().len() + LONGEST_SOCKET_SUFFIX.len(),
+            SUN_PATH_SIZE
+        );
+        assert!(!socket_fits(&past));
+    }
 }
 
 fn target_dir() -> PathBuf {
