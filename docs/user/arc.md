@@ -340,6 +340,37 @@ A task in `review.verifying` is checked against `verified_sha`, which is the pus
 `list` and `show` do not use the network: they do not check the remote and cannot see a branch that moved after the gate.
 `merge` checks the remote before it acts.
 
+## A gate for this repository
+
+Two bash scripts in this repository are the gate. A gate profile's `commands` call them:
+
+```toml
+[gate.profiles.default]
+commands = [
+  "/abs/path/to/repo/scripts/arc-gate.sh quick",
+  "/abs/path/to/repo/scripts/arc-gate.sh full",
+]
+```
+
+| Script | What it runs |
+|---|---|
+| `scripts/verify.sh [--log-dir <dir>]` | The full Verify of this repository: `cargo build -p radian-tui --bin radian --locked`, `cargo build -p agent-extensions --bin mcp-fixture --locked`, every command of the `Verify` block in `AGENTS.md`, then the three provider contract suites. It runs every step even after a failure, prints one `rc=<n> <seconds>s <command>` line per step, and keeps each step's output in `<dir>` (default `.radian/verify/`). It exits `0` only when every step passed, else `1`. |
+| `scripts/arc-gate.sh quick` | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the two binary builds, then `cargo nextest run --locked --no-fail-fast` for every crate under `crates/` that the checkout changed since its merge base with `origin/main`, plus `radian-tui` always. It stops at the first failing step. |
+| `scripts/arc-gate.sh full` | `scripts/verify.sh`, here or on `ARC_GATE_HOST` when that is set. It prints the step lines and the names of failing tests, and exits with the verify exit code. |
+
+With `ARC_GATE_HOST` set, `full` ships `HEAD` as a git bundle (`HEAD --not origin/main`; no bundle when `HEAD` is already in `origin/main`). On that host it takes a blocking lock on `~/.arc-gate.lock`, fetches the bundle, checks out exactly that commit detached inside `ARC_GATE_TREE`, and runs that checkout's `scripts/verify.sh`.
+
+| Environment variable | Type | Default | What it does |
+|---|---|---|---|
+| `ARC_GATE_HOST` | string | unset: `full` runs in this checkout | The ssh host that runs the full gate. |
+| `ARC_GATE_TREE` | string | unset | Required when `ARC_GATE_HOST` is set: the gate checkout on that host, as a path relative to the remote home directory. |
+
+Neither script sets `CARGO_TARGET_DIR`: a build cache is the caller's setting.
+
+**Trust.** arc runs a gate's `commands` inside a checkout of the task's own commit.
+A relative `scripts/...` path there would name the task's own script, so a task could change its own gate.
+Call both scripts by the main checkout's absolute path (`/abs/path/to/repo/scripts/arc-gate.sh`), never a relative path.
+
 ## `radian arc merge <TASK>`
 
 `merge` takes your approval, builds the integration candidate, pushes it to the remote main, and finishes the task.

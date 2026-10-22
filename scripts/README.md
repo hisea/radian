@@ -5,6 +5,14 @@
   `--from` is absent; APFS clone on macOS, reflink copy on Linux). Refuses when
   `SRC` is building unless `--force`. `worktree.sh --drop-target <worktree>`
   removes only that worktree's `target/`.
+- `verify.sh [--log-dir <dir>]`: the full Verify of `AGENTS.md`: the two binary
+  builds, the Verify block in order, then the provider contract suites. Runs every
+  step even after a failure; one `rc=<n> <seconds>s <command>` line per step.
+  `AGENTS.md` and its `run_step` lines are kept in sync by a docs drift test.
+- `arc-gate.sh quick|full`: the arc gate. `quick` is fmt, clippy, the two builds,
+  and nextest for the crates changed since `origin/main` plus `radian-tui`; `full`
+  is `verify.sh`, here or on `$ARC_GATE_HOST` inside `$ARC_GATE_TREE`. Both are
+  documented in `docs/user/arc.md`, including the absolute-path trust rule.
 
 ## Release
 

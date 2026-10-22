@@ -28,6 +28,8 @@ bash docs/schema/check-fixtures.sh
 bash docs/schema/check-config-fixtures.sh
 ```
 
+`scripts/verify.sh` runs exactly that list, in that order, after the two binary builds (`radian` and `mcp-fixture`) and before the three provider contract suites; a docs drift test reads this block and the script's `run_step` lines and fails when they differ.
+
 Run the suite with `--no-fail-fast`: nextest runs every test binary's tests as
 separate processes in parallel (`.config/nextest.toml` caps the pty suite's
 concurrency and kills a hung test by timeout), so one failure must not hide the
