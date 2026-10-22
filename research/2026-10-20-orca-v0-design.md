@@ -25,7 +25,7 @@ P1 与文档矛盾按本文"修订记录"一节处理。替代 herdr；不是 da
 | 身份 | 规则 |
 |---|---|
 | `item_id` | backlog 文件名，永不变 |
-| `session_id` | **= `item_id`**＼�一个 item 一个 session）。返工 `--resume` 回同一 host。`Result.outcome = poisoned` 等不可恢复时 item 进 `failed/irrecoverable`，人重新 `add`，新 item 的 frontmatter 写 `supersedes: <旧 item>`；原 session 不可变、不 fork |
+| `session_id` | **= `item_id`**（一个 item 一个 session）。返工 `--resume` 回同一 host。`Result.outcome = poisoned` 等不可恢复时 item 进 `failed/irrecoverable`，人重新 `add`，新 item 的 frontmatter 写 `supersedes: <旧 item>`；原 session 不可变、不 fork |
 | `attempt_id` | `<item_id>-<n>`，每次执行一个。记 host、随机 attempt token、远端进程身份（pid + 启动时间）、worktree 目录、branch、`base_sha`、`head_sha`、起止时间、session_id。旧 attempt 回来的结果因 token 不匹配被拒 |
 
 ## backlog：目录加 phase，单写者事务
@@ -167,7 +167,7 @@ v0 推（ssh + stdin），v1 拉（`radian work --pull`，需要 `orca serve`）
 | `integration` | pass 之后、合并之前：读当前 main 为 `base_sha`，临时工作区 merge（或 rebase）`head_sha`，冲突即停并回给 lead 返工；对 `candidate_sha` 跑 profile 的关键命令；记 base/candidate/结果。合并时 main 必须仍是 `base_sha` | 独立工作区；exclusive。不是 merge queue，只是一次对预期合并结果的验证 |
 
 - **缺省 profile**：通用 `commands(required) → human(required)`；**radian 仓库 profile**：
-  `commands(required) → mutation(required) → review → human(required)`＼�AGENTS.md 今天就要求
+  `commands(required) → mutation(required) → review → human(required)`（AGENTS.md 今天就要求
   变异检查）。
 - `on_fail`：`commands`/`mutation` 失败 → `rework_pending`（通知 lead，等它的 rework brief）；`review`
   阻塞 → `awaiting_human`。
@@ -215,7 +215,7 @@ ssh 参数分字段，argv 安全构造，不拼单段 shell 字符串。
 - worker 写 backlog、读 backlog 路径、持有 push 凭据。
 - 跨机器 resume：返工固定原 host；失联保守等人。
 - 多个调度器同时运行：`runner.lock` 只放一个 `orca run`。
-- 每 item 独立 clone：单机 v0 用 linked worktree 共享 clone＼�；独立 clone 留作多 host 时的备选。
+- 每 item 独立 clone：单机 v0 用 linked worktree 共享 clone；独立 clone 留作多 host 时的备选。
 - 模型自动生成并执行下一轮 rework：失败报给 lead，lead 提交新 brief。
 - 通用 gate DSL：固定 profile + 开关。
 - 负载预测调度：静态 slots。
@@ -284,7 +284,7 @@ workspace`；P1-1 身份三分（保留一 item 一 session）；P1-2 失败分�
 对时间；P1-11 TOML 与 ssh 字段；P1-12 无结束记录 = unknown；attach/jsonl 职责分开；费用按 attempt。
 owner 保留：mutation 在 radian profile 里 required；不做 Sortie A/B；一 item 一 session 不变量。
 
-第二轮审核＼�同日）采纳：P0-1 独立 clone 代替 linked worktree（ADR 0038 坐实）；P0-2
+第二轮审核（同日）采纳：P0-1 独立 clone 代替 linked worktree（ADR 0038 坐实）；P0-2
 owner-only 在 v0 是流程保证不是安全边界；P0-3 只在 `completed` 且产物有效时 push，包装器 git 置空
 hooksPath；P0-4 host-local attempt record（token、pid + 启动时间）作对账证据，worktree 上的 flock 作互斥；
 P0-5 Integration Gate 对合并候选验证，合并时核 base；P1-1 预算耗尽进 `paused_budget` 不进
