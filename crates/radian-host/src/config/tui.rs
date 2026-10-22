@@ -91,6 +91,14 @@ impl TuiColorOverride {
     }
 }
 
+/// The closed value sets the reader enforces for display preferences (an unknown value is
+/// skipped with a warning and the TUI keeps its default). One list each so the parser and
+/// the manual's drift test read the same source.
+pub const CLIPBOARD_MODES: &[&str] = &["osc52", "pbcopy", "off"];
+pub const BELL_MODES: &[&str] = &["off", "attention", "all"];
+pub const DISPLAY_REASONING_MODES: &[&str] = &["collapsed", "expanded", "hidden"];
+pub const DISPLAY_TOOL_OUTPUT_MODES: &[&str] = &["collapsed", "expanded", "errors"];
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TuiConfig {
     /// `tui.theme`: a built-in name (`dark|light|mono`) or a theme file name (ADR 0029). The
@@ -299,12 +307,12 @@ pub(super) fn parse_tui(
                 for (key, value) in display {
                     match (key.as_str(), value) {
                         ("reasoning", Value::String(mode))
-                            if matches!(mode.as_str(), "collapsed" | "expanded" | "hidden") =>
+                            if DISPLAY_REASONING_MODES.contains(&mode.as_str()) =>
                         {
                             config.tui.display_reasoning = Some(mode.clone());
                         }
                         ("tool_output", Value::String(mode))
-                            if matches!(mode.as_str(), "collapsed" | "expanded" | "errors") =>
+                            if DISPLAY_TOOL_OUTPUT_MODES.contains(&mode.as_str()) =>
                         {
                             config.tui.display_tool_output = Some(mode.clone());
                         }
@@ -324,17 +332,13 @@ pub(super) fn parse_tui(
                 }
             }
             ("display", _) => config.skipped.push("tui.display".into()),
-            ("clipboard", Value::String(mode))
-                if matches!(mode.as_str(), "osc52" | "pbcopy" | "off") =>
-            {
+            ("clipboard", Value::String(mode)) if CLIPBOARD_MODES.contains(&mode.as_str()) => {
                 config.tui.clipboard = Some(mode.clone());
             }
             // An unknown clipboard transport is a display preference too: skip it with the
             // same warning, and the TUI keeps its default.
             ("clipboard", _) => config.skipped.push("tui.clipboard".into()),
-            ("bell", Value::String(mode))
-                if matches!(mode.as_str(), "off" | "attention" | "all") =>
-            {
+            ("bell", Value::String(mode)) if BELL_MODES.contains(&mode.as_str()) => {
                 config.tui.bell = Some(mode.clone());
             }
             // An unknown bell mode is a display preference too: skip it with the same

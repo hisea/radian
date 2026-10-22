@@ -5,6 +5,15 @@
 
 use super::*;
 
+/// The `[tui]` boolean/display fallbacks (the parser fallback when the file leaves them
+/// unset). One list each: the applier and the manual's drift test read the same source.
+pub(crate) const DEFAULT_MOUSE: bool = true;
+pub(crate) const DEFAULT_TIPS: bool = true;
+pub(crate) const DEFAULT_BANNER: bool = true;
+pub(crate) const DEFAULT_MERMAID: bool = true;
+pub(crate) const DEFAULT_HIGHLIGHT: bool = true;
+pub(crate) const DEFAULT_TOOL_PREVIEW_LINES: usize = 5;
+
 impl App {
     pub fn new(model_name: impl Into<String>, session_id: impl Into<String>) -> Self {
         Self {
@@ -196,7 +205,9 @@ impl App {
             None => crate::spinner::Kind::default(),
             Some(name) => crate::spinner::Kind::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.spinner = {name:?} is not one of pulse|arc|quadrant|braille; using pulse"
+                    "tui.spinner = {name:?} is not one of {}; using {}",
+                    crate::spinner::SPINNER_NAMES.join("|"),
+                    crate::spinner::Kind::default().as_str()
                 ));
                 crate::spinner::Kind::default()
             }),
@@ -213,7 +224,9 @@ impl App {
             }
             Some(name) => InputStyle::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.input_style = {name:?} is not one of lines|box; using lines"
+                    "tui.input_style = {name:?} is not one of {}; using {}",
+                    crate::render::INPUT_STYLES.join("|"),
+                    InputStyle::default().as_str()
                 ));
                 InputStyle::default()
             }),
@@ -238,15 +251,15 @@ impl App {
                 .tui
                 .display_tool_preview_lines
                 .map(|lines| lines as usize)
-                .unwrap_or(5),
+                .unwrap_or(DEFAULT_TOOL_PREVIEW_LINES),
         };
         // `tui.display.mermaid` (ADR 0028 R8, default true).
-        self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(true);
-        self.highlight_enabled = config.tui.display_highlight.unwrap_or(true);
+        self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(DEFAULT_MERMAID);
+        self.highlight_enabled = config.tui.display_highlight.unwrap_or(DEFAULT_HIGHLIGHT);
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
         // back, because the copy effect would have no program to run.
-        self.mouse_enabled = config.tui.mouse.unwrap_or(true);
+        self.mouse_enabled = config.tui.mouse.unwrap_or(DEFAULT_MOUSE);
         self.clipboard = config
             .tui
             .clipboard

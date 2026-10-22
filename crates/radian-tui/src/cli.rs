@@ -1605,4 +1605,151 @@ mod tests {
             "these long options are missing from docs/user/cli.md: {missing:?}"
         );
     }
+
+    /// Every closed CLI value set appears in its option's rows of `docs/user/cli.md`, and
+    /// every defaulted option's default appears in its row.
+    /// Mutation: drop one value from a `--thinking` row → this fails naming the flag.
+    /// Why the code is the source that cannot drift: the possible values and defaults come
+    /// from the clap tree itself (the parser), and the stringly closed sets are the `pub
+    /// const`s the parsers read. Hidden flags are test seams, not user surface, so they are
+    /// not required; clap's own `--help`/`--version` are documented once in the TUI table.
+    #[test]
+    fn cli_option_values_and_defaults_appear_in_cli_md() {
+        use clap::CommandFactory;
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cli_md = std::fs::read_to_string(manifest.join("../../docs/user/cli.md"))
+            .expect("cli.md exists");
+        fn table_rows<'a>(doc: &'a str, flag: &str) -> Vec<&'a str> {
+            doc.lines()
+                .filter(|line| {
+                    line.starts_with('|')
+                        && line
+                            .split('|')
+                            .nth(1)
+                            .is_some_and(|cell| cell.contains(flag))
+                })
+                .collect()
+        }
+        // The default must sit in the row's Default cell (the Allowed/Value cells would
+        // mask a changed default). Tables without a Default column fall back to the whole
+        // row.
+        fn default_in_row(row: &str, default: &str) -> bool {
+            let cells: Vec<&str> = row.split('|').collect();
+            let inner = &cells[1..cells.len() - 1];
+            if inner.len() >= 4 {
+                inner[2].contains(default)
+            } else {
+                row.contains(default)
+            }
+        }
+        fn collect(command: &clap::Command, out: &mut Vec<(String, Vec<String>, Vec<String>)>) {
+            for arg in command.get_arguments() {
+                if arg.is_hide_set() {
+                    continue;
+                }
+                let id = arg.get_id();
+                if id == "help" || id == "version" {
+                    continue;
+                }
+                if let Some(long) = arg.get_long() {
+                    // Flags take no value: presence is the value, so there is no closed
+                    // set or default to check. Options that take a value report both.
+                    let takes_value = arg.get_action().takes_values();
+                    let values: Vec<String> = if takes_value {
+                        arg.get_possible_values()
+                            .iter()
+                            .map(|value| value.get_name().to_owned())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let defaults: Vec<String> = if takes_value {
+                        arg.get_default_values()
+                            .iter()
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    out.push((format!("--{long}"), values, defaults));
+                }
+            }
+            for sub in command.get_subcommands() {
+                collect(sub, out);
+            }
+        }
+        let mut options = Vec::new();
+        collect(&Cli::command(), &mut options);
+        assert!(!options.is_empty(), "the tree has options");
+        for (flag, values, defaults) in &options {
+            let rows = table_rows(&cli_md, flag);
+            if rows.is_empty() {
+                // Prose-documented flags (attach, footer export, theme import, config
+                // import, memory `--workspace`): presence only, no value set to check.
+                assert!(
+                    cli_md.contains(flag.as_str()),
+                    "{flag} is missing from docs/user/cli.md"
+                );
+                continue;
+            }
+            for row in &rows {
+                for value in values {
+                    assert!(
+                        row.contains(value.as_str()),
+                        "{flag} row is missing value {value}: {row}"
+                    );
+                }
+                for default in defaults {
+                    assert!(
+                        default_in_row(row, default),
+                        "{flag} row is missing default {default}: {row}"
+                    );
+                }
+            }
+        }
+        // Stringly closed sets: the parser's own consts, checked against every row.
+        let stringly: &[(&str, Vec<String>)] = &[
+            (
+                "--thinking",
+                radian_host::THINKING_LEVELS
+                    .iter()
+                    .map(|level| level.to_string())
+                    .collect(),
+            ),
+            (
+                "--profile",
+                radian_permissions::TIER_NAMES
+                    .iter()
+                    .chain(radian_permissions::TIER_ALIASES.iter())
+                    .map(|name| name.to_string())
+                    .collect(),
+            ),
+            (
+                "--approval",
+                radian_permissions::APPROVAL_POLICIES
+                    .iter()
+                    .map(|policy| policy.to_string())
+                    .collect(),
+            ),
+        ];
+        for (flag, values) in stringly {
+            let rows = table_rows(&cli_md, flag);
+            assert!(!rows.is_empty(), "{flag} has no row in cli.md");
+            for row in &rows {
+                for value in values {
+                    assert!(
+                        row.contains(value.as_str()),
+                        "{flag} row is missing value {value}: {row}"
+                    );
+                }
+            }
+        }
+        // The `--thinking` default is the code's.
+        for row in table_rows(&cli_md, "--thinking") {
+            assert!(
+                row.contains(radian_host::DEFAULT_THINKING_LEVEL),
+                "--thinking row misses its default: {row}"
+            );
+        }
+    }
 }

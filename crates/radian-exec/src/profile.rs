@@ -49,11 +49,13 @@ impl ProfileArg {
 /// The config file's `permissions.profile` name. The config reader has already restricted it
 /// to the known names; this maps them onto the CLI's values (old aliases included).
 pub(crate) fn parse_profile(name: &str) -> Result<ProfileArg, SetupError> {
-    match name {
-        "workspace" | "workspace-write" => Ok(ProfileArg::WorkspaceWrite),
-        "full" | "full-access" => Ok(ProfileArg::FullAccess),
-        other => Err(SetupError(format!("unknown profile {other:?}"))),
+    if radian_permissions::TIER_NAMES[0] == name || radian_permissions::TIER_ALIASES[0] == name {
+        return Ok(ProfileArg::WorkspaceWrite);
     }
+    if radian_permissions::TIER_NAMES[1] == name || radian_permissions::TIER_ALIASES[1] == name {
+        return Ok(ProfileArg::FullAccess);
+    }
+    Err(SetupError(format!("unknown profile {name:?}")))
 }
 
 /// The [`ProfileArg`] for a [`Preset`] (the reverse of [`ProfileArg::preset`]).

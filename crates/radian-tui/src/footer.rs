@@ -27,7 +27,7 @@ pub(crate) use draw::{
     role_style,
 };
 pub(crate) use presets::preset_footer_rows;
-pub use presets::{Preset, export_preset};
+pub use presets::{PRESET_NAMES, Preset, export_preset};
 pub(crate) use rows::{
     Item, ItemStyle, Row, build_rows, canonical_id, is_command_item, merge_into_item,
     parse_item_style,
@@ -49,6 +49,10 @@ pub fn brand_mark(glyphs: Glyphs) -> &'static str {
     }
 }
 
+/// The `tui.footer.glyphs` values, in documentation order. The parser and the manual's
+/// drift test both read this list.
+pub const GLYPH_NAMES: &[&str] = &["unicode", "nerd", "ascii", "emoji"];
+
 /// How the built-in items draw their icons (ADR 0027 C2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Glyphs {
@@ -66,12 +70,25 @@ pub enum Glyphs {
 
 impl Glyphs {
     pub fn parse(name: &str) -> Option<Self> {
+        if !GLYPH_NAMES.contains(&name) {
+            return None;
+        }
         match name {
             "unicode" => Some(Self::Unicode),
             "nerd" => Some(Self::Nerd),
             "ascii" => Some(Self::Ascii),
             "emoji" => Some(Self::Emoji),
             _ => None,
+        }
+    }
+
+    /// The `tui.footer.glyphs` spelling of this set.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unicode => GLYPH_NAMES[0],
+            Self::Nerd => GLYPH_NAMES[1],
+            Self::Ascii => GLYPH_NAMES[2],
+            Self::Emoji => GLYPH_NAMES[3],
         }
     }
 
@@ -143,6 +160,10 @@ impl Glyphs {
     }
 }
 
+/// The `tui.footer.context_line` values, in documentation order. The parser and the
+/// manual's drift test both read this list.
+pub const CONTEXT_LINE_MODES: &[&str] = &["off", "percentage"];
+
 /// How the gap between a row's left and right groups is drawn (ADR 0027 item 4,
 /// following omp's `statusLine.contextLine`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -159,6 +180,9 @@ pub enum ContextLine {
 
 impl ContextLine {
     pub fn parse(name: &str) -> Option<Self> {
+        if !CONTEXT_LINE_MODES.contains(&name) {
+            return None;
+        }
         match name {
             "off" => Some(Self::Off),
             "percentage" => Some(Self::Percentage),
@@ -168,8 +192,8 @@ impl ContextLine {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Off => "off",
-            Self::Percentage => "percentage",
+            Self::Off => CONTEXT_LINE_MODES[0],
+            Self::Percentage => CONTEXT_LINE_MODES[1],
         }
     }
 }
@@ -189,6 +213,10 @@ pub struct FrameGlyphs {
     pub bracket_left: &'static str,
     pub bracket_right: &'static str,
 }
+
+/// The `tui.footer.separator` default (the `deck` preset value): the glyphs between
+/// footer items when neither the footer nor the row sets its own.
+pub const DEFAULT_SEPARATOR: &str = " · ";
 
 /// The session's footer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -216,24 +244,28 @@ impl Footer {
             None => Preset::Deck,
             Some(name) => Preset::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.footer.preset = {name:?} is not one of deck|full|pi|classic; using deck"
+                    "tui.footer.preset = {name:?} is not one of {}; using {}",
+                    PRESET_NAMES.join("|"),
+                    Preset::default().as_str()
                 ));
-                Preset::Deck
+                Preset::default()
             }),
         };
         let glyphs = match config.glyphs.as_deref() {
             None => Glyphs::Unicode,
             Some(name) => Glyphs::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.footer.glyphs = {name:?} is not one of unicode|nerd|ascii|emoji; using unicode"
+                    "tui.footer.glyphs = {name:?} is not one of {}; using {}",
+                    GLYPH_NAMES.join("|"),
+                    Glyphs::default().as_str()
                 ));
-                Glyphs::Unicode
+                Glyphs::default()
             }),
         };
         let separator = config
             .separator
             .clone()
-            .unwrap_or_else(|| " · ".to_string());
+            .unwrap_or_else(|| DEFAULT_SEPARATOR.to_string());
         let separator_style = match config.separator_style.as_deref() {
             None => ItemStyle::Role(Role::FooterSeparator),
             Some(name) => parse_item_style(name).unwrap_or_else(|error| {
@@ -245,9 +277,11 @@ impl Footer {
             None => ContextLine::Off,
             Some(name) => ContextLine::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.footer.context_line = {name:?} is not one of off|percentage; using off"
+                    "tui.footer.context_line = {name:?} is not one of {}; using {}",
+                    CONTEXT_LINE_MODES.join("|"),
+                    ContextLine::default().as_str()
                 ));
-                ContextLine::Off
+                ContextLine::default()
             }),
         };
         let transparent = config.transparent.unwrap_or(false);
@@ -840,6 +874,163 @@ mod tests {
         assert_eq!(preset_footer_rows(Preset::Pi, &mut warnings).len(), 2);
         assert_eq!(preset_footer_rows(Preset::Classic, &mut warnings).len(), 0);
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// Round 2 completeness: every closed footer/display value set appears in its own row
+    /// of `docs/user/configuration.md`, and every documented default is the code's.
+    /// Mutation: drop one value from a row (or change one default cell) → this fails
+    /// naming the key. Why the code is the source that cannot drift: each value list is the
+    /// `pub const` the parser's own guard reads, and each default is a `Default` impl or an
+    /// `as_str` spelling from the same code.
+    #[test]
+    fn footer_closed_sets_and_defaults_appear_in_configuration_md() {
+        use crate::app::config::{
+            DEFAULT_BANNER, DEFAULT_HIGHLIGHT, DEFAULT_MERMAID, DEFAULT_MOUSE, DEFAULT_TIPS,
+            DEFAULT_TOOL_PREVIEW_LINES,
+        };
+        use crate::blocks::ReasoningMode;
+        use crate::footer::rows::{ROW_POSITIONS, RowPosition};
+        use crate::render::INPUT_STYLES;
+        use crate::spinner::SPINNER_NAMES;
+        use crate::tools::{ToolDisplay, ToolFold};
+        let doc = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/user/configuration.md"
+        ))
+        .expect("configuration.md exists");
+        fn row<'a>(doc: &'a str, key: &str) -> Vec<&'a str> {
+            let rows: Vec<&str> = doc
+                .lines()
+                .filter(|line| {
+                    line.starts_with('|')
+                        && line
+                            .split('|')
+                            .nth(1)
+                            .is_some_and(|cell| cell.contains(key))
+                })
+                .collect();
+            assert!(!rows.is_empty(), "{key} has no row in configuration.md");
+            rows
+        }
+        // Each value of a closed set appears in its key's row, not just anywhere.
+        let sets: &[(&str, &[&str])] = &[
+            ("tui.footer.preset", PRESET_NAMES),
+            ("tui.footer.glyphs", GLYPH_NAMES),
+            ("tui.footer.context_line", CONTEXT_LINE_MODES),
+            ("tui.footer.rows", ROW_POSITIONS),
+            ("tui.spinner", SPINNER_NAMES),
+            ("tui.input_style", INPUT_STYLES),
+            ("tui.clipboard", radian_host::config::CLIPBOARD_MODES),
+            ("tui.bell", radian_host::config::BELL_MODES),
+            (
+                "tui.display.reasoning",
+                radian_host::config::DISPLAY_REASONING_MODES,
+            ),
+            (
+                "tui.display.tool_output",
+                radian_host::config::DISPLAY_TOOL_OUTPUT_MODES,
+            ),
+        ];
+        for (key, values) in sets {
+            for line in row(&doc, key) {
+                for value in *values {
+                    assert!(
+                        line.contains(value),
+                        "{key} row is missing value {value}: {line}"
+                    );
+                }
+            }
+        }
+        // Each default is the code's own: `Default` impls, `as_str` spellings, shared consts.
+        // The default must sit in the row's Default cell (not just anywhere in the row: the
+        // Allowed cell would mask a changed default). Three-column rows (the memory table)
+        // and four-column rows carry the default inline or not at all: there the whole row
+        // must contain it.
+        fn default_in_row(row: &str, default: &str) -> bool {
+            let inner: Vec<&str> = {
+                let cells: Vec<&str> = row.split('|').collect();
+                cells[1..cells.len() - 1].to_vec()
+            };
+            if inner.len() >= 5 {
+                inner[2].contains(default)
+            } else {
+                row.contains(default)
+            }
+        }
+        let defaults: &[(&str, String)] = &[
+            ("tui.footer.preset", Preset::default().as_str().to_string()),
+            ("tui.footer.glyphs", Glyphs::default().as_str().to_string()),
+            (
+                "tui.footer.context_line",
+                ContextLine::default().as_str().to_string(),
+            ),
+            (
+                "tui.footer.rows",
+                RowPosition::default().as_str().to_string(),
+            ),
+            (
+                "tui.spinner",
+                crate::spinner::Kind::default().as_str().to_string(),
+            ),
+            (
+                "tui.input_style",
+                crate::render::InputStyle::default().as_str().to_string(),
+            ),
+            ("tui.footer.separator", DEFAULT_SEPARATOR.to_string()),
+            (
+                "tui.footer.separator_style",
+                crate::theme::Role::FooterSeparator.as_str().to_string(),
+            ),
+            (
+                "tui.display.reasoning",
+                ReasoningMode::default().as_str().to_string(),
+            ),
+            (
+                "tui.display.tool_output",
+                ToolFold::default().as_str().to_string(),
+            ),
+            (
+                "tui.display.tool_preview_lines",
+                ToolDisplay::default().preview_lines.to_string(),
+            ),
+            (
+                "tui.display.mermaid",
+                crate::tools::DisplayModes::default().mermaid.to_string(),
+            ),
+            (
+                "tui.display.highlight",
+                crate::tools::DisplayModes::default().highlight.to_string(),
+            ),
+            (
+                "tui.clipboard",
+                crate::clip::ClipboardMode::default().as_str().to_string(),
+            ),
+            (
+                "tui.bell",
+                crate::bell::BellMode::default().as_str().to_string(),
+            ),
+            ("tui.mouse", DEFAULT_MOUSE.to_string()),
+            ("tui.tips", DEFAULT_TIPS.to_string()),
+            ("tui.banner", DEFAULT_BANNER.to_string()),
+            ("tui.display.mermaid", DEFAULT_MERMAID.to_string()),
+            ("tui.display.highlight", DEFAULT_HIGHLIGHT.to_string()),
+            (
+                "tui.display.tool_preview_lines",
+                DEFAULT_TOOL_PREVIEW_LINES.to_string(),
+            ),
+            (
+                "tui.theme",
+                crate::theme::ThemeName::default().as_str().to_string(),
+            ),
+        ];
+        for (key, default) in defaults {
+            let lines = row(&doc, key);
+            assert!(
+                lines.iter().any(|line| default_in_row(line, default)),
+                "{key} row misses its default {default}: {}",
+                lines.join("\n")
+            );
+        }
     }
 
     /// ADR 0027: the draw path has no item-id tables. The pre-refactor

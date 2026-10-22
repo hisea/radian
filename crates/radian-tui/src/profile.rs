@@ -38,11 +38,13 @@ impl Tier {
 }
 
 pub fn parse_tier(value: &str) -> Result<Tier, String> {
-    match value {
-        "workspace" | "workspace-write" => Ok(Tier::WorkspaceWrite),
-        "full" | "full-access" => Ok(Tier::FullAccess),
-        other => Err(format!("--profile {other:?} is not one of workspace, full")),
+    if radian_permissions::TIER_NAMES[0] == value || radian_permissions::TIER_ALIASES[0] == value {
+        return Ok(Tier::WorkspaceWrite);
     }
+    if radian_permissions::TIER_NAMES[1] == value || radian_permissions::TIER_ALIASES[1] == value {
+        return Ok(Tier::FullAccess);
+    }
+    Err(format!("--profile {value:?} is not one of workspace, full"))
 }
 
 /// The [`Tier`] for a [`Preset`] (the reverse of [`Tier::preset`]).

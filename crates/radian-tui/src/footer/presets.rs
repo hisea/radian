@@ -8,6 +8,10 @@ use crate::theme::Role;
 use super::{ItemStyle, Row, build_rows};
 
 /// Which footer the session shows.
+///
+/// The `tui.footer.preset` values, in documentation order. The parser and the manual's
+/// drift test both read this list.
+pub const PRESET_NAMES: &[&str] = &["deck", "full", "pi", "classic"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
     /// The default (ADR 0027): three rows — the usage widget (absent without data),
@@ -24,12 +28,25 @@ pub enum Preset {
 
 impl Preset {
     pub fn parse(name: &str) -> Option<Self> {
+        if !PRESET_NAMES.contains(&name) {
+            return None;
+        }
         match name {
             "deck" => Some(Self::Deck),
             "full" => Some(Self::Full),
             "pi" => Some(Self::Pi),
             "classic" => Some(Self::Classic),
             _ => None,
+        }
+    }
+
+    /// The `tui.footer.preset` spelling of this preset.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deck => PRESET_NAMES[0],
+            Self::Full => PRESET_NAMES[1],
+            Self::Pi => PRESET_NAMES[2],
+            Self::Classic => PRESET_NAMES[3],
         }
     }
 }
@@ -52,7 +69,8 @@ pub fn export_preset(name: &str) -> Result<&'static str, String> {
     match Preset::parse(name) {
         Some(preset) => Ok(preset_source(preset)),
         None => Err(format!(
-            "unknown footer preset {name:?}; expected one of deck, full, pi, classic"
+            "unknown footer preset {name:?}; expected one of {}",
+            PRESET_NAMES.join(", ")
         )),
     }
 }
@@ -84,7 +102,7 @@ pub(crate) fn preset_footer_rows(preset: Preset, warnings: &mut Vec<String>) -> 
     let separator = preset_cfg
         .separator
         .clone()
-        .unwrap_or_else(|| " · ".to_string());
+        .unwrap_or_else(|| super::DEFAULT_SEPARATOR.to_string());
     build_rows(
         &preset_cfg.rows,
         &separator,

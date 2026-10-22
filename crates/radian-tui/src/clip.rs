@@ -30,11 +30,23 @@ impl ClipboardMode {
     /// The config spelling. `None` for anything else, so the caller warns and falls back to
     /// the default (the `tui.*` rule for a display preference).
     pub fn parse(name: &str) -> Option<Self> {
+        if !radian_host::config::CLIPBOARD_MODES.contains(&name) {
+            return None;
+        }
         match name {
             "osc52" => Some(Self::Osc52),
             "pbcopy" => Some(Self::PbCopy),
             "off" => Some(Self::Off),
             _ => None,
+        }
+    }
+
+    /// The config spelling of this mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Osc52 => radian_host::config::CLIPBOARD_MODES[0],
+            Self::PbCopy => radian_host::config::CLIPBOARD_MODES[1],
+            Self::Off => radian_host::config::CLIPBOARD_MODES[2],
         }
     }
 

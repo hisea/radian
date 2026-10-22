@@ -49,7 +49,7 @@ mod bash;
 mod btw;
 mod commands;
 mod composer;
-mod config;
+pub(crate) mod config;
 mod find;
 mod footer;
 pub(crate) mod goal_mode;

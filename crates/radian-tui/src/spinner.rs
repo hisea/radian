@@ -17,6 +17,10 @@ use ratatui::style::Color;
 use crate::footer::Glyphs;
 
 /// Which spinner the user configured (`tui.spinner`).
+///
+/// The `tui.spinner` values, in documentation order. The parser and the manual's drift
+/// test both read this list.
+pub const SPINNER_NAMES: &[&str] = &["pulse", "arc", "quadrant", "braille"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Kind {
     /// A `⏺` that breathes between the accent and the dim level (the default, revisions 10/13).
@@ -32,6 +36,9 @@ pub enum Kind {
 
 impl Kind {
     pub fn parse(name: &str) -> Option<Self> {
+        if !SPINNER_NAMES.contains(&name) {
+            return None;
+        }
         match name {
             "pulse" => Some(Self::Pulse),
             "arc" => Some(Self::Arc),
@@ -43,10 +50,10 @@ impl Kind {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Pulse => "pulse",
-            Self::Arc => "arc",
-            Self::Quadrant => "quadrant",
-            Self::Braille => "braille",
+            Self::Pulse => SPINNER_NAMES[0],
+            Self::Arc => SPINNER_NAMES[1],
+            Self::Quadrant => SPINNER_NAMES[2],
+            Self::Braille => SPINNER_NAMES[3],
         }
     }
 

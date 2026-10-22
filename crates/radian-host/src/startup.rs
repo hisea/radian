@@ -237,7 +237,11 @@ impl SessionSettings {
         max_tokens: u32,
         no_auto_compact: bool,
     ) -> (Self, Option<String>) {
-        let level = config.compaction.thinking.as_deref().unwrap_or("low");
+        let level = config
+            .compaction
+            .thinking
+            .as_deref()
+            .unwrap_or(crate::config::DEFAULT_COMPACTION_THINKING);
         let (compaction_settings, notice) =
             crate::model::compaction_settings_for(provider_ref, model_name, level, max_tokens);
         let compaction_settings_for = {
@@ -255,7 +259,11 @@ impl SessionSettings {
         };
         let settings = Self {
             // `--no-auto-compact` wins; otherwise the config may turn it off.
-            auto_compact: !no_auto_compact && config.compaction.auto.unwrap_or(true),
+            auto_compact: !no_auto_compact
+                && config
+                    .compaction
+                    .auto
+                    .unwrap_or(crate::config::DEFAULT_COMPACTION_AUTO),
             retries: config
                 .model
                 .retries
@@ -272,7 +280,10 @@ impl SessionSettings {
                 config.source.as_deref().and_then(Path::parent),
                 crate::user_home().as_deref(),
             ),
-            skills_builtin: config.skills.builtin.unwrap_or(true),
+            skills_builtin: config
+                .skills
+                .builtin
+                .unwrap_or(crate::config::DEFAULT_SKILLS_BUILTIN),
             skills_disabled: config.skills.disabled.clone(),
             memory_injection: config.memory.injection(),
             hooks: config.hooks.clone(),

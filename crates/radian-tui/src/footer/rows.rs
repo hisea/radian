@@ -138,6 +138,10 @@ pub(crate) struct Row {
 
 /// Where one footer row draws (ADR 0027): the status area, or a line
 /// above/below the input box. The default is the footer.
+///
+/// The `position` values, in documentation order. The parser and the manual's drift test
+/// both read this list.
+pub const ROW_POSITIONS: &[&str] = &["footer", "above_input", "below_input"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RowPosition {
     /// The status area (the default).
@@ -151,11 +155,23 @@ pub enum RowPosition {
 
 impl RowPosition {
     fn parse(name: &str) -> Option<Self> {
+        if !ROW_POSITIONS.contains(&name) {
+            return None;
+        }
         match name {
             "footer" => Some(Self::Footer),
             "above_input" => Some(Self::AboveInput),
             "below_input" => Some(Self::BelowInput),
             _ => None,
+        }
+    }
+
+    /// The `position` spelling of this row position.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Footer => ROW_POSITIONS[0],
+            Self::AboveInput => ROW_POSITIONS[1],
+            Self::BelowInput => ROW_POSITIONS[2],
         }
     }
 }
@@ -231,8 +247,9 @@ pub(crate) fn build_rows(
                 None => RowPosition::Footer,
                 Some(name) => RowPosition::parse(name).unwrap_or_else(|| {
                     warnings.push(format!(
-                        "tui.footer.rows: position {name:?} is not one of \
-                         footer|above_input|below_input; using footer"
+                        "tui.footer.rows: position {name:?} is not one of {}; using {}",
+                        ROW_POSITIONS.join("|"),
+                        RowPosition::Footer.as_str()
                     ));
                     RowPosition::Footer
                 }),

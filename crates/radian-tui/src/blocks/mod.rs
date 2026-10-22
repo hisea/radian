@@ -74,11 +74,23 @@ pub enum ReasoningMode {
 impl ReasoningMode {
     /// The `tui.display.reasoning` spelling.
     pub fn parse(name: &str) -> Option<Self> {
+        if !radian_host::config::DISPLAY_REASONING_MODES.contains(&name) {
+            return None;
+        }
         match name {
             "collapsed" => Some(Self::Collapsed),
             "expanded" => Some(Self::Expanded),
             "hidden" => Some(Self::Hidden),
             _ => None,
+        }
+    }
+
+    /// The `tui.display.reasoning` spelling of this mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Collapsed => radian_host::config::DISPLAY_REASONING_MODES[0],
+            Self::Expanded => radian_host::config::DISPLAY_REASONING_MODES[1],
+            Self::Hidden => radian_host::config::DISPLAY_REASONING_MODES[2],
         }
     }
 

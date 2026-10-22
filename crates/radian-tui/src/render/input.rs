@@ -14,6 +14,10 @@ const MAX_INPUT_ROWS: usize = 10;
 pub(super) const FIND_BOX_HEIGHT: u16 = 3;
 
 /// How the input area is drawn (config `tui.input_style`).
+///
+/// The `tui.input_style` values, in documentation order. The parser and the manual's drift
+/// test both read this list.
+pub const INPUT_STYLES: &[&str] = &["lines", "box"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputStyle {
     /// A rule above and below, `❯ ` on the first line, continuation lines indented two cells
@@ -30,10 +34,21 @@ impl InputStyle {
     /// The config spelling. `None` for anything else, so the caller falls back to the default.
     /// `bar` was removed (ADR 0035's 2026-10-16 note); the caller warns once and uses `lines`.
     pub fn parse(name: &str) -> Option<Self> {
+        if !INPUT_STYLES.contains(&name) {
+            return None;
+        }
         match name {
             "lines" => Some(Self::Lines),
             "box" => Some(Self::Box),
             _ => None,
+        }
+    }
+
+    /// The `tui.input_style` spelling of this style.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lines => INPUT_STYLES[0],
+            Self::Box => INPUT_STYLES[1],
         }
     }
 }
