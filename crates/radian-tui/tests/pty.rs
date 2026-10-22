@@ -3530,10 +3530,10 @@ async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
         "{}",
         pty.screen()
     );
-    // The session is open, so the status bar reports what connected. The fixture exposes 17
+    // The session is open, so the status bar reports what connected. The fixture exposes 18
     // tools.
     assert!(
-        pty.wait_for_screen("mcp 1/17", wait_positive()),
+        pty.wait_for_screen("mcp 1/18", wait_positive()),
         "the status bar does not show the MCP counts:\n{}",
         pty.screen()
     );
