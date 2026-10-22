@@ -2,7 +2,8 @@
 
 - 状态：idea（设计定为 v0，记录在案，**不开工**）。落地时直接进 radian 二进制：`radian arc` 不带子命令打开 TUI，`radian arc <子命令>` 是 CLI（`add / list / show / start / merge / reject / auto / run`）；不做仓库外原型，不出独立二进制。
   两轮外部审核的 P0 已全部采纳进设计稿；第一轮三处分歧保留原设计，第二轮保留一处：单机 v0 用 linked worktree 共享 clone，不做独立 clone。
-- 涉及 ADR：0032（保留子命令；落地时要加 `arc`/`work`）、0043（`radian arc` 子命令，落地前先改 ADR；`subagent` 是子进程
+- 决定：ADR 0048（arc 本体）；0032 与 0043 已同步（`radian arc` 进命令表；跨进程编排归 arc）。ADR 0048 与这两处改动在分支 `adr/arc` 上，随 arc 的实现一起合入 main。
+- 涉及 ADR：0048、0032、0043（`subagent` 是子进程
   的先例；缺省 `full`，无人值守必须显式 `--profile workspace`）、0044（`--output jsonl` 的 `Result` 与退
   出码是 worker 回传契约；`completed` 不等于任务完成；`cost` 为会话累计）、0038（`workspace` 沙箱内 git 可写 refs/index/objects、只有 config/hooks 只读；linked worktree 共享
   common dir；单机 v0 仍用 worktree，靠包装器检测并安全失败）、0020（push 凭据的禁读清单，同一 OS 用户下是否遮住待验证）、0024（`human` 闸门是结构化交互的宿主外映射）、0013
