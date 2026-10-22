@@ -500,7 +500,7 @@ When `attempt` has reached the task's `max_attempts` (else `[limits] max_attempt
 `todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; `start` does this before it claims.
 
 Cost is counted per attempt.
-ADR 0044's `Result.cost` is the session total, so the attempt's cost is this attempt's session total minus the previous attempt's.
+`Result.cost` is the session total, so the attempt's cost is this attempt's session total minus the previous attempt's.
 The delta is added to the task's `cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
 
 When a retry is due and the budget is used up, the task goes to `todo.paused_budget` instead of `todo.retry_wait`:
