@@ -278,6 +278,9 @@ Each exits `2` without serving anything.
 
 Both hosts share these codes.
 `radian exec --list | head` and every print-and-exit mode still exit `0` on a broken pipe.
+A closed output pipe ends any print-and-exit command of either host with exit `0`: the
+reader going away is a normal stop, so the command stops writing quietly, without a
+panic and without an error line.
 
 | Code | Meaning |
 |---|---|

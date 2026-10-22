@@ -162,11 +162,18 @@ pub(crate) async fn fork_session(cli: &Cli, parent_id: &str) -> Result<(), (Stri
     };
     match radian_session::fork(request).await {
         Ok(outcome) => {
-            println!(
+            if let Err(error) = radian_host::write_line(&format!(
                 "forked {parent_id} at seq {} into {}",
                 outcome.seq, outcome.child_id
-            );
-            println!("continue it with `--resume {}`", outcome.child_id);
+            )) {
+                return fork_stdout_error(error);
+            }
+            if let Err(error) = radian_host::write_line(&format!(
+                "continue it with `--resume {}`",
+                outcome.child_id
+            )) {
+                return fork_stdout_error(error);
+            }
             Ok(())
         }
         // The parent is being written by another process: say so and exit 1, do not wait.
@@ -178,6 +185,17 @@ pub(crate) async fn fork_session(cli: &Cli, parent_id: &str) -> Result<(), (Stri
             1,
         )),
         Err(error) => Err(usage(error.to_string())),
+    }
+}
+
+/// Maps a stdout write failure for `--fork`: a closed pipe stops quietly with exit 0,
+/// any other write error exits 1 with one line on stderr (reported by the caller).
+fn fork_stdout_error(error: radian_host::StdoutError) -> Result<(), (String, i32)> {
+    match error {
+        radian_host::StdoutError::BrokenPipe => Ok(()),
+        radian_host::StdoutError::Failed(error) => {
+            Err((format!("cannot write to stdout: {error}"), 1))
+        }
     }
 }
 

@@ -481,22 +481,27 @@ fn run_docs(topic: Option<&str>) -> ExitCode {
             for (name, text) in radian_coding::docs::DOCS {
                 let topic = radian_coding::docs::topic(name);
                 let description = radian_coding::docs::description(text);
-                if description.is_empty() {
-                    println!("{topic}");
+                let line = if description.is_empty() {
+                    topic.to_owned()
                 } else {
-                    println!("{topic}: {description}");
+                    format!("{topic}: {description}")
+                };
+                if let Err(error) = radian_host::write_line(&line) {
+                    return stdout_error(error);
                 }
             }
             ExitCode::SUCCESS
         }
         Some(topic) => match radian_coding::docs::lookup_topic(topic) {
             Some((_, text)) => {
-                print!("{text}");
+                if let Err(error) = radian_host::write_stdout(text) {
+                    return stdout_error(error);
+                }
                 ExitCode::SUCCESS
             }
             None => {
                 eprintln!(
-                    "radian: unknown docs topic `{topic}; available topics: {}",
+                    "radian: unknown docs topic `{topic}`; available topics: {}",
                     radian_coding::docs::DOCS
                         .iter()
                         .map(|(name, _)| radian_coding::docs::topic(name))
@@ -540,9 +545,15 @@ fn run_theme(command: ThemeCommand) -> ExitCode {
             match radian_tui::theme::importer::write(&dir, &converted.name, &converted.toml, force)
             {
                 Ok(written) => {
-                    println!("wrote {}", written.display());
+                    if let Err(error) =
+                        radian_host::write_line(&format!("wrote {}", written.display()))
+                    {
+                        return stdout_error(error);
+                    }
                     for line in &converted.report {
-                        println!("{line}");
+                        if let Err(error) = radian_host::write_line(line) {
+                            return stdout_error(error);
+                        }
                     }
                     ExitCode::SUCCESS
                 }
@@ -562,7 +573,9 @@ fn run_footer(command: FooterCommand) -> ExitCode {
     match command {
         FooterCommand::Export { preset } => match radian_tui::footer::export_preset(&preset) {
             Ok(toml) => {
-                print!("{toml}");
+                if let Err(error) = radian_host::write_stdout(toml) {
+                    return stdout_error(error);
+                }
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -570,6 +583,20 @@ fn run_footer(command: FooterCommand) -> ExitCode {
                 ExitCode::from(2)
             }
         },
+    }
+}
+
+/// Maps a stdout write failure to its exit code: a closed pipe is a normal stop (like
+/// `head`, `git` and `ripgrep`), so the command stops writing and exits 0 with nothing on
+/// stderr; any other write error is reported once on stderr and exits 1. Output bytes are
+/// unchanged when the pipe stays open.
+fn stdout_error(error: radian_host::StdoutError) -> ExitCode {
+    match error {
+        radian_host::StdoutError::BrokenPipe => ExitCode::SUCCESS,
+        radian_host::StdoutError::Failed(error) => {
+            eprintln!("radian: cannot write to stdout: {error}");
+            ExitCode::from(1)
+        }
     }
 }
 
