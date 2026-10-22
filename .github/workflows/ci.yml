@@ -60,6 +60,8 @@ jobs:
       - run: cargo clippy -p radian-core --all-targets --features journal-selfcheck -- -D warnings
       - run: cargo nextest run --workspace --locked --no-fail-fast
       - run: cargo nextest run -p radian-core --locked --features journal-selfcheck --no-fail-fast
+      - name: the docs site renders (broken links fail the build)
+        run: cargo run -p radian-tui --example site-docs --locked -- /tmp/site-docs
       - run: bash docs/schema/check-fixtures.sh
       - run: bash docs/schema/check-config-fixtures.sh
       - name: provider contract suites
