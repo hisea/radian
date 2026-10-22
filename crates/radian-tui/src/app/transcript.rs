@@ -59,7 +59,7 @@ impl App {
             .map(|line| Entry::new(EntryKind::Banner, line))
             .collect();
         if let Some(hint) = &startup.trust_hint {
-            block.push(Entry::new(EntryKind::Startup, hint.clone()));
+            block.push(Entry::new(EntryKind::TrustHint, hint.clone()));
         }
         if startup.expanded {
             block.push(Entry::new(

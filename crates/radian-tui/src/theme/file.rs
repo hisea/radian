@@ -138,6 +138,8 @@ pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
         Role::Truncation => Some("dim"),
         Role::ApprovalBorder => Some("borderAccent"),
         Role::Hint => Some("dim"),
+        // The trust hint (ADR 0031 T3): pi's warning, the same yellow `auto` takes.
+        Role::TrustHint => Some("warning"),
         Role::Completion => Some("dim"),
         Role::Find => Some("accent"),
         Role::Selection => None,

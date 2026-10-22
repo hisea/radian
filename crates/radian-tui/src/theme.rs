@@ -128,7 +128,7 @@ impl ThemeName {
     }
 }
 
-/// The 70 roles a [`Theme`] styles (ADR 0009, ADR 0023, ADR 0029). The config keys
+/// The 82 roles a [`Theme`] styles (ADR 0009, ADR 0023, ADR 0029). The config keys
 /// are the snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -162,6 +162,9 @@ pub enum Role {
     Truncation,
     ApprovalBorder,
     Hint,
+    /// The project trust line under the wordmark (ADR 0031 T3): the same yellow as
+    /// [`Role::Auto`], but without its `REVERSED` marker. Used for the hint line only.
+    TrustHint,
     Completion,
     Find,
     /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
@@ -241,7 +244,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 81] = [
+    pub const ALL: [Role; 82] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -269,6 +272,7 @@ impl Role {
         Role::Truncation,
         Role::ApprovalBorder,
         Role::Hint,
+        Role::TrustHint,
         Role::Completion,
         Role::Find,
         Role::Auto,
@@ -355,6 +359,7 @@ impl Role {
             Role::Truncation => "truncation",
             Role::ApprovalBorder => "approval_border",
             Role::Hint => "hint",
+            Role::TrustHint => "trust_hint",
             Role::Completion => "completion",
             Role::Find => "find",
             Role::Auto => "auto",
@@ -447,6 +452,7 @@ impl Role {
             Role::Truncation => &mut theme.truncation,
             Role::ApprovalBorder => &mut theme.approval_border,
             Role::Hint => &mut theme.hint,
+            Role::TrustHint => &mut theme.trust_hint,
             Role::Completion => &mut theme.completion,
             Role::Find => &mut theme.find,
             Role::Auto => &mut theme.auto,
@@ -540,6 +546,8 @@ pub struct Theme {
     pub truncation: Style,
     pub approval_border: Style,
     pub hint: Style,
+    /// The project trust line under the wordmark (ADR 0031 T3), and nothing else.
+    pub trust_hint: Style,
     /// The footer's item separator (ADR 0027).
     pub footer_separator: Style,
     /// The `@` file-reference completion list (Phase 4).
@@ -824,6 +832,10 @@ impl Theme {
             truncation: dim,
             approval_border: spec(pi::BORDER_ACCENT, Modifier::empty(), truecolor),
             hint: dim,
+            // The trust hint (ADR 0031 T3): the same yellow as `auto`, but foreground
+            // only — `auto`'s `REVERSED` marker stays the "this session behaves
+            // differently" signal.
+            trust_hint: spec(pi::YELLOW, Modifier::empty(), truecolor),
             completion: dim,
             find: spec(pi::VIOLET, Modifier::empty(), truecolor),
             // ADR 0026 D9: the status bar's AUTO marker, reversed so it reads at a glance
@@ -942,6 +954,10 @@ impl Theme {
             truncation: dim,
             approval_border: spec(pi::BORDER_ACCENT, Modifier::empty(), truecolor),
             hint: dim,
+            // The trust hint (ADR 0031 T3): the same yellow as `auto`, but foreground
+            // only — `auto`'s `REVERSED` marker stays the "this session behaves
+            // differently" signal.
+            trust_hint: spec(pi::YELLOW, Modifier::empty(), truecolor),
             completion: dim,
             find: spec(pi::VIOLET, Modifier::empty(), truecolor),
             // ADR 0026 D9: the status bar's AUTO marker, reversed so it reads at a glance
@@ -1020,6 +1036,8 @@ impl Theme {
             truncation: style(None, Modifier::DIM),
             approval_border: style(None, Modifier::BOLD),
             hint: style(None, Modifier::DIM),
+            // `mono` uses no color: like the other warnings, the trust hint is bold.
+            trust_hint: style(None, Modifier::BOLD),
             completion: style(None, Modifier::DIM),
             find: style(None, Modifier::BOLD),
             // ADR 0026 D9: the mono theme has no color, so `AUTO` stands out by reversal.

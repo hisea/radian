@@ -333,6 +333,16 @@ enum RadianCommand {
         #[command(subcommand)]
         command: radian_host::memory::commands::MemoryCommand,
     },
+    /// Show or change a directory's project trust decision: the same grammar as
+    /// `radian exec trust` and the TUI's `/trust`.
+    Trust {
+        /// The workspace the decision is about, like `radian exec --workspace`. Omitted:
+        /// the current directory.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+        #[command(subcommand)]
+        command: radian_exec::TrustCommand,
+    },
     /// Configuration tools: `radian config import-pi …`, the same code
     /// `radian exec config` runs.
     Config {
@@ -448,6 +458,12 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
         )),
         RadianCommand::Memory { workspace, command } => {
             run_radian_exec(radian_exec::Cli::for_memory(
+                workspace.map(|path| path.to_string_lossy().into_owned()),
+                command,
+            ))
+        }
+        RadianCommand::Trust { workspace, command } => {
+            run_radian_exec(radian_exec::Cli::for_trust(
                 workspace.map(|path| path.to_string_lossy().into_owned()),
                 command,
             ))

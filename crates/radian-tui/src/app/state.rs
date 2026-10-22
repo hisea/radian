@@ -88,6 +88,9 @@ pub enum EntryKind {
     /// use the same accent label / secondary body levels as a notice (`split_label`, ADR
     /// 0028 / ADR 0029).
     Startup,
+    /// The project trust line under the wordmark (ADR 0031 T3). Its own kind so the
+    /// renderer paints it with the `trust_hint` role and nothing else uses that role.
+    TrustHint,
     /// A startup safety line (an unavailable sandbox, an unsandboxed MCP, an unknown
     /// window, a memory/config warning): it is **never** folded away, and it uses the
     /// warning color.

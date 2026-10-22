@@ -32,15 +32,23 @@ pub const TIPS: &[&str] = &[
     "/compact summarizes the history now",
     "@path attaches a file to the request",
     "Shift+drag uses the terminal's own selection",
-    "!<command> runs a shell command in the sandbox",
+    "!<command> runs a shell command",
 ];
 
-/// The line under the wordmark for a project with no trusted decision (decision
+/// The line under the wordmark while the project has no trusted decision (decision
 /// 2026-10-20): it points at `/trust` and disappears once the project is trusted — no
-/// popup, no per-repository interrogation.
+/// popup, no per-repository interrogation. An explicit distrust (`/trust off`, a saved
+/// `false`) names itself as distrusted, so it reads apart from a project that was never
+/// decided (`/trust on` to trust it in both cases).
 pub fn trust_hint(trust: &radian_host::trust::Setup) -> Option<String> {
-    (!trust.resolved.decision.as_bool())
-        .then(|| "untrusted project · /trust to trust it".to_string())
+    use radian_host::trust::Source;
+    if trust.resolved.decision.as_bool() {
+        return None;
+    }
+    Some(match trust.resolved.source {
+        Source::Default => "untrusted project · /trust to trust it".to_string(),
+        _ => "distrusted project · /trust on to trust it".to_string(),
+    })
 }
 /// The tip for a session: a stable hash of the session id picks one, so the same session
 /// shows the same tip on resume. No randomness.

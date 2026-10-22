@@ -6,7 +6,9 @@
 //!
 //! [`parse`] only **parses**: running a command is an effect the event loop executes, so the
 //! app stays pure (ADR 0023 U3). `/memory` runs the same `radian-host::memory` command set
-//! `radian memory` uses (one clap grammar, one executor). Adding a command is one arm here.
+//! `radian memory` uses (one clap grammar, one executor). `/trust` runs the same
+//! `radian-host::trust` writes `radian trust` runs (one record, one notice shape). Adding a
+//! command is one arm here.
 
 use radian_host::memory::commands::{self, CommandOutput, MemoryCommand};
 
@@ -53,8 +55,11 @@ pub const HELP: &str = "\
 /login [provider]     store an API key in credentials/auth.json; custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
+/trust [status|on|off|forget]
+                       show or change the project trust decision; a write takes
+                       effect at the next start
 //…                   send a message that starts with `/`
-!<command>            run a shell command in the sandbox; `!!` keeps its output
+!<command>            run a shell command; `!!` keeps its output
                       out of the model's context
 Ask about radian itself in plain words to read the built in manual";
 
@@ -107,6 +112,31 @@ impl InspectorPage {
             InspectorPage::Tools => "tools",
             InspectorPage::Mcp => "mcp",
             InspectorPage::Hooks => "hooks",
+        }
+    }
+}
+
+/// What `/trust` asked for (ADR 0031 T3): `Status` shows the current directory's decision
+/// and its source; `On`/`Off` save it; `Forget` removes it. Every write changes disk
+/// state only and prints one takes-effect line; loaded resources never hot-load or
+/// hot-unload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustRequest {
+    Status,
+    On,
+    Off,
+    Forget,
+}
+
+impl TrustRequest {
+    /// The `radian-host::trust` write this request means, or `None` for the read-only
+    /// `Status`.
+    pub fn write(self) -> Option<radian_host::trust::TrustWrite> {
+        match self {
+            TrustRequest::Status => None,
+            TrustRequest::On => Some(radian_host::trust::TrustWrite::On),
+            TrustRequest::Off => Some(radian_host::trust::TrustWrite::Off),
+            TrustRequest::Forget => Some(radian_host::trust::TrustWrite::Forget),
         }
     }
 }
@@ -178,6 +208,9 @@ pub enum Outcome {
     /// `/auto on|off` (and `/yolo`, its alias): the in-session auto-approval switch
     /// (ADR 0026 D9). `true` = on.
     AutoToggle(bool),
+    /// `/trust [status|on|off|forget]` (ADR 0031 T3): show the current directory's trust
+    /// decision and its source, or save/remove it. Running it is the loop's effect.
+    Trust(TrustRequest),
     /// `/access [workspace|full]` (ADR 0038 slice 2): show the current tier and where it
     /// came from (`None`), or switch to a named tier (`Some`).
     Access(Option<String>),
@@ -374,6 +407,11 @@ pub fn tree() -> &'static [Command] {
             name: "yolo",
             description: "alias of /auto",
             levels: &[auto_level],
+        },
+        Command {
+            name: "trust",
+            description: "show or change the project trust decision",
+            levels: &[trust_level],
         },
         Command {
             name: "access",
@@ -634,6 +672,33 @@ fn auto_level(_typed: &[&str], _partial: &str) -> Level {
         Candidate {
             insert: "off".to_owned(),
             description: "ask again (back to on-ask)".to_owned(),
+            current: false,
+        },
+    ])
+}
+
+/// `/trust` [status|on|off|forget] (ADR 0031 T3): the four words are the whole argument
+/// grammar. A bare `/trust` is the query.
+fn trust_level(_typed: &[&str], _partial: &str) -> Level {
+    Level::Ready(vec![
+        Candidate {
+            insert: "status".to_owned(),
+            description: "show the current directory decision and its source".to_owned(),
+            current: false,
+        },
+        Candidate {
+            insert: "on".to_owned(),
+            description: "trust this directory (takes effect at the next start)".to_owned(),
+            current: false,
+        },
+        Candidate {
+            insert: "off".to_owned(),
+            description: "distrust this directory (takes effect at the next start)".to_owned(),
+            current: false,
+        },
+        Candidate {
+            insert: "forget".to_owned(),
+            description: "remove the saved decision (takes effect at the next start)".to_owned(),
             current: false,
         },
     ])
@@ -1068,7 +1133,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         let command = rest.trim();
         if command.is_empty() {
             return Outcome::Notices(vec![
-                "usage: !<command> runs it in the sandbox (!!<command> keeps its output out of \
+                "usage: !<command> runs it (!!<command> keeps its output out of \
                  the model's context)"
                     .to_owned(),
             ]);
@@ -1119,6 +1184,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/login") => Outcome::Login(login_provider(&tokens[1..])),
         Some("/logout") => Outcome::Logout(logout_provider(&tokens[1..])),
         Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
+        Some("/trust") => trust_request(&tokens[1..]),
         Some("/access") => access_request(&tokens[1..]),
         Some("/skills") if tokens.len() == 1 => Outcome::Skills,
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
@@ -1260,6 +1326,19 @@ fn auto_toggle(args: &[String]) -> Outcome {
         _ => Outcome::Notices(vec![
             "usage: /auto on|off (deny rules and the sandbox still apply)".to_owned(),
         ]),
+    }
+}
+
+/// `/trust` [status|on|off|forget] (ADR 0031 T3). No argument is the query; one of the
+/// four words runs it; anything else is a usage notice.
+fn trust_request(args: &[String]) -> Outcome {
+    match (args.first().map(String::as_str), args.get(1)) {
+        (None, _) => Outcome::Trust(TrustRequest::Status),
+        (Some("status"), None) => Outcome::Trust(TrustRequest::Status),
+        (Some("on"), None) => Outcome::Trust(TrustRequest::On),
+        (Some("off"), None) => Outcome::Trust(TrustRequest::Off),
+        (Some("forget"), None) => Outcome::Trust(TrustRequest::Forget),
+        _ => Outcome::Notices(vec!["usage: /trust [status|on|off|forget]".to_owned()]),
     }
 }
 
@@ -2508,5 +2587,71 @@ mod theme_tests {
             "only *.toml/*.json is a theme: {names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0031 T3: `/trust` with no argument is the query; `status|on|off|forget` run.
+    /// Anything else is a usage notice, never a write.
+    #[test]
+    fn trust_parses_bare_status_and_the_three_writes() {
+        for line in ["/trust", "/trust status"] {
+            assert!(
+                matches!(parse(line, false), Outcome::Trust(TrustRequest::Status)),
+                "{line} is the query"
+            );
+        }
+        for (line, expected) in [
+            ("/trust on", TrustRequest::On),
+            ("/trust off", TrustRequest::Off),
+            ("/trust forget", TrustRequest::Forget),
+        ] {
+            assert!(
+                matches!(parse(line, false), Outcome::Trust(request) if request == expected),
+                "{line}"
+            );
+        }
+        for line in ["/trust nope", "/trust on extra", "/trust status x"] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert_eq!(
+                        notices,
+                        vec!["usage: /trust [status|on|off|forget]".to_owned()]
+                    )
+                }
+                other => panic!("{line}: expected usage, got {other:?}"),
+            }
+        }
+    }
+
+    /// ADR 0031 T3: the query is a read, the writes go through the facade.
+    #[test]
+    fn trust_writes_map_to_the_shared_record() {
+        use radian_host::trust::TrustWrite;
+        assert_eq!(TrustRequest::Status.write(), None);
+        assert_eq!(TrustRequest::On.write(), Some(TrustWrite::On));
+        assert_eq!(TrustRequest::Off.write(), Some(TrustWrite::Off));
+        assert_eq!(TrustRequest::Forget.write(), Some(TrustWrite::Forget));
+    }
+
+    /// `/trust` is in the command registry with one level offering the four words, and
+    /// `/help` lists it. The mutation (the registry entry is dropped) fails the
+    /// completion assertion and the `/help` assertion.
+    #[test]
+    fn trust_is_in_the_registry_completion_and_help() {
+        assert!(
+            tree().iter().any(|command| command.name == "trust"),
+            "/trust is in the registry"
+        );
+        let level = complete_in(tree(), "/trust ", 7).expect("the argument level");
+        match level.level_result {
+            Level::Ready(candidates) => {
+                let inserts: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+                assert_eq!(inserts, ["status", "on", "off", "forget"], "{inserts:?}");
+            }
+            other => panic!("expected the four words, got {other:?}"),
+        }
+        assert!(
+            HELP.contains("/trust [status|on|off|forget]"),
+            "/help lists /trust"
+        );
     }
 }

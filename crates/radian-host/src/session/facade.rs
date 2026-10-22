@@ -87,6 +87,13 @@ pub trait SessionFacade: Send + Sync {
     /// choices and journals `ProjectTrustChanged`, or changes only this session's state.
     fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String>;
 
+    /// Applies a `/trust on|off|forget` write (ADR 0031 T3): writes `trust.json` through
+    /// [`trust::apply_write`] and journals `ProjectTrustChanged` per write, like
+    /// [`SessionFacade::record_trust`]. Returns the re-resolved setup. Loaded resources
+    /// never hot-load or hot-unload; the caller prints the takes-effect line.
+    /// Returns the re-resolved setup and whether anything was written.
+    fn write_trust(&self, write: trust::TrustWrite) -> Result<(trust::Setup, bool), String>;
+
     /// Appends one durable `UserBash` audit record (ADR 0033). Both `!` and `!!` call it; the
     /// record is audit-only and never replayed.
     fn record_user_bash(&self, record: &UserBashRecord);

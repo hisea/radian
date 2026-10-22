@@ -194,6 +194,33 @@ radian memory search tabs --json
 radian memory list --all
 ```
 
+## `radian trust`
+
+`radian trust` shows or changes a directory's project trust decision.
+Needs no model, no key, no session file, no network.
+`--workspace <DIR>` picks the directory the decision is about; omitted, the current
+directory. Only `list` ignores it: it prints every saved decision.
+
+| Command | Arguments and flags | What it does |
+|---|---|---|
+| `status` | — | Show the current directory's trust decision and its source: `trust on (saved for <dir>)`, `trust off (inherited from <dir>)`, or `trust: no saved decision (untrusted)`. A pure read: nothing is written. |
+| `on` | — | Trust the current directory, saving `true`. Disk state only: the notice says it takes effect at the next start. |
+| `off` | — | Distrust the current directory, saving `false`. Disk state only: like `on`, it takes effect at the next start. |
+| `forget` | — | Remove the current directory's saved decision. An ancestor's decision then applies, or none at all. With no saved decision, it prints `no saved trust decision for <dir>` and writes nothing. |
+| `list` | — | Print every saved decision, one `<dir>: on|off` line per directory, sorted. With none saved, it prints `no saved trust decisions`. |
+
+`status`, `on`, `off` and `forget` print exactly one line to stdout.
+A closed output pipe (`radian trust status | head`) exits `0` with no panic and no error
+line: the reader going away is a normal stop.
+Exit `0` on success, `1` when the store cannot be read or written, `2` for bad use.
+The TUI's `/trust` runs the same record and prints the same lines; see `commands.md`.
+
+```sh
+radian trust status
+radian trust on
+radian trust list
+```
+
 ## `radian config`
 
 `radian config import-pi --from <DIR>` drafts a configuration from a Pi agent directory.

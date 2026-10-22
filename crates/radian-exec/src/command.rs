@@ -33,6 +33,12 @@ pub enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Show or change a directory's project trust decision. Needs no model, no key, no
+    /// session file, no network.
+    Trust {
+        #[command(subcommand)]
+        command: TrustCommand,
+    },
     /// Configuration tools: `radian config --help`.
     Config {
         #[command(subcommand)]
@@ -54,6 +60,24 @@ pub enum Command {
         /// The provider id the key is stored under (`radian login` printed it).
         provider: String,
     },
+}
+
+/// The `radian trust` grammar. `status` reads the current directory's decision and its
+/// source; `on`/`off` save it; `forget` removes it; `list` prints every saved decision.
+/// A write changes disk state only: loaded resources stay as they are until the next start.
+#[derive(clap::Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustCommand {
+    /// Show the current directory's trust decision and its source.
+    Status,
+    /// Trust the current directory (saved; takes effect at the next start).
+    On,
+    /// Distrust the current directory (saved; takes effect at the next start).
+    Off,
+    /// Remove the current directory's saved decision (an ancestor's decision then
+    /// applies, or none at all; takes effect at the next start).
+    Forget,
+    /// Print every saved trust decision, one per line.
+    List,
 }
 
 /// The `radian config` grammar. `import-pi` is the only entry point in this version, and it is
@@ -96,6 +120,10 @@ pub enum ConfigCommand {
 
 pub(crate) fn run_memory(cli: &Cli, command: MemoryCommand) -> i32 {
     finish(memory_command(cli, command))
+}
+
+pub(crate) fn run_trust(cli: &Cli, command: TrustCommand) -> i32 {
+    finish(trust_command(cli, command))
 }
 
 pub(crate) fn run_config(cli: &Cli, command: ConfigCommand) -> i32 {
@@ -258,6 +286,55 @@ fn resolve_claude_targets(
         project_skills_dir: project.map(|dir| dir.join(".agents/skills")),
         project_hooks_path: project.map(|dir| dir.join(".radian/hooks.json")),
     })
+}
+
+/// Runs one `radian trust` subcommand. Deliberately before `setup`: no model, no key, no
+/// session file, no network. `status` reads the current directory's decision and its
+/// source; `on`/`off`/`forget` change `trust.json` (one audit-shaped write, no journal:
+/// a management command has no session); `list` prints every saved decision. Every write
+/// goes through `radian_host::write_line`, so a closed pipe exits 0 with no panic.
+fn trust_command(cli: &Cli, command: TrustCommand) -> Result<(), OutputError> {
+    use radian_host::trust;
+    // `list` is about every saved decision, not the current directory: it resolves
+    // nothing.
+    if command == TrustCommand::List {
+        let store = trust::read().map_err(CommandError::failure)?;
+        if store.is_empty() {
+            radian_host::write_line("no saved trust decisions")?;
+            return Ok(());
+        }
+        for (path, decision) in &store {
+            radian_host::write_line(&format!("{path}: {}", if *decision { "on" } else { "off" }))?;
+        }
+        return Ok(());
+    }
+    let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
+        .map_err(CommandError::usage)?;
+    match command {
+        TrustCommand::List => unreachable!("handled above"),
+        TrustCommand::Status => {
+            let line = trust::describe(&workspace, None).map_err(CommandError::failure)?;
+            radian_host::write_line(&line)?;
+            Ok(())
+        }
+        TrustCommand::On | TrustCommand::Off | TrustCommand::Forget => {
+            let write = match command {
+                TrustCommand::On => trust::TrustWrite::On,
+                TrustCommand::Off => trust::TrustWrite::Off,
+                TrustCommand::Forget => trust::TrustWrite::Forget,
+                TrustCommand::Status | TrustCommand::List => unreachable!("handled above"),
+            };
+            let path = trust::trust_file().ok_or_else(|| {
+                CommandError::usage("no RADIAN_HOME or HOME to place trust.json under")
+            })?;
+            // A management command has no session and no journal: the audit is a no-op.
+            let audit = |_: &trust::ProjectTrustChanged| {};
+            let (_, written) = trust::apply_write(&path, &workspace, write, &audit)
+                .map_err(CommandError::failure)?;
+            radian_host::write_line(&trust::write_notice(&workspace, write, written))?;
+            Ok(())
+        }
+    }
 }
 
 /// Runs one `radian memory` subcommand. Deliberately before `setup`: no model, no key, no

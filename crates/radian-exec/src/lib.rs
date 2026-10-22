@@ -27,8 +27,8 @@ mod trust;
 mod turn;
 mod ui;
 
-pub use command::{Command, ConfigCommand};
-pub(crate) use command::{ExportFormat, run_config, run_memory};
+pub use command::{Command, ConfigCommand, TrustCommand};
+pub(crate) use command::{ExportFormat, run_config, run_memory, run_trust};
 pub(crate) use error::{OutputError, SetupError, finish};
 pub(crate) use redact::redact;
 pub(crate) use setup::Setup;
@@ -321,6 +321,16 @@ impl Cli {
             ..Self::default()
         }
     }
+
+    /// [`Cli::for_command`] with the workspace `radian exec --workspace DIR trust …` would
+    /// carry.
+    pub fn for_trust(workspace: Option<String>, command: TrustCommand) -> Self {
+        Self {
+            command: Some(Command::Trust { command }),
+            workspace,
+            ..Self::default()
+        }
+    }
 }
 
 /// Parses `args` (program name included) and runs it to completion, returning the process
@@ -372,6 +382,7 @@ pub async fn run(mut cli: Cli, child_headers: Result<Vec<String>, String>) -> i3
         }
         match cli.command.take() {
             Some(Command::Memory { command }) => return run_memory(&cli, command),
+            Some(Command::Trust { command }) => return run_trust(&cli, command),
             Some(Command::Config { command }) => return run_config(&cli, command),
             // D3: the credential commands are modes of their own — no model, no session
             // file; `radian login` talks to the named endpoint once (the verification).

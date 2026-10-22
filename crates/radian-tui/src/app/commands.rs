@@ -243,6 +243,13 @@ impl App {
                 }
                 UpdateResult::effect(Effect::SetApprovalPolicy { on })
             }
+            // `/trust` (ADR 0031 T3): the query is a read, the writes go through the facade.
+            // Every write changes disk state only (loaded resources never hot-load or
+            // hot-unload) and prints one takes-effect line.
+            command::Outcome::Trust(request) => match request.write() {
+                None => UpdateResult::effect(Effect::TrustStatus),
+                Some(write) => UpdateResult::effect(Effect::WriteTrust { write }),
+            },
             // `/access` (ADR 0038 slice 2): a query with no argument, otherwise a switch. Only
             // `full` needs confirmation (it is "no sandbox"); the model has no tool for this.
             command::Outcome::Access(name) => match name {
