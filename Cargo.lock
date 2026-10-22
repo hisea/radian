@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-extensions"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "radian-core",
@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "agent-provider-anthropic"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-provider-anthropic",
  "agent-provider-contract",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "agent-provider-contract"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "radian-core",
  "serde_json",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent-provider-openai-compatible"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-provider-contract",
  "agent-provider-openai-compatible",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "agent-provider-openai-responses"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-provider-contract",
  "agent-provider-openai-responses",
@@ -2247,7 +2247,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "radian-coding"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "globset",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "radian-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "jsonschema",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "radian-exec"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-extensions",
  "agent-provider-anthropic",
@@ -2303,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "radian-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-extensions",
  "agent-provider-anthropic",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "radian-memory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "fs2",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "radian-permissions"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "radian-core",
@@ -2361,7 +2361,7 @@ dependencies = [
 
 [[package]]
 name = "radian-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "radian-sandbox"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "radian-sandbox",
@@ -2385,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "radian-session"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "fs2",
@@ -2402,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "radian-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-extensions",
  "agent-provider-anthropic",
