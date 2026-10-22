@@ -244,6 +244,17 @@ pub enum Effect {
     /// facade and journals one `ProjectTrustChanged` per write. The answer is
     /// [`Input::TrustResolved`].
     SetTrust { choice: radian_host::trust::Choice },
+    /// Show the current directory's trust decision and its source (`/trust`, `/trust
+    /// status`, ADR 0031 T3): the loop reads it from the facade and answers with
+    /// [`Input::SessionDone`]. No disk write.
+    TrustStatus,
+    /// Apply a `/trust on|off|forget` write (ADR 0031 T3): the loop writes `trust.json`
+    /// through the facade and journals one `ProjectTrustChanged` per write, like
+    /// [`Effect::SetTrust`]. Disk state only — loaded resources never hot-load or
+    /// hot-unload — so the answer is [`Input::SessionDone`] with the takes-effect line.
+    WriteTrust {
+        write: radian_host::trust::TrustWrite,
+    },
     /// Run a `!`/`!!` command in the sandbox (ADR 0033). The loop spawns it and answers with
     /// [`Input::BashDone`].
     RunBash {
@@ -369,6 +380,8 @@ impl PartialEq for Effect {
             (Copy { text: a }, Copy { text: b }) => a == b,
             (Bell, Bell) => true,
             (SetTrust { choice: a }, SetTrust { choice: b }) => a == b,
+            (TrustStatus, TrustStatus) => true,
+            (WriteTrust { write: a }, WriteTrust { write: b }) => a == b,
             (
                 ExpandSkill {
                     name: an,

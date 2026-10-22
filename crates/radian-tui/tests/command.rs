@@ -501,6 +501,74 @@ fn a_pending_confirmation_keeps_keys_out_of_the_input_box() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0031 T3: `/trust` and `/trust status` are a read effect; `on`/`off`/`forget` are
+/// write effects through the facade (disk state only). The loop answers with `SessionDone`;
+/// the notices are the one status line and the takes-effect lines. The mutation (the
+/// `/trust` arm is dropped, or a write prints the status line) fails the effect and
+/// notice assertions.
+#[test]
+fn trust_commands_become_effects_and_the_answers_become_notices() {
+    use radian_host::trust::TrustWrite;
+    let (dir, mut app, service) = app_with_memory("trust");
+    assert_eq!(
+        submit(&mut app, &service, &dir, "/trust"),
+        vec![Effect::TrustStatus]
+    );
+    assert_eq!(
+        submit(&mut app, &service, &dir, "/trust status"),
+        vec![Effect::TrustStatus]
+    );
+    assert_eq!(
+        submit(&mut app, &service, &dir, "/trust on"),
+        vec![Effect::WriteTrust {
+            write: TrustWrite::On
+        }]
+    );
+    assert_eq!(
+        submit(&mut app, &service, &dir, "/trust off"),
+        vec![Effect::WriteTrust {
+            write: TrustWrite::Off
+        }]
+    );
+    assert_eq!(
+        submit(&mut app, &service, &dir, "/trust forget"),
+        vec![Effect::WriteTrust {
+            write: TrustWrite::Forget
+        }]
+    );
+    // Anything else is a usage notice, never an effect.
+    assert!(submit(&mut app, &service, &dir, "/trust nope").is_empty());
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n == "usage: /trust [status|on|off|forget]"),
+        "{:?}",
+        notices(&app)
+    );
+    // The loop's answers land as notices, verbatim.
+    app.update(Input::SessionDone(vec![
+        "trust: no saved decision (untrusted)".to_owned()
+    ]));
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n == "trust: no saved decision (untrusted)"),
+        "{:?}",
+        notices(&app)
+    );
+    app.update(Input::SessionDone(vec![
+        "trusted /work/example; takes effect at the next start".to_owned()
+    ]));
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n == "trusted /work/example; takes effect at the next start"),
+        "{:?}",
+        notices(&app)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0025 S3: `/skill:<name>` becomes an expansion effect (the host reads the body), and its
 /// answer becomes one user message — or a steer while a turn runs. An error is a notice.
 #[test]

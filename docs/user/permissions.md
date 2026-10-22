@@ -32,6 +32,12 @@ Pass `--trust` to trust this run only.
 Pass `--no-trust` to distrust this run only.
 Neither flag writes to disk.
 Confirm trust once to save it.
+Show or change the saved decision with `/trust` inside the interface
+(`/trust status` shows the current directory's decision and its source;
+`/trust on`, `/trust off` and `/trust forget` change disk state only and take effect
+at the next start) or with `radian trust status|on|off|forget|list` outside it.
+After `/trust on` the next start shows no hint; after `/trust off` the hint says the
+project is distrusted.
 
 Approval controls questions.
 Use `on-ask` to ask when a rule says so.

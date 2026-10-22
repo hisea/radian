@@ -66,7 +66,7 @@ starts from one built-in palette, then sets roles.
 entries may reference each other with `$other`: chains resolve, and a loop
 only breaks the roles that use it. A missing variable warns once per name.
 
-A `[roles]` key is one of the 81 role names below. A value is one color for
+A `[roles]` key is one of the 82 role names below. A value is one color for
 the foreground, or a table with `fg`, `bg`, `bold`, `italic`, `dim` and
 `underline`. An absent field leaves the built-in value alone; `bold = false`
 turns off a bold the built-in sets. The same value shape overrides single
@@ -114,6 +114,7 @@ Transcript text:
 | `notice_label` | The `label:` half of a notice line. |
 | `notice_body` | The value half of a notice line. |
 | `hint` | Hints: the placeholder, the question-form hint row, the picker help. |
+| `trust_hint` | The project trust line under the wordmark. Only this line uses the role. |
 | `completion` | The completion menu. |
 | `find` | The in-transcript search match highlight. |
 | `selection` | The transcript selection. A background only: the text keeps its own foreground. |

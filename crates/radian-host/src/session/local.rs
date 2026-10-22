@@ -497,6 +497,41 @@ impl LocalSession {
         Ok((setup, changes.into_inner().unwrap()))
     }
 
+    /// Applies a `/trust on|off|forget` write (ADR 0031 T3): `trust::apply_write` writes
+    /// `trust.json` and collects the audit records, then the stored setup is replaced
+    /// with the re-resolved one. Journals one `ProjectTrustChanged` per write through the
+    /// session's own writer (best effort, like [`record_trust`]). Loaded resources never
+    /// hot-load or hot-unload: the caller prints the takes-effect line.
+    pub fn write_trust(&self, write: trust::TrustWrite) -> Result<(trust::Setup, bool), String> {
+        let path = trust::trust_file()
+            .ok_or("no RADIAN_HOME or HOME to place trust.json under")?;
+        let workspace = self
+            .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .workspace
+            .clone();
+        let changes = std::sync::Mutex::new(Vec::new());
+        let audit = |change: &trust::ProjectTrustChanged| {
+            changes.lock().unwrap().push(change.clone());
+        };
+        let (resolved, written) = trust::apply_write(&path, &workspace, write, &audit)?;
+        let setup = {
+            let mut setup = self.trust.lock().unwrap_or_else(|e| e.into_inner());
+            setup.resolved = resolved;
+            setup.needs_ask = false;
+            setup.clone()
+        };
+        for change in changes.into_inner().unwrap() {
+            let event = trust_event(&change);
+            let journal = Arc::clone(&self.journal);
+            self.runtime.spawn(async move {
+                let _ = journal.append_runtime_event(event).await;
+            });
+        }
+        Ok((setup, written))
+    }
+
     pub fn capabilities(&self) -> &[SessionCapability] {
         &self.capabilities
     }
@@ -663,6 +698,10 @@ impl SessionFacade for LocalSession {
 
     fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String> {
         LocalSession::record_trust(self, choice)
+    }
+
+    fn write_trust(&self, write: trust::TrustWrite) -> Result<(trust::Setup, bool), String> {
+        LocalSession::write_trust(self, write)
     }
 
     fn record_user_bash(&self, record: &UserBashRecord) {

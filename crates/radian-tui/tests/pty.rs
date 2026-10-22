@@ -1569,6 +1569,117 @@ async fn pty_trust_modal_lists_the_project_mcp_servers() {
     );
 }
 
+/// ADR 0031 T3: `/trust` in a project with no saved decision. A bare `/trust` shows the
+/// default status line; `/trust on` writes `trust.json`, journals one `ProjectTrustChanged`,
+/// and prints the takes-effect line — while the in-session startup block still says not
+/// loaded (disk state only, nothing hot-loads). A restart in the same `RADIAN_HOME` then
+/// shows no hint. The mutations (nothing is written on `on`; the takes-effect line is
+/// the status line) fail the disk, journal and screen assertions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_trust_on_saves_journals_and_applies_at_the_next_start() {
+    let server = MockServer::start(vec![text_reply("TRUST-ON-OK")]).await;
+    let dir = TempDir::new("trust-on-session");
+    let home = TempDir::new("trust-on-home");
+    // No project resources: no startup modal, but `/trust` still works (trust also
+    // hardens git for `!` in an untrusted project).
+    let ws = TempDir::new("trust-on-ws");
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-on",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        // Wide enough that the takes-effect line (with the full workspace path) never
+        // wraps mid-phrase.
+        200,
+    );
+    assert!(
+        pty.wait_for_screen("/trust to trust it", wait_positive()),
+        "the untrusted hint is missing:\n{}",
+        pty.screen()
+    );
+    // A bare `/trust` is the query: the default status line.
+    pty.send(b"/trust\r");
+    assert!(
+        pty.wait_for_screen("trust: no saved decision (untrusted)", wait_positive()),
+        "the status line is missing:\n{}",
+        pty.screen()
+    );
+    // `/trust on`: the takes-effect line, not the status line.
+    pty.send(b"/trust on\r\r");
+    assert!(
+        pty.wait_for_screen("takes effect at the next start", wait_positive()),
+        "the takes-effect line is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("trusted ", wait_positive()),
+        "the on notice is missing:\n{}",
+        pty.screen()
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: not loaded", wait_positive()),
+        "nothing hot-loads: the in-session block still says not loaded:\n{}",
+        pty.screen()
+    );
+
+    // Disk state: `trust.json` holds the workspace → true (canonicalized).
+    let canonical = std::fs::canonicalize(ws.path()).unwrap();
+    let trust = std::fs::read_to_string(home.path().join("trust/trust.json")).unwrap();
+    assert!(
+        trust.contains(&canonical.to_string_lossy().to_string()) && trust.contains("true"),
+        "{trust}"
+    );
+    // The write is audited in the session journal (ADR 0031 T2/T6).
+    let journal = std::fs::read_to_string(dir.path().join("trust-on.jsonl")).unwrap();
+    assert!(journal.contains("ProjectTrustChanged"), "{journal}");
+    assert!(journal.contains("\"decision\":true"), "{journal}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    // The next start in the same `RADIAN_HOME` shows no hint.
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-on-restart",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: loaded", wait_positive()),
+        "the trusted session did not start:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("/trust to trust it"),
+        "a trusted project shows no hint:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+}
+
 /// decision: a project with no trusted decision shows
 /// `untrusted project · /trust to trust it` under the wordmark (no modal when there
 /// are no project resources); a trusted project shows no hint.

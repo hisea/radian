@@ -54,6 +54,19 @@ first, so a `ctrl-c` exit saves the cleared line. A panic writes nothing.
 | `/yolo` | `/yolo on\|off` | Alias of `/auto` with the same two words. |
 | `/access` | `/access [workspace\|full]` | With no argument, show the current tier and where it came from. With a name, switch tiers. The switch takes effect at the next tool call, and `full` asks for confirmation first because it removes the sandbox. Applies at once. Example: `/access workspace`. |
 
+## Trust
+
+| Command | Syntax | What it does |
+|---|---|---|
+| `/trust` | `/trust` (no arguments) or `/trust status` | Show the current directory's trust decision and its source: `saved for`, `inherited from`, `command line`, `this session only`, or no saved decision. A pure read: no disk write. Applies at once. |
+| `/trust` | `/trust on` | Trust the current directory for every future session. Only the disk changes: loaded resources stay as they are, so the notice says it takes effect at the next start. Applies at once. Example: `/trust on`. |
+| `/trust` | `/trust off` | Distrust the current directory, saving `false`. Like `on`, disk state only: the next start never loads. Applies at once. |
+| `/trust` | `/trust forget` | Remove the current directory's saved decision. An ancestor's decision then applies, or none at all; with none, the untrusted hint returns. Applies at once. |
+
+`radian trust status|on|off|forget|list` outside the interface runs the same record:
+`status` prints the same line, `on`/`off`/`forget` print the same takes-effect
+notice, `list` prints every saved decision. See `cli.md`.
+
 ## Context
 
 | Command | Syntax | What it does |

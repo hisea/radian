@@ -621,6 +621,33 @@ impl LoopContext<'_> {
                 }
                 Ok(())
             }
+            // `/trust` (ADR 0031 T3): the query reads the decision and its source from the
+            // facade; a write goes through it (disk state only, one `ProjectTrustChanged`
+            // per write) and the notice says it takes effect at the next start.
+            Effect::TrustStatus => {
+                let setup = self.session.trust();
+                self.send(AppInput::SessionDone(vec![
+                    radian_host::trust::describe_resolved(&setup.resolved),
+                ]));
+                Ok(())
+            }
+            Effect::WriteTrust { write } => {
+                match self.session.write_trust(write) {
+                    Ok((setup, written)) => {
+                        let line =
+                            radian_host::trust::write_notice(&setup.workspace, write, written);
+                        self.send(AppInput::SessionDone(vec![line]));
+                    }
+                    Err(error) => {
+                        self.send(AppInput::CommandRefused(radian_host::CommandRefused {
+                            command: "trust".to_owned(),
+                            reason: error,
+                            capability: None,
+                        }))
+                    }
+                }
+                Ok(())
+            }
             Effect::Compact { instructions } => {
                 // The facade runs the request between turns and reports the outcome here; the
                 // result becomes an event like every other effect result.
@@ -1099,6 +1126,12 @@ mod tests {
             &self,
             _choice: radian_host::trust::Choice,
         ) -> Result<radian_host::trust::Setup, String> {
+            todo!()
+        }
+        fn write_trust(
+            &self,
+            _write: radian_host::trust::TrustWrite,
+        ) -> Result<(radian_host::trust::Setup, bool), String> {
             todo!()
         }
         fn record_user_bash(&self, _record: &radian_host::UserBashRecord) {

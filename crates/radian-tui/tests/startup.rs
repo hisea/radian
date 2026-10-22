@@ -44,9 +44,10 @@ fn with_startup() -> App {
 }
 
 /// decision: the wordmark carries `untrusted project · /trust to trust
-/// it` under it while the project has no trusted decision, and nothing once it is
-/// trusted. Showing it always (or never) fails this test, so it is the mutation catcher
-/// for both directions.
+/// it` under it while the project has no saved decision, `distrusted project ·
+/// /trust on to trust it` while it is explicitly distrusted, and nothing once it is
+/// trusted. Showing the wrong line (or none) fails this test, so it is the mutation
+/// catcher for the wording and for both directions.
 #[test]
 fn the_trust_hint_shows_until_the_project_is_trusted() {
     use radian_host::trust::{Decision, Resolved, Setup, Source};
@@ -57,6 +58,32 @@ fn the_trust_hint_shows_until_the_project_is_trusted() {
     assert_eq!(
         trust_hint(&untrusted),
         Some("untrusted project · /trust to trust it".to_string())
+    );
+    // An explicit distrust (a saved `false`) reads as distrusted, not untrusted.
+    let distrusted = Setup {
+        workspace: PathBuf::from("/work/example"),
+        resolved: Resolved {
+            decision: Decision::Untrust,
+            source: Source::Saved(PathBuf::from("/work/example")),
+        },
+        needs_ask: false,
+    };
+    assert_eq!(
+        trust_hint(&distrusted),
+        Some("distrusted project · /trust on to trust it".to_string())
+    );
+    // An inherited distrust reads the same way.
+    let inherited = Setup {
+        workspace: PathBuf::from("/work/example/sub"),
+        resolved: Resolved {
+            decision: Decision::Untrust,
+            source: Source::Ancestor(PathBuf::from("/work/example")),
+        },
+        needs_ask: false,
+    };
+    assert_eq!(
+        trust_hint(&inherited),
+        Some("distrusted project · /trust on to trust it".to_string())
     );
     let trusted = Setup {
         workspace: PathBuf::from("/work/example"),
@@ -84,7 +111,7 @@ fn the_trust_hint_is_an_entry_under_the_wordmark() {
         texts[banner_len], "untrusted project · /trust to trust it",
         "{texts:?}"
     );
-    assert_eq!(app.session.entries[banner_len].kind, EntryKind::Startup);
+    assert_eq!(app.session.entries[banner_len].kind, EntryKind::TrustHint);
 
     let plain = with_startup();
     assert!(
@@ -300,6 +327,82 @@ fn the_tip_is_stable_per_session() {
         assert_eq!(first, tip_for(id), "stable for {id}");
         assert!(TIPS.contains(&first), "{first:?} is in the table");
     }
+}
+
+/// The tip for `!` tells the truth in both tiers: it runs a shell command (the tier line
+/// above it already says whether a sandbox is on). The mutation (the old `in the sandbox`
+/// wording) fails this test.
+#[test]
+fn the_bang_tip_names_no_sandbox() {
+    assert!(
+        TIPS.contains(&"!<command> runs a shell command"),
+        "{TIPS:?}"
+    );
+    assert!(
+        !TIPS.iter().any(|tip| tip.contains("sandbox")),
+        "no tip may promise a sandbox: {TIPS:?}"
+    );
+}
+
+/// The trust hint carries the `trust_hint` role, not the old muted startup style.
+/// The mutation (the hint entry keeps the `Startup` kind, styled `hint`/`notice_body`)
+/// fails the foreground assertion.
+#[test]
+fn the_trust_hint_carries_the_trust_hint_role() {
+    use radian_tui::app::{App, EntryKind};
+    use radian_tui::startup::StartupScreen;
+    let mut app = App::new("mock", "s");
+    app.set_transcript_width(140);
+    app.set_startup(StartupScreen {
+        banner: banner_rows("0.1.0", "mock-model", "~/Code/radian"),
+        banner_narrow: "R radian 0.1.0".to_string(),
+        trust_hint: Some("distrusted project · /trust on to trust it".to_string()),
+        summary: "workspace".to_string(),
+        lines: vec!["profile: workspace".to_string()],
+        safety: vec![],
+        tip: None,
+        expanded: false,
+    });
+    assert!(
+        app.session
+            .entries
+            .iter()
+            .any(|entry| entry.kind == EntryKind::TrustHint),
+        "the hint is its own entry kind"
+    );
+    // Rendered: the hint row's foreground is the `trust_hint` role — the same yellow as
+    // `auto`, without its reversal.
+    let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+    terminal
+        .draw(|frame| radian_tui::render::draw(frame, &mut app))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let area = *buffer.area();
+    let mut found = false;
+    for y in area.top()..area.bottom() {
+        let mut row = String::new();
+        for x in area.left()..area.right() {
+            row.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+        }
+        if row.contains("distrusted project") {
+            found = true;
+            let col = row.find("distrusted project").unwrap() as u16;
+            let fg = buffer.cell((col, y)).map(|c| c.fg).unwrap();
+            assert_eq!(
+                fg,
+                app.theme.trust_hint.fg.expect("trust_hint fg"),
+                "the hint row carries the trust_hint role"
+            );
+            assert_ne!(
+                fg,
+                app.theme.hint.fg.expect("hint fg"),
+                "not the old muted startup style"
+            );
+            // The role is `auto`'s yellow without its `REVERSED` marker.
+            assert_eq!(fg, app.theme.auto.fg.expect("auto fg"), "{fg:?}");
+        }
+    }
+    assert!(found, "the hint row is on screen");
 }
 
 /// Renders and returns the foreground of the first cell of `needle` and of the cell

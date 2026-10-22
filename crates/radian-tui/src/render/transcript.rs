@@ -45,6 +45,8 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         // marker is its own.
         EntryKind::Banner => "  ",
         EntryKind::Startup => "  ",
+        // The trust hint has no marker of its own, like the startup lines it sits with.
+        EntryKind::TrustHint => "  ",
         EntryKind::Warning => "! ",
         // Rule 2: two cells like every other marker; the `Tip:` label is content now.
         EntryKind::Tip => "  ",
@@ -92,6 +94,8 @@ fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'s
         EntryKind::Context => theme.notice,
         EntryKind::Banner => theme.hint,
         EntryKind::Startup => theme.hint,
+        // The trust line under the wordmark (ADR 0031 T3): its own role.
+        EntryKind::TrustHint => theme.trust_hint,
         EntryKind::Warning => theme.note,
         // The `Tip:` label steps down (dim), the body is muted.
         EntryKind::Tip => theme.truncation,
@@ -130,6 +134,8 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::Context => theme.text,
         EntryKind::Banner => theme.text,
         EntryKind::Startup => theme.notice_body,
+        // The trust line under the wordmark (ADR 0031 T3): its own role.
+        EntryKind::TrustHint => theme.trust_hint,
         EntryKind::Warning => theme.note,
         EntryKind::Tip => theme.hint,
         // The expanded summary is body text; its one-liner is styled by `marker`.

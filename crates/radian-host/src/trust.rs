@@ -335,6 +335,125 @@ pub fn forget_at(path: &Path, dir: &Path, audit: Audit<'_>) -> Result<(), String
     Ok(())
 }
 
+/// A `/trust` (or `radian trust`) write: what changes on disk (ADR 0031 T3). `On` saves
+/// `true` for the directory, `Off` saves `false`, `Forget` removes its saved decision (an
+/// ancestor's decision then applies, or none at all). Every write records
+/// [`ProjectTrustChanged`] through the caller's audit, like the startup popup does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustWrite {
+    On,
+    Off,
+    Forget,
+}
+
+impl TrustWrite {
+    /// The `trust.json` decision this write saves, or `None` for [`TrustWrite::Forget`].
+    pub fn decision(self) -> Option<Decision> {
+        match self {
+            TrustWrite::On => Some(Decision::Trust),
+            TrustWrite::Off => Some(Decision::Untrust),
+            TrustWrite::Forget => None,
+        }
+    }
+
+    /// The verb the takes-effect notice uses (`trusted`, `distrusted`, `forgot`).
+    pub fn verb(self) -> &'static str {
+        match self {
+            TrustWrite::On => "trusted",
+            TrustWrite::Off => "distrusted",
+            TrustWrite::Forget => "forgot the trust decision for",
+        }
+    }
+}
+
+/// Applies a [`TrustWrite`] for `dir` (ADR 0031 T3): writes `trust.json` at `path` and
+/// calls `audit` once per write, like [`apply`]. Returns the re-resolved setup and whether
+/// anything was written (`Forget` with no saved decision writes nothing and audits
+/// nothing, like [`forget_at`]). Loaded resources never hot-load or hot-unload: the
+/// caller prints the takes-effect line (the in-session change is a separate backlog item).
+/// A corrupt record is an error, never silently replaced (like [`set_at`]).
+pub fn apply_write(
+    path: &Path,
+    dir: &Path,
+    write: TrustWrite,
+    audit: Audit<'_>,
+) -> Result<(Resolved, bool), String> {
+    let written = match write.decision() {
+        Some(decision) => {
+            set_at(path, dir, decision, audit)?;
+            true
+        }
+        None => {
+            let before = read_at(path)?;
+            let key = canonical(dir).to_string_lossy().into_owned();
+            if !before.contains_key(&key) {
+                let saved = before;
+                return Ok((resolve(dir, &saved, None), false));
+            }
+            forget_at(path, dir, audit)?;
+            true
+        }
+    };
+    let saved = read_at(path).map_err(|_| {
+        format!(
+            "{}: cannot read back the trust store after writing it",
+            path.display()
+        )
+    })?;
+    Ok((resolve(dir, &saved, None), written))
+}
+
+/// The `~`-shortened display of a directory: the `HOME` prefix becomes `~` (only on a
+/// path boundary), so notices never print a home-directory path in full.
+pub fn display_dir(dir: &Path) -> String {
+    let text = dir.display().to_string();
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+        && let Some(rest) = text.strip_prefix(&home)
+        && (rest.is_empty() || rest.starts_with('/'))
+    {
+        return format!("~{rest}");
+    }
+    text
+}
+
+/// The one-line status of `dir`'s decision and its source (what `/trust` with no argument
+/// and `radian trust status` print). `cli` is `None` outside a process with `--trust` or
+/// `--no-trust` (only the startup path passes one).
+pub fn describe(dir: &Path, cli: Option<Decision>) -> Result<String, String> {
+    let saved = read()?;
+    Ok(describe_resolved(&resolve(dir, &saved, cli)))
+}
+
+/// The one-line status of an already-resolved decision (the loop's path: it resolves
+/// against the session's own store).
+pub fn describe_resolved(resolved: &Resolved) -> String {
+    if matches!(resolved.source, Source::Default) {
+        return "trust: no saved decision (untrusted)".to_owned();
+    }
+    let state = if resolved.decision.as_bool() { "on" } else { "off" };
+    let source = match &resolved.source {
+        Source::Cli => "command line".to_owned(),
+        Source::Saved(path) => format!("saved for {}", display_dir(path)),
+        Source::Ancestor(path) => format!("inherited from {}", display_dir(path)),
+        Source::Session => "this session only".to_owned(),
+        Source::Default => unreachable!("handled above"),
+    };
+    format!("trust {state} ({source})")
+}
+
+/// The one line a `/trust` (or `radian trust`) write prints (ADR 0031 T3): the decision
+/// changes disk state only, so loaded resources stay as they are until the next start.
+pub fn write_notice(dir: &Path, write: TrustWrite, written: bool) -> String {
+    if !written {
+        return format!("no saved trust decision for {}", display_dir(&canonical(dir)));
+    }
+    format!(
+        "{} {}; takes effect at the next start",
+        write.verb(),
+        display_dir(&canonical(dir))
+    )
+}
 /// Resolves the decision for `cwd` (T5): the command line wins, then the **nearest** saved
 /// ancestor (the directory itself included), then no decision. Both sides are canonicalized.
 pub fn resolve(cwd: &Path, saved: &Store, cli: Option<Decision>) -> Resolved {
@@ -727,7 +846,156 @@ mod tests {
         std::fs::remove_file(ws.join(".radian/hooks.json")).unwrap();
         assert!(!has_project_resources(&ws));
     }
-    /// counts for a workspace below it, one above the root does not.
+    /// `/trust on|off|forget` (片 C): the write lands on disk, audits once, and the
+    /// returned setup is the re-resolved decision. `forget` with no saved decision writes
+    /// nothing and audits nothing. The mutation (nothing is written on `on`) fails the
+    /// disk assertions.
+    #[test]
+    fn apply_write_saves_audits_and_reresolves() {
+        let scratch = Scratch::new("apply-write");
+        let dir = scratch.root.join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let audit = Mutex::new(Vec::new());
+        let callback = |change: &ProjectTrustChanged| audit.lock().unwrap().push(change.clone());
+
+        // `on` saves `true` and resolves to the saved decision.
+        let (resolved, written) =
+            apply_write(&scratch.path(), &dir, TrustWrite::On, &callback).unwrap();
+        assert!(written);
+        assert_eq!(resolved.decision, Decision::Trust);
+        assert_eq!(resolved.source, Source::Saved(canonical(&dir)));
+        assert_eq!(
+            read_at(&scratch.path()).unwrap()[&canonical(&dir).to_string_lossy().into_owned()],
+            true
+        );
+        assert_eq!(audit.lock().unwrap().len(), 1);
+        assert_eq!(audit.lock().unwrap()[0].decision, Decision::Trust);
+
+        // `off` saves `false`.
+        let (resolved, written) =
+            apply_write(&scratch.path(), &dir, TrustWrite::Off, &callback).unwrap();
+        assert!(written);
+        assert_eq!(resolved.decision, Decision::Untrust);
+        assert_eq!(
+            read_at(&scratch.path()).unwrap()[&canonical(&dir).to_string_lossy().into_owned()],
+            false
+        );
+        assert_eq!(audit.lock().unwrap().len(), 2);
+
+        // `forget` removes the key; the decision falls back to the default.
+        let (resolved, written) =
+            apply_write(&scratch.path(), &dir, TrustWrite::Forget, &callback).unwrap();
+        assert!(written);
+        assert_eq!(resolved.decision, Decision::Untrust);
+        assert_eq!(resolved.source, Source::Default);
+        assert!(read_at(&scratch.path()).unwrap().is_empty());
+        assert_eq!(audit.lock().unwrap().len(), 3);
+
+        // `forget` again is a no-op: nothing written, nothing audited.
+        let before = audit.lock().unwrap().len();
+        let (resolved, written) =
+            apply_write(&scratch.path(), &dir, TrustWrite::Forget, &callback).unwrap();
+        assert!(!written);
+        assert_eq!(resolved.source, Source::Default);
+        assert_eq!(audit.lock().unwrap().len(), before);
+    }
+
+    /// `forget` inherits the ancestor's decision afterwards (nearest wins, T5).
+    #[test]
+    fn apply_write_forget_falls_back_to_the_ancestor() {
+        let scratch = Scratch::new("apply-write-ancestor");
+        let parent = scratch.root.join("repo");
+        let child = parent.join("sub");
+        std::fs::create_dir_all(&child).unwrap();
+        let audit = Mutex::new(Vec::new());
+        let callback = |change: &ProjectTrustChanged| audit.lock().unwrap().push(change.clone());
+        apply_write(&scratch.path(), &parent, TrustWrite::On, &callback).unwrap();
+        apply_write(&scratch.path(), &child, TrustWrite::Off, &callback).unwrap();
+        let (resolved, written) =
+            apply_write(&scratch.path(), &child, TrustWrite::Forget, &callback).unwrap();
+        assert!(written);
+        assert_eq!(resolved.decision, Decision::Trust);
+        assert_eq!(resolved.source, Source::Ancestor(canonical(&parent)));
+    }
+
+    /// A corrupt record is an error, never silently replaced (like [`set_at`]).
+    #[test]
+    fn apply_write_rejects_a_corrupt_record() {
+        let scratch = Scratch::new("apply-write-corrupt");
+        let dir = scratch.root.join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(scratch.path().parent().unwrap()).unwrap();
+        std::fs::write(scratch.path(), "{not json").unwrap();
+        let audit = Mutex::new(Vec::new());
+        let callback = |change: &ProjectTrustChanged| audit.lock().unwrap().push(change.clone());
+        for write in [TrustWrite::On, TrustWrite::Off, TrustWrite::Forget] {
+            assert!(
+                apply_write(&scratch.path(), &dir, write, &callback).is_err(),
+                "{write:?} must fail on a corrupt record"
+            );
+        }
+        assert!(audit.lock().unwrap().is_empty());
+    }
+
+    /// The status line names the state and the source: `off` with no saved decision is
+    /// the untrusted default, `on`/`off` name where the decision came from.
+    #[test]
+    fn describe_names_the_state_and_the_source() {
+        let untrusted = Resolved {
+            decision: Decision::Untrust,
+            source: Source::Default,
+        };
+        assert_eq!(
+            describe_resolved(&untrusted),
+            "trust: no saved decision (untrusted)"
+        );
+        let saved_on = Resolved {
+            decision: Decision::Trust,
+            source: Source::Saved(PathBuf::from("/work/example")),
+        };
+        assert_eq!(
+            describe_resolved(&saved_on),
+            "trust on (saved for /work/example)"
+        );
+        let inherited_off = Resolved {
+            decision: Decision::Untrust,
+            source: Source::Ancestor(PathBuf::from("/work")),
+        };
+        assert_eq!(
+            describe_resolved(&inherited_off),
+            "trust off (inherited from /work)"
+        );
+        let session_on = Resolved {
+            decision: Decision::Trust,
+            source: Source::Session,
+        };
+        assert_eq!(
+            describe_resolved(&session_on),
+            "trust on (this session only)"
+        );
+    }
+
+    /// The write notice says the write takes effect at the next start; a no-op forget
+    /// says there was nothing saved.
+    #[test]
+    fn the_write_notice_names_the_effect_timing() {
+        let dir = PathBuf::from("/work/example");
+        for (write, verb) in [
+            (TrustWrite::On, "trusted"),
+            (TrustWrite::Off, "distrusted"),
+        ] {
+            assert_eq!(
+                write_notice(&dir, write, true),
+                format!("{verb} /work/example; takes effect at the next start")
+            );
+        }
+        assert_eq!(
+            write_notice(&dir, TrustWrite::Forget, false),
+            "no saved trust decision for /work/example"
+        );
+    }
+
+    /// Counts for a workspace below it, one above the root does not.
     #[test]
     fn the_trigger_searches_up_to_the_repository_root() {
         let root = Scratch::new("trigger-root");
