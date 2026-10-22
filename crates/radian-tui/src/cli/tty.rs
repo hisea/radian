@@ -160,18 +160,41 @@ fn crossterm_event() -> Input {
 #[cfg(unix)]
 pub(super) fn read_input(timeout: Duration) -> Input {
     block_input_if_asked();
-    let timeout = if MAY_HAVE_BUFFERED.load(std::sync::atomic::Ordering::SeqCst) {
-        Duration::ZERO
-    } else {
-        timeout
-    };
-    match tty_readiness(timeout) {
+    let mut buffered = MAY_HAVE_BUFFERED.load(std::sync::atomic::Ordering::SeqCst);
+    let out = read_input_with(
+        timeout,
+        &mut buffered,
+        &mut tty_readiness,
+        &mut |wait| event::poll(wait).map_err(|_| ()),
+        &mut crossterm_event,
+        &mut size_changed,
+    );
+    MAY_HAVE_BUFFERED.store(buffered, std::sync::atomic::Ordering::SeqCst);
+    out
+}
+
+/// [`read_input`]'s state machine with its outside world as arguments, so a test can feed a
+/// buffered burst through the same path without a tty: `tty_ready` stands in for `poll(2)`,
+/// `crossterm_poll`/`crossterm_read` for crossterm's own buffer, `size_changed_in` for the
+/// `TIOCGWINSZ` check, and `buffered` for [`MAY_HAVE_BUFFERED`]. Production passes the real
+/// functions and the static, so behavior is unchanged.
+#[cfg(unix)]
+fn read_input_with(
+    timeout: Duration,
+    buffered: &mut bool,
+    tty_ready: &mut dyn FnMut(Duration) -> Tty,
+    crossterm_poll: &mut dyn FnMut(Duration) -> Result<bool, ()>,
+    crossterm_read: &mut dyn FnMut() -> Input,
+    size_changed_in: &mut dyn FnMut() -> Option<(u16, u16)>,
+) -> Input {
+    let timeout = if *buffered { Duration::ZERO } else { timeout };
+    match tty_ready(timeout) {
         Tty::Gone => Input::Gone,
         Tty::Readable => {
             exit_trace_once(&TRACED_READABLE, "poll-readable");
-            let input = crossterm_event();
+            let input = crossterm_read();
             if matches!(input, Input::Event(_)) {
-                MAY_HAVE_BUFFERED.store(true, std::sync::atomic::Ordering::SeqCst);
+                *buffered = true;
             }
             input
         }
@@ -182,7 +205,7 @@ pub(super) fn read_input(timeout: Duration) -> Input {
             // idle app stayed at the old width until the next key or wheel ("scroll once and
             // it re-lays out"). Ask the kernel directly instead: `TIOCGWINSZ` does not read
             // stdin, so it cannot hit the EOF spin guard 1 exists for.
-            if let Some((rows, cols)) = size_changed() {
+            if let Some((rows, cols)) = size_changed_in() {
                 // crossterm's own order is `(cols, rows)`; the synthetic event must match it so
                 // the input thread's single `Event::Resize` match is correct for both sources.
                 return Input::Event(Event::Resize(cols, rows));
@@ -190,25 +213,25 @@ pub(super) fn read_input(timeout: Duration) -> Input {
             // Guard 1: do not enter crossterm unless a previous read may have buffered
             // events. Its `poll(0)` reads the fd on an empty buffer and loops on a hung-up
             // tty (see the function docs); a plain Idle is safe.
-            if !MAY_HAVE_BUFFERED.load(std::sync::atomic::Ordering::SeqCst) {
+            if !*buffered {
                 return Input::Idle;
             }
             // The master may have closed since the readiness poll above. The zero-timeout
             // poll is non-consuming, so a Gone here is safe to report.
-            if matches!(tty_readiness(Duration::ZERO), Tty::Gone) {
+            if matches!(tty_ready(Duration::ZERO), Tty::Gone) {
                 return Input::Gone;
             }
-            match event::poll(Duration::ZERO) {
+            match crossterm_poll(Duration::ZERO) {
                 Ok(true) => {
                     exit_trace_once(&TRACED_CROSSTERM_ZERO, "poll-crossterm-zero");
-                    let input = crossterm_event();
+                    let input = crossterm_read();
                     if !matches!(input, Input::Event(_)) {
-                        MAY_HAVE_BUFFERED.store(false, std::sync::atomic::Ordering::SeqCst);
+                        *buffered = false;
                     }
                     input
                 }
                 Ok(false) => {
-                    MAY_HAVE_BUFFERED.store(false, std::sync::atomic::Ordering::SeqCst);
+                    *buffered = false;
                     Input::Idle
                 }
                 Err(_) => Input::Gone,
@@ -685,6 +708,86 @@ mod tests {
         assert_eq!(wait_for_an_event(&bare), TTY_CHECK_TICK);
         let mut last = None;
         assert_eq!(jobs_tick(&bare, &mut last), None);
+    }
+
+    /// An IME commit is one burst in crossterm's buffer: after the first readable fd, the
+    /// rest must drain with zero-timeout readiness waits, never one `INPUT_POLL` per event.
+    /// The fake tty is readable once (the burst arriving), then idle (the fd drained; only
+    /// crossterm's buffer is left). The fake clock charges every non-zero readiness wait, so
+    /// the pre-fix shape (a full poll period per buffered event) fails as elapsed time, not
+    /// as wall-clock timing: this test never sleeps and passes under any load.
+    #[test]
+    fn a_buffered_burst_drains_without_a_poll_wait_per_event() {
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use std::collections::VecDeque;
+
+        // What one IME commit leaves in crossterm's buffer after the first event.
+        let burst: Vec<Event> = ['a', 'b', 'c', '\u{4e2d}', '\u{6587}']
+            .map(|c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+            .to_vec();
+        let mut buffered_events: VecDeque<Event> = burst.clone().into();
+        // Every readiness wait the state machine asks for, in order.
+        let mut waits: Vec<Duration> = Vec::new();
+        let mut readable_used = false;
+        // What `crossterm_poll` reports: a separate counter, so the poll closure only
+        // needs a shared borrow while the read closure pops the queue.
+        let remaining = std::cell::Cell::new(burst.len());
+        let mut tty_ready = |wait: Duration| {
+            waits.push(wait);
+            if !readable_used {
+                readable_used = true;
+                Tty::Readable
+            } else {
+                Tty::Idle
+            }
+        };
+        let mut crossterm_poll = |wait: Duration| {
+            assert_eq!(
+                wait,
+                Duration::ZERO,
+                "crossterm is only ever polled with zero"
+            );
+            Ok(remaining.get() > 0)
+        };
+        let mut crossterm_read = || match buffered_events.pop_front() {
+            Some(event) => {
+                remaining.set(remaining.get() - 1);
+                Input::Event(event)
+            }
+            None => Input::Gone,
+        };
+        let mut size_changed_in = || None;
+
+        let mut buffered = false;
+        let mut drained = Vec::new();
+        loop {
+            match read_input_with(
+                INPUT_POLL,
+                &mut buffered,
+                &mut tty_ready,
+                &mut crossterm_poll,
+                &mut crossterm_read,
+                &mut size_changed_in,
+            ) {
+                Input::Event(event) => drained.push(event),
+                Input::Idle => break,
+                Input::Gone => panic!("the burst must drain, not report the tty gone"),
+            }
+        }
+        assert_eq!(drained, burst, "every buffered event arrives in order");
+        assert!(
+            !buffered,
+            "an empty crossterm buffer clears the flag, or idle would keep polling it"
+        );
+        // The first wait may take the full poll (the burst arriving on the fd); every wait
+        // after that is the drain, which must be free. A fake clock charges the waits, so a
+        // per-event poll period shows up here without depending on machine scheduling.
+        let drain_cost: Duration = waits.iter().skip(1).sum();
+        assert_eq!(
+            drain_cost,
+            Duration::ZERO,
+            "the drain waited {waits:?} for a {burst:?} burst"
+        );
     }
 
     /// ADR 0023 U5: a fact-only update (usage, budget, tier, MCP) wakes the UI with a `Dirty`
