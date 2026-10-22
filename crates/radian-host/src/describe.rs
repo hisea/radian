@@ -196,9 +196,9 @@ mod tests {
 
     /// ADR 0038 decision 4: the facts sentence follows the sandbox's **effective** git access,
     /// not the policy's request. A session that can really commit with native git says so (and
-    /// that config and hooks stay read-only); a task agent (or any backend without the
-    /// carve-out, Linux) keeps the read-only wording. This is the line the startup block shows
-    /// and the `<runtime>` layer carries.
+    /// that config and hooks stay read-only); a task agent or a backend without the carve-out
+    /// keeps the read-only wording. This is the line the startup block shows and the
+    /// `<runtime>` layer carries.
     #[test]
     fn the_workspace_facts_follow_the_effective_git_access() {
         let writable = workspace_sandbox_facts(TUI_WORDING, true);

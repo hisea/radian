@@ -26,11 +26,20 @@
 //! seccomp cannot see paths, so there is no per-path whitelist on Linux).
 //! `[sandbox] allow_unix_sockets` therefore still has no effect on Linux — only macOS's
 //! seatbelt backend reads it — and a non-empty list warns once at startup.
+//!
+//! `WritableExceptExec` (ADR 0038) is implemented with bind mounts: every discovered git
+//! directory is bound writable, and then the entries git can execute are bound back
+//! read-only. bwrap has no regex rules, so the exec entries are enumerated from what exists
+//! ([`git_exec_entries`]); see `LIMITS.md` for the one gap that leaves.
 
 use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{ProbeReport, SandboxError};
+use crate::git_exec::{
+    GIT_EXEC_DIRS, GIT_EXEC_FILES, GIT_MODULE_DIRS, GIT_MODULE_FILES, GIT_WORKTREE_FILES,
+};
 use crate::policy::{GitAccess, SandboxMode, SandboxPolicy};
 use crate::seccomp;
 use crate::{SandboxBackend, SandboxCommand, workspace_tmp};
@@ -46,6 +55,15 @@ pub struct Bwrap;
 impl SandboxBackend for Bwrap {
     fn name(&self) -> &'static str {
         "linux-bwrap"
+    }
+
+    /// bubblewrap implements ADR 0038's carve-out with bind mounts, so the policy's request is
+    /// the effective one: `ReadOnly` keeps the whole discovered metadata read-only, and
+    /// `WritableExceptExec` binds each git directory writable and then binds the executable
+    /// entries back read-only. The per-session text may therefore promise native `git commit`
+    /// in the `workspace` tier on Linux, exactly as it does on macOS.
+    fn git_writable_except_exec(&self, policy: &SandboxPolicy) -> bool {
+        matches!(policy.git_access, GitAccess::WritableExceptExec)
     }
 
     /// The Linux backend denies outbound Unix sockets in the `workspace` tier (slice 0): the
@@ -169,12 +187,35 @@ impl SandboxBackend for Bwrap {
                 .arg("--bind")
                 .arg(&policy.workspace)
                 .arg(&policy.workspace);
-            // ADR 0038 slice 1 is macOS-only: the whole discovered git metadata stays
-            // `--ro-bind` read-only here, whatever `policy.git_access` says (Linux is pending
-            // and nothing about it is claimed without running the VM matrix). The macOS
-            // backend is where `WritableExceptExec` opens `.git` except for the exec entries.
-            for path in &policy.read_only {
-                command.arg("--ro-bind-try").arg(path).arg(path);
+            match policy.git_access {
+                // The task-agent rule: the whole discovered metadata stays read-only.
+                GitAccess::ReadOnly => {
+                    for path in &policy.read_only {
+                        command.arg("--ro-bind-try").arg(path).arg(path);
+                    }
+                }
+                // ADR 0038: open each discovered git directory, then close the entries git can
+                // execute. Every allow is mounted before every deny: a later mount wins, and a
+                // per-worktree git dir sits **under** its shared common dir.
+                GitAccess::WritableExceptExec => {
+                    for path in &policy.read_only {
+                        if path.is_dir() {
+                            command.arg("--bind").arg(path).arg(path);
+                        }
+                    }
+                    for path in &policy.read_only {
+                        if path.is_dir() {
+                            for entry in git_exec_entries(path) {
+                                command.arg("--ro-bind-try").arg(&entry).arg(&entry);
+                            }
+                        } else {
+                            // A worktree's `.git` is a pointer **file**: writing it would
+                            // repoint git at a gitdir the model controls, whose hooks then run
+                            // outside the sandbox, so it keeps the full deny.
+                            command.arg("--ro-bind-try").arg(path).arg(path);
+                        }
+                    }
+                }
             }
         }
         // Sensitive reads: mask the path. A directory becomes an empty tmpfs; a file is
@@ -226,6 +267,70 @@ impl SandboxBackend for Bwrap {
 fn set_env(command: &mut Command, name: &str, fallback: &str) {
     let value = std::env::var_os(name).unwrap_or_else(|| fallback.into());
     command.arg("--setenv").arg(name).arg(value);
+}
+
+/// The concrete paths under one discovered git directory that must stay read-only under
+/// [`GitAccess::WritableExceptExec`] (ADR 0038): this git directory's own exec files and
+/// `hooks/`, the same entries of every existing submodule git directory (at any depth), and
+/// the link files and per-worktree config of every existing linked worktree.
+///
+/// bwrap has no regex rules, so this enumerates what exists at the time the command is built.
+/// A path that does not exist is skipped: a bind mount would have to create the destination on
+/// the host filesystem (the same reason `deny_read` skips missing paths). See `LIMITS.md`.
+fn git_exec_entries(git_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_exec_entries(git_dir, GIT_EXEC_FILES, GIT_EXEC_DIRS, &mut out);
+    collect_worktree_entries(&git_dir.join("worktrees"), &mut out);
+    collect_module_entries(&git_dir.join("modules"), &mut out);
+    out
+}
+
+fn collect_exec_entries(git_dir: &Path, files: &[&str], dirs: &[&str], out: &mut Vec<PathBuf>) {
+    for name in files.iter().chain(dirs.iter()) {
+        push_existing(git_dir.join(name), out);
+    }
+}
+
+/// `<git>/worktrees/<name>/{gitdir,commondir,config.worktree}`: a repointed link would make
+/// git use another gitdir, and a `core.hooksPath` in the per-worktree config would run when the
+/// user next runs git there.
+fn collect_worktree_entries(worktrees: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(worktrees) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // `file_type()` is the directory entry's `d_type` and never follows a symlink.
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        for name in GIT_WORKTREE_FILES {
+            push_existing(entry.path().join(name), out);
+        }
+    }
+}
+
+/// Every existing submodule git directory: `<git>/modules/<name>/` and, recursively,
+/// `modules/<a>/modules/<b>/`. A submodule's executable entries are its `config` and `hooks/`
+/// (not `config.worktree`, per ADR 0038 decision 3), plus any linked worktree of its own.
+fn collect_module_entries(modules: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(modules) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let git_dir = entry.path();
+        collect_exec_entries(&git_dir, GIT_MODULE_FILES, GIT_MODULE_DIRS, out);
+        collect_worktree_entries(&git_dir.join("worktrees"), out);
+        collect_module_entries(&git_dir.join("modules"), out);
+    }
+}
+
+fn push_existing(path: PathBuf, out: &mut Vec<PathBuf>) {
+    if std::fs::symlink_metadata(&path).is_ok() && !out.contains(&path) {
+        out.push(path);
+    }
 }
 
 fn shell_quote(path: &std::path::Path) -> String {
@@ -281,6 +386,115 @@ mod tests {
             !command.get_args().any(|arg| arg == "--seccomp"),
             "full runs no sandbox and gets no filter"
         );
-        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// ADR 0038: under `WritableExceptExec` every discovered git directory is bound writable
+    /// **before** its executable entries are bound back read-only, and the whole-directory
+    /// `--ro-bind-try` is gone. The exec entries come from the shared list, so a missing one
+    /// (no `config.worktree` here) is skipped rather than mounted.
+    #[test]
+    fn writable_except_exec_binds_git_writable_then_the_exec_entries_read_only() {
+        let root = std::env::temp_dir().join(format!("radian-bwrap-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let git = root.join("repo").join(".git");
+        let per = git.join("worktrees").join("wt");
+        std::fs::create_dir_all(&per).unwrap();
+        std::fs::create_dir_all(git.join("hooks")).unwrap();
+        std::fs::create_dir_all(git.join("objects")).unwrap();
+        std::fs::create_dir_all(git.join("modules").join("sub").join("hooks")).unwrap();
+        std::fs::write(git.join("config"), "[core]\n").unwrap();
+        std::fs::write(git.join("modules").join("sub").join("config"), "").unwrap();
+        std::fs::write(per.join("gitdir"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(per.join("commondir"), "../..\n").unwrap();
+        let ws = root
+            .join("repo")
+            .join(".radian")
+            .join("arc")
+            .join("worktrees")
+            .join("wt");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join(".git"), format!("gitdir: {}\n", per.display())).unwrap();
+
+        let policy = |access| {
+            let mut policy = SandboxPolicy::new(SandboxMode::WorkspaceWrite, &ws).unwrap();
+            policy.git_access = access;
+            policy.read_only = vec![ws.join(".git"), per.clone(), git.clone()];
+            policy
+        };
+        let argv = |policy: &SandboxPolicy| -> Vec<String> {
+            BWRAP
+                .command(policy, OsStr::new("/bin/true"), &[] as &[OsString])
+                .unwrap()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+
+        let writable = argv(&policy(GitAccess::WritableExceptExec));
+        let find = |argv: &[String], flag: &str, path: &Path| {
+            argv.windows(3).position(|window| {
+                window[0] == flag && window[1] == path.to_string_lossy().as_ref()
+            })
+        };
+        let git_bind = find(&writable, "--bind", &git)
+            .unwrap_or_else(|| panic!("no --bind for .git: {writable:?}"));
+        let pointer = find(&writable, "--ro-bind-try", &ws.join(".git"))
+            .unwrap_or_else(|| panic!("{writable:?}"));
+        assert!(
+            !writable
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind-try" && w[1] == git.to_string_lossy().as_ref()),
+            "the whole .git must not stay read-only: {writable:?}"
+        );
+        for path in [
+            git.join("config"),
+            git.join("hooks"),
+            git.join("modules").join("sub").join("config"),
+            git.join("modules").join("sub").join("hooks"),
+            per.join("gitdir"),
+            per.join("commondir"),
+        ] {
+            let at = find(&writable, "--ro-bind-try", &path)
+                .unwrap_or_else(|| panic!("no deny for {}: {writable:?}", path.display()));
+            assert!(
+                git_bind < at,
+                "every allow precedes every deny: {writable:?}"
+            );
+        }
+        assert!(git_bind < pointer);
+        // Not an executable entry: the object store stays writable (no mount over it).
+        assert!(
+            find(&writable, "--ro-bind-try", &git.join("objects")).is_none(),
+            "{writable:?}"
+        );
+
+        let read_only = argv(&policy(GitAccess::ReadOnly));
+        assert!(
+            read_only
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind-try" && w[1] == git.to_string_lossy().as_ref()),
+            "ReadOnly keeps the whole .git read-only: {read_only:?}"
+        );
+        assert!(find(&read_only, "--bind", &git).is_none(), "{read_only:?}");
+        // The pointer file keeps the full deny in both modes.
+        assert!(
+            read_only
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind-try"
+                    && w[1] == ws.join(".git").to_string_lossy().as_ref())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The effective answer follows the policy now that both the allow and the exec denies are
+    /// mounted, so the `shell` description and the startup line may promise native git.
+    #[test]
+    fn the_effective_git_access_follows_the_policy() {
+        let ws = std::env::temp_dir();
+        let mut policy = SandboxPolicy::new(SandboxMode::WorkspaceWrite, &ws).unwrap();
+        assert!(!BWRAP.git_writable_except_exec(&policy));
+        policy.git_access = GitAccess::WritableExceptExec;
+        assert!(BWRAP.git_writable_except_exec(&policy));
     }
 }

@@ -755,8 +755,12 @@ fn the_worker_cannot_read_the_arc_files_outside_its_worktree() {
         bodies.contains("outside the workspace"),
         "the read tool was refused: {bodies}"
     );
+    // The refusal wording belongs to the backend: the Linux backend masks the denied
+    // directory (ENOENT) and classifies it as a sandbox deny, while the macOS backend answers
+    // EPERM. Both mean the same thing, and the secret above never reaches the model.
     assert!(
-        bodies.contains("Operation not permitted"),
+        bodies.contains("sandbox denied: sensitive-read")
+            || bodies.contains("Operation not permitted"),
         "the sandbox refused the shell's read: {bodies}"
     );
     let spec = format!("work/{task}:worker.txt");
