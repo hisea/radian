@@ -20,6 +20,7 @@ pub mod config;
 mod frontmatter;
 mod git;
 pub mod model;
+pub mod plan_ops;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};

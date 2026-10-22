@@ -11,7 +11,9 @@ use serde_json::json;
 use super::{Error, Exit, Item, Loaded, PlanView, Store};
 
 /// The subcommands this build has, in the order `radian arc` lists them.
-pub const SUBCOMMANDS: &[&str] = &["init", "add", "list", "show", "adopt"];
+pub const SUBCOMMANDS: &[&str] = &[
+    "init", "add", "list", "show", "adopt", "confirm", "auto", "pause",
+];
 
 /// The subcommands ADR 0048 names that this build does not have. `work` is the wrapper a
 /// scheduling loop runs; a person does not run it, and it does not exist yet either.
@@ -19,9 +21,6 @@ pub const NOT_BUILT: &[&str] = &[
     "start",
     "merge",
     "reject",
-    "auto",
-    "confirm",
-    "pause",
     "reset-budget",
     "cancel",
     "run",
@@ -51,6 +50,12 @@ pub enum Command {
     Show { id: String, json: bool },
     /// `radian arc adopt <id>`.
     Adopt { id: String },
+    /// `radian arc confirm <plan>`.
+    Confirm { plan: String },
+    /// `radian arc auto <plan> <level>`.
+    Auto { plan: String, level: String },
+    /// `radian arc pause <plan>`.
+    Pause { plan: String },
 }
 
 /// Runs one invocation and returns the process exit code. `None` is a bare `radian arc`:
@@ -71,6 +76,9 @@ pub fn run(command: Option<&Command>) -> u8 {
         Some(Command::List { plan, json }) => list(plan.as_deref(), *json).map(emit),
         Some(Command::Show { id, json }) => show(id, *json).map(emit),
         Some(Command::Adopt { id }) => adopt(id).map(emit),
+        Some(Command::Confirm { plan }) => confirm(plan).map(emit),
+        Some(Command::Auto { plan, level }) => set_auto(plan, level).map(emit),
+        Some(Command::Pause { plan }) => pause(plan).map(emit),
     };
     match result {
         Ok(code) => code,
@@ -111,7 +119,8 @@ fn bare() -> Result<u8, Error> {
     out.push_str(&format!("subcommands: {}\n", SUBCOMMANDS.join(", ")));
     out.push_str(&format!(
         "in this build: `radian arc init`, `radian arc add plan|task`, `radian arc list`, \
-         `radian arc show`, `radian arc adopt`\n{}",
+         `radian arc show`, `radian arc adopt`, `radian arc confirm`, `radian arc auto`, \
+         `radian arc pause`\n{}",
         arc_dir_line(&store)
     ));
     let code = emit(out);
@@ -213,22 +222,17 @@ fn add_task(
 
 fn list(plan: Option<&str>, json: bool) -> Result<String, Error> {
     let store = open()?;
-    let views = match plan {
-        Some(id) => vec![store.plan_view(id)?],
-        None => store.plans()?,
-    };
     if json {
-        let value = serde_json::Value::Array(
-            views
-                .iter()
-                .map(|view| plan_json(view, false))
-                .collect::<Vec<_>>(),
-        );
+        let value = list_json(&store, plan)?;
         return Ok(format!(
             "{}\n",
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_owned())
         ));
     }
+    let views = match plan {
+        Some(id) => vec![store.plan_view(id)?],
+        None => store.plans()?,
+    };
     let mut out = String::new();
     for view in &views {
         out.push_str(&format!(
@@ -267,17 +271,14 @@ fn changed_marker(changed: bool) -> &'static str {
 
 fn show(id: &str, json: bool) -> Result<String, Error> {
     let store = open()?;
-    let item = store.show(id)?;
     if json {
-        let value = match &item {
-            Item::Plan(view) => plan_json(view, true),
-            Item::Task(task) => task_json(task, true),
-        };
+        let value = show_json(&store, id)?;
         return Ok(format!(
             "{}\n",
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_owned())
         ));
     }
+    let item = store.show(id)?;
     let mut out = String::new();
     match &item {
         Item::Plan(view) => {
@@ -475,6 +476,46 @@ fn adopt(id: &str) -> Result<String, Error> {
     })
 }
 
+/// `radian arc confirm <plan>`: the owner confirms a draft plan (decision 3).
+fn confirm(plan: &str) -> Result<String, Error> {
+    let store = open()?;
+    super::plan_ops::confirm(&store, plan)?;
+    Ok(format!("{plan} confirmed\n"))
+}
+
+/// `radian arc auto <plan> <level>`: the owner sets the plan's auto level (decision 12).
+fn set_auto(plan: &str, level: &str) -> Result<String, Error> {
+    let store = open()?;
+    super::plan_ops::set_auto(&store, plan, level)?;
+    Ok(format!("{plan} auto {level}\n"))
+}
+
+/// `radian arc pause <plan>`: the auto level back to `off`.
+fn pause(plan: &str) -> Result<String, Error> {
+    let store = open()?;
+    super::plan_ops::pause(&store, plan)?;
+    Ok(format!("{plan} auto off\n"))
+}
+
+/// `radian arc list --json`'s document, for the CLI and the MCP `list` tool.
+pub fn list_json(store: &Store, plan: Option<&str>) -> Result<serde_json::Value, Error> {
+    let views = match plan {
+        Some(id) => vec![store.plan_view(id)?],
+        None => store.plans()?,
+    };
+    Ok(serde_json::Value::Array(
+        views.iter().map(|view| plan_json(view, false)).collect(),
+    ))
+}
+
+/// `radian arc show --json`'s document, for the CLI and the MCP `show` tool.
+pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
+    Ok(match store.show(id)? {
+        Item::Plan(view) => plan_json(&view, true),
+        Item::Task(task) => task_json(&task, true),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,6 +528,7 @@ mod tests {
         }
         assert!(SUBCOMMANDS.contains(&"init"));
         assert!(NOT_BUILT.contains(&"mcp"));
+        assert!(NOT_BUILT.contains(&"work"));
     }
 
     #[test]
