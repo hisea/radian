@@ -490,3 +490,79 @@ fn radian_docs_unknown_topic_exits_two_and_lists_pages() {
         assert!(err.contains(topic), "stderr lists {topic}: {err}");
     }
 }
+
+/// The commands of the `## Verify` block in `AGENTS.md`, in order.
+fn agents_md_verify_commands(agents: &str) -> Vec<String> {
+    let mut lines = agents.lines();
+    let heading = lines.find(|line| line.trim_end() == "## Verify");
+    assert!(heading.is_some(), "AGENTS.md has a `## Verify` heading");
+    let mut in_block = false;
+    let mut commands = Vec::new();
+    for line in lines {
+        if !in_block {
+            in_block = line.trim_end() == "```sh";
+            continue;
+        }
+        if line.trim_end() == "```" {
+            break;
+        }
+        let command = line.trim();
+        if !command.is_empty() {
+            commands.push(command.to_owned());
+        }
+    }
+    assert!(in_block, "`## Verify` in AGENTS.md has a ```sh block");
+    commands
+}
+
+/// The `run_step` commands of `scripts/verify.sh`, in order.
+fn verify_script_commands(script: &str) -> Vec<String> {
+    script
+        .lines()
+        .filter_map(|line| line.strip_prefix("run_step "))
+        .map(|command| command.trim().to_owned())
+        .collect()
+}
+
+/// `scripts/verify.sh` runs exactly the `AGENTS.md` Verify block, after the two
+/// binary builds and before the three provider contract suites.
+///
+/// Mutation: delete one `run_step` line from the script, or one line from the
+/// block, and this fails naming the step that differs.
+#[test]
+fn verify_script_runs_the_agents_md_verify_block() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let agents =
+        std::fs::read_to_string(manifest.join("../../AGENTS.md")).expect("AGENTS.md exists");
+    let script = std::fs::read_to_string(manifest.join("../../scripts/verify.sh"))
+        .expect("scripts/verify.sh exists");
+    let block = agents_md_verify_commands(&agents);
+    let steps = verify_script_commands(&script);
+    assert!(!block.is_empty(), "the Verify block has commands");
+    assert!(
+        steps.len() >= block.len() + 5,
+        "verify.sh has the two builds, the block and the three contract suites: {steps:?}"
+    );
+    assert_eq!(
+        &steps[..2],
+        [
+            "cargo build -p radian-tui --bin radian --locked",
+            "cargo build -p agent-extensions --bin mcp-fixture --locked",
+        ],
+        "verify.sh starts with the two binary builds"
+    );
+    assert_eq!(
+        &steps[steps.len() - 3..],
+        [
+            "cargo test -p agent-provider-openai-compatible --features testing --test contract",
+            "cargo test -p agent-provider-anthropic --features testing --test contract",
+            "cargo test -p agent-provider-openai-responses --features testing --test contract",
+        ],
+        "verify.sh ends with the three provider contract suites"
+    );
+    assert_eq!(
+        &steps[2..steps.len() - 3],
+        block.as_slice(),
+        "verify.sh's middle steps are the AGENTS.md Verify block, in order"
+    );
+}
