@@ -111,14 +111,14 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
 
 For each attempt, the scheduling loop runs `radian arc work`. `radian arc work` is the trusted wrapper around the model. A person does not run it.
 
-1. It creates or reuses the linked worktree `<repository>/.radian/arc/worktrees/<task>` on branch `work/<task>` (decision 15). The first attempt starts from `origin/main` and records `base_sha`. In single-host v0 all worktrees share one clone.
+1. It creates or reuses the linked worktree `<repository>/.radian/arc/worktrees/<task>` on branch `work/<task>` (decision 15). The first attempt fetches the configured remote and main branch, starts from the remote main, and records `base_sha` in the host-local `attempts/<task>/base_sha`. At the end of each attempt the wrapper records the branch tip in `attempts/<task>/last_head`. A later attempt first checks that `work/<task>` still equals `last_head`; when it moved, the attempt fails before the model runs. In single-host v0 all worktrees share one clone.
 2. It runs the model:
 
    ```text
    radian exec -p - --session-id <task> --workspace <worktree> --profile workspace --yes --output jsonl
    ```
 
-   A rework attempt adds `--resume <task>`. The `workspace` tier is required: unattended work never runs in `full`.
+   A rework attempt passes `--resume <task>` in place of `--session-id <task>` (the two flags exclude each other); the resumed session's id is the task id. The `workspace` tier is required: unattended work never runs in `full`.
 3. After the model exits, the wrapper (not the model) reads the `Result` and the exit code, reads `head_sha`, and lists uncommitted and untracked files. It pushes `work/<task>` only when `outcome` is `completed` and the change is valid. After the push, it checks the remote ref with `ls-remote`. Every git command of the wrapper sets `core.hooksPath` to empty and `GIT_CONFIG_NOSYSTEM`, so no file the model can write changes what the wrapper runs.
 4. Before the push, it checks that `work/<task>` exists, that `head_sha` descends from `base_sha`, that the worktree HEAD is on that branch, and that the tree is clean. If one check fails, the attempt fails, nothing is pushed, and the worktree stays for inspection.
 5. Its last stdout line is its own `AttemptFinished` record: attempt id, token, exit code, outcome, `base_sha`, `head_sha`, dirty files, pushed, and remote sha. The radian `Result` is kept unchanged in `result.jsonl`.
@@ -208,7 +208,7 @@ The gate commands in `config.toml` are empty or the default profile. The owner w
 - arc code is in the repository from the start, so prototype work goes through the gate and Verify.
 - In the `workspace` tier, git in the sandbox can write refs, index, and objects (ADR 0038). Linked worktrees share one common directory, so one worker can change another task's branch. v0 detects this before the push and fails the attempt safely. The remote ref is the truth. It does not prevent the change.
 - The arc files, approvals included, are in the repository where the lead works. v0 finds outside changes to plans and tasks; it does not prevent a lead from changing arc's files.
-- The push credential and the model share an OS user in v0. Whether the sandbox hides the credential path (ADR 0020 deny list) must be verified before v0 runs unattended.
+- The push credential and the model share an OS user in v0. On macOS the `workspace` sandbox hides an ssh key under `~/.ssh` (ADR 0020 deny list), but it does not block the keychain: a worker can ask the system credential helper for an https credential that the keychain holds. Before v0 runs unattended, the remote must use ssh, or the https credential must not be in the keychain of the user that runs the workers.
 - The arc TUI does not embed a terminal. The lead runs in a separate terminal and talks to arc only through `radian arc mcp`.
 
 ## Verification
