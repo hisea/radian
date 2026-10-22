@@ -323,6 +323,8 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 - The gate's verdict and reason paths use the attempt id (`<task>-<n>`) as the run
   directory, as the gate's own tests and verdict example do; the wrapper's `runs/` and
   `attempts/` records still use the numeric attempt.
+- The merged task's worktree is removed with plain `git worktree remove`; a checkout with
+  uncommitted files is left in place and reported as a warning, never forced away.
 - The remote is always a parameter, never the literal `origin`: the caller passes
   `[repository] remote`.
 - A checkout that exists and is not a linked worktree is an error, unless it is an empty

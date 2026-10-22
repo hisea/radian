@@ -573,7 +573,7 @@ pub fn merge(store: &Store, task_id: &str) -> Result<Merged, Error> {
                 continue;
             }
         }
-        let remote_main = remote_branch(store.repo(), &remote, &main_branch)?;
+        let remote_main = ls_remote_branch(store.repo(), &remote, &main_branch)?;
         if remote_main.as_deref() != Some(candidate.as_str()) {
             last = format!(
                 "`{remote}` `{main_branch}` is {}, not {candidate}",
@@ -884,6 +884,14 @@ fn remote_branch(repo: &Path, remote: &str, branch: &str) -> Result<Option<Strin
     Ok((!sha.is_empty()).then(|| sha.to_owned()))
 }
 
+/// The remote's branch read over the wire (`git ls-remote`), when it exists.
+fn ls_remote_branch(repo: &Path, remote: &str, branch: &str) -> Result<Option<String>, Error> {
+    let reference = format!("refs/heads/{branch}");
+    let out = git_ok(repo, &["ls-remote", remote, &reference])?;
+    let sha = out.split_whitespace().next().unwrap_or_default();
+    Ok((!sha.is_empty()).then(|| sha.to_owned()))
+}
+
 enum Push {
     Pushed,
     /// The remote main moved under the candidate. The caller integrates again.
@@ -921,12 +929,13 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool, Er
 }
 
 /// Removes the task's worktree after a merge. The branch stays on the remote: only the
-/// checkout goes. A failure is a warning, not a rollback of the merge.
+/// checkout goes. A dirty worktree is not forced away: the merge stands, and the failure is
+/// a warning.
 fn remove_worktree(store: &Store, task: &str) -> Result<(), String> {
     let path = store.root().join("worktrees").join(task);
     if path.exists() {
         let path = path.to_string_lossy().into_owned();
-        let out = crate::git::run(store.repo(), &["worktree", "remove", "--force", &path])
+        let out = crate::git::run(store.repo(), &["worktree", "remove", &path])
             .map_err(|error| error.to_string())?;
         if !out.success() {
             return Err(format!(
