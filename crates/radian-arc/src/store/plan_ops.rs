@@ -31,6 +31,10 @@ pub const REWORK_HEADING: &str = "## Rework";
 /// Refused when the plan has no tasks (nothing to deliver) and when it is already
 /// confirmed. A file that changed outside arc is refused by the transaction.
 pub fn confirm(store: &Store, plan: &str) -> Result<(), Error> {
+    // A confirmed plan is the owner's promise that its tasks can run, so the worker's command
+    // line is checked first: a wrong `[worker] exec_args` entry leaves the plan a draft
+    // (ADR 0048 decision 7).
+    crate::worker_args::check(&store.config()?.worker.exec_args)?;
     store.change_plan(plan, |plan| {
         if plan.status == "confirmed" {
             return Err(Error::Refused(format!(

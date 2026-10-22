@@ -176,6 +176,29 @@ fn add_task(scratch: &Scratch, plan: &str, slug: &str, brief: &str) -> String {
     run.out.trim().to_owned()
 }
 
+/// Writes `[worker] exec_args` into the repository's `config.toml`.
+fn set_exec_args(scratch: &Scratch, args: &[&str]) {
+    let path = scratch.repo().join(".radian/arc/config.toml");
+    let text = fs::read_to_string(&path).expect("config.toml is readable");
+    let list = args
+        .iter()
+        .map(|arg| format!("\"{arg}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let replaced = text.replace("exec_args = []", &format!("exec_args = [{list}]"));
+    assert_ne!(replaced, text, "the default exec_args key is in the file");
+    fs::write(&path, replaced).expect("config.toml is writable");
+}
+
+/// A confirmed plan with one `todo.ready` task: the shape `start` and `run` would claim.
+fn confirmed_task(scratch: &Scratch) -> (String, String) {
+    let plan = add_plan(scratch, "worker");
+    let task = add_task(scratch, &plan, "work", "the brief\n");
+    let confirmed = run(scratch, &["arc", "confirm", &plan], "");
+    assert_eq!(confirmed.code, Some(0), "{confirmed:?}");
+    (plan, task)
+}
+
 impl std::fmt::Debug for Run {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -854,4 +877,101 @@ fn quick_tests_the_changed_crates_and_radian_tui() {
         nextest.contains("-p a -p b -p radian-tui"),
         "the changed crates and radian-tui: {nextest}"
     );
+}
+
+fn stored_task(scratch: &Scratch, task: &str) -> radian_arc::store::model::TaskFile {
+    radian_arc::store::Store::at(scratch.repo())
+        .load_task(task)
+        .expect("the task reads")
+        .item
+}
+
+/// A `[worker] exec_args` line `radian exec` would reject refuses `start`, `run` and
+/// `confirm` with exit `3` before anything is claimed or written (ADR 0048 decision 7).
+#[test]
+fn a_rejected_worker_argument_line_refuses_start_run_and_confirm() {
+    let scratch = fixture("bad-worker-args");
+    init(&scratch);
+    let (plan, task) = confirmed_task(&scratch);
+    // `run` claims only at a level other than `off`; the check must fire even then.
+    assert_eq!(
+        run(&scratch, &["arc", "auto", &plan, "run"], "").code,
+        Some(0)
+    );
+    set_exec_args(&scratch, &["-m", "x"]);
+
+    let started = run(&scratch, &["arc", "start", &task], "");
+    assert_eq!(started.code, Some(3), "{started:?}");
+    assert!(started.err.contains("worker.exec_args"), "{started:?}");
+    assert!(started.err.contains("-m"), "{started:?}");
+    let stored = stored_task(&scratch, &task);
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "ready")
+    );
+    assert_eq!(stored.attempt, 0, "a refused start claims nothing");
+    assert!(
+        !scratch.repo().join(".radian/arc/runs").join(&task).exists(),
+        "a refused start runs no wrapper"
+    );
+
+    let ran = run(&scratch, &["arc", "run"], "");
+    assert_eq!(ran.code, Some(3), "{ran:?}");
+    assert!(ran.err.contains("worker.exec_args"), "{ran:?}");
+    let stored = stored_task(&scratch, &task);
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "ready")
+    );
+    assert_eq!(stored.attempt, 0, "a refused run claims nothing");
+
+    let draft = add_plan(&scratch, "draft");
+    add_task(&scratch, &draft, "draftwork", "the brief\n");
+    let confirmed = run(&scratch, &["arc", "confirm", &draft], "");
+    assert_eq!(confirmed.code, Some(3), "{confirmed:?}");
+    assert!(confirmed.err.contains("worker.exec_args"), "{confirmed:?}");
+    let plan_file = radian_arc::store::Store::at(scratch.repo())
+        .load_plan(&draft)
+        .expect("the plan reads")
+        .item;
+    assert_eq!(
+        plan_file.status, "draft",
+        "a refusal leaves the plan a draft"
+    );
+}
+
+/// An `exec_args` entry that repeats an argument the wrapper sets is refused by name: the
+/// line itself parses, but the wrapper's value would be overridden.
+#[test]
+fn an_exec_args_entry_the_wrapper_sets_is_refused_by_name() {
+    let scratch = fixture("owned-worker-args");
+    init(&scratch);
+    let (_plan, task) = confirmed_task(&scratch);
+    set_exec_args(&scratch, &["--profile", "full"]);
+
+    let refused = run(&scratch, &["arc", "start", &task], "");
+    assert_eq!(refused.code, Some(3), "{refused:?}");
+    assert!(
+        refused.err.contains("must not repeat `--profile`"),
+        "the refusal is the wrapper's own, not only the parser's duplicate: {refused:?}"
+    );
+    assert!(refused.err.contains("worker.exec_args"), "{refused:?}");
+    assert_eq!(stored_task(&scratch, &task).attempt, 0);
+}
+
+/// A valid line passes the check: `confirm` and an idle `run` (auto `off`) act normally.
+#[test]
+fn a_valid_worker_argument_line_passes_the_check() {
+    let scratch = fixture("good-worker-args");
+    init(&scratch);
+    let plan = add_plan(&scratch, "valid");
+    add_task(&scratch, &plan, "work", "the brief\n");
+    set_exec_args(&scratch, &["--model", "x"]);
+
+    // `confirm` runs no worker: it passing proves the line was accepted.
+    let confirmed = run(&scratch, &["arc", "confirm", &plan], "");
+    assert_eq!(confirmed.code, Some(0), "{confirmed:?}");
+    // `run` claims nothing at auto `off`, so it also checks the line and exits 0.
+    let ran = run(&scratch, &["arc", "run"], "");
+    assert_eq!(ran.code, Some(0), "{ran:?}");
 }

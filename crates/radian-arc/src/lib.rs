@@ -13,6 +13,8 @@
 //! - [`run`]: `radian arc run`, the scheduling loop that advances every auto level.
 //! - [`work`]: `radian arc work`, the trusted wrapper around one worker attempt. It is
 //!   internal: arc runs it, a person does not.
+//! - [`worker_args`]: the worker's `radian exec` command line, parsed with the `radian exec`
+//!   parser before `start`, a `run` pass or `confirm` acts.
 //! - [`mcp`]: the MCP server the lead writes plans and tasks through (`radian arc mcp`).
 //!
 //! Every git call of these modules is built by the private `git` module.
@@ -27,3 +29,4 @@ pub mod review;
 pub mod run;
 pub mod store;
 pub mod work;
+pub mod worker_args;

@@ -95,3 +95,9 @@ pub(crate) fn resolve_commit(repository: &Path, revision: &str) -> Result<String
     }
     Ok(sha.to_string())
 }
+
+/// Whether `ancestor` is an ancestor of `descendant` (`git merge-base --is-ancestor`).
+pub(crate) fn is_ancestor(dir: &Path, ancestor: &str, descendant: &str) -> Result<bool, GateError> {
+    let output = run(dir, &["merge-base", "--is-ancestor", ancestor, descendant])?;
+    Ok(output.success())
+}

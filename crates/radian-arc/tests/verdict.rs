@@ -13,6 +13,7 @@ fn verdict(stage: Stage, sha: &str, result: VerdictResult, ended_at: &str) -> Ve
         commands: Vec::new(),
         started_at: "2026-10-22T00:00:00.000000Z".to_string(),
         ended_at: ended_at.to_string(),
+        main_sha: None,
         base_sha: None,
         candidate_sha: None,
         conflict_paths: Vec::new(),
@@ -271,4 +272,25 @@ fn a_human_verdict_is_the_owner_record() {
     let fail = Verdict::human("aaaa", false, Some("the tests are not enough".to_string()));
     assert_eq!(fail.result, VerdictResult::Fail);
     assert_eq!(fail.reason.as_deref(), Some("the tests are not enough"));
+}
+
+/// A verdict written before `main_sha` and `candidate_sha` existed still reads: both fields
+/// are optional, and a verdict that lacks them keeps the meaning it had.
+#[test]
+fn an_old_verdict_without_main_sha_still_reads() {
+    let text = r#"{
+        "schema_version": 1,
+        "stage": "commands",
+        "sha": "aaaa",
+        "result": "pass",
+        "reason": null,
+        "commands": [],
+        "started_at": "2026-10-22T00:00:00.000000Z",
+        "ended_at": "2026-10-22T00:01:00.000000Z"
+    }"#;
+    let verdict: Verdict = serde_json::from_str(text).expect("an old verdict reads");
+    assert_eq!(verdict.main_sha, None);
+    assert_eq!(verdict.candidate_sha, None);
+    assert!(verdict.is_pass());
+    assert_eq!(valid_verdicts(&[verdict], "aaaa").len(), 1);
 }
