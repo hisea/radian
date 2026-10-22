@@ -19,6 +19,7 @@ Each line names one page and what it covers.
 ## Use
 
 - `commands`: every slash command and `!` shell escape in the full-screen interface.
+- `keybindings`: every key in the full-screen interface, by area, and how to rebind it.
 - `sessions`: resume, list, search, fork, export, and attach to sessions.
 - `subagent-and-jobs`: helper sessions and background shell jobs.
 - `permissions`: permission tiers, trust, approval, and sandbox behavior.
@@ -33,7 +34,10 @@ Each line names one page and what it covers.
 
 ## Extend
 
-- `mcp`: add local model servers over standard input and output.
+- `extensions`: which extension mechanism fits which need, where each lives, and a first example.
+- `context-files`: which project instruction files (`AGENTS.md` and others) load, from where, in which order, and their limits.
+- `hooks`: run your own commands when a tool runs or the model stops.
+- `mcp`: add MCP tool servers that run as local processes over standard input and output.
 - `skills`: find reusable prompt packages, read them, and run them.
 - `memory`: save facts across sessions and search them by keyword.
 

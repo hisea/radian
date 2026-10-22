@@ -52,7 +52,9 @@ their text literally: `-` reads stdin only on the command line. A bare `-` in th
 for `import`. `/memory import <source>` reads the file at `<source>` in both:
 a relative path resolves against the workspace in the interface and against
 the current directory on the command line; an absolute path may point
-anywhere. On the command line, `-` reads the Markdown from stdin instead of
+anywhere. In the interface, a relative path that contains `..` or passes
+through a symbolic link is refused, and so is an absolute path whose last
+part is a symbolic link. On the command line, `-` reads the Markdown from stdin instead of
 a file. A file that cannot be read imports nothing and shows
 `cannot read <path>: <error>`.
 

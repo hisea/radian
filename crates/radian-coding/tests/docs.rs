@@ -162,6 +162,27 @@ async fn writers_refuse_virtual_paths() {
     }
 }
 
+/// `index.md` is the manual's map: it names every other page as a list item (`` - `stem`: ``),
+/// so a new page cannot ship without a line on the map.
+#[test]
+fn the_index_lists_every_page() {
+    let index = radian_coding::docs::DOCS
+        .iter()
+        .find(|(name, _)| *name == "index.md")
+        .map(|(_, text)| *text)
+        .expect("index.md is in the table");
+    for name in page_names() {
+        let stem = name.trim_end_matches(".md");
+        if stem == "index" {
+            continue;
+        }
+        assert!(
+            index.contains(&format!("- `{stem}`:")),
+            "index.md does not list {name}"
+        );
+    }
+}
+
 /// The embedded manual stays small.
 #[test]
 fn the_embedded_manual_has_a_size_cap() {
