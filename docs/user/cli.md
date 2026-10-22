@@ -133,6 +133,21 @@ radian exec --search "bubblewrap"
 radian exec --fork demo --at 12
 ```
 
+## `radian arc`
+
+`radian arc` is the plan and task orchestrator.
+A bare `radian arc` would open its interface, which this build does not have yet.
+The subcommands are `init`, `add`, `list`, `show`, and `adopt`; run `radian arc --help`.
+arc's exit codes are its own: `3` means the state does not allow the operation and `4`
+means a lock is held.
+See [`arc`](arc.md) for every subcommand, flag, file field, and exit code.
+
+```sh
+radian arc init
+radian arc add plan --slug first --title "First plan" < request.txt
+radian arc list --json
+```
+
 ## `radian login` and `radian logout`
 
 `radian login [PROVIDER]` stores an API key in `~/.radian/credentials/auth.json`.
