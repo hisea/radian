@@ -1,6 +1,6 @@
 [package]
 name = "radian-exec"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -12,16 +12,16 @@ publish = false
 # binary is deleted). This crate is the library the `radian` binary links.
 [dependencies]
 futures-util.workspace = true
-radian-core = { version = "0.1.1", path = "../radian-core" }
-agent-extensions = { version = "0.1.1", path = "../agent-extensions" }
-agent-provider-openai-compatible = { version = "0.1.1", path = "../agent-provider-openai-compatible" }
-radian-coding = { version = "0.1.1", path = "../radian-coding" }
-radian-host = { version = "0.1.1", path = "../radian-host" }
-radian-memory = { version = "0.1.1", path = "../radian-memory" }
-radian-permissions = { version = "0.1.1", path = "../radian-permissions" }
-radian-runtime = { version = "0.1.1", path = "../radian-runtime" }
-radian-sandbox = { version = "0.1.1", path = "../radian-sandbox" }
-radian-session = { version = "0.1.1", path = "../radian-session" }
+radian-core = { version = "0.1.2", path = "../radian-core" }
+agent-extensions = { version = "0.1.2", path = "../agent-extensions" }
+agent-provider-openai-compatible = { version = "0.1.2", path = "../agent-provider-openai-compatible" }
+radian-coding = { version = "0.1.2", path = "../radian-coding" }
+radian-host = { version = "0.1.2", path = "../radian-host" }
+radian-memory = { version = "0.1.2", path = "../radian-memory" }
+radian-permissions = { version = "0.1.2", path = "../radian-permissions" }
+radian-runtime = { version = "0.1.2", path = "../radian-runtime" }
+radian-sandbox = { version = "0.1.2", path = "../radian-sandbox" }
+radian-session = { version = "0.1.2", path = "../radian-session" }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true

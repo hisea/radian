@@ -1,6 +1,6 @@
 [package]
 name = "radian-tui"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -27,17 +27,17 @@ path = "src/rad.rs"
 [dependencies]
 # The `radian exec` subcommand and the top-level management commands (ADR 0032 slice 1): the
 # `agent` command as a library, so both entries run the same parser and dispatch.
-radian-exec = { version = "0.1.1", path = "../radian-exec" }
-radian-core = { version = "0.1.1", path = "../radian-core" }
-agent-extensions = { version = "0.1.1", path = "../agent-extensions" }
-agent-provider-openai-compatible = { version = "0.1.1", path = "../agent-provider-openai-compatible" }
+radian-exec = { version = "0.1.2", path = "../radian-exec" }
+radian-core = { version = "0.1.2", path = "../radian-core" }
+agent-extensions = { version = "0.1.2", path = "../agent-extensions" }
+agent-provider-openai-compatible = { version = "0.1.2", path = "../agent-provider-openai-compatible" }
 futures-util.workspace = true
-radian-coding = { version = "0.1.1", path = "../radian-coding" }
-radian-host = { version = "0.1.1", path = "../radian-host" }
-radian-permissions = { version = "0.1.1", path = "../radian-permissions" }
-radian-runtime = { version = "0.1.1", path = "../radian-runtime" }
-radian-sandbox = { version = "0.1.1", path = "../radian-sandbox" }
-radian-session = { version = "0.1.1", path = "../radian-session" }
+radian-coding = { version = "0.1.2", path = "../radian-coding" }
+radian-host = { version = "0.1.2", path = "../radian-host" }
+radian-permissions = { version = "0.1.2", path = "../radian-permissions" }
+radian-runtime = { version = "0.1.2", path = "../radian-runtime" }
+radian-sandbox = { version = "0.1.2", path = "../radian-sandbox" }
+radian-session = { version = "0.1.2", path = "../radian-session" }
 clap = { version = "4", features = ["derive"] }
 # The vendored Mermaid renderer (ADR 0042): the transcript draws a closed ```mermaid block
 # as Unicode box drawing. `radian-tui` depends on the crate directly (ADR 0042 supplement:
