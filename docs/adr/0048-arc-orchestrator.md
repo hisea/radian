@@ -142,8 +142,9 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 ### 10. Gate
 
 - A gate is a fixed profile: a list of stages. There are no conditions, no dynamic graph, and no override rules. A brief can add stages to the profile. It cannot remove a required stage.
-- Stages are `commands`, `mutation`, `review`, `ci`, `human`, and `integration`. Each stage runs once against `verified_sha` and writes one verdict.
-- `commands` runs only the fixed commands of the profile on a separate checkout of `verified_sha`. A brief cannot add a shell command.
+- Stages are `commands`, `mutation`, `review`, `ci`, `human`, and `integration`. Each stage runs once against the verification candidate and writes one verdict.
+- Before the verification stages run, arc fetches `[repository] remote` and builds the verification candidate in the stage's checkout. When the remote main is an ancestor of `verified_sha`, the candidate is `verified_sha` itself. Otherwise the candidate is a merge commit of `verified_sha` onto the remote main, made in that checkout and never pushed; the merge uses arc's own commit identity, so the same inputs build the same tree. A merge conflict is a failed stage: its reason is `conflict`, its verdict lists the conflicted paths, and the task goes to `review.rework_pending`. `verified_sha` stays the task's commit: the approval, the digest and the merge bind to it, and the candidate is evidence, not a new identity. A verification stage's verdict records `sha` (`verified_sha`), `main_sha` (the remote main the candidate was built on) and `candidate_sha` (the commit the stage ran on).
+- `commands` runs only the fixed commands of the profile on a separate checkout of the candidate. A brief cannot add a shell command.
 - `commands` and `mutation` are exclusive: one at a time, in separate trees, with no shared build state.
 - `review` is a read-only radian session. It is not the worker session.
 - `integration` merges `head_sha` onto the current main in a temporary tree and runs the key commands of the profile on the result. It records `base_sha` and `candidate_sha`. When main is still the task's `base_sha`, `candidate_sha` is `head_sha`. Otherwise it is a merge commit of `head_sha` onto main. arc never rebases a task branch, because a rebase changes the sha that the gate verified.

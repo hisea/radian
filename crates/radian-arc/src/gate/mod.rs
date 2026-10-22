@@ -2,15 +2,15 @@
 //! (ADR 0048 decisions 6, 10 and 11).
 //!
 //! A gate is a fixed profile: a list of stages with no conditions and no dynamic graph. Each
-//! stage runs once against one commit and writes one verdict. A brief can add stages; it can
-//! never remove a required one.
+//! stage runs once against the verification candidate and writes one verdict. A brief can add
+//! stages; it can never remove a required one.
 //!
 //! - [`GateConfig`] / [`Profile`] / [`Stage`] — the `[gate]` table of `config.toml`.
 //! - [`GateCheckout`] — the detached linked worktree of one stage under
 //!   `<repository>/.radian/arc/gates/<stage>/`, fetches from the remote name it is given.
 //! - [`ExclusiveLock`] — the lock `commands` and `mutation` hold for a whole stage. The
 //!   integration stage holds its own `gates/integration.lock`, so two runs never overlap.
-//! - [`CommandRun`] — the `commands` stage.
+//! - [`CommandRun`] — the `commands` stage, on the candidate `verified_sha` merged onto main.
 //! - [`Verdict`] and [`verdict_set_digest`] — the records and the digest of an approval.
 //! - [`IntegrationRun`] and [`merge_ready`] — the merge candidate and the main check.
 //!

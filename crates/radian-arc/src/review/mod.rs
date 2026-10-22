@@ -1,8 +1,11 @@
 //! Verification, merge and reject: the review half of the state machine (ADR 0048
 //! decisions 6, 10 and 11).
 //!
-//! - [`verify`] runs the gate's built stages against the task's pushed `head_sha` and
-//!   moves the task to `review.awaiting_human` or `review.rework_pending`.
+//! - [`verify`] runs the gate's built stages against the verification candidate for the
+//!   task's pushed `head_sha` and moves the task to `review.awaiting_human` or
+//!   `review.rework_pending`. The candidate is `head_sha` when the remote main is its
+//!   ancestor, else a merge of `head_sha` onto the remote main (ADR 0048 decision 10);
+//!   `verified_sha` stays the task's own commit.
 //! - [`merge`] takes the owner's approval for `verified_sha`, builds the integration
 //!   candidate, pushes it to the remote main without force, and moves the task to
 //!   `done.merged`. A main that moved makes it integrate again.
@@ -227,7 +230,8 @@ pub fn verify(store: &Store, task_id: &str) -> Result<Verified, Error> {
         .filter(|sha| !sha.is_empty())
         .ok_or_else(|| Error::Refused(format!("task `{task_id}` has no `head_sha`")))?;
     let config = store.config()?;
-    let (remote, _main_branch) = store.repository_names()?;
+    let (remote, main_branch) = store.repository_names()?;
+    let main_ref = format!("refs/remotes/{remote}/{main_branch}");
     let profile = config.gate.selected_profile().cloned().ok_or_else(|| {
         Error::Failed(format!(
             "gate.profile is `{}` but no such profile exists",
@@ -302,6 +306,7 @@ pub fn verify(store: &Store, task_id: &str) -> Result<Verified, Error> {
             task: task_id,
             attempt: &label,
             sha: &head,
+            main_ref: &main_ref,
             commands: &profile.commands,
             timeout: config.gate.command_timeout(),
         };
@@ -354,15 +359,7 @@ fn failed_stage(
     verdict: &Verdict,
     path: PathBuf,
 ) -> Result<Verified, Error> {
-    let reason = Reason::with_verdict(
-        "verify",
-        verdict.stage,
-        verdict
-            .reason
-            .clone()
-            .unwrap_or_else(|| "failed".to_owned()),
-        path,
-    );
+    let reason = Reason::with_verdict("verify", verdict.stage, failure_text(verdict), path);
     reason.record(store, &task.id, label);
     store.change_task(&task.id, |task| {
         task.state = model::TaskState::Review;
@@ -557,7 +554,7 @@ pub fn merge_as(store: &Store, task_id: &str, approver: Option<&str>) -> Result<
             let reason = Reason::with_verdict(
                 "merge",
                 verdict.stage,
-                integration_failure(&verdict),
+                failure_text(&verdict),
                 integration_verdict(store, task_id, &integration_label)?,
             );
             reason.record(store, task_id, &label);
@@ -664,7 +661,8 @@ fn approve(
     verdict.write_new(&path).map_err(gate_error)
 }
 
-fn integration_failure(verdict: &Verdict) -> String {
+/// The text of a failed stage: its reason, and the conflicted paths when it is `conflict`.
+fn failure_text(verdict: &Verdict) -> String {
     let reason = verdict
         .reason
         .clone()

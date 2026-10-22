@@ -323,8 +323,14 @@ A task in `review.verifying` is checked against `verified_sha`, which is the pus
   When it differs, arc records the reason in the attempt's `review.json` and the task stays in `review.verifying`; `show` prints the reason.
 - The stages are the configured profile's (`gate.profile`, then `gate.profiles.<name>.stages`), in order, plus the task's `extra_stages`.
   `human` is your approval and does not run here.
-- Every stage runs against that one commit, in its own checkout under `.radian/arc/gates/<stage>/`.
+- Every stage runs against the verification candidate, in its own checkout under `.radian/arc/gates/<stage>/`.
+  The candidate is `verified_sha` when the remote main is an ancestor of it; otherwise it is a merge commit of `verified_sha` onto the remote main, built in that checkout and never pushed.
+  The merge uses arc's own commit identity, so the same inputs build the same tree.
+  `verified_sha` stays the task's commit: the approval, the digest and `merge` bind to it, and the candidate is evidence only.
   A stage's commands run in order and stop at the first failure; each has its own log and the profile's timeout.
+- A verification stage's verdict records `sha` (the task's `verified_sha`), `main_sha` (the remote main the candidate was built on) and `candidate_sha` (the commit the stage ran on; absent when the merge conflicted).
+- A merge conflict is a failed stage: the verdict's reason is `conflict`, its `conflict_paths` lists the paths, the task goes to `review.rework_pending`, and `show` prints `conflict: <paths>`.
+  Nothing is pushed.
 - This build runs only `commands`.
   A profile or a task that lists `mutation`, `review`, or `ci` is refused with `stage <name> is not built yet`; the task stays in `review.verifying` and `show` prints that reason.
   `init`'s default profile lists only `commands` and `human`.
@@ -333,6 +339,7 @@ A task in `review.verifying` is checked against `verified_sha`, which is the pus
   A verdict that already exists for this attempt and stage is reused instead of rerun, so a crash between stages resumes where it stopped.
 - Any stage failing moves the task to `review.rework_pending`.
   The stage, its reason and the verdict path are in the task's `rework_reason` (`show` prints it).
+  Main moving after a verification does not send the task back to `review.verifying` by itself; `merge` integrates onto the then-current main and runs the key commands there.
 - Every required stage passing moves the task to `review.awaiting_human` and records `verified_sha` and `verdict_set_digest` in the task.
   The digest covers the verification verdicts for `verified_sha`; it leaves out the `human` approval and the `integration` verdict, which are written later, at merge.
   A new verdict for the same commit changes the digest and invalidates an approval.

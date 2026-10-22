@@ -54,8 +54,14 @@ pub struct Verdict {
     pub schema_version: u64,
     /// The stage that produced this verdict.
     pub stage: Stage,
-    /// The commit the stage ran against.
+    /// The commit the verdict is for: the task's `verified_sha` for a verification stage,
+    /// `head_sha` for integration, the approved commit for a human verdict. A verification
+    /// stage runs on `candidate_sha`, not necessarily on this commit.
     pub sha: String,
+    /// A verification stage only: the remote main the candidate was built on (ADR 0048
+    /// decision 10). `sha` stays `verified_sha`; `candidate_sha` is the commit the stage ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_sha: Option<String>,
     /// The outcome.
     pub result: VerdictResult,
     /// Why the stage failed: `command_failed`, `timeout`, `conflict`, the owner's note for a
@@ -70,10 +76,13 @@ pub struct Verdict {
     /// Integration only: the main commit the candidate was built on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_sha: Option<String>,
-    /// Integration only: the commit the merge produced, or `head_sha` when main had not moved.
+    /// A verification or integration verdict: the commit the stage ran on. For a
+    /// verification stage it is `sha` itself when the remote main is an ancestor, otherwise
+    /// the merge commit; `None` when the merge conflicted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_sha: Option<String>,
-    /// Integration only: the conflicted paths that made a merge fail, sorted.
+    /// A verification or integration verdict: the conflicted paths that made a merge fail,
+    /// sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflict_paths: Vec<String>,
     /// A `human` verdict only: who approved it. `auto` is the scheduling loop at auto level
@@ -104,6 +113,7 @@ impl Verdict {
             commands: Vec::new(),
             started_at: at.clone(),
             ended_at: at,
+            main_sha: None,
             base_sha: None,
             candidate_sha: None,
             conflict_paths: Vec::new(),

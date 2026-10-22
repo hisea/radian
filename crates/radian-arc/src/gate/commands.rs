@@ -1,8 +1,9 @@
 //! The `commands` stage (ADR 0048 decision 10).
 //!
 //! The profile's fixed command lines run in order, with `sh -c`, in the stage's own
-//! checkout. The stage stops at the first failure. Each command has its own log file and its
-//! own timeout; a timeout kills the command's whole process group.
+//! checkout of the verification candidate. The stage stops at the first failure. Each command
+//! has its own log file and its own timeout; a timeout kills the command's whole process
+//! group.
 
 use std::fs::File;
 use std::path::Path;
@@ -13,6 +14,7 @@ use super::checkout::GateCheckout;
 use super::config::Stage;
 use super::error::GateError;
 use super::exclusive::ExclusiveLock;
+use super::integration::candidate_for;
 use super::verdict::{
     CommandRecord, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, attempt_dir, now_utc,
     verdict_path,
@@ -20,21 +22,24 @@ use super::verdict::{
 
 /// The `commands` stage for one attempt and one sha.
 ///
-/// The stage holds the exclusive lock for its whole run, prepares
-/// `<repository>/.radian/arc/gates/commands/` at `sha` (fetching from `remote`), runs the
-/// lines and writes the verdict. `timeout` of zero waits forever for a command.
+/// The stage holds the exclusive lock for its whole run, builds the verification candidate
+/// in `<repository>/.radian/arc/gates/commands/` (fetching from `remote`), runs the lines on
+/// it and writes the verdict. `timeout` of zero waits forever for a command.
 #[derive(Debug, Clone)]
 pub struct CommandRun<'a> {
     /// The repository root.
     pub repository: &'a Path,
-    /// The repository's remote name, for the fetch before the checkout.
+    /// The repository's remote name, for the fetches before the checkout.
     pub remote: &'a str,
     /// The task id (one path component).
     pub task: &'a str,
     /// The attempt id (one path component).
     pub attempt: &'a str,
-    /// The commit the stage runs against.
+    /// The task's `verified_sha`; the verdict's `sha` and the commit the candidate contains.
     pub sha: &'a str,
+    /// The ref that names the remote main after a fetch, typically
+    /// `refs/remotes/<remote>/<main>`.
+    pub main_ref: &'a str,
     /// The profile's acceptance command lines.
     pub commands: &'a [String],
     /// Per-command timeout.
@@ -52,28 +57,42 @@ impl CommandRun<'_> {
         let _lock = ExclusiveLock::acquire(self.repository)?;
         let started_at = now_utc();
         let checkout = GateCheckout::new(self.repository, Stage::Commands, self.remote);
-        let sha = checkout.prepare(self.sha)?;
-        let log_dir = attempt_dir(self.repository, self.task, self.attempt)?.join("logs");
-        let (commands, outcome) = run_series(
-            &checkout.path(),
-            self.commands,
-            self.timeout,
-            &log_dir,
-            Stage::Commands,
+        let candidate = candidate_for(
+            self.repository,
+            self.remote,
+            self.main_ref,
+            self.sha,
+            self.task,
+            &checkout,
         )?;
+        let log_dir = attempt_dir(self.repository, self.task, self.attempt)?.join("logs");
+        // A candidate that could not be built is a failed stage; the commands never run on a
+        // tree without a candidate (ADR 0048 decision 10).
+        let (commands, outcome) = if candidate.failure.is_some() {
+            (Vec::new(), SeriesOutcome::Failed)
+        } else {
+            run_series(
+                &checkout.path(),
+                self.commands,
+                self.timeout,
+                &log_dir,
+                Stage::Commands,
+            )?
+        };
         let ended_at = now_utc();
         let verdict = Verdict {
             schema_version: VERDICT_SCHEMA_VERSION,
             stage: Stage::Commands,
-            sha,
+            sha: candidate.sha,
             result: outcome.result(),
-            reason: outcome.reason(),
+            reason: candidate.failure.or_else(|| outcome.reason()),
             commands,
             started_at,
             ended_at,
+            main_sha: Some(candidate.main_sha),
             base_sha: None,
-            candidate_sha: None,
-            conflict_paths: Vec::new(),
+            candidate_sha: candidate.candidate_sha,
+            conflict_paths: candidate.conflict_paths,
             approver: None,
         };
         verdict.write_new(&verdict_path(
