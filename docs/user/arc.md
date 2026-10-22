@@ -8,7 +8,8 @@ arc is a plan and task orchestrator built into the same `radian` binary.
 It keeps a plan and its tasks as files in the repository, runs each task as a separate headless `radian` worker, and merges only what passes a fixed gate.
 
 This build has the storage layer and the five subcommands that read and write it: `init`, `add`, `list`, `show`, and `adopt`.
-The scheduling loop, attempts, the gate, merge, the arc terminal interface, and the MCP server are **not built yet**.
+The gate and the worker wrapper exist as internal parts of the binary; no subcommand runs them yet.
+The scheduling loop, merge, the arc terminal interface, and the MCP server are **not built yet**.
 
 ## `radian arc`
 
@@ -190,6 +191,7 @@ A key you leave out takes its default.
 | `gate.profiles.<name>.key_commands` | array of strings | `[]` | Shell command lines | The integration stage runs them on the merge candidate. |
 
 `gate.profiles.<name>` above is written out as `gate.profiles.default` in the file `init` writes.
+A stage may be listed once per profile: a profile that lists a stage twice, or that lists `integration`, is refused by name.
 A per-task field of the same name overrides a `[limits]` value for that task; a plan budget adds to the task budgets.
 
 ## Plan and task files
@@ -269,10 +271,10 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `ledger/plans/<id>.last.md` | The plan as arc last wrote it, for `adopt`. |
 | `ledger/tasks/<id>.json` | The same for a task. |
 | `ledger/tasks/<id>.last.md` | The task as arc last wrote it. |
-| `runs/<task>/…` | One attempt's output (a later build fills it). |
-| `attempts/<task>/…` | The host-local attempt records (a later build fills it). |
-| `gates/<stage>/` | One checkout per gate stage (a later build fills it). |
-| `worktrees/<task>/` | The worker's checkout for that task (a later build fills it). |
+| `runs/<task>/…` | One attempt's output (the worker wrapper writes it). |
+| `attempts/<task>/…` | The host-local attempt records (the worker wrapper writes them). |
+| `gates/<stage>/` | One checkout per gate stage (the gate library uses it; no subcommand runs the gate yet). |
+| `worktrees/<task>/` | The worker's checkout for that task (the worker wrapper creates it). |
 | `state.lock` | The short lock every change takes. |
 | `runner.lock` | The lock a scheduling loop holds. |
 
@@ -281,15 +283,16 @@ take the lock (waiting up to 5 seconds, then exit `4`), compare the file with th
 
 Search skips `worktrees/`: `grep`, `glob`, skill discovery, and `@` completion do not enter it.
 They skipped `.radian-worktrees/` for the same reason.
-A worker also never reads the rest of `.radian/arc/` from inside its checkout; a later build adds that deny rule.
+A worker never reads the rest of `.radian/arc/` from inside its checkout: the worker wrapper denies every entry except `worktrees/`.
 
 ## Not built yet
 
 These subcommands are named in the design and do not exist in this build.
 Do not rely on their flags: they have none yet.
 
-`start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `run`, `mcp`, and the hidden `work` wrapper.
+`start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `run`, and `mcp`.
 The arc terminal interface is not built either.
+The hidden `work` wrapper exists, but a person does not run it: the scheduling loop that would run it is not built.
 
 ## See also
 
