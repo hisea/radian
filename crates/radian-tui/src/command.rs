@@ -1619,6 +1619,25 @@ fn memory_command(args: &[String], memory_enabled: bool) -> Outcome {
     }
 }
 
+/// The full-screen interface has no stdin, so a `-` text argument can never be
+/// resolved the way `radian memory` resolves it (the CLI reads stdin or the
+/// file before it calls `execute`). `Some` is the one notice to show instead
+/// of running the command; nothing is written. A `-` among other words is
+/// ordinary text and returns `None`.
+pub fn stdin_dash_notice(command: &MemoryCommand) -> Option<&'static str> {
+    match command {
+        MemoryCommand::Add { content, .. } | MemoryCommand::Edit { content, .. }
+            if content == "-" =>
+        {
+            Some("`-` reads stdin only in `radian memory`; type the text here")
+        }
+        MemoryCommand::Import { source, .. } if source == "-" => {
+            Some("`-` reads stdin only in `radian memory`; give a file path here")
+        }
+        _ => None,
+    }
+}
+
 /// The lines one command output becomes: the diagnostics note, then the text's lines. An
 /// output with neither becomes one `(no output)` line.
 pub fn output_notices(output: &CommandOutput) -> Vec<String> {

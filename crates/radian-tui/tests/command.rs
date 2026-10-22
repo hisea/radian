@@ -260,6 +260,101 @@ fn a_confirmed_forget_waits_for_y_and_n_keeps_the_record() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A bare `-` is the CLI's stdin marker; the interface has no stdin, so
+/// `/memory add -` writes no record, shows the one notice, and keeps the line.
+#[test]
+fn a_bare_dash_add_writes_nothing_and_keeps_the_line() {
+    let (dir, mut app, service) = app_with_memory("dash-add");
+    let effects = submit(&mut app, &service, "/memory add -");
+    assert!(effects.is_empty(), "no effect may run: {effects:?}");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n == "`-` reads stdin only in `radian memory`; type the text here"),
+        "{:?}",
+        notices(&app)
+    );
+    assert_eq!(app.input.text(), "/memory add -", "the typed line is kept");
+    assert!(
+        service
+            .list(ScopeSelection::ProjectOnly, false)
+            .unwrap()
+            .is_empty(),
+        "no record was written"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `/memory edit <id> -` leaves the record unchanged, with the same notice.
+#[test]
+fn a_bare_dash_edit_leaves_the_record_unchanged() {
+    let (dir, mut app, service) = app_with_memory("dash-edit");
+    let record = service
+        .add(WriteScope::Project, Kind::Fact, None, "original".into())
+        .unwrap();
+    let effects = submit(
+        &mut app,
+        &service,
+        &format!(
+            "/memory edit --revision {} {} -",
+            record.revision, record.id
+        ),
+    );
+    assert!(effects.is_empty(), "no effect may run: {effects:?}");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n == "`-` reads stdin only in `radian memory`; type the text here"),
+        "{:?}",
+        notices(&app)
+    );
+    let found = service
+        .get(ScopeSelection::ProjectOnly, &record.id)
+        .unwrap();
+    assert_eq!(found.content, "original");
+    assert_eq!(found.revision, record.revision);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `/memory import -` imports nothing and names a file path instead.
+#[test]
+fn a_bare_dash_import_imports_nothing() {
+    let (dir, mut app, service) = app_with_memory("dash-import");
+    let effects = submit(&mut app, &service, "/memory import -");
+    assert!(effects.is_empty(), "no effect may run: {effects:?}");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n == "`-` reads stdin only in `radian memory`; give a file path here"),
+        "{:?}",
+        notices(&app)
+    );
+    assert!(
+        service
+            .list(ScopeSelection::ProjectOnly, true)
+            .unwrap()
+            .is_empty(),
+        "nothing was imported"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `-` among other words is ordinary text: `/memory add "a - b"` stores `a - b`.
+/// (Unquoted extra words are a clap usage error, unchanged by the dash guard.)
+#[test]
+fn a_dash_among_other_words_is_stored_verbatim() {
+    let (dir, mut app, service) = app_with_memory("dash-words");
+    let effects = submit(&mut app, &service, "/memory add \"a - b\"");
+    assert!(
+        matches!(effects.as_slice(), [Effect::RunMemoryCommand { .. }]),
+        "a non-bare dash still runs: {effects:?}"
+    );
+    let records = service.list(ScopeSelection::ProjectOnly, false).unwrap();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].content, "a - b");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_pending_confirmation_keeps_keys_out_of_the_input_box() {
     let (dir, mut app, service) = app_with_memory("keys");
