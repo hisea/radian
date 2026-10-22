@@ -2612,7 +2612,10 @@ mod theme_tests {
         for line in ["/trust nope", "/trust on extra", "/trust status x"] {
             match parse(line, false) {
                 Outcome::Notices(notices) => {
-                    assert_eq!(notices, vec!["usage: /trust [status|on|off|forget]".to_owned()])
+                    assert_eq!(
+                        notices,
+                        vec!["usage: /trust [status|on|off|forget]".to_owned()]
+                    )
                 }
                 other => panic!("{line}: expected usage, got {other:?}"),
             }
@@ -2641,8 +2644,7 @@ mod theme_tests {
         let level = complete_in(tree(), "/trust ", 7).expect("the argument level");
         match level.level_result {
             Level::Ready(candidates) => {
-                let inserts: Vec<&str> =
-                    candidates.iter().map(|c| c.insert.as_str()).collect();
+                let inserts: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
                 assert_eq!(inserts, ["status", "on", "off", "forget"], "{inserts:?}");
             }
             other => panic!("expected the four words, got {other:?}"),

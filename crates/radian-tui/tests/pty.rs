@@ -1663,7 +1663,9 @@ async fn pty_trust_on_saves_journals_and_applies_at_the_next_start() {
         ],
         &[("RADIAN_HOME", home.path().to_str().unwrap())],
         30,
-        120,
+        // Wide enough that the takes-effect lines (with the full workspace path) never
+        // wrap mid-phrase.
+        200,
     );
     pty.expand_startup();
     assert!(
@@ -1674,6 +1676,47 @@ async fn pty_trust_on_saves_journals_and_applies_at_the_next_start() {
     assert!(
         !pty.screen().contains("/trust to trust it"),
         "a trusted project shows no hint:\n{}",
+        pty.screen()
+    );
+    // `/trust off` in the trusted session: the distrusted takes-effect line.
+    pty.send(b"/trust off\r\r");
+    assert!(
+        pty.wait_for_screen("distrusted ", wait_positive()),
+        "the off notice is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("takes effect at the next start", wait_positive()),
+        "the takes-effect line is missing:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+
+    // The next start shows the distrusted wording under the wordmark.
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust-off-restart",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        200,
+    );
+    assert!(
+        pty.wait_for_screen(
+            "distrusted project · /trust on to trust it",
+            wait_positive()
+        ),
+        "the distrusted hint is missing:\n{}",
         pty.screen()
     );
     pty.quit();

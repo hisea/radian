@@ -45,12 +45,10 @@ pub fn trust_hint(trust: &radian_host::trust::Setup) -> Option<String> {
     if trust.resolved.decision.as_bool() {
         return None;
     }
-    Some(
-        match trust.resolved.source {
-            Source::Default => "untrusted project · /trust to trust it".to_string(),
-            _ => "distrusted project · /trust on to trust it".to_string(),
-        },
-    )
+    Some(match trust.resolved.source {
+        Source::Default => "untrusted project · /trust to trust it".to_string(),
+        _ => "distrusted project · /trust on to trust it".to_string(),
+    })
 }
 /// The tip for a session: a stable hash of the session id picks one, so the same session
 /// shows the same tip on resume. No randomness.

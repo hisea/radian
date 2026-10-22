@@ -547,7 +547,7 @@ fn trust_commands_become_effects_and_the_answers_become_notices() {
     );
     // The loop's answers land as notices, verbatim.
     app.update(Input::SessionDone(vec![
-        "trust: no saved decision (untrusted)".to_owned()
+        "trust: no saved decision (untrusted)".to_owned(),
     ]));
     assert!(
         notices(&app)
@@ -557,7 +557,7 @@ fn trust_commands_become_effects_and_the_answers_become_notices() {
         notices(&app)
     );
     app.update(Input::SessionDone(vec![
-        "trusted /work/example; takes effect at the next start".to_owned()
+        "trusted /work/example; takes effect at the next start".to_owned(),
     ]));
     assert!(
         notices(&app)

@@ -721,7 +721,11 @@ pub fn gap_at(entries: &[Entry], index: usize) -> usize {
 fn is_startup_block(kind: EntryKind) -> bool {
     matches!(
         kind,
-        EntryKind::Banner | EntryKind::Startup | EntryKind::TrustHint | EntryKind::Warning | EntryKind::Tip
+        EntryKind::Banner
+            | EntryKind::Startup
+            | EntryKind::TrustHint
+            | EntryKind::Warning
+            | EntryKind::Tip
     )
 }
 

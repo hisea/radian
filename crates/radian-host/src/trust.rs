@@ -431,7 +431,11 @@ pub fn describe_resolved(resolved: &Resolved) -> String {
     if matches!(resolved.source, Source::Default) {
         return "trust: no saved decision (untrusted)".to_owned();
     }
-    let state = if resolved.decision.as_bool() { "on" } else { "off" };
+    let state = if resolved.decision.as_bool() {
+        "on"
+    } else {
+        "off"
+    };
     let source = match &resolved.source {
         Source::Cli => "command line".to_owned(),
         Source::Saved(path) => format!("saved for {}", display_dir(path)),
@@ -446,7 +450,10 @@ pub fn describe_resolved(resolved: &Resolved) -> String {
 /// changes disk state only, so loaded resources stay as they are until the next start.
 pub fn write_notice(dir: &Path, write: TrustWrite, written: bool) -> String {
     if !written {
-        return format!("no saved trust decision for {}", display_dir(&canonical(dir)));
+        return format!(
+            "no saved trust decision for {}",
+            display_dir(&canonical(dir))
+        );
     }
     format!(
         "{} {}; takes effect at the next start",
@@ -864,10 +871,7 @@ mod tests {
         assert!(written);
         assert_eq!(resolved.decision, Decision::Trust);
         assert_eq!(resolved.source, Source::Saved(canonical(&dir)));
-        assert_eq!(
-            read_at(&scratch.path()).unwrap()[&canonical(&dir).to_string_lossy().into_owned()],
-            true
-        );
+        assert!(read_at(&scratch.path()).unwrap()[&canonical(&dir).to_string_lossy().into_owned()]);
         assert_eq!(audit.lock().unwrap().len(), 1);
         assert_eq!(audit.lock().unwrap()[0].decision, Decision::Trust);
 
@@ -876,9 +880,8 @@ mod tests {
             apply_write(&scratch.path(), &dir, TrustWrite::Off, &callback).unwrap();
         assert!(written);
         assert_eq!(resolved.decision, Decision::Untrust);
-        assert_eq!(
-            read_at(&scratch.path()).unwrap()[&canonical(&dir).to_string_lossy().into_owned()],
-            false
+        assert!(
+            !read_at(&scratch.path()).unwrap()[&canonical(&dir).to_string_lossy().into_owned()]
         );
         assert_eq!(audit.lock().unwrap().len(), 2);
 
@@ -980,10 +983,7 @@ mod tests {
     #[test]
     fn the_write_notice_names_the_effect_timing() {
         let dir = PathBuf::from("/work/example");
-        for (write, verb) in [
-            (TrustWrite::On, "trusted"),
-            (TrustWrite::Off, "distrusted"),
-        ] {
+        for (write, verb) in [(TrustWrite::On, "trusted"), (TrustWrite::Off, "distrusted")] {
             assert_eq!(
                 write_notice(&dir, write, true),
                 format!("{verb} /work/example; takes effect at the next start")

@@ -9838,7 +9838,11 @@ fn trust_commands_read_and_write_the_record() {
 
     let (code, stdout, stderr) = run_trust(&home, &ws, &["status"]);
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(stdout.trim(), "trust: no saved decision (untrusted)", "{stdout}");
+    assert_eq!(
+        stdout.trim(),
+        "trust: no saved decision (untrusted)",
+        "{stdout}"
+    );
 
     let (code, stdout, stderr) = run_trust(&home, &ws, &["on"]);
     assert_eq!(code, 0, "{stderr}");
@@ -9873,7 +9877,11 @@ fn trust_commands_read_and_write_the_record() {
     );
     let (code, stdout, stderr) = run_trust(&home, &ws, &["status"]);
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(stdout.trim(), "trust: no saved decision (untrusted)", "{stdout}");
+    assert_eq!(
+        stdout.trim(),
+        "trust: no saved decision (untrusted)",
+        "{stdout}"
+    );
 
     // Forgetting again is a no-op that writes nothing and says so.
     let (code, stdout, stderr) = run_trust(&home, &ws, &["forget"]);
@@ -9903,7 +9911,12 @@ fn trust_commands_read_and_write_the_record() {
         .env("HOME", &home)
         .output()
         .expect("run radian exec trust status");
-    assert_eq!(exec.status.code(), Some(0), "{}", String::from_utf8_lossy(&exec.stderr));
+    assert_eq!(
+        exec.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&exec.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&exec.stdout).contains("no saved decision"),
         "{}",

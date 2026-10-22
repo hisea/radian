@@ -304,10 +304,7 @@ fn trust_command(cli: &Cli, command: TrustCommand) -> Result<(), OutputError> {
             return Ok(());
         }
         for (path, decision) in &store {
-            radian_host::write_line(&format!(
-                "{path}: {}",
-                if *decision { "on" } else { "off" }
-            ))?;
+            radian_host::write_line(&format!("{path}: {}", if *decision { "on" } else { "off" }))?;
         }
         return Ok(());
     }
@@ -332,9 +329,8 @@ fn trust_command(cli: &Cli, command: TrustCommand) -> Result<(), OutputError> {
             })?;
             // A management command has no session and no journal: the audit is a no-op.
             let audit = |_: &trust::ProjectTrustChanged| {};
-            let (_, written) =
-                trust::apply_write(&path, &workspace, write, &audit)
-                    .map_err(CommandError::failure)?;
+            let (_, written) = trust::apply_write(&path, &workspace, write, &audit)
+                .map_err(CommandError::failure)?;
             radian_host::write_line(&trust::write_notice(&workspace, write, written))?;
             Ok(())
         }

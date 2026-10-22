@@ -503,8 +503,7 @@ impl LocalSession {
     /// session's own writer (best effort, like [`record_trust`]). Loaded resources never
     /// hot-load or hot-unload: the caller prints the takes-effect line.
     pub fn write_trust(&self, write: trust::TrustWrite) -> Result<(trust::Setup, bool), String> {
-        let path = trust::trust_file()
-            .ok_or("no RADIAN_HOME or HOME to place trust.json under")?;
+        let path = trust::trust_file().ok_or("no RADIAN_HOME or HOME to place trust.json under")?;
         let workspace = self
             .trust
             .lock()
