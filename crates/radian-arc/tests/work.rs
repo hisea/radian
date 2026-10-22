@@ -189,6 +189,11 @@ fn another_tasks_moved_ref_fails_the_owners_next_check_without_a_push() {
         a1.stderr
     );
     assert_eq!(a1.finished()["pushed"], json!(true));
+    assert_eq!(
+        repo.local_branch(b_task).as_deref(),
+        Some(base.as_str()),
+        "A's worker moved B's ref inside the sandbox"
+    );
 
     let mock_b2 = Mock::start(vec![text_reply("nothing")]);
     let b2 = run(
@@ -266,14 +271,20 @@ fn a_child_without_a_result_is_terminated_and_not_pushed() {
     );
 }
 
-/// An outcome other than `completed` never pushes.
+/// An outcome other than `completed` never pushes, even when the worker did commit.
 #[test]
 fn an_outcome_other_than_completed_never_pushes() {
     let repo = Repo::new("budget");
-    let mock = Mock::start(vec![tool_reply("c1", "read", "{}")]);
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo change > change.txt && git add change.txt && git commit -m change",
+        ),
+        tool_reply("c2", "read", "{}"),
+    ]);
     let mut extra = model_args(mock.base_url());
     extra.push("--max-model-calls".to_owned());
-    extra.push("1".to_owned());
+    extra.push("2".to_owned());
     let run = run(
         &repo,
         "0004-budget",
@@ -287,6 +298,10 @@ fn an_outcome_other_than_completed_never_pushes() {
     let finished = run.finished();
     assert_eq!(finished["outcome"], json!("budget_exceeded"));
     assert_eq!(finished["exit_code"], json!(3));
+    assert_ne!(
+        finished["head_sha"], finished["base_sha"],
+        "the worker committed before the budget ran out: {finished}"
+    );
     assert_eq!(finished["pushed"], json!(false));
     assert!(
         finished["failure"]
