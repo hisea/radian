@@ -644,7 +644,7 @@ fn parse_mcp(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
         return Err(wrong_type(path, "mcp", "a table"));
     }
     let origin = format!("{} [mcp]", path.display());
-    match crate::mcp::load_mcp_from_toml(value, &origin) {
+    match crate::mcp::load_mcp_from_toml(value, &origin, path.parent()) {
         Ok(load) => {
             config.mcp = load;
             Ok(())

@@ -4,11 +4,11 @@
 //! Two JSON forms are accepted, and both normalise to the one internal
 //! [`McpServerConfig`]:
 //!
-//! - Radian's own `{"servers": [...]}`: `id`, `command`, `args`, `env`, `inherit_env`,
+//! - Radian's own `{"servers": [...]}`: `id`, `command`, `args`, `cwd`, `env`, `inherit_env`,
 //!   `shared_tools`, `call_timeout_secs`, `shutdown_timeout_secs`. Unknown fields are
 //!   rejected, so a typo cannot silently drop a setting. `inherit_env` defaults to empty.
 //! - The shared `{"mcpServers": {"<name>": {...}}}` object other clients write: the name is
-//!   the server id, `command`/`args`/`env` mean the same, and Radian's own extra keys
+//!   the server id, `command`/`args`/`cwd`/`env` mean the same, and Radian's own extra keys
 //!   (`inherit_env`, `shared_tools`, `call_timeout_secs`, `shutdown_timeout_secs`) are
 //!   accepted in both forms. Foreign keys (`disabled`, `autoApprove`, `timeout`, …) are
 //!   ignored with one warning each entry: this is a foreign format, not a typo. Entries
@@ -19,16 +19,22 @@
 //! with a `type` other than `stdio` (or none), or with a `url`, is skipped with one
 //! warning line; the session does not fail.
 //!
-//! `${VAR}` and `${VAR:-default}` in `command`, `args` and `env` values are expanded at
-//! load time with Claude Code's semantics. An unset variable with no default expands to
+//! `${VAR}` and `${VAR:-default}` in `command`, `args`, `cwd` and `env` values are expanded
+//! at load time with Claude Code's semantics. An unset variable with no default expands to
 //! empty and gives one warning line. A `${VAR:-default}` uses the default when the
 //! variable is unset **or empty** (shell `:-`); a set-but-empty `${VAR}` expands to empty
 //! with no warning.
 //!
+//! `cwd` is optional. A leading `~/` (or `~` alone) expands to the home directory; a
+//! relative path resolves against the directory of the file that declares the entry
+//! (`.mcp.json` → its directory, `config.toml` → its directory, `--mcp-config` → that
+//! file's directory). A path that is not an existing directory skips that one server with
+//! one warning line naming the server and the path; the other servers still load.
+//!
 //! The project `.mcp.json` (`Scope::Project`) blanks [`CREDENTIAL_VARS`] wherever they are
-//! referenced — `command`, `args`, `env` values and `inherit_env` — with one warning per
-//! reference, so a trusted project file cannot carry the user's shell credentials into its
-//! servers. User entries (`Scope::User`) expand as today.
+//! referenced — `command`, `args`, `cwd`, `env` values and `inherit_env` — with one warning
+//! per reference, so a trusted project file cannot carry the user's shell credentials into
+//! its servers. User entries (`Scope::User`) expand as today.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -95,6 +101,9 @@ struct ServerEntry {
     command: String,
     #[serde(default)]
     args: Vec<String>,
+    /// The server's working directory, before expansion and relative resolution.
+    #[serde(default)]
+    cwd: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
@@ -117,6 +126,9 @@ struct ForeignEntry {
     command: Option<String>,
     #[serde(default)]
     args: Vec<String>,
+    /// The server's working directory, before expansion and relative resolution.
+    #[serde(default)]
+    cwd: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
@@ -143,7 +155,12 @@ pub fn load_mcp_config(path: &str) -> Result<McpLoad, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("--mcp-config {path}: {e}"))?;
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("--mcp-config {path}: not valid MCP config JSON: {e}"))?;
-    load_json_value(&parsed, &format!("--mcp-config {path}"), LoadScope::User)
+    load_json_value(
+        &parsed,
+        &format!("--mcp-config {path}"),
+        LoadScope::User,
+        Path::new(path).parent(),
+    )
 }
 
 /// Loads the `[mcp]` section of the user's `config.toml`: the same two forms as
@@ -151,11 +168,16 @@ pub fn load_mcp_config(path: &str) -> Result<McpLoad, String> {
 /// entries). One normaliser: the TOML value is converted to JSON and runs through the
 /// same loader the file uses, so the rules (both/neither is an error, duplicate ids are
 /// refused, remote entries are skipped with a warning, `${VAR}` is expanded) cannot
-/// drift. `origin` names the section in errors (the config path, with ` [mcp]`).
-pub fn load_mcp_from_toml(mcp: &toml::Value, origin: &str) -> Result<McpLoad, String> {
+/// drift. `origin` names the section in errors (the config path, with ` [mcp]`), and
+/// `base_dir` is the directory that file sits in: a relative `cwd` resolves against it.
+pub fn load_mcp_from_toml(
+    mcp: &toml::Value,
+    origin: &str,
+    base_dir: Option<&Path>,
+) -> Result<McpLoad, String> {
     let json = serde_json::to_value(mcp)
         .map_err(|e| format!("{origin}: [mcp] is not valid MCP config: {e}"))?;
-    load_json_value(&json, origin, LoadScope::User)
+    load_json_value(&json, origin, LoadScope::User, base_dir)
 }
 
 /// The project file: `<workspace>/.mcp.json`.
@@ -171,7 +193,7 @@ pub fn load_project_file(path: &Path) -> Result<McpLoad, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{origin}: {e}"))?;
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("{origin}: not valid MCP config JSON: {e}"))?;
-    load_json_value(&parsed, &origin, LoadScope::Project)
+    load_json_value(&parsed, &origin, LoadScope::Project, path.parent())
 }
 
 /// Loads `<workspace>/.mcp.json` for a session that may start its servers (ADR 0031 T1:
@@ -332,7 +354,7 @@ pub fn preview_project(workspace: &Path) -> Option<ProjectPreview> {
     };
     // The structural check: both/neither forms, duplicate ids, a stdio entry without a
     // command. Its message is the preview's error, so the question and the load agree.
-    if let Err(error) = load_json_value(&parsed, &origin, LoadScope::Project) {
+    if let Err(error) = load_json_value(&parsed, &origin, LoadScope::Project, path.parent()) {
         return Some(ProjectPreview {
             entries: Vec::new(),
             error: Some(error),
@@ -496,6 +518,7 @@ fn load_json_value(
     parsed: &serde_json::Value,
     origin: &str,
     scope: LoadScope,
+    base_dir: Option<&Path>,
 ) -> Result<McpLoad, String> {
     let top = parsed
         .as_object()
@@ -520,10 +543,11 @@ fn load_json_value(
                     entry.id
                 ));
             }
-            load.servers.push(build_config(
+            let config = build_config(
                 entry.id,
                 entry.command,
                 entry.args,
+                entry.cwd,
                 entry.env,
                 entry.inherit_env,
                 entry.shared_tools,
@@ -531,7 +555,9 @@ fn load_json_value(
                 entry.shutdown_timeout_secs,
                 &mut load.warnings,
                 scope,
-            ));
+                base_dir,
+            );
+            push_server(&mut load, config);
         }
         return Ok(load);
     }
@@ -548,8 +574,10 @@ fn load_json_value(
                      and must be unique"
                 ));
             }
-            if let Some(config) = build_foreign(origin, name, raw, &mut load.warnings, scope)? {
-                load.servers.push(config);
+            if let Some(config) =
+                build_foreign(origin, name, raw, &mut load.warnings, scope, base_dir)?
+            {
+                push_server(&mut load, config);
             }
         }
         return Ok(load);
@@ -566,6 +594,7 @@ fn build_config(
     id: String,
     command: String,
     args: Vec<String>,
+    cwd: Option<String>,
     env: BTreeMap<String, String>,
     inherit_env: Vec<String>,
     shared_tools: Vec<String>,
@@ -573,6 +602,7 @@ fn build_config(
     shutdown_timeout_secs: Option<u64>,
     warnings: &mut Vec<String>,
     scope: LoadScope,
+    base_dir: Option<&Path>,
 ) -> McpServerConfig {
     let command = expand_env(&command, &id, warnings, scope);
     let args: Vec<String> = args
@@ -583,6 +613,10 @@ fn build_config(
         .into_iter()
         .map(|(key, value)| (key, expand_env(&value, &id, warnings, scope)))
         .collect();
+    let cwd = cwd.map(|raw| {
+        let expanded = expand_env(&raw, &id, warnings, scope);
+        resolve_cwd(&expanded, base_dir)
+    });
     let inherit_env: Vec<String> = inherit_env
         .into_iter()
         .filter(|name| {
@@ -597,6 +631,7 @@ fn build_config(
         })
         .collect();
     let mut config = McpServerConfig::new(id, command);
+    config.cwd = cwd;
     for arg in args {
         config = config.arg(arg);
     }
@@ -622,6 +657,7 @@ fn build_foreign(
     raw: &serde_json::Value,
     warnings: &mut Vec<String>,
     scope: LoadScope,
+    base_dir: Option<&Path>,
 ) -> Result<Option<McpServerConfig>, String> {
     let entry: ForeignEntry = serde_json::from_value(raw.clone())
         .map_err(|e| format!("{origin}: server `{name}` is not a valid entry: {e}"))?;
@@ -650,6 +686,7 @@ fn build_foreign(
         name.to_owned(),
         command,
         entry.args,
+        entry.cwd,
         entry.env,
         inherit_env,
         entry.shared_tools,
@@ -657,6 +694,7 @@ fn build_foreign(
         entry.shutdown_timeout_secs,
         warnings,
         scope,
+        base_dir,
     )))
 }
 
@@ -671,6 +709,57 @@ fn remote_reason(kind: Option<&str>, has_url: bool) -> Option<String> {
         Some(kind) => format!("type `{kind}`"),
         None => "has `url`".to_owned(),
     })
+}
+
+/// Adds one loaded server to `load`, unless its `cwd` is not an existing directory. A
+/// missing directory is a per-server problem, not a load error: the server is skipped with
+/// one warning naming it and the path, and the others still start. A session with no servers
+/// still opens.
+fn push_server(load: &mut McpLoad, config: McpServerConfig) {
+    if let Some(cwd) = &config.cwd
+        && !cwd.is_dir()
+    {
+        let problem = if cwd.exists() {
+            "is not a directory"
+        } else {
+            "does not exist"
+        };
+        load.warnings.push(format!(
+            "server `{}`: cwd `{}` {problem}; skipped",
+            config.id,
+            cwd.display()
+        ));
+        return;
+    }
+    load.servers.push(config);
+}
+
+/// Resolves an expanded `cwd`: `~` and `~/…` name the home directory (left as written when
+/// `HOME` is unusable, like `[skills] extra_paths`), and any other relative path joins
+/// `base_dir`, the directory of the file that declared the entry. An absolute path stands.
+fn resolve_cwd(raw: &str, base_dir: Option<&Path>) -> PathBuf {
+    let (expanded, tilde) = if raw == "~" {
+        (
+            crate::home::user_home().unwrap_or_else(|| PathBuf::from(raw)),
+            true,
+        )
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        (
+            crate::home::user_home()
+                .map(|home| home.join(rest))
+                .unwrap_or_else(|| PathBuf::from(raw)),
+            true,
+        )
+    } else {
+        (PathBuf::from(raw), false)
+    };
+    if expanded.is_absolute() || tilde {
+        expanded
+    } else if let Some(base_dir) = base_dir {
+        base_dir.join(expanded)
+    } else {
+        expanded
+    }
 }
 
 /// Expands `${VAR}` and `${VAR:-default}` with Claude Code's semantics: an unset variable
@@ -1088,13 +1177,175 @@ mod tests {
         assert!(merged.warnings.is_empty());
     }
 
+    /// `cwd` is accepted in both forms and in every source; a relative value resolves
+    /// against the directory of the file that declares it, never against radian's working
+    /// directory. Mutation: resolve against the process cwd → the `--mcp-config` and
+    /// `[mcp]` assertions fail (their files sit outside the process cwd).
+    #[test]
+    fn cwd_resolves_relative_to_the_declaring_file_in_every_form() {
+        let dir = temp_dir("cwd-forms");
+        let config_dir = dir.join("config");
+        let work = config_dir.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+
+        // `--mcp-config`, shared form: the file's own directory.
+        let path = write(
+            &config_dir,
+            "shared.json",
+            r#"{"mcpServers":{"a":{"command":"true","cwd":"work"}}}"#,
+        );
+        let load = load_mcp_config(path.to_str().unwrap()).unwrap();
+        assert!(load.warnings.is_empty(), "{:?}", load.warnings);
+        assert_eq!(load.servers[0].cwd.as_deref(), Some(work.as_path()));
+
+        // `--mcp-config`, Radian's own form: `.` is the file's directory too.
+        let path = write(
+            &dir,
+            "own.json",
+            r#"{"servers":[{"id":"a","command":"true","cwd":"."}]}"#,
+        );
+        let load = load_mcp_config(path.to_str().unwrap()).unwrap();
+        assert_eq!(load.servers[0].cwd.as_deref(), Some(dir.as_path()));
+
+        // The project `.mcp.json` at the project root: `.` is that root.
+        write(
+            &dir,
+            ".mcp.json",
+            r#"{"mcpServers":{"a":{"command":"true","cwd":"."}}}"#,
+        );
+        let load = load_project_file(&dir.join(".mcp.json")).unwrap();
+        assert_eq!(load.servers[0].cwd.as_deref(), Some(dir.as_path()));
+
+        // The `[mcp]` section: the config file's directory.
+        let value: toml::Value =
+            toml::from_str("[[servers]]\nid = \"a\"\ncommand = \"true\"\ncwd = \"work\"\n")
+                .unwrap();
+        let load = load_mcp_from_toml(&value, "test-config [mcp]", Some(&config_dir)).unwrap();
+        assert_eq!(load.servers[0].cwd.as_deref(), Some(work.as_path()));
+
+        // An absolute path stands, whatever the declaring file's directory.
+        let absolute = dir.join("elsewhere");
+        std::fs::create_dir_all(&absolute).unwrap();
+        let path = write(
+            &config_dir,
+            "absolute.json",
+            &format!(
+                r#"{{"mcpServers":{{"a":{{"command":"true","cwd":{:?}}}}}}}"#,
+                absolute.to_str().unwrap()
+            ),
+        );
+        let load = load_mcp_config(path.to_str().unwrap()).unwrap();
+        assert_eq!(load.servers[0].cwd.as_deref(), Some(absolute.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `cwd` takes `${VAR}` / `${VAR:-default}`, a leading `~/`, and the same project-scope
+    /// credential blanking as `command`, `args` and `env`.
+    #[test]
+    fn cwd_expands_env_tilde_and_blanks_project_credentials() {
+        let dir = temp_dir("cwd-expand");
+        let target = dir.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        unsafe {
+            std::env::set_var("RADIAN_MCP_CWD_DIR", target.to_str().unwrap());
+        }
+        let text = r#"{"mcpServers":{"a":{"command":"true",
+            "cwd":"${RADIAN_MCP_CWD_DIR:-fallback}"},
+            "b":{"command":"true","cwd":"${RADIAN_MCP_CWD_NEVER_SET:-${HOME}}"}}}"#;
+        let path = write(&dir, "expand.json", text);
+        let load = load_mcp_config(path.to_str().unwrap()).unwrap();
+        assert_eq!(load.servers[0].cwd.as_deref(), Some(target.as_path()));
+
+        // `~` and `~/…` name the home directory, not the declaring file's directory.
+        if let Some(home) = crate::home::user_home() {
+            let expanded = resolve_cwd("~", Some(&dir));
+            assert_eq!(expanded, home);
+            let expanded = resolve_cwd("~/alpha", Some(&dir));
+            assert_eq!(expanded, home.join("alpha"));
+            // Only a leading `~/` is special: `~user` is an ordinary relative path.
+            let expanded = resolve_cwd("~user/alpha", Some(&dir));
+            assert_eq!(expanded, dir.join("~user/alpha"));
+        }
+
+        // A project entry blanks a credential variable; the empty result resolves to the
+        // declaring file's directory, the same way an unset variable without a default does.
+        let project_dir = temp_dir("cwd-expand-project");
+        write(
+            &project_dir,
+            ".mcp.json",
+            r#"{"mcpServers":{"a":{"command":"true","cwd":"${ANTHROPIC_API_KEY}"}}}"#,
+        );
+        let load = load_project_file(&project_dir.join(".mcp.json")).unwrap();
+        assert_eq!(load.servers[0].cwd.as_deref(), Some(project_dir.as_path()));
+        assert!(
+            load.warnings.iter().any(|warning| {
+                warning.contains("server `a`")
+                    && warning.contains("credential variable `ANTHROPIC_API_KEY`")
+                    && warning.contains("expanding to empty")
+            }),
+            "{:?}",
+            load.warnings
+        );
+        unsafe {
+            std::env::remove_var("RADIAN_MCP_CWD_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    /// A `cwd` that is not an existing directory skips that one server with one warning
+    /// naming the server and the path; the other servers still load, so the session opens.
+    /// Mutation: fail the load → the `servers` assertions fail; drop the check → the
+    /// skipped server would load.
+    #[test]
+    fn a_missing_cwd_skips_one_server_with_one_warning() {
+        let dir = temp_dir("cwd-missing");
+        let not_a_dir = write(&dir, "plain-file", "x");
+        let path = write(
+            &dir,
+            "missing.json",
+            &format!(
+                r#"{{"mcpServers":{{
+                    "missing":{{"command":"true","cwd":"nowhere"}},
+                    "file":{{"command":"true","cwd":{:?}}},
+                    "ok":{{"command":"true","cwd":"."}}}}}}"#,
+                not_a_dir.to_str().unwrap()
+            ),
+        );
+        let load = load_mcp_config(path.to_str().unwrap()).unwrap();
+        let ids: Vec<&str> = load.servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["ok"], "only the existing directory starts");
+        assert_eq!(load.warnings.len(), 2, "{:?}", load.warnings);
+        let missing = load
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("server `missing`"))
+            .expect("the missing directory warns");
+        assert!(
+            missing.contains(&dir.join("nowhere").display().to_string())
+                && missing.contains("does not exist")
+                && missing.contains("skipped"),
+            "{missing:?}"
+        );
+        let file = load
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("server `file`"))
+            .expect("the plain file warns");
+        assert!(
+            file.contains("is not a directory") && file.contains("skipped"),
+            "{file:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `[mcp]` in TOML runs through the same loader as the file: a `mcpServers` table
     /// normalises with the `HOME` default, and both forms at once is an error.
     #[test]
     fn the_toml_section_runs_through_the_same_loader_as_the_file() {
         let value: toml::Value =
             toml::from_str("[mcpServers.files]\ncommand = \"/work/example/mcp-files\"\n").unwrap();
-        let load = load_mcp_from_toml(&value, "test-config [mcp]").unwrap();
+        let load = load_mcp_from_toml(&value, "test-config [mcp]", None).unwrap();
         assert_eq!(load.servers.len(), 1);
         assert_eq!(load.servers[0].id, "files");
         assert_eq!(
@@ -1103,7 +1354,7 @@ mod tests {
         );
         let both: toml::Value =
             toml::from_str("[[servers]]\nid = \"a\"\ncommand = \"true\"\n[mcpServers]\n").unwrap();
-        let error = load_mcp_from_toml(&both, "test-config [mcp]").unwrap_err();
+        let error = load_mcp_from_toml(&both, "test-config [mcp]", None).unwrap_err();
         assert!(error.contains("cannot be combined"), "{error}");
         assert!(error.starts_with("test-config [mcp]:"), "{error}");
     }

@@ -73,6 +73,7 @@ form rejects unknown fields, so a typo cannot silently drop a setting.
 | `id` | own | The server id. Required. It prefixes every tool alias (`notes__search`). |
 | `command` | both | The program to run. Required for a stdio entry. |
 | `args` | both | Arguments, default none. |
+| `cwd` | both | The server's working directory, default unset: Radian's own working directory. A relative path resolves against the file that declares the entry; a missing directory skips that server. See "Working directory". |
 | `env` | both | Variables set for the server, default none. The host environment is not inherited: `env` plus `inherit_env` is all the server sees, except `PATH`, which is always copied through. |
 | `inherit_env` | both | Host variable names copied through by name, for example `HOME`. Defaults to none in Radian's own form and to `["HOME"]` in the shared form. |
 | `shared_tools` | both | MCP tool names (not aliases) that may run in parallel with other calls, default none. |
@@ -83,18 +84,19 @@ Timeouts that the file cannot set keep built-in defaults: 30 seconds to
 spawn and list tools, 2 seconds of grace before a cancelled call kills the
 server. Two more internals stay fixed: a server's `readOnlyHint: true`
 annotation never makes a tool shareable on its own (only `shared_tools`
-names do), and a server starts in the session's working directory (no field
-sets another).
+names do), and a server starts in the session's working directory unless
+`cwd` names another.
 
 ## Environment and secrets
 
-`${VAR}` and `${VAR:-default}` in `command`, `args` and `env` values expand
-at load time. An unset variable with no default expands to empty with one
-warning. `${VAR:-default}` uses the default when the variable is unset or
-empty. A set-but-empty `${VAR}` expands to empty with no warning.
+`${VAR}` and `${VAR:-default}` in `command`, `args`, `cwd` and `env`
+values expand at load time. An unset variable with no default expands to
+empty with one warning. `${VAR:-default}` uses the default when the
+variable is unset or empty. A set-but-empty `${VAR}` expands to empty with
+no warning.
 
 The project `.mcp.json` additionally blanks eleven credential variables
-wherever they are referenced, in `command`, `args`, `env` values and
+wherever they are referenced, in `command`, `args`, `cwd`, `env` values and
 `inherit_env`, with one warning per reference. The blanked names are the
 customary provider keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `OPENCODE_API_KEY`, `OPENCODE_GO_API_KEY`, `DEEPSEEK_API_KEY`,
@@ -102,6 +104,24 @@ customary provider keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `XAI_API_KEY` and `MISTRAL_API_KEY`. A trusted project file still cannot
 carry your shell keys into its servers. Radian's own credentials never live
 in process environment, so they never pass through `inherit_env`.
+
+## Working directory
+
+`cwd` is a string, optional, and unset by default: the server then starts in
+Radian's own working directory, as it always did. When it is set:
+
+- A leading `~/` (or `~` alone) expands to your home directory.
+- A relative path resolves against the directory of the file that declares
+the entry: the project root for `.mcp.json` (the file sits at
+`<workspace>/.mcp.json`), the config file's own directory for `[mcp]`, and
+the `--mcp-config` file's directory.
+- An absolute path stands.
+- A path that is not an existing directory prints one warning naming the
+server and the path, and that server does not start. The other servers
+still start, and the session opens normally.
+
+The server process runs there, outside the sandbox, like any other MCP
+server. The `cwd` does not change the sandbox, the tier, or approval.
 
 ## Where servers come from
 
@@ -149,3 +169,5 @@ says what failed. Work through this list:
 6. Check the environment: with no `inherit_env` the server sees almost
    nothing. Add the names it needs, and expand one `${VAR}` at a time to
    find the empty one (each warns once).
+7. Check `cwd`: a warning names the server and the path when the directory
+   does not exist, and that server alone is skipped.
