@@ -66,7 +66,7 @@ fn the_happy_path_commits_pushes_and_records_the_attempt() {
     ]);
     let run = run(
         &repo,
-        "0001-happy",
+        "TK0001-happy",
         1,
         "tok-happy",
         &[],
@@ -76,7 +76,7 @@ fn the_happy_path_commits_pushes_and_records_the_attempt() {
     assert_eq!(run.code, 0, "{}", run.stderr);
 
     let finished = run.finished();
-    assert_eq!(finished["attempt_id"], json!("0001-happy-1"));
+    assert_eq!(finished["attempt_id"], json!("TK0001-happy-1"));
     assert_eq!(finished["token"], json!("tok-happy"));
     assert_eq!(finished["exit_code"], json!(0));
     assert_eq!(finished["outcome"], json!("completed"));
@@ -88,7 +88,7 @@ fn the_happy_path_commits_pushes_and_records_the_attempt() {
     assert_ne!(head, base, "the model's commit moves HEAD");
     assert_eq!(finished["remote_sha"], json!(head.as_str()));
     assert_eq!(
-        repo.remote_branch("0001-happy").as_deref(),
+        repo.remote_branch("TK0001-happy").as_deref(),
         Some(head.as_str()),
         "origin's work/<task> is head_sha"
     );
@@ -100,42 +100,45 @@ fn the_happy_path_commits_pushes_and_records_the_attempt() {
         "attempt_finished.json",
     ] {
         assert!(
-            repo.run_dir("0001-happy", 1).join(name).exists(),
+            repo.run_dir("TK0001-happy", 1).join(name).exists(),
             "runs/…/{name} exists"
         );
     }
     for name in ["identity.json", "status.json"] {
         assert!(
-            repo.attempt_dir("0001-happy", 1).join(name).exists(),
+            repo.attempt_dir("TK0001-happy", 1).join(name).exists(),
             "attempts/…/{name} exists"
         );
     }
     let identity: Value = serde_json::from_str(
-        &std::fs::read_to_string(repo.attempt_dir("0001-happy", 1).join("identity.json")).unwrap(),
+        &std::fs::read_to_string(repo.attempt_dir("TK0001-happy", 1).join("identity.json"))
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(identity["token"], json!("tok-happy"));
-    assert_eq!(identity["session_id"], json!("0001-happy"));
-    assert_eq!(identity["branch"], json!("work/0001-happy"));
+    assert_eq!(identity["session_id"], json!("TK0001-happy"));
+    assert_eq!(identity["branch"], json!("work/TK0001-happy"));
     assert!(identity["pid"].as_u64().unwrap() > 0);
     assert!(
         identity["process_started_at"].as_str().is_some(),
         "the worker's process start time is recorded"
     );
     let execution: Value = serde_json::from_str(
-        &std::fs::read_to_string(repo.run_dir("0001-happy", 1).join("execution.json")).unwrap(),
+        &std::fs::read_to_string(repo.run_dir("TK0001-happy", 1).join("execution.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(execution["base_sha"], json!(base.as_str()));
     assert_eq!(execution["head_sha"], json!(head.as_str()));
-    assert_eq!(execution["attempt_id"], json!("0001-happy-1"));
+    assert_eq!(execution["attempt_id"], json!("TK0001-happy-1"));
 
-    let result = last_result(&repo.run_dir("0001-happy", 1).join("result.jsonl"));
+    let result = last_result(&repo.run_dir("TK0001-happy", 1).join("result.jsonl"));
     assert_eq!(result["outcome"], json!("completed"));
-    assert_eq!(result["session_id"], json!("0001-happy"));
-    let written =
-        std::fs::read_to_string(repo.run_dir("0001-happy", 1).join("attempt_finished.json"))
-            .unwrap();
+    assert_eq!(result["session_id"], json!("TK0001-happy"));
+    let written = std::fs::read_to_string(
+        repo.run_dir("TK0001-happy", 1)
+            .join("attempt_finished.json"),
+    )
+    .unwrap();
     assert_eq!(
         written.trim(),
         run.stdout.trim(),
@@ -151,7 +154,7 @@ fn the_happy_path_commits_pushes_and_records_the_attempt() {
 fn another_tasks_moved_ref_fails_the_owners_next_attempt_at_start() {
     let repo = Repo::new("cross-ref");
     let base = repo.main_sha();
-    let b_task = "0002-b";
+    let b_task = "TK0002-b";
     let mock_b1 = Mock::start(vec![
         shell_reply("c1", "echo b > b.txt && git add b.txt && git commit -m b"),
         text_reply("done"),
@@ -178,7 +181,7 @@ fn another_tasks_moved_ref_fails_the_owners_next_attempt_at_start() {
     let mock_a = Mock::start(vec![shell_reply("c1", &command), text_reply("done")]);
     let a1 = run(
         &repo,
-        "0001-a",
+        "TK0001-a",
         1,
         "tok-a1",
         &[],
@@ -240,7 +243,7 @@ fn another_tasks_moved_ref_fails_the_owners_next_attempt_at_start() {
 #[test]
 fn a_moved_ref_is_refused_before_the_next_attempt_runs() {
     let repo = Repo::new("moved-ref");
-    let task = "0013-moved";
+    let task = "TK0013-moved";
     let branch = format!("work/{task}");
     let mock_b1 = Mock::start(vec![
         shell_reply("c1", "echo b > b.txt && git add b.txt && git commit -m b"),
@@ -329,7 +332,7 @@ fn a_child_without_a_result_is_terminated_and_not_pushed() {
     let repo = Repo::new("terminated");
     let mock = Mock::start(vec![shell_reply("c1", "sleep 5"), text_reply("done")]);
     let args = work_args(
-        "0003-kill",
+        "TK0003-kill",
         1,
         "tok-kill",
         &[],
@@ -340,7 +343,7 @@ fn a_child_without_a_result_is_terminated_and_not_pushed() {
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
             repo.work(&refs, "kill me")
         });
-        let pid = wait_for_pid(&repo.attempt_dir("0003-kill", 1).join("identity.json"));
+        let pid = wait_for_pid(&repo.attempt_dir("TK0003-kill", 1).join("identity.json"));
         let killed = std::process::Command::new("kill")
             .args(["-9", &pid.to_string()])
             .status()
@@ -361,9 +364,9 @@ fn a_child_without_a_result_is_terminated_and_not_pushed() {
             .contains("outcome terminated")
     );
     assert_eq!(run.code, 137);
-    assert_eq!(repo.remote_branch("0003-kill"), None);
+    assert_eq!(repo.remote_branch("TK0003-kill"), None);
     let result =
-        std::fs::read_to_string(repo.run_dir("0003-kill", 1).join("result.jsonl")).unwrap();
+        std::fs::read_to_string(repo.run_dir("TK0003-kill", 1).join("result.jsonl")).unwrap();
     assert!(
         !result.contains("\"type\":\"Result\""),
         "the killed child wrote no Result: {result}"
@@ -386,7 +389,7 @@ fn an_outcome_other_than_completed_never_pushes() {
     extra.push("2".to_owned());
     let run = run(
         &repo,
-        "0004-budget",
+        "TK0004-budget",
         1,
         "tok-budget",
         &[],
@@ -408,7 +411,7 @@ fn an_outcome_other_than_completed_never_pushes() {
             .unwrap()
             .contains("outcome budget_exceeded")
     );
-    assert_eq!(repo.remote_branch("0004-budget"), None);
+    assert_eq!(repo.remote_branch("TK0004-budget"), None);
 }
 
 /// An uncommitted file fails the attempt with the dirty list, and nothing is pushed.
@@ -421,7 +424,7 @@ fn a_dirty_tree_fails_with_its_reason() {
     ]);
     let run = run(
         &repo,
-        "0005-dirty",
+        "TK0005-dirty",
         1,
         "tok-dirty",
         &[],
@@ -447,7 +450,7 @@ fn a_dirty_tree_fails_with_its_reason() {
             .any(|path| path == "dirty.txt"),
         "{finished}"
     );
-    assert_eq!(repo.remote_branch("0005-dirty"), None);
+    assert_eq!(repo.remote_branch("TK0005-dirty"), None);
 }
 
 /// A branch with no commit past the base fails the delivery check unless the brief allows a
@@ -458,7 +461,7 @@ fn no_change_fails_with_its_reason() {
     let mock = Mock::start(vec![text_reply("nothing")]);
     let run = run(
         &repo,
-        "0006-noop",
+        "TK0006-noop",
         1,
         "tok-noop",
         &[],
@@ -473,7 +476,7 @@ fn no_change_fails_with_its_reason() {
         "{finished}"
     );
     assert_eq!(finished["head_sha"], finished["base_sha"]);
-    assert_eq!(repo.remote_branch("0006-noop"), None);
+    assert_eq!(repo.remote_branch("TK0006-noop"), None);
 }
 
 /// `--allow-noop` lets the same unchanged branch through: the checks pass and the ref is
@@ -484,7 +487,7 @@ fn allow_noop_pushes_an_unchanged_branch() {
     let mock = Mock::start(vec![text_reply("nothing")]);
     let run = run(
         &repo,
-        "0007-allow-noop",
+        "TK0007-allow-noop",
         1,
         "tok-allow",
         &["--allow-noop"],
@@ -496,7 +499,7 @@ fn allow_noop_pushes_an_unchanged_branch() {
     assert_eq!(finished["pushed"], json!(true));
     assert_eq!(finished["head_sha"], finished["base_sha"]);
     assert_eq!(
-        repo.remote_branch("0007-allow-noop").as_deref(),
+        repo.remote_branch("TK0007-allow-noop").as_deref(),
         finished["head_sha"].as_str()
     );
 }
@@ -516,7 +519,7 @@ fn a_change_under_the_arc_directory_fails_with_its_reason() {
     ]);
     let run = run(
         &repo,
-        "0008-arc-path",
+        "TK0008-arc-path",
         1,
         "tok-arc",
         &[],
@@ -533,7 +536,7 @@ fn a_change_under_the_arc_directory_fails_with_its_reason() {
             .contains("files under .radian/arc/"),
         "{finished}"
     );
-    assert_eq!(repo.remote_branch("0008-arc-path"), None);
+    assert_eq!(repo.remote_branch("TK0008-arc-path"), None);
 }
 
 /// A `core.hooksPath` in the repository points at hooks that write markers. The wrapper's
@@ -551,7 +554,7 @@ fn the_wrappers_git_commands_run_no_repository_hooks() {
     ]);
     let run = run(
         &repo,
-        "0009-hooks",
+        "TK0009-hooks",
         1,
         "tok-hooks",
         &[],
@@ -575,7 +578,7 @@ fn the_wrappers_git_commands_run_no_repository_hooks() {
 #[test]
 fn resume_on_the_second_attempt_continues_the_same_session() {
     let repo = Repo::new("resume");
-    let task = "0010-resume";
+    let task = "TK0010-resume";
     let mock1 = Mock::start(vec![
         shell_reply(
             "c1",
@@ -633,7 +636,7 @@ fn resume_on_the_second_attempt_continues_the_same_session() {
 #[test]
 fn a_later_attempt_starts_the_session_when_no_earlier_attempt_created_it() {
     let repo = Repo::new("resume-none");
-    let task = "0011-resume-none";
+    let task = "TK0011-resume-none";
     let first = run(
         &repo,
         task,
@@ -682,7 +685,7 @@ fn a_later_attempt_starts_the_session_when_no_earlier_attempt_created_it() {
 #[test]
 fn a_second_wrapper_for_the_same_task_fails_on_the_flock() {
     let repo = Repo::new("flock");
-    let task = "0011-flock";
+    let task = "TK0011-flock";
     let mock1 = Mock::start(vec![
         shell_reply(
             "c1",
@@ -727,7 +730,7 @@ fn a_second_wrapper_for_the_same_task_fails_on_the_flock() {
 #[test]
 fn a_sigterm_is_forwarded_and_the_wrapper_still_writes_its_record() {
     let repo = Repo::new("sigterm");
-    let task = "0016-sigterm";
+    let task = "TK0016-sigterm";
     let mock = Mock::start(vec![Reply::SseThenHang { pieces: Vec::new() }]);
     let args = work_args(task, 1, "tok-term", &[], &model_args(mock.base_url()));
     let run = std::thread::scope(|scope| {
@@ -775,7 +778,7 @@ fn a_sigterm_is_forwarded_and_the_wrapper_still_writes_its_record() {
 #[test]
 fn the_worker_cannot_read_the_arc_files_outside_its_worktree() {
     let repo = Repo::new("deny");
-    let task = "0012-deny";
+    let task = "TK0012-deny";
     let secret = repo.arc().join("runs").join("secret.txt");
     std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
     std::fs::write(&secret, "TOPSECRET-ARC-WORK").unwrap();
@@ -828,7 +831,7 @@ fn the_worker_cannot_read_the_arc_files_outside_its_worktree() {
 #[test]
 fn a_worker_that_resets_behind_the_start_is_not_pushed() {
     let repo = Repo::new("reset");
-    let task = "0014-reset";
+    let task = "TK0014-reset";
     let mock1 = Mock::start(vec![
         shell_reply(
             "c1",
@@ -917,7 +920,7 @@ fn the_wrapper_fetches_and_pushes_the_configured_remote_and_main_branch() {
     ]);
     let run = run(
         &repo,
-        "0015-upstream",
+        "TK0015-upstream",
         1,
         "tok-upstream",
         &[],
@@ -935,7 +938,7 @@ fn the_wrapper_fetches_and_pushes_the_configured_remote_and_main_branch() {
     let head = finished["head_sha"].as_str().unwrap().to_owned();
     assert_eq!(finished["remote_sha"], json!(head.as_str()));
     assert_eq!(
-        repo.remote_branch("0015-upstream").as_deref(),
+        repo.remote_branch("TK0015-upstream").as_deref(),
         Some(head.as_str()),
         "the push goes to the configured remote"
     );
@@ -969,7 +972,7 @@ fn init_and_an_attempt_leave_the_main_checkout_clean() {
     ]);
     let run = run(
         &repo,
-        "0001-clean",
+        "TK0001-clean",
         1,
         "tok-clean",
         &[],
@@ -987,14 +990,14 @@ fn init_and_an_attempt_leave_the_main_checkout_clean() {
         assert!(
             repo.arc()
                 .join("attempts")
-                .join("0001-clean")
+                .join("TK0001-clean")
                 .join(name)
                 .is_file(),
-            "attempts/0001-clean/{name} exists under the excluded attempts/ line"
+            "attempts/TK0001-clean/{name} exists under the excluded attempts/ line"
         );
     }
     assert!(
-        repo.arc().join("worktrees").join("0001-clean").is_dir(),
+        repo.arc().join("worktrees").join("TK0001-clean").is_dir(),
         "the worktree lives under the excluded worktrees/ line"
     );
 }

@@ -62,7 +62,7 @@ pub const TOOLS: &[ToolDef] = &[
   "properties": {
     "slug": {
       "type": "string",
-      "description": "The slug after the plan's number: 1 to 48 characters from a-z, 0-9 and -, with no leading or trailing -."
+      "description": "The slug after the plan's id prefix and four-digit number: 1 to 48 characters from a-z, 0-9 and -, with no leading or trailing -."
     },
     "title": {
       "type": "string",
@@ -89,7 +89,7 @@ pub const TOOLS: &[ToolDef] = &[
     },
     "slug": {
       "type": "string",
-      "description": "The slug after the task's number: 1 to 48 characters from a-z, 0-9 and -, with no leading or trailing -."
+      "description": "The slug after the task's id prefix and four-digit number: 1 to 48 characters from a-z, 0-9 and -, with no leading or trailing -."
     },
     "title": {
       "type": "string",
@@ -189,7 +189,7 @@ pub const TOOLS: &[ToolDef] = &[
   "properties": {
     "id": {
       "type": "string",
-      "description": "The plan or task id. An id that names both a plan and a task is refused."
+      "description": "The plan or task id: a 1 to 4 letter prefix, four digits, a dash and a slug. An id that names both a plan and a task is refused."
     }
   },
   "required": ["id"],

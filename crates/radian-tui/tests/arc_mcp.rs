@@ -267,7 +267,7 @@ async fn add_plan_add_task_and_list_work() {
             json!({"slug": "first", "title": "A plan", "request": "the request"}),
         )
         .await;
-    assert_eq!(plan["id"], "0001-first");
+    assert_eq!(plan["id"], "PL0001-first");
 
     let task = session
         .ok(
@@ -282,7 +282,7 @@ async fn add_plan_add_task_and_list_work() {
             }),
         )
         .await;
-    assert_eq!(task["id"], "0002-work");
+    assert_eq!(task["id"], "TK0001-work");
 
     // The optional arguments may be left out.
     let second = session
@@ -296,7 +296,7 @@ async fn add_plan_add_task_and_list_work() {
             }),
         )
         .await;
-    assert_eq!(second["id"], "0003-more");
+    assert_eq!(second["id"], "TK0002-more");
 
     let list = session.ok("list", json!({})).await;
     assert_eq!(list[0]["id"], plan["id"]);
@@ -326,7 +326,7 @@ async fn add_plan_add_task_and_list_work() {
         .error("add_task", json!({"plan": plan["id"], "slug": "x"}))
         .await;
     assert!(error.contains("title"), "{error}");
-    let error = session.error("show", json!({"id": "0099-missing"})).await;
+    let error = session.error("show", json!({"id": "TK0099-missing"})).await;
     assert!(error.contains("no plan or task"), "{error}");
     session.close().await;
 }

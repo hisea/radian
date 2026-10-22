@@ -70,7 +70,7 @@ fn app_with(workspace: &Path, text: &str) -> App {
 fn arc_worktrees_are_not_offered_but_the_rest_of_dot_radian_is() {
     let dir = TempDir::new("arc-worktrees");
     dir.write(".radian/arc/worktrees/t1/notes.txt", "x");
-    dir.write(".radian/arc/plans/0001-a.md", "x");
+    dir.write(".radian/arc/plans/PL0001-a.md", "x");
     let text = "@.radian/arc/";
     let completion =
         radian_tui::mention::complete(text, text.chars().count(), dir.path()).expect("a reference");
@@ -81,7 +81,7 @@ fn arc_worktrees_are_not_offered_but_the_rest_of_dot_radian_is() {
 fn arc_gates_are_not_offered_but_the_rest_of_dot_radian_is() {
     let dir = TempDir::new("arc-gates");
     dir.write(".radian/arc/gates/commands/notes.txt", "x");
-    dir.write(".radian/arc/plans/0001-a.md", "x");
+    dir.write(".radian/arc/plans/PL0001-a.md", "x");
     let text = "@.radian/arc/";
     let completion =
         radian_tui::mention::complete(text, text.chars().count(), dir.path()).expect("a reference");

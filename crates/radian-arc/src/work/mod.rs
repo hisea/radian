@@ -1034,12 +1034,15 @@ mod tests {
         fs::create_dir_all(&dir).expect("session dir");
         let path = dir.to_str().expect("utf-8 path");
         let args = strings(&["--model", "m", "--session-dir", path]);
-        assert!(!session_exists("0001-task", &args), "no file yet");
-        fs::write(dir.join("0001-task.jsonl"), "").expect("write session");
-        assert!(session_exists("0001-task", &args));
-        assert!(!session_exists("0002-other", &args), "another task's file");
+        assert!(!session_exists("TK0001-task", &args), "no file yet");
+        fs::write(dir.join("TK0001-task.jsonl"), "").expect("write session");
+        assert!(session_exists("TK0001-task", &args));
+        assert!(
+            !session_exists("TK0002-other", &args),
+            "another task's file"
+        );
         let equals = strings(&[&format!("--session-dir={path}")]);
-        assert!(session_exists("0001-task", &equals));
+        assert!(session_exists("TK0001-task", &equals));
         let _ = fs::remove_dir_all(&dir);
     }
 

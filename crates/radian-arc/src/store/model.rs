@@ -44,6 +44,9 @@ pub const TASK_PHASES: &[(&str, &[&str])] = &[
 /// The longest slug, in characters.
 pub const SLUG_MAX_CHARS: usize = 48;
 
+/// The longest id prefix, in characters.
+pub const PREFIX_MAX_CHARS: usize = 4;
+
 /// A slug: 1 to 48 characters from `[a-z0-9-]`, with no leading or trailing `-`.
 pub fn valid_slug(slug: &str) -> bool {
     let count = slug.chars().count();
@@ -55,30 +58,52 @@ pub fn valid_slug(slug: &str) -> bool {
         && !slug.ends_with('-')
 }
 
-/// A stored id: a four-digit number, `-`, and a valid slug. Also the check that refuses an
-/// id that would leave `plans/` or `tasks/`.
-pub fn valid_id(id: &str) -> bool {
-    match id.split_once('-') {
-        Some((number, slug)) => {
-            number.len() == 4
-                && number.chars().all(|c| c.is_ascii_digit())
-                && number != "0000"
-                && valid_slug(slug)
-        }
-        None => false,
+/// A prefix for a plan or task id: 1 to 4 ASCII uppercase letters.
+pub fn valid_prefix(prefix: &str) -> bool {
+    let count = prefix.chars().count();
+    (1..=PREFIX_MAX_CHARS).contains(&count) && prefix.chars().all(|c| c.is_ascii_uppercase())
+}
+
+/// The parts of a stored id: the prefix, the four-digit number and the slug. Also the check
+/// that refuses an id that would leave `plans/` or `tasks/`.
+pub fn split_id(id: &str) -> Option<(&str, u32, &str)> {
+    let (head, slug) = id.split_once('-')?;
+    let bytes = head.as_bytes();
+    if !(5..=PREFIX_MAX_CHARS + 4).contains(&bytes.len()) {
+        return None;
     }
+    let (prefix, number) = bytes.split_at(bytes.len() - 4);
+    let prefix = std::str::from_utf8(prefix).ok()?;
+    let number = std::str::from_utf8(number).ok()?;
+    if !valid_prefix(prefix)
+        || !number.chars().all(|c| c.is_ascii_digit())
+        || number == "0000"
+        || !valid_slug(slug)
+    {
+        return None;
+    }
+    Some((prefix, number.parse().ok()?, slug))
 }
 
-/// The id for `number` and `slug`. Numbers are never padded past four digits: a fifth
-/// digit is refused before this is called.
-pub fn format_id(number: u32, slug: &str) -> String {
-    format!("{number:04}-{slug}")
+/// A stored id: a 1-to-4-letter prefix, a four-digit number, `-`, and a valid slug.
+pub fn valid_id(id: &str) -> bool {
+    split_id(id).is_some()
 }
 
-/// The number an id starts with.
+/// The id for `prefix`, `number` and `slug`. Numbers are never padded past four digits: a
+/// fifth digit is refused before this is called.
+pub fn format_id(prefix: &str, number: u32, slug: &str) -> String {
+    format!("{prefix}{number:04}-{slug}")
+}
+
+/// The number an id carries.
 pub fn id_number(id: &str) -> Option<u32> {
-    id.split_once('-')
-        .and_then(|(number, _)| number.parse().ok())
+    split_id(id).map(|(_, number, _)| number)
+}
+
+/// The prefix an id carries.
+pub fn id_prefix(id: &str) -> Option<&str> {
+    split_id(id).map(|(prefix, _, _)| prefix)
 }
 
 /// A task's state, as a value rather than a string (the file keeps the string).
@@ -200,7 +225,9 @@ impl PlanFile {
         }
         let id = fields.required_string("id")?;
         if !valid_id(&id) {
-            return Err(format!("`id` `{id}` is not a four-digit number and a slug"));
+            return Err(format!(
+                "`id` `{id}` is not a prefix, a four-digit number and a slug"
+            ));
         }
         let title = fields.required_string("title")?;
         let status = fields.required_string("status")?;
@@ -395,12 +422,14 @@ impl TaskFile {
         }
         let id = fields.required_string("id")?;
         if !valid_id(&id) {
-            return Err(format!("`id` `{id}` is not a four-digit number and a slug"));
+            return Err(format!(
+                "`id` `{id}` is not a prefix, a four-digit number and a slug"
+            ));
         }
         let plan = fields.required_string("plan")?;
         if !valid_id(&plan) {
             return Err(format!(
-                "`plan` `{plan}` is not a four-digit number and a slug"
+                "`plan` `{plan}` is not a prefix, a four-digit number and a slug"
             ));
         }
         let title = fields.required_string("title")?;
@@ -627,13 +656,13 @@ mod tests {
     fn sample_plan() -> PlanFile {
         PlanFile {
             schema_version: SCHEMA_VERSION,
-            id: "0001-first".to_owned(),
+            id: "PL0001-first".to_owned(),
             title: "First: a plan".to_owned(),
             status: "draft".to_owned(),
             auto: "off".to_owned(),
             max_cost_usd: Some(5.0),
             max_wall_time_secs: Some(7200),
-            tasks: vec!["0001-one".to_owned(), "0002-two".to_owned()],
+            tasks: vec!["TK0001-one".to_owned(), "TK0002-two".to_owned()],
             body: plan_body("do the thing"),
         }
     }
@@ -641,15 +670,15 @@ mod tests {
     fn sample_task() -> TaskFile {
         TaskFile {
             schema_version: SCHEMA_VERSION,
-            id: "0002-two".to_owned(),
-            plan: "0001-first".to_owned(),
+            id: "TK0002-two".to_owned(),
+            plan: "PL0001-first".to_owned(),
             title: "Second task".to_owned(),
             state: TaskState::Review,
             phase: "awaiting_human".to_owned(),
-            after: vec!["0001-one".to_owned()],
-            supersedes: Some("0009-old".to_owned()),
+            after: vec!["TK0001-one".to_owned()],
+            supersedes: Some("TK0009-old".to_owned()),
             attempt: 2,
-            attempt_id: Some("0002-two-2".to_owned()),
+            attempt_id: Some("TK0002-two-2".to_owned()),
             token: Some("a-token".to_owned()),
             cost_usd: Some(1.25),
             auto_rework: 2,
@@ -684,12 +713,12 @@ mod tests {
 
     #[test]
     fn a_new_plan_and_task_are_draft_and_ready() {
-        let plan = PlanFile::new("0001-a".into(), "A".into(), "the request\n");
+        let plan = PlanFile::new("PL0001-a".into(), "A".into(), "the request\n");
         assert!(plan.to_text().contains("status: draft\nauto: off\n"));
         assert!(plan.body.ends_with("## Change records\n"));
         let task = TaskFile::new(
-            "0001-a".into(),
-            "0001-a".into(),
+            "TK0001-a".into(),
+            "PL0001-a".into(),
             "A".into(),
             Vec::new(),
             false,
@@ -741,13 +770,27 @@ mod tests {
         assert!(!valid_slug("a-"));
         assert!(!valid_slug("A"));
         assert!(!valid_slug("a_b"));
-        assert!(valid_id("0001-a"));
-        assert!(!valid_id("1-a"));
-        assert!(!valid_id("0000-a"), "numbers start at 1");
-        assert!(!valid_id("0001-"));
-        assert!(!valid_id("../0001-a"));
-        assert_eq!(format_id(1, "a"), "0001-a");
-        assert_eq!(id_number("0042-a-b"), Some(42));
+        assert!(valid_id("PL0001-a"));
+        assert!(valid_id("TK0001-a"));
+        assert!(valid_id("ABCD9999-a-b"));
+        assert!(!valid_id("0001-a"), "an id without a prefix");
+        assert!(!valid_id("pl0001-a"), "a lowercase prefix");
+        assert!(!valid_id("TOOLONG0001-a"), "a five-letter prefix");
+        assert!(!valid_id("PL1-a"), "a number shorter than four digits");
+        assert!(!valid_id("PL0000-a"), "numbers start at 1");
+        assert!(!valid_id("PL0001-"));
+        assert!(!valid_id("../PL0002-a"));
+        assert!(valid_prefix("P"));
+        assert!(valid_prefix("ABCD"));
+        assert!(!valid_prefix(""));
+        assert!(!valid_prefix("ABCDE"));
+        assert!(!valid_prefix("Pl"));
+        assert!(!valid_prefix("P1"));
+        assert_eq!(format_id("PL", 1, "a"), "PL0001-a");
+        assert_eq!(format_id("T", 42, "a-b"), "T0042-a-b");
+        assert_eq!(id_number("TK0042-a-b"), Some(42));
+        assert_eq!(id_prefix("TK0042-a-b"), Some("TK"));
+        assert_eq!(id_number("0042-a"), None);
     }
 
     #[test]

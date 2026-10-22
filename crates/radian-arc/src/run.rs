@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn a_summary_after_a_transition_holds_only_the_summary() {
         let report = Report {
-            transitions: vec!["0001-work-1 completed -> review.verifying".to_owned()],
+            transitions: vec!["TK0001-work-1 completed -> review.verifying".to_owned()],
             waiting: vec!["nothing waits".to_owned()],
             notes: Vec::new(),
         };

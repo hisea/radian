@@ -253,49 +253,124 @@ fn a_slug_outside_the_rules_is_a_usage_error() {
 }
 
 #[test]
-fn the_number_is_the_next_free_one_over_both_kinds() {
+fn the_number_is_the_next_free_one_of_that_kind() {
     let scratch = fixture("numbers");
     let store = initialized(&scratch);
     let first = store.add_plan("a", "A", "request").unwrap();
     let second = store.add_plan("b", "B", "request").unwrap();
-    assert_eq!(first, "0001-a");
-    assert_eq!(second, "0002-b");
+    assert_eq!(first, "PL0001-a");
+    assert_eq!(second, "PL0002-b");
     let task = store
         .add_task(&first, "t", "T", Vec::new(), false, Vec::new(), "brief")
         .unwrap();
     assert_eq!(
-        task, "0003-t",
-        "a task takes the next number above every plan"
+        task, "TK0001-t",
+        "a task counts in its own sequence, not above the plans"
     );
     // A plan file removed by hand frees its number only if the ledger entry is gone too.
-    fs::remove_file(scratch.repo().join(".radian/arc/plans/0002-b.md")).unwrap();
+    fs::remove_file(scratch.repo().join(".radian/arc/plans/PL0002-b.md")).unwrap();
     let third = store.add_plan("c", "C", "request").unwrap();
     assert_eq!(
-        third, "0004-c",
-        "the ledger keeps 0002 and the task keeps 0003 reserved"
+        third, "PL0003-c",
+        "the ledger keeps PL0002 reserved; the task's TK0001 does not count"
     );
 }
 
-/// The defect the shared sequence fixes: a plan `0001-x` and a task with the same slug used
-/// to get the same id, and every command that takes either could not reach the task.
+/// Plans and tasks count in separate sequences, so the same number and slug occur once in
+/// each kind and the prefix tells them apart.
 #[test]
-fn plans_and_tasks_share_one_number_sequence() {
-    let scratch = fixture("shared-numbers");
+fn plans_and_tasks_count_in_separate_sequences() {
+    let scratch = fixture("separate-numbers");
     let store = initialized(&scratch);
     let plan = store.add_plan("x", "X", "request").unwrap();
-    assert_eq!(plan, "0001-x");
+    assert_eq!(plan, "PL0001-x");
     let task = store
         .add_task(&plan, "x", "T", Vec::new(), false, Vec::new(), "brief")
         .unwrap();
-    assert_eq!(
-        task, "0002-x",
-        "the task takes the next number above the plan"
-    );
+    assert_eq!(task, "TK0001-x", "the first task is TK0001");
     let second = store.add_plan("x", "X", "request").unwrap();
     assert_eq!(
-        second, "0003-x",
-        "the next plan takes the number above the task"
+        second, "PL0002-x",
+        "the next plan continues the plan sequence"
     );
+}
+
+/// A custom `[ids]` section gives the new ids its prefixes.
+#[test]
+fn the_configured_prefixes_name_new_ids() {
+    let scratch = fixture("custom-prefixes");
+    let store = initialized(&scratch);
+    let config_path = scratch.repo().join(".radian/arc/config.toml");
+    let text = read(&config_path)
+        .replace("plan_prefix = \"PL\"", "plan_prefix = \"P\"")
+        .replace("task_prefix = \"TK\"", "task_prefix = \"T\"");
+    fs::write(&config_path, text).unwrap();
+    let plan = store.add_plan("x", "X", "request").unwrap();
+    assert_eq!(plan, "P0001-x");
+    let task = store
+        .add_task(&plan, "y", "Y", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    assert_eq!(task, "T0001-y");
+}
+
+/// An item made under an earlier prefix is still read and adopted, and the next number of
+/// its kind continues above it.
+#[test]
+fn an_old_prefix_still_works_and_its_number_still_counts() {
+    let scratch = fixture("old-prefix");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("x", "X", "request").unwrap();
+    let task = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    let config_path = scratch.repo().join(".radian/arc/config.toml");
+    let text = read(&config_path)
+        .replace("plan_prefix = \"PL\"", "plan_prefix = \"Q\"")
+        .replace("task_prefix = \"TK\"", "task_prefix = \"T\"");
+    fs::write(&config_path, text).unwrap();
+
+    // The old plan and task still show, and a hand edit to the plan is adoptable under its
+    // old id.
+    assert!(matches!(
+        store.show(&plan).expect("an old-prefix plan still reads"),
+        store::Item::Plan(_)
+    ));
+    assert!(matches!(
+        store.show(&task).expect("an old-prefix task still reads"),
+        store::Item::Task(_)
+    ));
+    let path = scratch
+        .repo()
+        .join(".radian/arc/plans")
+        .join(format!("{plan}.md"));
+    fs::write(&path, read(&path).replace("request", "a better request")).unwrap();
+    store.adopt(&plan).expect("the old id is adopted");
+
+    // Q0001 is taken by the old plan: the next plan is Q0002, not Q0001. The same for the
+    // task: T0001 is taken, so the next task is T0002.
+    let next_plan = store.add_plan("y", "Y", "request").unwrap();
+    assert_eq!(next_plan, "Q0002-y");
+    let next_task = store
+        .add_task(&plan, "y", "Y", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    assert_eq!(next_task, "T0002-y");
+}
+
+/// An id without a prefix is malformed: exit 2, and nothing is read or written.
+#[test]
+fn an_id_without_a_prefix_is_a_usage_error() {
+    let scratch = fixture("no-prefix");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("x", "X", "request").unwrap();
+    for id in ["0001-x", "0001", "-/x"] {
+        let error = store.show(id).expect_err("a malformed id is refused");
+        assert_eq!(error.exit(), Exit::Usage, "{id}: {}", error.message());
+    }
+    let error = store
+        .add_task("0001-x", "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .expect_err("a malformed plan id is refused");
+    assert_eq!(error.exit(), Exit::Usage);
+    assert!(store.show(&plan).is_ok());
 }
 
 /// An id a person made name both a plan and a task: every command that takes either refuses
@@ -305,7 +380,7 @@ fn an_id_that_names_both_a_plan_and_a_task_is_refused() {
     let scratch = fixture("ambiguous-id");
     let store = initialized(&scratch);
     let id = store.add_plan("x", "X", "request").unwrap();
-    assert_eq!(id, "0001-x");
+    assert_eq!(id, "PL0001-x");
     // A person writes a task file with the plan's id.
     let task = TaskFile::new(
         id.clone(),
@@ -379,7 +454,7 @@ fn concurrent_writers_never_take_the_same_number() {
         .collect();
     assert_eq!(
         numbers,
-        vec!["0001", "0002", "0003", "0004"],
+        vec!["PL0001", "PL0002", "PL0003", "PL0004"],
         "the numbers are sequential"
     );
     let store = Store::at(scratch.repo());
@@ -604,7 +679,7 @@ fn after_may_name_a_task_of_the_plan_or_a_done_task() {
             &plan,
             "z",
             "Z",
-            vec!["0042-missing".into()],
+            vec!["TK0042-missing".into()],
             false,
             Vec::new(),
             "brief",

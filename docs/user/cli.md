@@ -146,11 +146,11 @@ See [`arc`](arc.md) for every subcommand, flag, file field, and exit code.
 radian arc init
 radian arc add plan --slug first --title "First plan" < request.txt
 radian arc list --json
-radian arc confirm 0001-first
-radian arc auto 0001-first run
-radian arc start 0001-first-work
-radian arc cancel 0001-first-work
-radian arc reset-budget 0001-first-work
+radian arc confirm PL0001-first
+radian arc auto PL0001-first run
+radian arc start TK0001-first-work
+radian arc cancel TK0001-first-work
+radian arc reset-budget TK0001-first-work
 ```
 
 ## `radian login` and `radian logout`

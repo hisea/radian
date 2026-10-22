@@ -279,7 +279,7 @@ mod tests {
             .required_string("slug")
             .expect_err("a number is not a string");
         assert!(error.contains("`slug`"), "{error}");
-        let mut args = args_of(json!({"after": "0001-a"}));
+        let mut args = args_of(json!({"after": "TK0001-a"}));
         assert!(args.optional_strings("after").is_err());
         let mut args = args_of(json!({"allow_noop": "yes"}));
         assert!(args.optional_bool("allow_noop").is_err());
@@ -290,7 +290,7 @@ mod tests {
         let mut args = args_of(json!({}));
         let error = args.required_string("plan").expect_err("plan is required");
         assert!(error.contains("required"), "{error}");
-        let args = args_of(json!({"plan": "0001-a", "nope": true}));
+        let args = args_of(json!({"plan": "PL0001-a", "nope": true}));
         let error = args.finish().expect_err("nope is not an argument");
         assert!(error.contains("nope"), "{error}");
         assert_eq!(args_of(json!({})).finish(), Ok(()));

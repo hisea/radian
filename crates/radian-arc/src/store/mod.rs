@@ -167,6 +167,14 @@ impl Kind {
             Kind::Task => "task",
         }
     }
+
+    /// The prefix a new id of this kind starts with, from `[ids]`.
+    fn prefix(self, config: &config::Config) -> &str {
+        match self {
+            Kind::Plan => &config.ids.plan_prefix,
+            Kind::Task => &config.ids.task_prefix,
+        }
+    }
 }
 
 /// One stored file as it is on disk.
@@ -554,7 +562,7 @@ impl Store {
                 )));
             }
         }
-        let id = self.next_id(slug)?;
+        let id = self.next_id(Kind::Task, slug)?;
         let task = model::TaskFile::new(
             id.clone(),
             plan_id.to_owned(),
@@ -578,7 +586,7 @@ impl Store {
     pub fn add_plan(&self, slug: &str, title: &str, request: &str) -> Result<String, Error> {
         check_new(slug, title)?;
         let _lock = self.lock_state()?;
-        let id = self.next_id(slug)?;
+        let id = self.next_id(Kind::Plan, slug)?;
         let plan = model::PlanFile::new(id.clone(), title.trim().to_owned(), request);
         self.write_item(Kind::Plan, &id, &plan.to_text(), 1)?;
         Ok(id)
@@ -680,30 +688,30 @@ impl Store {
         }
     }
 
-    /// The next free four-digit number and `slug`. The caller holds `state.lock`, so two
-    /// processes never take the same number.
-    fn next_id(&self, slug: &str) -> Result<String, Error> {
-        let number = self.next_number()?;
-        Ok(model::format_id(number, slug))
+    /// The next free four-digit number for `kind` and `slug`, with that kind's configured
+    /// prefix. The caller holds `state.lock`, so two processes never take the same number.
+    fn next_id(&self, kind: Kind, slug: &str) -> Result<String, Error> {
+        let config = self.config()?;
+        let number = self.next_number(kind)?;
+        Ok(model::format_id(kind.prefix(&config), number, slug))
     }
 
-    /// The next free four-digit number, over the one sequence plans and tasks share: the
-    /// highest number any plan or task file or ledger entry uses, plus one.
-    fn next_number(&self) -> Result<u32, Error> {
-        let highest = [Kind::Plan, Kind::Task]
+    /// The next free four-digit number of `kind`: the highest number any item of that kind
+    /// (a file or a ledger entry, whatever prefix it carries), plus one. Plans and tasks have
+    /// separate sequences.
+    fn next_number(&self, kind: Kind) -> Result<u32, Error> {
+        let highest = self
+            .ids(kind)?
             .into_iter()
-            .map(|kind| self.ids(kind))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
             .filter_map(|(id, _)| model::id_number(&id))
             .max()
             .unwrap_or(0);
         let number = highest + 1;
         if number > MAX_ID_NUMBER {
-            return Err(Error::Failed(
-                "no free four-digit plan or task number left".to_owned(),
-            ));
+            return Err(Error::Failed(format!(
+                "no free four-digit {} number left",
+                kind.noun()
+            )));
         }
         Ok(number)
     }
@@ -862,7 +870,7 @@ fn check_id(id: &str) -> Result<(), Error> {
         return Ok(());
     }
     Err(Error::Usage(format!(
-        "`{id}` is not a plan or task id (four digits, a dash, and a slug)"
+        "`{id}` is not a plan or task id (a 1 to 4 letter prefix, four digits, a dash, and a slug)"
     )))
 }
 
@@ -1126,7 +1134,13 @@ mod tests {
     #[test]
     fn an_unknown_id_is_a_usage_error_not_a_failed_lookup() {
         assert_eq!(check_id("../etc").unwrap_err().exit(), Exit::Usage);
-        assert!(check_id("0001-a").is_ok());
+        assert!(check_id("PL0001-a").is_ok());
+        assert!(check_id("TK0001-a").is_ok());
+        assert_eq!(
+            check_id("0001-a").unwrap_err().exit(),
+            Exit::Usage,
+            "an id without a prefix is malformed"
+        );
     }
 
     #[test]

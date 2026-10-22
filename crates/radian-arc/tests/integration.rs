@@ -9,8 +9,8 @@ use radian_arc::gate::{IntegrationRun, Stage, Verdict, VerdictResult, merge_read
 fn setup(label: &str) -> (TestRepo, String, String) {
     let repo = TestRepo::new(label);
     let base = repo.rev("main");
-    let head = repo.commit_on("work/0001-feature", &base, "feature.txt", "feature\n");
-    repo.push("work/0001-feature");
+    let head = repo.commit_on("work/TK0001-feature", &base, "feature.txt", "feature\n");
+    repo.push("work/TK0001-feature");
     (repo, base, head)
 }
 
@@ -24,8 +24,8 @@ fn integration_with_main_unchanged_gives_candidate_head() {
     let run = IntegrationRun {
         repository: &repo.repo,
         remote: "origin",
-        task: "0001-feature",
-        attempt: "0001-feature-1",
+        task: "TK0001-feature",
+        attempt: "TK0001-feature-1",
         head_sha: &head,
         base_sha: &base,
         main_ref: "refs/remotes/origin/main",
@@ -49,7 +49,7 @@ fn integration_with_main_unchanged_gives_candidate_head() {
     );
     assert!(
         repo.repo
-            .join(".radian/arc/runs/0001-feature/attempts/0001-feature-1/verdicts/integration.json")
+            .join(".radian/arc/runs/TK0001-feature/attempts/TK0001-feature-1/verdicts/integration.json")
             .exists()
     );
 }
@@ -66,8 +66,8 @@ fn integration_with_main_moved_merges_and_runs_key_commands_on_the_merge() {
     let run = IntegrationRun {
         repository: &repo.repo,
         remote: "origin",
-        task: "0001-feature",
-        attempt: "0001-feature-1",
+        task: "TK0001-feature",
+        attempt: "TK0001-feature-1",
         head_sha: &head,
         base_sha: &base,
         main_ref: "refs/remotes/origin/main",
@@ -95,7 +95,10 @@ fn integration_with_main_moved_merges_and_runs_key_commands_on_the_merge() {
     );
 
     let subject = repo.git(&["log", "-1", "--format=%s", &candidate]);
-    assert_eq!(subject, format!("Merge work/0001-feature ({})", &head[..7]));
+    assert_eq!(
+        subject,
+        format!("Merge work/TK0001-feature ({})", &head[..7])
+    );
     let identity = repo.git(&["log", "-1", "--format=%cn <%ce>", &candidate]);
     assert_eq!(identity, "arc <arc@localhost>");
 
@@ -114,14 +117,14 @@ fn integration_with_main_moved_merges_and_runs_key_commands_on_the_merge() {
 fn a_conflict_gives_a_fail_verdict_with_the_path() {
     let repo = TestRepo::new("integration-conflict");
     let base = repo.rev("main");
-    let head = repo.commit_on("work/0001-conflict", &base, "file.txt", "work side\n");
-    repo.push("work/0001-conflict");
+    let head = repo.commit_on("work/TK0001-conflict", &base, "file.txt", "work side\n");
+    repo.push("work/TK0001-conflict");
     let moved = repo.advance_main("file.txt", "main side\n");
     let run = IntegrationRun {
         repository: &repo.repo,
         remote: "origin",
-        task: "0001-conflict",
-        attempt: "0001-conflict-1",
+        task: "TK0001-conflict",
+        attempt: "TK0001-conflict-1",
         head_sha: &head,
         base_sha: &base,
         main_ref: "refs/remotes/origin/main",
@@ -151,8 +154,8 @@ fn merge_ready_is_false_after_main_moves_again() {
     let run = IntegrationRun {
         repository: &repo.repo,
         remote: "origin",
-        task: "0001-feature",
-        attempt: "0001-feature-1",
+        task: "TK0001-feature",
+        attempt: "TK0001-feature-1",
         head_sha: &head,
         base_sha: &base,
         main_ref: "refs/remotes/origin/main",
@@ -178,8 +181,8 @@ fn merge_ready_is_false_after_main_moves_again() {
 fn integration_uses_the_named_remote() {
     let repo = TestRepo::new("integration-remote");
     let base = repo.rev("main");
-    let head = repo.commit_on("work/0001-remote", &base, "remote.txt", "remote\n");
-    repo.push("work/0001-remote");
+    let head = repo.commit_on("work/TK0001-remote", &base, "remote.txt", "remote\n");
+    repo.push("work/TK0001-remote");
     // The repository's remote is `upstream`; a leftover `origin` points nowhere.
     repo.rename_origin_to("upstream");
     let moved = repo.advance_main_on("upstream", "other.txt", "other\n");
@@ -192,8 +195,8 @@ fn integration_uses_the_named_remote() {
     let run = IntegrationRun {
         repository: &repo.repo,
         remote: "upstream",
-        task: "0001-remote",
-        attempt: "0001-remote-1",
+        task: "TK0001-remote",
+        attempt: "TK0001-remote-1",
         head_sha: &head,
         base_sha: &base,
         main_ref,
@@ -227,7 +230,7 @@ fn two_integration_runs_never_overlap() {
     );
 
     let mut handles = Vec::new();
-    for (task, attempt) in [("0001-a", "0001-a-1"), ("0002-b", "0002-b-1")] {
+    for (task, attempt) in [("TK0001-a", "TK0001-a-1"), ("TK0002-b", "TK0002-b-1")] {
         let repository = repo.repo.clone();
         let sha = head.clone();
         let base_sha = base.clone();

@@ -441,7 +441,7 @@ enum ArcCommand {
 
     /// List plans, each with its tasks in order.
     List {
-        /// Only this plan.
+        /// Only this plan's id: a 1 to 4 letter prefix, four digits, a dash and a slug.
         #[arg(long, value_name = "ID")]
         plan: Option<String>,
         /// Print JSON.
@@ -451,7 +451,7 @@ enum ArcCommand {
 
     /// Show one plan or task: every field and the body.
     Show {
-        /// The plan or task id.
+        /// The plan or task id: a 1 to 4 letter prefix, four digits, a dash and a slug.
         #[arg(value_name = "ID")]
         id: String,
         /// Print JSON.
@@ -461,7 +461,7 @@ enum ArcCommand {
 
     /// Accept a plan or task file that changed outside arc.
     Adopt {
-        /// The plan or task id.
+        /// The plan or task id: a 1 to 4 letter prefix, four digits, a dash and a slug.
         #[arg(value_name = "ID")]
         id: String,
     },
@@ -617,7 +617,8 @@ enum ArcCommand {
 enum ArcAddCommand {
     /// Create a plan from the request text on stdin.
     Plan {
-        /// The slug: 1 to 48 characters from `a-z`, `0-9` and `-`.
+        /// The slug: 1 to 48 characters from `a-z`, `0-9` and `-`. arc puts the plan's
+        /// configured prefix and the next number before it.
         #[arg(long, value_name = "SLUG")]
         slug: String,
         /// The plan's title.
@@ -627,10 +628,11 @@ enum ArcAddCommand {
 
     /// Create a task in a draft plan from the brief on stdin.
     Task {
-        /// The plan the task belongs to.
+        /// The plan the task belongs to (its id).
         #[arg(long, value_name = "ID")]
         plan: String,
-        /// The slug: 1 to 48 characters from `a-z`, `0-9` and `-`.
+        /// The slug: 1 to 48 characters from `a-z`, `0-9` and `-`. arc puts the task's
+        /// configured prefix and the next number before it.
         #[arg(long, value_name = "SLUG")]
         slug: String,
         /// The task's title.
