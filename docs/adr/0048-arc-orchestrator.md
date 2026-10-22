@@ -56,24 +56,32 @@ arc has four objects.
 
 ### 5. Backlog storage
 
-The backlog is a directory of Markdown files with front matter, in `~/.radian/arc/<project>/backlog/` (decision 15).
+The backlog has two parts (decision 15 gives the paths).
+
+- **In the repository**, `<repository>/.radian/arc/`: the plans and tasks, as Markdown files with front matter. The owner can read them in the repository.
+- **Private to arc**, `~/.radian/arc/<project>/`: the configuration, the ledger, the attempt records, and the two locks. The lead and the workers cannot read this part.
 
 ```text
-<backlog>/
+<repository>/.radian/arc/
+  plans/<plan>.md                 plan fields and the request text
+  tasks/<task>.md                 task fields (state, phase, after, limits) and the brief
+~/.radian/arc/<project>/
+  config.toml
   state.lock                      short lock for each state change
   runner.lock                     held for the life of one scheduling loop
-  plans/<plan>.md
-  todo/<task>.md                  phase: ready | blocked | retry_wait | paused_budget
-  doing/<task>.md                 phase: starting | running | reconciling
-  review/<task>.md                phase: verifying | rework_pending | awaiting_human | integrating | ready_to_merge
-  done/<task>.md                  phase: merged
-  failed/<task>.md                phase: exhausted | cancelled | irrecoverable
+  ledger/                         for each plan and task file: state_version and content hash;
+                                  approvals; verdict sets
   runs/<task>/attempts/<attempt>/ execution.json, result.jsonl, attempt_finished.json, stderr.log, verdicts
 ```
 
-- arc is the only writer. Workers and gate stages do not know the backlog path. A worker gets its brief as a copy on stdin.
-- Each state change is one transaction under `state.lock`: take the lock, check `state_version`, write a temporary file, fsync, rename on the same file system, fsync the parent directory, release the lock. Git, ssh, and gate runs happen outside the lock.
+- A task file keeps its path for its whole life. Its `state` (`todo`, `doing`, `review`, `done`, `failed`) and its `phase` are front-matter fields. Phases: `todo` has `ready`, `blocked`, `retry_wait`, `paused_budget`; `doing` has `starting`, `running`, `reconciling`; `review` has `verifying`, `rework_pending`, `awaiting_human`, `integrating`, `ready_to_merge`; `done` has `merged`; `failed` has `exhausted`, `cancelled`, `irrecoverable`.
+- arc is the only writer of both parts. The lead changes plans and tasks only through the `radian arc mcp` tools. The owner changes them only through the arc TUI and CLI.
+- **Outside changes.** Each time arc writes a plan or task file, it records the file's `state_version` and content hash in the ledger. Before arc acts on a file, it compares the file with the ledger. When they differ, someone changed the file outside arc: arc does not act on that plan or task, and it shows the plan or task as changed outside arc until the owner resolves it.
+- Approvals, verdict sets, and attempt records are only in the private part. A change to a file in the repository cannot approve, verify, or merge a task.
+- Workers and gate stages do not read the backlog. A worker gets its brief as a copy on stdin. The wrapper adds `<repository>/.radian/arc/plans/` and `<repository>/.radian/arc/tasks/` to the worker's sandbox deny list.
+- Each state change is one transaction under `state.lock`: take the lock, check `state_version` and the hash, write a temporary file, fsync, rename on the same file system, fsync the parent directory, update the ledger the same way, release the lock. Git, ssh, and gate runs happen outside the lock.
 - `runner.lock` allows one scheduling loop at a time. A second loop that cannot get the lock exits. The MCP server uses only `state.lock`, so the lead can add tasks while a loop runs.
+- arc never commits plan or task files. Whether git tracks them is the owner's choice (decision 15).
 - The fields frozen in v0 are identity, state and phase, attempt, and the verified sha. Other fields change through `schema_version`.
 - `retry_at` is stored as an absolute UTC time.
 
@@ -178,23 +186,26 @@ v0 does not have: a resident daemon; messages to a running worker (corrections g
 `radian arc init` runs in the repository. It:
 
 - finds the repository root, the `origin` URL, and the main branch, and writes a configuration template;
-- adds `/.radian/arc/` to `.git/info/exclude` (a local file: it never changes a committed `.gitignore`);
 - creates the directories below;
+- adds `/.radian/arc/worktrees/` to `.git/info/exclude`, and also `/.radian/arc/plans/` and `/.radian/arc/tasks/` unless `--track` is given (`.git/info/exclude` is local: `init` never changes a committed `.gitignore`);
 - checks the requirements: a stored provider credential (`radian login`), a working push to `origin`, and a working `workspace`-tier sandbox (bubblewrap on Linux);
 - prints the command that registers `radian arc mcp` with the lead. It does not change the lead's configuration.
 
 The gate commands in the template are empty or the default profile. The owner writes them.
 
 ```text
-<repository>/.radian/arc/worktrees/<task>/   the worker workspace for each task
+<repository>/.radian/arc/
+  plans/  tasks/                    decision 5; local unless init --track
+  worktrees/<task>/                 the worker workspace for each task; always local
 ~/.radian/arc/<project>/
-  config.toml                                repository, gate profiles and commands, budgets, concurrency
-  backlog/                                   decision 5
-  attempts/<task>/<attempt>/                 host-local attempt records (decision 7)
+  config.toml                       repository, gate profiles and commands, budgets, concurrency
+  state.lock  runner.lock  ledger/  runs/        decision 5
+  attempts/<task>/<attempt>/        host-local attempt records (decision 7)
 ```
 
 - `<project>` is the repository directory name. When that name is already set up for another repository, `init` asks for a different name.
-- The configuration and the backlog are never in the repository. The lead works in the repository, and a file there is a file the lead can change. The gate commands and the approval records must stay out of its reach. A worker also never sees them (decision 5).
+- **Tracking is the owner's choice.** With `--track`, git sees `plans/` and `tasks/`, and the owner commits them when the owner wants. arc itself never commits them and never writes to `main` for them. A checkout or pull that changes these files is an outside change (decision 5).
+- The configuration, the ledger, and the attempt records are never in the repository. The lead works in the repository, and a file there is a file the lead can change. The gate commands and the approval records must stay out of its reach.
 - `~/.radian/arc/` is unreadable in the sandbox and is in the file tools' deny set (ADR 0020, ADR 0039 decision 4). The worktrees are not under it: a workspace must not be inside a path that the sandbox hides.
 - The worktrees are inside the repository directory, so they get the repository's trust decision (ADR 0031) and need no extra flag.
 - A worktree is created on the first attempt of a task and removed when the task is merged.
@@ -209,11 +220,11 @@ The gate commands in the template are empty or the default profile. The owner wr
 
 ## Verification
 
-- Backlog: concurrent `add`, `run`, and `cancel` lose no state and claim no task twice. A second `run` that cannot get `runner.lock` exits. A restart continues from the files.
+- Backlog: concurrent `add`, `run`, and `cancel` lose no state and claim no task twice. An edit to a task file outside arc stops that task and shows it as changed outside arc; an edit to its approval-looking fields does not approve or merge it. A second `run` that cannot get `runner.lock` exits. A restart continues from the files.
 - Attempts: when ssh or the wrapper connection drops while the worker still runs, arc does not start the task again. A result with an old token changes nothing.
 - Wrapper: a worker that changes another task's ref makes that task's attempt fail without a push. A crash without a `Result` gives `terminated`, not `reconciling`. An outcome other than `completed` never pushes. A `core.hooksPath` in the worktree does not run during the wrapper's git commands.
 - Gate: a verdict counts only for its sha. A moved branch removes it. A new review of the same sha makes an older approval invalid. Task B is verified on a candidate that contains merged task A. A merge fails when main is no longer `base_sha`.
 - Auto: one plan with three tasks and dependencies runs at level `off` with one start and one merge each, at level `run` to `awaiting_human` for each task, and at level `merge` to `done` with no person. A task that fails its gate `max_auto_rework + 1` times pauses the whole plan and sets `auto` to `off`.
 - Approval: the MCP tool list contains no tool to confirm, start, merge, reject, change `auto`, or approve.
-- Setup: `radian arc init` in a repository creates the files above, adds the exclude line once, and refuses to reuse a project name of another repository. Without setup, `radian arc` names `radian arc init`. A worker cannot read `~/.radian/arc/` with the file tools or in the sandbox. `grep` from the repository root does not enter `.radian/arc/worktrees/`.
+- Setup: `radian arc init` in a repository creates the files above, adds the exclude lines once (without `plans/` and `tasks/` under `--track`), and refuses to reuse a project name of another repository. Without setup, `radian arc` names `radian arc init`. A worker cannot read `~/.radian/arc/` with the file tools or in the sandbox. `grep` from the repository root does not enter `.radian/arc/worktrees/`.
 - Commands: `radian arc` opens the TUI. Each subcommand runs and exits with a documented code. `docs/user/` documents every subcommand, option, and file field (`AGENTS.md`).
