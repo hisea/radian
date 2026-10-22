@@ -3031,10 +3031,14 @@ async fn pty_multiline_paste_reaches_the_input_box() {
     pty.quit();
 }
 
-/// An IME commits a whole word in one burst; every character must reach the input in one
-/// frame, not one poll period apart (11 CJK characters appeared ~50 ms
-/// apart, because `read_input` waited the full `INPUT_POLL` before draining crossterm's
-/// buffer).
+/// An IME commits a whole word in one burst; every character must reach the input together,
+/// not one poll period apart (the characters appeared ~50 ms apart, because `read_input`
+/// waited the full `INPUT_POLL` before draining crossterm's buffer). The burst drains with
+/// zero-timeout readiness waits (pinned by
+/// `a_buffered_burst_drains_without_a_poll_wait_per_event` in `cli/tty.rs`), so no screen
+/// between the write and the full string shows a partial prefix of it. That observation is
+/// structural, not a wall-clock bound, so it holds on a loaded machine; the `wait_positive`
+/// deadline only catches a hang.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_a_committed_ime_string_reaches_the_input_in_one_frame() {
     let server = MockServer::start(vec![text_reply("never")]).await;
@@ -3054,21 +3058,40 @@ async fn pty_a_committed_ime_string_reaches_the_input_in_one_frame() {
     assert!(pty.wait_for_screen("message", wait_positive()));
     // A mixed CJK/ASCII run written as one burst (what an IME commit produces).
     let text = "你好世界abc测试中文输入法";
-    let start = std::time::Instant::now();
+    let char_count = text.chars().count();
+    let prefixes: Vec<String> = (1..char_count)
+        .map(|len| text.chars().take(len).collect())
+        .collect();
     pty.send(text.as_bytes());
+    // Every screen from the write to the full string: none may show a partial prefix.
+    // `screen` pumps before reading, like `wait_for_screen`, whose 20 ms rhythm this keeps.
+    let deadline = Instant::now() + wait_positive();
+    let mut arrived = false;
+    let mut partial: Option<String> = None;
+    while Instant::now() < deadline {
+        let screen = pty.screen();
+        if screen.contains(text) {
+            arrived = true;
+            break;
+        }
+        if partial.is_none()
+            && let Some(prefix) = prefixes
+                .iter()
+                .find(|prefix| screen.contains(prefix.as_str()))
+        {
+            partial = Some(prefix.clone());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(
-        pty.wait_for_screen(text, wait_positive()),
+        arrived,
         "the whole string must reach the input:\n{}",
         pty.screen()
     );
-    let elapsed = start.elapsed();
-    // The pre-fix behavior was one 50 ms poll period per buffered character (~550 ms here).
-    // 150 ms is well above the one-frame latency (a frame renders in a few ms, and the state
-    // wait polls every 20 ms) and far below the pre-fix time, so it fails on the regression,
-    // not on a loaded machine.
     assert!(
-        elapsed < std::time::Duration::from_millis(150),
-        "the string took {elapsed:?}; the pre-fix behavior was ~50 ms per character"
+        partial.is_none(),
+        "a frame showed only {:?} of the committed string before the whole string arrived",
+        partial.unwrap_or_default()
     );
     pty.quit();
 }
