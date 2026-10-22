@@ -184,16 +184,47 @@ fn run(dir: Option<&Path>, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// `/tmp` (not `$TMPDIR`): on macOS the latter can push a control socket path past `SUN_LEN`.
+/// A unique scratch directory under `$TMPDIR` — the `workspace` sandbox sets it to its own
+/// writable temp directory, the only place a sandboxed test may create files. Its length does
+/// not matter for the process control socket, because every scratch home turns that off (see
+/// [`SCRATCH_HOME_CONFIG`]).
 pub fn scratch(prefix: &str) -> PathBuf {
     static DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = DIRS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = PathBuf::from("/tmp").join(format!(
-        "radian-arc-work-{prefix}-{}-{n}",
-        std::process::id()
-    ));
+    let name = format!("radian-arc-work-{prefix}-{}-{n}", std::process::id());
+    let dir = std::env::temp_dir().join(name);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// The `config/config.toml` every scratch home gets before any process runs in it: the
+/// process control port off. Every hosting process binds `$RADIAN_HOME/run/<pid>.sock`
+/// (ADR 0043), so a scratch home under a long temp directory would push that path past
+/// `sun_path` (104 bytes on macOS) and print `[control] disabled: path must be shorter than
+/// SUN_LEN`. The arc wrapper and its worker are driven by stdin/stdout and never use the
+/// port, so a test home turns it off rather than depend on the temp directory's length. That
+/// is what lets [`scratch`] use `$TMPDIR` unconditionally, including the `workspace` sandbox's
+/// own `/tmp`.
+pub const SCRATCH_HOME_CONFIG: &str = "schema_version = 1\n\n[control]\nenabled = false\n";
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+
+    /// A later change that drops the write, or brings the control socket back under the
+    /// scratch home, fails here instead of only on a long temp directory.
+    #[test]
+    fn a_scratch_home_turns_the_control_port_off() {
+        let repo = Repo::new("control-off");
+        let path = repo.home.join("config").join("config.toml");
+        let text = std::fs::read_to_string(&path).expect("the scratch home has a config");
+        let config = radian_host::config::parse(&path, &text).expect("the config parses");
+        assert_eq!(config.schema_version, Some(1));
+        assert!(
+            !config.control.enabled,
+            "a scratch home must not bind the control socket: {text}"
+        );
+    }
 }
 
 fn target_dir() -> PathBuf {
@@ -367,6 +398,13 @@ impl Repo {
         let home = root.join("home");
         let sessions = root.join("sessions");
         std::fs::create_dir_all(&home).unwrap();
+        // Every process these tests spawn inherits this as `HOME` and `RADIAN_HOME`, so the
+        // control port is off for all of them before anything runs; see
+        // [`SCRATCH_HOME_CONFIG`]. Tests that write a `config.toml` later write the arc
+        // store's own (`<clone>/.radian/arc/config.toml`), not this one.
+        let config_dir = home.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.toml"), SCRATCH_HOME_CONFIG).unwrap();
         std::fs::create_dir_all(&sessions).unwrap();
         let origin = root.join("origin.git");
         let clone = root.join("clone");
