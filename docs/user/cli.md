@@ -28,11 +28,11 @@ Run it only in a real terminal: it takes over the screen.
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|
-| `-m`, `--model` | `MODEL` | `model.model` from the file | The model name sent to the API. A bare name, never `provider/model`. |
-| `--provider` | `PROVIDER` | `openai-compatible` | The wire protocol: `openai-compatible` or `anthropic`. |
+| `-m`, `--model` | `MODEL` | `model.model` from the file | The model name sent to the API. A bare name, never `provider/model`. In the full-screen interface `/model` takes `<provider>/<model>`. |
+| `--provider` | `PROVIDER` | `openai-compatible` | A built-in provider id (`opencode-go`, `chatgpt`, `anthropic`, `openai`, `openai-compatible`) or a `[providers.<name>]` name. An unknown provider is refused. |
 | `--base-url` | `URL` | provider public endpoint | Everything before the provider path (`/chat/completions`, `/v1/messages`). Only for `openai-compatible`; refused for other providers. |
 | `--max-tokens` | `N` | `16384` | `max_tokens` for anthropic; the API requires it. Refused for `openai-compatible`. |
-| `--thinking` | `MODE` | `medium` | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Clamped to what the route supports. Legacy `adaptive` and `enabled:<budget>` still work with a warning. |
+| `--thinking` | `MODE` | `medium` | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Clamped to what the route supports. Legacy `adaptive` and `enabled:<budget>` warn and still work. |
 | `--header` | `NAME=VALUE` | — | One extra request header. Repeat the flag for more headers. `Authorization` is refused. Only for `openai-compatible`; refused for other providers. `{session_id}` in a value expands to the session id. A flag of the same name wins over the file. |
 | `--max-model-calls` | `N` | `1000` | Per-turn model call fuse. A loop of small calls is not stopped by the context budget. |
 | `--context-window` | `TOKENS` | catalog lookup | Explicit context window in tokens. Wins over the models.dev catalog. With neither, the budget guard is off. |
@@ -60,8 +60,8 @@ Run it only in a real terminal: it takes over the screen.
 
 | Flag | Value | Default | Conflicts | What it does |
 |---|---|---|---|---|
-| `--profile` | `TIER` | `full` | — | `workspace` (sandboxed) or `full` (unsandboxed). A project file can only narrow it. |
-| `--approval` | `POLICY` | `on-ask` | — | `on-ask`, `always`, `never`, or `auto`. Falls back to the file, then the session state, then `on-ask`. |
+| `--profile` | `TIER` | `full` | — | `workspace` (sandboxed) or `full` (unsandboxed). The aliases `workspace-write` and `full-access` are accepted but hidden from `--help`. A project file can only narrow it. |
+| `--approval` | `POLICY` | `on-ask` | — | `on-ask`, `always`, `never`, or `auto`. Falls back to the file, then the session state, then `on-ask`. `auto` in the file has no effect under `full`. |
 | `-y`, `--yes` | — | ask | — | Approve every tool question without asking. Deny rules still deny. The sandbox still applies. |
 | `--allow-shell-command` | `PREFIX` | — | — | Allow one simple shell prefix without asking. Repeat the flag. A compound command needs every segment allowed. |
 | `--trust` | — | — | `--no-trust` | Trust this workspace project resources for this process only. Never written to disk. |
@@ -82,19 +82,19 @@ The print-and-exit modes (`--list`, `--export`, `--search`, `--fork`) need no mo
 
 | Flag | Value | Default | Conflicts | What it does |
 |---|---|---|---|---|
-| `--model` | `MODEL` | file `model.model` | — | Bare model name. Required for a conversation unless the file sets it. |
-| `--provider` | `PROVIDER` | `openai-compatible` | — | `openai-compatible` or `anthropic`. |
+| `--model` | `MODEL` | file `model.model` | — | Bare model name. Required for a conversation unless the file sets it. In the full-screen interface `/model` takes `<provider>/<model>`. |
+| `--provider` | `PROVIDER` | `openai-compatible` | — | A built-in provider id (`opencode-go`, `chatgpt`, `anthropic`, `openai`, `openai-compatible`) or a `[providers.<name>]` name. An unknown provider is refused. |
 | `--base-url` | `URL` | provider endpoint | — | Everything before the provider path. Only for `openai-compatible`; refused for other providers. |
 | `--config` | `FILE` | `RADIAN_CONFIG`, else default file | — | Read this configuration file. Radian never writes it. |
 | `--max-tokens` | `N` | `16384` | — | `max_tokens` for anthropic. Refused for `openai-compatible`. |
-| `--thinking` | `MODE` | `medium` | — | Thinking level (`off` to `max`), clamped per route. Legacy `adaptive` / `enabled:<budget>` warn. |
+| `--thinking` | `MODE` | `medium` | — | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, clamped per route. Legacy `adaptive` and `enabled:<budget>` warn and still work. |
 | `--system` | `SYSTEM` | — | `--system-file` | System prompt text. |
 | `--system-file` | `FILE` | — | — | Read the system prompt from this file. |
 | `--mcp-config` | `FILE` | — | — | MCP servers JSON file. |
 | `--workspace` | `DIR` | current directory | — | Root the built-in file tools here. |
-| `--profile` | `workspace` \| `full` | `full` | — | Permission tier. A project file can only narrow it. |
+| `--profile` | `workspace` \| `full` | `full` | — | Permission tier. The aliases `workspace-write` and `full-access` are accepted but hidden from `--help`. A project file can only narrow it. |
 | `--allow-shell-command` | `PREFIX` | — | — | Allow one simple shell prefix without asking. Repeatable. |
-| `--approval` | `POLICY` | `on-ask` | — | `on-ask`, `always`, `never`, or `auto`. The file is the fallback. |
+| `--approval` | `POLICY` | `on-ask` | — | `on-ask`, `always`, `never`, or `auto`. The file is the fallback; `auto` in the file has no effect under `full`. |
 | `--yes` | — | ask | — | Shorthand for `--approval auto`. |
 | `-p`, `--prompt` | `PROMPT` | — | `--list` | One-shot mode: run this prompt, then exit. `-p -` reads stdin to EOF. |
 | `--output` | `jsonl` | model text | — | Print every journal line, live deltas, and a closing `Result` record as JSON lines. |
@@ -136,8 +136,8 @@ radian exec --fork demo --at 12
 ## `radian login` and `radian logout`
 
 `radian login [PROVIDER]` stores an API key in `~/.radian/credentials/auth.json`.
-A bare `radian login` shows a numbered provider list.
-`custom` names a new endpoint: name, protocol, base URL, and key.
+`PROVIDER` is a built-in id (`opencode-go`, `anthropic`, `openai`, `openai-compatible`), `chatgpt` (browser OAuth), `chatgpt-device` (device code), or `custom`, which names a new endpoint: name, protocol, base URL, and key. An unknown provider is refused.
+A bare `radian login` shows the numbered provider list.
 The key never echoes.
 A verification request (`GET <base>/models`) runs before the save.
 A failure shows and still offers to save.
