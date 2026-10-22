@@ -24,7 +24,7 @@ The directory carries mode 0700 and files carry 0600 on first use (ADR 0013 perm
   trust/trust.json         project trust records (ADR 0031)          sandbox-unreadable
   themes/<name>.toml       theme files (ADR 0029)                    sandbox-readable
   skills/<name>/SKILL.md   user-level skills (ADR 0025)              sandbox-readable
-  access/access.json       per-project tier records (ADR 0038)       sandbox-readable
+  access/access.json       per-project tier records (ADR 0038)       sandbox-unreadable
   run/<pid>.sock           control socket (ADR 0043, non-task verbs) sandbox-readable
 ```
 
@@ -32,11 +32,11 @@ The directory carries mode 0700 and files carry 0600 on first use (ADR 0013 perm
 
 ### 3. Sandbox read scope
 
-- **Readable**: `config/`, `cache/`, `themes/`, `skills/`, `access/`, `run/`. These hold user UI data, model-read text, or process coordinates. They carry no credentials. `$HOME/.agents/skills/` (Agent Skills standard location, ADR 0025) lives outside `$RADIAN_HOME` and outside the denylist, so the sandbox can read it. It never joins the layout tree above.
-- **Unreadable**: `sessions/`, `memory/`, `credentials/`, `trust/`, plus the actual session directory that `--session-dir` or `RADIAN_SESSION_DIR` points at. Only Radian own tools and commands reach them.
-- The `full` tier has no sandbox and ignores this scope (chosen explicitly by the user).
+- **Readable**: `config/`, `cache/`, `themes/`, `skills/`, `run/`. These hold user UI data, model-read text, or process coordinates. They carry no credentials. `$HOME/.agents/skills/` (Agent Skills standard location, ADR 0025) lives outside `$RADIAN_HOME` and outside the denylist, so the sandbox can read it. It never joins the layout tree above.
+- **Unreadable**: `sessions/`, `memory/`, `credentials/`, `trust/`, `access/` (the map of which projects run without a sandbox, ADR 0038 decision 3), plus the actual session directory that `--session-dir` or `RADIAN_SESSION_DIR` points at. Only Radian own tools and commands reach them.
+- The `full` tier has no sandbox, so its shell ignores this scope (chosen explicitly by the user). The file tools apply the unreadable list in every tier (ADR 0039 decision 4).
 
-The host first creates `sessions/`, `memory/`, `credentials/`, and `trust/` (0700), then hides them. Linux bwrap can only hide existing paths. `full` has no sandbox.
+The host first creates `sessions/`, `memory/`, `credentials/`, and `trust/` (0700), then hides them. Linux bwrap can only hide existing paths; `access/` is hidden when it exists, and a missing one holds nothing to hide. `full` has no sandbox.
 
 ### 4. Sandbox temp directory inside the workspace
 
