@@ -626,6 +626,57 @@ fn resume_on_the_second_attempt_continues_the_same_session() {
     );
 }
 
+/// A first attempt that fails before the model starts (here `radian exec` refuses an unknown
+/// worker argument) leaves no session file. The second attempt carries `--resume` but must
+/// start the session with `--session-id`: resuming would fail with `no session` on every
+/// remaining attempt.
+#[test]
+fn a_later_attempt_starts_the_session_when_no_earlier_attempt_created_it() {
+    let repo = Repo::new("resume-none");
+    let task = "0011-resume-none";
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-n1",
+        &[],
+        &["--no-such-worker-flag".to_owned()],
+        "one",
+    );
+    assert_ne!(first.code, 0, "the bad argument fails the worker");
+    assert_eq!(first.finished()["outcome"], json!("terminated"));
+    assert!(
+        !repo.sessions.join(format!("{task}.jsonl")).exists(),
+        "the failed attempt created no session"
+    );
+
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m one",
+        ),
+        text_reply("done"),
+    ]);
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-n2",
+        &["--resume"],
+        &model_args(mock.base_url()),
+        "one",
+    );
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert_eq!(second.finished()["pushed"], json!(true));
+    let result = last_result(&repo.run_dir(task, 2).join("result.jsonl"));
+    assert_eq!(result["session_id"], json!(task), "the task's session id");
+    assert_eq!(
+        result["turns"],
+        json!(1),
+        "a new session, not a resumed one"
+    );
+}
+
 /// Two wrappers for the same task at once: the second fails on the worktree flock with exit
 /// 4 and starts no worker.
 #[test]
