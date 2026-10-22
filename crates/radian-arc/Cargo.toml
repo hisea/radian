@@ -1,0 +1,21 @@
+[package]
+name = "radian-arc"
+version = "0.1.3"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "arc (ADR 0048): gate profiles, gate checkouts, verdicts and the integration candidate; the crate's only public module is `gate`"
+
+[dependencies]
+# Verdict timestamps use the same RFC 3339 UTC form as `radian-session` and `radian-memory`.
+chrono = "0.4"
+# The gate's exclusive stage lock.
+fs2 = "0.4"
+# `kill(-pid, SIGKILL)` for a command that runs past its timeout.
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+# `verdict_set_digest` (ADR 0048 decision 11).
+sha2 = "0.10"
+thiserror.workspace = true
