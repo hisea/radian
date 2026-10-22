@@ -75,8 +75,9 @@ pub enum Command {
     Merge { task: String },
     /// `radian arc reject <task> --note <text>`: send a task back to rework.
     Reject { task: String, note: String },
-    /// `radian arc run`: make every transition that can happen now, then exit.
-    Run,
+    /// `radian arc run [--watch [--interval <seconds>]]`: one pass, or a loop that repeats a
+    /// pass until SIGINT or SIGTERM.
+    Run { watch: bool, interval: u64 },
     /// `radian arc mcp`: the lead's MCP server on standard input and output.
     Mcp,
 }
@@ -108,7 +109,7 @@ pub fn run(command: Option<&Command>) -> u8 {
         Some(Command::ResetBudget { id }) => reset_budget(id),
         Some(Command::Merge { task }) => merge(task),
         Some(Command::Reject { task, note }) => reject(task, note),
-        Some(Command::Run) => run_loop(),
+        Some(Command::Run { watch, interval }) => run_loop(*watch, *interval),
         Some(Command::Mcp) => mcp(),
     };
     match result {
@@ -637,12 +638,45 @@ fn reject(task: &str, note: &str) -> Result<u8, Error> {
     Ok(emit(format!("{}\n", rejected.line())))
 }
 
-/// `radian arc run`: the scheduling loop without a TUI. It makes every transition it can
-/// make now and exits when nothing more can happen now.
-fn run_loop() -> Result<u8, Error> {
+/// `radian arc run`: the scheduling loop without a TUI. A pass makes every transition it can
+/// make now; without `--watch` it prints the summary and exits when nothing more can happen
+/// now. With `--watch` it repeats the pass every `interval` seconds until SIGINT or SIGTERM.
+///
+/// A transition line is written and flushed when the loop makes it; the summary when a pass
+/// ends (only when it changed, with `--watch`). A closed stdout stops the printing and is a
+/// normal stop (exit `0`), as every other print-and-exit command of this binary treats it.
+fn run_loop(watch: bool, interval: u64) -> Result<u8, Error> {
     let store = open()?;
-    let report = crate::run::run(&store)?;
-    Ok(emit(report.render()))
+    let failed = std::cell::Cell::new(false);
+    if watch {
+        let mut emit = |text: &str| match radian_host::write_stdout(text) {
+            Ok(()) => {}
+            // The reader of a foreground loop is gone (`... | head`): stop now, as a closed
+            // pipe stops every other print-and-exit command with exit `0`.
+            Err(radian_host::StdoutError::BrokenPipe) => std::process::exit(Exit::Ok.code().into()),
+            Err(error) => {
+                eprintln!("radian arc: cannot write to stdout: {error}");
+                failed.set(true);
+            }
+        };
+        crate::run::watch(&store, interval, &mut emit)?;
+    } else {
+        let mut emit = |text: &str| {
+            if let Err(error) = radian_host::write_stdout(text)
+                && !matches!(error, radian_host::StdoutError::BrokenPipe)
+            {
+                eprintln!("radian arc: cannot write to stdout: {error}");
+                failed.set(true);
+            }
+        };
+        let report = crate::run::run(&store, &mut emit)?;
+        emit(&report.render_summary());
+    }
+    Ok(if failed.get() {
+        Exit::Error.code()
+    } else {
+        Exit::Ok.code()
+    })
 }
 
 /// `radian arc mcp`: the lead's MCP server, until its client closes the connection. Without

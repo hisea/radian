@@ -181,14 +181,15 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 ### 13. The scheduling loop
 
 - While the arc TUI is open, it holds `runner.lock` and is the scheduling loop. It advances plans at auto level `run` or `merge`. When the TUI closes, nothing advances.
-- `radian arc run` is the same loop without a TUI. It makes every transition that it can make now, persists the state, and exits when nothing more can happen now. Waiting for a person, a retry time, or CI does not keep it running.
+- `radian arc run` is the same loop without a TUI. It makes every transition that it can make now, persists the state, and exits when nothing more can happen now. Waiting for a person, a retry time, or CI does not keep it running. It writes each transition line and flushes it when the transition happens, and prints the summary when the pass ends.
+- `radian arc run --watch [--interval <seconds>]` repeats that loop: after a pass that ends quiet it waits `--interval` seconds (integer, default 30, 5 to 3600) and runs another pass, until SIGINT or SIGTERM. It holds `runner.lock` for its whole life. It prints the summary only when it differs from the one it printed last. On SIGINT or SIGTERM it starts no new work, lets a running attempt finish (attempts are separate processes with their own records; the next `run` reconciles them), prints the summary, releases the lock and exits `0`.
 - The TUI and `radian arc run` use the same state machine and the same files.
 
 ### 14. v0 scope
 
 v0 runs on one host. Concurrency defaults to 1 task at a time. The v0 gate stages are `commands`, `human`, and `integration`; `mutation`, `review`, and `ci` come later. The host fields stay in the file format and are not used.
 
-v0 does not have: a resident daemon; messages to a running worker (corrections go through rework); workers that read or write the backlog or hold the push credential; resume on a different host; more than one scheduling loop; a separate clone per task; automatic rework briefs written by arc; a gate language; load-based scheduling; worker kinds other than `radian exec`; plan branches or plan merges.
+v0 does not have: a resident daemon (`radian arc run --watch` is not one: it is a foreground loop that a person starts and stops); messages to a running worker (corrections go through rework); workers that read or write the backlog or hold the push credential; resume on a different host; more than one scheduling loop; a separate clone per task; automatic rework briefs written by arc; a gate language; load-based scheduling; worker kinds other than `radian exec`; plan branches or plan merges.
 
 ### 15. Setup, files, and directories
 
