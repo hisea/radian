@@ -62,6 +62,8 @@ mod args;
 mod ask;
 mod deny;
 pub mod docs;
+#[cfg(feature = "testing")]
+pub mod drift;
 mod foreground;
 mod glob;
 mod grep;

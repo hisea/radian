@@ -81,6 +81,8 @@ getrandom = "0.3"
 regex = "1"
 
 [dev-dependencies]
+# The shared heading-anchored table reader for the manual drift tests.
+radian-coding = { path = "../radian-coding", features = ["testing"] }
 # The crate's own tests always build with the worktree-root test seam, so a plain `cargo test`
 # (the AGENTS.md Verify list) runs it too; production builds stay unarmed.
 radian-host = { path = ".", features = ["testing"] }

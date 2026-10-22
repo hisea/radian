@@ -84,6 +84,8 @@ libc = "0.2"
 libc = "0.2"
 
 [dev-dependencies]
+# The shared heading-anchored table reader for the manual drift tests.
+radian-coding = { path = "../radian-coding", features = ["testing"] }
 radian-core = { path = "../radian-core" }
 radian-memory = { path = "../radian-memory" }
 # The `radian arc mcp` tests drive the real server through a real MCP client over the

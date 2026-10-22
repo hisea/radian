@@ -2012,12 +2012,29 @@ future_option = "alpha"
         }
     }
 
+    /// The `configuration.md` headings whose tables hold the keys this check reads. Each
+    /// heading is an anchor: a row in another table on the page is never read.
+    const CONFIGURATION_KEY_HEADINGS: &[&str] = &[
+        "## `schema_version`",
+        "## `[model]`",
+        "## `[providers.<name>]`",
+        "## `[permissions]`",
+        "## `[hooks]`",
+        "## `[skills]`",
+        "## `[memory.injection]`",
+        "## `[control]`",
+        "## `[integrations]`",
+        "## `[compaction]`",
+        "## `[tui]`",
+    ];
+
     /// Every closed value set the reader enforces appears in its key's own row of
     /// `docs/user/configuration.md`, and every documented default matches the code.
     /// Mutation: drop one value from a row (or change one default cell) → this fails
     /// naming the key. Why the code is the source that cannot drift: each value list is the
     /// `pub const` the parser's own guard reads, and each default is the effective value the
-    /// host computes from an empty config.
+    /// host computes from an empty config. Each key's table is located by its section
+    /// heading; a row in another table never counts.
     #[test]
     fn closed_value_sets_and_defaults_appear_in_configuration_md() {
         use crate::model::COMPACTION_THINKING_CURRENT;
@@ -2025,19 +2042,22 @@ future_option = "alpha"
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let doc = std::fs::read_to_string(manifest.join("../../docs/user/configuration.md"))
             .expect("configuration.md exists");
-        fn row<'a>(doc: &'a str, key: &str) -> Vec<&'a str> {
-            let rows: Vec<&str> = doc
-                .lines()
-                .filter(|line| {
-                    line.starts_with('|')
-                        && line
-                            .split('|')
-                            .nth(1)
-                            .is_some_and(|cell| cell.contains(key))
-                })
+        // Every table under the config-section headings, flattened into one row list. The
+        // headings are the anchors; a table in any other section is never read.
+        let key_rows: Vec<Vec<String>> = CONFIGURATION_KEY_HEADINGS
+            .iter()
+            .flat_map(|heading| {
+                radian_coding::drift::tables_under(&doc, "configuration.md", heading)
+            })
+            .flatten()
+            .collect();
+        fn row<'a>(rows: &'a [Vec<String>], key: &str) -> Vec<&'a Vec<String>> {
+            let keyed: Vec<&Vec<String>> = rows
+                .iter()
+                .filter(|row| row.first().is_some_and(|cell| cell.contains(key)))
                 .collect();
-            assert!(!rows.is_empty(), "{key} has no row in configuration.md");
-            rows
+            assert!(!keyed.is_empty(), "{key} has no row in configuration.md");
+            keyed
         }
         // Each value of a closed set appears in its key's row, not just anywhere.
         let sets: &[(&str, Vec<String>)] = &[
@@ -2079,35 +2099,36 @@ future_option = "alpha"
             ),
         ];
         for (key, values) in sets {
-            for line in row(&doc, key) {
+            for row in row(&key_rows, key) {
                 for value in values {
                     assert!(
-                        line.contains(value.as_str()),
-                        "{key} row is missing value {value}: {line}"
+                        row.iter().any(|cell| cell.contains(value.as_str())),
+                        "{key} row is missing value {value}: {row:?}"
                     );
                 }
             }
         }
         // `compaction.thinking` is the seven levels plus `current`.
-        for line in row(&doc, "compaction.thinking") {
+        for row in row(&key_rows, "compaction.thinking") {
             for level in THINKING_LEVELS {
                 assert!(
-                    line.contains(level),
-                    "compaction.thinking row misses {level}: {line}"
+                    row.iter().any(|cell| cell.contains(level)),
+                    "compaction.thinking row misses {level}: {row:?}"
                 );
             }
             assert!(
-                line.contains(COMPACTION_THINKING_CURRENT),
-                "compaction.thinking row misses current: {line}"
+                row.iter()
+                    .any(|cell| cell.contains(COMPACTION_THINKING_CURRENT)),
+                "compaction.thinking row misses current: {row:?}"
             );
         }
         // `permissions.profile` is the tier names and their aliases (plus the ignored ADR
         // names, which the row names as ignored).
-        for line in row(&doc, "permissions.profile") {
+        for row in row(&key_rows, "permissions.profile") {
             for name in KNOWN_PROFILES {
                 assert!(
-                    line.contains(name),
-                    "permissions.profile row misses {name}: {line}"
+                    row.iter().any(|cell| cell.contains(name)),
+                    "permissions.profile row misses {name}: {row:?}"
                 );
             }
         }
@@ -2115,7 +2136,9 @@ future_option = "alpha"
         for event in HOOK_EVENTS {
             let key = format!("hooks.{event}");
             assert!(
-                row(&doc, &key).iter().any(|line| line.contains(event)),
+                row(&key_rows, &key)
+                    .iter()
+                    .any(|row| row.iter().any(|cell| cell.contains(event))),
                 "{key} row misses {event}"
             );
         }
@@ -2123,29 +2146,11 @@ future_option = "alpha"
         // sit in the row's Default cell (not just anywhere: the Allowed cell would mask a
         // changed default). The four-column `schema_version` row carries no Default cell:
         // there the whole row must contain it.
-        // Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
-        fn split_cells(row: &str) -> Vec<String> {
-            let mut cells = vec![String::new()];
-            let mut chars = row.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c == '\\' && chars.peek() == Some(&'|') {
-                    cells.last_mut().expect("a cell is open").push('|');
-                    chars.next();
-                } else if c == '|' {
-                    cells.push(String::new());
-                } else {
-                    cells.last_mut().expect("a cell is open").push(c);
-                }
-            }
-            cells
-        }
-        fn default_in_row(row: &str, default: &str) -> bool {
-            let cells = split_cells(row);
-            let inner = &cells[1..cells.len() - 1];
-            if inner.len() >= 5 {
-                inner[2].contains(default)
+        fn default_in_row(row: &[String], default: &str) -> bool {
+            if row.len() >= 5 {
+                row[2].contains(default)
             } else {
-                row.contains(default)
+                row.iter().any(|cell| cell.contains(default))
             }
         }
         let empty = parse(
@@ -2195,11 +2200,10 @@ future_option = "alpha"
             ),
         ];
         for (key, default) in defaults {
-            let lines = row(&doc, key);
+            let lines = row(&key_rows, key);
             assert!(
                 lines.iter().any(|line| default_in_row(line, default)),
-                "{key} row misses its default {default}: {}",
-                lines.join("\n")
+                "{key} row misses its default {default}: {lines:?}"
             );
         }
     }
