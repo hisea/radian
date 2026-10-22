@@ -63,7 +63,7 @@ without an `item` key is a structural mistake and drops the whole
 | `priority` | integer | the item's own number | Higher survives a narrow terminal longer. |
 | `thresholds` | array | the item's own list | `{ at = 70, style = "warn" }` entries in file order. Only `context`, `cost`, `pending` and `queued` have a number to compare, so only they ever match one. |
 | `disabled` | boolean | `false` | `true` hides the item everywhere it is named. A disabled command item never runs. |
-| `command` | string | none | Turns the id into a command item (only outside the built-in ids; a built-in keeps the draw). Write it in `[tui.footer.items.<id>]`: only that table starts the command. |
+| `command` | string | none | Turns the id into a command item. Write it in `[tui.footer.items.<id>]`: only that table starts the command. An inline `command` (or `period`) in a row is not read: the load warns `tui.footer: item "<id>" sets `command` (or `period`) inline; inline `command`/`period` is not read, move it to `[tui.footer.items.<id>]`` and the id follows the unknown-id rule unless the items table sets `command` for it. A `command` under a built-in id never runs: the load warns `tui.footer.items.<id>.command: "<id>" is a built-in item; its `command` is ignored` and the built-in keeps the draw. |
 | `period` | integer seconds | `60` | How often a command item runs. `0` runs once at startup. Any other value clamps silently into `15`–`3600`. A non-number warns and keeps `60`. |
 | `width`, `fill`, `empty` | string | `10`, `━`, `─` | The `context` item's bar. A non-number `width` reads as `10`. |
 | `keys` | string | all keys | The `status` item's filter: comma-separated `status.*` key names, trimmed. |
@@ -270,8 +270,14 @@ at the bottom with nothing to scroll, else `scroll/max` (for example
 
 Any id no built-in claims becomes a command item when its
 `[tui.footer.items.<id>]` table sets `command`. Only that table starts the
-command: a `command` written inline in a row marks the id (no unknown-id
-warning, `{value}` validates) but starts nothing. Placeholders: `value`.
+command: a `command` (or `period`) written inline in a row is not read. The
+load warns once per such item
+`tui.footer: item "<id>" sets `command` (or `period`) inline; inline `command`/`period` is not read, move it to `[tui.footer.items.<id>]``,
+and the id follows the unknown-id rule unless the items table sets `command`
+for it (an inline table still wins over the items table for every other
+field). A `command` under a built-in id never runs: the load warns
+`tui.footer.items.<id>.command: "<id>" is a built-in item; its `command` is ignored`
+and the built-in keeps the draw. Placeholders: `value`.
 Default format: `{value}`. Icons: none, unless the output or the item sets
 one. Priority: `50` unless the item sets another.
 
@@ -299,9 +305,7 @@ verbatim before the text, so include its own trailing space; a configured
 
 One run may take 5 seconds; a timeout, a spawn failure, a non-zero exit, an
 empty line or a bad line keeps the last value and draws it stale (dim).
-Until the first good value the item hides. A `command` under an id a
-built-in claims still starts its process, but its value never shows: the
-built-in keeps the draw.
+Until the first good value the item hides.
 
 ## Narrow terminals, numbers, unknown text
 

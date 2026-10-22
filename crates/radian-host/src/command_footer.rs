@@ -87,6 +87,43 @@ pub const INHERITED_ENV: &[&str] = &["RADIAN_SESSION_ID", "RADIAN_CWD"];
 /// period in seconds.
 pub const COMMAND_ITEM_PARAMS: &[&str] = &["command", "period"];
 
+/// Every built-in footer item id (ADR 0027): the ids the TUI's component registry claims.
+/// A `command` under one of these never spawns: the built-in always wins the draw, so the
+/// process would be invisible. `command_specs` skips such an entry with one warning.
+///
+/// The single source for the registry itself is `radian-tui`'s component list (which cannot
+/// be shared here without a dependency cycle); a drift test there pins the two equal, so a
+/// new built-in fails there until it is added here too.
+pub const BUILTIN_FOOTER_ITEMS: &[&str] = &[
+    "brand",
+    "host",
+    "model",
+    "reasoning",
+    "tier",
+    "cwd",
+    "git_branch",
+    "worktree",
+    "status",
+    "session",
+    "context",
+    "usage",
+    "tokens",
+    "speed",
+    "elapsed",
+    "cost",
+    "pending",
+    "queued",
+    "loop",
+    "jobs",
+    "mcp",
+    "scroll",
+];
+
+/// Whether `id` is a built-in footer item, whose draw the built-in component always wins.
+pub fn is_builtin_footer_item(id: &str) -> bool {
+    BUILTIN_FOOTER_ITEMS.contains(&id)
+}
+
 /// The display-safe facts a command item receives on stdin (ADR 0027).
 /// `None` means "unknown": a missing fact is `null`, never a zero that looks measured.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -183,6 +220,14 @@ pub fn command_specs(footer: &TuiFooterConfig) -> (Vec<CommandSpec>, Vec<String>
         };
         // A disabled item is hidden everywhere, so its command is never run.
         if item.disabled {
+            continue;
+        }
+        // A built-in always wins the draw, so a `command` under its id would run unseen:
+        // spawn nothing and warn once.
+        if is_builtin_footer_item(id) {
+            warnings.push(format!(
+                "tui.footer.items.{id}.command: {id:?} is a built-in item; its `command` is ignored"
+            ));
             continue;
         }
         let (program, args) = match parse_command(command) {
@@ -629,6 +674,65 @@ mod tests {
         assert!(specs.is_empty());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("command"), "{warnings:?}");
+    }
+
+    /// A `command` under a built-in id spawns nothing: the built-in always wins the draw,
+    /// so the process would be invisible. One warning per id names it.
+    #[test]
+    fn a_command_under_a_builtin_id_spawns_nothing_and_warns() {
+        let mut footer = TuiFooterConfig::default();
+        for id in ["model", "tokens"] {
+            footer.items.insert(
+                id.to_owned(),
+                crate::config::TuiFooterItemConfig {
+                    id: id.to_owned(),
+                    params: vec![("command".to_owned(), "printf hi".to_owned())],
+                    ..Default::default()
+                },
+            );
+        }
+        let (specs, warnings) = command_specs(&footer);
+        assert!(
+            specs.is_empty(),
+            "a built-in `command` never runs: {specs:?}"
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        for id in ["model", "tokens"] {
+            assert!(
+                warnings.iter().any(
+                    |w| w.contains(id) && w.contains("built-in item; its `command` is ignored")
+                ),
+                "the warning names {id:?}: {warnings:?}"
+            );
+        }
+    }
+
+    /// A custom id next to a built-in one still runs: the built-in skip drops only the
+    /// built-in entry.
+    #[test]
+    fn a_custom_id_next_to_a_builtin_one_still_runs() {
+        let mut footer = TuiFooterConfig::default();
+        for id in ["model", "weather"] {
+            footer.items.insert(
+                id.to_owned(),
+                crate::config::TuiFooterItemConfig {
+                    id: id.to_owned(),
+                    params: vec![("command".to_owned(), "printf hi".to_owned())],
+                    ..Default::default()
+                },
+            );
+        }
+        let (specs, warnings) = command_specs(&footer);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["weather"],
+            "{specs:?}"
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("model"), "{warnings:?}");
     }
 
     #[cfg(target_os = "linux")]
