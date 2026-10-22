@@ -1,8 +1,8 @@
 # arc flows：一个仓库里按任务种类选 worker 配置与 gate
 
-- 状态：decided（第 1、2 步）；idea（第 3 步）
+- 状态：decided（第 1、2 步）；idea（第 3、4 步）
 - 涉及 ADR：0048（§10 gate profile、§14 v0 范围、§15 `config.toml`）、0043（单会话、`subagent` 子进程先例）、0044（`Result` 回传契约）、0025（skill）、0008（配置 schema）
-- 来源：owner 问题 2026-10-22（一个项目同时跑 coding、game art、marketing content 等流程）
+- 来源：owner 问题 2026-10-22（一个项目同时跑 coding、game art、marketing content 等流程）；mattpocock/skills PR #1316（software-factory 术语表：trigger、三道刹车、每个 task 的五个问题、ratchet / retro / fix 三个示例 task）
 
 ## 背景
 
@@ -44,12 +44,27 @@ allow_noop = false
 - 一个 task 的 flow 在创建后不变；返工 `--resume` 同一个 session，换 flow 等于换 worker 配置，应新建 task 并写 `supersedes`。
 - flow 的工具差异靠 `radian exec` 已有的输入注入（`--model`、`--mcp-config`、`--system-file`、`--config`），不公开隐藏的 `--tools`，不加新输入。
 - lead 的 brief 标准加一条：拆任务时写明 flow，选错 flow 的任务 gate 和工具全错。
+- 每个 flow 节的注释（或手册里每个内置 flow 的条目）回答五个问题，照 software-factory 的模板：什么触发它；它读写什么（worktree、远端、外部服务）；完成后触发什么；人从哪里重新进入；什么阻止两个 attempt 干同一件事。后四个 arc 对所有 flow 的答案相同（`after` 与 `auto`；worktree 与 `work/<task>`；gate 与 `awaiting_human`；claim 事务与 token），所以 flow 定义只需写第一个，直到第 4 步把 trigger 做出来。
 
 ## 待决（第 3 步：非代码交付物）
 
 - 交付物仍必须是 git commit（0048 §8：`head_sha` 是 `base_sha` 后代、树干净）。文案没问题；美术二进制资产要么走 git LFS，要么 worker 只提交引用（路径、hash、生成参数），资产放外部存储。哪一种、以及 delivery check 是否要认 LFS 指针，未定。
 - `review` stage 对非代码 flow 的评审标准从哪里来：profile 一段固定 prompt，还是 flow 节一个 `review_prompt_file`。未定。
 - 是否需要每个 flow 自己的 `limits`（美术任务更贵、更慢）。未定，先用 task 级覆盖。
+
+## 待决（第 4 步：trigger，idea）
+
+arc 今天只有两种启动：owner `start`，或 `auto` 级别在 `after` 全部合并后自动起。没有时钟，没有外部事件，没有 lead 之外的 ticket source。software-factory 的三个示例 task 只有加了 trigger 才做得出来，而且每个都是一个 flow（gate 为 `review` + `human`）：
+
+- **ratchet**：每天一次，从 exception list 取一个文件修到过更严的检查，开一个小改动。
+- **retro**：每合并 N 个 task 读一次 task、brief、verdict 与日志，给工厂自己的指令（AGENTS.md、brief 标准、skill）提改动。这是现有 dogfood 复盘规则的自动化。
+- **fix**：arc 自己的 attempt 失败（基础设施类）时把日志立成 task；fix 的 attempt 失败不再链式触发；改工厂自己的改动永远要 `human`。
+
+- trigger 种类最少两种：`clock`（间隔或每日时刻）与 `every_merges`（每合并 N 个 task）；trigger 属于 flow 还是属于 plan，未定。
+- 节流与 trigger 一起定义，不另开配置：一个 trigger 刚加时按比例或频率节流，`max_auto_rework` 仍是每条循环的封顶。
+- 触发产生的 task 由谁写 brief：固定 brief 模板跟 flow 走，还是仍由 lead 经 MCP 写。未定。
+- 这一步需要常驻进程或外部时钟调用 `radian arc run`，与 0048 §14 "v0 没有常驻 daemon"冲突；落地时要先改 0048。
+- per-flow 的 host / runner 字段（review 用便宜机器、implement 用沙箱机）属于这一步之后，0048 已把 host 字段留在文件格式里。
 
 ## 验收
 
