@@ -35,7 +35,7 @@ struct Fixture {
     outside: PathBuf,
     /// A symlink under `$HOME` pointing into a denied directory.
     denied_link: PathBuf,
-    /// The host's deny-read list (sessions, memory, credentials, trust).
+    /// The host's deny-read list (sessions, memory, credentials, trust, access).
     extras: Vec<PathBuf>,
 }
 
@@ -69,7 +69,7 @@ fn fixture() -> &'static Fixture {
         // The host's `$RADIAN_HOME` deny-read list.
         let radian_home = home.join("radian-home");
         let mut extras = Vec::new();
-        for name in ["sessions", "memory", "credentials", "trust"] {
+        for name in ["sessions", "memory", "credentials", "trust", "access"] {
             let dir = radian_home.join(name);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("sentinel.txt"), "SESSION-SECRET\n").unwrap();

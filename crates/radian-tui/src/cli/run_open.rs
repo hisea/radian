@@ -72,18 +72,13 @@ pub(super) fn build_session_inputs(
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
     // The tier and its source were resolved above (ADR 0038 decision 3).
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
-    // the memory directory (plus the credential and trust stores, ADR 0026 D4 / ADR 0031
-    // T2). The shared helper builds that list — the same list the file tools deny in the
+    // the memory directory (plus the credential, trust and remembered-tier stores, ADR 0026 D4 / ADR 0031
+    // T2 / ADR 0038 decision 3). The shared helper builds that list — the same list the file tools deny in the
     // `full` tier — so the two can never differ (ADR 0039 decision 4). The directories were
     // created owner-only before the terminal was entered (`ensure_private_dir` above);
     // Linux's bwrap can only mask paths that exist.
     let memory_root = radian_host::memory_dir();
-    let mut sandbox_deny_read = radian_host::file_tool_deny_read(dir);
-    // ADR 0038 decision 3: the remembered-tier store is denied read like trust/ — it is the
-    // user's map of which projects run unsandboxed. Creating it first lets bwrap mask it.
-    if let Some(access) = radian_host::access::access_dir() {
-        sandbox_deny_read.push(access);
-    }
+    let sandbox_deny_read = radian_host::file_tool_deny_read(dir);
     let sandbox = radian_tui::profile::build_sandbox(
         tier,
         workspace_path,
