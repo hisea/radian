@@ -55,7 +55,15 @@
 - 剪贴板截屏（Cmd-Ctrl-Shift-4、预览里 Cmd-C）：Cmd-V 由终端处理，剪贴板是图像时什么都不发，所以 pi 和 Claude Code 都绑 Ctrl-V。radian 自己读系统剪贴板（`arboard`：macOS NSPasteboard，Linux X11/Wayland），键绑定建议 Ctrl-V，读到字节当场做 `Image` part，不落盘（同 Q2）。这就是 Q1 的 v1；owner 要可并进 v0。
 - 限制：SSH 到远端跑 TUI 时拖拽插的是本机路径，远端不存在，留作文字并提示；剪贴板读的是远端的，读不到。tmux / herdr 里两条路都透传，正常。exec worker 不受影响，走 `--image PATH`。
 
-**不做**：终端内渲染图（kitty / iTerm2 / sixel 图形协议，`ratatui-image`）。transcript 只显示一行占位，v1 以后看需求；0028 R5 加一句。
+**Q8 transcript 里显示图（已定，owner 2026-10-22）：用 `ratatui-image`。** 核对于其仓库 master（12.0.0-rc.3；最新正式版 11.1.0，要求 ratatui ^0.30.1）：
+
+- 协议按它的探测走：kitty 和 Ghostty 用 kitty unicode placeholder（图绑在占位字符上，随滚动、折叠一起走）；iTerm2、WezTerm 用 iTerm2 协议（WezTerm 的 kitty / sixel 实现被作者拉黑）；foot、xterm 等用 sixel；Terminal.app、Alacritty、Konsole、Warp 等退到半块字符缩略图。radian 不自己写协议，也不挑终端。
+- feature 必须是 `--no-default-features --features image-defaults,crossterm`：默认的 `chafa-dyn` 动态链接 libchafa，运行机器没有就起不来。
+- 它依赖 `image` crate 解码，和 Q4 的本地缩放共用一份依赖，两件事一个 slice。
+- 探测要写控制序列到终端并读回答，必须在事件循环读 stdin 之前做；和 `terminal.rs` 现有的 kitty 键盘协议探测合成一次。
+- 在 tmux（herdr）里它会自己 spawn `tmux set -p allow-passthrough on` 改当前 pane 的选项，然后穿透查询真实终端。接受这个副作用，手册写明。
+- 显示规则（0028 加一节）：图是 block 里一段固定高度的行（高度常量，按字号换算像素；宽按比例，超宽缩到列宽），上面一行仍是 `[image: <来源>, W×H, N KB]` 占位行。折叠态只剩占位行。选择复制、Ctrl-F、`--export` 只看占位行，不看图。journal 不变。
+- 顺序：先 Q5 估算，再 read / `@` / 拖拽 / `exec --image` 管道，再这个渲染 slice，最后剪贴板。
 
 ## 涉及的输入（手册要写）
 
