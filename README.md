@@ -11,7 +11,7 @@
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-5b3fd0" alt="license: MIT / Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.99.1%2B-5b3fd0" alt="rust 1.99.1+">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-5b3fd0" alt="platform: macOS | Linux">
-  <img src="https://img.shields.io/badge/status-pre--release-8f8d9c" alt="status: pre-release">
+  <a href="https://github.com/hisea/radian/releases"><img src="https://img.shields.io/github/v/release/hisea/radian?color=5b3fd0" alt="release"></a>
 </p>
 
 # radian
@@ -138,9 +138,9 @@ The full verification suite an agent must run before calling a change done is in
 
 ## Run
 
-Both hosts read the API key **only** from an environment variable — never from the command line
-— and never print it. The default variable is `$OPENAI_API_KEY` for `openai-compatible` and
-`$ANTHROPIC_API_KEY` for `anthropic`; `--api-key-env` names a different one. A session is one
+Both hosts read the API key only from the credential store
+(`~/.radian/credentials/auth.json`, written by `radian login`) — never from
+the command line — and never print it. See `radian docs providers`. A session is one
 `<session-dir>/<session-id>.jsonl` file; the session directory defaults to
 `--session-dir`, else `$RADIAN_SESSION_DIR`, else `~/.radian/sessions` (`$RADIAN_HOME/sessions`
 when `RADIAN_HOME` is set). The same `~/.radian/` root also holds `config/`,
@@ -149,7 +149,7 @@ when `RADIAN_HOME` is set). The same `~/.radian/` root also holds `config/`,
 ### `radian exec` (line prompt)
 
 ```sh
-export OPENAI_API_KEY=sk-...
+# Store a key first: `radian login` (see `radian docs providers`).
 
 # One turn, a new session named `demo`, provider and tier named explicitly.
 ./target/debug/radian exec \
@@ -164,7 +164,7 @@ export OPENAI_API_KEY=sk-...
 ```
 
 `--provider anthropic` uses the Messages API instead: the base URL defaults to
-`https://api.anthropic.com`, the key comes from `$ANTHROPIC_API_KEY`, and `--max-tokens`
+`https://api.anthropic.com`, and `--max-tokens`
 (default 16384) is sent because the API requires the field. `--thinking off|adaptive|enabled:<budget>`
 controls extended thinking (default `off`).
 
@@ -240,7 +240,7 @@ provider = "openai-compatible"
 base_url = "https://api.openai.com/v1"
 model = "gpt-5"
 context_window = 200000
-api_key = { from = "env", name = "OPENAI_API_KEY" }   # a reference; never a value
+# No key here: keys live in ~/.radian/credentials/auth.json; see `radian docs providers`.
 
 [model.headers]
 x-tenant = "team"

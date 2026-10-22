@@ -109,15 +109,15 @@ type into the message box.
 | `/memory list` | `/memory list [--global\|--project] [--all] [--json]` | List records, project first then global. `--all` includes archived records. |
 | `/memory search` | `/memory search [--global\|--project] [--json] <words>...` | Search by keyword. Every word must match; matching ignores case. Example: `/memory search vpn profile`. |
 | `/memory show` | `/memory show [--global\|--project] [--json] <id>` | Show one record in full. |
-| `/memory add` | `/memory add [--global] [--kind preference\|decision\|fact\|lesson] [--key <key>] <text\|->` | Add a record. Project scope by default. The text is literal in the interface; on the command line `-` reads it from stdin. Example: `/memory add The deploy needs the vpn profile "office".` |
-| `/memory edit` | `/memory edit [--global] --revision <N> <id> <text>` | Change a record's content. Needs the current revision. |
+| `/memory add` | `/memory add [--global] [--kind preference\|decision\|fact\|lesson] [--key <key>] <text\|->` | Add a record. Project scope by default. The text is literal in the interface: a bare `-` writes nothing and shows `` `-` reads stdin only in `radian memory`; type the text here``. On the command line `-` reads it from stdin. Example: `/memory add The deploy needs the vpn profile "office".` |
+| `/memory edit` | `/memory edit [--global] --revision <N> <id> <text>` | Change a record's content. Needs the current revision. A bare `-` as the text writes nothing and shows `` `-` reads stdin only in `radian memory`; type the text here``. |
 | `/memory archive` | `/memory archive [--global] --revision <N> <id>` | Archive a record. It stays stored but is no longer injected or searched by default. |
 | `/memory restore` | `/memory restore [--global] --revision <N> <id>` | Restore an archived record. |
 | `/memory forget` | `/memory forget [--global] [--yes] <id>` | Forget a record. Gone from every view, never resurrected by a rebuild; the bytes remain until a purge. Asks first. |
 | `/memory purge` | `/memory purge [--global\|--project] [--yes]` | Rewrite the log, removing forgotten content. Asks first. |
 | `/memory confirm` | `/memory confirm [--global] --revision <N> <id>` | Confirm a record. Keeps its original source. |
 | `/memory export` | `/memory export [--global\|--project]` | Print one scope as editable Markdown. |
-| `/memory import` | `/memory import [--global\|--project] <source>` | Import an edited Markdown export. On the command line `-` reads it from stdin. |
+| `/memory import` | `/memory import [--global\|--project] <source>` | Import an edited Markdown export from the file at `<source>`: a relative path resolves against the workspace in the interface and against the current directory on the command line; an absolute path may point anywhere. A bare `-` imports nothing and shows `` `-` reads stdin only in `radian memory`; give a file path here``. On the command line `-` reads it from stdin. A file that cannot be read imports nothing and shows `cannot read <path>: <error>`. |
 | `/memory project` | `/memory project [--json] [new]` | Show this workspace's identity key and project state, or register it with `new`. |
 | `/memory relink` | `/memory relink <project-id>` | Attach this workspace's identity key to an existing project. |
 | `/memory split` | `/memory split [--yes] <from> <to> <id>...` | Move records between projects. Asks first. |
