@@ -19,7 +19,7 @@ radian arc                    open the arc TUI
 radian arc <subcommand>       run one CLI operation and exit
 ```
 
-- `radian arc` with no subcommand opens the TUI. A subcommand runs the CLI. This follows `radian` (TUI) and `radian exec` (headless).
+- `radian arc` with no subcommand opens the TUI. A subcommand runs the CLI. This follows `radian` (TUI) and `radian exec` (headless). The TUI's pages are `plans`, `task` and `merge`. The plans and task pages read the plans, the tasks, the attempt verdicts and a worker's journal and write nothing; the merge page is shown disabled.
 - The CLI subcommands are `init`, `add`, `list`, `show`, `adopt`, `start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `reverify`, `run`, `mcp`, and `work`.
 - Exit codes: 0 success; 1 error; 2 usage error; 3 the state does not allow the operation (this includes a file changed outside arc); 4 a lock is held by another process. `list` and `show` take `--json`.
 - `rad arc` is the same command through the `rad` alias.
@@ -180,7 +180,7 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 
 ### 13. The scheduling loop
 
-- While the arc TUI is open, it holds `runner.lock` and is the scheduling loop. It advances plans at auto level `run` or `merge`. When the TUI closes, nothing advances.
+- While the arc TUI is open, it holds `runner.lock` and is the scheduling loop. It advances plans at auto level `run` or `merge`. When the TUI closes, nothing advances. A read-only TUI — the plans and task pages without the merge page — holds no lock and advances nothing; `runner.lock` is what tells it that another process is the loop.
 - `radian arc run` is the same loop without a TUI. It makes every transition that it can make now, persists the state, and exits when nothing more can happen now. Waiting for a person, a retry time, or CI does not keep it running. It writes each transition line and flushes it when the transition happens, and prints the summary when the pass ends.
 - `radian arc run --watch [--interval <seconds>]` repeats that loop: after a pass that ends quiet it waits `--interval` seconds (integer, default 30, 5 to 3600) and runs another pass, until SIGINT or SIGTERM. It holds `runner.lock` for its whole life. It prints the summary only when it differs from the one it printed last. On SIGINT or SIGTERM it starts no new work, lets a running attempt finish (attempts are separate processes with their own records; the next `run` reconciles them), prints the summary, releases the lock and exits `0`.
 - The TUI and `radian arc run` use the same state machine and the same files.
