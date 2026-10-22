@@ -2246,6 +2246,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "radian-arc"
+version = "0.1.3"
+dependencies = [
+ "agent-provider-openai-compatible",
+ "chrono",
+ "fs2",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "radian-coding"
 version = "0.1.3"
 dependencies = [
@@ -2413,6 +2424,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "pulldown-cmark",
+ "radian-arc",
  "radian-coding",
  "radian-core",
  "radian-exec",

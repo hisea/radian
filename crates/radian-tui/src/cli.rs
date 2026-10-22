@@ -399,6 +399,48 @@ enum RadianCommand {
     /// Serve the session's tools over MCP. Not available in this build: the command exits 2
     /// without serving anything.
     Mcp,
+
+    /// arc: the plan and task orchestrator. Not set up yet in this build: without a
+    /// subcommand it prints a notice and exits 2.
+    Arc {
+        #[command(subcommand)]
+        command: Option<ArcCommand>,
+    },
+}
+
+/// The `radian arc` subcommands (ADR 0048). This slice has only the internal worker
+/// wrapper; the CLI operations (`init`, `add`, `list`, …) arrive with their own slices.
+#[derive(clap::Subcommand, Debug)]
+enum ArcCommand {
+    /// Internal: run one attempt of one task. arc runs it, a person does not (ADR 0048
+    /// decision 7); it is hidden and has no manual page. The brief is read from stdin; the
+    /// last stdout line is the `AttemptFinished` record.
+    #[command(hide = true)]
+    Work {
+        /// The task id: the session id, the branch suffix and the worktree name.
+        #[arg(long, value_name = "TASK", hide = true)]
+        task: String,
+        /// The attempt number, 1-based.
+        #[arg(long, value_name = "N", hide = true)]
+        attempt: u32,
+        /// The random token the scheduling loop expects back in `AttemptFinished`.
+        #[arg(long, value_name = "TOKEN", hide = true)]
+        token: String,
+        /// Continue the task's session (`--resume <task>`) instead of starting one.
+        #[arg(long, hide = true)]
+        resume: bool,
+        /// Let a branch with no change past the base pass the delivery check.
+        #[arg(long, hide = true)]
+        allow_noop: bool,
+        /// Extra `radian exec` arguments, after `--` (the model route in tests).
+        #[arg(
+            last = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS",
+            hide = true
+        )]
+        extra: Vec<String>,
+    },
 }
 
 /// The `radian footer` subcommands.
@@ -484,6 +526,30 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
         // implements these names; a usage-class refusal (2), never a silent no-op.
         RadianCommand::Serve => reserved("serve"),
         RadianCommand::Mcp => reserved("mcp"),
+        RadianCommand::Arc { command } => match command {
+            Some(ArcCommand::Work {
+                task,
+                attempt,
+                token,
+                resume,
+                allow_noop,
+                extra,
+            }) => ExitCode::from(radian_arc::work::run(radian_arc::work::Options {
+                task,
+                attempt,
+                token,
+                resume,
+                allow_noop,
+                extra_args: extra,
+            }) as u8),
+            // ADR 0048 decision 15: without setup arc refuses and names `radian arc init`.
+            // `init` does not exist in this slice, so the notice names no command it cannot
+            // run; a usage-class exit (2) is what a refusal is (ADR 0048 decision 1).
+            None => {
+                eprintln!("radian: arc is not set up yet");
+                ExitCode::from(2)
+            }
+        },
     }
 }
 

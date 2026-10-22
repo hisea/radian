@@ -28,6 +28,9 @@ path = "src/rad.rs"
 # The `radian exec` subcommand and the top-level management commands (ADR 0032 slice 1): the
 # `agent` command as a library, so both entries run the same parser and dispatch.
 radian-exec = { version = "0.1.3", path = "../radian-exec" }
+# `radian arc`: the plan and task orchestrator's control plane (ADR 0048). This slice is
+# `radian arc work`, the internal worker wrapper.
+radian-arc = { version = "0.1.3", path = "../radian-arc" }
 radian-core = { version = "0.1.3", path = "../radian-core" }
 agent-extensions = { version = "0.1.3", path = "../agent-extensions" }
 agent-provider-openai-compatible = { version = "0.1.3", path = "../agent-provider-openai-compatible" }

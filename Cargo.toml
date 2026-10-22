@@ -7,6 +7,7 @@ members = [
     "crates/agent-provider-openai-responses",
     "crates/agent-provider-anthropic",
     "crates/radian-exec",
+    "crates/radian-arc",
     "crates/radian-host",
     "crates/agent-provider-contract",
     "crates/radian-session",

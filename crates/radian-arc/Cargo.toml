@@ -1,0 +1,19 @@
+[package]
+name = "radian-arc"
+version = "0.1.3"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "arc, the plan and task orchestrator (ADR 0048)"
+publish = false
+
+[dependencies]
+chrono = "0.4"
+fs2 = "0.4"
+serde_json.workspace = true
+
+[dev-dependencies]
+agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
