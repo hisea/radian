@@ -20,10 +20,35 @@ The two numbers are the theme's accent RGB; the script maps it to the page's `va
 
 ## Before launch
 
-- `brew install radian` is a placeholder (marked "soon"); fix the formula name or remove the row.
+- The old speed numbers were removed; they come back only after a re-measure (`benchmarks/perf-baseline.md`).
 - The frame's model name, costs and quota are invented by the prototype script.
-- The two speed numbers come from `benchmarks/perf-baseline.md` (Apple M4, before ADR 0040); re-measure.
-- Deployment (host, `CNAME`) is not decided.
+
+## Deploy
+
+`getrad.dev` is hosted on GitHub Pages by `.github/workflows/pages.yml`.
+Every push to `main` that changes `site/**`, `docs/user/**`, the generator
+(`crates/radian-tui/examples/site-docs.rs`, `crates/radian-tui/src/site_docs.rs`)
+or the workflow itself deploys; `workflow_dispatch` deploys on demand. The job
+copies `site/` (leaving out `site/tools/` and `site/README.md`) into `_site/`,
+runs the generator into `_site/docs/`, writes `_site/CNAME` with `getrad.dev`,
+then configures and uploads the Pages artifact.
+
+## Preview the docs
+
+```sh
+cargo run -p radian-tui --example site-docs --locked -- /tmp/site
+cp site/index.html site/favicon.svg site/docs.css /tmp/site/
+python3 -m http.server -d /tmp/site 8000
+```
+
+then open `http://localhost:8000/docs/`.
+
+## One source
+
+The docs pages are generated from the same `DOCS` table the binary embeds
+(`crates/radian-coding/src/docs.rs`), never from a second copy: the generator
+reads the table through the `radian-tui` library. A broken link between pages
+fails the build, so it fails CI before merge.
 
 ## README images
 
