@@ -45,7 +45,7 @@ Disk roots open like the workspace: stepwise `openat(O_NOFOLLOW)` from the root 
 **`full` tier.** `read`, `grep`, and `glob` also read any other absolute or `~` path, except the deny set. The `full` tier's shell already reads every file; a file tool that refuses what the shell reads protects nothing and only moves the model to `cat`, without paging or line numbers. The deny set keeps credential and session files out of the file tools:
 
 - the sandbox deny-read list `DEFAULT_DENY_READ` (`radian-sandbox/src/policy.rs`: `.ssh`, `.aws`, `.gnupg`, `.netrc`, `.npmrc`, `.config/gcloud`, `.docker/config.json`, and the browser profile and cookie directories), relative to `$HOME`;
-- the `$RADIAN_HOME` paths the sandbox denies (ADR 0020): the actual sessions directory, `memory/`, `credentials/`, `trust/`, and `access/`. One function builds this list for the sandbox policy and for the file tools, so the two never differ.
+- the `$RADIAN_HOME` paths the sandbox denies (ADR 0020): the actual sessions directory, `memory/`, `credentials/`, `trust/`, `access/`, and `arc/` (ADR 0048 decision 15). One function builds this list for the sandbox policy and for the file tools, so the two never differ.
 
 The deny check runs on the path after `realpath`, so a symlink into a denied directory refuses, and the file opens with `O_NOFOLLOW` on its last component. A refusal names the path as denied and says the deny set is the sandbox's. The shell in the `full` tier still reads the deny set; the `workspace` tier is the tier that keeps it from the shell too. This does not claim credential isolation in the `full` tier.
 

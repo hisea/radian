@@ -56,7 +56,7 @@ arc has four objects.
 
 ### 5. Backlog storage
 
-The backlog is a directory of Markdown files with front matter.
+The backlog is a directory of Markdown files with front matter, in `~/.radian/arc/<project>/backlog/` (decision 15).
 
 ```text
 <backlog>/
@@ -101,7 +101,7 @@ The backlog is a directory of Markdown files with front matter.
 
 For each attempt, the scheduling loop runs `radian arc work`. `radian arc work` is the trusted wrapper around the model. A person does not run it.
 
-1. It creates or reuses the linked worktree `.radian-worktrees/<task>` on branch `work/<task>`. The first attempt starts from `origin/main` and records `base_sha`. In single-host v0 all worktrees share one clone.
+1. It creates or reuses the linked worktree `<repository>/.radian/arc/worktrees/<task>` on branch `work/<task>` (decision 15). The first attempt starts from `origin/main` and records `base_sha`. In single-host v0 all worktrees share one clone.
 2. It runs the model:
 
    ```text
@@ -171,6 +171,35 @@ v0 runs on one host. Concurrency defaults to 1 task at a time. The host fields s
 
 v0 does not have: a resident daemon; messages to a running worker (corrections go through rework); workers that read or write the backlog or hold the push credential; resume on a different host; more than one scheduling loop; a separate clone per task; automatic rework briefs written by arc; a gate language; load-based scheduling; worker kinds other than `radian exec`; plan branches or plan merges.
 
+### 15. Setup, files, and directories
+
+`radian arc init` sets up arc for one repository. arc does not guess the repository or the gate commands, so without setup `radian arc` and its subcommands refuse and name `radian arc init`.
+
+`radian arc init` runs in the repository. It:
+
+- finds the repository root, the `origin` URL, and the main branch, and writes a configuration template;
+- adds `/.radian/arc/` to `.git/info/exclude` (a local file: it never changes a committed `.gitignore`);
+- creates the directories below;
+- checks the requirements: a stored provider credential (`radian login`), a working push to `origin`, and a working `workspace`-tier sandbox (bubblewrap on Linux);
+- prints the command that registers `radian arc mcp` with the lead. It does not change the lead's configuration.
+
+The gate commands in the template are empty or the default profile. The owner writes them.
+
+```text
+<repository>/.radian/arc/worktrees/<task>/   the worker workspace for each task
+~/.radian/arc/<project>/
+  config.toml                                repository, gate profiles and commands, budgets, concurrency
+  backlog/                                   decision 5
+  attempts/<task>/<attempt>/                 host-local attempt records (decision 7)
+```
+
+- `<project>` is the repository directory name. When that name is already set up for another repository, `init` asks for a different name.
+- The configuration and the backlog are never in the repository. The lead works in the repository, and a file there is a file the lead can change. The gate commands and the approval records must stay out of its reach. A worker also never sees them (decision 5).
+- `~/.radian/arc/` is unreadable in the sandbox and is in the file tools' deny set (ADR 0020, ADR 0039 decision 4). The worktrees are not under it: a workspace must not be inside a path that the sandbox hides.
+- The worktrees are inside the repository directory, so they get the repository's trust decision (ADR 0031) and need no extra flag.
+- A worktree is created on the first attempt of a task and removed when the task is merged.
+- `.radian-worktrees/` is not a radian location. Search (`grep`, `glob`), skill discovery, and `@` completion skip `.radian/arc/worktrees/` (they skipped `.radian-worktrees/` before).
+
 ## Constraints and Costs
 
 - arc code is in the repository from the start, so prototype work goes through the gate and Verify.
@@ -186,4 +215,5 @@ v0 does not have: a resident daemon; messages to a running worker (corrections g
 - Gate: a verdict counts only for its sha. A moved branch removes it. A new review of the same sha makes an older approval invalid. Task B is verified on a candidate that contains merged task A. A merge fails when main is no longer `base_sha`.
 - Auto: one plan with three tasks and dependencies runs at level `off` with one start and one merge each, at level `run` to `awaiting_human` for each task, and at level `merge` to `done` with no person. A task that fails its gate `max_auto_rework + 1` times pauses the whole plan and sets `auto` to `off`.
 - Approval: the MCP tool list contains no tool to confirm, start, merge, reject, change `auto`, or approve.
+- Setup: `radian arc init` in a repository creates the files above, adds the exclude line once, and refuses to reuse a project name of another repository. Without setup, `radian arc` names `radian arc init`. A worker cannot read `~/.radian/arc/` with the file tools or in the sandbox. `grep` from the repository root does not enter `.radian/arc/worktrees/`.
 - Commands: `radian arc` opens the TUI. Each subcommand runs and exits with a documented code. `docs/user/` documents every subcommand, option, and file field (`AGENTS.md`).
