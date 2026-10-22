@@ -79,6 +79,7 @@ pub async fn open_session(
         skills_builtin,
         skills_disabled,
         tools_allow,
+        extra_deny_read,
         skills_allow,
         memory_injection,
         hooks: hooks_config,
@@ -309,13 +310,15 @@ pub async fn open_session(
         .filter(|skill| skill.body.is_none())
         .map(|skill| skill.dir.clone())
         .collect();
+    let mut file_deny_read = crate::home::file_tool_deny_read(&session_dir);
+    file_deny_read.extend(extra_deny_read);
     let (coding, jobs) = build_coding_tools(
         coding_root.as_deref(),
         sandbox_slot.clone(),
         &jobs_dir,
         harden_git,
         &skill_dirs,
-        &crate::home::file_tool_deny_read(&session_dir),
+        &file_deny_read,
     )?;
     // ADR 0037 §6: a resumed session clears its jobs directory. The registry is built empty
     // above, so at this point no file in the directory can belong to it and nothing is

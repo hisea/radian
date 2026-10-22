@@ -497,6 +497,7 @@ pub(super) fn open_session_and_refresh(
                     trust: trust_setup.resolved.decision.as_bool(),
                 }),
                 tools_allow: None,
+                extra_deny_read: Vec::new(),
                 project_hooks,
                 memory_root,
                 trust: trust_setup,
