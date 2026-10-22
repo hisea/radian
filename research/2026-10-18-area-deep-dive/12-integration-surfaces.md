@@ -123,7 +123,7 @@ Radian 只有两个入口：全屏 TUI 和 `radian exec`，外加一个只有本
 
 | 入口 | 为什么不做 / 什么时候再看 |
 |---|---|
-| 自建 app-server 那种 JSON-RPC 协议 | Codex 为它付出了全量协议层和 daemon（分报告 4）。ACP 已经是编辑器侧的事实标准，Radian 没有自己的桌面或网页客户端，用不上。等将来有 `radian chord` 或跨机器需求再说（ADR 0043 远期） |
+| 自建 app-server 那种 JSON-RPC 协议 | Codex 为它付出了全量协议层和 daemon（分报告 4）。ACP 已经是编辑器侧的事实标准，Radian 没有自己的桌面或网页客户端，用不上。等将来有 `radian arc` 或跨机器需求再说（ADR 0043 远期） |
 | 远程和手机控制 | 要么自建中继（新服务，碰 ADR 0013 的不出网缺省），要么依赖厂商云。可以先写文档：用 SSH 转发控制 socket，再加 `radian attach`（ADR 0043 远期“跨机器”）。opencode 的 `pair` 和 omp 的 collab 都要常驻 server |
 | Slack 等聊天平台 | 对手的做法都是开云端会话（§3），Radian 没有云。等 ① 落地后，Slack bot 可以作为仓库外的示例，用“bot 跑 `radian exec --output jsonl`”实现，不进核心 |
 | Python/TS SDK 包 | ① 落地后就是一层很薄的子进程封装（Codex TS SDK 的做法），可以交给 pi 或社区；先在 README 给一个 30 行的示例 |

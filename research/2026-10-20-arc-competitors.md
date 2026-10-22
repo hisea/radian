@@ -1,4 +1,4 @@
-# chord 对手调查（2026-10-20）
+# arc 对手调查（2026-10-20）
 
 来源以官网/README/SPEC 为主；二手博客的说法标"二手"。未核实项标"未验证"。
 
@@ -7,7 +7,7 @@
 | 类 | 代表 | 做什么 | 和我们的关系 |
 |---|---|---|---|
 | 终端运行时 / 多路复用 | **herdr**、claude-squad、cmux、muxel | 保住 pane，知道 agent 是 working/blocked/done，API 做 read/send/wait/split/attach | herdr 自己的定位："坐在 Conductor/Emdash/Superset 下面"。我们要退出的就是这层 |
-| 桌面管理器 | **Orca（onorca.dev，Stably AI，MIT）**、Conductor、Emdash、Superset、Nimbalyst（Crystal 继任）、Vibe Kanban（休眠）、OrchestratorInc | 每任务一个 worktree，diff 评审 UI，GitHub/Linear 集成，本地或 ssh 远端；27 种 agent CLI | 人盯着的交互式会话，长驻；无自动验证（Chord 的 review 是人工批注发回 agent） |
+| 桌面管理器 | **Orca（onorca.dev，Stably AI，MIT）**、Conductor、Emdash、Superset、Nimbalyst（Crystal 继任）、Vibe Kanban（休眠）、OrchestratorInc | 每任务一个 worktree，diff 评审 UI，GitHub/Linear 集成，本地或 ssh 远端；27 种 agent CLI | 人盯着的交互式会话，长驻；无自动验证（Arc 的 review 是人工批注发回 agent） |
 | 自治任务运行器 | **OpenAI Symphony**（spec + Elixir 参考实现）、**sortie**（单 Go 二进制 + SQLite）、Contrabass、cyrus、Machinist、Orbi、SuperPlane、autonomousagentai/agent-orchestrator、Solenta（未验证） | 以 issue tracker 为控制面：轮询、按 issue 开隔离工作区、起一次性 agent、产出 PR，人审 | **我们的设计属于这一类** |
 | 群体 / 组织 | **Gas Town + Beads**（Yegge）、Paperclip | 持久身份 + 一次性会话；心跳领票；预算、审批、组织架构 | 规模 20–30 agent，复杂度远超我们需要 |
 
@@ -45,7 +45,7 @@
 
 印证：
 1. 多写者经 git 分支合并共享任务状态是高复杂度设计（Beads 现以单写者 Dolt 为源）。单写者目录避开了这个问题，不用引入数据库。
-2. "只有编排器改调度状态"、"重启不留内存状态"、"工作区活到终态"：Symphony 原话，和我们的 chord 一致。
+2. "只有编排器改调度状态"、"重启不留内存状态"、"工作区活到终态"：Symphony 原话，和我们的 arc 一致。
 3. 一次性 worker + resume 返工：Symphony 的 thread 复用、Gas Town 的一次性会话都这么做。
 4. headless 无输入口避开了 Gas Town 的 politeness deadlock。
 
@@ -53,14 +53,14 @@
 5. **stall 超时按无输出计**（Symphony），不是总时长；radian 的 `--output jsonl` 流正好能算。
 6. **退避重试**与并发上限：设计稿没写。
 7. 独立 reviewer 不是空白：OrchestratorInc 有专用 reviewer agent；Sortie 的 self-review 是同 session。**没人做的是：绑定固定 sha 的隔离 commands gate 加变异检查、verdict 随 sha 失效、合并前集成复验。** 差异点要具体到验证契约，不是"多一个 agent 做 review"。
-8. 没人做"不长驻"：Symphony、sortie、Paperclip 全是服务。`chord run` 排空即退是取舍不是必然优势：部署简单，代价是不主动轮询、不收远程推送、重试靠定时器。
+8. 没人做"不长驻"：Symphony、sortie、Paperclip 全是服务。`arc run` 排空即退是取舍不是必然优势：部署简单，代价是不主动轮询、不收远程推送、重试靠定时器。
 
 ## 要不要自己做
 
 - 桌面管理器那一类不做：和"worker 只读、人只观察"相反。
 - 任务运行器那一类有现成的：若 backlog 用 GitHub Issues，sortie 或一个 Symphony 实现加一个 `radian exec --output jsonl` 的 stdio 适配器，今天就能跑，代价是长驻、需要 tracker、没有固定 sha 的独立 gate。外部审核建议与 Sortie 做双路径实验；决定不做整轮 A/B，只读其 adapter 接口做参照。
 - 第二轮审核（同日）对竞品没有新纠正；它建议参考 Sortie 的 adapter、Stage Chains 与 CI feedback 实现，避免重复踩已解决的问题，owner 接受。
-- 建议：自己做小的 chord，**抄 Symphony 的状态机和超时/退避语义**（其 SSH 附录只要求区分主机失联与任务失败，没有定义远端进程身份与 push，这两处要自己做），保留差异点：文件单写者、不长驻、固定 sha 的独立 gate 与 verdict 失效规则。先做仓库外原型。
+- 建议：自己做小的 arc，**抄 Symphony 的状态机和超时/退避语义**（其 SSH 附录只要求区分主机失联与任务失败，没有定义远端进程身份与 push，这两处要自己做），保留差异点：文件单写者、不长驻、固定 sha 的独立 gate 与 verdict 失效规则。先做仓库外原型。
 
 ## 来源
 - https://www.onorca.dev/
