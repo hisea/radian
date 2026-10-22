@@ -457,6 +457,30 @@ fn wait_for_file(path: &Path) {
     }
 }
 
+/// Runs one `radian arc …` command with a deadline, so a missing timer fails the test
+/// instead of hanging until nextest's own timeout.
+fn run_with_deadline(repo: &Repo, args: &[&str], limit: Duration) -> std::process::Output {
+    let mut child = repo.spawn(args);
+    let deadline = Instant::now() + limit;
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return child.wait_with_output().expect("the command's output");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .expect("the killed command's output");
+            panic!(
+                "`{}` did not finish within {limit:?}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn pid_start(pid: u32) -> String {
     let output = std::process::Command::new("ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
@@ -554,8 +578,13 @@ fn a_stall_signals_the_wrapper_and_records_the_class() {
     );
     write_worker_args(&repo, mock.base_url());
 
-    let run = repo.radian(&["arc", "start", task]);
-    assert_eq!(run.code, 0, "start failed: {}", run.stderr);
+    let output = run_with_deadline(&repo, &["arc", "start", task], Duration::from_secs(30));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let record = attempt_result(&store, task, 1);
     assert_eq!(record["class"], json!("stall"), "{record}");
     assert!(
@@ -592,8 +621,13 @@ fn a_wall_time_signals_the_wrapper_and_records_the_class() {
     );
     write_worker_args(&repo, mock.base_url());
 
-    let run = repo.radian(&["arc", "start", task]);
-    assert_eq!(run.code, 0, "start failed: {}", run.stderr);
+    let output = run_with_deadline(&repo, &["arc", "start", task], Duration::from_secs(30));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let record = attempt_result(&store, task, 1);
     assert_eq!(record["class"], json!("wall_time"), "{record}");
     assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));

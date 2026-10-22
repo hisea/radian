@@ -611,14 +611,13 @@ fn start_refuses_a_draft_plan_and_writes_no_attempt() {
         .load_task(&task)
         .expect("the task reads")
         .item;
-    assert_eq!((stored.state.as_str(), stored.phase.as_str()), ("todo", "ready"));
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "ready")
+    );
     assert_eq!(stored.attempt, 0, "a refusal writes nothing");
     assert!(
-        !scratch
-            .repo()
-            .join(".radian/arc/runs")
-            .join(&task)
-            .exists(),
+        !scratch.repo().join(".radian/arc/runs").join(&task).exists(),
         "a refused start runs no wrapper"
     );
 }
