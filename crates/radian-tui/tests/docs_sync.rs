@@ -156,8 +156,8 @@ fn every_theme_role_appears_in_the_manual() {
 #[test]
 fn every_footer_item_id_appears_in_the_manual() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let footer_md =
-        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
+        .expect("footer.md exists");
     for id in radian_tui::footer::footer_item_ids() {
         assert!(
             footer_md.contains(&format!("`{id}`")),
@@ -181,8 +181,8 @@ fn every_footer_item_id_appears_in_the_manual() {
 #[test]
 fn every_footer_item_parameter_appears_in_its_section() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let footer_md =
-        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
+        .expect("footer.md exists");
     for id in radian_tui::footer::footer_item_ids() {
         let section = item_section(&footer_md, id);
         for param in radian_tui::footer::footer_item_params(id).unwrap_or(&[]) {
@@ -209,8 +209,8 @@ fn every_footer_item_parameter_appears_in_its_section() {
 #[test]
 fn every_footer_item_placeholder_appears_in_its_section() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let footer_md =
-        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
+        .expect("footer.md exists");
     for id in radian_tui::footer::footer_item_ids() {
         let section = item_section(&footer_md, id);
         for placeholder in radian_tui::footer::footer_item_placeholders(id).unwrap_or(&[]) {
@@ -230,11 +230,11 @@ fn every_footer_item_placeholder_appears_in_its_section() {
 #[test]
 fn every_footer_preset_block_matches_its_export() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let footer_md =
-        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
+        .expect("footer.md exists");
     for preset in radian_tui::footer::Preset::NAMES {
         let section = item_section(&footer_md, &format!("Preset `{preset}`"));
-        let block = fenced_toml(&section);
+        let block = fenced_toml(section);
         let exported = radian_tui::footer::export_preset(preset).expect("a built-in preset");
         assert_eq!(
             block, exported,
@@ -252,8 +252,8 @@ fn every_footer_preset_block_matches_its_export() {
 #[test]
 fn every_footer_closed_set_value_appears_in_its_row() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let footer_md =
-        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
+        .expect("footer.md exists");
     for (key, values) in [
         ("position", radian_tui::footer::RowPosition::NAMES),
         ("glyphs", radian_tui::footer::Glyphs::NAMES),
@@ -282,8 +282,8 @@ fn every_footer_closed_set_value_appears_in_its_row() {
 fn every_footer_default_matches_the_code() {
     use radian_host::config::TuiFooterConfig;
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let footer_md =
-        std::fs::read_to_string(manifest.join("../../docs/user/footer.md")).expect("footer.md exists");
+    let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
+        .expect("footer.md exists");
     let (footer, _) = radian_tui::footer::Footer::from_config(&TuiFooterConfig::default());
     // The fixture parses an empty config, so the built footer carries the code defaults.
     assert!(
@@ -295,7 +295,10 @@ fn every_footer_default_matches_the_code() {
             "preset",
             format!("`{}`", radian_tui::footer::Preset::default().as_str()),
         ),
-        ("glyphs", format!("`{}`", radian_tui::footer::Glyphs::default().as_str())),
+        (
+            "glyphs",
+            format!("`{}`", radian_tui::footer::Glyphs::default().as_str()),
+        ),
         (
             "context_line",
             format!("`{}`", radian_tui::footer::ContextLine::default().as_str()),
@@ -315,10 +318,7 @@ fn every_footer_default_matches_the_code() {
         ),
         (
             "separator_style",
-            format!(
-                "`{}`",
-                radian_tui::footer::DEFAULT_SEPARATOR_STYLE.as_str()
-            ),
+            format!("`{}`", radian_tui::footer::DEFAULT_SEPARATOR_STYLE.as_str()),
         ),
     ] {
         let row = footer_md
@@ -362,7 +362,9 @@ fn item_section<'a>(footer_md: &'a str, name: &str) -> &'a str {
 
 /// The first fenced `toml` block of a section, with its trailing newline restored.
 fn fenced_toml(section: &str) -> String {
-    let start = section.find("```toml").expect("the section has a toml block");
+    let start = section
+        .find("```toml")
+        .expect("the section has a toml block");
     let after = &section[start + "```toml".len()..];
     let after = after.strip_prefix('\n').unwrap_or(after);
     let end = after.find("\n```").expect("the toml block is closed");
