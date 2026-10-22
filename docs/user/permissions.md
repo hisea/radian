@@ -52,6 +52,38 @@ at the next start) or with `radian trust status|on|off|forget|list` outside it.
 After `/trust on` the next start shows no hint; after `/trust off` the hint says the
 project is distrusted.
 
+In an untrusted project every command the `shell` tool starts carries git safety keys
+in its environment.
+This covers a foreground command, a background job, `!` and `!!`, both tiers, and an
+approved outside-sandbox call.
+The keys are `GIT_CONFIG_COUNT`, then `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>`,
+numbered from `0`.
+
+| Key | Value | When |
+|---|---|---|
+| `core.fsmonitor` | `false` | always |
+| `core.hooksPath` | `/dev/null` | always |
+| `core.attributesFile` | `/dev/null` | always |
+| `filter.<name>.clean`, `filter.<name>.smudge`, `filter.<name>.process` | empty | for each filter name the effective git configuration sets |
+| `filter.<name>.required` | `false` | for each such filter name |
+| `diff.external` | `true` | only when the effective git configuration sets it |
+| `diff.<name>.command` | `true` | for each diff driver that sets it |
+| `diff.<name>.textconv` | `cat` | for each diff driver that sets it |
+
+Git hooks do not run, and filter commands run nothing.
+A plain `git diff` shows no patch while the effective git configuration sets
+`diff.external`; a driver that sets `command` shows no patch for its paths, while one
+that sets `textconv` passes the content through and keeps the text diff.
+The git command itself still succeeds, and `--stat` and `--name-only` still work.
+A project whose own test suite tests hooks or filters gives different results.
+Nothing in the transcript warns you.
+
+Trust the project to remove the keys: the startup prompt, `--trust`, `radian trust on`,
+or `/trust on`.
+The `shell` tool reads the decision when the session starts, so it keeps the keys until
+the next start; a `!` command reads it when it runs.
+A trusted project gets no keys, and the hooks and filters you installed run as usual.
+
 Approval controls questions.
 Use `on-ask` to ask when a rule says so.
 Use `always` to ask for every call a rule does not deny.
