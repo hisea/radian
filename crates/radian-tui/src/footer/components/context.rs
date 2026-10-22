@@ -52,6 +52,10 @@ impl Component for Context {
         85
     }
 
+    fn params(&self) -> &'static [&'static str] {
+        PARAMS
+    }
+
     fn role(&self, _app: &App) -> Option<Role> {
         Some(Role::Budget)
     }

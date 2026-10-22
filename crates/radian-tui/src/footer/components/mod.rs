@@ -107,6 +107,12 @@ pub(crate) trait Component: Sync {
     fn thresholds(&self) -> Vec<(i64, ItemStyle)> {
         Vec::new()
     }
+    /// The parameters the item reads from its config (`context`'s `width`/`fill`/`empty`,
+    /// `status`'s `keys`); empty when it reads none. The single source for the manual's
+    /// drift test: a component that reads a parameter declares it here.
+    fn params(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// The item's data at draw time, or `None` when it has nothing (the item hides; v5 §5: never
     /// a fabricated number). `item` carries the configured per-item parameters (`context`'s
     /// `width`/`fill`/`empty`, `status`'s `keys`).
@@ -161,14 +167,10 @@ pub(crate) fn ids_all() -> Vec<&'static str> {
 }
 
 /// The parameters one built-in id reads from its item, or `None` for an id no component
-/// claims. Each component reads from its own entry here, so the manual's drift test cannot
-/// drift from the behavior.
+/// claims. Each component declares its own list by overriding `Component::params`, so the
+/// manual's drift test cannot drift from the behavior.
 pub(crate) fn params_of(id: &str) -> Option<&'static [&'static str]> {
-    Some(match id {
-        "context" => context::PARAMS,
-        "status" => status::PARAMS,
-        _ => return builtin(id).map(|_| &[] as &'static [&'static str]),
-    })
+    builtin(id).map(Component::params)
 }
 
 /// The placeholders a built-in id declares; `None` for an id no component claims.

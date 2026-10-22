@@ -23,28 +23,23 @@ pub enum Preset {
 }
 
 impl Preset {
-    /// Every preset name, in parse order. The single source for the `match` below and the
-    /// manual's drift test: adding a preset means adding it here first.
-    pub const NAMES: &[&str] = &["deck", "full", "pi", "classic"];
+    /// Every preset name, in parse order. The single source for `parse` and the manual's
+    /// drift test: adding a preset means adding it here first (`as_str` is exhaustive, so
+    /// the compiler forces a new variant into it, and `parse` is a lookup over this list).
+    pub const ALL: &[Self] = &[Self::Deck, Self::Full, Self::Pi, Self::Classic];
 
     /// The config-file spelling of this preset.
     pub fn as_str(self) -> &'static str {
-        Self::NAMES[match self {
-            Self::Deck => 0,
-            Self::Full => 1,
-            Self::Pi => 2,
-            Self::Classic => 3,
-        }]
+        match self {
+            Self::Deck => "deck",
+            Self::Full => "full",
+            Self::Pi => "pi",
+            Self::Classic => "classic",
+        }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "deck" => Some(Self::Deck),
-            "full" => Some(Self::Full),
-            "pi" => Some(Self::Pi),
-            "classic" => Some(Self::Classic),
-            _ => None,
-        }
+        Self::ALL.iter().copied().find(|v| v.as_str() == name)
     }
 }
 
@@ -108,4 +103,18 @@ pub(crate) fn preset_footer_rows(preset: Preset, warnings: &mut Vec<String>) -> 
         &mut std::collections::BTreeSet::new(),
         warnings,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `Preset::ALL` entry round-trips through `parse(as_str())`: `ALL` is the single
+    /// source, so a new preset without a spelling fails here.
+    #[test]
+    fn every_preset_round_trips_through_parse() {
+        for preset in Preset::ALL {
+            assert_eq!(Preset::parse(preset.as_str()), Some(*preset), "{preset:?}");
+        }
+    }
 }

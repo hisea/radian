@@ -150,17 +150,20 @@ pub enum RowPosition {
 }
 
 impl RowPosition {
-    /// Every row position name. The single source for the `match` below and the manual's
-    /// drift test.
-    pub const NAMES: &[&str] = &["footer", "above_input", "below_input"];
+    /// Every row position name. The single source for `parse` and the manual's drift test.
+    pub const ALL: &[Self] = &[Self::Footer, Self::AboveInput, Self::BelowInput];
+
+    /// The config-file spelling of this position.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Footer => "footer",
+            Self::AboveInput => "above_input",
+            Self::BelowInput => "below_input",
+        }
+    }
 
     fn parse(name: &str) -> Option<Self> {
-        match name {
-            "footer" => Some(Self::Footer),
-            "above_input" => Some(Self::AboveInput),
-            "below_input" => Some(Self::BelowInput),
-            _ => None,
-        }
+        Self::ALL.iter().copied().find(|v| v.as_str() == name)
     }
 }
 
@@ -502,4 +505,22 @@ fn placeholders(format: &str) -> Vec<String> {
         rest = &after[close + 1..];
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `RowPosition::ALL` entry round-trips through `parse(as_str())`: `ALL` is the
+    /// single source, so a new position without a spelling fails here.
+    #[test]
+    fn every_row_position_round_trips_through_parse() {
+        for position in RowPosition::ALL {
+            assert_eq!(
+                RowPosition::parse(position.as_str()),
+                Some(*position),
+                "{position:?}"
+            );
+        }
+    }
 }

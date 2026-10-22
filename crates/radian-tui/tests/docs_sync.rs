@@ -174,9 +174,9 @@ fn every_footer_item_id_appears_in_the_manual() {
 /// Every parameter each footer item reads appears in that item's section of
 /// `docs/user/footer.md`.
 ///
-/// The source is [`radian_tui::footer::footer_item_params`]: each component reads from its own
-/// entry there (`context`'s `width`/`fill`/`empty`, `status`'s `keys`), so the test cannot drift
-/// from the behavior. A command item's `command`/`period` come from
+/// The source is [`radian_tui::footer::footer_item_params`]: each component declares its own
+/// list by overriding `Component::params` (`context`'s `width`/`fill`/`empty`, `status`'s
+/// `keys`), so the test cannot drift from the behavior. A command item's `command`/`period` come from
 /// [`radian_host::command_footer::COMMAND_ITEM_PARAMS`], the same list `command_specs` reads.
 #[test]
 fn every_footer_item_parameter_appears_in_its_section() {
@@ -232,7 +232,8 @@ fn every_footer_preset_block_matches_its_export() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
         .expect("footer.md exists");
-    for preset in radian_tui::footer::Preset::NAMES {
+    for preset in radian_tui::footer::Preset::ALL {
+        let preset = preset.as_str();
         let section = item_section(&footer_md, &format!("Preset `{preset}`"));
         let block = fenced_toml(section);
         let exported = radian_tui::footer::export_preset(preset).expect("a built-in preset");
@@ -246,8 +247,9 @@ fn every_footer_preset_block_matches_its_export() {
 /// Every allowed value of `position`, `glyphs`, `context_line` and `preset` appears in that
 /// field's own `[tui.footer]` row of `docs/user/footer.md`.
 ///
-/// Each source is the one `pub const` list its parser matches on, so a new value fails this test
-/// until the manual names it. Each value is asserted in its key's row, so a mention elsewhere on
+/// Each source is the one `ALL` list its parser looks up (`as_str` is exhaustive, so a new
+/// variant fails to compile until it gains a spelling), so a new value fails this test until
+/// the manual names it. Each value is asserted in its key's row, so a mention elsewhere on
 /// the page does not satisfy it.
 #[test]
 fn every_footer_closed_set_value_appears_in_its_row() {
@@ -255,10 +257,34 @@ fn every_footer_closed_set_value_appears_in_its_row() {
     let footer_md = std::fs::read_to_string(manifest.join("../../docs/user/footer.md"))
         .expect("footer.md exists");
     for (key, values) in [
-        ("position", radian_tui::footer::RowPosition::NAMES),
-        ("glyphs", radian_tui::footer::Glyphs::NAMES),
-        ("context_line", radian_tui::footer::ContextLine::NAMES),
-        ("preset", radian_tui::footer::Preset::NAMES),
+        (
+            "position",
+            radian_tui::footer::RowPosition::ALL
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "glyphs",
+            radian_tui::footer::Glyphs::ALL
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "context_line",
+            radian_tui::footer::ContextLine::ALL
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "preset",
+            radian_tui::footer::Preset::ALL
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+        ),
     ] {
         let row = footer_md
             .lines()

@@ -32,6 +32,10 @@ impl Component for Status {
         45
     }
 
+    fn params(&self) -> &'static [&'static str] {
+        PARAMS
+    }
+
     fn data(&self, app: &App, item: &Item) -> Option<ItemData> {
         let keys: Option<Vec<&str>> = item
             .params

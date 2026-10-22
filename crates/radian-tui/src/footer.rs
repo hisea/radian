@@ -46,7 +46,8 @@ pub fn footer_item_placeholders(id: &str) -> Option<&'static [&'static str]> {
 }
 
 /// The parameters one built-in id reads from its item (an empty list when it reads none),
-/// or `None` when no component claims the id. Each component reads from its own entry here.
+/// or `None` when no component claims the id. Each component declares its own list by
+/// overriding `Component::params`.
 pub fn footer_item_params(id: &str) -> Option<&'static [&'static str]> {
     components::params_of(id)
 }
@@ -82,28 +83,23 @@ pub enum Glyphs {
 }
 
 impl Glyphs {
-    /// Every glyph set name, in parse order. The single source for the `match` below and the
-    /// manual's drift test: adding a set means adding it here first.
-    pub const NAMES: &[&str] = &["unicode", "nerd", "ascii", "emoji"];
+    /// Every glyph set, in parse order. The single source for `parse` and the manual's drift
+    /// test: adding a set means adding it here first (`as_str` is exhaustive, so the
+    /// compiler forces a new variant into it, and `parse` is a lookup over this list).
+    pub const ALL: &[Self] = &[Self::Unicode, Self::Nerd, Self::Ascii, Self::Emoji];
 
     pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "unicode" => Some(Self::Unicode),
-            "nerd" => Some(Self::Nerd),
-            "ascii" => Some(Self::Ascii),
-            "emoji" => Some(Self::Emoji),
-            _ => None,
-        }
+        Self::ALL.iter().copied().find(|v| v.as_str() == name)
     }
 
     /// The config-file spelling of this set.
     pub fn as_str(self) -> &'static str {
-        Self::NAMES[match self {
-            Self::Unicode => 0,
-            Self::Nerd => 1,
-            Self::Ascii => 2,
-            Self::Emoji => 3,
-        }]
+        match self {
+            Self::Unicode => "unicode",
+            Self::Nerd => "nerd",
+            Self::Ascii => "ascii",
+            Self::Emoji => "emoji",
+        }
     }
 
     /// The card frame's characters (ADR 0028 rule 2): unicode box drawing for the
@@ -189,16 +185,11 @@ pub enum ContextLine {
 }
 
 impl ContextLine {
-    /// Every gap-fill name. The single source for the `match` below and the manual's drift
-    /// test.
-    pub const NAMES: &[&str] = &["off", "percentage"];
+    /// Every gap-fill name. The single source for `parse` and the manual's drift test.
+    pub const ALL: &[Self] = &[Self::Off, Self::Percentage];
 
     pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "off" => Some(Self::Off),
-            "percentage" => Some(Self::Percentage),
-            _ => None,
-        }
+        Self::ALL.iter().copied().find(|v| v.as_str() == name)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -229,6 +220,7 @@ pub struct FrameGlyphs {
 pub const DEFAULT_SEPARATOR: &str = " · ";
 /// The separator's style when none is set: the `footer_separator` theme role.
 pub const DEFAULT_SEPARATOR_STYLE: Role = Role::FooterSeparator;
+/// The session's footer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Footer {
     preset: Preset,
@@ -1004,5 +996,22 @@ mod tests {
             components::lookup(&app, "custom.thing").is_some(),
             "the store value resolves through the dynamic component"
         );
+    }
+
+    /// Every `Glyphs::ALL` entry round-trips through `parse(as_str())`: `ALL` is the single
+    /// source, so a new set without a spelling fails here.
+    #[test]
+    fn every_glyph_set_round_trips_through_parse() {
+        for set in Glyphs::ALL {
+            assert_eq!(Glyphs::parse(set.as_str()), Some(*set), "{set:?}");
+        }
+    }
+
+    /// Every `ContextLine::ALL` entry round-trips through `parse(as_str())`.
+    #[test]
+    fn every_context_line_round_trips_through_parse() {
+        for line in ContextLine::ALL {
+            assert_eq!(ContextLine::parse(line.as_str()), Some(*line), "{line:?}");
+        }
     }
 }
