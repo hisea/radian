@@ -89,6 +89,7 @@ impl Server {
             {"name": "Bad Name!", "description": "A name providers reject.", "inputSchema": object},
             {"name": "crash_later", "description": "Starts a child process, then exits shortly after replying.", "inputSchema": object},
             {"name": "pid", "description": "Returns this server's process id.", "inputSchema": object},
+            {"name": "cwd", "description": "Returns this server's working directory.", "inputSchema": object},
             {"name": "freeze", "description": "Blocks the whole server, so it stops responding.", "inputSchema": object},
             {"name": "progress",
              "description": "Sends `count` progress notifications, then returns.",
@@ -124,6 +125,11 @@ impl Server {
                 text("slept".into())
             }
             "pid" => text(std::process::id().to_string()),
+            "cwd" => text(
+                std::env::current_dir()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_default(),
+            ),
             "crash_later" => {
                 // Left running on purpose: the host must clean it up when this server dies.
                 #[allow(clippy::zombie_processes)]

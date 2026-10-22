@@ -851,7 +851,7 @@ fn planned_mcp_load(
         push_mcp_value(table, servers_form, server);
     }
     let origin = format!("{} [mcp]", path.display());
-    crate::mcp::load_mcp_from_toml(&merged, &origin)
+    crate::mcp::load_mcp_from_toml(&merged, &origin, path.parent())
         .map(Some)
         .map_err(|message| ClaudeMigrateError::InvalidDraft { message })
 }
