@@ -29,6 +29,8 @@ path = "src/rad.rs"
 # `agent` command as a library, so both entries run the same parser and dispatch.
 radian-exec = { version = "0.1.3", path = "../radian-exec" }
 radian-core = { version = "0.1.3", path = "../radian-core" }
+# `radian arc`: the plan and task orchestrator's storage layer and its subcommands.
+radian-arc = { version = "0.1.3", path = "../radian-arc" }
 agent-extensions = { version = "0.1.3", path = "../agent-extensions" }
 agent-provider-openai-compatible = { version = "0.1.3", path = "../agent-provider-openai-compatible" }
 futures-util.workspace = true
@@ -83,6 +85,9 @@ libc = "0.2"
 [dev-dependencies]
 radian-core = { path = "../radian-core" }
 radian-memory = { path = "../radian-memory" }
+# The `radian arc` lock test holds `state.lock` from the test process, the same flock the
+# store takes.
+fs2 = "0.4"
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 radian-session = { path = "../radian-session" }

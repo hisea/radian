@@ -357,6 +357,14 @@ enum RadianCommand {
         command: ThemeCommand,
     },
 
+    /// The plan and task orchestrator: set arc up, and read and write plans and tasks.
+    /// A bare `radian arc` would open the arc interface, which this build does not have
+    /// yet.
+    Arc {
+        #[command(subcommand)]
+        command: Option<ArcCommand>,
+    },
+
     /// Footer tools: `radian footer export <preset>`
     /// prints a built-in preset's TOML exactly, so a user can copy and edit it.
     Footer {
@@ -412,6 +420,134 @@ enum FooterCommand {
         #[arg(value_name = "PRESET")]
         preset: String,
     },
+}
+
+/// The `radian arc` subcommands this build has. The grammar lives here so `radian arc
+/// --help` and the manual's drift test read one parser; everything the subcommands do is
+/// in `radian-arc`.
+#[derive(clap::Subcommand, Debug)]
+enum ArcCommand {
+    /// Set arc up for this repository and check its requirements.
+    Init {
+        /// Track `config.toml`, `plans/` and `tasks/` in git. arc itself never commits them.
+        #[arg(long)]
+        track: bool,
+    },
+
+    /// Create a plan or a task. The request text or the brief is read from stdin.
+    Add {
+        #[command(subcommand)]
+        command: ArcAddCommand,
+    },
+
+    /// List plans, each with its tasks in order.
+    List {
+        /// Only this plan.
+        #[arg(long, value_name = "ID")]
+        plan: Option<String>,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show one plan or task: every field and the body.
+    Show {
+        /// The plan or task id.
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Accept a plan or task file that changed outside arc.
+    Adopt {
+        /// The plan or task id.
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+}
+
+/// The `radian arc add` subcommands.
+#[derive(clap::Subcommand, Debug)]
+enum ArcAddCommand {
+    /// Create a plan from the request text on stdin.
+    Plan {
+        /// The slug: 1 to 48 characters from `a-z`, `0-9` and `-`.
+        #[arg(long, value_name = "SLUG")]
+        slug: String,
+        /// The plan's title.
+        #[arg(long, value_name = "TITLE")]
+        title: String,
+    },
+
+    /// Create a task in a draft plan from the brief on stdin.
+    Task {
+        /// The plan the task belongs to.
+        #[arg(long, value_name = "ID")]
+        plan: String,
+        /// The slug: 1 to 48 characters from `a-z`, `0-9` and `-`.
+        #[arg(long, value_name = "SLUG")]
+        slug: String,
+        /// The task's title.
+        #[arg(long, value_name = "TITLE")]
+        title: String,
+        /// A task this one waits for: a task of the same plan, or a done task. Repeat it.
+        #[arg(long = "after", value_name = "ID")]
+        after: Vec<String>,
+        /// The task may deliver no change on purpose.
+        #[arg(long)]
+        allow_noop: bool,
+        /// An extra gate stage to run for this task. Repeat it.
+        #[arg(
+            long = "stage",
+            value_name = "NAME",
+            value_parser = clap::builder::PossibleValuesParser::new(
+                radian_arc::store::config::STAGE_NAMES.iter().copied()
+            )
+        )]
+        stages: Vec<String>,
+    },
+}
+
+impl ArcCommand {
+    /// The same arguments as `radian-arc`'s own request type.
+    fn into_command(self) -> radian_arc::store::cli::Command {
+        use radian_arc::store::cli::Command as ArcRun;
+        match self {
+            ArcCommand::Init { track } => ArcRun::Init { track },
+            ArcCommand::Add {
+                command: ArcAddCommand::Plan { slug, title },
+            } => ArcRun::AddPlan { slug, title },
+            ArcCommand::Add {
+                command:
+                    ArcAddCommand::Task {
+                        plan,
+                        slug,
+                        title,
+                        after,
+                        allow_noop,
+                        stages,
+                    },
+            } => ArcRun::AddTask {
+                plan,
+                slug,
+                title,
+                after,
+                allow_noop,
+                stages,
+            },
+            ArcCommand::List { plan, json } => ArcRun::List { plan, json },
+            ArcCommand::Show { id, json } => ArcRun::Show { id, json },
+            ArcCommand::Adopt { id } => ArcRun::Adopt { id },
+        }
+    }
+}
+
+/// Runs `radian arc`: the arguments are parsed here, the work is in `radian-arc`.
+fn run_arc(command: Option<ArcCommand>) -> ExitCode {
+    let command = command.map(ArcCommand::into_command);
+    ExitCode::from(radian_arc::store::cli::run(command.as_ref()))
 }
 
 /// The `radian theme` subcommands.
@@ -472,6 +608,7 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
             radian_exec::Command::Config { command },
         )),
         RadianCommand::Theme { command } => run_theme(command),
+        RadianCommand::Arc { command } => run_arc(command),
         RadianCommand::Footer { command } => run_footer(command),
         RadianCommand::Docs { topic } => run_docs(topic.as_deref()),
         RadianCommand::Attach {
@@ -1633,6 +1770,10 @@ mod tests {
                 }
             }
             for sub in command.get_subcommands() {
+                // `radian arc` has its own page: its options are checked against `arc.md`.
+                if sub.get_name() == "arc" {
+                    continue;
+                }
                 collect(sub, out);
             }
         }
@@ -1662,45 +1803,6 @@ mod tests {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let cli_md = std::fs::read_to_string(manifest.join("../../docs/user/cli.md"))
             .expect("cli.md exists");
-        fn table_rows<'a>(doc: &'a str, flag: &str) -> Vec<&'a str> {
-            doc.lines()
-                .filter(|line| {
-                    line.starts_with('|')
-                        && line
-                            .split('|')
-                            .nth(1)
-                            .is_some_and(|cell| cell.contains(flag))
-                })
-                .collect()
-        }
-        // The default must sit in the row's Default cell (the Allowed/Value cells would
-        // mask a changed default). Tables without a Default column fall back to the whole
-        // row.
-        // Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
-        fn split_cells(row: &str) -> Vec<String> {
-            let mut cells = vec![String::new()];
-            let mut chars = row.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c == '\\' && chars.peek() == Some(&'|') {
-                    cells.last_mut().expect("a cell is open").push('|');
-                    chars.next();
-                } else if c == '|' {
-                    cells.push(String::new());
-                } else {
-                    cells.last_mut().expect("a cell is open").push(c);
-                }
-            }
-            cells
-        }
-        fn default_in_row(row: &str, default: &str) -> bool {
-            let cells = split_cells(row);
-            let inner = &cells[1..cells.len() - 1];
-            if inner.len() >= 4 {
-                inner[2].contains(default)
-            } else {
-                row.contains(default)
-            }
-        }
         fn collect(command: &clap::Command, out: &mut Vec<(String, Vec<String>, Vec<String>)>) {
             for arg in command.get_arguments() {
                 if arg.is_hide_set() {
@@ -1734,6 +1836,11 @@ mod tests {
                 }
             }
             for sub in command.get_subcommands() {
+                // `radian arc` has its own page: its values and defaults are checked
+                // against `arc.md` (see `every_arc_option_and_value_appears_in_arc_md`).
+                if sub.get_name() == "arc" {
+                    continue;
+                }
                 collect(sub, out);
             }
         }
@@ -1810,5 +1917,367 @@ mod tests {
                 "--thinking row misses its default: {row}"
             );
         }
+    }
+
+    // ---- the arc manual --------------------------------------------------------------
+
+    /// Every Markdown table row whose second cell contains `needle`.
+    fn table_rows<'a>(doc: &'a str, needle: &str) -> Vec<&'a str> {
+        doc.lines()
+            .filter(|line| {
+                line.starts_with('|')
+                    && line
+                        .split('|')
+                        .nth(1)
+                        .is_some_and(|cell| cell.contains(needle))
+            })
+            .collect()
+    }
+
+    /// Split a table row on unescaped `|` only: Value cells escape theirs as `\|`.
+    fn split_cells(row: &str) -> Vec<String> {
+        let mut cells = vec![String::new()];
+        let mut chars = row.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' && chars.peek() == Some(&'|') {
+                cells.last_mut().expect("a cell is open").push('|');
+                chars.next();
+            } else if c == '|' {
+                cells.push(String::new());
+            } else {
+                cells.last_mut().expect("a cell is open").push(c);
+            }
+        }
+        cells
+    }
+
+    /// Whether `default` sits in the row's Default cell (the Allowed/Value cells would mask
+    /// a changed default). Tables without a Default column fall back to the whole row.
+    fn default_in_row(row: &str, default: &str) -> bool {
+        let cells = split_cells(row);
+        let inner = &cells[1..cells.len() - 1];
+        if inner.len() >= 4 {
+            inner[2].contains(default)
+        } else {
+            row.contains(default)
+        }
+    }
+
+    /// `docs/user/arc.md`, the page the `radian arc` grammar is checked against.
+    fn arc_md() -> String {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(manifest.join("../../docs/user/arc.md")).expect("arc.md exists")
+    }
+
+    /// The `arc` subcommand of the parser, as a tree of its own.
+    fn arc_subcommand() -> clap::Command {
+        use clap::CommandFactory;
+        Cli::command()
+            .find_subcommand("arc")
+            .expect("`radian arc` exists")
+            .clone()
+    }
+
+    /// Every subcommand the parser has is in `SUBCOMMANDS` and on the page, and every name
+    /// the page calls not built is in `NOT_BUILT` too. The parser is the source: a renamed
+    /// or added subcommand fails here.
+    #[test]
+    fn every_arc_subcommand_appears_in_arc_md() {
+        let doc = arc_md();
+        let arc = arc_subcommand();
+        let mut parsed: Vec<&str> = arc.get_subcommands().map(|sub| sub.get_name()).collect();
+        parsed.sort();
+        let mut listed: Vec<&str> = radian_arc::store::cli::SUBCOMMANDS.to_vec();
+        listed.sort();
+        assert_eq!(parsed, listed, "the parser and `SUBCOMMANDS` agree");
+        for sub in arc.get_subcommands() {
+            let name = sub.get_name();
+            assert!(
+                doc.contains(&format!("radian arc {name}")),
+                "`radian arc {name}` is missing from arc.md"
+            );
+            for nested in sub.get_subcommands() {
+                assert!(
+                    doc.contains(&format!("radian arc {name} {}", nested.get_name())),
+                    "`radian arc {name} {}` is missing from arc.md",
+                    nested.get_name()
+                );
+            }
+        }
+        for name in radian_arc::store::cli::NOT_BUILT {
+            assert!(
+                doc.contains(&format!("`{name}`")),
+                "arc.md does not name the unbuilt subcommand `{name}`"
+            );
+        }
+    }
+
+    /// Every option of `radian arc`, with every allowed value and default the parser
+    /// declares, appears in arc.md (in the option's own table rows where it has them).
+    #[test]
+    fn every_arc_option_and_value_appears_in_arc_md() {
+        let doc = arc_md();
+        let mut rows = Vec::new();
+        collect_options(&arc_subcommand(), &mut rows);
+        assert!(!rows.is_empty(), "the arc subcommand has options");
+        for row in &rows {
+            let strings = table_rows(&doc, &row.flag);
+            if strings.is_empty() {
+                assert!(
+                    doc.contains(&row.flag),
+                    "{} is missing from arc.md",
+                    row.flag
+                );
+                continue;
+            }
+            for line in &strings {
+                for value in &row.values {
+                    assert!(
+                        line.contains(value.as_str()),
+                        "{} row is missing value {value}: {line}",
+                        row.flag
+                    );
+                }
+                for default in &row.defaults {
+                    assert!(
+                        default_in_row(line, default),
+                        "{} row is missing default {default}: {line}",
+                        row.flag
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every arc exit code and its meaning appears in arc.md's own row.
+    #[test]
+    fn every_arc_exit_code_appears_in_arc_md() {
+        let doc = arc_md();
+        for (code, meaning) in radian_arc::store::EXIT_CODES {
+            let row = doc
+                .lines()
+                .find(|line| line.starts_with(&format!("| `{code}` |")))
+                .unwrap_or_else(|| panic!("arc.md has no row for exit code {code}"));
+            assert!(
+                row.contains(meaning),
+                "the `{code}` row misses `{meaning}`: {row}"
+            );
+        }
+    }
+
+    /// Every `config.toml` key appears in arc.md's table with the default the code has, and
+    /// every key whose default is "not set" says so. The source is the serialized
+    /// `Config::default()`, so a changed default fails here.
+    #[test]
+    fn every_config_key_and_default_appears_in_arc_md() {
+        let doc = arc_md();
+        let config = radian_arc::store::config::Config::default();
+        let value = toml::Value::try_from(config).expect("the config serializes to TOML");
+        let mut leaves = Vec::new();
+        flatten_toml("", &value, &mut leaves);
+        assert!(leaves.iter().any(|(key, _)| key == "schema_version"));
+        assert!(
+            leaves
+                .iter()
+                .any(|(key, _)| key == "gate.profiles.default.stages")
+        );
+        for (key, rendered) in &leaves {
+            let row = config_key_row(&doc, key)
+                .unwrap_or_else(|| panic!("arc.md has no row for config key `{key}`"));
+            assert!(
+                config_default_cell(row).contains(rendered.as_str()),
+                "`{key}` row default misses `{rendered}`: {row}"
+            );
+        }
+        for key in radian_arc::store::config::OPTIONAL_KEYS {
+            let row = config_key_row(&doc, key)
+                .unwrap_or_else(|| panic!("arc.md has no row for config key `{key}`"));
+            assert!(
+                config_default_cell(row).contains("not set"),
+                "`{key}` row must say `not set`: {row}"
+            );
+        }
+    }
+
+    /// Every plan status, auto level, stage, task state, and each state's phases appear in
+    /// arc.md: the state rows are the phase table's.
+    #[test]
+    fn every_arc_value_set_appears_in_arc_md() {
+        let doc = arc_md();
+        for status in radian_arc::store::PLAN_STATUSES {
+            assert!(doc.contains(&format!("`{status}`")), "status {status}");
+        }
+        for level in radian_arc::store::AUTO_LEVELS {
+            assert!(doc.contains(&format!("`{level}`")), "auto {level}");
+        }
+        for stage in radian_arc::store::STAGE_NAMES {
+            assert!(doc.contains(&format!("`{stage}`")), "stage {stage}");
+        }
+        for state in radian_arc::store::TASK_STATES {
+            let row = doc
+                .lines()
+                .find(|line| line.starts_with(&format!("| `{state}` |")))
+                .unwrap_or_else(|| panic!("arc.md has no row for state `{state}`"));
+            let phases = radian_arc::store::TASK_PHASES
+                .iter()
+                .find(|(name, _)| name == state)
+                .map(|(_, phases)| *phases)
+                .expect("every state has a phase list");
+            for phase in phases {
+                assert!(
+                    row.contains(&format!("`{phase}`")),
+                    "state `{state}` row misses phase `{phase}`: {row}"
+                );
+            }
+        }
+    }
+
+    /// Every front-matter field the writer puts in a plan or a task file has a row in
+    /// arc.md. The source is the writer: a renamed or added field fails here.
+    #[test]
+    fn every_plan_and_task_field_appears_in_arc_md() {
+        use radian_arc::store::model::{PlanFile, TaskFile, TaskState};
+        let doc = arc_md();
+        let plan = PlanFile {
+            schema_version: 1,
+            id: "0001-a".to_owned(),
+            title: "A plan".to_owned(),
+            status: "draft".to_owned(),
+            auto: "off".to_owned(),
+            max_cost_usd: Some(5.0),
+            max_wall_time_secs: Some(7200),
+            tasks: vec!["0001-b".to_owned()],
+            body: String::new(),
+        };
+        let task = TaskFile {
+            schema_version: 1,
+            id: "0001-b".to_owned(),
+            plan: "0001-a".to_owned(),
+            title: "A task".to_owned(),
+            state: TaskState::Todo,
+            phase: "ready".to_owned(),
+            after: vec!["0002-c".to_owned()],
+            supersedes: Some("0003-d".to_owned()),
+            attempt: 0,
+            allow_noop: false,
+            extra_stages: vec!["mutation".to_owned()],
+            max_attempts: Some(2),
+            max_cost_usd: Some(1.0),
+            max_wall_time_secs: Some(600),
+            stall_timeout_secs: Some(300),
+            base_sha: Some("a".repeat(40)),
+            head_sha: Some("b".repeat(40)),
+            verified_sha: Some("c".repeat(40)),
+            retry_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            body: String::new(),
+        };
+        for text in [plan.to_text(), task.to_text()] {
+            for key in front_matter_keys(&text) {
+                assert!(
+                    doc.lines()
+                        .any(|line| line.starts_with(&format!("| `{key}` |"))),
+                    "front-matter field `{key}` has no row in arc.md"
+                );
+            }
+        }
+    }
+
+    /// One option of a subtree: its spelling, its possible values, its defaults.
+    struct OptionRow {
+        flag: String,
+        values: Vec<String>,
+        defaults: Vec<String>,
+    }
+
+    fn collect_options(command: &clap::Command, out: &mut Vec<OptionRow>) {
+        for arg in command.get_arguments() {
+            if arg.is_hide_set() {
+                continue;
+            }
+            let id = arg.get_id();
+            if id == "help" || id == "version" {
+                continue;
+            }
+            let Some(long) = arg.get_long() else {
+                continue;
+            };
+            let takes_value = arg.get_action().takes_values();
+            let values = if takes_value {
+                arg.get_possible_values()
+                    .iter()
+                    .map(|value| value.get_name().to_owned())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let defaults = if takes_value {
+                arg.get_default_values()
+                    .iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            out.push(OptionRow {
+                flag: format!("--{long}"),
+                values,
+                defaults,
+            });
+        }
+        for sub in command.get_subcommands() {
+            collect_options(sub, out);
+        }
+    }
+
+    /// The flattened TOML default: `(dotted key, rendered value)` for every non-table leaf.
+    fn flatten_toml(prefix: &str, value: &toml::Value, out: &mut Vec<(String, String)>) {
+        match value {
+            toml::Value::Table(table) => {
+                for (key, value) in table {
+                    let key = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    flatten_toml(&key, value, out);
+                }
+            }
+            other => out.push((prefix.to_owned(), other.to_string())),
+        }
+    }
+
+    /// The config table's row for `key`. The page writes a profile key as
+    /// `gate.profiles.<name>.x`; the default section's own spelling is accepted too.
+    fn config_key_row<'a>(doc: &'a str, key: &str) -> Option<&'a str> {
+        let spellings = [key.to_owned(), key.replace(".default.", ".<name>.")];
+        doc.lines().find(|line| {
+            spellings
+                .iter()
+                .any(|spelling| line.starts_with(&format!("| `{spelling}` |")))
+        })
+    }
+
+    /// The Default cell of a five-column table row.
+    fn config_default_cell(row: &str) -> &str {
+        row.split('|').nth(3).unwrap_or("")
+    }
+
+    /// The front-matter keys of a plan or task file, in file order.
+    fn front_matter_keys(text: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("---"));
+        for line in lines {
+            if line == "---" {
+                break;
+            }
+            if line.starts_with(' ') || line.starts_with('\t') {
+                continue;
+            }
+            if let Some((key, _)) = line.split_once(':') {
+                keys.push(key.trim().to_owned());
+            }
+        }
+        keys
     }
 }
