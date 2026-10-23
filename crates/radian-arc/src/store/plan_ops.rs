@@ -84,6 +84,25 @@ pub fn set_auto(store: &Store, plan: &str, level: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// `radian arc priority <plan> <P0..P5>`: the plan's priority (decision 3).
+///
+/// A plan in any state can be changed, and the next scheduling pass reads the new value. A
+/// value outside [`model::PLAN_PRIORITIES`] is refused with exit 3, the same class as a state
+/// refusal, and the message lists every value.
+pub fn set_priority(store: &Store, plan: &str, priority: &str) -> Result<(), Error> {
+    if !model::PLAN_PRIORITIES.contains(&priority) {
+        return Err(Error::Refused(format!(
+            "`{priority}` is not a plan priority; priorities are {}",
+            model::PLAN_PRIORITIES.join(", ")
+        )));
+    }
+    store.change_plan(plan, |plan| {
+        plan.priority = Some(priority.to_owned());
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// `radian arc pause <plan>`: the auto level back to `off` (decision 12).
 ///
 /// This build has no scheduling loop, so nothing is running: `pause` only writes the level.

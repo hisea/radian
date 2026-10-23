@@ -20,6 +20,32 @@ pub const PLAN_STATUSES: &[&str] = &["draft", "confirmed"];
 /// A plan's `auto` level. Only a `confirmed` plan may be other than `off`.
 pub const AUTO_LEVELS: &[&str] = &["off", "run", "merge"];
 
+/// A plan's `priority`, highest first: `P0` is claimed before `P1`, and so on. A task has no
+/// priority of its own; it follows its plan. One list: the parser, the CLI's help and the
+/// manual's drift test read it.
+pub const PLAN_PRIORITIES: &[&str] = &["P0", "P1", "P2", "P3", "P4", "P5"];
+
+/// The priority a plan has when its file has no `priority` field: a file written before the
+/// field existed, which arc writes back unchanged until the owner changes the priority.
+pub const DEFAULT_PRIORITY: &str = "P3";
+
+/// Where `priority` sits in [`PLAN_PRIORITIES`]: `0` for `P0`, the highest. A value the list
+/// does not hold sorts last (a stored file is checked when it is read).
+pub fn priority_rank(priority: &str) -> usize {
+    PLAN_PRIORITIES
+        .iter()
+        .position(|candidate| *candidate == priority)
+        .unwrap_or(PLAN_PRIORITIES.len())
+}
+
+/// The claim order of two plans: the higher priority first, then the smaller id. The
+/// scheduling loop claims ready tasks in this order, and `list` prints plans in it.
+pub fn claim_order(one: &PlanFile, other: &PlanFile) -> std::cmp::Ordering {
+    priority_rank(one.priority())
+        .cmp(&priority_rank(other.priority()))
+        .then_with(|| one.id.cmp(&other.id))
+}
+
 /// A task's `state`, in the order the manual's table lists it.
 pub const TASK_STATES: &[&str] = &["todo", "doing", "review", "done", "failed"];
 
@@ -168,6 +194,10 @@ pub struct PlanFile {
     pub title: String,
     pub status: String,
     pub auto: String,
+    /// The plan's priority. `None` is a file that has no `priority` field yet: it reads as
+    /// [`DEFAULT_PRIORITY`], and a write that does not set it leaves the file without the
+    /// field, so an older file stays byte for byte.
+    pub priority: Option<String>,
     pub max_cost_usd: Option<f64>,
     pub max_wall_time_secs: Option<u64>,
     /// The plan's tasks, in display order.
@@ -185,11 +215,18 @@ impl PlanFile {
             title,
             status: "draft".to_owned(),
             auto: "off".to_owned(),
+            priority: None,
             max_cost_usd: None,
             max_wall_time_secs: None,
             tasks: Vec::new(),
             body: plan_body(request),
         }
+    }
+
+    /// The plan's effective priority: the stored one, or [`DEFAULT_PRIORITY`] when the file
+    /// has no `priority` field.
+    pub fn priority(&self) -> &str {
+        self.priority.as_deref().unwrap_or(DEFAULT_PRIORITY)
     }
 
     /// The file's bytes.
@@ -200,6 +237,9 @@ impl PlanFile {
         out.push_str(&format!("title: {}\n", frontmatter::scalar(&self.title)));
         out.push_str(&format!("status: {}\n", self.status));
         out.push_str(&format!("auto: {}\n", self.auto));
+        if let Some(priority) = &self.priority {
+            out.push_str(&format!("priority: {priority}\n"));
+        }
         if let Some(limit) = self.max_cost_usd {
             out.push_str(&format!("max_cost_usd: {limit}\n"));
         }
@@ -246,6 +286,15 @@ impl PlanFile {
         }
         let max_cost_usd = fields.optional_f64("max_cost_usd")?;
         let max_wall_time_secs = fields.optional_u64("max_wall_time_secs")?;
+        let priority = fields.optional_string("priority")?;
+        if let Some(priority) = &priority
+            && !PLAN_PRIORITIES.contains(&priority.as_str())
+        {
+            return Err(format!(
+                "`priority` `{priority}` is not one of {}",
+                PLAN_PRIORITIES.join(", ")
+            ));
+        }
         let tasks = fields.optional_list("tasks")?;
         fields.finish()?;
         Ok(Self {
@@ -254,6 +303,7 @@ impl PlanFile {
             title,
             status,
             auto,
+            priority,
             max_cost_usd,
             max_wall_time_secs,
             tasks,
@@ -660,6 +710,7 @@ mod tests {
             title: "First: a plan".to_owned(),
             status: "draft".to_owned(),
             auto: "off".to_owned(),
+            priority: Some("P2".to_owned()),
             max_cost_usd: Some(5.0),
             max_wall_time_secs: Some(7200),
             tasks: vec!["TK0001-one".to_owned(), "TK0002-two".to_owned()],
@@ -702,6 +753,52 @@ mod tests {
         let plan = sample_plan();
         let text = plan.to_text();
         assert_eq!(PlanFile::from_text(&text).unwrap(), plan);
+    }
+
+    /// A file written before the `priority` field existed reads as `P3` and keeps its bytes:
+    /// a write that does not set the priority never adds the field.
+    #[test]
+    fn an_absent_priority_reads_as_p3_and_stays_out_of_the_file() {
+        let mut plan = sample_plan();
+        plan.priority = None;
+        let text = plan.to_text();
+        assert!(!text.contains("priority:"), "{text}");
+        let read = PlanFile::from_text(&text).expect("an older file reads");
+        assert_eq!(read.priority(), DEFAULT_PRIORITY);
+        let mut rewritten = read.clone();
+        rewritten.auto = "run".to_owned();
+        assert!(!rewritten.to_text().contains("priority:"));
+    }
+
+    /// The set is one list: a value outside it is refused when the file is read, naming every
+    /// value, and the claim order is priority first, then id.
+    #[test]
+    fn a_priority_outside_the_set_is_refused_and_the_order_is_priority_then_id() {
+        let text = sample_plan()
+            .to_text()
+            .replace("priority: P2", "priority: P6");
+        let error = PlanFile::from_text(&text).expect_err("P6 is not a priority");
+        for priority in PLAN_PRIORITIES {
+            assert!(error.contains(priority), "{error}");
+        }
+        assert_eq!(PLAN_PRIORITIES, &["P0", "P1", "P2", "P3", "P4", "P5"]);
+        assert_eq!(DEFAULT_PRIORITY, "P3");
+        assert_eq!(priority_rank("P0"), 0);
+        assert_eq!(priority_rank("P5"), 5);
+        let plan = |id: &str, priority: Option<&str>| {
+            let mut plan = PlanFile::new(id.to_owned(), "T".to_owned(), "request");
+            plan.priority = priority.map(str::to_owned);
+            plan
+        };
+        let mut plans = [
+            plan("PL0001-a", None),
+            plan("PL0002-b", Some("P1")),
+            plan("PL0003-c", Some("P1")),
+            plan("PL0004-d", Some("P0")),
+        ];
+        plans.sort_by(claim_order);
+        let ids: Vec<&str> = plans.iter().map(|plan| plan.id.as_str()).collect();
+        assert_eq!(ids, vec!["PL0004-d", "PL0002-b", "PL0003-c", "PL0001-a"]);
     }
 
     #[test]

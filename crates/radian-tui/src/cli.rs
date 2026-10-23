@@ -423,6 +423,39 @@ enum FooterCommand {
     },
 }
 
+/// The `priority` argument's parser. It lists [`radian_arc::store::PLAN_PRIORITIES`], the one
+/// list the store also checks against, as the possible values `--help` shows; it accepts any
+/// text, because a value outside the set is the store's refusal (exit 3), not clap's usage
+/// error (2).
+#[derive(Clone)]
+struct PriorityValueParser;
+
+impl clap::builder::TypedValueParser for PriorityValueParser {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        _cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        value.to_str().map(str::to_owned).ok_or_else(|| {
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidUtf8,
+                "the plan priority is not valid UTF-8",
+            )
+        })
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(radian_arc::store::PLAN_PRIORITIES.iter().map(
+            |priority| clap::builder::PossibleValue::new(*priority),
+        )))
+    }
+}
+
 /// The `radian arc` subcommands. The grammar lives here so `radian arc --help` and the
 /// manual's drift test read one parser; everything the subcommands do is in `radian-arc`.
 #[derive(clap::Subcommand, Debug)]
@@ -561,6 +594,18 @@ enum ArcCommand {
         /// The plan id.
         #[arg(value_name = "PLAN")]
         plan: String,
+    },
+
+    /// Set a plan's priority: `P0` is the highest, `P5` the lowest, and `P3` is what a plan
+    /// without the field reads as. The next pass claims a higher priority's tasks first and
+    /// never preempts a running attempt.
+    Priority {
+        /// The plan id, in any state.
+        #[arg(value_name = "PLAN")]
+        plan: String,
+        /// The priority. A value outside the set is refused with exit 3.
+        #[arg(value_name = "PRIORITY", value_parser = PriorityValueParser)]
+        priority: String,
     },
 
     /// Claim a task and run one attempt of it, waiting until it ends.
@@ -714,6 +759,7 @@ impl ArcCommand {
             ArcCommand::Adopt { id } => ArcRun::Adopt { id },
             ArcCommand::Confirm { plan } => ArcRun::Confirm { plan },
             ArcCommand::Auto { plan, level } => ArcRun::Auto { plan, level },
+            ArcCommand::Priority { plan, priority } => ArcRun::Priority { plan, priority },
             ArcCommand::Pause { plan } => ArcRun::Pause { plan },
             ArcCommand::Start { task } => ArcRun::Start { task },
             ArcCommand::Reverify { task } => ArcRun::Reverify { task },
@@ -2701,6 +2747,73 @@ mod tests {
         );
     }
 
+    /// The plan priorities are one closed list in the code, the same list the `priority`
+    /// argument's help shows: the plan fields table's `priority` row lists every value and its
+    /// default, the `radian arc priority` section of `arc.md` lists every value, and the
+    /// parser's possible values are exactly the list. A priority added to the list fails here
+    /// until both pages and the parser have it.
+    #[test]
+    fn every_plan_priority_appears_in_the_arc_pages() {
+        let fields = arc_files_md();
+        let plan_fields = arc_table(&fields, "arc-files.md", "### Plan fields");
+        let row = row_with_first_cell(&plan_fields, "`priority`")
+            .expect("the plan fields table has a `priority` row");
+        let allowed = row
+            .get(3)
+            .expect("the `priority` row has an Allowed values cell");
+        for priority in radian_arc::store::PLAN_PRIORITIES {
+            assert!(
+                allowed.contains(priority),
+                "the `priority` row misses `{priority}`: {row:?}"
+            );
+        }
+        assert!(
+            allowed.contains(radian_arc::store::DEFAULT_PRIORITY),
+            "the `priority` row must name its default {}: {row:?}",
+            radian_arc::store::DEFAULT_PRIORITY
+        );
+
+        let commands = arc_md();
+        assert!(
+            commands.contains(&format!(
+                "reads as `{}`",
+                radian_arc::store::DEFAULT_PRIORITY
+            )),
+            "arc.md must say a plan without the field reads as `{}`",
+            radian_arc::store::DEFAULT_PRIORITY
+        );
+        let tables = arc_tables(&commands, "arc.md", "## `radian arc priority");
+        for priority in radian_arc::store::PLAN_PRIORITIES {
+            assert!(
+                tables
+                    .iter()
+                    .flatten()
+                    .any(|row| row.iter().any(|cell| cell.contains(priority))),
+                "arc.md's `radian arc priority` section misses `{priority}`"
+            );
+        }
+
+        let arc = arc_subcommand();
+        let priority = arc
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "priority")
+            .expect("the parser has `arc priority`");
+        let arg = priority
+            .get_arguments()
+            .find(|arg| arg.get_id() == "priority")
+            .expect("`priority` takes the value");
+        let shown: Vec<String> = arg
+            .get_possible_values()
+            .iter()
+            .map(|value| value.get_name().to_owned())
+            .collect();
+        assert_eq!(
+            shown,
+            radian_arc::store::PLAN_PRIORITIES,
+            "the parser's help lists the code's one priority list"
+        );
+    }
+
     /// Every plan status, auto level, stage, task state, and each state's phases appear in
     /// the table that owns them on the page that holds it: the plan fields table's `status`
     /// row (`arc-files.md`), the level table (`arc.md`), the config table's `stages` row
@@ -2776,6 +2889,7 @@ mod tests {
             title: "A plan".to_owned(),
             status: "draft".to_owned(),
             auto: "off".to_owned(),
+            priority: Some("P3".to_owned()),
             max_cost_usd: Some(5.0),
             max_wall_time_secs: Some(7200),
             tasks: vec!["0001-b".to_owned()],

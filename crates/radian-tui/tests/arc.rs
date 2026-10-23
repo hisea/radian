@@ -1431,3 +1431,78 @@ fn a_watch_interval_outside_five_to_3600_is_a_usage_error() {
         assert_eq!(run.code, Some(2), "{args:?}: {run:?}");
     }
 }
+
+/// `radian arc priority`: a value outside the closed set is refused with exit 3 and a message
+/// that lists every value; the default is `P3`; `list`, `show --json`, and the MCP documents
+/// carry the field; and `list` prints plans in claim order.
+#[test]
+fn priority_is_set_listed_and_shown_and_a_bad_value_exits_three() {
+    let scratch = fixture("priority");
+    init(&scratch);
+    let first = add_plan(&scratch, "first");
+    let second = add_plan(&scratch, "second");
+    add_task(&scratch, &first, "work", "the brief\n");
+    let confirmed = run(&scratch, &["arc", "confirm", &first], "");
+    assert_eq!(confirmed.code, Some(0), "{confirmed:?}");
+
+    for bad in ["P6", "p1", "high"] {
+        let refused = run(&scratch, &["arc", "priority", &first, bad], "");
+        assert_eq!(refused.code, Some(3), "{bad}: {refused:?}");
+        for value in radian_arc::store::PLAN_PRIORITIES {
+            assert!(
+                refused.err.contains(value),
+                "the refusal for `{bad}` must list `{value}`: {}",
+                refused.err
+            );
+        }
+    }
+    let store = radian_arc::store::Store::at(scratch.repo());
+    let unchanged = store.load_plan(&first).expect("the plan reads");
+    assert_eq!(unchanged.item.priority(), "P3", "a refusal writes nothing");
+    assert!(!unchanged.changed_outside_arc);
+
+    // The default is shown everywhere before anyone sets it.
+    let list = run(&scratch, &["arc", "list"], "");
+    assert!(
+        list.out.contains("priority: P3"),
+        "the plan line shows the priority:\n{}",
+        list.out
+    );
+    let json = run(&scratch, &["arc", "list", "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("list --json parses");
+    assert_eq!(value[0]["priority"], "P3");
+    let shown = run(&scratch, &["arc", "show", &first, "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&shown.out).expect("show --json parses");
+    assert_eq!(value["priority"], "P3");
+    let shown = run(&scratch, &["arc", "show", &first], "");
+    assert!(shown.out.contains("priority: P3"), "{}", shown.out);
+
+    // Setting it on a draft plan works, and the file gets the field.
+    let set = run(&scratch, &["arc", "priority", &second, "P0"], "");
+    assert_eq!(set.code, Some(0), "{set:?}");
+    assert!(set.out.contains("priority P0"), "{}", set.out);
+    let path = scratch
+        .repo()
+        .join(".radian/arc/plans")
+        .join(format!("{second}.md"));
+    let set_text = fs::read_to_string(&path).expect("the plan file reads");
+    assert!(set_text.contains("\npriority: P0\n"), "{set_text}");
+
+    // `list` prints plans in claim order: the higher priority first, even with the larger id.
+    let list = run(&scratch, &["arc", "list"], "");
+    let first_at = list.out.find(&first).expect("the first plan is listed");
+    let second_at = list.out.find(&second).expect("the second plan is listed");
+    assert!(
+        second_at < first_at,
+        "the higher priority must be listed first:\n{}",
+        list.out
+    );
+    let json = run(&scratch, &["arc", "list", "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("list --json parses");
+    assert_eq!(value[0]["id"], second.as_str());
+
+    // The MCP `show` document is the same JSON.
+    let json = run(&scratch, &["arc", "show", &second, "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("show --json parses");
+    assert_eq!(value["priority"], "P0");
+}
