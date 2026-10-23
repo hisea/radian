@@ -280,8 +280,14 @@ fn plan_frame_lines(app: &ArcApp, row: &PlanRow, title: &str, width: usize) -> V
     ));
     out.push(rail(theme, Line::default()));
     let (id_width, phase_width) = task_columns(&row.tasks, width.saturating_sub(2));
+    // The cursor is on the task the moves act on: the row at `task_sel` in this same display
+    // order, and only while the task list has the focus.
+    let selected = (app.focus == Focus::Tasks)
+        .then(|| row.tasks.get(app.task_sel).map(|task| task.id.as_str()))
+        .flatten();
     for task in &row.tasks {
-        let line = task_row_line(task, id_width, phase_width, theme);
+        let cursor = selected == Some(task.id.as_str());
+        let line = task_row_line(task, id_width, phase_width, cursor, theme);
         out.push(rail(theme, line));
     }
     out.push(frame_bottom(theme));
@@ -323,9 +329,13 @@ fn task_row_line(
     task: &TaskRow,
     id_width: usize,
     phase_width: usize,
+    cursor: bool,
     theme: &Theme,
 ) -> Line<'static> {
     let mut spans = Vec::new();
+    if cursor {
+        spans.push(Span::styled("❯ ", theme.model));
+    }
     if !task.connector.is_empty() {
         spans.push(Span::styled(task.connector.clone(), theme.frame));
     }
@@ -545,7 +555,7 @@ fn draw_diff(
     theme: &Theme,
 ) {
     let inner = width.saturating_sub(2);
-    if page.diff_loading && page.diff.is_none() {
+    if page.diff_loading.is_some() && page.diff.is_none() {
         lines.push(rail(
             theme,
             Line::from(Span::styled("loading…", theme.hint)),

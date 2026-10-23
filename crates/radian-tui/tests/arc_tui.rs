@@ -18,7 +18,7 @@ use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
 use radian_tui::arc::render;
-use radian_tui::arc::{ArcApp, ArcKey};
+use radian_tui::arc::{ArcApp, ArcKey, Focus};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -262,11 +262,12 @@ impl Fixture {
     }
 
     fn pos(&self, name: &str) -> usize {
-        let view = self.store.plan_view(&self.plan).unwrap();
-        view.tasks
+        let app = self.app();
+        let view = app.selected_plan().expect("the plan is selected");
+        app.task_rows(view)
             .iter()
-            .position(|task| task.item.id == self.id(name))
-            .expect("the task is on the plan")
+            .position(|row| row.id == self.id(name))
+            .expect("the task is displayed")
     }
 
     /// Selects the fixture plan and opens the app on it.
@@ -516,6 +517,103 @@ fn the_header_reports_the_remote_main_and_the_loop_lock() {
     }
     app.refresh();
     assert!(screen(&mut app, 120, 30).contains("loop ◻ stopped"));
+}
+
+#[test]
+fn the_task_selection_follows_the_drawn_order() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    // Tree order: a, c, e, d, b, f, g, h. Right focuses the task list; Down selects c.
+    app.on_key(&key(KeyCode::Right));
+    assert_eq!(app.focus, Focus::Tasks);
+    app.on_key(&key(KeyCode::Down));
+    let view = app.selected_plan().unwrap();
+    assert_eq!(app.task_rows(view)[1].id, fixture.id("c"));
+    assert_eq!(app.selected_task().unwrap().item.id, fixture.id("c"));
+    app.on_key(&key(KeyCode::Enter));
+    assert_eq!(app.task.as_ref().unwrap().id, fixture.id("c"));
+
+    // Flat order is plan order: a, b, c, e, d, f, g, h; the second row is b.
+    app.close_task();
+    app.flat = true;
+    app.task_sel = 0;
+    app.on_key(&key(KeyCode::Down));
+    let view = app.selected_plan().unwrap();
+    assert_eq!(app.task_rows(view)[1].id, fixture.id("b"));
+    app.on_key(&key(KeyCode::Enter));
+    assert_eq!(app.task.as_ref().unwrap().id, fixture.id("b"));
+
+    // `g` keeps the same task selected when the order changes.
+    app.close_task();
+    app.flat = false;
+    app.task_sel = 1; // c in the tree
+    assert_eq!(app.selected_task().unwrap().item.id, fixture.id("c"));
+    app.on_key(&key(KeyCode::Char('g')));
+    assert!(app.flat);
+    assert_eq!(app.selected_task().unwrap().item.id, fixture.id("c"));
+}
+
+#[test]
+fn the_selected_task_row_shows_the_cursor_only_with_focus() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = 1; // c in the tree
+    let text = screen(&mut app, 120, 30);
+    let row = text
+        .lines()
+        .find(|line| line.contains(fixture.id("c")))
+        .expect("the c row is drawn");
+    assert!(!row.contains('❯'), "no cursor without focus: {row}");
+
+    app.focus = Focus::Tasks;
+    let text = screen(&mut app, 120, 30);
+    let row = text
+        .lines()
+        .find(|line| line.contains(fixture.id("c")))
+        .expect("the c row is drawn");
+    assert!(
+        row.contains("❯ "),
+        "the cursor is on the selected row: {row}"
+    );
+}
+
+#[test]
+fn a_stale_diff_reply_does_not_block_the_next_attempt() {
+    use radian_arc::read::TaskDiff;
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    assert_eq!(app.task.as_ref().unwrap().attempt, Some(2));
+    app.on_key(&key(KeyCode::Char('l')));
+    let latest = app
+        .diff_request()
+        .expect("the latest attempt asks for its diff");
+    assert_eq!(latest.1, 2);
+    app.mark_diff_loading(latest.clone());
+    assert_eq!(
+        app.diff_request(),
+        None,
+        "the same request is not started twice"
+    );
+
+    // The attempt changes while attempt 2's diff is in flight: attempt 1 asks at once.
+    app.on_key(&key(KeyCode::Char('[')));
+    assert_eq!(app.task.as_ref().unwrap().attempt, Some(1));
+    let next = app.diff_request().expect("the new attempt asks at once");
+    assert_eq!(next.1, 1);
+    assert!(
+        !app.apply_diff(&latest.0, latest.1, Ok(TaskDiff::default())),
+        "the old attempt's reply is stale"
+    );
+    assert_eq!(
+        app.diff_request(),
+        Some(next.clone()),
+        "a stale reply never blocks the new request"
+    );
+    app.mark_diff_loading(next.clone());
+    assert!(app.apply_diff(&next.0, next.1, Ok(TaskDiff::default())));
+    assert_eq!(app.diff_request(), None);
 }
 
 #[test]

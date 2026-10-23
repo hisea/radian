@@ -78,7 +78,9 @@ pub(super) fn run_arc() -> ExitCode {
                     attempt,
                     result,
                 } => {
-                    diff_pending = None;
+                    if diff_pending.as_ref() == Some(&(id.clone(), attempt)) {
+                        diff_pending = None;
+                    }
                     if app.apply_diff(&id, attempt, result) {
                         dirty = true;
                     }
@@ -106,11 +108,13 @@ pub(super) fn run_arc() -> ExitCode {
                 let _ = tx.send(GitReply::Main(sha));
             });
         }
-        // The diff tab's file list: one request at a time, off the UI thread.
-        if diff_pending.is_none()
-            && let Some((id, attempt)) = app.diff_request()
+        // The diff tab's file list: a request per selected attempt, off the UI thread. A
+        // switch while one is in flight starts the new attempt's request at once; the old
+        // reply is dropped by the app.
+        if let Some((id, attempt)) = app.diff_request()
+            && diff_pending.as_ref() != Some(&(id.clone(), attempt))
         {
-            app.mark_diff_loading();
+            app.mark_diff_loading((id.clone(), attempt));
             diff_pending = Some((id.clone(), attempt));
             let store = app.store.clone();
             let tx = tx.clone();

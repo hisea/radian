@@ -212,7 +212,9 @@ pub struct TaskPage {
     pub diff: Option<TaskDiff>,
     /// The `(task, attempt)` a diff is loaded for, or is being loaded for.
     pub diff_key: Option<(String, u32)>,
-    pub diff_loading: bool,
+    /// The request in flight, tied to its key: a reset (an attempt switch, a moved head)
+    /// clears it, so a stale reply can never keep the next request from starting.
+    pub diff_loading: Option<(String, u32)>,
     pub diff_error: Option<String>,
     pub file_sel: usize,
     pub diff_scroll: usize,
@@ -245,7 +247,7 @@ impl TaskPage {
             journal_checked: false,
             diff: None,
             diff_key: None,
-            diff_loading: false,
+            diff_loading: None,
             diff_error: None,
             file_sel: 0,
             diff_scroll: 0,
@@ -276,9 +278,11 @@ impl TaskPage {
         let next = (index as i32 + delta).clamp(0, self.attempts.len() as i32 - 1) as usize;
         self.attempt = Some(self.attempts[next].attempt);
         self.follow_latest = Some(self.attempts[next].attempt) == self.latest;
-        // A diff belongs to one attempt: the next draw asks for the new one.
+        // A diff belongs to one attempt: the next draw asks for the new one, and an in-flight
+        // request for the old attempt stops counting as loading.
         self.diff = None;
         self.diff_key = None;
+        self.diff_loading = None;
         self.diff_error = None;
         self.diff_scroll = 0;
     }
@@ -406,6 +410,7 @@ impl ArcApp {
             if head_changed {
                 page.diff = None;
                 page.diff_key = None;
+                page.diff_loading = None;
                 page.diff_error = None;
                 page.diff_scroll = 0;
             }
@@ -458,11 +463,14 @@ impl ArcApp {
         self.plans.get(self.plan_sel)
     }
 
-    /// The selected task, in the selected plan's display order.
+    /// The selected task, in the selected plan's **display** order: the tree (`g` off) or the
+    /// flat list (`g` on). The page draws that order, so the cursor, the moves and this
+    /// selection are all one index into it.
     pub fn selected_task(&self) -> Option<&Loaded<TaskFile>> {
         let view = self.selected_plan()?;
-        view.tasks
-            .get(self.task_sel.min(view.tasks.len().saturating_sub(1)))
+        let rows = self.task_rows(view);
+        let row = rows.get(self.task_sel.min(rows.len().saturating_sub(1)))?;
+        view.tasks.iter().find(|task| task.item.id == row.id)
     }
 
     fn selected_task_id(&self) -> Option<String> {
@@ -470,17 +478,14 @@ impl ArcApp {
     }
 
     fn clamp_task_selection(&mut self, keep: Option<&str>) {
-        let index = keep.and_then(|id| {
-            self.selected_plan()
-                .and_then(|view| view.tasks.iter().position(|task| task.item.id == id))
-        });
-        let len = self
+        let rows = self
             .selected_plan()
-            .map(|view| view.tasks.len())
-            .unwrap_or(0);
+            .map(|view| self.task_rows(view))
+            .unwrap_or_default();
+        let index = keep.and_then(|id| rows.iter().position(|row| row.id == id));
         self.task_sel = match index {
             Some(index) => index,
-            None => self.task_sel.min(len.saturating_sub(1)),
+            None => self.task_sel.min(rows.len().saturating_sub(1)),
         };
     }
 
@@ -505,7 +510,12 @@ impl ArcApp {
         let Some(view) = self.selected_plan() else {
             return;
         };
-        let Some(task) = view.tasks.get(self.task_sel) else {
+        let rows = self.task_rows(view);
+        let index = self.task_sel.min(rows.len().saturating_sub(1));
+        let Some(row) = rows.get(index) else {
+            return;
+        };
+        let Some(task) = view.tasks.iter().find(|task| task.item.id == row.id) else {
             return;
         };
         let id = task.item.id.clone();
@@ -522,18 +532,21 @@ impl ArcApp {
     }
 
     /// The diff the runner should fetch now, if any: the open task page's selected attempt
-    /// has no diff and none is loading.
+    /// has no diff, and no request for that same attempt is in flight.
     pub fn diff_request(&self) -> Option<(String, u32)> {
         let page = self.task.as_ref()?;
-        if self.page != Page::Task || page.tab != TaskTab::Diff || page.diff_loading {
+        if self.page != Page::Task || page.tab != TaskTab::Diff {
             return None;
         }
-        let attempt = page.attempt.unwrap_or(0);
-        let key = (page.id.clone(), attempt);
-        (page.diff_key.as_ref() != Some(&key)).then_some(key)
+        let key = (page.id.clone(), page.attempt.unwrap_or(0));
+        if page.diff_key.as_ref() == Some(&key) || page.diff_loading.as_ref() == Some(&key) {
+            return None;
+        }
+        Some(key)
     }
 
-    /// Records the diff a worker read. A reply for another task or attempt is dropped.
+    /// Records the diff a worker read. A reply for another task or attempt is dropped, and
+    /// only the request it belongs to stops being in flight.
     pub fn apply_diff(&mut self, id: &str, attempt: u32, result: Result<TaskDiff, String>) -> bool {
         let Some(page) = &mut self.task else {
             return false;
@@ -541,8 +554,11 @@ impl ArcApp {
         if page.id != id || page.attempt.unwrap_or(0) != attempt {
             return false;
         }
-        page.diff_loading = false;
-        page.diff_key = Some((id.to_owned(), attempt));
+        let key = (id.to_owned(), attempt);
+        if page.diff_loading.as_ref() == Some(&key) {
+            page.diff_loading = None;
+        }
+        page.diff_key = Some(key);
         match result {
             Ok(diff) => {
                 page.diff_error = None;
@@ -555,10 +571,10 @@ impl ArcApp {
         true
     }
 
-    /// Marks the open diff as being read, so no second request is started.
-    pub fn mark_diff_loading(&mut self) {
+    /// Marks the request `key` as in flight, so no second request for it is started.
+    pub fn mark_diff_loading(&mut self, key: (String, u32)) {
         if let Some(page) = &mut self.task {
-            page.diff_loading = true;
+            page.diff_loading = Some(key);
         }
     }
 
@@ -632,7 +648,9 @@ impl ArcApp {
                 }
             }
             KeyCode::Char('g') => {
+                let keep = self.selected_task_id();
                 self.flat = !self.flat;
+                self.clamp_task_selection(keep.as_deref());
                 ArcKey::Redraw
             }
             KeyCode::Enter => {
@@ -661,7 +679,7 @@ impl ArcApp {
             Focus::Tasks => {
                 let count = self
                     .selected_plan()
-                    .map(|view| view.tasks.len())
+                    .map(|view| self.task_rows(view).len())
                     .unwrap_or(0);
                 if count == 0 {
                     return ArcKey::Ignored;
