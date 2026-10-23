@@ -121,7 +121,7 @@ A task merged without a review stage, or with no item left, gets none.
 With `propose_followups` `false` arc adds none (see the [`propose_followups` row](arc-files.md#configtoml)); the lead can still add a task to the plan with MCP `add_task`.
 `radian arc run` prints `<new task id> proposed (follow-ups from <task id>)`.
 
-A follow-up arc cannot add (the plan's file changed outside arc) leaves a `warning:` line after the merge and does not undo the merge.
+A follow-up arc cannot add (the plan's file changed outside arc) does not undo the merge: `radian arc merge` prints it as a `warning:` line after the merge, and `radian arc run` reports it in the summary.
 The plan keeps the state it had.
 
 ### A conflict with main
