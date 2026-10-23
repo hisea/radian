@@ -134,9 +134,11 @@ Every other reason, and a conflict without `merge-main`, keeps `review.rework_pe
 It never raises `auto_rework`, never pauses the plan, and never sends the task to `failed.exhausted`: a conflict rework is not a retry, and it sets the task's `retry_count` back to `0`.
 
 A run of conflicts is bounded by [`limits.max_conflict_rework`](arc-files.md#configtoml) (default `3`).
-It counts the task's consecutive conflicts, including the one arc is handling: while the count is below the limit, arc writes the brief above; when the count reaches the limit, arc writes no brief and the task stays in `review.rework_pending`.
+It is how many conflict reworks arc writes in a row: while it has written fewer than the limit, the conflict gets the brief above; once it has written the limit, arc writes no brief and the task stays in `review.rework_pending`.
 `radian arc run` then prints `<task> conflict with main -> review.rework_pending: <reason>`, and `show` prints the same text as part of the `rework_reason`.
-A verification that does not end in a conflict sets the count back to `0`, and so does an attempt that never reaches the gate, so only a run of conflicts reaches the limit; `show` prints the task's `retry_count`, not this count.
+An attempt that does not end in a conflict sets the run back to `0`, and so does your own rework (`add_rework`), which is you stepping in; arc's review and conflict reworks do not.
+`0` writes none, so the first conflict waits for you; `1` writes exactly one.
+`show` prints the task's `retry_count`, not this run.
 `auto` decides whether the next attempt starts by itself.
 
 ### A command failure and a moved main
