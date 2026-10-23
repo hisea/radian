@@ -868,7 +868,7 @@ A missing `runner.lock` is not created.
 Every page has the same two rows at the top and bottom.
 The top row is `arc`, the page tabs `plans · task · merge` (the current page bold, the others weak; `merge` is always disabled), and on the right `main <8-character sha of origin/main>` and the loop state: `● running` while another process holds `runner.lock`, `◻ stopped` otherwise.
 The bottom row is a rule and the keys of the page.
-Colors are theme roles (ADR 0029); no page writes its own color.
+Colors are the theme's roles (see [`themes`](themes.md)); no page writes its own color.
 
 ### Plans page
 
