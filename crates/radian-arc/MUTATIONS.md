@@ -33,6 +33,9 @@ copy.
 | M21 | treat any heartbeat as alive (`is_some` instead of `age <= window`) | `attempt::reconcile_judges_a_stale_heartbeat_dead_without_calling_ps`, `attempt::reconcile_retries_a_dead_wrapper_without_a_result` | ✅ 2 failed |
 | M22 | ignore the held gate lock in `background::start` (a pass starts a second gate) | `run::a_gate_is_not_started_twice_while_it_runs` | ✅ failed |
 | M23 | stop enforcing `max_wall_time_secs` in the wrapper (go back to a monitor in the `run` process) | `run::a_worker_still_stops_at_its_limit_after_the_run_process_is_killed`, `attempt::a_wall_time_signals_the_wrapper_and_records_the_class` | ✅ 2 failed |
+| M24 | write `""` as the attempt of a refused gate record | `run::a_refused_gate_is_reported_once_and_not_restarted` | ✅ failed |
+| M25 | stop the heartbeat when the worker exits, before the delivery and push checks | `run::a_wrapper_pushing_past_the_stall_window_is_not_judged_dead` | ✅ failed |
+| M26 | install no SIGTERM handler in the gate (the stop reaches only the gate pid) | `run::sigterm_to_watch_kills_the_running_gate_stage` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -60,6 +63,9 @@ wait), each from a copy under `.radian/mut/` restored with `cp` and compared wit
 M22's first run survived: the extra gates all lost the verdict race, so the test's counter
 stayed at one. The test now also requires the first pass's whole run to print exactly one
 `verify started` line, which is what the lock is for.
+
+M24–M26 were run against the gate records, the whole-life heartbeat and the stage stop, each
+from a copy under `.radian/mut2/` restored with `cp` and compared with `cmp`.
 
 The old stale-main test (`a_rejected_push_never_overwrites_the_remote_main`) cannot survive
 the explicit main refspec: a main moved on the remote is now visible before the push, so the

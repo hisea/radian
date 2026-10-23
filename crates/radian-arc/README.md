@@ -125,7 +125,9 @@ the worker's process group (then SIGKILL after `cancel_grace_secs`); the reason 
 started it exits or is killed.
 
 The wrapper also writes `attempts/<task>/<attempt>/heartbeat.json` (worker pid, process start
-time, last beat) about every 15 seconds, from its own thread.
+time, last beat) from the moment the attempt directory exists until both end records are
+written: a beat at most every 15 seconds and at least three inside the attempt's stall
+window, so a long worktree setup or push is not mistaken for a dead wrapper.
 
 `attempt::spawn_claim` starts the wrapper and returns; `attempt::run_claim` waits for it and
 applies the result (`start`). `radian arc run` uses `spawn_claim` and leaves the result to its
@@ -184,8 +186,9 @@ summary with `Report::render_summary`.
 
 `run::watch` repeats the pass every `--interval` seconds (default 30, 5 to 3600) until SIGINT
 or SIGTERM; it holds `runner.lock` for the whole loop, prints the summary only when it changed,
-starts no new worker or gate once the signal arrived, leaves a running worker alone, and
-signals a running gate (`gate::background::stop`) before it returns.
+prints a pass error as one `radian arc: <message>` line and runs the next pass, starts no new
+worker or gate once the signal arrived, leaves a running worker alone, and signals a running
+gate (`gate::background::stop`) before it returns.
 
 ## Gate checkout
 
@@ -332,9 +335,8 @@ One run:
    nothing is pushed. Every attempt that ran ends by recording its branch tip there again.
 3. Writes the host-local attempt record `attempts/<task>/<attempt>/identity.json` (token,
    the worker's pid and process start time, the session id, the worktree, the branch, the
-   start time), and starts the heartbeat writer
-   (`attempts/<task>/<attempt>/heartbeat.json`: worker pid, process start time, last beat)
-   on a thread of its own.
+   start time). The heartbeat writer already runs (it starts with the attempt directory, so
+   the worktree setup counts too) and picks up the worker's identity here.
 4. Runs the current executable as `radian exec -p - --session-id <task> --workspace
    <worktree> --profile workspace --yes --output jsonl` (a rework attempt passes
    `--resume <task>` instead of `--session-id`), with the caller's extra arguments and one
@@ -388,11 +390,18 @@ the lock free for the next pass. The pass keeps no child handle it waits on; a t
 the child so a `--watch` loop collects no zombies.
 
 The child (`radian arc gate`) owns the lock for its life, reads the task and picks the gate by
-its phase: `review.verifying` runs `review::gate_verification` (plan and stages), and
+its phase: `review.verifying` plans the verification and runs its stages, and
 `review.integrating` runs `review::gate_integration` (the next free integration label). It
-writes only verdicts and `runs/<task>/gate.json` — `running` with its pid first, then `done`,
-`refused` or `error`. It never changes the task's state; the pass holding `runner.lock` does
-that from the record.
+writes only verdicts and `runs/<task>/gate.json`: `running` with its pid first, then `done`,
+`refused` or `error` with the attempt it ran for. A verification record also carries the
+`inputs` digest from `plan_verification` (config text, shas, extra stages, remote sha); a pass
+reports a `refused` record and starts no new gate while the digest is unchanged. It never
+changes the task's state; the pass holding `runner.lock` does that from the record.
+
+The gate installs its own SIGTERM handler (`gate::stage`); a stage tracks its child's group
+(`commands::run_one`, `ReviewRun::run_session`) and forwards the stop to it, SIGKILL after
+`[limits] cancel_grace_secs`. A stopped stage writes no verdict, and the gate exits without a
+completion record, so the next loop starts it again as unverified.
 
 ## Verification
 

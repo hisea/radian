@@ -369,6 +369,9 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   Stages of different tasks still queue on their own locks: one `commands` stage at a time, one checkout per stage, and the review stage has its own.
   The `review` stage is a read-only session, so it does not wait for another task's `commands`.
 - The gate's own output is `runs/<task>/gate.log`.
+- The gate records its outcome in `runs/<task>/gate.json` with the attempt it ran for: `done`, `refused` (a check before the stages refused: a moved branch, a stage this build does not run, no `head_sha`), or `error`.
+  A pass applies a `done` record; reports a `refused` one in the summary and starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt); and reports an `error` one as an error (exit `1` for a one-shot `run`).
+  `radian arc show` keeps printing the recorded reason.
 - Any stage failing moves the task to `review.rework_pending`.
   The stage, its reason and the verdict path are in the task's `rework_reason` (`show` prints it).
   Main moving after a verification does not send the task back to `review.verifying` by itself; `merge` integrates onto the then-current main and runs the key commands there.
@@ -548,7 +551,7 @@ One pass repeats until a pass changes nothing, in this order:
    `run` writes the same `human` pass verdict `radian arc merge` writes, with `approver` `auto` in it.
 
 The long work runs outside the pass: a worker is a separate `radian arc work` process with its own limits and record, and a gate is a separate process with its own record.
-A class this build does not run, or a branch that moved, is reported in the summary; it is not retried in a loop.
+A stage this build does not run, or a branch that moved, is reported in the summary; the gate's refusal is recorded, and `run` starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt).
 
 A one-shot `run` starts its work and exits without waiting for it; the next `run` collects the result.
 Use `--watch` (or the arc interface, when it exists) to keep advancing.
@@ -576,9 +579,12 @@ It is a foreground loop that you start and stop, not a daemon: while it is not r
 
 With `--watch`, the summary is printed only when it differs from the summary the loop printed last, so a quiet loop does not repeat the same lines every interval. Every transition line is still printed when it happens.
 
+A pass that returns an error prints one `radian arc: <message>` line and the loop waits its interval and runs the next pass; the lock and every state file stay as they are.
+A one-shot `run` prints the same line and exits `1` instead.
+
 On SIGINT or SIGTERM the loop starts no new worker and no new gate.
 A running worker is left alone: it is a separate process with its own limits and record, and the next pass (or the next `run`) collects it.
-A running gate is signalled and gets `[limits] cancel_grace_secs` before SIGKILL; a gate that did not finish is started again by the next loop as unverified, and the verdicts it already wrote are reused.
+A running gate is signalled and gets `[limits] cancel_grace_secs` before SIGKILL; the gate forwards the signal to the stage it is running (the `commands` shell or the review session), waits for it, and exits without a record; a gate that did not finish is started again by the next loop as unverified, and the verdicts it already wrote are reused.
 The loop then prints the summary, releases `runner.lock`, and exits `0`.
 
 It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or SIGTERM with `--watch`; `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
@@ -825,8 +831,8 @@ The class is recorded in `runs/<task>/attempts/<attempt id>/attempt_result.json`
 | `terminated` (no `Result`, a crash or a kill) | `infrastructure` | retry |
 | an outcome this build does not know | `infrastructure` | retry |
 | a wrapper exit `4` (the worktree lock is held) | `infrastructure` | retry |
-| `stall` (arc sent SIGTERM) | `stall` | retry |
-| `wall_time` (arc sent SIGTERM) | `wall_time` | retry |
+| `stall` (the wrapper sent SIGTERM) | `stall` | retry |
+| `wall_time` (the wrapper sent SIGTERM) | `wall_time` | retry |
 | `cancelled` by `radian arc cancel` | `cancel` | `failed.cancelled` (never retries) |
 | `reverify` (no worker: `radian arc reverify`) | `reverify` | `review.verifying`, verified at once |
 
@@ -858,7 +864,8 @@ Before `start` or `cancel` acts, and after a restart, it reconciles every task i
 
 - the wrapper's `attempt_finished.json` is present and its token is current: the result is applied;
 - the wrapper's last heartbeat (`attempts/<task>/<attempt>/heartbeat.json`) is younger than the attempt's stall window (its `stall_timeout_secs`, else `[limits] stall_timeout_secs`): the attempt is alive and left alone.
-  The wrapper writes a beat about every 15 seconds, and more often when the stall window is short, from a thread that keeps beating while it waits.
+  The wrapper beats at most every 15 seconds and at least three times inside the attempt's stall window, from the moment the attempt directory exists until both end records are written; it keeps beating while the wrapper sets up the worktree, waits for the model, or checks and pushes the result.
+  When both stall values are `0` the window is three beats, 45 seconds.
   A claim whose wrapper has not beaten yet is judged by its `start.json`;
 - the heartbeat is older than that window and there is no result: the attempt is an `infrastructure` (terminated) failure and the retry rules above apply.
 
@@ -880,7 +887,7 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `ledger/tasks/<id>.json` | The same for a task. |
 | `ledger/tasks/<id>.last.md` | The task as arc last wrote it. |
 | `runs/<task>/attempts/<attempt id>/` | One attempt's output: the worker's `result.jsonl`, `stderr.log`, `execution.json`, the wrapper's `attempt_finished.json`, `signal.json` when the wrapper signalled the worker, arc's `attempt_result.json`, and `paused.json` when the automatic rework limit paused the plan. |
-| `runs/<task>/gate.json` | The last background gate's outcome, until a pass applies it. |
+| `runs/<task>/gate.json` | The background gate's outcome: `running`, then `done`, `refused` or `error`, with the attempt it ran for. |
 | `runs/<task>/gate.log` | The background gate process's own output. |
 | `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). |
 | `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |

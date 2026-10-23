@@ -655,6 +655,22 @@ impl Repo {
         }
     }
 
+    /// Like [`Repo::radian`], with extra environment variables that win over the isolated
+    /// defaults. A test that must change `PATH` (or another process-wide variable) sets it
+    /// here, on the child, instead of calling `std::env::set_var` in the test process.
+    pub fn radian_with_env(&self, args: &[&str], envs: &[(&str, String)]) -> Run {
+        let mut command = self.radian_command(args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let output = command.stdin(Stdio::null()).output().expect("run radian");
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
     /// Runs one `radian` command in the clone and returns the running child: a test that needs
     /// to signal the process, or to run something else while it blocks, uses this.
     pub fn spawn(&self, args: &[&str]) -> std::process::Child {

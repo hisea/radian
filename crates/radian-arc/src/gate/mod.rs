@@ -29,6 +29,7 @@ mod exclusive;
 mod git;
 mod integration;
 mod review;
+mod stage;
 mod verdict;
 
 pub mod background;

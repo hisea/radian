@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::{Barrier, Reply};
 use common::*;
+use radian_arc::attempt;
 use radian_arc::gate::{Stage, Verdict};
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, plan_ops};
@@ -1079,5 +1080,281 @@ fn sigterm_to_watch_starts_no_new_work_and_the_next_run_collects_the_worker() {
     assert_eq!(
         state(&store, &a),
         ("review".to_owned(), "awaiting_human".to_owned())
+    );
+}
+
+// ---- gate records and a stopped stage ------------------------------------------------
+
+/// The task's `runs/<task>/gate.json`, when one exists.
+fn gate_record(repo: &Repo, task: &str) -> Option<Value> {
+    let text = fs::read_to_string(repo.arc().join("runs").join(task).join("gate.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Writes a gate record as the gate process would leave it.
+fn write_gate_record(repo: &Repo, task: &str, record: Value) {
+    let dir = repo.arc().join("runs").join(task);
+    fs::create_dir_all(&dir).expect("the run directory");
+    fs::write(dir.join("gate.json"), record.to_string()).expect("the gate record");
+}
+
+/// Whether `pid` exists (a `kill -0` probe, no `ps`).
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .expect("kill -0")
+        .success()
+}
+
+/// Makes `path` executable.
+fn executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path).expect("the script").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("executable");
+}
+
+/// A gate `error` record belongs to the current attempt and is reported as an error: a
+/// one-shot `run` exits 1 with its text.
+#[test]
+fn a_gate_error_record_is_reported_as_an_error() {
+    let repo = Repo::new("run-gate-error");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-error");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    write_gate_record(
+        &repo,
+        &task,
+        serde_json::json!({
+            "kind": "verify",
+            "attempt": format!("{task}-1"),
+            "status": "error",
+            "text": "boom",
+        }),
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(
+        run.code, 1,
+        "a one-shot run keeps an error's code: {} {}",
+        run.stdout, run.stderr
+    );
+    assert!(run.stderr.contains("boom"), "{}", run.stderr);
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+}
+
+/// `--watch` prints a pass error as one line and runs the next pass instead of exiting.
+#[test]
+fn a_watch_pass_that_errors_prints_a_line_and_goes_on() {
+    let repo = Repo::new("run-watch-error");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "watch-error");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    write_gate_record(
+        &repo,
+        &task,
+        serde_json::json!({
+            "kind": "verify",
+            "attempt": format!("{task}-1"),
+            "status": "error",
+            "text": "boom",
+        }),
+    );
+
+    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    // The pass reads the record, reports it and clears it; the loop then waits its interval.
+    wait_until(
+        Duration::from_secs(30),
+        "the error record to be read",
+        || gate_record(&repo, &task).is_none(),
+    );
+    assert!(
+        watch.try_wait().expect("try_wait").is_none(),
+        "one pass error ended --watch"
+    );
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("radian arc: "), "{stdout}");
+    assert!(stdout.contains("boom"), "{stdout}");
+}
+
+/// A refusal is reported once and keeps its record: later passes start no gate for the same
+/// attempt while the inputs are unchanged. Mutation: write `""` as the attempt of a refused
+/// record and every pass starts another gate.
+#[test]
+fn a_refused_gate_is_reported_once_and_not_restarted() {
+    let repo = Repo::new("run-gate-refused");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-refused");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    let head = publish_verifying(&repo, &store, &plan, &task);
+    // Move the remote work branch: the gate's plan refuses, because the remote is no longer
+    // the task's `head_sha`.
+    let branch = format!("work/{task}");
+    repo.git(&["checkout", "-B", &branch, &head]);
+    write(&repo.clone.join("moved.txt"), "moved\n");
+    repo.git(&["add", "moved.txt"]);
+    repo.git(&["commit", "-m", "moved"]);
+    repo.git(&["push", "origin", &branch]);
+
+    // The first pass starts the gate; it refuses and leaves its record.
+    let first = repo.radian(&["arc", "run"]);
+    assert_eq!(first.code, 0, "run: {}", first.stderr);
+    wait_until(Duration::from_secs(30), "the gate's refusal", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "refused")
+    });
+    // The gate process exits right after writing the record; let its lock go.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+
+    for pass in 1..=2 {
+        let run = repo.radian(&["arc", "run"]);
+        assert_eq!(run.code, 0, "run {pass}: {}", run.stderr);
+        assert!(
+            !run.stdout.contains("verify started"),
+            "pass {pass} retried the refusal: {}",
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains("verify cannot run"),
+            "pass {pass} did not report the refusal: {}",
+            run.stdout
+        );
+    }
+    assert!(
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "refused"),
+        "the refusal record was cleared"
+    );
+}
+
+/// The heartbeat covers the whole wrapper: a push that takes longer than the stall window
+/// does not make reconcile call the attempt dead. Mutation: stop the heartbeat when the
+/// worker exits and the push phase looks dead.
+#[test]
+fn a_wrapper_pushing_past_the_stall_window_is_not_judged_dead() {
+    let repo = Repo::new("run-slow-push");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "slow-push");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    commands(&repo, "true");
+    tune(&repo, "stall_timeout_secs = 900", "stall_timeout_secs = 5");
+    // The wrapper's push runs this as the remote's receive-pack and sleeps past the window.
+    let script = repo.root.join("slow-receive-pack.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nsleep 12\nexec git-receive-pack \"$@\"\n",
+    )
+    .expect("the slow receive-pack");
+    executable(&script);
+    repo.git(&[
+        "config",
+        "remote.origin.receivepack",
+        script.to_str().unwrap(),
+    ]);
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let applied = attempt::reconcile(&store).expect("reconcile");
+        let finished = repo
+            .run_dir(&task, 1)
+            .join("attempt_finished.json")
+            .is_file();
+        if finished {
+            break;
+        }
+        assert!(
+            applied.is_empty(),
+            "a live wrapper was judged dead while it pushed: {applied:?}"
+        );
+        assert!(Instant::now() < deadline, "the attempt never finished");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    run_until(&repo, Duration::from_secs(60), || {
+        state(&store, &task).1 == "awaiting_human"
+    });
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "awaiting_human".to_owned())
+    );
+}
+
+/// A `--watch` stop reaches the stage the gate runs, not only the gate: the long `commands`
+/// child is gone when the loop returns. Mutation: signal only the gate pid and the `sleep`
+/// survives.
+#[test]
+fn sigterm_to_watch_kills_the_running_gate_stage() {
+    let repo = Repo::new("run-stop-stage");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "stop-stage");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let pid_file = repo.root.join("stage.pid");
+    commands(
+        &repo,
+        &format!("echo $$ > '{}' && sleep 30", pid_file.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+
+    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    wait_for(&pid_file);
+    let pid: u32 = fs::read_to_string(&pid_file)
+        .expect("stage.pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    assert!(process_alive(pid), "the stage did not start");
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while process_alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "the stage child (pid {pid}) outlived the stop"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

@@ -27,6 +27,8 @@ use serde_json::{Value, json};
 
 use crate::store::{Error, Store, model};
 
+use super::stage;
+
 /// The record a background gate leaves for the next pass.
 pub const GATE_FILE: &str = "gate.json";
 /// The background gate process's output, next to the record.
@@ -49,6 +51,9 @@ pub struct Record {
     pub pid: Option<u32>,
     /// The gate process's `ps` start time, while it is `running`.
     pub process_started_at: Option<String>,
+    /// The digest of the inputs the gate saw (`plan_verification`'s `inputs`), when it could
+    /// plan. A pass uses it to skip an unchanged refusal.
+    pub inputs: Option<String>,
 }
 
 /// The record path for one task.
@@ -79,6 +84,11 @@ pub fn read(store: &Store, task: &str) -> Option<Record> {
         process_started_at: value
             .get("process_started_at")
             .and_then(Value::as_str)
+            .map(str::to_owned),
+        inputs: value
+            .get("inputs")
+            .and_then(Value::as_str)
+            .filter(|inputs| !inputs.is_empty())
             .map(str::to_owned),
     })
 }
@@ -295,6 +305,9 @@ pub fn run(options: Options) -> i32 {
         // by `--lock-fd`; `from_raw_fd` takes ownership of it exactly once.
         unsafe { File::from_raw_fd(fd) }
     });
+    // A `--watch` stop reaches this process; its stage child must get it too, or the child
+    // would keep writing in the checkout after the gate is gone.
+    stage::install_handler();
     match run_inner(&options) {
         Ok(()) => 0,
         Err(error) => {
@@ -308,6 +321,9 @@ fn run_inner(options: &Options) -> Result<(), Error> {
     let cwd = std::env::current_dir()
         .map_err(|error| Error::Failed(format!("cannot read the current directory: {error}")))?;
     let store = Store::open(&cwd)?;
+    stage::set_grace(Duration::from_secs(
+        store.config()?.limits.cancel_grace_secs,
+    ));
     let loaded = store.load_task(&options.task)?;
     if loaded.changed_outside_arc {
         return Ok(());
@@ -320,10 +336,20 @@ fn run_inner(options: &Options) -> Result<(), Error> {
         // record. The pass that moved it already knows.
         _ => return Ok(()),
     };
+    // The attempt is known before the stages run, so every record names it: a pass applies a
+    // refused or error record only when it belongs to the task's current attempt.
+    let attempt = crate::review::attempt_label(&task)?;
+    let label = if kind == "verify" {
+        attempt
+    } else {
+        crate::review::next_integration_label(&store, &task.id, &attempt)?
+    };
+    // Filled in when the verification can be planned; a planning refusal has none.
+    let mut inputs = String::new();
     // While the gate runs, the record names this process, so a stop can signal it.
     let running = json!({
-        "kind": "pending",
-        "attempt": "",
+        "kind": kind,
+        "attempt": label,
         "status": "running",
         "pid": std::process::id(),
         "process_started_at": crate::process::start_time(std::process::id()),
@@ -333,21 +359,45 @@ fn run_inner(options: &Options) -> Result<(), Error> {
         .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))?;
 
     let result = if kind == "verify" {
-        crate::review::gate_verification(&store, &task.id)
+        match crate::review::plan_verification(&store, &task.id) {
+            Ok(plan) => {
+                inputs = plan.inputs.clone();
+                crate::review::run_stages(&store, &plan, None).map(|_| plan.label.clone())
+            }
+            // A planning refusal has no inputs: the pass re-plans and, if it now succeeds,
+            // knows the inputs changed.
+            Err(error) => Err(error),
+        }
     } else {
         crate::review::gate_integration(&store, &task.id)
     };
+    // A stop is not an outcome: the stage was killed and the next loop starts it again as
+    // unverified. Leave the `running` record and exit without a completion record.
+    if stage::stop_requested() {
+        return Err(Error::Failed("the gate was stopped".to_owned()));
+    }
     match result {
         Ok(attempt) => write(
             &store,
             &task.id,
-            &json!({ "kind": kind, "attempt": attempt, "status": "done" }),
+            &json!({
+                "kind": kind,
+                "attempt": attempt,
+                "status": "done",
+                "inputs": inputs,
+            }),
         )
         .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}"))),
         Err(Error::Refused(text)) => write(
             &store,
             &task.id,
-            &json!({ "kind": kind, "attempt": "", "status": "refused", "text": text }),
+            &json!({
+                "kind": kind,
+                "attempt": label,
+                "status": "refused",
+                "text": text,
+                "inputs": inputs,
+            }),
         )
         .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}"))),
         Err(error) => {
@@ -356,9 +406,10 @@ fn run_inner(options: &Options) -> Result<(), Error> {
                 &task.id,
                 &json!({
                     "kind": kind,
-                    "attempt": "",
+                    "attempt": label,
                     "status": "error",
                     "text": error.message(),
+                    "inputs": inputs,
                 }),
             );
             Err(error)

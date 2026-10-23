@@ -318,6 +318,9 @@ impl ReviewRun<'_> {
             let _ = stdin.write_all(prompt.as_bytes());
         }
         let deadline = (!self.timeout.is_zero()).then(|| Instant::now() + self.timeout);
+        // A stop from `--watch` reaches the session's group, not only the gate.
+        #[cfg(unix)]
+        let mut running = super::stage::Running::track(child.id());
         let (status, timed_out) = loop {
             if let Some(status) = child.try_wait().map_err(|source| GateError::Io {
                 path: checkout.to_path_buf(),
@@ -325,6 +328,8 @@ impl ReviewRun<'_> {
             })? {
                 break (status, false);
             }
+            #[cfg(unix)]
+            running.stopped();
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 #[cfg(unix)]
                 kill_group(child.id());
@@ -338,6 +343,10 @@ impl ReviewRun<'_> {
             }
             std::thread::sleep(Duration::from_millis(5));
         };
+        // A stop killed the session: no verdict may be written for it.
+        if super::stage::stop_requested() {
+            return Err(GateError::Stopped);
+        }
         Ok(Ran {
             timed_out,
             exit_code: status.code(),

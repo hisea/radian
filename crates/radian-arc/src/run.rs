@@ -116,7 +116,19 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
         if stop_requested() {
             break;
         }
-        let report = run_quiet(store, emit, Some(&STOP))?;
+        let report = match run_quiet(store, emit, Some(&STOP)) {
+            Ok(report) => report,
+            // One task's error does not end the loop: print it and run the next pass. The
+            // lock and every state file stay as they are; a one-shot `run` still returns
+            // the error and exits non-zero.
+            Err(error) => {
+                emit(&format!("radian arc: {}\n", error.message()));
+                if stop_requested() || !wait_interval(interval_secs) {
+                    break;
+                }
+                continue;
+            }
+        };
         let summary = report.render_summary();
         if last.as_deref() != Some(summary.as_str()) {
             emit(&summary);
@@ -300,43 +312,63 @@ fn advance_verification(
     if let Some(record) = crate::gate::background::read(store, task_id)
         && record.kind == "verify"
         && record.attempt == label
-        && record.status != "running"
     {
-        crate::gate::background::clear(store, task_id);
-        if record.status == "error" {
-            return Err(Error::Failed(
-                record
-                    .text
-                    .unwrap_or_else(|| format!("the gate of {task_id} failed")),
-            ));
-        }
-        if record.status == "refused" {
-            transitions.note(format!(
-                "{task_id} verify cannot run: {}",
-                record.text.unwrap_or_default()
-            ));
-            return Ok(false);
-        }
-        return match crate::review::apply_verification(store, task_id) {
-            Ok(verified) => {
-                transitions.push(verified.line());
-                let mut changed = true;
-                if verified.phase == "rework_pending"
-                    && let Some(paused) = attempt_ops::record_auto_rework(store, task_id)?
-                {
-                    transitions.push(format!("{} paused: {}", paused.plan, paused.text));
-                    changed = true;
+        match record.status.as_str() {
+            "running" => {}
+            "error" => {
+                crate::gate::background::clear(store, task_id);
+                return Err(Error::Failed(
+                    record
+                        .text
+                        .unwrap_or_else(|| format!("the gate of {task_id} failed")),
+                ));
+            }
+            "refused" => {
+                // Reported once, and no new gate for this attempt while the inputs the gate
+                // saw are unchanged: a repeat would rerun the same refusal every interval.
+                // A new attempt, a changed config, or the branch coming back changes the
+                // inputs (ADR 0048 decision 10).
+                let text = record.text.clone().unwrap_or_default();
+                let inputs = record.inputs.clone();
+                match crate::review::plan_verification(store, task_id) {
+                    Ok(plan) if inputs.as_deref() == Some(plan.inputs.as_str()) => {
+                        transitions.note(format!("{task_id} verify cannot run: {text}"));
+                        return Ok(false);
+                    }
+                    // The inputs changed: start a gate below.
+                    Ok(_) => {}
+                    Err(Error::Refused(reason)) => {
+                        transitions.note(format!("{task_id} verify cannot run: {reason}"));
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error),
                 }
-                Ok(changed)
             }
-            // The branch moved or a stage this build does not run: the task stays in
-            // `review.verifying` and the reason is recorded; the summary reports it.
-            Err(Error::Refused(reason)) => {
-                transitions.note(format!("{task_id} verify cannot run: {reason}"));
-                Ok(false)
+            "done" => {
+                crate::gate::background::clear(store, task_id);
+                return match crate::review::apply_verification(store, task_id) {
+                    Ok(verified) => {
+                        transitions.push(verified.line());
+                        let mut changed = true;
+                        if verified.phase == "rework_pending"
+                            && let Some(paused) = attempt_ops::record_auto_rework(store, task_id)?
+                        {
+                            transitions.push(format!("{} paused: {}", paused.plan, paused.text));
+                            changed = true;
+                        }
+                        Ok(changed)
+                    }
+                    // The branch moved or a stage this build does not run: the task stays in
+                    // `review.verifying` and the reason is recorded; the summary reports it.
+                    Err(Error::Refused(reason)) => {
+                        transitions.note(format!("{task_id} verify cannot run: {reason}"));
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                };
             }
-            Err(error) => Err(error),
-        };
+            _ => {}
+        }
     }
     if stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
         return Ok(false);
@@ -414,10 +446,16 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
         return Ok(false);
     }
     // A claim only starts the wrapper: the wrapper owns the attempt's limits from here, and
-    // this pass does not wait for it (ADR 0048 decisions 7.8 and 13).
+    // this pass does not wait for it (ADR 0048 decisions 7.8 and 13). A thread waits for the
+    // child so a long `--watch` collects no zombie; the thread dies with this process, and
+    // the worker keeps running either way.
     let config = store.config()?;
     for (claim, task) in &claims {
-        crate::attempt::spawn_claim(store, claim, task, &config)?;
+        let spawned = crate::attempt::spawn_claim(store, claim, task, &config)?;
+        let mut child = spawned.child;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         transitions.push(format!("{} started -> doing.running", claim.attempt_id));
     }
     Ok(true)

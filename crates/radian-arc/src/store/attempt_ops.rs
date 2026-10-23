@@ -13,6 +13,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -37,13 +38,19 @@ pub const PAUSED_FILE: &str = "paused.json";
 /// The wrapper's heartbeat, in the host-local attempt directory (ADR 0048 decision 7.9).
 pub const HEARTBEAT_FILE: &str = "heartbeat.json";
 
-/// How often the wrapper writes its heartbeat, in seconds: about 15, and at least three beats
-/// inside a stall window so a live wrapper never looks dead.
-pub fn heartbeat_interval_secs(stall_secs: u64) -> u64 {
+/// The longest and shortest gap between two heartbeats: about 15 seconds at most, and never
+/// more than a third of a stall window (down to a tenth of a second, for a 1-second window).
+pub const HEARTBEAT_MAX: Duration = Duration::from_secs(15);
+pub const HEARTBEAT_MIN: Duration = Duration::from_millis(100);
+
+/// How often the wrapper writes its heartbeat: at most 15 seconds, and at most a third of the
+/// attempt's stall window, so every window holds at least three beats. Without a stall limit,
+/// the window is three beats of 15 seconds, 45 seconds.
+pub fn heartbeat_interval(stall_secs: u64) -> Duration {
     if stall_secs == 0 {
-        15
+        HEARTBEAT_MAX
     } else {
-        (stall_secs / 3).clamp(1, 15)
+        (Duration::from_secs(stall_secs) / 3).clamp(HEARTBEAT_MIN, HEARTBEAT_MAX)
     }
 }
 
@@ -51,7 +58,7 @@ pub fn heartbeat_interval_secs(stall_secs: u64) -> u64 {
 /// window, or three beats when the attempt has no stall limit (ADR 0048 decision 9).
 pub fn liveness_window_secs(stall_secs: u64) -> u64 {
     if stall_secs == 0 {
-        heartbeat_interval_secs(0) * 3
+        heartbeat_interval(0).as_secs() * 3
     } else {
         stall_secs
     }

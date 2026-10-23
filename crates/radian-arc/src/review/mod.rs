@@ -29,6 +29,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use sha2::Digest;
 
 use crate::gate::{
     CommandRun, IntegrationRun, ReviewRun, Stage, StageSpec, Verdict, attempt_dir,
@@ -281,6 +282,10 @@ pub struct Verification {
     pub stages: Vec<StageSpec>,
     /// `config.toml`, for the stage timeouts and the review route.
     pub config: crate::store::config::Config,
+    /// A digest of what this verification depends on: `config.toml`, the task's shas, its
+    /// extra stages, and the remote `work/<task>` sha. A pass compares it with the one a
+    /// refused gate recorded, so an unchanged refusal is not retried.
+    pub inputs: String,
 }
 
 /// Reads and checks one `review.verifying` task's verification: its state, attempt, shas,
@@ -349,6 +354,7 @@ pub fn plan_verification(store: &Store, task_id: &str) -> Result<Verification, E
         reason.record(store, task_id, &label);
         return Err(Error::Refused(reason.text()));
     }
+    let inputs = verification_inputs(store, &task, remote_sha.as_deref().unwrap_or_default());
     Ok(Verification {
         task,
         label,
@@ -358,7 +364,27 @@ pub fn plan_verification(store: &Store, task_id: &str) -> Result<Verification, E
         profile,
         stages,
         config,
+        inputs,
     })
+}
+
+/// A digest of what a verification depends on: `config.toml`, the task's `head_sha`,
+/// `base_sha`, extra stages and `allow_noop`, and the remote `work/<task>` sha. Two runs with
+/// the same digest would refuse for the same reason, so a pass does not start their gate
+/// again (ADR 0048 decision 10).
+fn verification_inputs(store: &Store, task: &model::TaskFile, remote_sha: &str) -> String {
+    let config = fs::read(store.root().join(crate::store::CONFIG_FILE)).unwrap_or_default();
+    let fields = json!({
+        "head": task.head_sha,
+        "base": task.base_sha,
+        "extra": task.extra_stages,
+        "allow_noop": task.allow_noop,
+    });
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&config);
+    hasher.update(fields.to_string().as_bytes());
+    hasher.update(remote_sha.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// Runs the stages the plan lists that have no verdict yet, in order, and stops at the first
@@ -547,18 +573,6 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
         digest: Some(digest),
         reused: Vec::new(),
     })
-}
-
-/// One verification for a background gate: plan it and run its stages. Returns the attempt
-/// label the verdicts belong to. A refusal records its reason, as the synchronous path does.
-///
-/// # Errors
-///
-/// As [`plan_verification`] and [`run_stages`].
-pub fn gate_verification(store: &Store, task_id: &str) -> Result<String, Error> {
-    let plan = plan_verification(store, task_id)?;
-    run_stages(store, &plan, None)?;
-    Ok(plan.label)
 }
 
 /// Applies the verdicts a background gate left for a `review.verifying` task: re-reads the
@@ -1267,7 +1281,11 @@ fn return_to_verifying(store: &Store, task_id: &str) -> Result<(), Error> {
 
 /// The next free integration label for one attempt: the attempt id, then `<attempt id>.i2`,
 /// `.i3`, … Each integration run writes its own verdict, which is never changed.
-fn next_integration_label(store: &Store, task: &str, base: &str) -> Result<String, Error> {
+pub(crate) fn next_integration_label(
+    store: &Store,
+    task: &str,
+    base: &str,
+) -> Result<String, Error> {
     for n in 1..=1000u32 {
         let label = if n == 1 {
             base.to_owned()
@@ -1480,7 +1498,7 @@ pub fn verification_digest(verdicts: &[Verdict], sha: &str) -> String {
 }
 
 /// The attempt id of the task's current attempt, which names its run directory.
-fn attempt_label(task: &model::TaskFile) -> Result<String, Error> {
+pub(crate) fn attempt_label(task: &model::TaskFile) -> Result<String, Error> {
     task.attempt_id
         .clone()
         .filter(|label| !label.is_empty())

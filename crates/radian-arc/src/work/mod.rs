@@ -49,7 +49,7 @@ use serde_json::{Value, json};
 
 use crate::git::GitOutput;
 use crate::process;
-use crate::store::attempt_ops::{HEARTBEAT_FILE, SIGNAL_FILE, heartbeat_interval_secs};
+use crate::store::attempt_ops::{HEARTBEAT_FILE, SIGNAL_FILE, heartbeat_interval};
 
 /// How often the wrapper looks at the worker, its jsonl stream and a cancel signal.
 const POLL: Duration = Duration::from_millis(100);
@@ -185,9 +185,6 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     let arc = repo.join(".radian").join("arc");
     let worktree = arc.join("worktrees").join(&o.task);
     let branch = format!("work/{}", o.task);
-    let created = ensure_worktree(&repo, &worktree, &branch, &o.remote, &o.main_branch)?;
-    // Held until this function returns: one attempt of one task at a time.
-    let _lock = lock_worktree(&worktree)?;
 
     let runs = arc
         .join("runs")
@@ -202,6 +199,27 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         fs::create_dir_all(dir)
             .map_err(|error| Failure::error(format!("cannot create {}: {error}", dir.display())))?;
     }
+    // The heartbeat starts with the attempt directory and lives until both end records are
+    // written: the worktree setup, the model wait and the delivery and push checks all count
+    // as alive (ADR 0048 decisions 7.9 and 9). `set_worker` fills in the worker's identity
+    // once it is spawned.
+    let wrapper_pid = std::process::id();
+    let mut heartbeat = Heartbeat::start(
+        &attempt_dir,
+        Beat {
+            attempt_id: format!("{}-{}", o.task, o.attempt),
+            pid: None,
+            process_started_at: None,
+            wrapper_pid,
+            wrapper_started_at: process::start_time(wrapper_pid),
+        },
+        o.stall_timeout_secs,
+    )?;
+
+    let created = ensure_worktree(&repo, &worktree, &branch, &o.remote, &o.main_branch)?;
+    // Held until this function returns: one attempt of one task at a time.
+    let _lock = lock_worktree(&worktree)?;
+
     let result_path = runs.join("result.jsonl");
     let stderr_path = runs.join("stderr.log");
     let brief = read_stdin()?;
@@ -229,7 +247,6 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         process::signal_group(pid, process::SIGTERM);
     }
     let processor_started_at = process_start(pid).unwrap_or_else(|| started_at.clone());
-    let wrapper_pid = std::process::id();
     let wrapper_started_at = process::start_time(wrapper_pid);
     write_json(
         &attempt_dir.join("identity.json"),
@@ -248,20 +265,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
             "started_at": started_at,
         }),
     )?;
-    // The heartbeat is how a later pass decides whether this attempt is alive; it beats from
-    // a thread of its own, so it keeps beating while the wrapper waits on git or the model
-    // (ADR 0048 decisions 7.9 and 9).
-    let mut heartbeat = Heartbeat::start(
-        &attempt_dir,
-        Beat {
-            attempt_id: format!("{}-{}", o.task, o.attempt),
-            pid,
-            process_started_at: processor_started_at.clone(),
-            wrapper_pid,
-            wrapper_started_at: wrapper_started_at.clone(),
-        },
-        o.stall_timeout_secs,
-    )?;
+    heartbeat.set_worker(pid, &processor_started_at);
     // The limits belong to this process, not to the scheduling loop that started it: a
     // one-shot `run`, or a killed one, leaves the worker bounded (decision 7.8).
     let status = monitor_child(
@@ -270,7 +274,6 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         &runs.join(SIGNAL_FILE),
         &Limits::of(o),
     )?;
-    heartbeat.stop();
     CHILD_PID.store(0, Ordering::SeqCst);
     let ended_at = now();
     let exit_code = exit_code_of(&status);
@@ -375,6 +378,9 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     write_text(&runs.join("attempt_finished.json"), &line)?;
     write_text(&attempt_dir.join("status.json"), &line)?;
     println!("{line}");
+    // Both end records are on disk: from here the attempt is over, and a pass reads the
+    // result rather than the heartbeat.
+    heartbeat.stop();
 
     // ADR 0044 section 3: the child's exit code passes through. A check that failed after a
     // `completed` (exit 0) child is this wrapper's own failure: exit 1.
@@ -385,31 +391,36 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     })
 }
 
-/// What the heartbeat thread writes: the attempt's identity and the file to refresh.
+/// What the heartbeat thread writes: the attempt's identity. The worker's fields are filled
+/// in once it is spawned.
 #[derive(Clone)]
 struct Beat {
     attempt_id: String,
-    pid: u32,
-    process_started_at: String,
+    pid: Option<u32>,
+    process_started_at: Option<String>,
     wrapper_pid: u32,
     wrapper_started_at: Option<String>,
 }
 
 /// The wrapper's heartbeat writer (ADR 0048 decision 7.9). One beat is written at once; the
-/// thread then refreshes `last_beat` every interval until [`Heartbeat::stop`]. A rename over
-/// the old file means a reader never sees half a record.
+/// thread then refreshes `last_beat` every interval until [`Heartbeat::stop`] (or, on an
+/// early return, until the guard drops). A rename over the old file means a reader never sees
+/// half a record.
 struct Heartbeat {
     stop: Arc<AtomicBool>,
+    beat: Arc<std::sync::Mutex<Beat>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Heartbeat {
     fn start(dir: &Path, beat: Beat, stall_secs: u64) -> Result<Self, Failure> {
         let path = dir.join(HEARTBEAT_FILE);
+        let beat = Arc::new(std::sync::Mutex::new(beat));
         write_beat(&path, &beat)?;
-        let interval = Duration::from_secs(heartbeat_interval_secs(stall_secs));
+        let interval = heartbeat_interval(stall_secs);
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
+        let shared = Arc::clone(&beat);
         let handle = std::thread::spawn(move || {
             loop {
                 let deadline = Instant::now() + interval;
@@ -424,13 +435,22 @@ impl Heartbeat {
                 }
                 // A heartbeat that cannot be written is not the attempt's failure: the
                 // next pass then judges the attempt by the age of the last beat it has.
-                let _ = write_beat(&path, &beat);
+                let _ = write_beat(&path, &shared);
             }
         });
         Ok(Self {
             stop,
+            beat,
             handle: Some(handle),
         })
+    }
+
+    /// Adds the worker's identity to every beat from now on.
+    fn set_worker(&self, pid: u32, process_started_at: &str) {
+        if let Ok(mut beat) = self.beat.lock() {
+            beat.pid = Some(pid);
+            beat.process_started_at = Some(process_started_at.to_owned());
+        }
     }
 
     fn stop(&mut self) {
@@ -441,7 +461,17 @@ impl Heartbeat {
     }
 }
 
-fn write_beat(path: &Path, beat: &Beat) -> Result<(), Failure> {
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        // A start refusal or an error returns before [`Heartbeat::stop`]; the beats still end.
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+fn write_beat(path: &Path, beat: &std::sync::Mutex<Beat>) -> Result<(), Failure> {
+    let beat = beat
+        .lock()
+        .map_err(|_| Failure::error("the heartbeat record was poisoned"))?;
     let record = json!({
         "attempt_id": beat.attempt_id,
         "pid": beat.pid,
