@@ -431,6 +431,31 @@ pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
 /// `attempt_id` and `token`, clears the old approval, and records an attempt result whose
 /// class is [`REVERIFY_CLASS`]. No `result.jsonl` is written: no worker ran.
 pub fn claim_reverify(store: &Store, task_id: &str) -> Result<ReverifyClaim, Error> {
+    claim_reverify_by(store, task_id, ReverifyBy::Owner)
+}
+
+/// Who claims a worker-less attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReverifyBy {
+    /// `radian arc reverify`: the rework reason must be a failed verification stage.
+    Owner,
+    /// A scheduling pass's automatic reverify: the pass proved itself that the reason is a
+    /// `commands` or integration command failure or timeout that a moved main can fix
+    /// (ADR 0048 decision 9), so the owner's reason check does not apply.
+    Automatic,
+}
+
+/// [`claim_reverify`] for one source of the claim. An automatic claim is the same transaction
+/// and leaves the same records; only the owner's rework-reason check is skipped.
+///
+/// # Errors
+///
+/// As [`claim_reverify`].
+pub fn claim_reverify_by(
+    store: &Store,
+    task_id: &str,
+    by: ReverifyBy,
+) -> Result<ReverifyClaim, Error> {
     let _lock = store.lock_state()?;
     let loaded = store.load_task(task_id)?;
     require_unchanged(task_id, loaded.changed_outside_arc)?;
@@ -454,7 +479,9 @@ pub fn claim_reverify(store: &Store, task_id: &str) -> Result<ReverifyClaim, Err
             "task `{task_id}` has no `head_sha`"
         )));
     }
-    reverify_reason_allowed(store, &task)?;
+    if by == ReverifyBy::Owner {
+        reverify_reason_allowed(store, &task)?;
+    }
     let number = task.attempt + 1;
     let token = random_token()?;
     let attempt_id = format!("{task_id}-{number}");
