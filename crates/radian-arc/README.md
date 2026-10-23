@@ -120,10 +120,13 @@ random token). A claim is refused (exit 3) when the task is not ready, its plan 
 confirmed, an `after` task is not done, or `[limits] concurrency` tasks are already in
 `doing`. A task already in `review.verifying` resumes verification instead of being claimed.
 
-It then runs the current executable as `arc work --task … --attempt … --token … --remote …
---main-branch … --stall-timeout-secs … --max-wall-time-secs … --cancel-grace-secs …
-[--resume] [--allow-noop] -- <[worker] exec_args>`, with the task body on stdin, and moves the
-task to `doing.running`. The wrapper, not the caller, enforces the attempt's limits: no growth
+It then runs the current executable as `arc work --task … --attempt … --token … --session …
+--remote … --main-branch … --stall-timeout-secs … --max-wall-time-secs …
+--cancel-grace-secs … [--resume] [--allow-noop] -- <[worker] exec_args>`, with the task body
+on stdin, and moves the task to `doing.running`. The claim picks the session from
+`[worker] rework_session`: `<task>-<attempt>` with `fresh` (the default), the task id with
+`resume`, and only the latter sets `--resume`. The wrapper, not the caller, enforces the
+attempt's limits: no growth
 in `result.jsonl` for the stall timeout, or `max_wall_time_secs` in total, sends SIGTERM to
 the worker's process group (then SIGKILL after `cancel_grace_secs`); the reason is in
 `signal.json`. The limits travel with the wrapper, so they hold after the `run` process that
@@ -316,15 +319,22 @@ still reads the current main.
 
 ## `work`: the trusted worker wrapper
 
-`radian arc work --task <id> --attempt <n> --token <token> [--resume] [--allow-noop]
-[--remote <name>] [--main-branch <name>] [--stall-timeout-secs <n>] [--max-wall-time-secs <n>]
-[--cancel-grace-secs <n>] [-- <extra radian exec args>]` runs one attempt
-of one task, the brief on stdin. It is an **internal** subcommand: arc runs it, a person does
-not. It is hidden from `--help` and has no manual page. `--remote`, `--main-branch` and the
-three limit flags are internal too: `radian-tui` takes the names from the repository's
-`[repository] remote` and `main_branch` when they are absent, and from `origin`/`main` when
-there is no `config.toml`; `--stall-timeout-secs` and `--max-wall-time-secs` of `0` mean no
-limit, while `--cancel-grace-secs` of `0` sends the worker SIGKILL right after SIGTERM.
+`radian arc work --task <id> --attempt <n> --token <token> [--session <id>] [--resume]
+[--allow-noop] [--remote <name>] [--main-branch <name>] [--stall-timeout-secs <n>]
+[--max-wall-time-secs <n>] [--cancel-grace-secs <n>] [-- <extra radian exec args>]` runs one
+attempt of one task, the brief on stdin. It is an **internal** subcommand: arc runs it, a
+person does not. It is hidden from `--help` and has no manual page. `--remote`,
+`--main-branch` and the three limit flags are internal too: `radian-tui` takes the names from
+the repository's `[repository] remote` and `main_branch` when they are absent, and from
+`origin`/`main` when there is no `config.toml`; `--stall-timeout-secs` and
+`--max-wall-time-secs` of `0` mean no limit, while `--cancel-grace-secs` of `0` sends the
+worker SIGKILL right after SIGTERM.
+
+`--session <id>` is the worker's session id (the task id when absent), and `--resume` is the
+`resume` mode's flag: only then does the wrapper pass `--resume <session>` instead of
+`--session-id <session>`, and only when the session file exists. A `fresh` attempt
+(ADR 0048 decision 4: `[worker] rework_session`, the default) never gets the flag, so it never
+resumes; an attempt after the first also gets the hand-off section described in step 4.
 
 One run:
 
@@ -345,15 +355,19 @@ One run:
    the worker's pid and process start time, the session id, the worktree, the branch, the
    start time). The heartbeat writer already runs (it starts with the attempt directory, so
    the worktree setup counts too) and picks up the worker's identity here.
-4. Runs the current executable as `radian exec -p - --session-id <task> --workspace
-   <worktree> --profile workspace --yes --output jsonl` (a rework attempt passes
-   `--resume <task>` instead of `--session-id`), with the caller's extra arguments and one
-   hidden `--deny-read <path>` per entry of `.radian/arc/` except `worktrees/`. The worker
-   runs in its own process group, so a SIGTERM reaches it and every child that stays in the
-   group. Its stdout is `runs/<task>/attempts/<task>-<n>/result.jsonl`, its stderr
-   `stderr.log`; the attempt fields go to `execution.json`. A hidden
-   `--worker-command <shell command>` replaces the `radian exec` child for the forwarding
-   tests; it exists only for tests and is not a user input.
+4. Runs the current executable as `radian exec -p - --session-id <session> --workspace
+   <worktree> --profile workspace --yes --output jsonl` (a `resume` attempt whose session file
+   exists passes `--resume <session>` instead of `--session-id`), with the caller's extra
+   arguments and one hidden `--deny-read <path>` per entry of `.radian/arc/` except
+   `worktrees/`. The worker runs in its own process group, so a SIGTERM reaches it and every
+   child that stays in the group. Its stdout is `runs/<task>/attempts/<task>-<n>/result.jsonl`,
+   its stderr `stderr.log`; the attempt fields, the session id included, go to
+   `execution.json`. A fresh attempt after the first gets a hand-off section in front of the
+   brief (`## Where the previous attempt left off`): the previous attempt's `Result.text` cut
+   at 8,000 characters with a note, `git log --oneline` and `git diff --stat` of the task's
+   own change from the merge base with the remote main. A `merge-main` conflict section stays
+   first. A hidden `--worker-command <shell command>` replaces the `radian exec` child for the
+   forwarding tests; it exists only for tests and is not a user input.
    While the child runs, the wrapper enforces the limits itself: a stall, the wall time, or a
    `cancel` records `signal.json` with its class, sends SIGTERM to the child's group and then
    SIGKILL after the grace period. The scheduling loop does not watch the attempt. The wall

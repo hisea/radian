@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use super::model::{self, TaskState};
 use super::{Error, Kind, Store, require_unchanged};
+use crate::store::config::ReworkSession;
 
 /// The wrapper's own end record, in the attempt's run directory.
 pub const ATTEMPT_FINISHED_FILE: &str = "attempt_finished.json";
@@ -147,7 +148,12 @@ pub struct Claim {
     pub attempt: u32,
     pub attempt_id: String,
     pub token: String,
+    /// A later attempt that continues the task's one session (`[worker] rework_session =
+    /// "resume"`). With `fresh` every attempt has its own session, so this is false.
     pub resume: bool,
+    /// The session the worker runs in: the task id with `resume`, `<task>-<attempt>` with
+    /// `fresh` (ADR 0048 decision 4).
+    pub session_id: String,
     pub allow_noop: bool,
     /// The task body: the brief and every rework section.
     pub brief: String,
@@ -382,6 +388,14 @@ pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
     let number = task.attempt + 1;
     let token = random_token()?;
     let attempt_id = format!("{task_id}-{number}");
+    // ADR 0048 decision 4: `fresh` (the default) gives every attempt a session of its own, in
+    // the shape the review sessions use; `resume` keeps the task's one session and continues
+    // it. The wrapper is told both, so it never resumes a fresh attempt.
+    let session_id = match config.worker.rework_session {
+        ReworkSession::Fresh => format!("{task_id}-{number}"),
+        ReworkSession::Resume => task_id.to_owned(),
+    };
+    let resume = number > 1 && config.worker.rework_session == ReworkSession::Resume;
     task.attempt = number;
     task.attempt_id = Some(attempt_id.clone());
     task.token = Some(token.clone());
@@ -416,7 +430,8 @@ pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
         attempt: number,
         attempt_id,
         token,
-        resume: number > 1,
+        resume,
+        session_id,
         allow_noop: task.allow_noop,
         brief: task.body.clone(),
     })
@@ -887,9 +902,9 @@ pub fn retry_delay_secs(attempt: u32) -> u64 {
 
 // ---- cost and budget -----------------------------------------------------------------
 
-/// One attempt's cost: this attempt's session total minus the previous attempt's, both read
-/// from the `Result.cost.micros` of their jsonl streams (ADR 0044: `cost` is the session
-/// total).
+/// One attempt's cost: the cost the attempt added. `Result.cost` is the session total
+/// (ADR 0044), so an attempt that shares the previous attempt's session (`resume`) adds the
+/// difference, and a `fresh` attempt, whose session is its own, adds the whole total.
 struct AttemptCost {
     cost_usd: f64,
     session_cost_usd: Option<f64>,
@@ -897,16 +912,31 @@ struct AttemptCost {
 
 fn attempt_cost(store: &Store, task: &str, attempt: u32) -> AttemptCost {
     let this = session_total_micros(store, task, attempt);
-    let previous = if attempt > 1 {
-        session_total_micros(store, task, attempt - 1)
-    } else {
-        None
-    };
+    let shared_session = attempt > 1
+        && attempt_session_id(store, task, attempt).is_some_and(|session| {
+            attempt_session_id(store, task, attempt - 1).as_deref() == Some(session.as_str())
+        });
+    let previous = shared_session
+        .then(|| session_total_micros(store, task, attempt - 1))
+        .flatten();
     let delta = this.unwrap_or(0).saturating_sub(previous.unwrap_or(0));
     AttemptCost {
         cost_usd: delta as f64 / 1_000_000.0,
         session_cost_usd: this.map(|micros| micros as f64 / 1_000_000.0),
     }
+}
+
+/// The worker session an attempt recorded in its `execution.json`. `None` for an attempt whose
+/// wrapper wrote no record (a worker-less `reverify`) and for an attempt that never ran. This
+/// is how a later reader finds a worker's journal: by the attempt's session id, which is the
+/// task id only with `[worker] rework_session = "resume"` or for an older attempt.
+pub fn attempt_session_id(store: &Store, task: &str, attempt: u32) -> Option<String> {
+    let text = fs::read_to_string(run_dir(store, task, attempt).join("execution.json")).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// The `Result.cost.micros` of one attempt's jsonl stream, when it wrote one.

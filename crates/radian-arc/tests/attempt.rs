@@ -94,6 +94,22 @@ fn write_stream(store: &Store, task: &str, attempt: u32, micros: Option<u64>) {
     .unwrap();
 }
 
+/// The attempt's `execution.json`, which the wrapper writes: the cost rule reads the session
+/// id from it to tell an attempt that shares the previous session from one with its own.
+fn write_execution(store: &Store, task: &str, attempt: u32, session: &str) {
+    let dir = attempt_ops::run_dir(store, task, attempt);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("execution.json"),
+        json!({
+            "attempt_id": format!("{task}-{attempt}"),
+            "session_id": session,
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
 fn attempt_result(store: &Store, task: &str, attempt: u32) -> Value {
     let path = attempt_ops::run_dir(store, task, attempt).join("attempt_result.json");
     serde_json::from_str(&std::fs::read_to_string(&path).expect("attempt_result.json")).unwrap()
@@ -141,6 +157,11 @@ fn claim_refusals_are_exit_three_and_write_nothing() {
     assert_eq!(claim.attempt, 1);
     assert_eq!(claim.attempt_id, format!("{first}-1"));
     assert!(!claim.resume);
+    assert_eq!(
+        claim.session_id,
+        format!("{first}-1"),
+        "a fresh first attempt"
+    );
     assert_eq!(state(&store, &first), ("doing".into(), "starting".into()));
     let stored = store.load_task(&first).unwrap().item;
     assert_eq!(
@@ -152,6 +173,57 @@ fn claim_refusals_are_exit_three_and_write_nothing() {
     let refusal = attempt_ops::claim(&store, &third).expect_err("the slot is taken");
     assert_eq!(refusal.exit(), Exit::State, "{refusal:?}");
     assert!(refusal.message().contains("concurrency"), "{refusal:?}");
+}
+
+/// ADR 0048 decision 4: with `fresh` (the default) every attempt has a session of its own,
+/// `<task>-<attempt>`, so a rework claims a new one and never resumes. Mutation: `resume:
+/// number > 1` (pass `--resume` with `fresh`) and the second claim resumes.
+#[test]
+fn a_fresh_claim_names_each_attempts_session_and_never_resumes() {
+    let (_repo, store) = setup("fresh-claim");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+
+    let first = attempt_ops::claim(&store, task).expect("claim 1");
+    assert_eq!(first.session_id, format!("{task}-1"));
+    assert!(!first.resume);
+    let finish = finish(&store, task, 1, "failed", false, None);
+    attempt_ops::apply(&store, task, 1, Some(&finish), None, Some(1)).expect("apply");
+
+    let retry_at = store.load_task(task).unwrap().item.retry_at.unwrap();
+    attempt_ops::release_retries(&store, &retry_at).expect("release");
+    let second = attempt_ops::claim(&store, task).expect("claim 2");
+    assert_eq!(
+        second.session_id,
+        format!("{task}-2"),
+        "the attempt's own session"
+    );
+    assert!(!second.resume, "a fresh attempt never resumes");
+}
+
+/// `resume` keeps the old behavior: one session per task, the task id, and every attempt after
+/// the first continues it.
+#[test]
+fn a_resume_claim_continues_the_task_session() {
+    let (repo, store) = setup("resume-claim");
+    tune(
+        &repo,
+        &[("rework_session = \"fresh\"", "rework_session = \"resume\"")],
+    );
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+
+    let first = attempt_ops::claim(&store, task).expect("claim 1");
+    assert_eq!(first.session_id, task.as_str(), "the task's one session");
+    assert!(!first.resume, "the first attempt starts the session");
+    let finish = finish(&store, task, 1, "failed", false, None);
+    attempt_ops::apply(&store, task, 1, Some(&finish), None, Some(1)).expect("apply");
+
+    let retry_at = store.load_task(task).unwrap().item.retry_at.unwrap();
+    attempt_ops::release_retries(&store, &retry_at).expect("release");
+    let second = attempt_ops::claim(&store, task).expect("claim 2");
+    assert_eq!(second.session_id, task.as_str(), "the same session");
+    assert!(second.resume, "a resume attempt continues the session");
 }
 
 // ---- apply ----------------------------------------------------------------------------
@@ -235,7 +307,12 @@ fn a_failed_outcome_retries_with_the_backoff_then_is_exhausted() {
         }
         let claim = attempt_ops::claim(&store, task).expect("claim");
         assert_eq!(claim.attempt, attempt);
-        assert_eq!(claim.resume, attempt > 1, "a rework attempt resumes");
+        assert!(!claim.resume, "a fresh attempt never resumes");
+        assert_eq!(
+            claim.session_id,
+            format!("{task}-{attempt}"),
+            "every fresh attempt has its own session"
+        );
         let finish = finish(&store, task, attempt, "failed", false, None);
         let applied =
             attempt_ops::apply(&store, task, attempt, Some(&finish), None, Some(1)).expect("apply");
@@ -301,8 +378,8 @@ fn a_result_with_an_old_token_changes_nothing() {
 }
 
 /// ADR 0044: `Result.cost` is the session total, so the attempt's cost is this attempt's
-/// total minus the previous attempt's. Mutation: count the session total as the attempt cost
-/// and the second attempt reads 1.5 instead of 0.5.
+/// total minus the previous attempt's when both ran in one session (`resume`). Mutation: count
+/// the session total as the attempt cost and the second attempt reads 1.5 instead of 0.5.
 #[test]
 fn cost_is_the_attempt_delta_of_the_session_total() {
     let (_repo, store) = setup("cost");
@@ -311,6 +388,7 @@ fn cost_is_the_attempt_delta_of_the_session_total() {
 
     attempt_ops::claim(&store, task).expect("claim 1");
     write_stream(&store, task, 1, Some(1_000_000));
+    write_execution(&store, task, 1, task);
     let first_finish = finish(&store, task, 1, "failed", false, None);
     let first =
         attempt_ops::apply(&store, task, 1, Some(&first_finish), None, Some(1)).expect("apply");
@@ -321,6 +399,7 @@ fn cost_is_the_attempt_delta_of_the_session_total() {
     attempt_ops::release_retries(&store, &retry_at).expect("release");
     attempt_ops::claim(&store, task).expect("claim 2");
     write_stream(&store, task, 2, Some(1_500_000));
+    write_execution(&store, task, 2, task);
     let second_finish = finish(&store, task, 2, "failed", false, None);
     let second =
         attempt_ops::apply(&store, task, 2, Some(&second_finish), None, Some(1)).expect("apply");
@@ -336,6 +415,38 @@ fn cost_is_the_attempt_delta_of_the_session_total() {
         (record["session_cost_usd"].as_f64().unwrap() - 1.5).abs() < 1e-9,
         "{record}"
     );
+}
+
+/// With `fresh` every attempt has a session of its own, so its session total is the cost it
+/// added: the delta would read zero for a cheaper second attempt. Mutation: always take the
+/// delta and the second attempt costs nothing.
+#[test]
+fn a_fresh_attempt_counts_its_whole_session_cost() {
+    let (_repo, store) = setup("fresh-cost");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+
+    attempt_ops::claim(&store, task).expect("claim 1");
+    write_stream(&store, task, 1, Some(1_000_000));
+    write_execution(&store, task, 1, &format!("{task}-1"));
+    let first_finish = finish(&store, task, 1, "failed", false, None);
+    let first =
+        attempt_ops::apply(&store, task, 1, Some(&first_finish), None, Some(1)).expect("apply");
+    assert!((first.cost_usd - 1.0).abs() < 1e-9, "{first:?}");
+
+    let retry_at = store.load_task(task).unwrap().item.retry_at.unwrap();
+    attempt_ops::release_retries(&store, &retry_at).expect("release");
+    attempt_ops::claim(&store, task).expect("claim 2");
+    write_stream(&store, task, 2, Some(500_000));
+    write_execution(&store, task, 2, &format!("{task}-2"));
+    let second_finish = finish(&store, task, 2, "failed", false, None);
+    let second =
+        attempt_ops::apply(&store, task, 2, Some(&second_finish), None, Some(1)).expect("apply");
+    assert!(
+        (second.cost_usd - 0.5).abs() < 1e-9,
+        "the whole second session is the attempt's cost: {second:?}"
+    );
+    assert_eq!(store.load_task(task).unwrap().item.cost_usd, Some(1.5));
 }
 
 /// A task budget pauses the task instead of retrying; `reset-budget` makes it ready and

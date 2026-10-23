@@ -484,7 +484,13 @@ enum ArcCommand {
         /// The random token the scheduling loop expects back in `AttemptFinished`.
         #[arg(long, value_name = "TOKEN", hide = true)]
         token: String,
-        /// Continue the task's session (`--resume <task>`) instead of starting one.
+        /// Internal: the worker's session id. arc passes `<task>-<attempt>` with
+        /// `[worker] rework_session = "fresh"` and the task id with `resume`; absent, the
+        /// task id. Not in the manual.
+        #[arg(long, value_name = "ID", hide = true)]
+        session: Option<String>,
+        /// Continue the session (`--resume <session>`) instead of starting one; a `fresh`
+        /// attempt never passes it.
         #[arg(long, hide = true)]
         resume: bool,
         /// Let a branch with no change past the base pass the delivery check.
@@ -748,6 +754,7 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             task,
             attempt,
             token,
+            session,
             resume,
             allow_noop,
             remote,
@@ -759,10 +766,12 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             cancel_grace_secs,
         }) => {
             let (remote, main_branch) = work_remote_and_main(remote, main_branch);
+            let session = session.unwrap_or_else(|| task.clone());
             ExitCode::from(radian_arc::work::run(radian_arc::work::Options {
                 task,
                 attempt,
                 token,
+                session,
                 resume,
                 allow_noop,
                 remote,
@@ -2670,6 +2679,27 @@ mod tests {
             documented,
             radian_arc::gate::OWNED_EXEC_ARGS,
             "arc-files.md's `gate.review.exec_args` row lists the stage's owned arguments: {row:?}"
+        );
+    }
+
+    /// `worker.rework_session`'s values are one closed list in the code, and the config table's
+    /// row names exactly them, in order. A value added to the list fails here until the row
+    /// lists it, and so does a row that names a value the parser refuses.
+    #[test]
+    fn every_rework_session_value_appears_in_arc_files_md() {
+        let doc = arc_files_md();
+        let table = arc_table(&doc, "arc-files.md", "## `config.toml`");
+        let row = config_key_row(&table, "worker.rework_session")
+            .expect("arc-files.md's config table has a `worker.rework_session` row");
+        let allowed = row.get(3).expect("the row has an Allowed values cell");
+        let documented: Vec<&str> = allowed.split('`').skip(1).step_by(2).collect();
+        let code: Vec<&str> = radian_arc::store::config::REWORK_SESSIONS
+            .iter()
+            .map(|value| value.as_str())
+            .collect();
+        assert_eq!(
+            documented, code,
+            "arc-files.md's `worker.rework_session` row lists the code's closed list: {row:?}"
         );
     }
 

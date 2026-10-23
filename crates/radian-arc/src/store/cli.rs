@@ -441,6 +441,14 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
                 "attempt_id",
                 &optional_text(item.attempt_id.as_deref()),
             );
+            field(
+                &mut out,
+                "session_id",
+                &optional_text(
+                    super::attempt_ops::attempt_session_id(&store, &item.id, item.attempt)
+                        .as_deref(),
+                ),
+            );
             field(&mut out, "token", &optional_text(item.token.as_deref()));
             field(&mut out, "cost_usd", &optional_number(item.cost_usd));
             field(&mut out, "auto_rework", &item.auto_rework.to_string());
@@ -852,6 +860,17 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
                             .as_ref()
                             .and_then(|verdict| verdict.review_cost_micros)
                     ),
+                );
+                // The current attempt's worker session (ADR 0048 decision 4): `attach` and the
+                // arc TUI open the worker's journal by this id. `null` when the attempt's
+                // wrapper wrote no record.
+                object.insert(
+                    "session_id".to_owned(),
+                    json!(super::attempt_ops::attempt_session_id(
+                        store,
+                        &task.item.id,
+                        task.item.attempt
+                    )),
                 );
             }
             value
