@@ -464,6 +464,7 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
             field(&mut out, "token", &optional_text(item.token.as_deref()));
             field(&mut out, "cost_usd", &optional_number(item.cost_usd));
             field(&mut out, "auto_rework", &item.auto_rework.to_string());
+            field(&mut out, "retry_count", &item.retry_count.to_string());
             field(&mut out, "after", &joined(&item.after));
             field(
                 &mut out,
@@ -610,6 +611,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "token": item.token,
         "cost_usd": item.cost_usd,
         "auto_rework": item.auto_rework,
+        "retry_count": item.retry_count,
         "after": item.after,
         "supersedes": item.supersedes,
         "allow_noop": item.allow_noop,

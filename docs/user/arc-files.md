@@ -18,13 +18,14 @@ A key you leave out takes its default.
 | `repository.remote` | string | `"origin"` | A remote name that exists in the repository | When arc reads the main branch or pushes a task branch. |
 | `repository.main_branch` | string | `"main"` (`init` writes what it found) | A branch name | When a task starts from main, and when main is checked before a merge. |
 | `limits.concurrency` | integer | `1` | 1 or more | When `radian arc run` starts tasks: how many attempts may be in flight at once. A running gate takes no slot. |
-| `limits.max_attempts` | integer | `3` | 1 or more | When a task fails and arc decides whether to retry. |
+| `limits.max_attempts` | integer | `3` | 1 or more | When a task fails and arc decides whether to retry: how many retries the task gets since its last rework. The count is the task's [`retry_count`](#task-fields); the attempt number is never compared with the limit. |
 | `limits.stall_timeout_secs` | integer | `900` | seconds | When a worker prints no new line for that long. |
 | `limits.max_wall_time_secs` | integer | `7200` | seconds | As an absolute limit on one attempt, on top of the stall timeout. |
 | `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
 | `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
 | `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. A review rework counts; a conflict rework that arc writes itself does not. |
 | `limits.max_auto_reverify` | integer | `2` | 0 or more; `0` turns the feature off | When a `commands` or integration command failure waits for a moved main: how many automatic reverifies one task gets. A hand `radian arc reverify` neither checks the count nor uses it up. |
+| `limits.max_conflict_rework` | integer | `3` | 0 or more | When a verification or integration stage fails with a conflict with main: how many conflict reworks arc writes in a row for one task. While it has written fewer, the conflict gets the brief; once it has written the limit, arc writes no brief, the task stays in `review.rework_pending` and waits for you. The lead's rework and an attempt that does not end in a conflict set the run back to `0`. `0` writes none, so the first conflict waits for you; `1` writes exactly one. |
 | `worker.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | Before `start`, each `run` pass and `confirm` act, the line the worker would get is parsed with the `radian exec` parser; a rejected line exits `3`. Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
 | `worker.rework_session` | string | `"fresh"` | `fresh`, `resume` | The session each worker attempt runs in. `fresh`: every attempt, a retry or a rework, starts a session of its own, `<task>-<attempt>`, and an attempt after the first gets a hand-off section in front of the brief ([what a rework receives](arc.md#radian-arc-start-task)). `resume`: one session per task, whose id is the task id, created by the first attempt that reaches the model and continued by every later one. A change takes effect at the next attempt. |
 | `ids.plan_prefix` | string | `"PL"` | 1 to 4 ASCII uppercase letters; must differ from `ids.task_prefix` | When a plan id is created. |
@@ -99,6 +100,7 @@ A confirmed plan gains records only; a draft plan may have its request text repl
 | `token` | string | no | the current attempt's random token; a result is applied only when it matches |
 | `cost_usd` | number | no | the task's counted cost in US dollars, summed over its attempts; `reset-budget` makes it `0` |
 | `auto_rework` | integer | no | `0` or more; how many reworks arc counted while the plan's `auto` was not `off`; `0` when absent |
+| `retry_count` | integer | no | `0` or more; how many retries arc started since the task's last rework; `0` when absent. A rework sets it back to `0`, and `max_attempts` counts it. |
 | `allow_noop` | boolean | yes | `true`, `false`; `false` when the task is new |
 | `extra_stages` | list of strings | yes | gate stages added to the profile (`[]` when there are none) |
 | `max_attempts` | integer | no | 1 or more; overrides `limits.max_attempts` for this task |
@@ -165,6 +167,7 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `runs/<task>/gate.json` | The background gate's record: `started` while a pass has started the gate but the process has not written its own record yet, then `running`, then `done`, `refused` or `error`; `no_record` when the process exited without writing any record. It keeps the attempt it runs for and, for `started`, `refused` and `no_record`, the inputs the gate was started with. |
 | `runs/<task>/gate.log` | The background gate process's own output. |
 | `runs/<task>/auto_reverify.json` | The `(head_sha, remote main)` pairs a scheduling pass already re-verified for the task, and the text of the last `limits.max_auto_reverify` stop. |
+| `runs/<task>/conflict_rework.json` | How many conflict reworks arc has written for the task in a row. The lead's rework and an attempt that does not end in a conflict set it back to `0`. |
 | `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). |
 | `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |
 | `attempts/<task>/…` | The host-local attempt records: `base_sha`, `last_head`, and per attempt `start.json`, `identity.json`, `status.json`, `heartbeat.json`. |

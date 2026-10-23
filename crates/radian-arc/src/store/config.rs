@@ -89,7 +89,7 @@ impl Default for Repository {
 pub struct Limits {
     /// How many tasks run at once.
     pub concurrency: u32,
-    /// How many attempts one task gets before it is `failed.exhausted`.
+    /// How many retries one task gets since its last rework before it is `failed.exhausted`.
     pub max_attempts: u32,
     /// No new line on the worker's jsonl stream for this long is a stall.
     pub stall_timeout_secs: u64,
@@ -101,6 +101,9 @@ pub struct Limits {
     pub cancel_grace_secs: u64,
     /// How many automatic reworks one task may get before the plan pauses.
     pub max_auto_rework: u32,
+    /// How many conflicts with main one task may reach in a row before arc stops writing the
+    /// conflict rework and waits for the lead. `0` writes no conflict rework.
+    pub max_conflict_rework: u32,
     /// How many times a task a command failure blocked may be re-verified by itself once the
     /// remote main moved (ADR 0048 decision 9). `0` turns the step off.
     pub max_auto_reverify: u32,
@@ -116,6 +119,7 @@ impl Default for Limits {
             max_cost_usd: None,
             cancel_grace_secs: 10,
             max_auto_rework: 2,
+            max_conflict_rework: 3,
             max_auto_reverify: 2,
         }
     }
@@ -261,6 +265,7 @@ max_wall_time_secs = 7200
 # max_cost_usd = 5.0          # not set = no limit
 cancel_grace_secs = 10
 max_auto_rework = 2
+max_conflict_rework = 3       # consecutive conflicts before the task waits for you
 max_auto_reverify = 2         # 0 turns the automatic reverify off
 
 [worker]

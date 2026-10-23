@@ -1013,6 +1013,9 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             if last.auto_rework != current.auto_rework {
                 touched.push("auto_rework");
             }
+            if last.retry_count != current.retry_count {
+                touched.push("retry_count");
+            }
             if last.retry_at != current.retry_at {
                 touched.push("retry_at");
             }

@@ -348,6 +348,9 @@ pub struct TaskFile {
     /// How many reworks arc counted while the plan's `auto` level was not `off`
     /// (`[limits] max_auto_rework`).
     pub auto_rework: u32,
+    /// How many retries arc started since the task's last rework. `max_attempts` counts
+    /// this, not the attempt number; every rework sets it back to `0`.
+    pub retry_count: u32,
     pub allow_noop: bool,
     /// Gate stages this brief adds to the profile's.
     pub extra_stages: Vec<String>,
@@ -394,6 +397,7 @@ impl TaskFile {
             token: None,
             cost_usd: None,
             auto_rework: 0,
+            retry_count: 0,
             allow_noop,
             extra_stages,
             max_attempts: None,
@@ -434,6 +438,9 @@ impl TaskFile {
         }
         if self.auto_rework > 0 {
             out.push_str(&format!("auto_rework: {}\n", self.auto_rework));
+        }
+        if self.retry_count > 0 {
+            out.push_str(&format!("retry_count: {}\n", self.retry_count));
         }
         out.push_str(&format!("allow_noop: {}\n", self.allow_noop));
         out.push_str(&frontmatter::list_field("extra_stages", &self.extra_stages));
@@ -519,6 +526,7 @@ impl TaskFile {
         let token = fields.optional_string("token")?;
         let cost_usd = fields.optional_f64("cost_usd")?;
         let auto_rework = fields.optional_u32("auto_rework")?.unwrap_or(0);
+        let retry_count = fields.optional_u32("retry_count")?.unwrap_or(0);
         let allow_noop = fields.optional_bool("allow_noop")?.unwrap_or(false);
         let extra_stages = fields.optional_list("extra_stages")?;
         for stage in &extra_stages {
@@ -560,6 +568,7 @@ impl TaskFile {
             token,
             cost_usd,
             auto_rework,
+            retry_count,
             allow_noop,
             extra_stages,
             max_attempts,
@@ -747,6 +756,7 @@ mod tests {
             token: Some("a-token".to_owned()),
             cost_usd: Some(1.25),
             auto_rework: 2,
+            retry_count: 1,
             allow_noop: true,
             extra_stages: vec!["mutation".to_owned(), "review".to_owned()],
             max_attempts: Some(2),

@@ -131,7 +131,14 @@ With `merge-main` on, the next attempt starts mid-merge, so arc writes its brief
 The heading is `## Rework <n> (conflict with main)`, with the lead's `add_rework` numbering.
 The text names the main commit (short sha) and the stage, lists the conflicted paths, says the next attempt starts mid-merge, and asks the worker to resolve the conflict keeping both sides' intent, commit the merge, rebuild, run the touched tests, and change nothing else.
 Every other reason, and a conflict without `merge-main`, keeps `review.rework_pending`; a `reverify` conflict takes the automatic path above.
-It never raises `auto_rework` and never pauses the plan, and it counts as an attempt: a task that keeps conflicting reaches `failed.exhausted` when its last counted attempt conflicts.
+It never raises `auto_rework`, never pauses the plan, and never sends the task to `failed.exhausted`: a conflict rework is not a retry, and it sets the task's `retry_count` back to `0`.
+
+A run of conflicts is bounded by [`limits.max_conflict_rework`](arc-files.md#configtoml) (default `3`).
+It is how many conflict reworks arc writes in a row: while it has written fewer than the limit, the conflict gets the brief above; once it has written the limit, arc writes no brief and the task stays in `review.rework_pending`.
+`radian arc run` then prints `<task> conflict with main -> review.rework_pending: <reason>`, and `show` prints the same text as part of the `rework_reason`.
+An attempt that does not end in a conflict sets the run back to `0`, and so does your own rework (`add_rework`), which is you stepping in; arc's review and conflict reworks do not.
+`0` writes none, so the first conflict waits for you; `1` writes exactly one.
+`show` prints the task's `retry_count`, not this run.
 `auto` decides whether the next attempt starts by itself.
 
 ### A command failure and a moved main
@@ -152,7 +159,7 @@ Two guards stop a loop:
 - each `(head_sha, remote main)` pair is re-verified by itself at most once, and the pairs are kept in `runs/<task>/auto_reverify.json`. A main that does not move runs nothing again.
 - [`limits.max_auto_reverify`](arc-files.md#configtoml) counts the automatic reverifies of one task. When the count is used up, the task stays in `review.rework_pending`, `radian arc run` prints one line with the reason, and `show` prints the same text as the `rework_reason`. The plan is not paused.
 
-An automatic reverify starts no worker, does not count toward `max_attempts`, and does not count toward `auto_rework`.
+An automatic reverify starts no worker, is not a retry (it changes neither `retry_count` nor `max_attempts`), and does not count toward `auto_rework`.
 A hand `radian arc reverify` ignores both guards and does not use up the count.
 
 ## A gate for this repository
@@ -209,8 +216,11 @@ The class is recorded in `runs/<task>/attempts/<attempt id>/attempt_result.json`
 | `cancelled` by `radian arc cancel` | `cancel` | `failed.cancelled` (never retries) |
 | `reverify` (no worker: `radian arc reverify`) | `reverify` | `review.verifying`, verified at once |
 
-A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 10 seconds for the first attempt, doubled for each later attempt, capped at 5 minutes.
-When `attempt` has reached the task's `max_attempts` (else `[limits] max_attempts`), the task goes to `failed.exhausted` instead.
+A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 10 seconds for the first retry, doubled for each later one, capped at 5 minutes.
+`max_attempts` (the task's, else [`limits.max_attempts`](arc-files.md#configtoml)) counts retries, not attempts: every retry raises the task's `retry_count`, and when the count has reached the limit the task goes to `failed.exhausted` instead.
+Every rework sets `retry_count` back to `0` (the lead's brief, arc's review rework, and the conflict rework), so the new instructions get their own retries.
+The attempt number is never compared with the limit; `show` prints `retry_count`.
+A `reverify` attempt is not a retry: it changes neither `retry_count` nor the limit.
 `todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; `start` does this before it claims.
 
 Every attempt of a task runs in a worker session.
