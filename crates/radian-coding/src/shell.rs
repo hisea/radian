@@ -374,8 +374,10 @@ pub(crate) async fn run(
         sandbox.mode(),
         deadline,
         clamped,
+        args.timeout_secs,
         output_cap,
         output_clamped,
+        args.max_output_bytes,
         &outcome,
         retained,
         denied,
@@ -565,8 +567,10 @@ async fn run_outside_sandbox(
         sandbox.mode(),
         deadline,
         clamped,
+        args.timeout_secs,
         output_cap,
         output_clamped,
+        args.max_output_bytes,
         &outcome,
         None,
         None,
@@ -1352,8 +1356,10 @@ fn report(
     mode: SandboxMode,
     timeout: Duration,
     clamped: bool,
+    requested_timeout: Option<u64>,
     output_cap: usize,
     output_clamped: bool,
+    requested_output: Option<usize>,
     outcome: &Outcome,
     retained: Option<RetainedView>,
     denied: Option<DenialCategory>,
@@ -1387,6 +1393,22 @@ fn report(
     }
     if outcome.cancelled {
         text.push_str("[cancelled; the whole process group was killed]\n");
+    }
+    // A clamp is a note about the request, not command stderr: it belongs in the marker block
+    // before `exit code:` with `[timed out after …]` and `[cancelled …]`, and it names both
+    // numbers so a transcript cannot read it as a timeout (ADR 0037's foreground rules).
+    if clamped && let Some(requested) = requested_timeout {
+        let max = timeout.as_secs();
+        text.push_str(&format!(
+            "[timeout_secs {requested} is above the maximum {max}; the command ran with the \
+             {max} s limit]\n"
+        ));
+    }
+    if output_clamped && let Some(requested) = requested_output {
+        text.push_str(&format!(
+            "[max_output_bytes {requested} is above the maximum {output_cap}; each stream was \
+             capped at {output_cap} bytes]\n"
+        ));
     }
     match exit_code {
         Some(code) => text.push_str(&format!("exit code: {code}\n")),
@@ -1436,16 +1458,6 @@ fn report(
     }
     if outcome.drain_incomplete {
         text.push_str("[output was not fully drained after the kill]\n");
-    }
-    if clamped {
-        text.push_str(&format!(
-            "[timeout clamped to the configured maximum of {timeout:?}]\n"
-        ));
-    }
-    if output_clamped {
-        text.push_str(&format!(
-            "[output budget clamped to the configured maximum of {output_cap} bytes per stream]\n"
-        ));
     }
 
     let cwd_relative = cwd

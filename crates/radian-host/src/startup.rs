@@ -169,21 +169,21 @@ fn session_rows(dir: &Path, workspace: &str) -> Result<Vec<sessions::SessionRow>
 }
 
 /// Whether `base_url` points at this machine (loopback), where a server needs no credential
-/// (ADR 0026 D2). A URL with no scheme is not a URL this rule can read, so it is not local.
+/// (ADR 0026 D2). The URL is **parsed**, so userinfo cannot smuggle another host past the rule
+/// (`http://[::1]@198.51.100.7/v1` is remote: the userinfo is not the host). A string that does
+/// not parse as a URL is not local.
 pub fn is_local_base_url(base_url: &str) -> bool {
-    let Some((_, rest)) = base_url.split_once("://") else {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
         return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.strip_prefix('[').map_or_else(
-        || {
-            authority
-                .rsplit_once(':')
-                .filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
-                .map_or(authority, |(host, _)| host)
-        },
-        |bracketed| bracketed.split(']').next().unwrap_or_default(),
-    );
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    // `host_str` serializes an IPv6 host with its brackets and never carries the userinfo.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
@@ -562,10 +562,18 @@ mod tests {
         assert!(!is_local_base_url("https://localhost.example.com"));
         assert!(!is_local_base_url("https://127.0.0.1.example.com"));
         assert!(!is_local_base_url("https://example.com"));
-        // A non-numeric or empty port is not a port, so the authority keeps its colon and no
-        // host matches.
-        assert!(!is_local_base_url("http://localhost:/x"));
+        // A non-numeric port is not a URL, so it parses to nothing and is not local. An empty
+        // port parses as the default one, so `http://localhost:/x` really is this machine.
+        assert!(is_local_base_url("http://localhost:/x"));
         assert!(!is_local_base_url("http://127.0.0.1:notaport"));
+        // Userinfo never counts as the host: the request goes to the authority, so a bracketed
+        // loopback name in the userinfo must not make a remote URL local.
+        assert!(!is_local_base_url("http://[::1]@198.51.100.7/v1"));
+        assert!(!is_local_base_url("http://[localhost]@evil.com/v1"));
+        assert!(!is_local_base_url("http://[::1]:80@evil.com/v1"));
+        // A plain user@ on a loopback authority stays local.
+        assert!(is_local_base_url("http://user@localhost/v1"));
+        assert!(is_local_base_url("http://user:pw@127.0.0.1:8080/v1"));
     }
 
     /// The `-m provider/model` hint: a **known** provider prefix with no

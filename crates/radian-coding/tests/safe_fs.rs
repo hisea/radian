@@ -112,6 +112,63 @@ fn every_file_tool_refuses_a_parent_symlink_inside_and_names_the_target() {
 }
 
 #[test]
+fn write_creates_no_level_under_a_symlinked_parent() {
+    serial(async {
+        let dir = TempDir::new("fs-write-link-parent");
+        let root = dir.file("ws");
+        dir.write("ws/inside/keep.txt", "keep");
+        let outside = sentinel_outside(&dir);
+        std::os::unix::fs::symlink(&outside, root.join("out_link")).unwrap();
+        std::os::unix::fs::symlink("inside", root.join("in_link")).unwrap();
+        let tools = tools(&root);
+
+        // A link to the outside: the boundary refusal, and no level is created beneath it.
+        let failure = call(
+            &tools,
+            "write",
+            json!({"path": "out_link/a/b/c.txt", "content": "X"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure.code, "path_outside_workspace", "{failure:?}");
+        assert!(
+            !failure.message.contains(outside.to_str().unwrap()),
+            "the outside path leaked: {}",
+            failure.message
+        );
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            1,
+            "nothing was created outside"
+        );
+        assert!(!outside.join("a").exists());
+
+        // A link to a directory inside the workspace: the existing inside-link shape, and the
+        // missing levels are not created under the target either.
+        let failure = call(
+            &tools,
+            "write",
+            json!({"path": "in_link/a/b/c.txt", "content": "X"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure.code, "path_is_symlink", "{failure:?}");
+        assert!(
+            failure
+                .message
+                .contains("`in_link` is a symlink to `inside`"),
+            "{}",
+            failure.message
+        );
+        assert!(
+            !root.join("inside/a").exists(),
+            "nothing was created under the link target"
+        );
+        assert_eq!(read(&root.join("inside/keep.txt")), "keep");
+    });
+}
+
+#[test]
 fn an_absolute_inside_link_target_is_named_relative_to_the_workspace() {
     serial(async {
         let dir = TempDir::new("fs-abs-inside");

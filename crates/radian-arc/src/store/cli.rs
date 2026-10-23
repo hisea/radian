@@ -402,8 +402,12 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
                 field(&mut out, "review_verdict", &path.display().to_string());
                 if let Some(review) = &verdict.review {
                     field(&mut out, "review_summary", &review.summary);
-                    field(&mut out, "review_blocking", &joined(&review.blocking));
-                    field(&mut out, "review_suggestions", &joined(&review.suggestions));
+                    field(&mut out, "review_blocking", &joined_items(&review.blocking));
+                    field(
+                        &mut out,
+                        "review_suggestions",
+                        &joined_items(&review.suggestions),
+                    );
                     field(&mut out, "review_verified", &joined(&review.verified));
                 }
                 field(
@@ -445,6 +449,19 @@ fn joined(values: &[String]) -> String {
         "-".to_owned()
     } else {
         values.join(", ")
+    }
+}
+
+/// The review items as `[level] path:line text`, separated by `; `.
+fn joined_items(items: &[crate::gate::ReviewItem]) -> String {
+    if items.is_empty() {
+        "-".to_owned()
+    } else {
+        items
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 

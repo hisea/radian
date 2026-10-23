@@ -290,8 +290,8 @@ fn diff_frame() -> App {
             "replaced": 2,
             "matched": "exact",
             "hunks": [
-                {"old_start": 10, "old_lines": 2, "new_start": 10, "new_lines": 3},
-                {"old_start": 40, "old_lines": 2, "new_start": 41, "new_lines": 3},
+                {"edit": 1, "old_start": 10, "old_lines": 2, "new_start": 10, "new_lines": 3},
+                {"edit": 1, "old_start": 40, "old_lines": 2, "new_start": 41, "new_lines": 3},
             ],
         }),
         false,
@@ -329,7 +329,7 @@ fn diff_frame() -> App {
 const DIFF_GOLDEN: &[&str] = &[
     "  Applying the edits.",
     "",
-    "◻ patch src/main.rs · +3 −2 ✓",
+    "◻ patch src/main.rs · +6 −4 ✓",
     "│ @@ -10,2 +10,3 @@",
     "│   10 - let a = 1;",
     "│   11 - let b = 2;",

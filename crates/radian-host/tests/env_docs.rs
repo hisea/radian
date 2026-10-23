@@ -85,6 +85,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "RADIAN_TRACE_PHASES",
         "read in radian-session/src/trace.rs: prints a startup phase trace with timings, for development",
     ),
+    (
+        "RADIAN_ARC_GATE_TEST_EXIT_WITHOUT_RECORD",
+        "read in radian-arc/src/gate/background.rs: makes the background gate exit before it writes any record, to exercise the no-record guard",
+    ),
 ];
 
 /// The headings whose tables list environment variables. Each heading is an anchor: a row

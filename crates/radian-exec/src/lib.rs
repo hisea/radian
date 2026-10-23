@@ -305,6 +305,14 @@ pub struct Cli {
     /// outside its worktree stay unreadable (ADR 0048 decision 5). It is not a user input.
     #[arg(long = "deny-read", value_name = "PATH", hide = true)]
     deny_read: Vec<PathBuf>,
+
+    /// Hidden, test-only: the core's tool cancel grace for this process's turns, in
+    /// milliseconds (`DEFAULT_TOOL_CANCEL_GRACE`, 5 s, when absent). It is not a user input and
+    /// it is not in the manual: only `crates/radian-exec/tests/subagent.rs` sets it, to put the
+    /// grace far beyond the deadline at which the `subagent` tool's own cancel branch must have
+    /// killed the child, so machine load cannot make the two branches look alike.
+    #[arg(long = "tool-cancel-grace-ms", value_name = "MILLIS", hide = true)]
+    tool_cancel_grace_ms: Option<u64>,
 }
 
 impl Cli {

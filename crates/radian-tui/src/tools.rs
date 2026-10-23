@@ -60,6 +60,10 @@ pub struct ToolCard {
     /// **call** entry while the body lives on the result's, so the call entry can only know the
     /// count through this field, which the pairing fills ([`crate::app::App::push_message`]).
     pub result_lines: Option<usize>,
+    /// Whether the paired result is an error. A failed `patch` changed nothing, so its card
+    /// shows the tool's own error text instead of the call's edits, and no `+N −M`
+    /// (`crates/radian-tui/src/app/transcript.rs` sets it when the result arrives).
+    pub is_error: bool,
 }
 
 impl ToolCard {
@@ -71,6 +75,7 @@ impl ToolCard {
             structured: None,
             duration_ms: None,
             result_lines: None,
+            is_error: false,
         }
     }
 
@@ -878,6 +883,192 @@ mod tests {
             .collect()
     }
 
+    /// The `+N −M` of an `edits` card counts the **hunks**: one edit's `replace_all` that
+    /// matched three places adds three times, even though the call's edit text names the change
+    /// once. A result without `hunks` sums the call's edit list instead, and the old form's
+    /// single edit counts its own lines.
+    #[test]
+    fn the_patch_meta_sums_the_structured_hunks() {
+        let mut replace_all = card(
+            "patch",
+            json!({"path": "f.txt", "edits": [{"old": "x\n", "new": "y\n", "replace_all": true}]}),
+        );
+        replace_all.structured = Some(json!({
+            "hunks": [
+                {"edit": 1, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1},
+                {"edit": 1, "old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1},
+                {"edit": 1, "old_start": 5, "old_lines": 1, "new_start": 5, "new_lines": 1},
+            ],
+        }));
+        assert_eq!(meta_parts(&replace_all, false), vec!["+3 −3"]);
+
+        // Two edits, the second's `replace_all` matching twice: the sums cover every hunk.
+        let mut two = card(
+            "patch",
+            json!({
+                "path": "f.txt",
+                "edits": [
+                    {"old": "one\n", "new": "ONE\n"},
+                    {"old": "two\n", "new": "TWO\nTWO2\n", "replace_all": true}
+                ]
+            }),
+        );
+        two.structured = Some(json!({
+            "hunks": [
+                {"edit": 1, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1},
+                {"edit": 2, "old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 2},
+                {"edit": 2, "old_start": 7, "old_lines": 1, "new_start": 8, "new_lines": 2},
+            ],
+        }));
+        assert_eq!(meta_parts(&two, false), vec!["+5 −3"]);
+
+        // No `hunks` (an older journal entry): the call's edit list, summed edit by edit.
+        let mut no_hunks = card(
+            "patch",
+            json!({
+                "path": "f.txt",
+                "edits": [
+                    {"old": "one\n", "new": "ONE\n"},
+                    {"old": "two\n", "new": "TWO\nTWO2\n", "replace_all": true}
+                ]
+            }),
+        );
+        no_hunks.structured = Some(json!({"path": "f.txt", "edits": 2, "replaced": 3}));
+        assert_eq!(meta_parts(&no_hunks, false), vec!["+3 −2"]);
+
+        // The old form without `hunks`: one `old`/`new` pair.
+        let legacy = card(
+            "patch",
+            json!({"path": "a", "old": "a\nb\n", "new": "A\nB\nC\n"}),
+        );
+        assert_eq!(meta_parts(&legacy, false), vec!["+3 −2"]);
+    }
+
+    /// The body of an `edits` card: per hunk in **file** order an `@@` line, then the `-`/`+`
+    /// lines of that hunk's `edit`. The second edit's `replace_all` matched the file's first and
+    /// third ranges, so its text appears in the first and last block, the first edit's in the
+    /// middle one.
+    #[test]
+    fn a_patch_body_takes_each_hunks_text_from_its_edit() {
+        let mut patch = card(
+            "patch",
+            json!({
+                "path": "src/a.rs",
+                "edits": [
+                    {"old": "old one\n", "new": "new one\n"},
+                    {"old": "old two\n", "new": "new two\nnew two b\n", "replace_all": true}
+                ]
+            }),
+        );
+        patch.structured = Some(json!({
+            "hunks": [
+                {"edit": 2, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 2},
+                {"edit": 1, "old_start": 4, "old_lines": 1, "new_start": 5, "new_lines": 1},
+                {"edit": 2, "old_start": 7, "old_lines": 1, "new_start": 8, "new_lines": 2},
+            ],
+        }));
+        let text = result_display_text(&patch, "replaced 3 occurrences across 2 edits in src/a.rs");
+        assert_eq!(
+            text,
+            "@@ -1,1 +1,2 @@\n-old two\n+new two\n+new two b\n\
+             @@ -4,1 +5,1 @@\n-old one\n+new one\n\
+             @@ -7,1 +8,2 @@\n-old two\n+new two\n+new two b\n"
+        );
+        // The rows number from each header, and the entry text is the card's body (copy and
+        // search see exactly this).
+        let body = diff_body(&patch, &text);
+        assert_eq!(
+            diff_rows(&body),
+            vec![
+                (Some(1), DiffKind::Removed),
+                (Some(1), DiffKind::Added),
+                (Some(2), DiffKind::Added),
+                (Some(4), DiffKind::Removed),
+                (Some(5), DiffKind::Added),
+                (Some(7), DiffKind::Removed),
+                (Some(8), DiffKind::Added),
+                (Some(9), DiffKind::Added),
+            ]
+        );
+        assert_eq!(
+            text_role(&body),
+            vec![LineRole::Frame, LineRole::Frame, LineRole::Frame]
+        );
+    }
+
+    /// A result without `hunks` (an older journal entry), or one whose hunk names no edit of
+    /// this call, falls back to the call's edits in call order with no `@@` line — and never
+    /// panics.
+    #[test]
+    fn an_edits_card_without_usable_hunks_falls_back_to_call_order() {
+        let mut patch = card(
+            "patch",
+            json!({
+                "path": "a.txt",
+                "edits": [
+                    {"old": "old one\n", "new": "new one\n"},
+                    {"old": "old two\n", "new": "new two\n"}
+                ]
+            }),
+        );
+        patch.structured = Some(json!({"path": "a.txt", "edits": 2}));
+        let text = result_display_text(&patch, "replaced 2 occurrences across 2 edits in a.txt");
+        assert_eq!(text, "-old one\n+new one\n-old two\n+new two\n");
+
+        // An out-of-range `edit` (and a missing one) take the same path.
+        for hunks in [
+            json!([{"edit": 9, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}]),
+            json!([{"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}]),
+        ] {
+            patch.structured = Some(json!({"path": "a.txt", "hunks": hunks}));
+            assert_eq!(
+                result_display_text(&patch, "the tool text"),
+                "-old one\n+new one\n-old two\n+new two\n"
+            );
+        }
+    }
+
+    /// A failed `patch` applies nothing, so its card shows the tool's own error text (with its
+    /// closest-region hint) and no `+N −M` — for the `edits` form and the `old`/`new` pair
+    /// alike. A successful call keeps its diff and its counts.
+    #[test]
+    fn a_failed_patch_shows_the_error_text_and_no_counts() {
+        let error = "`old` does not appear in `f.txt`; the file is unchanged\n\
+                     The closest region is lines 3-3:\n3: gamma";
+        for arguments in [
+            json!({"path": "f.txt", "edits": [{"old": "alpha", "new": "ALPHA"}]}),
+            json!({"path": "f.txt", "old": "alpha", "new": "ALPHA"}),
+        ] {
+            let mut patch = card("patch", arguments.clone());
+            patch.is_error = true;
+            assert_eq!(
+                result_display_text(&patch, error),
+                error,
+                "a failed patch shows the tool's text: {arguments}"
+            );
+            assert!(
+                meta_parts(&patch, false).is_empty(),
+                "a failed patch claims no changed lines: {arguments}"
+            );
+        }
+
+        // A successful call is unchanged: the hunk body and the hunk sums.
+        let mut patch = card(
+            "patch",
+            json!({"path": "f.txt", "edits": [{"old": "alpha\n", "new": "ALPHA\n"}]}),
+        );
+        patch.structured = Some(json!({
+            "hunks": [
+                {"edit": 1, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1},
+            ],
+        }));
+        assert_eq!(meta_parts(&patch, false), vec!["+1 −1"]);
+        assert_eq!(
+            result_display_text(&patch, "replaced 1 occurrence across 1 edit in f.txt"),
+            "@@ -1,1 +1,1 @@\n-alpha\n+ALPHA\n"
+        );
+    }
+
     /// A `patch` result that carries `hunks`: one `@@` block per replaced range, every row
     /// numbered from its own header, and the **second** range's rows already carry the first
     /// range's line delta (a two-line replacement that became one line moves them up).
@@ -892,8 +1083,8 @@ mod tests {
             "replaced": 2,
             "matched": "exact",
             "hunks": [
-                {"old_start": 2, "old_lines": 2, "new_start": 2, "new_lines": 1},
-                {"old_start": 5, "old_lines": 2, "new_start": 4, "new_lines": 1},
+                {"edit": 1, "old_start": 2, "old_lines": 2, "new_start": 2, "new_lines": 1},
+                {"edit": 1, "old_start": 5, "old_lines": 2, "new_start": 4, "new_lines": 1},
             ],
         }));
         let text = result_display_text(&patch, "replaced 2 occurrences in src/日本.rs");
@@ -1029,7 +1220,7 @@ mod tests {
             json!({"path": "notes.txt", "old": "a\n", "new": "b\n"}),
         );
         patch.structured = Some(json!({
-            "hunks": [{"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}],
+            "hunks": [{"edit": 1, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}],
         }));
         let text = result_display_text(&patch, "replaced 1 occurrence");
         assert_eq!(text, "@@ -1,1 +1,1 @@\n-a\n+b\n");
