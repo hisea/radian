@@ -39,6 +39,10 @@ copy.
 | M27 | leave the wrapper's git commands unbounded (the wall clock starts at the model child again) | `run::a_hanging_push_ends_the_attempt_at_the_wall_time` (40 s deadline: `start` never returned) | ✅ failed |
 | M28 | leave the inherited gate-lock descriptor inheritable (no `FD_CLOEXEC` reset) | `run::a_stage_child_does_not_keep_the_gate_lock` (the lock stayed held by an orphan `sleep`) | ✅ failed |
 | M29 | leave the gate in the loop's process group (drop `process_group(0)` from its spawn) | `run::sigint_to_a_gate_stops_its_stage` (`kill(-<pid>, SIGINT)` fails: the gate has no group of its own) | ✅ failed |
+| M30 | skip the rework round's `pre_existing` move (record 0 and move nothing) | `review::a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes` | ✅ failed |
+| M31 | treat the whole task's own diff as the increment (drop the intersection with `previous..sha`) | `review::a_rework_prompt_holds_the_increment_and_the_previous_items`, `review::a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes` | ✅ 2 failed |
+| M32 | drop rule (b) of `ReworkRound::keeps` (an earlier unfixed item stops blocking) | `review::a_blocking_item_near_an_unfixed_previous_item_still_blocks` | ✅ failed |
+| M33 | write the review rework when the plan's `auto` is `off` | `review::a_failed_review_with_auto_off_waits_for_the_lead` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -78,6 +82,11 @@ M29 was run against the process groups and the SIGINT handlers, from a copy unde
 group, the loop's group SIGINT still reaches the gate and its SIGINT handler still stops the
 stage, so `sigint_to_the_watch_group_leaves_the_worker_running` passes; the test that fails is
 the one that signals the gate's own group, which no longer exists.
+
+M30–M33 were run against the review-increment change (the rework round, `pre_existing` and the
+review rework), from copies under `.radian/mutations/` restored with `cp` and compared with
+`cmp`. M31's main-merge test still passed under the mutation, because that test's own diff is
+already restricted to the task's file; the rework-prompt test is the one that catches it.
 
 The old stale-main test (`a_rejected_push_never_overwrites_the_remote_main`) cannot survive
 the explicit main refspec: a main moved on the remote is now visible before the push, so the
