@@ -151,6 +151,8 @@ pub fn spawn_claim(
         .arg(claim.attempt.to_string())
         .arg("--token")
         .arg(&claim.token)
+        .arg("--session")
+        .arg(&claim.session_id)
         .arg("--remote")
         .arg(&remote)
         .arg("--main-branch")

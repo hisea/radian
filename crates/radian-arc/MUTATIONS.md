@@ -56,6 +56,10 @@ copy.
 | M41 | let the loop claim a `todo.proposed` task (accept `proposed` in `run::start_ready`'s phase filter and in `attempt_ops::claim`) | `review::the_loop_does_not_claim_a_proposed_task_and_start_refuses_it` | ✅ failed |
 | M42 | move the plan back to `draft` on a task confirm | `review::confirm_makes_a_proposed_task_ready_and_leaves_the_plan_alone` | ✅ failed |
 | M43 | include the review verdict's `blocking` items in the follow-up task | `review::a_blocking_item_is_never_carried_into_the_followup` | ✅ failed |
+| M44 | pass `--resume` with `fresh`: `claim` sets `resume: number > 1` (the mode check dropped) | `attempt::a_fresh_claim_names_each_attempts_session_and_never_resumes`, `attempt::a_failed_outcome_retries_with_the_backoff_then_is_exhausted`, `review::rework_after_reject_starts_a_new_attempt_with_its_own_verdicts` | ✅ 3 failed |
+| M45 | drop the hand-off section (a fresh later attempt's stdin is the brief alone) | `work::a_fresh_rework_starts_a_new_session_with_the_hand_off`, `work::a_fresh_rework_keeps_the_conflict_section_first`, `work::a_long_previous_report_is_cut_at_the_cap_with_a_note` | ✅ 3 failed |
+| M46 | put the hand-off before the conflict section | `work::a_fresh_rework_keeps_the_conflict_section_first` | ✅ failed |
+| M47 | read only attempt `n-1` for the hand-off's report (`newest_report` does not walk back) | `work::the_hand_off_walks_back_past_a_reverify_attempt` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -131,6 +135,20 @@ records the main it ran against, so "main moved since the failing verdict" is fa
 therefore drives the state a pass leaves when it dies between recording the `(head, main)`
 pair and claiming the attempt, which is the state the pair guard alone protects.
 
+M44–M46 were run against `a948a2d7` (the fresh worker session), each from a copy under
+`.radian/mut/` restored with `cp` and compared with `cmp`, with `cargo build -p radian-tui
+--bin radian -p agent-extensions --bin mcp-fixture` before each run (the work tests refuse a
+binary older than its sources). M44 is caught at the claim: a fresh rework claims
+`<task>-2` with `resume` set, and the retry test and the review rework test see it too. M45
+leaves the fresh brief as the body alone, so the hand-off tests fail on the missing section,
+the missing cap and the missing hand-off in the conflicted brief. M46 swaps the two
+sections in `compose_brief`'s argument list; only the conflicted-brief test compares their
+order (the unit test passes the order it asserts). The `run::a_watch_pass_does_not_restart_a_gate_that_left_no_record`
+failure that M45's run also showed is a timeout under load: it passes in every clean run.
+
+M47 was run against `3ebead45`, from `.radian/mut/work_mod_walkback.rs` restored with `cp` and
+compared with `cmp`: `newest_report` reads `attempt - 1` instead of walking back, so the
+reverify attempt in the middle hides attempt 1's report and only the new work test fails.
 M41–M43 were run against `a95de60e` (the priority change), each through `git restore` of the
 mutated file and verified byte for byte with `git diff --exit-code`. M41 leaves the id order
 alone, so `two_plans_at_the_same_priority_keep_id_order` still passes under it: the priority

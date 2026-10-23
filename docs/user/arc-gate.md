@@ -213,13 +213,15 @@ A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 1
 When `attempt` has reached the task's `max_attempts` (else `[limits] max_attempts`), the task goes to `failed.exhausted` instead.
 `todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; `start` does this before it claims.
 
-Every attempt of a task runs in one worker session, whose id is the task id.
-The first attempt that reaches the model creates the session; every later attempt, a retry or a rework, resumes it.
+Every attempt of a task runs in a worker session.
+With [`worker.rework_session`](arc-files.md#configtoml) at `fresh` (the default) each attempt has a session of its own, `<task>-<attempt>`, and none is ever resumed; an attempt after the first gets the hand-off section (see [`start`](arc.md#radian-arc-start-task)).
+With `resume` the session id is the task id: the first attempt that reaches the model creates it, and every later attempt, a retry or a rework, continues it.
 An attempt that failed before the model started (a missing credential, a worktree that could not be prepared) leaves no session, so the next attempt creates it.
 A bad `worker.exec_args` entry no longer gets that far: `start`, `run` and `confirm` refuse it before the claim.
+The attempt's session id is in `runs/<task>/attempts/<attempt id>/execution.json`, so the worker's journal is found by that id.
 
 Cost is counted per attempt.
-`Result.cost` is the session total, so the attempt's cost is this attempt's session total minus the previous attempt's.
+`Result.cost` is the session total, so the attempt's cost is the difference from the previous attempt's session total when both ran in the same session (`resume`), and the whole session total when the attempt has a session of its own (`fresh`).
 The delta is added to the task's `cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
 A `reverify` attempt runs no worker and costs nothing: it adds nothing to `cost_usd`.
 

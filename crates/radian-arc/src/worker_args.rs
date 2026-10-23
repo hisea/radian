@@ -20,12 +20,11 @@ use clap::Parser;
 use crate::store::Error;
 
 /// The `radian exec` arguments the wrapper fixes for every worker, with placeholder values
-/// for the task (which is also the session id) and the worktree. [`check`] parses these, then
-/// `[worker] exec_args`, then `-p -`, in the order [`crate::work`]'s `spawn_child` builds
-/// them.
+/// for the session and the worktree. [`check`] parses these, then `[worker] exec_args`, then
+/// `-p -`, in the order [`crate::work`]'s `spawn_child` builds them.
 pub const FIXED_EXEC_ARGS: &[&str] = &[
     "--session-id",
-    "<task>",
+    "<session>",
     "--workspace",
     "<worktree>",
     "--profile",
