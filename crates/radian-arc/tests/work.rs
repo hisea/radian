@@ -773,10 +773,20 @@ fn a_second_wrapper_for_the_same_task_fails_on_the_flock() {
             "{}",
             second.stderr
         );
+        // The locked-out wrapper still writes its record, which is what frees the attempt's
+        // concurrency slot in the next pass; it starts no worker.
+        let locked_out = second.finished();
+        assert_eq!(locked_out["exit_code"], json!(4), "{locked_out}");
+        assert_eq!(locked_out["outcome"], json!("terminated"), "{locked_out}");
         assert!(
-            !second.stdout.contains("AttemptFinished"),
-            "the locked-out wrapper starts no worker: {}",
-            second.stdout
+            locked_out["failure"]
+                .as_str()
+                .is_some_and(|failure| failure.contains("another attempt holds the lock")),
+            "{locked_out}"
+        );
+        assert!(
+            !repo.attempt_dir(task, 2).join("identity.json").exists(),
+            "the locked-out wrapper started a worker"
         );
         let first = first.join().expect("the first wrapper");
         assert_eq!(first.code, 0, "{}", first.stderr);

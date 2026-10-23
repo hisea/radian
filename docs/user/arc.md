@@ -136,7 +136,7 @@ The id names one plan or task. An id that names both a plan and a task is refuse
 | `--json` | — | Print one JSON object instead of fields. |
 
 The object holds the same keys as in `list --json`, plus `body`, `rework_reason`, and the newest review verdict's `review`, `review_verdict`, `review_session_ids` and `review_cost_micros`.
-An unset field is `null`; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a reject note, or the automatic rework limit that paused the plan).
+An unset field is `null`; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that exited without a record, a reject note, or the automatic rework limit that paused the plan).
 `review` is `{"summary", "blocking", "suggestions", "verified"}` from the newest `review` verdict, or `null`; `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none).
 For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_blocking`, `review_suggestions`, `review_verified`, `review_session_ids` and `review_cost_micros`.
 An id that names nothing exits `1`.
@@ -369,13 +369,17 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   A verdict that already exists for this attempt and stage is reused instead of rerun, so a crash between stages resumes where it stopped.
 - One gate runs per task at a time.
   The gate process holds `gates/<task>.gate.lock` from the moment a pass starts it, so the pass that follows starts no second gate for the same commit.
-  A gate that stops without a record releases the lock; the next pass starts it again, and the verdicts already written are reused.
+  A gate that stops without writing its outcome (it was signalled, or its process died) releases the lock; the next pass starts it again, because it left its `running` record, and the verdicts already written are reused.
   Stages of different tasks still queue on their own locks: one `commands` stage at a time, one checkout per stage, and the review stage has its own.
   The `review` stage is a read-only session, so it does not wait for another task's `commands`.
 - The gate's own output is `runs/<task>/gate.log`.
 - The gate records its outcome in `runs/<task>/gate.json` with the attempt it ran for: `done`, `refused` (a check before the stages refused: a moved branch, a stage this build does not run, no `head_sha`), or `error`.
   A pass applies a `done` record; reports a `refused` one in the summary and starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt); and reports an `error` one as an error (exit `1` for a one-shot `run`).
   `radian arc show` keeps printing the recorded reason.
+- Before a pass starts a gate it writes the inputs it starts it with to the same record, with `status` `started`; the gate replaces that with `running` as its first write, and an integration gate gets the same treatment.
+  A gate process that exits before it writes any record at all (it panics, or it cannot read the store) leaves the `started` record: the next pass records `no_record` for the same attempt with those inputs, reports it, and starts no gate for it.
+  A new `head_sha`, a new main, or a changed `config.toml` allows one new start.
+  A gate that wrote its `running` record and then died is started again, as above.
 - Any stage failing moves the task to `review.rework_pending`.
   The stage, its reason and the verdict path are in the task's `rework_reason` (`show` prints it).
   Main moving after a verification does not send the task back to `review.verifying` by itself; `merge` integrates onto the then-current main and runs the key commands there.
@@ -566,6 +570,8 @@ One pass repeats until a pass changes nothing, in this order:
 
 The long work runs outside the pass: a worker is a separate `radian arc work` process with its own limits and record, and a gate is a separate process with its own record.
 A stage this build does not run, or a branch that moved, is reported in the summary; the gate's refusal is recorded, and `run` starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt).
+A gate whose process exited without writing any record is reported the same way, as `<task> verify cannot run: its gate exited without a record` (or `<task> integration cannot run: …`); the fact is recorded for that attempt and no new gate starts while its inputs stay the same, and `show` prints the same text as the `rework_reason`.
+The next pass applies a wrapper's early failure (a refused argument, a held worktree lock) the same way, so the attempt's concurrency slot is free in that pass instead of after the stall window (see Reconcile).
 
 A one-shot `run` starts its work and exits without waiting for it; the next `run` collects the result.
 Use `--watch` (or the arc interface, when it exists) to keep advancing.
@@ -878,6 +884,8 @@ When a retry is due and the budget is used up, the task goes to `todo.paused_bud
 arc keeps no attempt state in memory.
 Before `start` or `cancel` acts, and after a restart, it reconciles every task in `doing`:
 
+- a wrapper that failed after its attempt directory existed wrote its own end record before it exited, whatever the failure: a refused argument, a worktree lock another attempt holds, a fetch that failed, a worktree that could not be prepared, or a worker that could not start. The record is applied at once: the attempt's concurrency slot is free in the next pass, the class is an infrastructure failure, and the retry rules apply. A retry is not counted as a rework;
+- only a failure before those directories exist (a task id that names no path, a directory that cannot be created) leaves no record. That attempt is applied as an infrastructure failure when its heartbeat is older than the stall window, as below;
 - the wrapper's `attempt_finished.json` is present and its token is current: the result is applied;
 - the wrapper's last heartbeat (`attempts/<task>/<attempt>/heartbeat.json`) is younger than the attempt's stall window (its `stall_timeout_secs`, else `[limits] stall_timeout_secs`): the attempt is alive and left alone.
   The wrapper beats at most every 15 seconds and at least three times inside the attempt's stall window, from the moment the attempt directory exists until both end records are written; it keeps beating while the wrapper sets up the worktree, waits for the model, or checks and pushes the result.
@@ -903,7 +911,7 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `ledger/tasks/<id>.json` | The same for a task. |
 | `ledger/tasks/<id>.last.md` | The task as arc last wrote it. |
 | `runs/<task>/attempts/<attempt id>/` | One attempt's output: the worker's `result.jsonl`, `stderr.log`, `execution.json`, the wrapper's `attempt_finished.json`, `signal.json` when the wrapper signalled the worker, arc's `attempt_result.json`, and `paused.json` when the automatic rework limit paused the plan. |
-| `runs/<task>/gate.json` | The background gate's outcome: `running`, then `done`, `refused` or `error`, with the attempt it ran for. |
+| `runs/<task>/gate.json` | The background gate's record: `started` while a pass has started the gate but the process has not written its own yet, then `running`, then `done`, `refused` or `error`; `no_record` when the process exited without writing any record. It keeps the attempt it runs for and, for `started`, `refused` and `no_record`, the inputs it was started with. |
 | `runs/<task>/gate.log` | The background gate process's own output. |
 | `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). |
 | `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |

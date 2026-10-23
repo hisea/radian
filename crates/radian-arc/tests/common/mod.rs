@@ -680,7 +680,20 @@ impl Repo {
     /// Like [`Repo::spawn`], in a process group of its own: a test can signal that group the
     /// way a terminal's Ctrl-C signals the foreground job.
     pub fn spawn_in_own_group(&self, args: &[&str]) -> std::process::Child {
+        self.spawn_in_own_group_with_env(args, &[])
+    }
+
+    /// [`Repo::spawn_in_own_group`] with extra environment variables that win over the isolated
+    /// defaults.
+    pub fn spawn_in_own_group_with_env(
+        &self,
+        args: &[&str],
+        envs: &[(&str, String)],
+    ) -> std::process::Child {
         let mut command = self.radian_command(args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
