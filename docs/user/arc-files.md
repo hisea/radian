@@ -46,7 +46,7 @@ A per-task field of the same name overrides a `[limits]` value for that task; a 
 
 A plan file is `plans/<id>.md`; a task file is `tasks/<id>.md`.
 Both are front matter between two `---` lines, then a body.
-arc is the only writer; you change them with the subcommands above, and `adopt` after a hand edit.
+arc is the only writer; you change them with [the `radian arc` subcommands](arc.md), and `adopt` after a hand edit.
 
 An id is a prefix of 1 to 4 uppercase ASCII letters, a four-digit number, a dash, and a slug (`PL0001-first`, `TK0001-work`).
 `[ids] plan_prefix` (default `PL`) and `[ids] task_prefix` (default `TK`) set the two prefixes; they must differ, and a prefix that is empty, not 1 to 4 uppercase letters, or equal to the other is refused by name when `config.toml` is read.

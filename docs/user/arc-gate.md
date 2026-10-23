@@ -9,7 +9,7 @@ This page covers the gate run and its failures; the commands are in [`arc`](arc.
 ## The gate run
 
 A task in `review.verifying` is checked against `verified_sha`, which is the pushed `head_sha` of the task's current attempt.
-`start` runs the gate in the same process after a pushed attempt, and `radian arc run` starts it as a background process: a pass starts the gate and returns, and a later pass reads its verdicts and moves the task (`run` below).
+`start` runs the gate in the same process after a pushed attempt, and `radian arc run` starts it as a background process: a pass starts the gate and returns, and a later pass reads its verdicts and moves the task ([`run`](arc.md#radian-arc-run)).
 A gate writes its verdict files and one record, `runs/<task>/gate.json`; it never changes the task's state itself.
 
 - arc fetches `[repository] remote` first.

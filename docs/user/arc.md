@@ -1,5 +1,5 @@
 ---
-description: Plan and task orchestration: setup, plans, tasks, the files arc keeps, the lead's MCP server, and its exit codes.
+description: The arc commands: every subcommand, the lead's MCP server, and the exit codes.
 ---
 
 # arc
@@ -77,7 +77,7 @@ claude mcp add arc -- radian arc mcp
 
 `add` creates one plan or one task from standard input.
 The new id is printed on stdout, one line.
-Plans and tasks count in separate number sequences, so a plan and a task may carry the same number; the prefix tells them apart (see Plan and task files below).
+Plans and tasks count in separate number sequences, so a plan and a task may carry the same number; the prefix tells them apart (see [Plan and task files](arc-files.md#plan-and-task-files)).
 
 ### `radian arc add plan --slug <SLUG> --title <TITLE>`
 
@@ -126,7 +126,7 @@ Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `atte
 
 Prints one plan or task: every field, whether it changed outside arc, then its body.
 
-The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see Plan and task files below).
+The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see [Plan and task files](arc-files.md#plan-and-task-files)).
 `list --plan <id>` always reads the plan.
 
 | Argument | Value | What it does |
@@ -155,7 +155,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 |---|---|---|
 | `<ID>` | a plan or task id | Required. The item whose current file becomes arc's own. |
 
-It refuses with exit `3` when the id names both a plan and a task (see Plan and task files below), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
+It refuses with exit `3` when the id names both a plan and a task (see [Plan and task files](arc-files.md#plan-and-task-files)), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
 - a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `auto_rework`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
 - a plan: `status`, `auto`.
@@ -166,14 +166,14 @@ Without a recorded version to compare against, `adopt` refuses: it cannot tell w
 ## `radian arc confirm <PLAN>`
 
 `confirm` moves a plan from `draft` to `confirmed`.
-A confirmed plan gets no new tasks, and its request text can only gain change records (below).
+A confirmed plan gets no new tasks, and its request text can only gain change records (see [Plan and task files](arc-files.md#plan-and-task-files)).
 A plan's `auto` level may only be other than `off` once it is confirmed.
 
 | Argument | Value | What it does |
 |---|---|---|
 | `<PLAN>` | `ID` | The plan id. Required. |
 
-It refuses with exit `3` when the plan has no tasks, when it is already confirmed, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and `worker.exec_args`).
+It refuses with exit `3` when the plan has no tasks, when it is already confirmed, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and [`worker.exec_args`](arc-files.md#configtoml)).
 A refusal writes nothing.
 
 ## `radian arc auto <PLAN> <LEVEL>`
@@ -235,10 +235,10 @@ radian arc start <TASK>
 |---|---|---|
 | `<TASK>` | `ID` | The task id. Required. |
 
-Before it reconciles, claims or verifies anything, `start` parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args` (see the `worker.exec_args` row of `config.toml` below).
+Before it reconciles, claims or verifies anything, `start` parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args` (see the `worker.exec_args` row of [`config.toml`](arc-files.md#configtoml)).
 A line `radian exec` would reject, or one that repeats an argument the wrapper sets, refuses the command with exit `3` and the parser's own message, names `worker.exec_args`, claims nothing, and changes no file.
 
-Before it claims anything it reconciles every task in `doing` (see below) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
+Before it claims anything it reconciles every task in `doing` (see [Reconcile](arc-gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 
 A claim is refused with exit `3` and changes nothing when:
 
@@ -250,8 +250,8 @@ A claim is refused with exit `3` and changes nothing when:
 The claim is one transaction: the task's `attempt` goes up by one, `attempt_id` becomes `<task>-<attempt>`, a random `token` is written, and the task moves to `doing.starting`.
 arc then runs the hidden `radian arc work` wrapper as a child, with the brief on its stdin; the wrapper moves the task to `doing.running`.
 
-Before the worker starts, the wrapper runs the profile's `before_attempt` steps in the worktree (see the `before_attempt` row below); a first attempt's steps do nothing.
-`merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; a conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see A conflict with main).
+Before the worker starts, the wrapper runs the profile's `before_attempt` steps in the worktree (see the [`before_attempt` row](arc-files.md#configtoml)); a first attempt's steps do nothing.
+`merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; a conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see [A conflict with main](arc-gate.md#a-conflict-with-main)).
 A failed fetch or merge ends the attempt with git's message.
 
 The wrapper enforces the attempt's limits itself, so they hold even after the process that started the wrapper is gone:
@@ -264,7 +264,7 @@ A limit of `0` means no limit for that timer.
 The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json` (`stall` or `wall_time`), forwards SIGTERM, waits for the worker, and still writes its `AttemptFinished` record.
 `start` waits for the wrapper and applies the result; `radian arc run` does not wait (see `run`).
 
-When the attempt ends, arc applies the result in one transaction (the table below) and prints one line:
+When the attempt ends, arc applies the result in one transaction (the [result table](arc-gate.md#failures-retries-and-the-budget)) and prints one line:
 
 ```text
 <attempt id> <outcome> -> <state>.<phase>
@@ -315,7 +315,7 @@ It exits `0` when it stopped the task or left it `doing.reconciling`, `3` for a 
 ## `radian arc reset-budget <ID>`
 
 `reset-budget` returns budget-paused tasks to `todo.ready` and resets the counted cost to zero from now on.
-The id names one plan or task; an id that names both is refused with exit `3` (see Plan and task files below).
+The id names one plan or task; an id that names both is refused with exit `3` (see [Plan and task files](arc-files.md#plan-and-task-files)).
 
 | Argument | Value | What it does |
 |---|---|---|
@@ -448,7 +448,7 @@ A pass only schedules: it starts a worker or a gate, collects what one left, and
 Waiting for you, a `retry_at` in the future, a running worker, or a running gate does not keep it running.
 A task of a plan at `auto` `off` is never started or merged by `run`; its verification still advances.
 
-Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see `worker.exec_args` below).
+Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](arc-files.md#configtoml)).
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|
@@ -457,7 +457,7 @@ Before its first pass, and before each pass claims a task, it checks the worker'
 
 One pass repeats until a pass changes nothing, in this order:
 
-1. reconcile every task in `doing` (see Reconcile): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one;
+1. reconcile every task in `doing` (see [Reconcile](arc-gate.md#reconcile)): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one;
 2. move every `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`;
 3. for every task in `review.verifying` (every plan, including a task that a moved branch or a changed digest sent back): apply the verdicts a background gate left, or start its gate in the background;
 4. for each confirmed plan at `auto` `run` or `merge`, claim every `todo.ready` task whose `after` tasks are merged, up to `[limits] concurrency` attempts in flight, and start each wrapper without waiting for it;
@@ -582,7 +582,7 @@ A tool that cannot do its work answers with `isError: true` and one text line: t
 That line is the same text the CLI prints for the same refusal, so a plan or task that changed outside arc says `changed outside arc` and names `radian arc adopt`.
 An argument of the wrong type, a missing required argument, and an argument the tool does not take are errors that name the argument.
 The arc exit codes below belong to the CLI; a tool error carries no code.
-An id that names both a plan and a task is a tool error that names both files (see Plan and task files below); the CLI exits `3` for it.
+An id that names both a plan and a task is a tool error that names both files (see [Plan and task files](arc-files.md#plan-and-task-files)); the CLI exits `3` for it.
 
 ## Exit codes
 
