@@ -34,6 +34,35 @@ pub const ATTEMPT_RESULT_FILE: &str = "attempt_result.json";
 pub const REVERIFY_CLASS: &str = "reverify";
 /// The record that the plan paused because this task used its automatic reworks.
 pub const PAUSED_FILE: &str = "paused.json";
+/// The wrapper's heartbeat, in the host-local attempt directory (ADR 0048 decision 7.9).
+pub const HEARTBEAT_FILE: &str = "heartbeat.json";
+
+/// How often the wrapper writes its heartbeat, in seconds: about 15, and at least three beats
+/// inside a stall window so a live wrapper never looks dead.
+pub fn heartbeat_interval_secs(stall_secs: u64) -> u64 {
+    if stall_secs == 0 {
+        15
+    } else {
+        (stall_secs / 3).clamp(1, 15)
+    }
+}
+
+/// How old a last heartbeat may be before a pass calls the attempt dead: the attempt's stall
+/// window, or three beats when the attempt has no stall limit (ADR 0048 decision 9).
+pub fn liveness_window_secs(stall_secs: u64) -> u64 {
+    if stall_secs == 0 {
+        heartbeat_interval_secs(0) * 3
+    } else {
+        stall_secs
+    }
+}
+
+/// How many seconds ago `text` (an RFC 3339 UTC time) was. `None` when it cannot be read.
+pub fn utc_age_secs(text: &str) -> Option<u64> {
+    let at = chrono::DateTime::parse_from_rfc3339(text).ok()?;
+    let age = chrono::Utc::now().signed_duration_since(at.with_timezone(&chrono::Utc));
+    u64::try_from(age.num_seconds()).ok()
+}
 
 /// The failure classes of decision 9, as one closed list the manual's drift test reads.
 /// `stall` and `wall_time` are written by arc when it signalled the wrapper; the other four
@@ -252,6 +281,27 @@ pub fn read_signal(store: &Store, task: &str, attempt: u32) -> Option<Class> {
         .get("reason")
         .and_then(Value::as_str)
         .and_then(Class::parse)
+}
+
+/// The wrapper's last heartbeat time for one attempt, as it wrote it.
+pub fn read_heartbeat(store: &Store, task: &str, attempt: u32) -> Option<String> {
+    let text = fs::read_to_string(attempt_dir(store, task, attempt).join(HEARTBEAT_FILE)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("last_beat")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// The time the claim that created the attempt recorded, for a wrapper that has not beaten
+/// yet. `start.json` is written in the same transaction as the task's move to `doing`.
+pub fn read_start_time(store: &Store, task: &str, attempt: u32) -> Option<String> {
+    let text = fs::read_to_string(attempt_dir(store, task, attempt).join(START_FILE)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("started_at")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// Records why arc signalled the wrapper. The first reason wins: a stall followed by a wall

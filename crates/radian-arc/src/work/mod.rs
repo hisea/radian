@@ -17,11 +17,17 @@
 //!    --yes --output jsonl` (with `--resume <task>` when the task's session already
 //!    exists, and the caller's extra arguments), the brief on its stdin, stdout into
 //!    `runs/…/result.jsonl`;
-//! 4. after the child exits, read the `Result` line and the exit code, read `head_sha`,
+//! 4. while the child runs, enforce the attempt's limits here: a stall, the wall time, or a
+//!    `cancel` records `signal.json`, sends SIGTERM to the child's process group and then
+//!    SIGKILL after the grace period. These limits belong to this process, so they hold after
+//!    the `run` process that started it exits or is killed (decision 7.8).
+//!    A heartbeat thread writes `attempts/<task>/<attempt>/heartbeat.json` for a later pass
+//!    to judge liveness (decision 7.9);
+//! 5. after the child exits, read the `Result` line and the exit code, read `head_sha`,
 //!    list uncommitted and untracked files, and run the delivery checks;
-//! 5. push `work/<task>` only when the outcome is `completed` and every check passed, then
+//! 6. push `work/<task>` only when the outcome is `completed` and every check passed, then
 //!    verify the remote ref with `ls-remote`;
-//! 6. print one `AttemptFinished` JSON line as its last stdout line and exit with the
+//! 7. print one `AttemptFinished` JSON line as its last stdout line and exit with the
 //!    child's exit code (or 1 when a check failed after a `completed` child).
 //!
 //! Every git command this module runs goes through the crate's one git helper
@@ -34,13 +40,19 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use serde_json::{Value, json};
 
 use crate::git::GitOutput;
 use crate::process;
+use crate::store::attempt_ops::{HEARTBEAT_FILE, SIGNAL_FILE, heartbeat_interval_secs};
+
+/// How often the wrapper looks at the worker, its jsonl stream and a cancel signal.
+const POLL: Duration = Duration::from_millis(100);
 
 /// The `radian arc work` flags. `radian-tui`'s `arc work` subcommand fills this.
 pub struct Options {
@@ -67,6 +79,15 @@ pub struct Options {
     /// Extra `radian exec` arguments after `--` (the model route in tests: `--model`,
     /// `--base-url`).
     pub extra_args: Vec<String>,
+    /// Internal: the attempt's stall limit in seconds; `0` means no limit. arc passes the
+    /// task's `stall_timeout_secs`, else `[limits] stall_timeout_secs`. The wrapper enforces
+    /// it, so the limit survives the `run` process that started it (ADR 0048 decision 7.8).
+    pub stall_timeout_secs: u64,
+    /// Internal: the attempt's absolute wall-time limit in seconds; `0` means no limit.
+    pub max_wall_time_secs: u64,
+    /// Internal: how long a signalled worker gets before SIGKILL (`[limits]
+    /// cancel_grace_secs`).
+    pub cancel_grace_secs: u64,
     /// Test-only: run this shell command as the worker instead of `radian exec`. It exists so
     /// the forwarding tests can start a plain process that spawns a child of its own, which
     /// a real `radian exec` does not (its tools run in their own sessions). Never set by
@@ -209,6 +230,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     }
     let processor_started_at = process_start(pid).unwrap_or_else(|| started_at.clone());
     let wrapper_pid = std::process::id();
+    let wrapper_started_at = process::start_time(wrapper_pid);
     write_json(
         &attempt_dir.join("identity.json"),
         &json!({
@@ -219,16 +241,36 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
             // The scheduling side signals the wrapper, not the worker, so the attempt
             // record carries the wrapper's own identity too (decision 9).
             "wrapper_pid": wrapper_pid,
-            "wrapper_process_started_at": process::start_time(wrapper_pid),
+            "wrapper_process_started_at": wrapper_started_at,
             "session_id": o.task,
             "worktree": worktree.display().to_string(),
             "branch": branch,
             "started_at": started_at,
         }),
     )?;
-    let status = child
-        .wait()
-        .map_err(|error| Failure::error(format!("cannot wait for the worker: {error}")))?;
+    // The heartbeat is how a later pass decides whether this attempt is alive; it beats from
+    // a thread of its own, so it keeps beating while the wrapper waits on git or the model
+    // (ADR 0048 decisions 7.9 and 9).
+    let mut heartbeat = Heartbeat::start(
+        &attempt_dir,
+        Beat {
+            attempt_id: format!("{}-{}", o.task, o.attempt),
+            pid,
+            process_started_at: processor_started_at.clone(),
+            wrapper_pid,
+            wrapper_started_at: wrapper_started_at.clone(),
+        },
+        o.stall_timeout_secs,
+    )?;
+    // The limits belong to this process, not to the scheduling loop that started it: a
+    // one-shot `run`, or a killed one, leaves the worker bounded (decision 7.8).
+    let status = monitor_child(
+        &mut child,
+        &result_path,
+        &runs.join(SIGNAL_FILE),
+        &Limits::of(o),
+    )?;
+    heartbeat.stop();
     CHILD_PID.store(0, Ordering::SeqCst);
     let ended_at = now();
     let exit_code = exit_code_of(&status);
@@ -341,6 +383,175 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     } else {
         exit_code
     })
+}
+
+/// What the heartbeat thread writes: the attempt's identity and the file to refresh.
+#[derive(Clone)]
+struct Beat {
+    attempt_id: String,
+    pid: u32,
+    process_started_at: String,
+    wrapper_pid: u32,
+    wrapper_started_at: Option<String>,
+}
+
+/// The wrapper's heartbeat writer (ADR 0048 decision 7.9). One beat is written at once; the
+/// thread then refreshes `last_beat` every interval until [`Heartbeat::stop`]. A rename over
+/// the old file means a reader never sees half a record.
+struct Heartbeat {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Heartbeat {
+    fn start(dir: &Path, beat: Beat, stall_secs: u64) -> Result<Self, Failure> {
+        let path = dir.join(HEARTBEAT_FILE);
+        write_beat(&path, &beat)?;
+        let interval = Duration::from_secs(heartbeat_interval_secs(stall_secs));
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            loop {
+                let deadline = Instant::now() + interval;
+                while Instant::now() < deadline {
+                    if flag.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(POLL);
+                }
+                if flag.load(Ordering::SeqCst) {
+                    return;
+                }
+                // A heartbeat that cannot be written is not the attempt's failure: the
+                // next pass then judges the attempt by the age of the last beat it has.
+                let _ = write_beat(&path, &beat);
+            }
+        });
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn write_beat(path: &Path, beat: &Beat) -> Result<(), Failure> {
+    let record = json!({
+        "attempt_id": beat.attempt_id,
+        "pid": beat.pid,
+        "process_started_at": beat.process_started_at,
+        "wrapper_pid": beat.wrapper_pid,
+        "wrapper_process_started_at": beat.wrapper_started_at,
+        "last_beat": now(),
+    });
+    let text = serde_json::to_string_pretty(&record)
+        .map_err(|error| Failure::error(format!("cannot encode the heartbeat: {error}")))?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, format!("{text}\n")).map_err(|error| {
+        Failure::error(format!("cannot write {}: {error}", temporary.display()))
+    })?;
+    fs::rename(&temporary, path)
+        .map_err(|error| Failure::error(format!("cannot write {}: {error}", path.display())))
+}
+
+/// One attempt's limits, as the wrapper enforces them (ADR 0048 decisions 7.8 and 9).
+struct Limits {
+    stall: Duration,
+    wall: Duration,
+    grace: Duration,
+}
+
+impl Limits {
+    fn of(o: &Options) -> Self {
+        Self {
+            stall: Duration::from_secs(o.stall_timeout_secs),
+            wall: Duration::from_secs(o.max_wall_time_secs),
+            grace: Duration::from_secs(o.cancel_grace_secs),
+        }
+    }
+}
+
+/// Waits for the worker and stops it with SIGTERM (then SIGKILL after the grace period) when
+/// it stalls, runs past its wall time, or a `cancel` recorded a signal. The scheduling loop
+/// does not watch the attempt any more: this process owns the limits.
+fn monitor_child(
+    child: &mut Child,
+    result_path: &Path,
+    signal_path: &Path,
+    limits: &Limits,
+) -> Result<ExitStatus, Failure> {
+    let started_at = Instant::now();
+    let mut last_len = file_len(result_path);
+    let mut last_growth = started_at;
+    let mut signalled = false;
+    let mut kill_at: Option<Instant> = None;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| Failure::error(format!("cannot wait for the worker: {error}")))?
+        {
+            return Ok(status);
+        }
+        let now = Instant::now();
+        let len = file_len(result_path);
+        if len != last_len {
+            last_len = len;
+            last_growth = now;
+        }
+        if !signalled {
+            // The order of the old monitor: a cancel from another process first, then the
+            // wall clock, then the stall timer.
+            let reason = if signal_path.is_file() {
+                // `radian arc cancel` wrote its own reason; this process adds none.
+                Some("cancel")
+            } else if !limits.wall.is_zero() && now.duration_since(started_at) >= limits.wall {
+                Some("wall_time")
+            } else if !limits.stall.is_zero() && now.duration_since(last_growth) >= limits.stall {
+                Some("stall")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                write_signal(signal_path, reason)?;
+                process::signal_group(child.id(), process::SIGTERM);
+                signalled = true;
+                kill_at = Some(now + limits.grace);
+            }
+        }
+        if let Some(at) = kill_at
+            && now >= at
+        {
+            process::signal_group(child.id(), process::SIGKILL);
+            kill_at = None;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+fn file_len(path: &Path) -> u64 {
+    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+/// Records why the wrapper was signalled. The first reason wins, exactly as the store's
+/// `write_signal` does: a stall followed by a cancel records the stall.
+fn write_signal(path: &Path, reason: &str) -> Result<(), Failure> {
+    if path.is_file() {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|error| Failure::error(format!("cannot create {}: {error}", dir.display())))?;
+    }
+    let text = serde_json::to_string_pretty(&json!({ "reason": reason }))
+        .map_err(|error| Failure::error(format!("cannot encode the signal: {error}")))?;
+    fs::write(path, format!("{text}\n"))
+        .map_err(|error| Failure::error(format!("cannot write {}: {error}", path.display())))
 }
 
 /// The task id is a file name and a branch suffix: keep it to characters that are safe in

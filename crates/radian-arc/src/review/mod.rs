@@ -3,9 +3,11 @@
 //!
 //! - [`verify`] runs the gate's built stages against the verification candidate for the
 //!   task's pushed `head_sha` and moves the task to `review.awaiting_human` or
-//!   `review.rework_pending`. The candidate is `head_sha` when the remote main is its
-//!   ancestor, else a merge of `head_sha` onto the remote main (ADR 0048 decision 10);
-//!   `verified_sha` stays the task's own commit.
+//!   `review.rework_pending`. It is split into [`plan_verification`], [`run_stages`] (which
+//!   writes verdicts only) and [`finish_verification`] (which moves the state), so a
+//!   background gate can run the stages and a later pass can apply them. The candidate is
+//!   `head_sha` when the remote main is its ancestor, else a merge of `head_sha` onto the
+//!   remote main (ADR 0048 decision 10); `verified_sha` stays the task's own commit.
 //! - [`merge`] takes the owner's approval for `verified_sha`, builds the integration
 //!   candidate, pushes it to the remote main without force, and moves the task to
 //!   `done.merged`. A main that moved makes it integrate again.
@@ -238,6 +240,10 @@ pub fn verify(store: &Store, task_id: &str) -> Result<Verified, Error> {
 
 /// [`verify`] with an optional review program (test-only; see [`ReviewRun::program`]).
 ///
+/// This is the synchronous path (`radian arc start`, `radian arc reverify`): it runs the
+/// stages and applies the verdicts in one call. A scheduling pass starts the same stages in
+/// a background gate and applies them in a later pass.
+///
 /// # Errors
 ///
 /// As [`verify`].
@@ -246,6 +252,46 @@ pub fn verify_with(
     task_id: &str,
     review_program: Option<&Path>,
 ) -> Result<Verified, Error> {
+    // One gate per task: a background gate may hold this lock. Waiting here means two
+    // verifications never run the same stages at once; when the gate that held it is done,
+    // its verdicts are reused below.
+    let _gate = crate::gate::background::lock_task(store, task_id)?;
+    let plan = plan_verification(store, task_id)?;
+    let reused = run_stages(store, &plan, review_program)?;
+    let mut verified = finish_verification(store, &plan)?;
+    verified.reused = reused;
+    Ok(verified)
+}
+
+/// Everything one verification needs, read and checked once (ADR 0048 decision 10).
+pub struct Verification {
+    /// The task as it was read: its id, brief, shas and limits.
+    pub task: model::TaskFile,
+    /// The attempt id that names the verdict directory.
+    pub label: String,
+    /// The task's `head_sha`: the commit the gate verifies.
+    pub head: String,
+    /// The remote name.
+    pub remote: String,
+    /// `refs/remotes/<remote>/<main>`.
+    pub main_ref: String,
+    /// The effective profile.
+    pub profile: crate::gate::Profile,
+    /// The effective stages, in order (the profile's plus the task's extra stages).
+    pub stages: Vec<StageSpec>,
+    /// `config.toml`, for the stage timeouts and the review route.
+    pub config: crate::store::config::Config,
+}
+
+/// Reads and checks one `review.verifying` task's verification: its state, attempt, shas,
+/// profile and stages, and the remote `work/<task>`. A refusal records its reason in the
+/// attempt's `review.json` and leaves the task in `review.verifying`.
+///
+/// # Errors
+///
+/// The task is not `review.verifying`, it has no `head_sha`, the remote moved, a listed
+/// stage is not built in this build, or `config.toml` could not be read.
+pub fn plan_verification(store: &Store, task_id: &str) -> Result<Verification, Error> {
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
@@ -303,41 +349,69 @@ pub fn verify_with(
         reason.record(store, task_id, &label);
         return Err(Error::Refused(reason.text()));
     }
+    Ok(Verification {
+        task,
+        label,
+        head,
+        remote,
+        main_ref,
+        profile,
+        stages,
+        config,
+    })
+}
 
+/// Runs the stages the plan lists that have no verdict yet, in order, and stops at the first
+/// failure. A verdict already written for this attempt and stage is reused, so a gate that
+/// died between stages resumes instead of rerunning (ADR 0048 decision 10). This writes
+/// verdicts only: it never moves the task's state. It returns the stages whose verdict was
+/// reused.
+///
+/// # Errors
+///
+/// A verdict exists for another sha, a stage this build does not run was reached, or the gate
+/// could not run (a git or file error, a failing checkout).
+pub fn run_stages(
+    store: &Store,
+    plan: &Verification,
+    review_program: Option<&Path>,
+) -> Result<Vec<Stage>, Error> {
+    let task = &plan.task;
     let mut reused = Vec::new();
-    for spec in &stages {
+    for spec in &plan.stages {
         if spec.stage == Stage::Human {
             continue;
         }
-        let path = verdict_path(store.repo(), task_id, &label, spec.stage).map_err(gate_error)?;
+        let path =
+            verdict_path(store.repo(), &task.id, &plan.label, spec.stage).map_err(gate_error)?;
         if path.is_file() {
             let verdict = Verdict::read(&path).map_err(gate_error)?;
-            if verdict.sha != head {
+            if verdict.sha != plan.head {
                 let reason = Reason::with_verdict(
                     "verify",
                     spec.stage,
-                    format!("the verdict is for {}, not {head}", verdict.sha),
+                    format!("the verdict is for {}, not {}", verdict.sha, plan.head),
                     path,
                 );
-                reason.record(store, task_id, &label);
+                reason.record(store, &task.id, &plan.label);
                 return Err(Error::Refused(reason.text()));
             }
             reused.push(spec.stage);
             if !verdict.is_pass() {
-                return failed_stage(store, &task, &label, &head, &verdict, path);
+                return Ok(reused);
             }
             continue;
         }
         let verdict = match spec.stage {
             Stage::Commands => CommandRun {
                 repository: store.repo(),
-                remote: &remote,
-                task: task_id,
-                attempt: &label,
-                sha: &head,
-                main_ref: &main_ref,
-                commands: &profile.commands,
-                timeout: config.gate.command_timeout(),
+                remote: &plan.remote,
+                task: &task.id,
+                attempt: &plan.label,
+                sha: &plan.head,
+                main_ref: &plan.main_ref,
+                commands: &plan.profile.commands,
+                timeout: plan.config.gate.command_timeout(),
             }
             .run()
             .map_err(gate_error)?,
@@ -348,11 +422,13 @@ pub fn verify_with(
                     .base_sha
                     .clone()
                     .filter(|sha| !sha.is_empty())
-                    .ok_or_else(|| Error::Refused(format!("task `{task_id}` has no `base_sha`")))?;
-                let review = &config.gate.review;
+                    .ok_or_else(|| {
+                        Error::Refused(format!("task `{}` has no `base_sha`", task.id))
+                    })?;
+                let review = &plan.config.gate.review;
                 let (exec_args, key) = match &review.exec_args {
                     Some(args) => (args.as_slice(), "gate.review.exec_args"),
-                    None => (config.worker.exec_args.as_slice(), "worker.exec_args"),
+                    None => (plan.config.worker.exec_args.as_slice(), "worker.exec_args"),
                 };
                 // The stage owns the read-only mount and the session flags: an argument that
                 // repeated one would overrule them (ADR 0048 decision 10).
@@ -371,13 +447,13 @@ pub fn verify_with(
                     .map(|file| store.repo().join(file));
                 ReviewRun {
                     repository: store.repo(),
-                    remote: &remote,
-                    task: task_id,
-                    attempt: &label,
-                    sha: &head,
+                    remote: &plan.remote,
+                    task: &task.id,
+                    attempt: &plan.label,
+                    sha: &plan.head,
                     base_sha: &base,
                     brief: &task.body,
-                    main_ref: &main_ref,
+                    main_ref: &plan.main_ref,
                     exec_args,
                     prompt_file: prompt_file.as_deref(),
                     timeout: review.timeout(),
@@ -387,49 +463,115 @@ pub fn verify_with(
                 .map_err(gate_error)?
             }
             other => {
-                // `effective_stages` cannot produce an unbuilt stage here: it was refused
-                // above.
+                // `plan_verification` refused an unbuilt stage before this point.
                 return Err(Error::Failed(format!("stage {other} is not built yet")));
             }
         };
         if !verdict.is_pass() {
-            return failed_stage(store, &task, &label, &head, &verdict, path);
+            return Ok(reused);
+        }
+    }
+    Ok(reused)
+}
+
+/// Applies the verdicts a gate left for `plan` (ADR 0048 decisions 6 and 10): a failed stage
+/// moves the task to `review.rework_pending`; every required stage passing moves it to
+/// `review.awaiting_human` with `verified_sha` and the verdict set digest. Only a pass that
+/// holds `runner.lock` calls this; a background gate never moves the state itself.
+///
+/// # Errors
+///
+/// A stage left no verdict, a verdict is for another sha, or the task file changed outside
+/// arc.
+pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verified, Error> {
+    let task = &plan.task;
+    for spec in &plan.stages {
+        if spec.stage == Stage::Human {
+            continue;
+        }
+        let path =
+            verdict_path(store.repo(), &task.id, &plan.label, spec.stage).map_err(gate_error)?;
+        if !path.is_file() {
+            return Err(Error::Failed(format!(
+                "the gate of {} left no {} verdict",
+                plan.label, spec.stage
+            )));
+        }
+        let verdict = Verdict::read(&path).map_err(gate_error)?;
+        if verdict.sha != plan.head {
+            let reason = Reason::with_verdict(
+                "verify",
+                spec.stage,
+                format!("the verdict is for {}, not {}", verdict.sha, plan.head),
+                path,
+            );
+            reason.record(store, &task.id, &plan.label);
+            return Err(Error::Refused(reason.text()));
+        }
+        if !verdict.is_pass() {
+            return failed_stage(store, task, &plan.label, &plan.head, &verdict, path);
         }
     }
 
-    let verdicts = task_verdicts(store, task_id)?;
-    let mut check_profile = profile;
+    let verdicts = task_verdicts(store, &task.id)?;
+    let mut check_profile = plan.profile.clone();
     check_profile
         .stages
         .retain(|spec| spec.stage != Stage::Human);
-    let check_extra: Vec<StageSpec> = extra
+    let check_extra: Vec<StageSpec> = extra_stages(task)
         .into_iter()
         .filter(|spec| spec.stage != Stage::Human)
         .collect();
-    if !required_passed(&check_profile, &check_extra, &verdicts, &head) {
+    if !required_passed(&check_profile, &check_extra, &verdicts, &plan.head) {
         return Err(Error::Failed(format!(
-            "the gate recorded no verdict for every required stage of {head}"
+            "the gate recorded no verdict for every required stage of {}",
+            plan.head
         )));
     }
-    let digest = verification_digest(&verdicts, &head);
-    store.change_task(task_id, |task| {
+    let digest = verification_digest(&verdicts, &plan.head);
+    store.change_task(&task.id, |task| {
         task.state = model::TaskState::Review;
         task.phase = "awaiting_human".to_owned();
-        task.verified_sha = Some(head.clone());
+        task.verified_sha = Some(plan.head.clone());
         task.verdict_set_digest = Some(digest.clone());
         task.retry_at = None;
         Ok(())
     })?;
     // A pass leaves no rework reason behind for `show` to print.
-    clear_reason(store, task_id, &label);
+    clear_reason(store, &task.id, &plan.label);
     Ok(Verified {
-        attempt_id: label,
+        attempt_id: plan.label.clone(),
         state: "review",
         phase: "awaiting_human".to_owned(),
         reason: None,
         digest: Some(digest),
-        reused,
+        reused: Vec::new(),
     })
+}
+
+/// One verification for a background gate: plan it and run its stages. Returns the attempt
+/// label the verdicts belong to. A refusal records its reason, as the synchronous path does.
+///
+/// # Errors
+///
+/// As [`plan_verification`] and [`run_stages`].
+pub fn gate_verification(store: &Store, task_id: &str) -> Result<String, Error> {
+    let plan = plan_verification(store, task_id)?;
+    run_stages(store, &plan, None)?;
+    Ok(plan.label)
+}
+
+/// Applies the verdicts a background gate left for a `review.verifying` task: re-reads the
+/// plan, then moves the task as [`finish_verification`] does. The state moves here, in a pass
+/// that holds `runner.lock`, never in the gate process.
+///
+/// # Errors
+///
+/// A refusal (a moved branch, an unbuilt stage) leaves the task in `review.verifying`; a
+/// missing verdict or a task file that changed outside arc is an error.
+pub fn apply_verification(store: &Store, task_id: &str) -> Result<Verified, Error> {
+    let plan = plan_verification(store, task_id)?;
+    finish_verification(store, &plan)
 }
 
 /// `radian arc reverify <task>`: claim a new attempt without a worker and verify it at once
@@ -540,7 +682,57 @@ pub fn merge(store: &Store, task_id: &str) -> Result<Merged, Error> {
 /// [`merge`] with the approver to record in the `human` verdict: `None` is the owner's own
 /// `radian arc merge`, `Some("auto")` is the scheduling loop at auto level `merge` (ADR 0048
 /// decision 12).
+///
+/// This is the synchronous at once: approval, integration and push in one call.
 pub fn merge_as(store: &Store, task_id: &str, approver: Option<&str>) -> Result<Merged, Error> {
+    let context = prepare_merge(store, task_id, approver)?;
+    let mut last = String::new();
+    for round in 1..=MAX_INTEGRATION_ROUNDS {
+        let integration_label = next_integration_label(store, task_id, &context.label)?;
+        let verdict = run_integration(store, &context, &integration_label)?;
+        if !verdict.is_pass() {
+            return integration_failed(store, &context, &integration_label, &verdict, round);
+        }
+        match finish_integration(store, &context, &verdict, round)? {
+            Integration::Merged(merged) => return Ok(merged),
+            Integration::Again(reason) => last = reason,
+        }
+    }
+
+    back_to_integrating(store, task_id)?;
+    Err(Error::Refused(format!(
+        "{last}; {MAX_INTEGRATION_ROUNDS} integration runs did not settle, so the task stays \
+         in `review.integrating`"
+    )))
+}
+
+/// What one merge's preconditions and approval need (ADR 0048 decisions 6 and 11).
+pub struct MergeContext {
+    pub task_id: String,
+    /// The attempt id that names the task's verdict directory.
+    pub label: String,
+    pub head: String,
+    pub base: String,
+    pub remote: String,
+    pub main_branch: String,
+    pub main_ref: String,
+    pub profile: crate::gate::Profile,
+    /// The phase after this call: `integrating`, or `ready_to_merge` on a resume.
+    pub phase: String,
+}
+
+/// Checks the approval's preconditions, writes the approval when the task is
+/// `review.awaiting_human`, and moves it to `review.integrating`. It starts nothing.
+///
+/// # Errors
+///
+/// The state does not allow the merge, the branch moved, the digest changed, or every
+/// required stage did not pass.
+fn prepare_merge(
+    store: &Store,
+    task_id: &str,
+    approver: Option<&str>,
+) -> Result<MergeContext, Error> {
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
@@ -650,106 +842,342 @@ pub fn merge_as(store: &Store, task_id: &str, approver: Option<&str>) -> Result<
             config.gate.profile
         ))
     })?;
-    let timeout = config.gate.command_timeout();
-    let mut last = String::new();
-    for round in 1..=MAX_INTEGRATION_ROUNDS {
-        let integration_label = next_integration_label(store, task_id, &label)?;
-        let verdict = IntegrationRun {
-            repository: store.repo(),
-            remote: &remote,
-            task: task_id,
-            attempt: &integration_label,
-            head_sha: &head,
-            base_sha: &base,
-            main_ref: &main_ref,
-            key_commands: &profile.key_commands,
-            timeout,
-        }
-        .run()
-        .map_err(gate_error)?;
-        if !verdict.is_pass() {
-            let reason = Reason::with_verdict(
-                "merge",
-                verdict.stage,
-                failure_text(&verdict),
-                integration_verdict(store, task_id, &integration_label)?,
-            );
-            reason.record(store, task_id, &label);
-            to_rework(store, task_id)?;
-            return Ok(Merged {
-                task: task_id.to_owned(),
-                state: "review",
-                phase: "rework_pending".to_owned(),
-                reason: Some(reason.text()),
-                candidate_sha: None,
-                rounds: round,
-                warning: None,
-            });
-        }
-        let candidate = match verdict.candidate_sha.clone() {
-            Some(sha) if !sha.is_empty() => sha,
-            _ => {
-                return Err(Error::Failed(format!(
-                    "the integration verdict of `{task_id}` passed without a candidate"
-                )));
-            }
-        };
-        store.change_task(task_id, |task| {
-            if task.state == model::TaskState::Review {
-                task.phase = "ready_to_merge".to_owned();
-            }
-            Ok(())
-        })?;
-        if !merge_ready(store.repo(), &remote, &main_ref, &verdict).map_err(gate_error)? {
-            last = "main moved after integration".to_owned();
-            back_to_integrating(store, task_id)?;
-            continue;
-        }
-        match push_candidate(store.repo(), &remote, &candidate, &main_branch)? {
-            Push::Pushed => {}
-            Push::Rejected(stderr) => {
-                last = format!("the push to `{remote}` `{main_branch}` was rejected: {stderr}");
-                back_to_integrating(store, task_id)?;
-                continue;
-            }
-        }
-        let remote_main = ls_remote_branch(store.repo(), &remote, &main_branch)?;
-        if remote_main.as_deref() != Some(candidate.as_str()) {
-            last = format!(
-                "`{remote}` `{main_branch}` is {}, not {candidate}",
-                remote_main.as_deref().unwrap_or("missing")
-            );
-            back_to_integrating(store, task_id)?;
-            continue;
-        }
-        if !is_ancestor(store.repo(), &head, &candidate)? {
+    Ok(MergeContext {
+        task_id: task_id.to_owned(),
+        label,
+        head,
+        base,
+        remote,
+        main_branch,
+        main_ref,
+        profile,
+        phase: if task.phase == "awaiting_human" {
+            "integrating".to_owned()
+        } else {
+            task.phase
+        },
+    })
+}
+
+/// The integration stage for one context and label.
+fn run_integration(store: &Store, context: &MergeContext, label: &str) -> Result<Verdict, Error> {
+    let config = store.config()?;
+    IntegrationRun {
+        repository: store.repo(),
+        remote: &context.remote,
+        task: &context.task_id,
+        attempt: label,
+        head_sha: &context.head,
+        base_sha: &context.base,
+        main_ref: &context.main_ref,
+        key_commands: &context.profile.key_commands,
+        timeout: config.gate.command_timeout(),
+    }
+    .run()
+    .map_err(gate_error)
+}
+
+/// One integration for a background gate: check that the task is `review.integrating`, run the
+/// stage for the next free integration label, and return that label. The state is the pass's
+/// to move.
+///
+/// # Errors
+///
+/// The task is not `review.integrating`, has no shas, or the stage could not run.
+pub fn gate_integration(store: &Store, task_id: &str) -> Result<String, Error> {
+    let loaded = store.load_task(task_id)?;
+    if loaded.changed_outside_arc {
+        return Err(Error::ChangedOutsideArc(task_id.to_owned()));
+    }
+    let task = loaded.item;
+    if task.state != model::TaskState::Review || task.phase != "integrating" {
+        return Err(Error::Refused(format!(
+            "task `{task_id}` is `{}.{}`; only a `review.integrating` task integrates",
+            task.state.as_str(),
+            task.phase
+        )));
+    }
+    let label = attempt_label(&task)?;
+    let head = task
+        .head_sha
+        .clone()
+        .filter(|sha| !sha.is_empty())
+        .ok_or_else(|| Error::Refused(format!("task `{task_id}` has no `head_sha`")))?;
+    let base = task
+        .base_sha
+        .clone()
+        .filter(|sha| !sha.is_empty())
+        .ok_or_else(|| Error::Refused(format!("task `{task_id}` has no `base_sha`")))?;
+    let config = store.config()?;
+    let (remote, main_branch) = store.repository_names()?;
+    let main_ref = format!("refs/remotes/{remote}/{main_branch}");
+    let profile = config.gate.selected_profile().cloned().ok_or_else(|| {
+        Error::Failed(format!(
+            "gate.profile is `{}` but no such profile exists",
+            config.gate.profile
+        ))
+    })?;
+    let integration_label = next_integration_label(store, task_id, &label)?;
+    IntegrationRun {
+        repository: store.repo(),
+        remote: &remote,
+        task: task_id,
+        attempt: &integration_label,
+        head_sha: &head,
+        base_sha: &base,
+        main_ref: &main_ref,
+        key_commands: &profile.key_commands,
+        timeout: config.gate.command_timeout(),
+    }
+    .run()
+    .map_err(gate_error)?;
+    Ok(integration_label)
+}
+
+/// What a passing integration did.
+enum Integration {
+    Merged(Merged),
+    /// Main moved or the push was rejected: the task is back in `review.integrating` and
+    /// needs another round.
+    Again(String),
+}
+
+/// Finishes a passing integration verdict: `review.ready_to_merge`, the fast-forward push to
+/// the remote main, `done.merged`, and the removal of the worktree (ADR 0048 decisions 6 and
+/// 11).
+fn finish_integration(
+    store: &Store,
+    context: &MergeContext,
+    verdict: &Verdict,
+    round: u32,
+) -> Result<Integration, Error> {
+    let task_id = context.task_id.as_str();
+    let candidate = match verdict.candidate_sha.clone() {
+        Some(sha) if !sha.is_empty() => sha,
+        _ => {
             return Err(Error::Failed(format!(
-                "{candidate} does not contain the verified {head}"
+                "the integration verdict of `{task_id}` passed without a candidate"
             )));
         }
-        store.change_task(task_id, |task| {
-            task.state = model::TaskState::Done;
-            task.phase = "merged".to_owned();
-            task.retry_at = None;
-            Ok(())
-        })?;
-        let warning = remove_worktree(store, task_id).err();
-        return Ok(Merged {
-            task: task_id.to_owned(),
-            state: "done",
-            phase: "merged".to_owned(),
-            reason: None,
-            candidate_sha: Some(candidate),
-            rounds: round,
-            warning,
-        });
+    };
+    store.change_task(task_id, |task| {
+        if task.state == model::TaskState::Review {
+            task.phase = "ready_to_merge".to_owned();
+        }
+        Ok(())
+    })?;
+    if !merge_ready(store.repo(), &context.remote, &context.main_ref, verdict)
+        .map_err(gate_error)?
+    {
+        back_to_integrating(store, task_id)?;
+        return Ok(Integration::Again(
+            "main moved after integration".to_owned(),
+        ));
+    }
+    match push_candidate(
+        store.repo(),
+        &context.remote,
+        &candidate,
+        &context.main_branch,
+    )? {
+        Push::Pushed => {}
+        Push::Rejected(stderr) => {
+            back_to_integrating(store, task_id)?;
+            return Ok(Integration::Again(format!(
+                "the push to `{}` `{}` was rejected: {stderr}",
+                context.remote, context.main_branch
+            )));
+        }
+    }
+    let remote_main = ls_remote_branch(store.repo(), &context.remote, &context.main_branch)?;
+    if remote_main.as_deref() != Some(candidate.as_str()) {
+        back_to_integrating(store, task_id)?;
+        return Ok(Integration::Again(format!(
+            "`{}` `{}` is {}, not {candidate}",
+            context.remote,
+            context.main_branch,
+            remote_main.as_deref().unwrap_or("missing")
+        )));
+    }
+    if !is_ancestor(store.repo(), &context.head, &candidate)? {
+        return Err(Error::Failed(format!(
+            "{candidate} does not contain the verified {}",
+            context.head
+        )));
+    }
+    store.change_task(task_id, |task| {
+        task.state = model::TaskState::Done;
+        task.phase = "merged".to_owned();
+        task.retry_at = None;
+        Ok(())
+    })?;
+    let warning = remove_worktree(store, task_id).err();
+    Ok(Integration::Merged(Merged {
+        task: task_id.to_owned(),
+        state: "done",
+        phase: "merged".to_owned(),
+        reason: None,
+        candidate_sha: Some(candidate),
+        rounds: round,
+        warning,
+    }))
+}
+
+/// A failed integration verdict: record the reason and send the task to
+/// `review.rework_pending`. It is a normal result, not an error.
+fn integration_failed(
+    store: &Store,
+    context: &MergeContext,
+    integration_label: &str,
+    verdict: &Verdict,
+    round: u32,
+) -> Result<Merged, Error> {
+    let reason = Reason::with_verdict(
+        "merge",
+        verdict.stage,
+        failure_text(verdict),
+        integration_verdict(store, &context.task_id, integration_label)?,
+    );
+    reason.record(store, &context.task_id, &context.label);
+    to_rework(store, &context.task_id)?;
+    Ok(Merged {
+        task: context.task_id.clone(),
+        state: "review",
+        phase: "rework_pending".to_owned(),
+        reason: Some(reason.text()),
+        candidate_sha: None,
+        rounds: round,
+        warning: None,
+    })
+}
+
+/// What one pass's merge step for one task did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MergeStep {
+    /// The transition line, when the step moved the task.
+    pub line: Option<String>,
+    /// A reason the step could not move the task; the summary prints it.
+    pub note: Option<String>,
+}
+
+impl MergeStep {
+    fn quiet() -> Self {
+        Self::default()
     }
 
-    back_to_integrating(store, task_id)?;
-    Err(Error::Refused(format!(
-        "{last}; {MAX_INTEGRATION_ROUNDS} integration runs did not settle, so the task stays \
-         in `review.integrating`"
-    )))
+    fn line(line: String) -> Self {
+        Self {
+            line: Some(line),
+            note: None,
+        }
+    }
+
+    fn note(note: String) -> Self {
+        Self {
+            line: None,
+            note: Some(note),
+        }
+    }
+}
+
+/// One pass's merge step for a task of a plan at auto `merge` (ADR 0048 decisions 10, 12 and
+/// 13): take the approval, start the integration gate in the background, or finish the
+/// integration the gate left. It never waits for the gate.
+pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep, Error> {
+    let loaded = store.load_task(task_id)?;
+    if loaded.changed_outside_arc {
+        return Ok(MergeStep::note(format!(
+            "{task_id} changed outside arc; run `radian arc adopt {task_id}`"
+        )));
+    }
+    let task = loaded.item;
+    let phase = task.phase.clone();
+    if task.state != model::TaskState::Review
+        || !matches!(
+            phase.as_str(),
+            "awaiting_human" | "integrating" | "ready_to_merge"
+        )
+    {
+        return Ok(MergeStep::quiet());
+    }
+    if phase == "awaiting_human" {
+        let context = prepare_merge(store, task_id, Some("auto"))?;
+        return Ok(MergeStep::line(format!(
+            "{} approved -> review.integrating ({})",
+            context.task_id, context.label
+        )));
+    }
+    if phase == "integrating" {
+        if let Some(record) = crate::gate::background::read(store, task_id)
+            && record.kind == "integration"
+            && record.status != "running"
+        {
+            crate::gate::background::clear(store, task_id);
+            if record.status == "error" {
+                return Err(Error::Failed(
+                    record
+                        .text
+                        .unwrap_or_else(|| "the integration gate failed".to_owned()),
+                ));
+            }
+            if record.status == "refused" {
+                return Ok(MergeStep::note(format!(
+                    "{task_id} integration cannot run: {}",
+                    record.text.unwrap_or_default()
+                )));
+            }
+            let path = verdict_path(store.repo(), task_id, &record.attempt, Stage::Integration)
+                .map_err(gate_error)?;
+            let verdict = Verdict::read(&path).map_err(gate_error)?;
+            let context = prepare_merge(store, task_id, Some("auto"))?;
+            if !verdict.is_pass() {
+                let merged = integration_failed(store, &context, &record.attempt, &verdict, 1)?;
+                return Ok(MergeStep::line(merged.line()));
+            }
+            return match finish_integration(store, &context, &verdict, 1)? {
+                Integration::Merged(merged) => Ok(MergeStep::line(merged.line())),
+                Integration::Again(reason) => Ok(MergeStep::line(format!(
+                    "{task_id} integration -> review.integrating ({reason})"
+                ))),
+            };
+        }
+        if stop {
+            return Ok(MergeStep::quiet());
+        }
+        return match crate::gate::background::start(store, task_id)? {
+            Some(pid) => Ok(MergeStep::line(format!(
+                "{task_id} integration started (pid {pid})"
+            ))),
+            None => Ok(MergeStep::quiet()),
+        };
+    }
+    // `review.ready_to_merge`: finish the last passing integration verdict, or integrate
+    // again when main moved under it.
+    let context = prepare_merge(store, task_id, Some("auto"))?;
+    match latest_integration_verdict(store, task_id, &context.head) {
+        Some((_, verdict)) if verdict.is_pass() => {
+            match finish_integration(store, &context, &verdict, 1)? {
+                Integration::Merged(merged) => Ok(MergeStep::line(merged.line())),
+                Integration::Again(reason) => Ok(MergeStep::line(format!(
+                    "{task_id} integration -> review.integrating ({reason})"
+                ))),
+            }
+        }
+        _ => {
+            back_to_integrating(store, task_id)?;
+            Ok(MergeStep::line(format!(
+                "{task_id} review.ready_to_merge -> review.integrating (no usable integration verdict)"
+            )))
+        }
+    }
+}
+
+/// The newest integration verdict for `head`, with its path.
+fn latest_integration_verdict(store: &Store, task: &str, head: &str) -> Option<(PathBuf, Verdict)> {
+    task_verdict_files(store, task)
+        .ok()?
+        .into_iter()
+        .rfind(|(_, verdict)| verdict.stage == Stage::Integration && verdict.sha == head)
 }
 
 /// Writes the owner's `human` pass verdict for `sha` (once), or reuses the one a crash left.

@@ -506,6 +506,30 @@ enum ArcCommand {
         /// The wrapper's forwarding test starts a plain process with a child of its own.
         #[arg(long, value_name = "SHELL-COMMAND", hide = true)]
         worker_command: Option<String>,
+        /// Internal: the attempt's stall limit in seconds; `0` means no limit. arc passes the
+        /// task's value or `[limits] stall_timeout_secs`. Not in the manual.
+        #[arg(long, value_name = "SECONDS", hide = true)]
+        stall_timeout_secs: Option<u64>,
+        /// Internal: the attempt's absolute wall-time limit in seconds; `0` means no limit.
+        /// Not in the manual.
+        #[arg(long, value_name = "SECONDS", hide = true)]
+        max_wall_time_secs: Option<u64>,
+        /// Internal: the grace period before SIGKILL after a signalled worker
+        /// (`[limits] cancel_grace_secs`). Not in the manual.
+        #[arg(long, value_name = "SECONDS", hide = true)]
+        cancel_grace_secs: Option<u64>,
+    },
+
+    /// Internal: run one task's gate in the background. A scheduling pass starts it and does
+    /// not wait; it is hidden and has no manual page.
+    #[command(hide = true)]
+    Gate {
+        /// The task whose gate to run.
+        #[arg(long, value_name = "TASK", hide = true)]
+        task: String,
+        /// The inherited lock descriptor: it keeps one gate per task at a time.
+        #[arg(long, value_name = "FD", hide = true)]
+        lock_fd: Option<i32>,
     },
 
     /// Confirm a draft plan. A plan with no tasks is refused, and so is a second confirm.
@@ -587,8 +611,9 @@ enum ArcCommand {
     },
 
     /// Make every transition the auto levels allow now, then exit: reconcile, release due
-    /// retries, verify, start ready tasks, and merge what passed at auto level `merge`.
-    /// With `--watch`, repeat after `--interval` seconds until SIGINT or SIGTERM.
+    /// retries, start a task's gate or a worker, and drive a merge at auto level `merge`. A
+    /// pass only schedules: the worker and the gate run outside it and a later pass collects
+    /// them. With `--watch`, repeat after `--interval` seconds until SIGINT or SIGTERM.
     Run {
         /// Keep running: after a pass that ends quiet, wait `--interval` seconds and run
         /// another pass, until SIGINT or SIGTERM. Holds `runner.lock` the whole time.
@@ -700,9 +725,9 @@ impl ArcCommand {
                 interval: interval.unwrap_or(radian_arc::run::DEFAULT_INTERVAL_SECS),
             },
             ArcCommand::Mcp => ArcRun::Mcp,
-            // `work` is the trusted wrapper, not a store operation: `run_arc` dispatches it
-            // before this conversion.
-            ArcCommand::Work { .. } => return None,
+            // `work` is the trusted wrapper and `gate` is the background gate: not store
+            // operations. `run_arc` dispatches both before this conversion.
+            ArcCommand::Work { .. } | ArcCommand::Gate { .. } => return None,
         })
     }
 }
@@ -723,6 +748,9 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             main_branch,
             extra,
             worker_command,
+            stall_timeout_secs,
+            max_wall_time_secs,
+            cancel_grace_secs,
         }) => {
             let (remote, main_branch) = work_remote_and_main(remote, main_branch);
             ExitCode::from(radian_arc::work::run(radian_arc::work::Options {
@@ -735,7 +763,15 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
                 main_branch,
                 extra_args: extra,
                 worker_command,
+                stall_timeout_secs: stall_timeout_secs.unwrap_or(0),
+                max_wall_time_secs: max_wall_time_secs.unwrap_or(0),
+                cancel_grace_secs: cancel_grace_secs.unwrap_or(0),
             }) as u8)
+        }
+        Some(ArcCommand::Gate { task, lock_fd }) => {
+            ExitCode::from(radian_arc::gate::background::run(
+                radian_arc::gate::background::Options { task, lock_fd },
+            ) as u8)
         }
         Some(command) => {
             let command = command.into_store_command();

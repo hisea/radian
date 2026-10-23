@@ -1335,7 +1335,15 @@ fn run_writes_a_transition_line_before_it_exits() {
         "the pass ends with a summary: {:?}",
         lines.seen
     );
-    assert!(mock.requests() >= 1, "the worker reached the mock model");
+    // The pass does not wait for the worker it started; the worker still reaches the model.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while mock.requests() < 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never reached the mock model"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// `--watch` runs another pass on its own: a retry that becomes due between passes is released

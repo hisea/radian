@@ -12,6 +12,7 @@
 //!   integration stage holds its own `gates/integration.lock`, so two runs never overlap.
 //! - [`CommandRun`] — the `commands` stage, on the candidate `verified_sha` merged onto main.
 //! - [`ReviewRun`] — the read-only `review` session on the same candidate.
+//! - [`background`] — the gate as a separate process a pass starts and does not wait for.
 //! - [`Verdict`] and [`verdict_set_digest`] — the records and the digest of an approval.
 //! - [`IntegrationRun`] and [`merge_ready`] — the merge candidate and the main check.
 //!
@@ -29,6 +30,8 @@ mod git;
 mod integration;
 mod review;
 mod verdict;
+
+pub mod background;
 
 pub use checkout::{GateCheckout, gates_dir};
 pub use commands::CommandRun;
