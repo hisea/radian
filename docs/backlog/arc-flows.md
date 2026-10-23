@@ -20,7 +20,7 @@ arc 今天一个仓库只有一套流程，三个地方锁死：
 
 ### 第 1 步：`review` stage 落地（已落地）
 
-`review` 已在 `BUILT_STAGES` 里；`[gate.review]` 的 `exec_args`、`prompt_file`、`timeout_secs` 已实现（ADR 0048 §10、§15），`docs/user/arc.md` 有手册条目。`prompt_file` 同时给了第 3 步“评审标准从哪里来”一个 repository 级的答案；per-flow 的 `review_prompt_file` 仍未定。
+`review` 已在 `BUILT_STAGES` 里；`[gate.review]` 的 `exec_args`、`prompt_file`、`timeout_secs` 已实现（ADR 0048 §10、§15），`docs/user/arc.md` 有手册条目。`prompt_file` 是 repository 级的评审标准；按 flow 的评审标准见第 2 步（profile 自带的 review 设置）。
 
 非代码 flow 的 gate 只有 `review` 和 `human` 有意义（`commands` 对美术和文案几乎无用）。这一步独立于 flow，所以先落。
 
@@ -40,6 +40,7 @@ allow_noop = false
 ```
 
 - flow 节的键：`exec_args`（同今天的 `worker.exec_args`）、`gate_profile`（必须是一个 `gate.profiles.<name>`）、`allow_noop`（task 未指定时的缺省）。每个键按手册规矩写全名称、类型、缺省、允许值、何时生效。
+- 一个 `gate.profiles.<name>` 可以带自己的 review 设置：`review_exec_args`、`review_prompt_file`、`review_timeout_secs`，含义同 `[gate.review]` 的三个键，写了就覆盖全局的那一项，没写就用全局的。这样不同 flow 的 review 可以用不同的模型和评审标准（一个只改文档的 flow 也可以用不含 `review` 的 profile）。
 - `worker.exec_args` 与 `gate.profile` 保留为 `flows.default` 的别名还是直接迁移（`schema_version` 升 2，按 0008 迁移），落地时定；两者只能留一个，不能两处都有值。
 - task 文件加 `flow` 字段（字符串，缺省 `default`，必须是一个 `flows.<name>`）；`add_task` MCP 工具和 `radian arc add` 加同名参数。`show --json` 输出它。
 - plan 层不知道 flow。一个 plan 可以混：coding task 出功能，`after` 它的 marketing task 写文案。
@@ -51,7 +52,6 @@ allow_noop = false
 ## 待决（第 3 步：非代码交付物）
 
 - 交付物仍必须是 git commit（0048 §8：`head_sha` 是 `base_sha` 后代、树干净）。文案没问题；美术二进制资产要么走 git LFS，要么 worker 只提交引用（路径、hash、生成参数），资产放外部存储。哪一种、以及 delivery check 是否要认 LFS 指针，未定。
-- `review` stage 对非代码 flow 的评审标准从哪里来：现在有 repository 级的 `[gate.review] prompt_file`（第 1 步已落），但 per-flow 的 `review_prompt_file` 仍未有。未定。
 - 是否需要每个 flow 自己的 `limits`（美术任务更贵、更慢）。未定，先用 task 级覆盖。
 
 ## 待决（第 4 步：trigger，idea）
