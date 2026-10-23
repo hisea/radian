@@ -531,6 +531,12 @@ async fn a_non_auto_parent_denies_the_childs_ask_and_says_so() {
 /// on a model request that never answers; the test finds its pid from the control socket it
 /// binds at startup, cancels the parent, and polls (bounded) for the process to go away. The
 /// mutation (not propagating cancellation) leaves it alive.
+///
+/// The parent runs with a 60 s tool cancel grace (the hidden test-only
+/// `--tool-cancel-grace-ms`) and the deadline is 20 s: the tool's own cancel branch must kill
+/// the child well inside the deadline even on a loaded machine, while a tool that ignores the
+/// token is only dropped — and its leader killed by `kill_on_drop` — after the grace, so it
+/// fails the deadline by 40 s instead of by the 2 s a 3 s/5 s pair left to machine load.
 #[tokio::test]
 async fn a_cancelled_parent_turn_kills_the_child() {
     let server = MockServer::start(vec![
@@ -541,17 +547,25 @@ async fn a_cancelled_parent_turn_kills_the_child() {
     let env = Env::new("cancel");
     let parent = spawn_parent(
         &env,
-        &["--model", "m", "--base-url", &server.base_url, "-p", "go"],
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--tool-cancel-grace-ms",
+            "60000",
+            "-p",
+            "go",
+        ],
     );
     let parent_pid = parent.id().expect("parent pid");
     let child_pid = child_pid(&env, parent_pid).await;
 
     sigint(&parent);
-    // The deadline is shorter than the core's 5 s `DEFAULT_TOOL_CANCEL_GRACE`: the tool's own
-    // cancellation branch kills the session at once, while a tool that ignores the token would
-    // only be dropped (and its leader killed by `kill_on_drop`) after the grace. A bounded
-    // poll, not a guess: the kill is a few milliseconds of process scheduling.
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // The deadline is far below the core's grace: the tool's own cancellation branch kills the
+    // session at once, while a tool that ignores the token is only dropped (and its leader
+    // killed by `kill_on_drop`) after the grace. A bounded poll, not a guess.
+    let deadline = Instant::now() + Duration::from_secs(20);
     while alive(child_pid) && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
