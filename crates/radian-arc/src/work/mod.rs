@@ -189,7 +189,10 @@ impl Failure {
 }
 
 fn run_inner(o: &Options) -> Result<i32, Failure> {
-    validate(o)?;
+    // The task id names a directory and a branch, so it is checked before anything is
+    // created. Every other check runs once the attempt directories exist, so a refused
+    // argument still leaves the record the next pass applies (ADR 0048 decision 9).
+    validate_task(o)?;
     // ADR 0048 decision 9: arc cancels an attempt with SIGTERM and expects the wrapper to
     // pass it on, wait for the worker, and still write `AttemptFinished`. Without a handler
     // the wrapper would die at once and leave no record for arc to apply.
@@ -216,22 +219,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         fs::create_dir_all(dir)
             .map_err(|error| Failure::error(format!("cannot create {}: {error}", dir.display())))?;
     }
-    // The heartbeat starts with the attempt directory and lives until both end records are
-    // written: the worktree setup, the model wait and the delivery and push checks all count
-    // as alive (ADR 0048 decisions 7.9 and 9). `set_worker` fills in the worker's identity
-    // once it is spawned.
     let wrapper_pid = std::process::id();
-    let mut heartbeat = Heartbeat::start(
-        &attempt_dir,
-        Beat {
-            attempt_id: format!("{}-{}", o.task, o.attempt),
-            pid: None,
-            process_started_at: None,
-            wrapper_pid,
-            wrapper_started_at: process::start_time(wrapper_pid),
-        },
-        o.stall_timeout_secs,
-    )?;
     let signal = runs.join(SIGNAL_FILE);
     let setup = Setup {
         repo,
@@ -243,15 +231,70 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         wrapper_pid,
         clock: Clock::new(started, Duration::from_secs(o.max_wall_time_secs), signal),
     };
-    let result = match run_attempt(o, &setup, &heartbeat) {
+    // From here on every failure writes the attempt's finish record before the wrapper exits:
+    // the next pass applies it and frees the attempt's `[limits] concurrency` slot at once
+    // (ADR 0048 decision 9). Only a failure before the two directories exist (a task id that
+    // names no path, a directory that cannot be created) has no record to leave; reconcile
+    // then applies the attempt after the stall window.
+    attempt(o, &setup).map_err(|failure| record_failure(o, &setup, failure))
+}
+
+/// The rest of the attempt: the remaining argument checks, the heartbeat, and the work itself.
+/// The heartbeat starts with the attempt directory and lives until both end records are
+/// written: the worktree setup, the model wait and the delivery and push checks all count as
+/// alive (ADR 0048 decisions 7.9 and 9).
+fn attempt(o: &Options, s: &Setup) -> Result<i32, Failure> {
+    validate_rest(o)?;
+    let mut heartbeat = Heartbeat::start(
+        &s.attempt_dir,
+        Beat {
+            attempt_id: format!("{}-{}", o.task, o.attempt),
+            pid: None,
+            process_started_at: None,
+            wrapper_pid: s.wrapper_pid,
+            wrapper_started_at: process::start_time(s.wrapper_pid),
+        },
+        o.stall_timeout_secs,
+    )?;
+    let result = match run_attempt(o, s, &heartbeat) {
         Ok(code) => Ok(code),
         // The wall clock ran out (a git command was killed or a later step saw it expired):
         // the attempt still ends with its records and the `wall_time` class.
-        Err(failure) if failure.wall => finish_wall(o, &setup),
+        Err(failure) if failure.wall => finish_wall(o, s),
         Err(failure) => Err(failure),
     };
     heartbeat.stop();
     result
+}
+
+/// Writes the attempt's finish record for a failure and returns the failure unchanged. The
+/// record is what the next pass applies, so a wrapper that fails at once (a refused argument,
+/// a held worktree lock) frees its concurrency slot in that pass instead of after the stall
+/// window (ADR 0048 decision 9). A failure to record it never hides the failure itself.
+fn record_failure(o: &Options, s: &Setup, failure: Failure) -> Failure {
+    let base_sha = recorded_base_sha(&s.arc, &o.task);
+    let _ = write_finish(
+        o,
+        s,
+        Finish {
+            base_sha: &base_sha,
+            head_sha: None,
+            dirty: Vec::new(),
+            pushed: false,
+            remote_sha: None,
+            outcome: "terminated",
+            exit_code: failure.code,
+            failure: Some(failure.message.clone()),
+        },
+    );
+    failure
+}
+
+/// The base commit a first attempt recorded, when it did: the early finish records name it.
+fn recorded_base_sha(arc: &Path, task: &str) -> String {
+    fs::read_to_string(arc.join("attempts").join(task).join("base_sha"))
+        .map(|text| text.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// The paths one attempt works in, and its wall clock.
@@ -539,9 +582,7 @@ fn finish_wall(o: &Options, s: &Setup) -> Result<i32, Failure> {
     if let Some(tip) = loose_branch_tip(&s.repo, &s.branch) {
         let _ = write_text(&last_head_path(&s.arc, &o.task), &tip);
     }
-    let base_sha = fs::read_to_string(s.arc.join("attempts").join(&o.task).join("base_sha"))
-        .map(|text| text.trim().to_owned())
-        .unwrap_or_default();
+    let base_sha = recorded_base_sha(&s.arc, &o.task);
     write_finish(
         o,
         s,
@@ -760,8 +801,10 @@ fn write_signal(path: &Path, reason: &str) -> Result<(), Failure> {
 }
 
 /// The task id is a file name and a branch suffix: keep it to characters that are safe in
-/// both, so a caller cannot walk out of the arc directory or name an option.
-fn validate(o: &Options) -> Result<(), Failure> {
+/// both, so a caller cannot walk out of the arc directory or name an option. It is checked
+/// before the wrapper creates anything; the rest of the flags are checked by
+/// [`validate_rest`], after the attempt directories exist.
+fn validate_task(o: &Options) -> Result<(), Failure> {
     if o.task.is_empty() || o.task.len() > 64 {
         return Err(Failure::usage("--task needs 1 to 64 characters"));
     }
@@ -776,6 +819,13 @@ fn validate(o: &Options) -> Result<(), Failure> {
             "--task takes ASCII letters, digits, `-`, `_` and `.` only",
         ));
     }
+    Ok(())
+}
+
+/// The other flags. They are checked after the attempt directory exists, so a refused value
+/// (example: a remote name from `config.toml` with a character a ref cannot hold) still
+/// leaves the `AttemptFinished` record the next pass applies (ADR 0048 decision 9).
+fn validate_rest(o: &Options) -> Result<(), Failure> {
     if o.attempt == 0 {
         return Err(Failure::usage("--attempt is 1-based"));
     }

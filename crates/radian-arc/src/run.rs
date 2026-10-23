@@ -309,34 +309,53 @@ fn advance_verification(
         .clone()
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| format!("{}-{}", task.id, task.attempt));
-    if let Some(record) = crate::gate::background::read(store, task_id)
-        && record.kind == "verify"
-        && record.attempt == label
-    {
+    // A plan this pass could reuse when the unchanged refusal or no-record record lets it
+    // start nothing; planning costs a fetch, so it happens only when a start is possible.
+    let mut planned: Option<crate::review::Verification> = None;
+    let record = crate::gate::background::read(store, task_id)
+        .filter(|record| record.kind == "verify" && record.attempt == label);
+    if let Some(record) = &record {
         match record.status.as_str() {
-            "running" => {}
+            crate::gate::background::STARTED => {
+                // The pass wrote the inputs it started the gate with and no gate record came
+                // back. A held lock means the gate is still coming up; a free one means the
+                // process exited without writing anything, and another start with the same
+                // inputs would only repeat it (ADR 0048 decision 10).
+                if !crate::gate::background::running(store, task_id)
+                    && let Some(inputs) = record.inputs.clone()
+                {
+                    crate::gate::background::write_no_record(
+                        store, task_id, "verify", &label, &inputs,
+                    )?;
+                    transitions.note(format!(
+                        "{task_id} verify cannot run: {}",
+                        crate::gate::background::NO_RECORD_TEXT
+                    ));
+                    return Ok(false);
+                }
+            }
             "error" => {
                 crate::gate::background::clear(store, task_id);
                 return Err(Error::Failed(
                     record
                         .text
+                        .clone()
                         .unwrap_or_else(|| format!("the gate of {task_id} failed")),
                 ));
             }
-            "refused" => {
-                // Reported once, and no new gate for this attempt while the inputs the gate
-                // saw are unchanged: a repeat would rerun the same refusal every interval.
-                // A new attempt, a changed config, or the branch coming back changes the
-                // inputs (ADR 0048 decision 10).
-                let text = record.text.clone().unwrap_or_default();
-                let inputs = record.inputs.clone();
+            // Reported once, and no new gate for this attempt while the inputs the gate
+            // saw are unchanged: a repeat would rerun the same refusal (or the same missing
+            // record) every interval. A new attempt, a changed config, or the branch coming
+            // back changes the inputs (ADR 0048 decision 10).
+            crate::gate::background::NO_RECORD | "refused" => {
                 match crate::review::plan_verification(store, task_id) {
-                    Ok(plan) if inputs.as_deref() == Some(plan.inputs.as_str()) => {
+                    Ok(plan) if record.inputs.as_deref() == Some(plan.inputs.as_str()) => {
+                        let text = record.text.clone().unwrap_or_default();
                         transitions.note(format!("{task_id} verify cannot run: {text}"));
                         return Ok(false);
                     }
                     // The inputs changed: start a gate below.
-                    Ok(_) => {}
+                    Ok(plan) => planned = Some(plan),
                     Err(Error::Refused(reason)) => {
                         transitions.note(format!("{task_id} verify cannot run: {reason}"));
                         return Ok(false);
@@ -378,10 +397,29 @@ fn advance_verification(
             _ => {}
         }
     }
+    // A gate that is still running is the reason this pass starts none.
+    if crate::gate::background::running(store, task_id) {
+        return Ok(false);
+    }
     if stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
         return Ok(false);
     }
-    match crate::gate::background::start(store, task_id)? {
+    // The digest of what the gate will read, written before it starts: a gate that exits
+    // without a record leaves it for the next pass (ADR 0048 decision 10). A plan that
+    // refuses is the gate's own record to write; there is no digest to guard.
+    let planned = match planned {
+        Some(plan) => Some(plan),
+        None => crate::review::plan_verification(store, task_id).ok(),
+    };
+    match crate::gate::background::start(
+        store,
+        task_id,
+        &crate::gate::background::Start {
+            kind: "verify",
+            attempt: label.clone(),
+            inputs: planned.map(|plan| plan.inputs),
+        },
+    )? {
         Some(pid) => {
             transitions.push(format!("{label} verify started (pid {pid})"));
             Ok(true)

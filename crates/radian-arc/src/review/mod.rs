@@ -453,6 +453,29 @@ fn verification_inputs(store: &Store, task: &model::TaskFile, remote_sha: &str) 
     format!("{:x}", hasher.finalize())
 }
 
+/// A digest of what an integration depends on: `config.toml`, the task's `head_sha` and
+/// `base_sha`, and the remote main over the wire. A pass records it when it starts an
+/// integration gate, so a gate that exits without a record is not started again while these
+/// inputs are unchanged, and a new head, a new main or a changed profile allows one new start
+/// (ADR 0048 decision 10). `None` when the config, the task or the remote cannot be read.
+#[must_use]
+pub fn integration_inputs(store: &Store, task_id: &str) -> Option<String> {
+    let task = store.load_task(task_id).ok()?.item;
+    let config = fs::read(store.root().join(crate::store::CONFIG_FILE)).unwrap_or_default();
+    let (remote, main_branch) = store.repository_names().ok()?;
+    let main = ls_remote_branch(store.repo(), &remote, &main_branch).ok()??;
+    let fields = json!({
+        "kind": "integration",
+        "head": task.head_sha,
+        "base": task.base_sha,
+        "main": main,
+    });
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&config);
+    hasher.update(fields.to_string().as_bytes());
+    Some(format!("{:x}", hasher.finalize()))
+}
+
 /// Runs the stages the plan lists that have no verdict yet, in order, and stops at the first
 /// failure. A verdict already written for this attempt and stage is reused, so a gate that
 /// died between stages resumes instead of rerunning (ADR 0048 decision 10). This writes
@@ -1420,43 +1443,100 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
         )));
     }
     if phase == "integrating" {
-        if let Some(record) = crate::gate::background::read(store, task_id)
-            && record.kind == "integration"
-            && record.status != "running"
-        {
-            crate::gate::background::clear(store, task_id);
-            if record.status == "error" {
-                return Err(Error::Failed(
-                    record
-                        .text
-                        .unwrap_or_else(|| "the integration gate failed".to_owned()),
-                ));
+        // A gate record of another kind belongs to verification.
+        let record = crate::gate::background::read(store, task_id)
+            .filter(|record| record.kind == "integration");
+        if let Some(record) = &record {
+            match record.status.as_str() {
+                // A start or a running gate is still the lock's business: the lock below is
+                // what decides, and a `running` record carries the integration label, not the
+                // attempt id.
+                "running" => {}
+                // The pass wrote the inputs it started the integration with and the gate
+                // wrote nothing: a new start with the same inputs would only repeat it.
+                crate::gate::background::STARTED => {
+                    if !crate::gate::background::running(store, task_id)
+                        && record.attempt == attempt_label(&task)?
+                        && let Some(inputs) = record.inputs.clone()
+                    {
+                        crate::gate::background::write_no_record(
+                            store,
+                            task_id,
+                            "integration",
+                            &record.attempt,
+                            &inputs,
+                        )?;
+                        return Ok(MergeStep::note(format!(
+                            "{task_id} integration cannot run: {}",
+                            crate::gate::background::NO_RECORD_TEXT
+                        )));
+                    }
+                }
+                crate::gate::background::NO_RECORD => {
+                    let current = integration_inputs(store, task_id);
+                    let reported = format!(
+                        "{task_id} integration cannot run: {}",
+                        crate::gate::background::NO_RECORD_TEXT
+                    );
+                    if record.attempt == attempt_label(&task)?
+                        && current.as_deref() == record.inputs.as_deref()
+                    {
+                        return Ok(MergeStep::note(reported));
+                    }
+                    // The inputs changed (a new head, a new main, a changed profile), or the
+                    // record belongs to an earlier attempt: start one new gate below.
+                }
+                _ => {
+                    crate::gate::background::clear(store, task_id);
+                    if record.status == "error" {
+                        return Err(Error::Failed(
+                            record
+                                .text
+                                .clone()
+                                .unwrap_or_else(|| "the integration gate failed".to_owned()),
+                        ));
+                    }
+                    if record.status == "refused" {
+                        return Ok(MergeStep::note(format!(
+                            "{task_id} integration cannot run: {}",
+                            record.text.clone().unwrap_or_default()
+                        )));
+                    }
+                    let path =
+                        verdict_path(store.repo(), task_id, &record.attempt, Stage::Integration)
+                            .map_err(gate_error)?;
+                    let verdict = Verdict::read(&path).map_err(gate_error)?;
+                    let context = prepare_merge(store, task_id, Some("auto"))?;
+                    if !verdict.is_pass() {
+                        let merged =
+                            integration_failed(store, &context, &record.attempt, &verdict, 1)?;
+                        return Ok(MergeStep::line(merged.line()));
+                    }
+                    return match finish_integration(store, &context, &verdict, 1)? {
+                        Integration::Merged(merged) => Ok(MergeStep::line(merged.line())),
+                        Integration::Again(reason) => Ok(MergeStep::line(format!(
+                            "{task_id} integration -> review.integrating ({reason})"
+                        ))),
+                    };
+                }
             }
-            if record.status == "refused" {
-                return Ok(MergeStep::note(format!(
-                    "{task_id} integration cannot run: {}",
-                    record.text.unwrap_or_default()
-                )));
-            }
-            let path = verdict_path(store.repo(), task_id, &record.attempt, Stage::Integration)
-                .map_err(gate_error)?;
-            let verdict = Verdict::read(&path).map_err(gate_error)?;
-            let context = prepare_merge(store, task_id, Some("auto"))?;
-            if !verdict.is_pass() {
-                let merged = integration_failed(store, &context, &record.attempt, &verdict, 1)?;
-                return Ok(MergeStep::line(merged.line()));
-            }
-            return match finish_integration(store, &context, &verdict, 1)? {
-                Integration::Merged(merged) => Ok(MergeStep::line(merged.line())),
-                Integration::Again(reason) => Ok(MergeStep::line(format!(
-                    "{task_id} integration -> review.integrating ({reason})"
-                ))),
-            };
+        }
+        // A gate that is still running is the reason this pass starts none.
+        if crate::gate::background::running(store, task_id) {
+            return Ok(MergeStep::quiet());
         }
         if stop {
             return Ok(MergeStep::quiet());
         }
-        return match crate::gate::background::start(store, task_id)? {
+        return match crate::gate::background::start(
+            store,
+            task_id,
+            &crate::gate::background::Start {
+                kind: "integration",
+                attempt: attempt_label(&task)?,
+                inputs: integration_inputs(store, task_id),
+            },
+        )? {
             Some(pid) => Ok(MergeStep::line(format!(
                 "{task_id} integration started (pid {pid})"
             ))),
@@ -1719,6 +1799,17 @@ pub fn rework_reason(store: &Store, task: &model::TaskFile) -> Option<String> {
         && !text.is_empty()
     {
         parts.push(text.to_owned());
+    }
+    // A gate that exited without a record: the pass that started it recorded the fact in the
+    // gate record, and `show` reports the same text `radian arc run` prints (ADR 0048
+    // decision 10).
+    if parts.is_empty()
+        && let Some(record) = crate::gate::background::read(store, &task.id)
+        && record.kind == "verify"
+        && record.status == crate::gate::background::NO_RECORD
+        && record.attempt == label
+    {
+        parts.push(crate::gate::background::NO_RECORD_TEXT.to_owned());
     }
     // The automatic rework limit: the task stays in `rework_pending` and `show` says why the
     // plan stopped (ADR 0048 decision 12).

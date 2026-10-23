@@ -380,7 +380,12 @@ One run:
    `outcome` is the child's `Result.outcome`, or `terminated` when the child exited
    without a `Result`. A start refusal (the moved-ref check) also ends with
    `outcome: "terminated"`, `exit_code: 1` and its reason in `failure`; it runs no child
-   and does not update `last_head`.
+   and does not update `last_head`. Every failure after the attempt directory exists (a
+   refused argument, a held worktree lock, a fetch that failed, a worktree that could not
+   be prepared, a worker that could not start) writes the same record before the wrapper
+   exits, so the next pass applies it and frees the attempt's concurrency slot at once;
+   only a failure before those directories exist leaves no record, and reconcile then
+   applies the attempt after the stall window.
 
 8. Exits with the child's exit code (ADR 0044 §3). A check that fails after a `completed`
    child exits 1, with the reason in `failure`. A second attempt of the same task exits 4.
@@ -394,20 +399,24 @@ OS user, so that is not isolation.
 ## Background gates
 
 `gate::background` is the gate as a separate process (ADR 0048 decision 10). `start(store,
-task)` opens `gates/<task>.gate.lock`, locks it, clears the descriptor's `FD_CLOEXEC` and
+task, start)` opens `gates/<task>.gate.lock`, locks it, clears the descriptor's `FD_CLOEXEC`
+and writes the digest of what the gate will read to `runs/<task>/gate.json` (`started`), then
 spawns `radian arc gate --task <task> --lock-fd <fd>`: the child inherits the lock, so no
-second gate can start for that task until it exits, and a gate killed without a record leaves
-the lock free for the next pass. The pass keeps no child handle it waits on; a thread reaps
-the child so a `--watch` loop collects no zombies.
+second gate can start for that task until it exits. The pass keeps no child handle it waits
+on; a thread reaps the child so a `--watch` loop collects no zombies.
 
 The child (`radian arc gate`) owns the lock for its life, reads the task and picks the gate by
 its phase: `review.verifying` plans the verification and runs its stages, and
 `review.integrating` runs `review::gate_integration` (the next free integration label). It
 writes only verdicts and `runs/<task>/gate.json`: `running` with its pid first, then `done`,
 `refused` or `error` with the attempt it ran for. A verification record also carries the
-`inputs` digest from `plan_verification` (config text, shas, extra stages, remote sha); a pass
-reports a `refused` record and starts no new gate while the digest is unchanged. It never
-changes the task's state; the pass holding `runner.lock` does that from the record.
+`inputs` digest from `plan_verification` (config text, shas, extra stages, remote sha); an
+integration record carries a digest of the shas, the config text and the remote main; a pass
+reports a `refused` record and starts no new gate while the digest is unchanged. A gate
+process that exits having written nothing leaves the pass's `started` record: the pass rewrites
+it as `no_record` with those inputs, reports it in the summary and does not count the pass as
+changed, so a gate that fails at once is not started on every pass. It never changes the
+task's state; the pass holding `runner.lock` does that from the record.
 
 The gate installs its own SIGTERM handler (`gate::stage`); a stage tracks its child's group
 (`commands::run_one`, `ReviewRun::run_session`) and forwards the stop to it, SIGKILL after
