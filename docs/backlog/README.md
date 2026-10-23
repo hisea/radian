@@ -59,6 +59,7 @@
 | `test-temp-leak.md` | idea | 0048 | 测试泄漏临时目录（Linux gate 机 tmpfs inode 被占满导致成批假红）：统一会删除的临时目录 helper，`verify.sh` / `arc-gate.sh` 开跑前查 inode；环境问题是否扣返工次数待定 |
 | `arc-gate-batch.md` | decided（排在 `arc-landing.md` 之后） | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
 | `arc-reviewer-profiles.md` | decided | 0048 | reviewer profile（模型、prompt 写审查范围、时限、`fix_level`，第一轮可另设模型与时限）；只审 diff，返工轮只审增量和上轮问题，`pre_existing` 由 arc 按改动行机械判定、不打回；问题分 `critical`/`major`/`minor` 并附校准例子，用户选修到哪级，task 可覆盖；review 与 commands 并行，review 失败由 arc 自动写返工；没修的问题变成 `todo.proposed` 收尾 task，新增 task 级 `confirm` |
+| `arc-auto-reverify.md` | decided | 0048 | `commands`/integration 因命令失败或超时打回、远端 main 又前进时，`auto` 非 `off` 的 plan 自动 reverify；同一组 (head, main) 只跑一次，`[limits] max_auto_reverify` 缺省 2；review、冲突、拒绝不自动 |
 | `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 
 只占索引行（暂无文件；来源都是总报告 `research/2026-10-18-area-deep-dive/README.md`）：
