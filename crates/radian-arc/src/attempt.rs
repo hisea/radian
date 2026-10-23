@@ -6,7 +6,7 @@
 //! transaction, which is what `radian arc start` does; a scheduling pass uses [`spawn_claim`]
 //! and leaves the result to its next [`reconcile`].
 //!
-//! `radian arc cancel <task>` stops a running attempt: SIGTERM to the wrapper, a grace
+//! `radian arc cancel <id>` stops one task, or a whole plan: SIGTERM to the wrapper, a grace
 //! period, then SIGKILL. [`reconcile`] is the restart step the loop and `start` and `cancel`
 //! call (decision 9, last bullet); it decides liveness from the wrapper's heartbeat and never
 //! from `ps`, which the `workspace` sandbox refuses.
@@ -43,15 +43,50 @@ pub struct Started {
 /// What one `cancel` did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Canceled {
+    /// The task the line names.
+    pub task: String,
     pub applied: Option<Applied>,
     pub state: String,
     pub phase: String,
 }
 
 impl Canceled {
-    /// The one line `radian arc cancel` prints.
-    pub fn line(&self, task: &str) -> String {
-        format!("{task} {}.{}", self.state, self.phase)
+    /// The one line `radian arc cancel` prints for this task.
+    pub fn line(&self) -> String {
+        format!("{} {}.{}", self.task, self.state, self.phase)
+    }
+}
+
+/// What a plan's cancel did: every task it changed, in the plan's task order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanCanceled {
+    pub plan: String,
+    pub tasks: Vec<Canceled>,
+}
+
+impl PlanCanceled {
+    /// The lines `radian arc cancel <plan>` prints: one per changed task, then the plan.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self.tasks.iter().map(Canceled::line).collect();
+        lines.push(format!("{} cancelled", self.plan));
+        lines
+    }
+}
+
+/// What `radian arc cancel <id>` did: the task form or the plan form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cancelled {
+    Task(Box<Canceled>),
+    Plan(PlanCanceled),
+}
+
+impl Cancelled {
+    /// The lines the command prints, one per line.
+    pub fn lines(&self) -> Vec<String> {
+        match self {
+            Cancelled::Task(canceled) => vec![canceled.line()],
+            Cancelled::Plan(canceled) => canceled.lines(),
+        }
     }
 }
 
@@ -69,6 +104,12 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
     }
     let task = loaded.item;
+    // A cancelled plan is final: none of its tasks starts or resumes verification (ADR 0048
+    // decisions 3 and 9).
+    let plan = store.load_plan(&task.plan)?;
+    if plan.item.is_cancelled() {
+        return Err(crate::store::cancelled_plan(&task.plan));
+    }
     if task.state == model::TaskState::Review && task.phase == "verifying" {
         return Ok(Started {
             reconciled: Vec::new(),
@@ -347,14 +388,94 @@ fn read_json(path: &std::path::Path) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// `radian arc cancel <id>`: stop one task, or a whole plan (ADR 0048 decisions 3, 6 and 9).
+///
+/// The id resolves to a plan or a task as `reset-budget` resolves it: an id that names both is
+/// refused (exit 3), and one that names neither is an error (exit 1).
+pub fn cancel_any(store: &Store, id: &str) -> Result<Cancelled, Error> {
+    match store.resolve_kind(id)? {
+        crate::store::Kind::Plan => Ok(Cancelled::Plan(cancel_plan(store, id)?)),
+        crate::store::Kind::Task => Ok(Cancelled::Task(Box::new(cancel(store, id)?))),
+    }
+}
+
 /// `radian arc cancel <task>`: stop one task.
 ///
 /// A `todo` task goes to `failed.cancelled`. A `doing` task gets SIGTERM on its wrapper (the
 /// pid and its start time must match, so a reused pid is never signalled), then SIGKILL after
 /// `[limits] cancel_grace_secs`. When the wrapper's `AttemptFinished` arrives the task goes to
-/// `failed.cancelled`; when it never arrives the task goes to `doing.reconciling`.
+/// `failed.cancelled`; when it never arrives the task goes to `doing.reconciling`. A `review`
+/// task's running gate is signalled first (the way the loop's own stop signals one), and the
+/// task then goes to `failed.cancelled`.
 pub fn cancel(store: &Store, task_id: &str) -> Result<Canceled, Error> {
     let _ = reconcile(store)?;
+    cancel_task(store, task_id)
+}
+
+/// `radian arc cancel <plan>`: end every open task of a plan and the plan itself.
+///
+/// In this order: the plan's `auto` becomes `off`; every task in `todo`, `doing` or `review`
+/// is cancelled by the task form's rules; a task in `done` or `failed` is left alone; the
+/// plan's `status` becomes `cancelled`. A task left at `doing.reconciling` does not stop the
+/// plan from being cancelled.
+pub fn cancel_plan(store: &Store, plan_id: &str) -> Result<PlanCanceled, Error> {
+    let loaded = store.load_plan(plan_id)?;
+    if loaded.changed_outside_arc {
+        return Err(Error::ChangedOutsideArc(plan_id.to_owned()));
+    }
+    if loaded.item.is_cancelled() {
+        return Err(crate::store::cancelled_plan(plan_id));
+    }
+    store.change_plan(plan_id, |plan| {
+        if plan.is_cancelled() {
+            return Err(crate::store::cancelled_plan(&plan.id));
+        }
+        plan.auto = "off".to_owned();
+        Ok(())
+    })?;
+    // One reconcile for the whole plan, then each task's cancel uses its current state.
+    let _ = reconcile(store)?;
+    let plan = store.load_plan(plan_id)?.item;
+    let mut tasks = Vec::new();
+    for task_id in &plan.tasks {
+        if !store.task_exists(task_id) {
+            continue;
+        }
+        let task = store.load_task(task_id)?;
+        // arc does not act on a file that changed outside it; the rest of the plan still ends.
+        if task.changed_outside_arc {
+            continue;
+        }
+        if !matches!(
+            task.item.state,
+            model::TaskState::Todo | model::TaskState::Doing | model::TaskState::Review
+        ) {
+            continue;
+        }
+        match cancel_task(store, task_id) {
+            Ok(canceled) => tasks.push(canceled),
+            // The task moved between the read and the cancel (a merge finished it, say):
+            // `done` and `failed` are left as they are.
+            Err(Error::Refused(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    store.change_plan(plan_id, |plan| {
+        if plan.is_cancelled() {
+            return Err(crate::store::cancelled_plan(&plan.id));
+        }
+        plan.status = "cancelled".to_owned();
+        plan.auto = "off".to_owned();
+        Ok(())
+    })?;
+    Ok(PlanCanceled {
+        plan: plan_id.to_owned(),
+        tasks,
+    })
+}
+
+/// One task's cancel, after the caller's reconcile: the task form of [`cancel_any`].
+fn cancel_task(store: &Store, task_id: &str) -> Result<Canceled, Error> {
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
@@ -369,6 +490,7 @@ pub fn cancel(store: &Store, task_id: &str) -> Result<Canceled, Error> {
                 Ok(())
             })?;
             Ok(Canceled {
+                task: task_id.to_owned(),
                 applied: None,
                 state: "failed".to_owned(),
                 phase: "cancelled".to_owned(),
@@ -399,20 +521,57 @@ pub fn cancel(store: &Store, task_id: &str) -> Result<Canceled, Error> {
             })?;
             let after = store.load_task(task_id)?.item;
             Ok(Canceled {
+                task: task_id.to_owned(),
                 applied: None,
                 state: after.state.as_str().to_owned(),
                 phase: after.phase,
             })
         }
         model::TaskState::Doing => cancel_running(store, task_id, &task),
-        model::TaskState::Review | model::TaskState::Done | model::TaskState::Failed => {
-            Err(Error::Refused(format!(
-                "task `{task_id}` is `{}.{}`; only a `todo` or `doing` task can be cancelled",
-                task.state.as_str(),
-                task.phase
-            )))
+        model::TaskState::Review => {
+            // A gate the task is waiting on is stopped the way the loop's own stop stops it,
+            // before the task moves (ADR 0048 decisions 9 and 10).
+            if gate_running(store, task_id) {
+                let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
+                crate::gate::background::stop(store, task_id, grace);
+            }
+            store.change_task(task_id, |task| {
+                if task.state != model::TaskState::Review {
+                    return Err(Error::Refused(format!(
+                        "task `{}` is `{}.{}`; only a `todo`, `doing` or `review` task can be cancelled",
+                        task.id,
+                        task.state.as_str(),
+                        task.phase
+                    )));
+                }
+                task.state = model::TaskState::Failed;
+                task.phase = "cancelled".to_owned();
+                task.retry_at = None;
+                Ok(())
+            })?;
+            Ok(Canceled {
+                task: task_id.to_owned(),
+                applied: None,
+                state: "failed".to_owned(),
+                phase: "cancelled".to_owned(),
+            })
         }
+        model::TaskState::Done | model::TaskState::Failed => Err(Error::Refused(format!(
+            "task `{task_id}` is `{}.{}`; only a `todo`, `doing` or `review` task can be cancelled",
+            task.state.as_str(),
+            task.phase
+        ))),
     }
+}
+
+/// Whether a gate is running for the task: its record is `started` or `running`.
+fn gate_running(store: &Store, task: &str) -> bool {
+    crate::gate::background::read(store, task).is_some_and(|record| {
+        matches!(
+            record.status.as_str(),
+            crate::gate::background::STARTED | crate::gate::background::RUNNING
+        )
+    })
 }
 
 fn cancel_running(store: &Store, task_id: &str, task: &model::TaskFile) -> Result<Canceled, Error> {
@@ -449,6 +608,7 @@ fn cancel_running(store: &Store, task_id: &str, task: &model::TaskFile) -> Resul
         )?;
         if applied.ignored.is_none() {
             return Ok(Canceled {
+                task: task_id.to_owned(),
                 applied: Some(applied),
                 state: "failed".to_owned(),
                 phase: "cancelled".to_owned(),
@@ -468,6 +628,7 @@ fn cancel_running(store: &Store, task_id: &str, task: &model::TaskFile) -> Resul
     })?;
     let after = store.load_task(task_id)?.item;
     Ok(Canceled {
+        task: task_id.to_owned(),
         applied: None,
         state: after.state.as_str().to_owned(),
         phase: after.phase,

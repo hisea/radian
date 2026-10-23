@@ -549,13 +549,19 @@ fn task_claim_order(store: &Store) -> Result<Vec<String>, Error> {
     Ok(ids)
 }
 
-/// Every task in `review.rework_pending`, in claim order. A file that changed outside arc is
-/// skipped.
+/// Whether the task's plan is `cancelled`: the loop neither claims nor gates its tasks
+/// (ADR 0048 decisions 3 and 13).
+fn plan_is_cancelled(store: &Store, plan: &str) -> Result<bool, Error> {
+    Ok(store.load_plan(plan)?.item.is_cancelled())
+}
+
+/// Every task in `review.rework_pending`, in claim order. A file that changed outside arc and
+/// a task of a `cancelled` plan are skipped.
 fn rework_pending_tasks(store: &Store) -> Result<Vec<String>, Error> {
     let mut ids = Vec::new();
     for id in task_claim_order(store)? {
         let loaded = store.load_task(&id)?;
-        if loaded.changed_outside_arc {
+        if loaded.changed_outside_arc || plan_is_cancelled(store, &loaded.item.plan)? {
             continue;
         }
         if loaded.item.state == TaskState::Review && loaded.item.phase == "rework_pending" {
@@ -565,13 +571,13 @@ fn rework_pending_tasks(store: &Store) -> Result<Vec<String>, Error> {
     Ok(ids)
 }
 
-/// Every task in `review.verifying`, in claim order. A file that changed outside arc is
-/// skipped.
+/// Every task in `review.verifying`, in claim order. A file that changed outside arc and a task
+/// of a `cancelled` plan are skipped.
 fn verifying_tasks(store: &Store) -> Result<Vec<String>, Error> {
     let mut ids = Vec::new();
     for id in task_claim_order(store)? {
         let loaded = store.load_task(&id)?;
-        if loaded.changed_outside_arc {
+        if loaded.changed_outside_arc || plan_is_cancelled(store, &loaded.item.plan)? {
             continue;
         }
         if loaded.item.state == TaskState::Review && loaded.item.phase == "verifying" {
@@ -743,6 +749,10 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
     let mut lines = Vec::new();
     for view in plans_in_claim_order(store)? {
         let plan = &view.plan.item;
+        // A cancelled plan waits on nothing: the loop never serves it again.
+        if plan.is_cancelled() {
+            continue;
+        }
         let open: Vec<&crate::store::Loaded<model::TaskFile>> = view
             .tasks
             .iter()

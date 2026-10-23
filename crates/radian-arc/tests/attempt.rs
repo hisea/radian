@@ -744,6 +744,65 @@ fn kill(pid: u32, signal: &str) {
     let _ = status;
 }
 
+/// A stand-in wrapper for a `doing` task: a shell process that writes the attempt's
+/// `AttemptFinished` when it gets SIGTERM. Its pid and start time go into `identity.json`, the
+/// record `cancel` reads, so `cancel` signals exactly this process.
+fn fake_wrapper(repo: &Repo, store: &Store, task: &str, attempt: u32) -> std::process::Child {
+    let token = store
+        .load_task(task)
+        .expect("the task reads")
+        .item
+        .token
+        .expect("the claim wrote a token");
+    let run_dir = attempt_ops::run_dir(store, task, attempt);
+    std::fs::create_dir_all(&run_dir).expect("the run directory");
+    let staged = repo.root.join(format!("{task}-{attempt}-finished.json"));
+    std::fs::write(
+        &staged,
+        json!({
+            "type": "AttemptFinished",
+            "attempt_id": format!("{task}-{attempt}"),
+            "token": token,
+            "exit_code": 0,
+            "outcome": "cancelled",
+            "base_sha": null,
+            "head_sha": null,
+            "dirty": [],
+            "pushed": false,
+            "remote_sha": null,
+        })
+        .to_string(),
+    )
+    .expect("the staged finish record");
+    let finish = run_dir.join("attempt_finished.json");
+    let script = format!(
+        "trap 'cp \"{}\" \"{}\"; exit 0' TERM; while :; do sleep 0.05; done",
+        staged.display(),
+        finish.display()
+    );
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .spawn()
+        .expect("a fake wrapper");
+    let dir = repo.attempt_dir(task, attempt);
+    std::fs::create_dir_all(&dir).expect("the attempt directory");
+    let identity = json!({
+        "attempt_id": format!("{task}-{attempt}"),
+        "token": "t",
+        "pid": child.id(),
+        "process_started_at": pid_start_or_empty(child.id()),
+        "wrapper_pid": child.id(),
+        "wrapper_process_started_at": pid_start_or_empty(child.id()),
+    });
+    std::fs::write(dir.join("identity.json"), identity.to_string()).expect("the identity record");
+    child
+}
+
+fn plan_is(store: &Store, plan: &str, status: &str) -> bool {
+    store.load_plan(plan).expect("the plan reads").item.status == status
+}
+
 /// The owner's path: `radian arc start` claims, runs the wrapper, applies a completed,
 /// pushed attempt, and continues into the gate. The start process waits until the attempt
 /// ends and prints the attempt's line and the verification's line.
@@ -1045,6 +1104,244 @@ fn a_reused_pid_with_another_start_time_is_not_signalled() {
     );
     kill(pid, "-9");
     let _ = stand_in.wait();
+}
+
+/// `radian arc cancel <plan>` ends every task in `todo`, `doing` or `review` at
+/// `failed.cancelled`, leaves `done` and `failed` tasks alone, sets `auto` `off` and the
+/// plan's `status` `cancelled`, prints one line per changed task and the plan, and refuses a
+/// second cancel.
+#[test]
+fn cancelling_a_plan_ends_every_open_task_and_the_plan() {
+    let repo = Repo::new("cancel-plan");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    tune(
+        &repo,
+        &[("cancel_grace_secs = 10", "cancel_grace_secs = 1")],
+    );
+    let plan = new_plan(&store, "plan");
+    let done = new_task(&store, &plan, "done", &[]);
+    let todo = new_task(&store, &plan, "todo", &[]);
+    let doing = new_task(&store, &plan, "doing", &[]);
+    let review = new_task(&store, &plan, "review", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+
+    for (task, state, phase) in [
+        (&done, TaskState::Done, "merged"),
+        (&review, TaskState::Review, "awaiting_human"),
+    ] {
+        store
+            .change_task(task, |task| {
+                task.state = state;
+                task.phase = phase.to_owned();
+                Ok(())
+            })
+            .expect("the fixture state");
+    }
+
+    attempt_ops::claim(&store, &doing).expect("claim the doing task");
+    store
+        .change_task(&doing, |task| {
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("running");
+    let mut wrapper = fake_wrapper(&repo, &store, &doing, 1);
+
+    let canceled = attempt::cancel_any(&store, &plan).expect("the plan cancels");
+    let attempt::Cancelled::Plan(canceled) = canceled else {
+        panic!("a plan id takes the plan form");
+    };
+    assert_eq!(canceled.tasks.len(), 3, "{canceled:?}");
+    for task in [&todo, &doing, &review] {
+        assert_eq!(
+            state(&store, task),
+            ("failed".to_owned(), "cancelled".to_owned()),
+            "{task}"
+        );
+    }
+    assert_eq!(
+        state(&store, &done),
+        ("done".to_owned(), "merged".to_owned()),
+        "a merged task is left alone"
+    );
+    let stored = store.load_plan(&plan).expect("the plan reads").item;
+    assert_eq!(stored.status, "cancelled");
+    assert_eq!(stored.auto, "off");
+    let lines = canceled.lines();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    for task in [&todo, &doing, &review] {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == &format!("{task} failed.cancelled")),
+            "{task} has its line: {lines:?}"
+        );
+    }
+    assert_eq!(lines.last(), Some(&format!("{plan} cancelled")));
+
+    let again = repo.radian(&["arc", "cancel", &plan]);
+    assert_eq!(again.code, 3, "{again:?}");
+    assert!(
+        again.stderr.contains("cancelled"),
+        "the refusal names the status: {}",
+        again.stderr
+    );
+    let _ = wrapper.kill();
+    let _ = wrapper.wait();
+}
+
+/// A `review` task's running gate is signalled before the task moves: `cancel` stops the
+/// process the gate record names, then ends the task at `failed.cancelled`.
+#[test]
+fn cancelling_a_review_task_signals_its_running_gate_first() {
+    let repo = Repo::new("cancel-review-gate");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    tune(
+        &repo,
+        &[("cancel_grace_secs = 10", "cancel_grace_secs = 1")],
+    );
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    store
+        .change_task(task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "awaiting_human".to_owned();
+            Ok(())
+        })
+        .expect("review");
+
+    let mut gate = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("a stand-in gate");
+    let dir = repo.arc().join("runs").join(task);
+    std::fs::create_dir_all(&dir).expect("the run directory");
+    std::fs::write(
+        dir.join("gate.json"),
+        json!({
+            "kind": "verify",
+            "attempt": format!("{task}-1"),
+            "status": "running",
+            "pid": gate.id(),
+            "process_started_at": pid_start_or_empty(gate.id()),
+        })
+        .to_string(),
+    )
+    .expect("the gate record");
+
+    let canceled = attempt::cancel(&store, task).expect("cancel");
+    assert_eq!(
+        (canceled.state.as_str(), canceled.phase.as_str()),
+        ("failed", "cancelled")
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if gate.try_wait().expect("try_wait").is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the gate outlived the cancel");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `cancel` resolves its id as `reset-budget` does: an id that names both a plan and a task is
+/// refused (exit 3) and changes nothing.
+#[test]
+fn an_id_that_names_a_plan_and_a_task_is_refused_by_cancel() {
+    let (_repo, store) = setup("cancel-both");
+    let (plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    std::fs::copy(
+        store.root().join("tasks").join(format!("{}.md", tasks[0])),
+        store.root().join("tasks").join(format!("{plan}.md")),
+    )
+    .expect("a task file under the plan's id");
+
+    let error = attempt::cancel_any(&store, &plan).expect_err("the id names both");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(
+        error.message().contains("names both"),
+        "{}",
+        error.message()
+    );
+    assert!(!plan_is(&store, &plan, "cancelled"), "nothing changed");
+}
+
+/// A cancelled plan is final: `confirm`, `auto`, `priority`, `start`, `reverify`,
+/// `reset-budget`, `add task` and the MCP `add_task`, `update_plan` and `add_rework` tools
+/// all refuse it, naming the status.
+#[test]
+fn a_cancelled_plan_refuses_every_command_that_would_change_it() {
+    let (_repo, store) = setup("cancel-refusals");
+    let plan = new_plan(&store, "plan");
+    let task = new_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    attempt::cancel_any(&store, &plan).expect("the plan cancels");
+    assert!(plan_is(&store, &plan, "cancelled"));
+
+    let refusals = [
+        plan_ops::confirm(&store, &plan).expect_err("confirm"),
+        plan_ops::set_auto(&store, &plan, "run").expect_err("auto"),
+        plan_ops::set_priority(&store, &plan, "P1").expect_err("priority"),
+        store
+            .add_task(&plan, "new", "New", vec![], false, vec![], "brief")
+            .expect_err("add task"),
+        attempt_ops::reset_budget(&store, &plan).expect_err("reset-budget"),
+        attempt::start(&store, &task).expect_err("start"),
+    ];
+    for error in refusals {
+        assert_eq!(error.exit(), Exit::State, "{}", error.message());
+        assert!(error.message().contains("cancelled"), "{}", error.message());
+    }
+
+    // A task of the plan, set back to `review`, is refused by `reverify` and by the lead's
+    // rework tool; the plan itself by `update_plan`.
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "verifying".to_owned();
+            task.attempt = 1;
+            task.attempt_id = Some(format!("{}-1", task.id));
+            task.token = Some("t".to_owned());
+            task.head_sha = Some("b".repeat(40));
+            Ok(())
+        })
+        .expect("review.verifying");
+    let reverify = radian_arc::review::reverify(&store, &task).expect_err("reverify");
+    assert_eq!(reverify.exit(), Exit::State);
+    assert!(
+        reverify.message().contains("cancelled"),
+        "{}",
+        reverify.message()
+    );
+    store
+        .change_task(&task, |task| {
+            task.phase = "awaiting_human".to_owned();
+            Ok(())
+        })
+        .expect("review.awaiting_human");
+
+    let server = radian_arc::mcp::ArcServer::new(store.clone());
+    let call = |name: &str, arguments: serde_json::Value| {
+        server
+            .dispatch(name, arguments.as_object().cloned())
+            .expect_err("the tool refuses")
+    };
+    let add_task = call(
+        "add_task",
+        json!({"plan": plan, "slug": "mcp", "title": "T", "brief": "b"}),
+    );
+    assert!(add_task.contains("cancelled"), "{add_task}");
+    let update_plan = call(
+        "update_plan",
+        json!({"plan": plan, "change_record": "a change"}),
+    );
+    assert!(update_plan.contains("cancelled"), "{update_plan}");
+    let add_rework = call("add_rework", json!({"task": task, "brief": "again"}));
+    assert!(add_rework.contains("cancelled"), "{add_rework}");
 }
 
 /// Reconcile after a restart: a live wrapper is left alone; a finished wrapper's result is

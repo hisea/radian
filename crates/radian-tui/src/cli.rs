@@ -473,15 +473,18 @@ enum ArcCommand {
         command: ArcAddCommand,
     },
 
-    /// List plans, each with its tasks in order. Merged history is hidden unless `--all`.
+    /// List plans, each with its tasks in order. Merged history and cancelled plans are
+    /// hidden unless `--all`.
     List {
         /// Only this plan's id: a 1 to 4 letter prefix, four digits, a dash and a slug.
         #[arg(long, value_name = "ID")]
         plan: Option<String>,
-        /// Show every plan and every task, including finished plans and merged tasks.
+        /// Show every plan and every task, including finished and cancelled plans and merged
+        /// tasks.
         #[arg(long)]
         all: bool,
-        /// Print JSON. It always holds every plan and task.
+        /// Print JSON. Without `--all` it follows the same filter: a cancelled plan is left
+        /// out.
         #[arg(long)]
         json: bool,
     },
@@ -635,11 +638,11 @@ enum ArcCommand {
         task: String,
     },
 
-    /// Stop a task: a `todo` task ends, a `doing` task's wrapper is signalled.
+    /// Stop a task, or end every open task of a plan and the plan itself.
     Cancel {
-        /// The task id.
-        #[arg(value_name = "TASK")]
-        task: String,
+        /// The task id, or the plan id.
+        #[arg(value_name = "ID")]
+        id: String,
     },
 
     /// Move a budget-paused task, or every paused task of a plan, back to `todo.ready`.
@@ -774,7 +777,7 @@ impl ArcCommand {
             ArcCommand::Pause { plan } => ArcRun::Pause { plan },
             ArcCommand::Start { task } => ArcRun::Start { task },
             ArcCommand::Reverify { task } => ArcRun::Reverify { task },
-            ArcCommand::Cancel { task } => ArcRun::Cancel { task },
+            ArcCommand::Cancel { id } => ArcRun::Cancel { id },
             ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
             ArcCommand::Merge { task } => ArcRun::Merge { task },
             ArcCommand::Reject { task, note } => ArcRun::Reject { task, note },

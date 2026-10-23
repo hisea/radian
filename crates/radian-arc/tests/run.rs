@@ -370,6 +370,58 @@ fn auto_off_starts_nothing_but_still_verifies() {
     );
 }
 
+/// A cancelled plan is final for the loop: even when an outside edit puts a task back at
+/// `todo.ready` and the plan back at `auto` `run`, a pass claims nothing and starts no gate.
+#[test]
+fn a_run_pass_claims_and_gates_nothing_from_a_cancelled_plan() {
+    let repo = Repo::new("run-cancelled");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "cancelled");
+    let ready = add_task(&store, &plan, "ready", &[]);
+    let verifying = add_task(&store, &plan, "verify", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    attempt::cancel_any(&store, &plan).expect("the plan cancels");
+
+    // The state only an outside change can leave: an open task and `auto` `run`.
+    store
+        .change_plan(&plan, |plan| {
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .expect("auto run");
+    store
+        .change_task(&ready, |task| {
+            task.state = TaskState::Todo;
+            task.phase = "ready".to_owned();
+            Ok(())
+        })
+        .expect("ready");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &verifying);
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(
+        !run.stdout.contains("started"),
+        "a cancelled plan's ready task is not claimed:\n{}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("verify started"),
+        "a cancelled plan's task is not gated:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        state(&store, &ready),
+        ("todo".to_owned(), "ready".to_owned())
+    );
+    assert_eq!(
+        state(&store, &verifying),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+}
+
 /// A second `run` while one holds `runner.lock` exits 4 at once.
 #[test]
 fn a_second_run_while_one_holds_the_lock_exits_four() {

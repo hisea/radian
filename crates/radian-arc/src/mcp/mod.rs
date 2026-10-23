@@ -107,7 +107,9 @@ impl ArcServer {
             "list" => {
                 let plan = args.optional_string("plan")?;
                 args.finish()?;
-                store::cli::list_json(&self.store, plan.as_deref()).map_err(reason)
+                // The manual's `list --json`: without `--all` a cancelled plan is hidden,
+                // and the MCP `list` tool has no `--all`.
+                store::cli::list_json(&self.store, plan.as_deref(), false).map_err(reason)
             }
             "show" => {
                 let id = args.required_string("id")?;
