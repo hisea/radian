@@ -41,6 +41,7 @@
 | `tool-friction.md` | decided | 0039、0037 | `write` 在工作区内自动建缺失的父目录（按 fd `mkdirat`，链接仍拒绝）；`shell` 的 timeout / output clamp 提示从 stderr 段之后移到 `exit code:` 之前并写明两个数字（一天 34 次被读成超时，实际 0 次超时） |
 | `patch-card-edits.md` | decided | 0028 | TUI 的 `patch` 卡片只认 `old`/`new` 形式，`edits` 形式头部恒为 `+0 −0` 且没有 diff 体；结果的每个 hunk 加 `edit` 编号，卡片按 hunk 求和与取文本 |
 | `arc-start-skips-retry-wait.md` | decided | 0048 | owner 的 `radian arc start` 也接受 `todo.retry_wait`，当场领取不等退避；调度循环照旧等 `retry_at` |
+| `arc-plan-profile.md` | decided | 0048 | plan 选自己的 gate profile（lead 在 `add_plan` 设，confirm 后不可改）；只改文档的 plan 可以用轻的 profile |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
