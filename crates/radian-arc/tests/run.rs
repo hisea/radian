@@ -508,6 +508,112 @@ fn max_auto_rework_pauses_the_plan_and_sets_auto_off() {
     );
 }
 
+/// Publishes `work/<task>` with a commit on `feature.txt`, sets the task to
+/// `review.verifying`, and moves main with a conflicting `feature.txt` in the main clone. The
+/// gate's candidate build then conflicts. Returns the moved main.
+fn a_conflicting_main(repo: &Repo, store: &Store, plan: &str, task: &str) -> String {
+    publish_verifying(repo, store, plan, task);
+    repo.git(&["checkout", "main"]);
+    write(&repo.clone.join("feature.txt"), "main side\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "main side"]);
+    repo.git(&["push", "origin", "main"]);
+    repo.git(&["rev-parse", "HEAD"]).trim().to_owned()
+}
+
+/// A `commands` conflict at the gate returns the task to `todo.ready` by itself, with the brief
+/// arc wrote and its own line; `auto_rework` is untouched. The blocked dependency keeps the
+/// next attempt from being claimed, so the assertions see the state the conflict left.
+/// Mutations: drop the brief, count the rework in `auto_rework`, or use `base_sha` as the
+/// automatic path's trigger — the paths and the line fail.
+#[test]
+fn a_commands_conflict_returns_the_task_to_todo_ready_by_itself() {
+    let repo = Repo::new("run-conflict");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "conflict");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let task = add_task(&store, &plan, "work", &[&blocker]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    store
+        .change_task(&blocker, |task| {
+            task.phase = "blocked".to_owned();
+            Ok(())
+        })
+        .expect("the blocker waits");
+    commands(&repo, "true");
+    let moved = a_conflicting_main(&repo, &store, &plan, &task);
+
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task) == ("todo".to_owned(), "ready".to_owned())
+    });
+    assert!(
+        run.contains(&format!(
+            "{task} conflict with main -> todo.ready (automatic rework)"
+        )),
+        "{run}"
+    );
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        stored.auto_rework, 0,
+        "a conflict rework raised auto_rework: {run}"
+    );
+    assert_eq!(plan_auto(&store, &plan), "run", "{run}");
+    assert_eq!(stored.attempt, 1, "the next attempt was claimed: {run}");
+    assert!(
+        !repo.attempt_dir(&task, 2).exists(),
+        "the next attempt was claimed"
+    );
+    let short = &moved[..7];
+    assert!(
+        stored.body.contains("## Rework 2 (conflict with main)"),
+        "{}",
+        stored.body
+    );
+    assert!(
+        stored
+            .body
+            .contains(&format!("conflicted with main at `{short}` in `commands`")),
+        "{}",
+        stored.body
+    );
+    assert!(stored.body.contains("- feature.txt"), "{}", stored.body);
+}
+
+/// A plan at its automatic rework limit is not paused by a conflict: the conflict rework is
+/// not an automatic rework. Mutation: count it and the plan pauses (`auto` becomes `off`).
+#[test]
+fn a_plan_at_its_auto_rework_limit_is_not_paused_by_a_conflict() {
+    let repo = Repo::new("run-conflict-limit");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "conflict-limit");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let task = add_task(&store, &plan, "work", &[&blocker]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    store
+        .change_task(&blocker, |task| {
+            task.phase = "blocked".to_owned();
+            Ok(())
+        })
+        .expect("the blocker waits");
+    tune(&repo, "max_auto_rework = 2", "max_auto_rework = 0");
+    commands(&repo, "true");
+    a_conflicting_main(&repo, &store, &plan, &task);
+
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task) == ("todo".to_owned(), "ready".to_owned())
+    });
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(stored.auto_rework, 0, "{run}");
+    assert_eq!(
+        plan_auto(&store, &plan),
+        "run",
+        "the conflict paused the plan: {run}"
+    );
+    assert!(!run.contains("paused"), "{run}");
+}
+
 /// A plan budget pauses the plan; `run` respects the pause and starts nothing more.
 #[test]
 fn run_respects_a_plan_budget_pause() {
