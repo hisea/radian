@@ -96,7 +96,7 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
 | `doing.running` | `doing.reconciling` | arc cannot prove the state of the worker. arc does not start the task again. A person decides. |
 | `doing.running` | `todo.paused_budget` | A task or plan budget is used up. Only `reset-budget` returns the task to `ready`. |
 | `review.verifying` | `review.awaiting_human` | Each required stage passed for the same `verified_sha`. arc records `verdict_set_digest`. |
-| `review.verifying` | `review.rework_pending` | A `commands` or `mutation` stage failed. arc sends the result to the lead. |
+| `review.verifying` | `review.rework_pending` | A `commands`, `mutation` or `review` stage failed. arc sends the result to the lead. |
 | `review.awaiting_human` | `review.integrating` | The owner merges (or the plan is at auto level `merge`) with the sha equal to `verified_sha` and the digest unchanged. |
 | `review.integrating` | `review.ready_to_merge` | The integration stage passed against the current main as `base_sha`. |
 | `review.ready_to_merge` | `done.merged` | Main is still `base_sha`, main fast-forwards to `candidate_sha`, the push to `origin` succeeds, and `origin/main` contains `head_sha`. |
@@ -151,6 +151,17 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 - `commands` runs only the fixed commands of the profile on a separate checkout of the candidate. A brief cannot add a shell command.
 - `commands` and `mutation` are exclusive: one at a time, in separate trees, with no shared build state.
 - `review` is a read-only radian session. It is not the worker session.
+  For each verification it runs one `radian exec` in its own checkout of the verification candidate, with the candidate as the workspace and `--tools read,grep,glob`: no shell tool, no write tool, and no MCP tool is mounted. Its model route is `[gate.review] exec_args` (default: `[worker] exec_args`), and `[gate.review] timeout_secs` is its wall-time limit (default 900).
+  The prompt is built in: the task's brief, the commit list and the diff `base..verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the ADRs the brief names).
+  `[gate.review] prompt_file` is appended to it.
+  The session ends with one fenced `json` block, and arc parses the last such block: `{"summary": string, "blocking": [string], "suggestions": [string], "verified": [string]}`.
+  `summary` is 2 to 6 sentences on what the change does.
+  An empty `blocking` passes the stage; any item fails it with reason `review_blocking` and the rework reason lists the items.
+  `suggestions` and `verified` never fail the stage.
+  No parsable block, a missing field, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output` (or `review_timeout` when the last run timed out), and the verdict records both session ids.
+  The verdict records the four fields, the session ids and their cost beside the usual `sha`, `main_sha` and `candidate_sha`.
+  `review` runs after `commands` passes and before `human`; a profile that lists both must list `commands` first.
+  Its verdict is bound to `verified_sha` and is part of `verdict_set_digest`, and `radian arc reverify` runs it again.
 - `integration` merges `head_sha` onto the current main in a temporary tree and runs the key commands of the profile on the result. It records `base_sha` and `candidate_sha`. When main is still the task's `base_sha`, `candidate_sha` is `head_sha`. Otherwise it is a merge commit of `head_sha` onto main. arc never rebases a task branch, because a rebase changes the sha that the gate verified.
 - Each stage runs in its own checkout under `<repository>/.radian/arc/gates/<stage>/`.
 - The default profile is `commands` (required), then `human` (required). The radian repository profile is `commands` (required), `mutation`, `review`, then `human` (required).
@@ -187,7 +198,7 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 
 ### 14. v0 scope
 
-v0 runs on one host. Concurrency defaults to 1 task at a time. The v0 gate stages are `commands`, `human`, and `integration`; `mutation`, `review`, and `ci` come later. The host fields stay in the file format and are not used.
+v0 runs on one host. Concurrency defaults to 1 task at a time. The v0 gate stages are `commands`, `review`, `human`, and `integration`; `mutation` and `ci` come later. The host fields stay in the file format and are not used.
 
 v0 does not have: a resident daemon (`radian arc run --watch` is not one: it is a foreground loop that a person starts and stops); messages to a running worker (corrections go through rework); workers that read or write the backlog or hold the push credential; resume on a different host; more than one scheduling loop; a separate clone per task; automatic rework briefs written by arc; a gate language; load-based scheduling; worker kinds other than `radian exec`; plan branches or plan merges.
 
@@ -204,6 +215,12 @@ v0 does not have: a resident daemon (`radian arc run --watch` is not one: it is 
 - prints the command that registers `radian arc mcp` with the lead. It does not change the lead's configuration.
 
 The gate commands in `config.toml` are empty or the default profile. The owner writes them.
+
+The `[gate.review]` table configures the `review` stage:
+
+- `exec_args` (array of strings): the `radian exec` arguments of the review session, after the stage's own arguments. Unset, it is `[worker] exec_args`. It may not repeat an argument the stage sets (`--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p`).
+- `prompt_file` (string): a path relative to the repository root. It is appended to the built-in prompt. Unset: only the built-in prompt.
+- `timeout_secs` (integer, default 900): the wall-time limit of one review session; `0` waits forever.
 
 - **Tracking is the owner's choice.** With `--track`, git sees `config.toml`, `plans/`, and `tasks/`, and the owner commits them when the owner wants. arc never commits them. A checkout or pull that changes a plan or task file is an outside change (decision 5). The ledger, the runs, the attempt records, the locks, and the worktrees are always local.
 - The worktrees are inside the repository directory, so they get the repository's trust decision (ADR 0031) and need no extra flag.

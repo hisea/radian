@@ -141,6 +141,9 @@ impl IntegrationRun<'_> {
             candidate_sha: candidate,
             conflict_paths,
             approver: None,
+            review: None,
+            review_session_ids: Vec::new(),
+            review_cost_micros: None,
         };
         verdict.write_new(&verdict_path(
             self.repository,

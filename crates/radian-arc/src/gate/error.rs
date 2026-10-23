@@ -82,4 +82,13 @@ pub enum GateError {
     /// A profile lists the same stage twice.
     #[error("stage {0} is listed twice")]
     DuplicateStage(crate::gate::Stage),
+
+    /// A profile lists a stage before the stage it depends on.
+    #[error("stage {stage} must come after {after} in a profile")]
+    StageOrder {
+        /// The stage that is too early.
+        stage: crate::gate::Stage,
+        /// The stage it must follow.
+        after: crate::gate::Stage,
+    },
 }

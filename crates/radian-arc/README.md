@@ -58,6 +58,11 @@ task_prefix = "TK"           # 1 to 4 uppercase letters; the first letters of a 
 profile = "default"
 command_timeout_secs = 3600
 
+[gate.review]
+exec_args = ["--model", "m"]  # unset: `[worker] exec_args`
+prompt_file = "review.md"      # unset: the built-in prompt only
+timeout_secs = 900
+
 [gate.profiles.default]
 stages = [{ stage = "commands", required = true }, { stage = "human", required = true }]
 commands = []        # shell command lines, run in order by the `commands` stage
@@ -65,9 +70,11 @@ key_commands = []    # shell command lines, run on the merge candidate by `integ
 ```
 
 - `Stage` is the closed set `commands`, `mutation`, `review`, `ci`, `human` plus
-  `integration`. `integration` always runs at merge and a profile cannot list it;
-  `Profile::validate` rejects it and duplicate stages. `LISTED_STAGES` is the closed list the
-  parser, `Profile::validate` and the manual's drift test read; `STAGE_NAMES` is its names.
+  `integration`. `integration` always runs at merge and a profile cannot list it.
+  `LISTED_STAGES` is the closed list the parser, `Profile::validate` and the manual's drift
+  test read; `STAGE_NAMES` is its names.
+- `Profile::validate` rejects `integration`, a duplicate stage, and `review` listed before
+  `commands` (the order ADR 0048 decision 10 fixes).
 - A profile stage's `required` defaults to `true` when the field is omitted.
 - `effective_stages(profile, extra)` adds a task's extra stages in their order. An existing
   stage merges into its profile entry and can only raise `required`: an extra stage can never
@@ -353,9 +360,21 @@ attempt (`review::verify`): the remote's `work/<task>` must still equal the task
 `head_sha`, then the effective stages of the profile plus the task's extra stages run in
 order, except `human`, each through the gate on the verification candidate (`candidate_for`:
 `verified_sha` when the remote main is its ancestor, else a merge of `verified_sha` onto the
-remote main). This build runs only `commands`; a profile or task that lists `mutation`,
-`review` or `ci` is refused with `stage <name> is not built yet` and the task stays in
+remote main). This build runs `commands` and `review`; a profile or task that lists `mutation`
+or `ci` is refused with `stage <name> is not built yet` and the task stays in
 `review.verifying`. An existing verdict for the current attempt and stage is reused.
+
+`review` (`ReviewRun`) is a read-only session on the same candidate, after `commands` and
+before `human` (a profile that lists both must list `commands` first). It runs one
+`radian exec` per run in `gates/review/` with `--tools read,grep,glob`, no `--mcp-config` and
+`--no-config-mcp`, a model route from `[gate.review] exec_args` (default
+`[worker] exec_args`), and `[gate.review] timeout_secs`. The prompt is built from the brief,
+the commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The
+last fenced `json` block of the final message is parsed; an empty `blocking` list passes,
+any item fails with `review_blocking`. Unusable output (no block, a missing field, a timeout,
+a session error) runs the session once more; two unusable runs fail with `review_output`, or
+`review_timeout` when the last run timed out. The verdict records `review`,
+`review_session_ids` and `review_cost_micros`.
 
 Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
 such a failure, with reason `conflict` and the paths. When every required non-`human` stage

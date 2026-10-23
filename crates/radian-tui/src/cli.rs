@@ -2565,6 +2565,30 @@ mod tests {
         );
     }
 
+    /// The review stage's own arguments are the ones the `gate.review.exec_args` row names:
+    /// the row's Allowed values cell lists exactly `radian_arc::gate::OWNED_EXEC_ARGS`, in
+    /// order. The source is the code's one list, so a new or removed owned argument fails
+    /// here, and so does a row that names an argument the stage does not own.
+    #[test]
+    fn the_owned_review_arguments_are_the_config_rows_list() {
+        let doc = arc_md();
+        let table = arc_table(&doc, "## `config.toml`");
+        let row = config_key_row(&table, "gate.review.exec_args")
+            .expect("arc.md's config table has a `gate.review.exec_args` row");
+        let allowed = row.get(3).expect("the row has an Allowed values cell");
+        let documented: Vec<&str> = allowed
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|token| token.starts_with('-'))
+            .collect();
+        assert_eq!(
+            documented,
+            radian_arc::gate::OWNED_EXEC_ARGS,
+            "arc.md's `gate.review.exec_args` row lists the stage's owned arguments: {row:?}"
+        );
+    }
+
     /// Every attempt failure class appears in the Class cell of the table under
     /// `## Failures, retries and the budget`. The source is
     /// `radian_arc::attempt::FAILURE_CLASSES`.

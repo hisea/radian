@@ -94,6 +94,9 @@ impl CommandRun<'_> {
             candidate_sha: candidate.candidate_sha,
             conflict_paths: candidate.conflict_paths,
             approver: None,
+            review: None,
+            review_session_ids: Vec::new(),
+            review_cost_micros: None,
         };
         verdict.write_new(&verdict_path(
             self.repository,
@@ -247,7 +250,7 @@ fn run_one(
 }
 
 #[cfg(unix)]
-fn kill_group(pid: u32) {
+pub(crate) fn kill_group(pid: u32) {
     // SAFETY: `kill` is a syscall with no memory operands; a negative pid signals the
     // process group whose id is `pid`, which `process_group(0)` made the child lead.
     // A group that already exited yields ESRCH, which is ignored.
