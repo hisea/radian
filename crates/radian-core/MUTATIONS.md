@@ -1,5 +1,7 @@
 # Mutation checks — radian-core
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 ## Rate-limit headers on `ModelResponseReceived` (ADR 0027 slice ④, 2026-10-17)
 
 Base `c09b614` · branch `dogfood/footer-s4`. Each mutation was applied in place, only the catching

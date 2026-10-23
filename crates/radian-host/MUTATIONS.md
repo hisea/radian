@@ -1,5 +1,7 @@
 # `radian-host` mutation record (provider selection + shared describe)
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 Base: `47ede1a` · one-shot worktree `/tmp/anthost-mut` (created from HEAD, deleted after) ·
 each mutation run with `--no-fail-fast`; the file was restored from a copy after each and
 `git status --short` was empty at the end.

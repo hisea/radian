@@ -1,5 +1,7 @@
 # `radian-arc` mutation record (gate slice, ADR 0048)
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 Base: `201f1bc6` for M1–M5; `0352b129` for M6–M7 (the environment-isolation change landed
 between them); the fix-round commits for M8–M12. Each mutation was applied to the committed
 file, run with `cargo nextest run -p radian-arc --no-fail-fast`, restored from a copy under

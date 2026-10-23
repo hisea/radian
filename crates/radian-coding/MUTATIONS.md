@@ -1,5 +1,7 @@
 # `radian-coding` mutation record (Phase 3 coding tools)
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 Base: `0a8dda4` · one-shot worktree `/tmp/tools-mut` (created from HEAD, deleted after) ·
 every mutation run with `cargo test -q -p radian-coding --no-fail-fast`; `git checkout --`
 after each; `git status --short` empty at the end.

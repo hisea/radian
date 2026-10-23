@@ -1,5 +1,7 @@
 # `agent-provider-openai-compatible` mutation record
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 ## 网络异常矩阵（resilience，2026-10-16）
 
 一次性 worktree `/tmp/resil-mut`（从 `20a8ac7` 创建，用完删除），`--no-fail-fast`，每个变异后从副本还原。

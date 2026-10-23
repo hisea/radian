@@ -1,5 +1,7 @@
 # `radian-memory` mutation record (ADR 0021)
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 Base: `75e31a5` · one-shot worktree `/tmp/memstore-mut` (created from HEAD, deleted after) ·
 each mutation run with `cargo test -p radian-memory --no-fail-fast`, then `git checkout -- .`;
 `git status --short` empty at the end.

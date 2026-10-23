@@ -1,5 +1,7 @@
 # `radian-exec` sessions-on-disk mutation record (Phase 2 / B)
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 Base: `3451dc1` · one-shot worktree `/tmp/cli-mut` (deleted after) · each mutation run with
 `cargo test -q -p radian-exec --test cli --no-fail-fast`; `git checkout --` after each;
 `git status --short` empty at the end.
