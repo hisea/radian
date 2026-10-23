@@ -334,12 +334,35 @@ fn input_object(arguments: &Value) -> Value {
 }
 
 fn tool_result_block(result: &ToolResult) -> Value {
-    let text = plain_text(&result.content);
     let mut block = Map::new();
     block.insert("type".into(), json!("tool_result"));
     block.insert("tool_use_id".into(), json!(result.call_id));
-    if !text.is_empty() {
-        block.insert("content".into(), json!(text));
+    // A result with an image part needs the array form: Anthropic's `tool_result.content`
+    // accepts content blocks (text and image), and a plain string would flatten the image to
+    // its `[<mime> image omitted]` placeholder. A text-only result keeps the string form, so
+    // the body is byte-identical to before (the contract's tool tests).
+    if result
+        .content
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }))
+    {
+        let blocks: Vec<Value> = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text, .. } if text.is_empty() => None,
+                ContentPart::Image { .. } => Some(crate::request::block(part)),
+                other => Some(json!({"type": "text", "text": text_of(other)})),
+            })
+            .collect();
+        if !blocks.is_empty() {
+            block.insert("content".into(), Value::Array(blocks));
+        }
+    } else {
+        let text = plain_text(&result.content);
+        if !text.is_empty() {
+            block.insert("content".into(), json!(text));
+        }
     }
     if result.is_error {
         block.insert("is_error".into(), json!(true));
@@ -574,6 +597,48 @@ mod tests {
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
             ])
         );
+    }
+
+    #[test]
+    fn a_tool_result_image_is_a_content_block() {
+        let body = build_body(
+            &request(vec![Message::Tool {
+                result: ToolResult::success(
+                    "toolu_1",
+                    vec![
+                        ContentPart::text("Read image file [image/png] 1×1"),
+                        ContentPart::Image {
+                            mime_type: "image/png".into(),
+                            data: "AAAA".into(),
+                            annotations: None,
+                            meta: None,
+                        },
+                    ],
+                ),
+                meta: MessageMeta::default(),
+            }]),
+            &uncached(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][0]["content"],
+            json!([
+                {"type": "text", "text": "Read image file [image/png] 1×1"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+            ]),
+            "a tool result with an image uses the content-block array form"
+        );
+
+        // A text-only result keeps the string form (the contract's existing shape).
+        let plain = build_body(
+            &request(vec![Message::Tool {
+                result: ToolResult::success("toolu_2", vec![ContentPart::text("ok")]),
+                meta: MessageMeta::default(),
+            }]),
+            &uncached(),
+        )
+        .unwrap();
+        assert_eq!(plain["messages"][0]["content"][0]["content"], "ok");
     }
 
     #[test]

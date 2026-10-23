@@ -187,10 +187,31 @@ async fn the_read_parts_become_an_anthropic_image_block() {
     let model = Anthropic::new(config).expect("a local mock config is valid");
     let request = ModelRequest {
         system_prompt: None,
-        messages: vec![radian_core::Message::User {
-            content: output.content,
-            meta: Default::default(),
-        }],
+        messages: vec![
+            radian_core::Message::user("look at shot.png"),
+            radian_core::Message::Assistant {
+                content: Vec::new(),
+                reasoning: Vec::new(),
+                tool_calls: vec![radian_core::ToolCall {
+                    id: "toolu_1".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "shot.png"}),
+                }],
+                provider_payload: None,
+                interrupted: false,
+                meta: Default::default(),
+            },
+            radian_core::Message::Tool {
+                result: radian_core::ToolResult {
+                    call_id: "toolu_1".into(),
+                    content: output.content,
+                    structured: None,
+                    is_error: false,
+                    error_code: None,
+                },
+                meta: Default::default(),
+            },
+        ],
         tools: Vec::new(),
         settings: Value::Null,
     };
@@ -201,8 +222,13 @@ async fn the_read_parts_become_an_anthropic_image_block() {
     model.complete(request, cx).await.unwrap();
 
     let body = server.requests()[0].json();
-    let blocks = body["messages"][0]["content"].as_array().unwrap();
+    let result = &body["messages"][2]["content"][0];
+    assert_eq!(result["type"], "tool_result", "{body}");
+    let blocks = result["content"]
+        .as_array()
+        .expect("the content-block array");
     assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "Read image file [image/png] 1200×800");
     assert_eq!(blocks[1]["type"], "image", "{body}");
     assert_eq!(blocks[1]["source"]["type"], "base64");
     assert_eq!(blocks[1]["source"]["media_type"], "image/png");
