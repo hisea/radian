@@ -91,4 +91,9 @@ pub enum GateError {
         /// The stage it must follow.
         after: crate::gate::Stage,
     },
+
+    /// A `--watch` stop reached the gate: the stage child was killed and no verdict is
+    /// written. The next loop starts the stage again as unverified (ADR 0048 decision 13).
+    #[error("the gate was stopped")]
+    Stopped,
 }

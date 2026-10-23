@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::{Barrier, Reply};
 use common::*;
+use radian_arc::attempt;
+use radian_arc::gate::background;
 use radian_arc::gate::{Stage, Verdict};
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, plan_ops};
@@ -145,14 +147,36 @@ fn wait_for(path: &Path) {
     }
 }
 
+/// Runs `radian arc run` again and again until `done` holds (a pass only schedules: the
+/// worker and the gate run outside it) and returns everything the runs printed. Each pass is
+/// a few hundred milliseconds; a worker or a gate is collected by a later one.
+fn run_until(repo: &Repo, limit: Duration, done: impl Fn() -> bool) -> String {
+    let deadline = Instant::now() + limit;
+    let mut output = String::new();
+    loop {
+        let run = repo.radian(&["arc", "run"]);
+        assert_eq!(run.code, 0, "run failed: {}", run.stderr);
+        output.push_str(&run.stdout);
+        if done() {
+            return output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the loop did not settle within {limit:?}:\n{output}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn utc(text: &str) -> chrono::DateTime<chrono::FixedOffset> {
     chrono::DateTime::parse_from_rfc3339(text).unwrap_or_else(|error| panic!("{text}: {error}"))
 }
 
 // ---- auto levels ----------------------------------------------------------------------
 
-/// At auto `run`, one `run` takes A to `awaiting_human` and stops: B waits on A's merge. After
-/// `merge A`, the next `run` takes B.
+/// At auto `run`, the passes take A to `awaiting_human` and stop: B waits on A's merge. After
+/// `merge A`, later passes take B. A pass only starts the worker or the gate; the loop of
+/// passes is what collects them.
 #[test]
 fn one_run_takes_a_chain_to_awaiting_human_and_stops() {
     let repo = Repo::new("run-chain");
@@ -172,14 +196,12 @@ fn one_run_takes_a_chain_to_awaiting_human_and_stops() {
     ]);
     worker_args(&repo, mock.base_url());
 
-    let first = repo.radian(&["arc", "run"]);
-    assert_eq!(first.code, 0, "run failed: {}", first.stderr);
+    let first = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &a).1 == "awaiting_human"
+    });
     assert!(
-        first
-            .stdout
-            .contains(&format!("{a}-1 verify -> review.awaiting_human")),
-        "{}",
-        first.stdout
+        first.contains(&format!("{a}-1 verify -> review.awaiting_human")),
+        "{first}"
     );
     assert_eq!(
         state(&store, &a),
@@ -188,11 +210,8 @@ fn one_run_takes_a_chain_to_awaiting_human_and_stops() {
     assert_eq!(state(&store, &b), ("todo".to_owned(), "ready".to_owned()));
     assert_eq!(state(&store, &c), ("todo".to_owned(), "ready".to_owned()));
     assert!(
-        first
-            .stdout
-            .contains(&format!("{b} todo.ready: waiting for {a} to merge")),
-        "{}",
-        first.stdout
+        first.contains(&format!("{b} todo.ready: waiting for {a} to merge")),
+        "{first}"
     );
     // One attempt, one run directory named by its attempt id.
     let attempts = store.root().join("runs").join(&a).join("attempts");
@@ -212,8 +231,9 @@ fn one_run_takes_a_chain_to_awaiting_human_and_stops() {
     assert_eq!(merged.code, 0, "merge: {}", merged.stderr);
     assert!(merged.stdout.contains("done.merged"), "{}", merged.stdout);
 
-    let second = repo.radian(&["arc", "run"]);
-    assert_eq!(second.code, 0, "run failed: {}", second.stderr);
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &b).1 == "awaiting_human"
+    });
     assert_eq!(
         state(&store, &b),
         ("review".to_owned(), "awaiting_human".to_owned())
@@ -222,7 +242,7 @@ fn one_run_takes_a_chain_to_awaiting_human_and_stops() {
     assert_eq!(state(&store, &a), ("done".to_owned(), "merged".to_owned()));
 }
 
-/// At auto `merge`, one `run` takes all three to `done.merged`, in order.
+/// At auto `merge`, the passes take all three to `done.merged`, in order.
 #[test]
 fn auto_merge_takes_all_three_to_done_merged_in_one_run() {
     let repo = Repo::new("run-merge");
@@ -244,22 +264,23 @@ fn auto_merge_takes_all_three_to_done_merged_in_one_run() {
     ]);
     worker_args(&repo, mock.base_url());
 
-    let run = repo.radian(&["arc", "run"]);
-    assert_eq!(run.code, 0, "run failed: {}", run.stderr);
+    let run = run_until(&repo, Duration::from_secs(180), || {
+        [&a, &b, &c]
+            .iter()
+            .all(|task| state(&store, task) == ("done".to_owned(), "merged".to_owned()))
+    });
     for task in [&a, &b, &c] {
         assert_eq!(
             state(&store, task),
             ("done".to_owned(), "merged".to_owned()),
-            "{task}: {}",
-            run.stdout
+            "{task}: {run}"
         );
     }
     let merged_lines: Vec<&str> = run
-        .stdout
         .lines()
         .filter(|line| line.contains("done.merged"))
         .collect();
-    assert_eq!(merged_lines.len(), 3, "{}", run.stdout);
+    assert_eq!(merged_lines.len(), 3, "{run}");
     assert!(merged_lines[0].starts_with(&a), "{merged_lines:?}");
     assert!(merged_lines[1].starts_with(&b), "{merged_lines:?}");
     assert!(merged_lines[2].starts_with(&c), "{merged_lines:?}");
@@ -301,8 +322,9 @@ fn auto_off_starts_nothing_but_still_verifies() {
     commands(&repo, "true");
     let head = publish_verifying(&repo, &store, &plan, &verifying);
 
-    let run = repo.radian(&["arc", "run"]);
-    assert_eq!(run.code, 0, "run failed: {}", run.stderr);
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &verifying).1 == "awaiting_human"
+    });
     let stored = store.load_task(&verifying).expect("the task reads").item;
     assert_eq!(
         (stored.state.as_str(), stored.phase.as_str()),
@@ -314,10 +336,8 @@ fn auto_off_starts_nothing_but_still_verifies() {
         ("todo".to_owned(), "ready".to_owned())
     );
     assert!(
-        run.stdout
-            .contains(&format!("{ready} todo.ready: waiting for you to start it")),
-        "{}",
-        run.stdout
+        run.contains(&format!("{ready} todo.ready: waiting for you to start it")),
+        "{run}"
     );
     assert!(
         !store
@@ -396,14 +416,16 @@ fn concurrency_two_runs_both_attempts_at_once() {
     ]);
     worker_args(&repo, mock.base_url());
 
-    let run = repo.radian(&["arc", "run"]);
-    assert_eq!(run.code, 0, "run failed: {}", run.stderr);
+    let run = run_until(&repo, Duration::from_secs(120), || {
+        [&a, &b]
+            .iter()
+            .all(|task| state(&store, task).1 == "awaiting_human")
+    });
     for task in [&a, &b] {
         assert_eq!(
             state(&store, task),
             ("review".to_owned(), "awaiting_human".to_owned()),
-            "{task}: {}",
-            run.stdout
+            "{task}: {run}"
         );
     }
     let execution = |task: &str| -> Value {
@@ -446,14 +468,14 @@ fn max_auto_rework_pauses_the_plan_and_sets_auto_off() {
     worker_args(&repo, mock.base_url());
 
     for attempt in 1..=3 {
-        let run = repo.radian(&["arc", "run"]);
-        assert_eq!(run.code, 0, "run {attempt}: {}", run.stderr);
+        let run = run_until(&repo, Duration::from_secs(90), || {
+            state(&store, &task).1 == "rework_pending"
+        });
         let stored = store.load_task(&task).expect("the task reads").item;
         assert_eq!(
             (stored.state.as_str(), stored.phase.as_str()),
             ("review", "rework_pending"),
-            "attempt {attempt}: {}",
-            run.stdout
+            "attempt {attempt}: {run}"
         );
         assert_eq!(stored.auto_rework, attempt);
         if attempt <= 2 {
@@ -462,9 +484,8 @@ fn max_auto_rework_pauses_the_plan_and_sets_auto_off() {
         } else {
             assert_eq!(plan_auto(&store, &plan), "off", "attempt {attempt}");
             assert!(
-                run.stdout.contains("auto rework limit"),
-                "the pause says why: {}",
-                run.stdout
+                run.contains("auto rework limit"),
+                "the pause says why: {run}"
             );
         }
     }
@@ -507,9 +528,10 @@ fn run_respects_a_plan_budget_pause() {
     let mock = Mock::start(vec![tool_reply("c1", "read", "{}")]);
     worker_args_with(&repo, mock.base_url(), &["--max-model-calls", "1"]);
 
-    let run = repo.radian(&["arc", "run"]);
-    assert_eq!(run.code, 0, "run failed: {}", run.stderr);
-    assert_eq!(plan_auto(&store, &plan), "off", "{}", run.stdout);
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "paused_budget"
+    });
+    assert_eq!(plan_auto(&store, &plan), "off", "{run}");
     assert_eq!(
         state(&store, &task),
         ("todo".to_owned(), "paused_budget".to_owned())
@@ -571,14 +593,14 @@ fn a_digest_mismatch_returns_to_verifying_and_is_reverified() {
     assert!(stored.verified_sha.is_none(), "the approval is invalid");
     assert!(stored.verdict_set_digest.is_none());
 
-    let run = repo.radian(&["arc", "run"]);
-    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "awaiting_human"
+    });
     let stored = store.load_task(&task).expect("the task reads").item;
     assert_eq!(
         (stored.state.as_str(), stored.phase.as_str()),
         ("review", "awaiting_human"),
-        "{}",
-        run.stdout
+        "{run}"
     );
     assert_eq!(stored.verified_sha.as_deref(), Some(head.as_str()));
     assert_ne!(
@@ -728,5 +750,873 @@ fn a_cancelled_attempt_whose_worker_started_sleep_leaves_no_sleep_process() {
             panic!("the worker's `sleep 300` (pid {pid}) outlived the cancel");
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+// ---- a pass only schedules ------------------------------------------------------------
+
+/// Waits until `predicate` holds, failing with `what` after `limit`.
+fn wait_until(limit: Duration, what: &str, predicate: impl Fn() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !predicate() {
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not happen in {limit:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The gate's lock file: it exists once a pass started that task's gate.
+fn gate_lock(repo: &Repo, task: &str) -> std::path::PathBuf {
+    repo.arc().join("gates").join(format!("{task}.gate.lock"))
+}
+
+/// `[limits] concurrency` counts workers. While A's worker runs long, a later pass with a
+/// second slot starts B, and B reaches `done.merged` before A ends.
+#[test]
+fn a_long_worker_does_not_hold_up_another_tasks_verify_and_merge() {
+    let repo = Repo::new("run-long-worker");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "parallel");
+    let a = add_task(&store, &plan, "a", &[]);
+    let b = add_task(&store, &plan, "b", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "merge").expect("auto merge");
+    commands(&repo, "sleep 1");
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "sleep 30 && echo a > a.txt && git add a.txt && git commit -m a",
+        ),
+        shell_reply("c2", "echo b > b.txt && git add b.txt && git commit -m b"),
+        text_reply("done"),
+        text_reply("done"),
+    ]);
+    worker_args(&repo, mock.base_url());
+
+    // One slot: only A starts, so A's request is the first the mock serves.
+    run_until(&repo, Duration::from_secs(60), || {
+        state(&store, &a).0 == "doing"
+    });
+    wait_until(Duration::from_secs(30), "A's first model request", || {
+        !mock.requests().is_empty()
+    });
+
+    tune(&repo, "concurrency = 1", "concurrency = 2");
+    let run = run_until(&repo, Duration::from_secs(120), || {
+        state(&store, &b) == ("done".to_owned(), "merged".to_owned())
+    });
+    assert_eq!(
+        state(&store, &a),
+        ("doing".to_owned(), "running".to_owned()),
+        "A's worker should still be running when B merged: {run}"
+    );
+
+    // Clean up the long worker rather than leave it behind.
+    let canceled = repo.radian(&["arc", "cancel", &a]);
+    assert_eq!(canceled.code, 0, "cancel: {}", canceled.stderr);
+}
+
+/// A running gate holds its own lock but no `[limits] concurrency` slot: with A's worker gone,
+/// a pass claims B while A's gate still runs.
+#[test]
+fn a_running_gate_does_not_take_a_concurrency_slot() {
+    let repo = Repo::new("run-gate-slot");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "slot");
+    let a = add_task(&store, &plan, "a", &[]);
+    let b = add_task(&store, &plan, "b", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    commands(&repo, "sleep 5");
+    let mock = Mock::start(vec![
+        commit_reply("c1", "a.txt"),
+        text_reply("done"),
+        commit_reply("c2", "b.txt"),
+        text_reply("done"),
+    ]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(60), || {
+        state(&store, &a).1 == "verifying"
+    });
+    wait_until(Duration::from_secs(30), "A's gate", || {
+        gate_lock(&repo, &a).is_file()
+    });
+
+    // The slot A's worker held is free while its gate runs: B starts now.
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert_eq!(
+        state(&store, &b).0,
+        "doing",
+        "B was not claimed while A's gate runs: {}",
+        run.stdout
+    );
+
+    // Let A's gate finish so the test leaves nothing behind.
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &a).1 == "awaiting_human"
+    });
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &b).1 == "awaiting_human"
+    });
+}
+
+/// The wrapper owns the limits: after the `run` process is killed, its worker still stops at
+/// `max_wall_time_secs` and leaves its record. Mutation: enforce the wall time in the `run`
+/// process instead, and this test waits forever for `attempt_finished.json`.
+#[test]
+fn a_worker_still_stops_at_its_limit_after_the_run_process_is_killed() {
+    let repo = Repo::new("run-limit-killed");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "limit");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(&repo, "max_wall_time_secs = 7200", "max_wall_time_secs = 3");
+    tune(
+        &repo,
+        "stall_timeout_secs = 900",
+        "stall_timeout_secs = 600",
+    );
+    let mock = Mock::start(vec![Reply::SseThenHang { pieces: Vec::new() }]);
+    worker_args(&repo, mock.base_url());
+
+    let mut run = repo.spawn(&["arc", "run"]);
+    wait_for(&repo.attempt_dir(&task, 1).join("identity.json"));
+    let _ = run.kill();
+    let _ = run.wait();
+
+    let finished = repo.run_dir(&task, 1).join("attempt_finished.json");
+    wait_for(&finished);
+    let signal: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&task, 1).join("signal.json")).expect("signal.json"),
+    )
+    .expect("signal.json parses");
+    assert_eq!(signal["reason"], "wall_time", "{signal}");
+    // The next pass applies what the wrapper left.
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert_eq!(
+        state(&store, &task),
+        ("todo".to_owned(), "retry_wait".to_owned()),
+        "{}",
+        run.stdout
+    );
+}
+
+/// One shot: `radian arc run` starts the wrapper and returns; the next run collects the
+/// result (ADR 0048 decision 13).
+#[test]
+fn a_one_shot_run_exits_after_starting_a_worker_and_the_next_run_collects_it() {
+    let repo = Repo::new("run-one-shot");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "one");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    commands(&repo, "true");
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "sleep 5 && echo change > change.txt && git add change.txt && git commit -m change",
+        ),
+        text_reply("done"),
+    ]);
+    worker_args(&repo, mock.base_url());
+
+    let started = Instant::now();
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert!(
+        run.stdout
+            .contains(&format!("{task}-1 started -> doing.running")),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        state(&store, &task),
+        ("doing".to_owned(), "running".to_owned()),
+        "the pass waited for the worker: {}",
+        run.stdout
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a one-shot run took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        !repo
+            .run_dir(&task, 1)
+            .join("attempt_finished.json")
+            .exists(),
+        "the worker already finished; the test proves nothing"
+    );
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "awaiting_human"
+    });
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "awaiting_human".to_owned())
+    );
+}
+
+/// One gate per task: while a gate runs, a pass starts no second gate for the same sha, so
+/// the stage's command runs once. Mutation: drop the lock check in `background::start` and
+/// the counter has two lines.
+#[test]
+fn a_gate_is_not_started_twice_while_it_runs() {
+    let repo = Repo::new("run-one-gate");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "one-gate");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let counter = repo.root.join("gate-starts.txt");
+    commands(
+        &repo,
+        &format!("echo start >> '{}' && sleep 3", counter.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+
+    let first = repo.radian(&["arc", "run"]);
+    assert_eq!(first.code, 0, "run: {}", first.stderr);
+    assert_eq!(
+        first.stdout.matches("verify started").count(),
+        1,
+        "a pass started the same gate more than once: {}",
+        first.stdout
+    );
+    assert!(
+        first.stdout.contains("verify started"),
+        "the first pass did not start the gate: {}",
+        first.stdout
+    );
+    let second = repo.radian(&["arc", "run"]);
+    assert_eq!(second.code, 0, "run: {}", second.stderr);
+    assert!(
+        !second.stdout.contains("verify started"),
+        "a second gate started while the first ran: {}",
+        second.stdout
+    );
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "awaiting_human"
+    });
+    let starts = fs::read_to_string(&counter).expect("the counter");
+    assert_eq!(
+        starts.lines().count(),
+        1,
+        "the commands stage ran more than once: {starts}"
+    );
+}
+
+/// SIGTERM to `--watch`: no new worker and no new gate starts; the running worker finishes
+/// and the next `run` collects it (ADR 0048 decision 13).
+#[test]
+fn sigterm_to_watch_starts_no_new_work_and_the_next_run_collects_the_worker() {
+    let repo = Repo::new("run-watch-stop");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "stop");
+    let a = add_task(&store, &plan, "a", &[]);
+    let b = add_task(&store, &plan, "b", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    commands(&repo, "true");
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "sleep 5 && echo a > a.txt && git add a.txt && git commit -m a",
+        ),
+        text_reply("done"),
+        commit_reply("c2", "b.txt"),
+        text_reply("done"),
+    ]);
+    worker_args(&repo, mock.base_url());
+
+    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    wait_for(&repo.attempt_dir(&a, 1).join("identity.json"));
+    // While the loop waits out its interval, a new `review.verifying` task appears.
+    publish_verifying(&repo, &store, &plan, &b);
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // No gate started for B after the signal.
+    assert!(
+        !gate_lock(&repo, &b).exists(),
+        "the stopped loop started a gate"
+    );
+    assert_eq!(
+        state(&store, &b),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+
+    // A's worker was not signalled: it finishes on its own, and the next run collects it.
+    let finished = repo.run_dir(&a, 1).join("attempt_finished.json");
+    wait_for(&finished);
+    assert!(
+        !repo.attempt_dir(&b, 1).join("identity.json").exists(),
+        "the signal started B's worker"
+    );
+    assert_eq!(
+        state(&store, &b),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &a).1 == "awaiting_human"
+    });
+    assert_eq!(
+        state(&store, &a),
+        ("review".to_owned(), "awaiting_human".to_owned())
+    );
+}
+
+// ---- gate records and a stopped stage ------------------------------------------------
+
+/// The task's `runs/<task>/gate.json`, when one exists.
+fn gate_record(repo: &Repo, task: &str) -> Option<Value> {
+    let text = fs::read_to_string(repo.arc().join("runs").join(task).join("gate.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Writes a gate record as the gate process would leave it.
+fn write_gate_record(repo: &Repo, task: &str, record: Value) {
+    let dir = repo.arc().join("runs").join(task);
+    fs::create_dir_all(&dir).expect("the run directory");
+    fs::write(dir.join("gate.json"), record.to_string()).expect("the gate record");
+}
+
+/// Whether `pid` exists (a `kill -0` probe, no `ps`).
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .expect("kill -0")
+        .success()
+}
+
+/// Sends `signal` to the process group `pgid`, the way a terminal signals its foreground job.
+/// This is `kill(2)` and not the `kill` program: procps-ng reads a negative id that follows
+/// the signal flag (`kill -INT -123`) as an option and exits 1, where macOS' `kill` accepts
+/// it.
+fn signal_group(pgid: u32, signal: i32) -> bool {
+    // SAFETY: `kill(2)` takes plain integers and has no memory contract; a negative pid names
+    // the process group whose leader is `pgid`.
+    unsafe { libc::kill(-(pgid as libc::pid_t), signal) == 0 }
+}
+
+/// Makes `path` executable.
+fn executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path).expect("the script").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("executable");
+}
+
+/// A gate `error` record belongs to the current attempt and is reported as an error: a
+/// one-shot `run` exits 1 with its text.
+#[test]
+fn a_gate_error_record_is_reported_as_an_error() {
+    let repo = Repo::new("run-gate-error");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-error");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    write_gate_record(
+        &repo,
+        &task,
+        serde_json::json!({
+            "kind": "verify",
+            "attempt": format!("{task}-1"),
+            "status": "error",
+            "text": "boom",
+        }),
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(
+        run.code, 1,
+        "a one-shot run keeps an error's code: {} {}",
+        run.stdout, run.stderr
+    );
+    assert!(run.stderr.contains("boom"), "{}", run.stderr);
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+}
+
+/// `--watch` prints a pass error as one line and runs the next pass instead of exiting.
+#[test]
+fn a_watch_pass_that_errors_prints_a_line_and_goes_on() {
+    let repo = Repo::new("run-watch-error");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "watch-error");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    write_gate_record(
+        &repo,
+        &task,
+        serde_json::json!({
+            "kind": "verify",
+            "attempt": format!("{task}-1"),
+            "status": "error",
+            "text": "boom",
+        }),
+    );
+
+    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    // The pass reads the record, reports it and clears it; the loop then waits its interval.
+    wait_until(
+        Duration::from_secs(30),
+        "the error record to be read",
+        || gate_record(&repo, &task).is_none(),
+    );
+    assert!(
+        watch.try_wait().expect("try_wait").is_none(),
+        "one pass error ended --watch"
+    );
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("radian arc: "), "{stdout}");
+    assert!(stdout.contains("boom"), "{stdout}");
+}
+
+/// A refusal is reported once and keeps its record: later passes start no gate for the same
+/// attempt while the inputs are unchanged. Mutation: write `""` as the attempt of a refused
+/// record and every pass starts another gate.
+#[test]
+fn a_refused_gate_is_reported_once_and_not_restarted() {
+    let repo = Repo::new("run-gate-refused");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-refused");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    let head = publish_verifying(&repo, &store, &plan, &task);
+    // Move the remote work branch: the gate's plan refuses, because the remote is no longer
+    // the task's `head_sha`.
+    let branch = format!("work/{task}");
+    repo.git(&["checkout", "-B", &branch, &head]);
+    write(&repo.clone.join("moved.txt"), "moved\n");
+    repo.git(&["add", "moved.txt"]);
+    repo.git(&["commit", "-m", "moved"]);
+    repo.git(&["push", "origin", &branch]);
+
+    // The first pass starts the gate; it refuses and leaves its record.
+    let first = repo.radian(&["arc", "run"]);
+    assert_eq!(first.code, 0, "run: {}", first.stderr);
+    wait_until(Duration::from_secs(30), "the gate's refusal", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "refused")
+    });
+    // The gate process exits right after writing the record; let its lock go.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+
+    for pass in 1..=2 {
+        let run = repo.radian(&["arc", "run"]);
+        assert_eq!(run.code, 0, "run {pass}: {}", run.stderr);
+        assert!(
+            !run.stdout.contains("verify started"),
+            "pass {pass} retried the refusal: {}",
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains("verify cannot run"),
+            "pass {pass} did not report the refusal: {}",
+            run.stdout
+        );
+    }
+    assert!(
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "refused"),
+        "the refusal record was cleared"
+    );
+}
+
+/// The heartbeat covers the whole wrapper: a push that takes longer than the stall window
+/// does not make reconcile call the attempt dead. Mutation: stop the heartbeat when the
+/// worker exits and the push phase looks dead.
+#[test]
+fn a_wrapper_pushing_past_the_stall_window_is_not_judged_dead() {
+    let repo = Repo::new("run-slow-push");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "slow-push");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    commands(&repo, "true");
+    tune(&repo, "stall_timeout_secs = 900", "stall_timeout_secs = 5");
+    // The wrapper's push runs this as the remote's receive-pack and sleeps past the window.
+    let script = repo.root.join("slow-receive-pack.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nsleep 12\nexec git-receive-pack \"$@\"\n",
+    )
+    .expect("the slow receive-pack");
+    executable(&script);
+    repo.git(&[
+        "config",
+        "remote.origin.receivepack",
+        script.to_str().unwrap(),
+    ]);
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let applied = attempt::reconcile(&store).expect("reconcile");
+        let finished = repo
+            .run_dir(&task, 1)
+            .join("attempt_finished.json")
+            .is_file();
+        if finished {
+            break;
+        }
+        assert!(
+            applied.is_empty(),
+            "a live wrapper was judged dead while it pushed: {applied:?}"
+        );
+        assert!(Instant::now() < deadline, "the attempt never finished");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    run_until(&repo, Duration::from_secs(60), || {
+        state(&store, &task).1 == "awaiting_human"
+    });
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "awaiting_human".to_owned())
+    );
+}
+
+/// A `--watch` stop reaches the stage the gate runs, not only the gate: the long `commands`
+/// child is gone when the loop returns. Mutation: signal only the gate pid and the `sleep`
+/// survives.
+#[test]
+fn sigterm_to_watch_kills_the_running_gate_stage() {
+    let repo = Repo::new("run-stop-stage");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "stop-stage");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let pid_file = repo.root.join("stage.pid");
+    commands(
+        &repo,
+        &format!("echo $$ > '{}' && sleep 30", pid_file.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+
+    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    wait_for(&pid_file);
+    let pid: u32 = fs::read_to_string(&pid_file)
+        .expect("stage.pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    assert!(process_alive(pid), "the stage did not start");
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while process_alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "the stage child (pid {pid}) outlived the stop"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The wall clock covers the wrapper's own push: a remote that never answers is killed at
+/// `max_wall_time_secs`, the attempt records `wall_time`, and `start` returns instead of
+/// waiting forever. Mutation: start the clock after the worktree setup and leave the git
+/// commands unbounded, and `start` never returns.
+#[test]
+fn a_hanging_push_ends_the_attempt_at_the_wall_time() {
+    let repo = Repo::new("run-wall-push");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "wall-push");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    tune(&repo, "max_wall_time_secs = 7200", "max_wall_time_secs = 3");
+    tune(
+        &repo,
+        "stall_timeout_secs = 900",
+        "stall_timeout_secs = 600",
+    );
+    // The push waits forever: only the wrapper's clock can end it.
+    let script = repo.root.join("hanging-receive-pack.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nsleep 60\nexec git-receive-pack \"$@\"\n",
+    )
+    .expect("the hanging receive-pack");
+    executable(&script);
+    repo.git(&[
+        "config",
+        "remote.origin.receivepack",
+        script.to_str().unwrap(),
+    ]);
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    let started = Instant::now();
+    let output = run_with_deadline(&repo, &["arc", "start", &task], Duration::from_secs(40));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "start: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(25),
+        "start waited {:?} for a hanging push",
+        started.elapsed()
+    );
+
+    let signal: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&task, 1).join("signal.json")).expect("signal.json"),
+    )
+    .expect("signal.json parses");
+    assert_eq!(signal["reason"], "wall_time", "{signal}");
+    let result: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&task, 1).join("attempt_result.json"))
+            .expect("attempt_result.json"),
+    )
+    .expect("attempt_result.json parses");
+    assert_eq!(result["class"], "wall_time", "{result}");
+    assert_eq!(
+        state(&store, &task),
+        ("todo".to_owned(), "retry_wait".to_owned())
+    );
+}
+
+/// The gate's lock is the gate's alone: a stage command that leaves a background process
+/// behind must not keep `gates/<task>.gate.lock` after the gate exits. Mutation: leave the
+/// inherited descriptor inheritable and the orphan holds the lock.
+#[test]
+fn a_stage_child_does_not_keep_the_gate_lock() {
+    let repo = Repo::new("run-gate-lock");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-lock");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    // The shell exits at once; its `sleep` lives on with whatever descriptors it inherited.
+    commands(&repo, "sleep 15 & true");
+    publish_verifying(&repo, &store, &plan, &task);
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    wait_until(Duration::from_secs(30), "the gate's record", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "done")
+    });
+    // The gate exits right after writing the record; an orphan `sleep` must not hold the
+    // lock (it lives 15 s, well past this deadline).
+    wait_until(Duration::from_secs(8), "the gate lock to be free", || {
+        !background::running(&store, &task)
+    });
+}
+
+/// A terminal Ctrl-C sends SIGINT to the foreground process group. The loop, each wrapper
+/// and each gate are in their own group, so only the loop gets it: the worker keeps running
+/// for the next loop, and the loop stops the gate, which stops its stage child. Mutation:
+/// leave the gate in the loop's group and the SIGINT reaches it directly (the group signal in
+/// the second test below no longer names a gate group).
+#[test]
+fn sigint_to_the_watch_group_leaves_the_worker_running() {
+    let repo = Repo::new("run-sigint-group");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "sigint");
+    let a = add_task(&store, &plan, "a", &[]);
+    let b = add_task(&store, &plan, "b", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    // The gate's `commands` sleeps only while this marker exists, so the later loop that
+    // collects the worker uses a fast gate.
+    let slow = repo.root.join("slow-stage");
+    fs::write(&slow, "slow\n").expect("the slow marker");
+    let stage_pid_file = repo.root.join("stage.pid");
+    commands(
+        &repo,
+        &format!(
+            "if [ -f '{}' ]; then echo $$ > '{}'; sleep 30; fi",
+            slow.display(),
+            stage_pid_file.display()
+        ),
+    );
+    publish_verifying(&repo, &store, &plan, &b);
+    // The worker runs until this marker is removed, so it is provably still alive when the
+    // loop gets the terminal signal.
+    let work_marker = repo.root.join("work-marker");
+    fs::write(&work_marker, "work\n").expect("the work marker");
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            &format!(
+                "while [ -f '{}' ]; do sleep 1; done; echo a > a.txt && git add a.txt && git commit -m a",
+                work_marker.display()
+            ),
+        ),
+        text_reply("done"),
+    ]);
+    worker_args(&repo, mock.base_url());
+
+    let watch = repo.spawn_in_own_group(&["arc", "run", "--watch", "--interval", "30"]);
+    let identity_path = repo.attempt_dir(&a, 1).join("identity.json");
+    wait_for(&identity_path);
+    wait_for(&stage_pid_file);
+    let identity: Value =
+        serde_json::from_str(&fs::read_to_string(&identity_path).expect("the wrapper's identity"))
+            .expect("identity.json parses");
+    let wrapper = identity["wrapper_pid"].as_u64().expect("wrapper_pid") as u32;
+    let stage: u32 = fs::read_to_string(&stage_pid_file)
+        .expect("stage.pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+
+    let sent = signal_group(watch.id(), libc::SIGINT);
+    assert!(sent, "kill(-{}, SIGINT)", watch.id());
+
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        process_alive(wrapper),
+        "the terminal-like SIGINT reached the worker's wrapper"
+    );
+    wait_until(Duration::from_secs(20), "the stage child to stop", || {
+        !process_alive(stage)
+    });
+
+    fs::remove_file(&slow).expect("the slow marker is removed");
+    fs::remove_file(&work_marker).expect("the work marker is removed");
+    wait_for(&repo.run_dir(&a, 1).join("attempt_finished.json"));
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &a).1 == "awaiting_human" && state(&store, &b).1 == "awaiting_human"
+    });
+}
+
+/// SIGINT aimed at the gate alone (its own process group) stops its stage child exactly as
+/// SIGTERM does. Mutation: without the gate's own process group, the group signal finds no
+/// such group.
+#[test]
+fn sigint_to_a_gate_stops_its_stage() {
+    let repo = Repo::new("run-sigint-gate");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "sigint-gate");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let stage_pid_file = repo.root.join("stage.pid");
+    commands(
+        &repo,
+        &format!("echo $$ > '{}' && sleep 30", stage_pid_file.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+
+    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    wait_for(&stage_pid_file);
+    let stage: u32 = fs::read_to_string(&stage_pid_file)
+        .expect("stage.pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let record = gate_record(&repo, &task).expect("the gate record");
+    let gate = record["pid"].as_u64().expect("the gate pid") as u32;
+
+    // The gate leads its own process group; the stage child is in another, so this reaches
+    // the gate alone.
+    let sent = signal_group(gate, libc::SIGINT);
+    assert!(sent, "kill(-{gate}, SIGINT)");
+    wait_until(Duration::from_secs(20), "the stage child to stop", || {
+        !process_alive(stage)
+    });
+    wait_until(Duration::from_secs(20), "the gate to exit", || {
+        !process_alive(gate)
+    });
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill -TERM");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Runs one `radian` command with a deadline, so a hung `start` fails the test instead of
+/// hanging until nextest's own timeout.
+fn run_with_deadline(repo: &Repo, args: &[&str], limit: Duration) -> std::process::Output {
+    let mut child = repo.spawn(args);
+    let deadline = Instant::now() + limit;
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return child.wait_with_output().expect("the command's output");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .expect("the killed command's output");
+            panic!(
+                "`{}` did not finish within {limit:?}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }

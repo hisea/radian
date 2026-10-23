@@ -21,8 +21,10 @@
 //! The repository, global and system configuration files are otherwise unaffected.
 
 use std::fmt;
+use std::io::Read;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 /// The environment variables that would point git at another repository or object store.
 const REPOSITORY_ENV: [&str; 6] = [
@@ -94,6 +96,110 @@ pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<GitOutput, RunError> {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
+}
+
+/// What a git command with a wall-clock limit produced.
+pub(crate) enum TimedRun {
+    /// The command finished.
+    Done(GitOutput),
+    /// The limit ran out; the command's whole process group was killed.
+    TimedOut,
+}
+
+/// Runs a git command in `dir` with an optional wall-clock limit. A limit that runs out kills
+/// the command's process group (the command leads its own group), so a fetch or a push that
+/// waits on a remote cannot outlive the attempt. `None` waits forever, which is what every
+/// non-wrapper caller wants.
+pub(crate) fn run_with_timeout(
+    dir: &Path,
+    args: &[&str],
+    timeout: Option<Duration>,
+) -> Result<TimedRun, RunError> {
+    let Some(timeout) = timeout else {
+        return run(dir, args).map(TimedRun::Done);
+    };
+    let mut command = command(dir)?;
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // Own process group: killing it reaches everything git started (receive-pack, ssh).
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    #[cfg(unix)]
+    let pid = child.id();
+    // Drain the pipes while waiting, so a chatty fetch cannot fill them and block.
+    let read = |mut pipe: Option<std::process::ChildStdout>| {
+        pipe.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let _ = pipe.read_to_end(&mut buffer);
+                buffer
+            })
+        })
+    };
+    let stdout = read(child.stdout.take());
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = pipe.read_to_end(&mut buffer);
+            buffer
+        })
+    });
+    let join = |handle: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        handle
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default()
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok(TimedRun::Done(GitOutput {
+                    status,
+                    stdout: String::from_utf8_lossy(&join(stdout)).into_owned(),
+                    stderr: String::from_utf8_lossy(&join(stderr)).into_owned(),
+                }));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                #[cfg(unix)]
+                kill_group(pid);
+                #[cfg(not(unix))]
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = join(stdout);
+                let _ = join(stderr);
+                return Err(RunError::Spawn(error));
+            }
+        }
+        if Instant::now() >= deadline {
+            #[cfg(unix)]
+            kill_group(pid);
+            #[cfg(not(unix))]
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = join(stdout);
+            let _ = join(stderr);
+            return Ok(TimedRun::TimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    // SAFETY: `kill` is a syscall with no memory operands; a negative pid signals the process
+    // group whose id is `pid`, which `process_group(0)` made the command lead. A group that
+    // already exited yields ESRCH, which is ignored.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
 }
 
 /// Runs a git command in `dir` and requires success, returning trimmed standard output.

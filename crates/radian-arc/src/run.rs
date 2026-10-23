@@ -1,19 +1,25 @@
 //! `radian arc run`: the scheduling loop without a TUI (ADR 0048 decision 13).
 //!
 //! One `run` holds `runner.lock` for its lifetime and makes every transition it can make
-//! now. A pass, repeated until a pass changes nothing:
+//! now. A pass only schedules, and it ends in seconds; the work it starts runs outside the
+//! pass and the next pass reads what it left (ADR 0048 decision 13). A pass, repeated until
+//! one changes nothing:
 //!
 //! 1. reconcile every task in `doing` (apply a result that is there, leave a live attempt);
 //! 2. release every retry whose `retry_at` has passed;
-//! 3. verify every task in `review.verifying`; this is also how a task a moved branch or a
-//!    changed digest sent back reaches `review.awaiting_human` again;
-//! 4. for every confirmed plan at `auto` `run` or `merge`, claim and run each `todo.ready`
-//!    task whose `after` tasks are merged, up to `[limits] concurrency` attempts at once;
-//! 5. for every plan at `auto` `merge`, merge each task whose verification passed.
+//! 3. start the gate of every task in `review.verifying`, or apply the verdicts a background
+//!    gate left; this is also how a task a moved branch or a changed digest sent back reaches
+//!    `review.awaiting_human` again;
+//! 4. for every confirmed plan at `auto` `run` or `merge`, claim each `todo.ready` task whose
+//!    `after` tasks are merged, up to `[limits] concurrency` attempts in flight at once, and
+//!    start its wrapper without waiting for it;
+//! 5. for every plan at `auto` `merge`, approve a verified task and start its integration
+//!    gate, or finish the integration a gate left.
 //!
-//! Waiting for a person, a future `retry_at`, or a lead's rework does not keep it running:
-//! the loop ends at the first pass that changes nothing. A task of a plan at `auto` `off` is
-//! never started or merged by `run`; its verification still advances.
+//! Waiting for a person, a future `retry_at`, a worker, or a gate does not keep it running:
+//! the loop ends at the first pass that changes nothing. A one-shot `run` therefore exits
+//! after starting work; `--watch` is how the loop keeps collecting it. A task of a plan at
+//! `auto` `off` is never started or merged by `run`; its verification still advances.
 //!
 //! Every transition line is written through the caller's sink and flushed when the loop makes
 //! it; the summary of what waits on whom prints when the pass ends. `watch` repeats a pass
@@ -23,7 +29,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::store::attempt_ops::{self, Applied, Claim};
+use crate::store::attempt_ops::{self, Claim};
 use crate::store::model::{self, TaskState};
 use crate::store::{Error, Store, plan_ops};
 
@@ -92,8 +98,10 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
 /// `runner.lock` for the whole loop. `emit` receives each transition line with its newline as
 /// it happens, and a pass's summary block when it differs from the last one printed.
 ///
-/// A signal starts no new work: a running attempt is a separate process and is left alone (the
-/// next `run` reconciles it). The loop then prints the summary, releases the lock and returns
+/// A signal starts no new work: a running worker and a running gate are separate processes.
+/// A worker is left alone (the next pass, or the next `run`, collects it); a running gate is
+/// signalled and gets `[limits] cancel_grace_secs` before SIGKILL, so the next loop starts it
+/// again as unverified. The loop then prints the summary, releases the lock and returns
 /// [`Exit`](crate::store::Exit) `0` through the caller.
 ///
 /// # Errors
@@ -108,7 +116,19 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
         if stop_requested() {
             break;
         }
-        let report = run_quiet(store, emit, Some(&STOP))?;
+        let report = match run_quiet(store, emit, Some(&STOP)) {
+            Ok(report) => report,
+            // One task's error does not end the loop: print it and run the next pass. The
+            // lock and every state file stay as they are; a one-shot `run` still returns
+            // the error and exits non-zero.
+            Err(error) => {
+                emit(&format!("radian arc: {}\n", error.message()));
+                if stop_requested() || !wait_interval(interval_secs) {
+                    break;
+                }
+                continue;
+            }
+        };
         let summary = report.render_summary();
         if last.as_deref() != Some(summary.as_str()) {
             emit(&summary);
@@ -117,6 +137,19 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
         if stop_requested() || !wait_interval(interval_secs) {
             break;
         }
+    }
+    if stop_requested() {
+        stop_gates(store)?;
+    }
+    Ok(())
+}
+
+/// Stops the gates a watch loop leaves running: a short grace, then SIGKILL. The next loop
+/// starts a gate it did not finish again as unverified.
+fn stop_gates(store: &Store) -> Result<(), Error> {
+    let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
+    for id in store.task_ids()? {
+        crate::gate::background::stop(store, &id, grace);
     }
     Ok(())
 }
@@ -245,34 +278,109 @@ fn one_pass(
         changed = true;
     }
 
-    // 3. Verification, for every plan: a plan at `auto` `off` still advances here.
+    // 3. Verification, for every plan: a plan at `auto` `off` still advances here. The gate
+    // runs as a background process; this pass applies what an earlier gate left (ADR 0048
+    // decision 10).
     for id in verifying_tasks(store)? {
-        match crate::review::verify(store, &id) {
-            Ok(verified) => {
-                transitions.push(verified.line());
-                changed = true;
-                if verified.phase == "rework_pending"
-                    && let Some(paused) = attempt_ops::record_auto_rework(store, &id)?
-                {
-                    transitions.push(format!("{} paused: {}", paused.plan, paused.text));
-                    changed = true;
-                }
-            }
-            // A moved branch or a stage this build does not run: the task stays in
-            // `review.verifying` and the reason is recorded; the summary reports it.
-            Err(Error::Refused(_)) => {}
-            Err(error) => return Err(error),
-        }
+        changed |= advance_verification(store, &id, transitions, stop)?;
     }
 
     // 4. Start what the auto levels allow, and 5. merge what passed, unless a stop signal
-    // arrived while steps 1-3 ran: no new attempt and no merge starts after it.
+    // arrived while steps 1-3 ran: no new attempt and no new gate starts after it.
     if !stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
         changed |= start_ready(store, transitions)?;
-        changed |= merge_auto(store, transitions)?;
+        changed |= merge_auto(store, transitions, stop)?;
     }
 
     Ok(changed)
+}
+
+/// One task in `review.verifying`: apply the verdicts a background gate left, or start its
+/// gate. `true` when it moved the task (or started something that will).
+fn advance_verification(
+    store: &Store,
+    task_id: &str,
+    transitions: &mut Transitions,
+    stop: Option<&AtomicBool>,
+) -> Result<bool, Error> {
+    let task = store.load_task(task_id)?.item;
+    let label = task
+        .attempt_id
+        .clone()
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| format!("{}-{}", task.id, task.attempt));
+    if let Some(record) = crate::gate::background::read(store, task_id)
+        && record.kind == "verify"
+        && record.attempt == label
+    {
+        match record.status.as_str() {
+            "running" => {}
+            "error" => {
+                crate::gate::background::clear(store, task_id);
+                return Err(Error::Failed(
+                    record
+                        .text
+                        .unwrap_or_else(|| format!("the gate of {task_id} failed")),
+                ));
+            }
+            "refused" => {
+                // Reported once, and no new gate for this attempt while the inputs the gate
+                // saw are unchanged: a repeat would rerun the same refusal every interval.
+                // A new attempt, a changed config, or the branch coming back changes the
+                // inputs (ADR 0048 decision 10).
+                let text = record.text.clone().unwrap_or_default();
+                let inputs = record.inputs.clone();
+                match crate::review::plan_verification(store, task_id) {
+                    Ok(plan) if inputs.as_deref() == Some(plan.inputs.as_str()) => {
+                        transitions.note(format!("{task_id} verify cannot run: {text}"));
+                        return Ok(false);
+                    }
+                    // The inputs changed: start a gate below.
+                    Ok(_) => {}
+                    Err(Error::Refused(reason)) => {
+                        transitions.note(format!("{task_id} verify cannot run: {reason}"));
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            "done" => {
+                crate::gate::background::clear(store, task_id);
+                return match crate::review::apply_verification(store, task_id) {
+                    Ok(verified) => {
+                        transitions.push(verified.line());
+                        let mut changed = true;
+                        if verified.phase == "rework_pending"
+                            && let Some(paused) = attempt_ops::record_auto_rework(store, task_id)?
+                        {
+                            transitions.push(format!("{} paused: {}", paused.plan, paused.text));
+                            changed = true;
+                        }
+                        Ok(changed)
+                    }
+                    // The branch moved or a stage this build does not run: the task stays in
+                    // `review.verifying` and the reason is recorded; the summary reports it.
+                    Err(Error::Refused(reason)) => {
+                        transitions.note(format!("{task_id} verify cannot run: {reason}"));
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                };
+            }
+            _ => {}
+        }
+    }
+    if stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        return Ok(false);
+    }
+    match crate::gate::background::start(store, task_id)? {
+        Some(pid) => {
+            transitions.push(format!("{label} verify started (pid {pid})"));
+            Ok(true)
+        }
+        // One gate per task: the running one is the reason this pass starts none.
+        None => Ok(false),
+    }
 }
 
 /// Every task in `review.verifying`, in id order. A file that changed outside arc is skipped.
@@ -337,44 +445,28 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
     if claims.is_empty() {
         return Ok(false);
     }
-    for applied in execute(store, &claims, &config)? {
-        transitions.push(applied.line());
+    // A claim only starts the wrapper: the wrapper owns the attempt's limits from here, and
+    // this pass does not wait for it (ADR 0048 decisions 7.8 and 13). A thread waits for the
+    // child so a long `--watch` collects no zombie; the thread dies with this process, and
+    // the worker keeps running either way.
+    let config = store.config()?;
+    for (claim, task) in &claims {
+        let spawned = crate::attempt::spawn_claim(store, claim, task, &config)?;
+        let mut child = spawned.child;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        transitions.push(format!("{} started -> doing.running", claim.attempt_id));
     }
     Ok(true)
 }
 
-/// Runs the claimed attempts. With more than one claim each attempt runs on its own thread,
-/// so `[limits] concurrency` attempts really overlap; the results are returned in claim
-/// order.
-fn execute(
-    store: &Store,
-    claims: &[(Claim, model::TaskFile)],
-    config: &crate::store::config::Config,
-) -> Result<Vec<Applied>, Error> {
-    if claims.len() == 1 {
-        let (claim, task) = &claims[0];
-        return Ok(vec![crate::attempt::run_claim(store, claim, task, config)?]);
-    }
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = claims
-            .iter()
-            .map(|(claim, task)| {
-                scope.spawn(move || crate::attempt::run_claim(store, claim, task, config))
-            })
-            .collect();
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let result = handle
-                .join()
-                .map_err(|_| Error::Failed("an attempt thread panicked".to_owned()))?;
-            results.push(result?);
-        }
-        Ok(results)
-    })
-}
-
 /// Merges every finished task of a plan at `auto` `merge`. `true` when a task changed state.
-fn merge_auto(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
+fn merge_auto(
+    store: &Store,
+    transitions: &mut Transitions,
+    stop: Option<&AtomicBool>,
+) -> Result<bool, Error> {
     let mut changed = false;
     for view in store.plans()? {
         if view.plan.changed_outside_arc
@@ -391,11 +483,19 @@ fn merge_auto(store: &Store, transitions: &mut Transitions) -> Result<bool, Erro
             if !matches!(phase, "awaiting_human" | "integrating" | "ready_to_merge") {
                 continue;
             }
-            match crate::review::merge_as(store, &task.item.id, Some("auto")) {
-                Ok(merged) => {
-                    transitions.push(merged.line());
-                    changed = true;
-                    if merged.phase == "rework_pending"
+            let stopped = stop.is_some_and(|flag| flag.load(Ordering::SeqCst));
+            match crate::review::merge_step(store, &task.item.id, stopped) {
+                Ok(step) => {
+                    if let Some(line) = step.line {
+                        transitions.push(line);
+                        changed = true;
+                    }
+                    if let Some(note) = step.note {
+                        transitions.note(note);
+                    }
+                    let after = store.load_task(&task.item.id)?.item;
+                    if after.state == TaskState::Review
+                        && after.phase == "rework_pending"
                         && let Some(paused) = attempt_ops::record_auto_rework(store, &task.item.id)?
                     {
                         transitions.push(format!("{} paused: {}", paused.plan, paused.text));
@@ -542,7 +642,7 @@ fn task_reason(
             }
         }
         (TaskState::Review, "integrating" | "ready_to_merge") => {
-            "waiting for the integration to finish (run `radian arc merge`)".to_owned()
+            "waiting for its integration to finish".to_owned()
         }
         (TaskState::Review, _) => "waiting in review".to_owned(),
         (TaskState::Failed, phase) => format!("failed.{phase}; nothing starts it again"),
