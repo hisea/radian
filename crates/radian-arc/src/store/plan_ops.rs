@@ -264,6 +264,8 @@ pub fn add_rework_with(
         append_rework(&mut task.body, number, brief, heading_suffix);
         task.state = TaskState::Todo;
         task.phase = "ready".to_owned();
+        // The rework's new instructions get their own retries (ADR 0048 decision 9).
+        task.retry_count = 0;
         Ok(())
     })?;
     Ok(())

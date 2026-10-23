@@ -754,6 +754,37 @@ fn a_retry_time_is_printed_by_list_and_show() {
     );
 }
 
+/// `show --json`, `list --json` and the text form carry the task's retry count: how many
+/// retries arc started since the task's last rework, which is what `max_attempts` counts.
+#[test]
+fn the_retry_count_is_a_field_of_show_and_list_json() {
+    let scratch = fixture("retry-count-json");
+    init(&scratch);
+    let plan = add_plan(&scratch, "retry");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+    radian_arc::store::Store::at(scratch.repo())
+        .change_task(&task, |task| {
+            task.retry_count = 2;
+            Ok(())
+        })
+        .expect("the retry count");
+
+    let list = run(&scratch, &["arc", "list", "--json"], "");
+    assert_eq!(list.code, Some(0), "{list:?}");
+    let value: serde_json::Value = serde_json::from_str(&list.out).expect("list --json parses");
+    assert_eq!(value[0]["tasks"][0]["retry_count"], 2, "{value}");
+
+    let shown = run(&scratch, &["arc", "show", &task, "--json"], "");
+    assert_eq!(shown.code, Some(0), "{shown:?}");
+    let value: serde_json::Value = serde_json::from_str(&shown.out).expect("show --json parses");
+    assert_eq!(value["retry_count"], 2, "{value}");
+    assert!(value["retry_at"].is_null(), "{}", shown.out);
+
+    let human = run(&scratch, &["arc", "show", &task], "");
+    assert_eq!(human.code, Some(0), "{human:?}");
+    assert!(human.out.contains("retry_count: 2"), "{}", human.out);
+}
+
 #[test]
 fn list_hides_finished_work_unless_all_and_json_is_unfiltered() {
     let scratch = fixture("list-filter");

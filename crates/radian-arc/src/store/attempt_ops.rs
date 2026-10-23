@@ -567,8 +567,8 @@ fn is_verification_stage(name: &str) -> bool {
 }
 
 /// Writes the worker-less attempt's own result record: class [`REVERIFY_CLASS`], no cost, and
-/// the state the claim wrote. The next `apply` reads it to leave reverify attempts out of
-/// `max_attempts`.
+/// the state the claim wrote. It is the record reconcile reads to apply the attempt's end; the
+/// attempt never reaches [`apply`], so it changes no retry count.
 fn write_reverify_result(
     store: &Store,
     task: &str,
@@ -597,39 +597,6 @@ fn write_reverify_result(
         .map_err(|error| Error::Failed(format!("cannot encode the attempt result: {error}")))?;
     fs::write(&path, format!("{text}\n"))
         .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
-}
-
-/// The attempt number `max_attempts` counts: the stored attempt number minus the worker-less
-/// `reverify` attempts before it (ADR 0048 decision 11). A reverify attempt costs no worker
-/// and does not use up a retry, so it is invisible to the limit; for a task with no reverify
-/// attempt this is the attempt number itself, as before.
-pub(crate) fn counted_attempt(store: &Store, task: &str, attempt: u32) -> u32 {
-    attempt.saturating_sub(reverify_attempts(store, task))
-}
-
-/// How many `reverify` attempt results `task` has recorded so far. The current attempt's
-/// record is written after `apply` decides, so this counts only earlier attempts.
-fn reverify_attempts(store: &Store, task: &str) -> u32 {
-    let attempts = store.root().join("runs").join(task).join("attempts");
-    let Ok(entries) = fs::read_dir(attempts) else {
-        return 0;
-    };
-    let mut count = 0;
-    for entry in entries.flatten() {
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(entry.path().join(ATTEMPT_RESULT_FILE)) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        if value.get("class").and_then(Value::as_str) == Some(REVERIFY_CLASS) {
-            count += 1;
-        }
-    }
-    count
 }
 
 /// How many tasks are in `doing`.
@@ -780,10 +747,11 @@ pub fn apply(
                     task.phase = "paused_budget".to_owned();
                     task.retry_at = None;
                     pause_plan = plan_reached;
-                } else if counted_attempt(store, task_id, attempt) < max_attempts {
+                } else if task.retry_count < max_attempts {
                     task.state = TaskState::Todo;
                     task.phase = "retry_wait".to_owned();
-                    let at = retry_at_after(attempt);
+                    task.retry_count += 1;
+                    let at = retry_at_after(task.retry_count);
                     task.retry_at = Some(at.clone());
                     retry_at = Some(at);
                 } else {
@@ -871,17 +839,17 @@ fn ignored(task: &model::TaskFile, finish: Option<&Finish>, reason: String) -> A
     }
 }
 
-/// The retry time for an attempt that failed: 10 s for the first, doubled per attempt, capped
-/// at 5 minutes.
-pub fn retry_at_after(attempt: u32) -> String {
-    let delay = retry_delay_secs(attempt);
+/// The retry time for an attempt that failed: 10 s for the first retry, doubled per retry
+/// since the task's last rework, capped at 5 minutes.
+pub fn retry_at_after(retry_count: u32) -> String {
+    let delay = retry_delay_secs(retry_count);
     let at = chrono::Utc::now() + chrono::Duration::seconds(delay as i64);
     at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// The backoff in seconds for the attempt that just failed.
-pub fn retry_delay_secs(attempt: u32) -> u64 {
-    let exponent = attempt.saturating_sub(1).min(5);
+/// The backoff in seconds for the retry that just ended the attempt.
+pub fn retry_delay_secs(retry_count: u32) -> u64 {
+    let exponent = retry_count.saturating_sub(1).min(5);
     (RETRY_BASE_SECS << exponent).min(RETRY_CAP_SECS)
 }
 

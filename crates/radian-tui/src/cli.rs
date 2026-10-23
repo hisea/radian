@@ -2914,6 +2914,7 @@ mod tests {
             token: Some("a-token".to_owned()),
             cost_usd: Some(0.5),
             auto_rework: 2,
+            retry_count: 1,
             allow_noop: false,
             extra_stages: vec!["mutation".to_owned()],
             max_attempts: Some(2),

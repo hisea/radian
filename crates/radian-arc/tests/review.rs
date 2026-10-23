@@ -70,14 +70,19 @@ impl Fixture {
 
     /// Puts the task in `review.verifying` for `head`, the way a pushed attempt leaves it.
     fn set_verifying(&self, head: &str) {
+        self.set_verifying_at(head, 1);
+    }
+
+    /// The same, for a given attempt number.
+    fn set_verifying_at(&self, head: &str, attempt: u32) {
         let base = self.base.clone();
         self.store
             .change_task(&self.task, |task| {
                 task.state = TaskState::Review;
                 task.phase = "verifying".to_owned();
-                task.attempt = 1;
-                task.attempt_id = Some(format!("{}-1", task.id));
-                task.token = Some("token-1".to_owned());
+                task.attempt = attempt;
+                task.attempt_id = Some(format!("{}-{attempt}", task.id));
+                task.token = Some(format!("token-{attempt}"));
                 task.base_sha = Some(base.clone());
                 task.head_sha = Some(head.to_owned());
                 Ok(())
@@ -1029,7 +1034,7 @@ fn a_verification_conflict_with_main_writes_the_next_brief_and_returns_to_ready(
     assert_eq!(conflict.stage, Stage::Commands);
     assert_eq!(conflict.main_sha, moved);
     assert_eq!(conflict.paths, vec!["file.txt".to_owned()]);
-    assert!(!conflict.exhausted);
+    assert!(conflict.stop.is_none());
     assert_eq!(
         verified.line(),
         format!(
@@ -1140,12 +1145,13 @@ fn a_command_failed_verdict_still_waits_for_the_lead() {
     );
 }
 
-/// `max_attempts` bounds the loop: when the attempt that conflicted is the task's last counted
-/// attempt, the task goes to `failed.exhausted` and no brief is written. Mutation: always write
-/// the rework and the task keeps conflicting.
+/// `max_attempts` does not decide a conflict: the attempt number is not the retry count, and
+/// a conflict rework is not a retry. A conflict on the attempt that used to be the task's last
+/// one writes its brief and returns the task to `todo.ready`. Mutation: compare `max_attempts`
+/// with the attempt number again and the task is `failed.exhausted`.
 #[test]
-fn max_attempts_stops_a_task_that_keeps_conflicting() {
-    let fixture = Fixture::new("verify-conflict-exhausted");
+fn a_conflict_on_the_old_last_attempt_still_gets_the_conflict_rework() {
+    let fixture = Fixture::new("verify-conflict-last-attempt");
     fixture
         .store
         .change_task(&fixture.task, |task| {
@@ -1157,24 +1163,171 @@ fn max_attempts_stops_a_task_that_keeps_conflicting() {
     fixture.commands(&["true"]);
     fixture.repo.advance_main("file.txt", "main side\n");
 
-    let verified = fixture.verifying_with(&head);
+    fixture.set_verifying_at(&head, 3);
+    let verified = review::verify(&fixture.store, &fixture.task).expect("verification runs");
     assert_eq!(
         (verified.state, verified.phase.as_str()),
-        ("failed", "exhausted"),
+        ("todo", "ready"),
         "{verified:?}"
     );
     let conflict = verified.conflict.clone().expect("the conflict");
-    assert!(conflict.exhausted);
+    assert!(conflict.stop.is_none());
     let stored = fixture.store.load_task(&fixture.task).unwrap().item;
     assert_eq!(
         (stored.state.as_str(), stored.phase.as_str()),
-        ("failed", "exhausted")
+        ("todo", "ready")
     );
     assert!(
-        !stored.body.contains("## Rework"),
-        "no brief was written: {}",
+        stored.body.contains("## Rework 4 (conflict with main)"),
+        "{}",
         stored.body
     );
+}
+
+/// `[limits] max_conflict_rework` bounds a run of conflicts: with the default 3, the third
+/// conflict in a row writes no brief, and the task waits in `review.rework_pending`. The
+/// conflict line and `show`'s `rework_reason` say why, and the conflict never counts as an
+/// automatic rework and never pauses the plan. Mutation: drop the limit and the third conflict
+/// returns to `todo.ready`.
+#[test]
+fn max_conflict_rework_stops_a_run_of_conflicts_and_says_why() {
+    let fixture = Fixture::new("verify-conflict-limit");
+    let plan = fixture.store.load_task(&fixture.task).unwrap().item.plan;
+    plan_ops::set_auto(&fixture.store, &plan, "run").expect("auto run");
+    let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
+    fixture.commands(&["true"]);
+    fixture.repo.advance_main("file.txt", "main side\n");
+
+    for attempt in 1..=2u32 {
+        fixture.set_verifying_at(&head, attempt);
+        let verified = review::verify(&fixture.store, &fixture.task).expect("verification runs");
+        assert_eq!(
+            (verified.state, verified.phase.as_str()),
+            ("todo", "ready"),
+            "conflict {attempt}: {verified:?}"
+        );
+        assert_eq!(
+            verified.line(),
+            format!(
+                "{} conflict with main -> todo.ready (automatic rework)",
+                fixture.task
+            )
+        );
+    }
+
+    fixture.set_verifying_at(&head, 3);
+    let verified = review::verify(&fixture.store, &fixture.task).expect("verification runs");
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("review", "rework_pending"),
+        "{verified:?}"
+    );
+    let conflict = verified.conflict.clone().expect("the conflict");
+    let stop = conflict.stop.clone().expect("the stop text");
+    assert!(
+        stop.contains("conflicted with main 3 times in a row"),
+        "{stop}"
+    );
+    assert!(stop.contains("max_conflict_rework"), "{stop}");
+    assert_eq!(
+        verified.line(),
+        format!(
+            "{} conflict with main -> review.rework_pending: {stop}",
+            fixture.task
+        )
+    );
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "rework_pending")
+    );
+    assert!(
+        stored.body.contains("## Rework 3 (conflict with main)"),
+        "{}",
+        stored.body
+    );
+    assert!(
+        !stored.body.contains("## Rework 4"),
+        "the limit wrote a brief: {}",
+        stored.body
+    );
+    assert_eq!(
+        stored.auto_rework, 0,
+        "a conflict is not an automatic rework"
+    );
+    assert_eq!(
+        fixture.store.load_plan(&plan).unwrap().item.auto,
+        "run",
+        "the conflict limit never pauses the plan"
+    );
+    let reason = review::rework_reason(&fixture.store, &stored).expect("a reason");
+    assert!(reason.contains(&stop), "{reason}");
+}
+
+/// `0` writes no conflict rework at all: the first conflict waits for the lead. Mutation: drop
+/// the limit and the brief is written.
+#[test]
+fn a_zero_conflict_limit_never_writes_the_rework() {
+    let fixture = Fixture::new("verify-conflict-zero");
+    fixture.tune("max_conflict_rework = 3", "max_conflict_rework = 0");
+    let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
+    fixture.commands(&["true"]);
+    fixture.repo.advance_main("file.txt", "main side\n");
+
+    let verified = fixture.verifying_with(&head);
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("review", "rework_pending"),
+        "{verified:?}"
+    );
+    let conflict = verified.conflict.clone().expect("the conflict");
+    assert!(conflict.stop.is_some());
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        !stored.body.contains("## Rework"),
+        "the limit wrote a brief: {}",
+        stored.body
+    );
+}
+
+/// A verification that does not end in a conflict starts a new run: two conflicts, a review
+/// that passes, then two more conflicts still write their briefs. Mutation: drop the reset and
+/// the first conflict after the pass reaches the limit and waits.
+#[test]
+fn a_non_conflicting_verification_resets_the_conflict_count() {
+    let fixture = Fixture::new("verify-conflict-reset");
+    let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
+    fixture.commands(&["true"]);
+    fixture.repo.advance_main("file.txt", "main side\n");
+
+    for attempt in 1..=2u32 {
+        fixture.set_verifying_at(&head, attempt);
+        let verified = review::verify(&fixture.store, &fixture.task).expect("verification runs");
+        assert_eq!(
+            (verified.state, verified.phase.as_str()),
+            ("todo", "ready"),
+            "conflict {attempt}: {verified:?}"
+        );
+    }
+
+    // The branch takes main's content, so the candidate merges and the gate passes.
+    let merged = fixture.publish(&head, "file.txt", "main side\n");
+    fixture.set_verifying_at(&merged, 3);
+    let verified = review::verify(&fixture.store, &fixture.task).expect("verification runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    // Main moves again and conflicts with the new branch content: a new run of conflicts.
+    fixture.repo.advance_main("file.txt", "main side 2\n");
+    for attempt in 4..=5u32 {
+        fixture.set_verifying_at(&merged, attempt);
+        let verified = review::verify(&fixture.store, &fixture.task).expect("verification runs");
+        assert_eq!(
+            (verified.state, verified.phase.as_str()),
+            ("todo", "ready"),
+            "conflict {attempt}: {verified:?}"
+        );
+    }
 }
 
 /// A `reverify` attempt that conflicts takes the same path as a worker attempt.
