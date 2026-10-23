@@ -61,6 +61,8 @@ copy.
 | M46 | drop the conflict limit (`if false && record.conflicts >= limit`) | `review::max_conflict_rework_stops_a_run_of_conflicts_and_says_why` (the third conflict returns to `todo.ready`), `review::a_zero_conflict_limit_never_writes_the_rework` (the brief is written at `0`) | ✅ 2 failed |
 | M47 | the conflict path consults `max_attempts` again (`task.attempt >= max_attempts \|\| …`) | `review::a_conflict_on_the_old_last_attempt_still_gets_the_conflict_rework` (the third attempt with `max_attempts` 1 stops instead of returning to `todo.ready`) | ✅ failed |
 | M48 | drop `retry_count` from the task JSON (`store::cli::task_json`) | `arc::the_retry_count_is_a_field_of_show_and_list_json` | ✅ failed |
+| M49 | drop the reset after a passing verification (`finish_verification`) | `review::a_non_conflicting_verification_resets_the_conflict_count` (the first conflict after the pass stops the task) | ✅ failed |
+| M50 | drop the reset in `attempt_ops::apply` for an attempt that never reached the gate | `attempt::an_attempt_that_does_not_reach_the_gate_resets_the_conflict_count` (the count stays at 2) | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -155,3 +157,7 @@ M47–M48 were run against `4b6a9619`, each from a copy under `.radian/mutations
 limit itself in place, so only the test for an old-last-attempt conflict fails. M48 is the
 JSON field alone: the text form still prints `retry_count`, so the drift-style tests pass and
 the CLI test catches it.
+
+M49–M50 were run against `4b6a9619` the same way (`cp` back, `cmp`). Each drops one reset and
+one test sees it; no other test depends on the record, so the pair is what pins both reset
+paths.
