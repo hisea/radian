@@ -681,6 +681,18 @@ fn start_runs_an_attempt_through_verification_to_awaiting_human() {
             .is_file(),
         "the commands verdict is in the attempt's directory"
     );
+    // The claim's fresh session reaches the wrapper's record, and `show` finds it there.
+    let shown = repo.radian(&["arc", "show", task, "--json"]);
+    assert_eq!(shown.code, 0, "show: {}", shown.stderr);
+    let value: Value = serde_json::from_str(&shown.stdout).expect("show --json is JSON");
+    assert_eq!(value["session_id"], json!(format!("{task}-1")));
+    let text = repo.radian(&["arc", "show", task]);
+    assert_eq!(text.code, 0, "show: {}", text.stderr);
+    assert!(
+        text.stdout.contains(&format!("session_id: {task}-1")),
+        "the text form prints the session:\n{}",
+        text.stdout
+    );
 }
 
 /// A delivery failure (a dirty tree) is `review.rework_pending`, and `start` exits 0 because
