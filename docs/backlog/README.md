@@ -37,6 +37,7 @@
 | `images.md` | decided | 0015、0018、0028、0039、0032、0043 | 图像输入：`read` 读图、`@` 贴图、拖拽、Ctrl-V 剪贴板、`exec --image` 一次做全，host 拿字节不落盘；transcript 用 ratatui-image 渲染；硬前提是 ADR 0015 估算改按像素，否则一张图就触发压缩 |
 | `arc-landing.md` | decided | 0048 | 合并方式可配置（`push` 三种 style、`pr`、`command`，arc 只保证验过的内容落地）与钩子（`after_merge`/`after_fail`/`after_rework` 跑配置里的命令，失败只警告）；默认钩子删 worktree 与 `work/<task>` 分支 |
 | `arc-start-skips-retry-wait.md` | decided | 0048 | owner 的 `radian arc start` 也接受 `todo.retry_wait`，当场领取不等退避；调度循环照旧等 `retry_at` |
+| `arc-cost-total.md` | decided | 0048、0044 | review 的花费计入 task 预算（verdict 写下时检查上限）；task 新增不清零的 `total_cost_usd`（worker + 每次 review），plan 在 `list`/`show` 给出两个和 |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
