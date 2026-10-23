@@ -88,7 +88,9 @@ comes from the magic number (PNG, JPEG, GIF, WebP; BMP and everything else are n
 then the limits (raw bytes ≤ `MAX_IMAGE_BYTES` = 5 MiB, each side ≤ `MAX_IMAGE_SIDE` = 8000),
 then the base64 part with its display facts in `annotations` (`kind`, `name`, `width`,
 `height`, `bytes`). No decode, no re-encode, no local resize; `imagesize` reads the header.
-`read`, the TUI's `@path`/dropped path and `exec --image` all call it. `read` returns
+`read`, the TUI's `@path`/dropped path and `exec --image` all call it. A path input goes through
+`load_path`: metadata and a bounded 64 KiB head first, the body only for an accepted image, so a
+huge non-image is never allocated. `read` returns
 `Read image file [<mime>] W×H` plus the part, adds the provider-scaling sentence over
 `SCALE_NOTICE_SIDE` (1568 px), and, when the host-supplied `ImageSupport` says the current
 model takes no images, returns only the text with the omission sentence. A `read` image travels

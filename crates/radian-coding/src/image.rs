@@ -1,7 +1,8 @@
 //! The one image pipeline: file bytes or host bytes → checks → [`ContentPart::Image`].
 //!
-//! Every entry point (`read`, TUI `@path`, a dropped path, `radian exec --image`) calls
-//! [`load`]. The kind comes from the **magic number**, never from the extension: PNG, JPEG,
+//! Every entry point (`read`, TUI `@path`, a dropped path, `radian exec --image`) ends in
+//! [`load`]; a path input uses [`load_path`], the shared bounded read. The kind comes from the
+//! **magic number**, never from the extension: PNG, JPEG,
 //! GIF and WebP are images for radian; BMP and everything else are not. The limits are
 //! constants, not configuration: raw bytes ≤ [`MAX_IMAGE_BYTES`], each side ≤
 //! [`MAX_IMAGE_SIDE`]. Dimensions come from the header with `imagesize` (no decode, no
@@ -12,6 +13,8 @@
 //! `[image: <name>, W×H, N KB]` line and journal replay need no decode. The compaction
 //! layer (ADR 0018) keeps reading the header from `data` as before.
 
+use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 
 use radian_core::ContentPart;
@@ -221,6 +224,121 @@ pub fn load(name: &str, bytes: &[u8]) -> Result<LoadedImage, ImageError> {
     })
 }
 
+/// The bounded head read for a path input: enough for every magic number and for `imagesize`
+/// to read an ordinary header. The rest is read only after the metadata size check passes.
+pub const MAX_HEAD_BYTES: usize = 64 * 1024;
+
+/// What [`load_path`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathImage {
+    /// An accepted image, read in full.
+    Loaded(LoadedImage),
+    /// The file exists but its magic number is not PNG, JPEG, GIF or WebP.
+    NotImage,
+    /// The path cannot be opened or read, or is not a regular file.
+    Unreadable(String),
+    /// It is an image, but over a limit or with an unreadable header.
+    Unusable(String),
+}
+
+/// The shared bounded path read used by the TUI's dropped paths and `exec --image`: metadata
+/// size and a [`MAX_HEAD_BYTES`] head first, the body only for an accepted image. A non-image
+/// never allocates its body, and an over-limit image is refused before its body is read.
+pub fn load_path(path: &Path) -> PathImage {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return PathImage::Unreadable("cannot open the file".into());
+    };
+    let Ok(meta) = file.metadata() else {
+        return PathImage::Unreadable("cannot read the file's metadata".into());
+    };
+    if !meta.is_file() {
+        return PathImage::Unreadable("not a regular file".into());
+    }
+    let total = meta.len();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let mut head = Vec::with_capacity(MAX_HEAD_BYTES.min(total as usize));
+    let mut buf = [0u8; 8192];
+    while head.len() < MAX_HEAD_BYTES {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                note_read(n);
+                head.extend_from_slice(&buf[..n]);
+            }
+            Err(error) => return PathImage::Unreadable(error.to_string()),
+        }
+    }
+    if ImageKind::from_magic(&head).is_none() {
+        return PathImage::NotImage;
+    }
+    // A candidate image: the byte limit comes from metadata, before any body read.
+    if total > MAX_IMAGE_BYTES {
+        return PathImage::Unusable(ImageError::TooLarge { bytes: total }.to_string());
+    }
+    // When the head already holds the dimensions, a per-side over-limit is refused here too.
+    if let Some((width, height)) = header_dimensions(&head)
+        && (width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE)
+    {
+        return PathImage::Unusable(ImageError::TooManyPixels { width, height }.to_string());
+    }
+    // The accepted image (at most 5 MiB by the check above): read the rest. The cap also holds
+    // if the file grew after the metadata read.
+    let want = total.min(MAX_IMAGE_BYTES) as usize;
+    let mut bytes = head;
+    bytes.reserve(want.saturating_sub(bytes.len()));
+    while bytes.len() < want {
+        let room = (want - bytes.len()).min(buf.len());
+        match file.read(&mut buf[..room]) {
+            Ok(0) => break,
+            Ok(n) => {
+                note_read(n);
+                bytes.extend_from_slice(&buf[..n]);
+            }
+            Err(error) => return PathImage::Unreadable(error.to_string()),
+        }
+    }
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return PathImage::Unusable(
+            ImageError::TooLarge {
+                bytes: bytes.len() as u64,
+            }
+            .to_string(),
+        );
+    }
+    match load(&name, &bytes) {
+        Ok(image) => PathImage::Loaded(image),
+        Err(ImageError::NotImage) => PathImage::NotImage,
+        Err(error) => PathImage::Unusable(error.to_string()),
+    }
+}
+
+// Test-only count of the bytes `load_path` reads, so a test can prove a huge non-image is not
+// read whole. Compiled out of a normal build.
+#[cfg(any(test, feature = "testing"))]
+std::thread_local! {
+    static PATH_BYTES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn reset_path_read_bytes() {
+    PATH_BYTES_READ.with(|bytes| bytes.set(0));
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn path_read_bytes() -> usize {
+    PATH_BYTES_READ.with(std::cell::Cell::get)
+}
+
+fn note_read(n: usize) {
+    #[cfg(any(test, feature = "testing"))]
+    PATH_BYTES_READ.with(|bytes| bytes.set(bytes.get() + n));
+    #[cfg(not(any(test, feature = "testing")))]
+    let _ = n;
+}
+
 /// The `read` tool's text part for an image (ADR 0018: the non-vision line is added only when
 /// the current model is known not to take images).
 pub fn read_description(image: &LoadedImage, supports_images: bool) -> String {
@@ -317,6 +435,115 @@ mod tests {
         let part = image.part();
         assert_eq!(part_placeholder(&part), Some(image.placeholder()));
         assert_eq!(image.placeholder(), "[image: shot.png, 1200×800, 1 KB]");
+    }
+
+    /// A unique scratch directory removed on drop (no tempdir dependency).
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir()
+                .join(format!("radian-image-{}-{label}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_valid_path_loads_the_image() {
+        let dir = Scratch::new("valid");
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, png(10, 10)).unwrap();
+        let PathImage::Loaded(image) = load_path(&path) else {
+            panic!("a valid PNG loads");
+        };
+        assert_eq!(image.name, "shot.png");
+        assert_eq!(image.width, 10);
+    }
+
+    #[test]
+    fn a_text_file_is_not_an_image() {
+        let dir = Scratch::new("text");
+        let path = dir.path().join("notes.png");
+        std::fs::write(&path, "plain text").unwrap();
+        assert_eq!(load_path(&path), PathImage::NotImage);
+    }
+
+    #[test]
+    fn a_missing_path_is_unreadable() {
+        let dir = Scratch::new("missing");
+        assert!(matches!(
+            load_path(&dir.path().join("nope.png")),
+            PathImage::Unreadable(_)
+        ));
+    }
+
+    /// A huge sparse non-image must not be read whole: the head is enough to say `NotImage`.
+    #[test]
+    fn a_large_non_image_is_refused_from_its_head() {
+        let dir = Scratch::new("huge-non-image");
+        let path = dir.path().join("huge.bin");
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"not an image").unwrap();
+        file.set_len(2 * 1024 * 1024 * 1024).unwrap();
+        drop(file);
+        reset_path_read_bytes();
+        assert_eq!(load_path(&path), PathImage::NotImage);
+        let read = path_read_bytes();
+        assert!(
+            read > 0 && read <= MAX_HEAD_BYTES,
+            "read {read} bytes of a 2 GiB non-image"
+        );
+    }
+
+    /// An over-limit image is refused from metadata, never by reading its body.
+    #[test]
+    fn an_over_limit_image_is_refused_before_its_body_is_read() {
+        let dir = Scratch::new("huge-image");
+        let path = dir.path().join("huge.png");
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, &png(10, 10)).unwrap();
+        file.set_len(MAX_IMAGE_BYTES + 1).unwrap();
+        drop(file);
+        reset_path_read_bytes();
+        let outcome = load_path(&path);
+        assert!(
+            matches!(&outcome, PathImage::Unusable(reason) if reason.contains("5 MiB")),
+            "{outcome:?}"
+        );
+        let read = path_read_bytes();
+        assert!(read > 0, "the head must be read");
+        assert!(read <= MAX_HEAD_BYTES, "read {read} bytes");
+        assert!((read as u64) < MAX_IMAGE_BYTES, "the body was read");
+    }
+
+    /// A header whose dimensions are already over 8000 px is refused from the head too.
+    #[test]
+    fn an_over_limit_side_is_refused_from_its_header() {
+        let dir = Scratch::new("wide-image");
+        let path = dir.path().join("wide.png");
+        std::fs::write(&path, png(9000, 10)).unwrap();
+        reset_path_read_bytes();
+        let outcome = load_path(&path);
+        assert!(
+            matches!(&outcome, PathImage::Unusable(reason) if reason.contains("8000")),
+            "{outcome:?}"
+        );
+        assert!(path_read_bytes() > 0, "the head must be read");
+        assert!(path_read_bytes() <= MAX_HEAD_BYTES);
     }
 
     #[test]

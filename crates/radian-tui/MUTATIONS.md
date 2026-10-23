@@ -2412,13 +2412,14 @@ from a `cp` in `/tmp/` and confirmed byte-identical with `cmp`; every run with
 
 ## rework 3: a dropped path is not read whole before a check (2026-10-23, branch `work/TK0013-image-inputs`)
 
-`load_dropped` now opens the file, reads a bounded 64 KiB head for the magic number and
-`imagesize`, checks the metadata size against 5 MiB, and reads the body only for an accepted
-image. The mutation puts `std::fs::read(path)` back, so the whole file is allocated before
-`image::load` decides. The test-only read counter (`DROPPED_BYTES_READ`) makes the miss visible
-without writing a 2 GiB file: the sparse file is `set_len`-created. Restored from
-`.radian/mention.rs.bak` byte-identically.
+`mention::load_dropped` now wraps the shared `radian_coding::image::load_path`, which opens the
+file, reads a bounded 64 KiB head for the magic number and `imagesize`, checks the metadata size
+against 5 MiB, and reads the body only for an accepted image. The mutation puts
+`std::fs::read(path)` back, so the whole file is allocated before `image::load` decides. The
+test-only read counter (`PATH_BYTES_READ`, also exposed under the `testing` feature for the
+`radian-exec` tests) makes the miss visible without writing a 2 GiB file: the sparse file is
+`set_len`-created. Restored from `.radian/mention.rs.bak` byte-identically.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| RW3-1 | `load_dropped` reads the whole file (`std::fs::read`) before the magic/size checks | ✅ 1 failed | `mention::tests::a_large_non_image_is_refused_from_its_head` (0 bytes through the bounded reader on a 2 GiB sparse file) |
+| RW3-1 | the path read reads the whole file (`std::fs::read`) before the magic/size checks | ✅ 1 failed | `radian-coding image::tests::a_large_non_image_is_refused_from_its_head` (0 bytes through the bounded reader on a 2 GiB sparse file) |

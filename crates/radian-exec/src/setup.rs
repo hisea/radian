@@ -611,19 +611,25 @@ pub(crate) async fn setup(
 
 /// Reads each `--image` path with the host's own bytes and runs the shared image pipeline. A
 /// missing file, a non-image, or a limit crossed is a usage error (exit 2, ADR 0032) naming
-/// the path and the reason; nothing is read lazily later.
+/// the path and the reason; nothing is read lazily later. The read is bounded
+/// (`image::load_path`): a huge non-image never allocates its body, and an over-limit image is
+/// refused from metadata before its body is read.
 fn load_images(cli: &Cli) -> Result<Vec<radian_coding::LoadedImage>, SetupError> {
     let mut images = Vec::new();
     for path in &cli.image {
-        let bytes = std::fs::read(path)
-            .map_err(|error| SetupError(format!("--image {}: {error}", path.display())))?;
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let image = radian_coding::image::load(&name, &bytes)
-            .map_err(|error| SetupError(format!("--image {}: {error}", path.display())))?;
-        images.push(image);
+        match radian_coding::image::load_path(path) {
+            radian_coding::image::PathImage::Loaded(image) => images.push(image),
+            radian_coding::image::PathImage::NotImage => {
+                return Err(SetupError(format!(
+                    "--image {}: not a PNG, JPEG, GIF or WebP image",
+                    path.display()
+                )));
+            }
+            radian_coding::image::PathImage::Unreadable(reason)
+            | radian_coding::image::PathImage::Unusable(reason) => {
+                return Err(SetupError(format!("--image {}: {reason}", path.display())));
+            }
+        }
     }
     Ok(images)
 }
@@ -690,6 +696,62 @@ mod tests {
         assert!(
             Cli::try_parse_from(["radian", "--image", first.to_str().unwrap()]).is_err(),
             "--image needs -p"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A huge sparse non-image is refused from its bounded head: `--image` never allocates the
+    /// whole file, and the error is the not-an-image reason (usage exit 2).
+    #[test]
+    fn a_large_non_image_is_refused_without_reading_it_whole() {
+        let dir =
+            std::env::temp_dir().join(format!("radian-exec-image-huge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huge.mp4");
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"not an image").unwrap();
+        file.set_len(2 * 1024 * 1024 * 1024).unwrap();
+        drop(file);
+
+        let cli = Cli::try_parse_from(["radian", "-p", "hi", "--image", path.to_str().unwrap()])
+            .expect("the flags parse");
+        radian_coding::image::reset_path_read_bytes();
+        let error = load_images(&cli).unwrap_err();
+        assert!(error.0.contains("not a PNG"), "{error:?}");
+        let read = radian_coding::image::path_read_bytes();
+        assert!(
+            read > 0 && read <= radian_coding::image::MAX_HEAD_BYTES,
+            "read {read} bytes of a 2 GiB non-image"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An over-limit image is refused from metadata, before its body is read; the reason is
+    /// the documented 5 MiB one (usage exit 2).
+    #[test]
+    fn an_over_limit_image_is_refused_without_reading_its_body() {
+        let dir =
+            std::env::temp_dir().join(format!("radian-exec-image-over-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huge.png");
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, &png(10, 10)).unwrap();
+        file.set_len(radian_coding::MAX_IMAGE_BYTES + 1).unwrap();
+        drop(file);
+
+        let cli = Cli::try_parse_from(["radian", "-p", "hi", "--image", path.to_str().unwrap()])
+            .expect("the flags parse");
+        radian_coding::image::reset_path_read_bytes();
+        let error = load_images(&cli).unwrap_err();
+        assert!(error.0.contains("5 MiB"), "{error:?}");
+        let read = radian_coding::image::path_read_bytes();
+        assert!(read > 0, "the head must be read");
+        assert!(read <= radian_coding::image::MAX_HEAD_BYTES, "read {read}");
+        assert!(
+            (read as u64) < radian_coding::MAX_IMAGE_BYTES,
+            "the body was read"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
