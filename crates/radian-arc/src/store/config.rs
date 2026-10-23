@@ -125,6 +125,66 @@ impl Default for Limits {
     }
 }
 
+/// How a later attempt of a task gets its worker session (`[worker] rework_session`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReworkSession {
+    /// Every attempt has a session of its own, `<task>-<attempt>`; nothing is resumed.
+    #[default]
+    Fresh,
+    /// One session per task, the task id; a later attempt resumes it.
+    Resume,
+}
+
+/// The values `worker.rework_session` accepts, in one list: the parser refuses anything else
+/// and the manual's drift test reads it.
+pub const REWORK_SESSIONS: &[ReworkSession] = &[ReworkSession::Fresh, ReworkSession::Resume];
+
+impl ReworkSession {
+    /// The stored spelling: the TOML value and the word the manual uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReworkSession::Fresh => "fresh",
+            ReworkSession::Resume => "resume",
+        }
+    }
+
+    /// The value `text` names, if any.
+    pub fn parse(text: &str) -> Option<Self> {
+        REWORK_SESSIONS
+            .iter()
+            .copied()
+            .find(|value| value.as_str() == text)
+    }
+}
+
+impl std::fmt::Display for ReworkSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A value outside [`REWORK_SESSIONS`] is refused by name when the file is read, so the field
+/// never holds one.
+impl<'de> Deserialize<'de> for ReworkSession {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "`worker.rework_session` is `{text}`; it must be one of {}",
+                REWORK_SESSIONS
+                    .iter()
+                    .map(|value| format!("`{value}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })
+    }
+}
+
 /// `[worker]`: how arc starts the model process of one attempt.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -132,6 +192,9 @@ pub struct Worker {
     /// Extra `radian exec` arguments, after the wrapper's fixed ones. Empty: the worker uses
     /// the host's normal model configuration.
     pub exec_args: Vec<String>,
+    /// Whether a later attempt of a task gets a session of its own (`fresh`, the default) or
+    /// continues the task's one session (`resume`).
+    pub rework_session: ReworkSession,
 }
 
 /// `[ids]`: the prefix every new plan and task id starts with.
@@ -207,6 +270,7 @@ max_auto_reverify = 2         # 0 turns the automatic reverify off
 
 [worker]
 exec_args = []                 # extra `radian exec` arguments for the worker
+rework_session = "fresh"       # `fresh`: a session per attempt; `resume`: the task's one session
 
 [ids]
 plan_prefix = "PL"             # 1 to 4 uppercase letters; the first letters of a new plan id
@@ -473,5 +537,67 @@ mod tests {
         let error = parse(&equal).expect_err("equal prefixes must fail");
         assert!(error.contains("ids.plan_prefix"), "{error}");
         assert!(error.contains("ids.task_prefix"), "{error}");
+    }
+
+    /// `rework_session` defaults to `fresh`, the written file names it, and a file without the
+    /// key takes the default. `resume` is the other value of the one closed list.
+    #[test]
+    fn the_worker_section_defaults_to_a_fresh_rework_session() {
+        assert_eq!(
+            Worker::default().rework_session,
+            ReworkSession::Fresh,
+            "the default is `fresh`"
+        );
+        assert_eq!(ReworkSession::default().as_str(), "fresh");
+        let text = default_text("main");
+        assert!(
+            text.contains("rework_session = \"fresh\""),
+            "init names the key:\n{text}"
+        );
+        assert_eq!(
+            parse(&text).expect("the default text parses").worker,
+            Worker::default()
+        );
+        assert_eq!(
+            parse("schema_version = 1\n")
+                .expect("an empty file")
+                .worker
+                .rework_session,
+            ReworkSession::Fresh,
+            "a missing key takes the default"
+        );
+        let resumed = parse("schema_version = 1\n[worker]\nrework_session = \"resume\"\n")
+            .expect("`resume` parses");
+        assert_eq!(resumed.worker.rework_session, ReworkSession::Resume);
+        for value in REWORK_SESSIONS {
+            assert_eq!(
+                ReworkSession::parse(value.as_str()),
+                Some(*value),
+                "every listed value parses back"
+            );
+        }
+    }
+
+    /// A value outside the list is a config error, and the error names the value and the
+    /// allowed ones.
+    #[test]
+    fn an_unknown_rework_session_is_refused_by_name() {
+        let text = default_text("main").replace(
+            "rework_session = \"fresh\"",
+            "rework_session = \"sometimes\"",
+        );
+        let error = parse(&text).expect_err("an unknown value must fail");
+        assert!(error.contains("rework_session"), "{error}");
+        assert!(
+            error.contains("sometimes"),
+            "the error names the value: {error}"
+        );
+        for value in REWORK_SESSIONS {
+            assert!(
+                error.contains(&format!("`{value}`")),
+                "the error lists `{value}`: {error}"
+            );
+        }
+        assert_eq!(ReworkSession::parse("sometimes"), None);
     }
 }

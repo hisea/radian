@@ -740,6 +740,337 @@ fn a_later_attempt_starts_the_session_when_no_earlier_attempt_created_it() {
     );
 }
 
+/// ADR 0048 decision 7: a fresh rework starts a session of its own (`<task>-2`, no
+/// `--resume`), its stdin opens with the hand-off section (the previous report, the commit
+/// list and the diff stat), and the first attempt's journal is untouched. Mutation: pass
+/// `--resume` and the second result reports a resumed session; drop the section and the
+/// brief is the body alone.
+#[test]
+fn a_fresh_rework_starts_a_new_session_with_the_hand_off() {
+    let repo = Repo::new("fresh-rework");
+    init(&repo);
+    let task = "TK0012-fresh";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m 'first commit on the branch'",
+        ),
+        text_reply("the first attempt is done"),
+    ]);
+    let first_session = format!("{task}-1");
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-f1",
+        &["--session", first_session.as_str()],
+        &model_args(mock1.base_url()),
+        "one",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    let result1 = last_result(&repo.run_dir(task, 1).join("result.jsonl"));
+    assert_eq!(result1["session_id"], json!(first_session));
+    assert_eq!(result1["turns"], json!(1));
+    let journal = repo.sessions.join(format!("{first_session}.jsonl"));
+    assert!(journal.is_file(), "{} exists", journal.display());
+    let before = std::fs::read(&journal).expect("the first attempt's journal");
+
+    let mock2 = Mock::start(vec![
+        shell_reply(
+            "c2",
+            "echo two > two.txt && git add two.txt && git commit -m two",
+        ),
+        text_reply("done"),
+    ]);
+    let second_session = format!("{task}-2");
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-f2",
+        &["--session", second_session.as_str()],
+        &model_args(mock2.base_url()),
+        "second",
+    );
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert_eq!(second.finished()["pushed"], json!(true));
+    let result2 = last_result(&repo.run_dir(task, 2).join("result.jsonl"));
+    assert_eq!(
+        result2["session_id"],
+        json!(second_session),
+        "the attempt's own session"
+    );
+    assert_eq!(
+        result2["turns"],
+        json!(1),
+        "a new session, not a resumed one"
+    );
+    assert_eq!(
+        std::fs::read(&journal).expect("the first attempt's journal"),
+        before,
+        "the first attempt's journal is untouched"
+    );
+
+    let brief = brief_of(&mock2.requests()[0]);
+    assert!(
+        brief.starts_with("## Where the previous attempt left off"),
+        "the hand-off comes first:\n{brief}"
+    );
+    assert!(
+        brief.contains("the first attempt is done"),
+        "the previous attempt's final report:\n{brief}"
+    );
+    let commits = brief
+        .split("### The commits on the branch")
+        .nth(1)
+        .expect("the commit list section");
+    assert!(
+        commits.contains("first commit on the branch"),
+        "the commit list names the branch's commit:\n{commits}"
+    );
+    let stat = brief
+        .split("### The change so far")
+        .nth(1)
+        .expect("the diff stat section");
+    assert!(
+        stat.contains("one.txt"),
+        "the diff stat names the changed file:\n{stat}"
+    );
+    assert!(
+        brief.contains("read the files you need rather than assume"),
+        "the hand-off says to read the files:\n{brief}"
+    );
+    assert!(
+        brief.trim_end().ends_with("second"),
+        "the brief follows the hand-off:\n{brief}"
+    );
+
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir(task, 2).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
+    assert_eq!(
+        execution["session_id"],
+        json!(second_session),
+        "the attempt record names its session"
+    );
+}
+
+/// A `reverify` attempt in between writes no `result.jsonl`, so the hand-off walks back to
+/// the newest attempt that wrote a final report (attempt 1) and says which one it is.
+/// Mutation: read only attempt n-1, and the report is the "wrote no final report" line.
+#[test]
+fn the_hand_off_walks_back_past_a_reverify_attempt() {
+    let repo = Repo::new("fresh-reverify");
+    let task = "TK0015-reverify-between";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m 'first commit on the branch'",
+        ),
+        text_reply("the first attempt's report"),
+    ]);
+    let first_session = format!("{task}-1");
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-rb1",
+        &["--session", first_session.as_str()],
+        &model_args(mock1.base_url()),
+        "one",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+
+    // Attempt 2 is the scheduling loop's own worker-less reverify: the attempt is claimed and
+    // its records written, but no worker runs, so there is no `result.jsonl`.
+    let reverify = repo.run_dir(task, 2);
+    std::fs::create_dir_all(&reverify).expect("the reverify attempt's run directory");
+    std::fs::write(
+        reverify.join("attempt_result.json"),
+        "{\"class\":\"reverify\"}\n",
+    )
+    .expect("the reverify attempt's record");
+    assert!(
+        !reverify.join("result.jsonl").exists(),
+        "a reverify attempt has no worker stream"
+    );
+
+    let mock3 = Mock::start(vec![
+        shell_reply(
+            "c3",
+            "echo two > two.txt && git add two.txt && git commit -m two",
+        ),
+        text_reply("done"),
+    ]);
+    let third_session = format!("{task}-3");
+    let third = run(
+        &repo,
+        task,
+        3,
+        "tok-rb3",
+        &["--session", third_session.as_str()],
+        &model_args(mock3.base_url()),
+        "third",
+    );
+    assert_eq!(third.code, 0, "{}", third.stderr);
+    let result3 = last_result(&repo.run_dir(task, 3).join("result.jsonl"));
+    assert_eq!(result3["session_id"], json!(third_session));
+
+    let brief = brief_of(&mock3.requests()[0]);
+    let report = brief
+        .split("### The previous attempt's final report")
+        .nth(1)
+        .expect("the report section");
+    assert!(
+        report.contains("the first attempt's report"),
+        "the newest report survives the reverify attempt:\n{report}"
+    );
+    assert!(
+        report.contains("Attempt 1 is the newest attempt that wrote a final report"),
+        "the section names the attempt it came from:\n{report}"
+    );
+    assert!(
+        report.contains("attempt 2 ended without one"),
+        "the section says the attempt before it wrote none:\n{report}"
+    );
+}
+
+/// The hand-off cuts a long previous report at 8,000 characters and says so.
+#[test]
+fn a_long_previous_report_is_cut_at_the_cap_with_a_note() {
+    let repo = Repo::new("fresh-cap");
+    let task = "TK0013-cap";
+    let long = "x".repeat(9_000);
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m one",
+        ),
+        text_reply(&long),
+    ]);
+    let first_session = format!("{task}-1");
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-cap1",
+        &["--session", first_session.as_str()],
+        &model_args(mock1.base_url()),
+        "one",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+
+    let mock2 = Mock::start(vec![
+        shell_reply(
+            "c2",
+            "echo two > two.txt && git add two.txt && git commit -m two",
+        ),
+        text_reply("done"),
+    ]);
+    let second_session = format!("{task}-2");
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-cap2",
+        &["--session", second_session.as_str()],
+        &model_args(mock2.base_url()),
+        "second",
+    );
+    assert_eq!(second.code, 0, "{}", second.stderr);
+
+    let brief = brief_of(&mock2.requests()[0]);
+    assert!(
+        brief.contains(&"x".repeat(8_000)),
+        "the first 8,000 characters are there"
+    );
+    assert!(
+        !brief.contains(&"x".repeat(8_001)),
+        "the report is cut at 8,000 characters"
+    );
+    assert!(
+        brief.contains("cut at 8,000 characters"),
+        "the note says the report was cut:\n{brief}"
+    );
+}
+
+/// A `merge-main` conflict section stays first when a fresh rework also gets the hand-off.
+/// Mutation: put the hand-off first and the worker reads about the previous attempt before the
+/// merge it must resolve.
+#[test]
+fn a_fresh_rework_keeps_the_conflict_section_first() {
+    let repo = Repo::new("fresh-conflict");
+    init(&repo);
+    let task = "TK0014-fresh-conflict";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "printf 'task side\\n' > file.txt && git add file.txt && git commit -m task",
+        ),
+        text_reply("done"),
+    ]);
+    let first_session = format!("{task}-1");
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-fc1",
+        &["--session", first_session.as_str()],
+        &model_args(mock1.base_url()),
+        "task side",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert_eq!(first.finished()["pushed"], json!(true));
+
+    let moved = advance_main(&repo, "file.txt", "main side\n");
+    let short = &moved[..7];
+
+    let mock2 = Mock::start(vec![
+        shell_reply(
+            "c2",
+            "printf 'resolved\\n' > file.txt && git add file.txt && git commit --no-edit",
+        ),
+        text_reply("done"),
+    ]);
+    let second_session = format!("{task}-2");
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-fc2",
+        &["--session", second_session.as_str()],
+        &model_args(mock2.base_url()),
+        "resolve it",
+    );
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert_eq!(second.finished()["pushed"], json!(true));
+
+    let brief = brief_of(&mock2.requests()[0]);
+    assert!(
+        brief.starts_with("## Before you start: the worktree is merging"),
+        "the conflict section is first:\n{brief}"
+    );
+    assert!(
+        brief.contains(&format!("origin/main ({short})")),
+        "the conflict section names the merged main:\n{brief}"
+    );
+    assert!(brief.contains("- file.txt"), "{brief}");
+    let conflict = brief.find("- file.txt").expect("the conflicted path");
+    let handoff = brief
+        .find("## Where the previous attempt left off")
+        .expect("the hand-off section");
+    assert!(
+        conflict < handoff,
+        "the conflict section comes before the hand-off:\n{brief}"
+    );
+    assert!(
+        brief.contains("The full history is on the branch"),
+        "the hand-off is there:\n{brief}"
+    );
+}
+
 /// Two wrappers for the same task at once: the second fails on the worktree flock with exit
 /// 4 and starts no worker.
 #[test]

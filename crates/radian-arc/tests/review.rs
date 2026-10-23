@@ -1649,7 +1649,8 @@ fn rework_after_reject_starts_a_new_attempt_with_its_own_verdicts() {
     assert_state(&fixture, ("todo", "ready"));
     let claim = attempt_ops::claim(&fixture.store, &fixture.task).expect("the next attempt");
     assert_eq!(claim.attempt, 2);
-    assert!(claim.resume, "a rework attempt resumes the session");
+    assert!(!claim.resume, "a fresh rework starts a session of its own");
+    assert_eq!(claim.session_id, format!("{}-2", fixture.task));
     let head2 = fixture.publish(&head, "second.txt", "second\n");
     let finish = Finish {
         attempt_id: claim.attempt_id.clone(),
