@@ -584,9 +584,10 @@ fn draw_diff(
         return;
     }
     // The task frame holds the file list; the diff frame takes the rest of the page.
-    // The file list takes at most what leaves the diff frame its title, one body row and its
-    // bottom; the window follows the selected file.
-    let file_rows = diff.files.len().min(remaining.saturating_sub(4).max(1));
+    // After the list the frame needs five rows: the task frame's bottom, a blank, the diff
+    // frame's title, at least one body row and its bottom. The list is clipped to leave
+    // them; the window follows the selected file.
+    let file_rows = diff.files.len().min(remaining.saturating_sub(5).max(1));
     let first = page
         .file_sel
         .saturating_sub(file_rows.saturating_sub(1))

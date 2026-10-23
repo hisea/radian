@@ -675,6 +675,37 @@ fn first_diff_body_row(text: &str) -> String {
 }
 
 #[test]
+fn a_long_file_list_still_leaves_the_diff_a_body_row() {
+    use radian_arc::read::{DiffFile, TaskDiff};
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    let id = app.task.as_ref().unwrap().id.clone();
+    let attempt = app.task.as_ref().unwrap().attempt.unwrap();
+    let files = (1..=20)
+        .map(|i| DiffFile {
+            path: format!("file-{i:02}.txt"),
+            added: 1,
+            removed: 0,
+            text: format!("+the change of file-{i:02}.txt\n"),
+        })
+        .collect();
+    app.apply_diff(&id, attempt, Ok(TaskDiff { files }));
+
+    let text = screen(&mut app, 80, 24);
+    assert!(
+        text.contains("╭─ file-01.txt"),
+        "the selected file's frame is drawn:\n{text}"
+    );
+    assert!(
+        text.contains("the change of file-01.txt"),
+        "the frame keeps at least one body row:\n{text}"
+    );
+}
+
+#[test]
 fn the_task_page_has_the_frame_the_tabs_and_the_attempt_selector() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
