@@ -10,7 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::*;
-use radian_arc::gate::{Stage, Verdict, effective_stages, required_passed, verdict_set_digest};
+use radian_arc::gate::{
+    ReviewItem, Stage, Verdict, effective_stages, required_passed, verdict_set_digest,
+};
 use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
 use radian_arc::store::model::TaskState;
@@ -206,6 +208,45 @@ impl Fixture {
             &format!("work/{}", self.task),
         ]);
         path
+    }
+
+    /// Sets the plan's auto level.
+    fn set_auto(&self, level: &str) {
+        let plan = self
+            .store
+            .load_task(&self.task)
+            .expect("the task")
+            .item
+            .plan;
+        plan_ops::set_auto(&self.store, &plan, level).expect("the auto level");
+    }
+
+    /// Runs one rework attempt: the lead's brief, the claim, a commit on `work/<task>` at `at`,
+    /// and the pushed result, so the task is back in `review.verifying` for `head`.
+    fn rework(&self, at: &str, file: &str, content: &str) -> String {
+        plan_ops::add_rework(&self.store, &self.task, "fix the review").expect("a rework brief");
+        let claim = attempt_ops::claim(&self.store, &self.task).expect("the next attempt");
+        let head = self.publish(at, file, content);
+        let finish = Finish {
+            attempt_id: claim.attempt_id.clone(),
+            token: claim.token.clone(),
+            exit_code: 0,
+            outcome: "completed".to_owned(),
+            base_sha: Some(self.base.clone()),
+            head_sha: Some(head.clone()),
+            pushed: true,
+            failure: None,
+        };
+        attempt_ops::apply(
+            &self.store,
+            &self.task,
+            claim.attempt,
+            Some(&finish),
+            None,
+            Some(0),
+        )
+        .expect("the rework result applies");
+        head
     }
 }
 
@@ -1543,6 +1584,30 @@ fn review_message(summary: &str, blocking: &[&str], suggestions: &[&str]) -> Str
     )
 }
 
+/// One review item in the object form.
+fn review_item(level: &str, file: &str, line: u32, text: &str) -> Value {
+    serde_json::json!({"level": level, "file": file, "line": line, "text": text})
+}
+
+/// A session's final message with one fenced report whose items are objects.
+fn review_object_message(summary: &str, blocking: &[Value], suggestions: &[Value]) -> String {
+    let value = serde_json::json!({
+        "summary": summary,
+        "blocking": blocking,
+        "suggestions": suggestions,
+        "verified": ["the diff reads correctly"],
+    });
+    format!(
+        "Here is my review.\n\n```json\n{}\n```\n",
+        serde_json::to_string_pretty(&value).expect("the report serializes")
+    )
+}
+
+/// A file with `count` numbered lines.
+fn numbered(count: u32) -> String {
+    (1..=count).map(|n| format!("line {n}\n")).collect()
+}
+
 fn garbage() -> String {
     "I could not review this.".to_owned()
 }
@@ -1580,7 +1645,7 @@ fn a_review_with_no_blocking_findings_passes_and_keeps_its_summary() {
     let report = verdict.review.clone().expect("the review report");
     assert_eq!(report.summary, summary);
     assert!(report.blocking.is_empty(), "{report:?}");
-    assert_eq!(report.suggestions, vec!["a nicer name".to_owned()]);
+    assert_eq!(report.suggestions, vec![ReviewItem::text("a nicer name")]);
     assert_eq!(verdict.sha, head);
     assert_eq!(verdict.main_sha.as_deref(), Some(fixture.base.as_str()));
     assert_eq!(verdict.candidate_sha.as_deref(), Some(head.as_str()));
@@ -1683,6 +1748,16 @@ fn a_blocking_finding_sends_the_task_to_rework_with_the_item_in_the_reason() {
     assert!(reason.contains("review_blocking"), "{reason}");
     assert!(reason.contains("rename the helper"), "{reason}");
     assert!(reason.contains("add a test"), "{reason}");
+    // A plain string in the report is an item with only its text.
+    let report = verdict.review.clone().expect("a report");
+    assert_eq!(
+        report.blocking,
+        vec![
+            ReviewItem::text("rename the helper"),
+            ReviewItem::text("add a test"),
+        ]
+    );
+    assert!(!report.blocking[0].pre_existing);
 
     // The rework path is the same as after a failed `commands` stage.
     plan_ops::add_rework(&fixture.store, &fixture.task, "fix the review").expect("a rework");
@@ -1999,4 +2074,574 @@ fn show_exposes_the_review_findings() {
     );
     assert_eq!(value["review_session_ids"][0], "fake-review-1");
     assert_eq!(value["review_cost_micros"], 2000);
+}
+
+// ---- the rework round (ADR 0048 decision 10) ------------------------------------------
+
+/// The first review of a task is unchanged: its prompt holds the whole diff of the task's own
+/// change, and a blocking item with a place blocks.
+#[test]
+fn the_first_review_prompt_holds_the_full_diff_and_its_item_blocks() {
+    let fixture = Fixture::new("review-first-unchanged");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "review-first-unchanged-fake",
+        &[review_object_message(
+            "the change adds one.txt",
+            &[review_item("major", "one.txt", 1, "the line is wrong")],
+            &[],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let prompt = fake.prompt(1);
+    assert!(prompt.contains("## The diff"), "{prompt}");
+    assert!(prompt.contains("diff --git a/one.txt"), "{prompt}");
+    assert!(prompt.contains("+one"), "{prompt}");
+    assert!(!prompt.contains("## The previous review"), "{prompt}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(
+        verdict.review.expect("a report").blocking,
+        vec![ReviewItem {
+            level: Some("major".to_owned()),
+            file: Some("one.txt".to_owned()),
+            line: Some(1),
+            text: "the line is wrong".to_owned(),
+            pre_existing: false,
+        }]
+    );
+    assert_eq!(
+        verdict.review_pre_existing, None,
+        "a first review moves nothing"
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "rework_pending"),
+        "auto is off, so the lead gets the task"
+    );
+}
+
+/// A rework round's prompt holds the increment and the previous blocking items, and not a file
+/// that only the first attempt changed. Mutation: treat the whole own diff as the increment →
+/// the prompt holds one.txt's hunk again.
+#[test]
+fn a_rework_prompt_holds_the_increment_and_the_previous_items() {
+    let fixture = Fixture::new("review-rework-prompt");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let first_fake = FakeReview::new(
+        "review-rework-prompt-first",
+        &[review_object_message(
+            "the change adds one.txt",
+            &[review_item("major", "one.txt", 1, "the line is wrong")],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    let second = fixture.rework(&first, "two.txt", "two\n");
+    let fake = FakeReview::new(
+        "review-rework-prompt-second",
+        &[review_object_message(
+            "the rework fixes it and adds two.txt",
+            &[],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let prompt = fake.prompt(1);
+    assert!(prompt.contains("## The previous review"), "{prompt}");
+    assert!(
+        prompt.contains("- [major] one.txt:1 the line is wrong"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("{first}..{second}")),
+        "the commit list is the rework's range: {prompt}"
+    );
+    assert!(prompt.contains("## The increment"), "{prompt}");
+    assert!(prompt.contains("diff --git a/two.txt"), "{prompt}");
+    assert!(
+        !prompt.contains("diff --git a/one.txt"),
+        "a file only the first attempt changed is in the increment:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("Check that each blocking item of the previous review is fixed"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("## The diff"), "{prompt}");
+    assert_eq!(
+        fixture
+            .verdict(&format!("{}-2", fixture.task), Stage::Review)
+            .review_pre_existing,
+        Some(0),
+        "a rework round records the count, even when it moved nothing"
+    );
+}
+
+/// A blocking item on a line the rework did not touch is moved to `suggestions` with
+/// `pre_existing`, the stage passes, and the verdict records the move. Mutation: skip the move
+/// → the stage stays in `review.rework_pending`.
+#[test]
+fn a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes() {
+    let fixture = Fixture::new("review-pre-existing");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "review-pre-existing-first",
+        &[review_object_message(
+            "the change adds old.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // The rework adds another file and leaves old.txt alone; the review now finds a problem
+    // far from its previous one.
+    fixture.rework(&first, "new.txt", "new\n");
+    let fake = FakeReview::new(
+        "review-pre-existing-second",
+        &[review_object_message(
+            "the rework adds new.txt",
+            &[review_item(
+                "minor",
+                "old.txt",
+                30,
+                "this line was always odd",
+            )],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert!(verdict.is_pass(), "{:?}", verdict.reason);
+    assert_eq!(verdict.review_pre_existing, Some(1));
+    let report = verdict.review.expect("a report");
+    assert!(report.blocking.is_empty(), "{report:?}");
+    assert_eq!(
+        report.suggestions,
+        vec![ReviewItem {
+            level: Some("minor".to_owned()),
+            file: Some("old.txt".to_owned()),
+            line: Some(30),
+            text: "this line was always odd".to_owned(),
+            pre_existing: true,
+        }]
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(stored.verdict_set_digest.is_some(), "the stage passed");
+}
+
+/// A blocking item on an increment line blocks: the rework introduced it. Mutation: treat every
+/// item as pre-existing → this test sees `awaiting_human`.
+#[test]
+fn a_blocking_item_on_an_increment_line_blocks() {
+    let fixture = Fixture::new("review-increment-blocks");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let first_fake = FakeReview::new(
+        "review-increment-blocks-first",
+        &[review_object_message("the change adds one.txt", &[], &[])],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "awaiting_human"
+    );
+
+    // A reverify of the same sha is a rework round with an empty increment, so the review
+    // starts from the previous pass: give it a new attempt with a blocking item on the line
+    // the rework adds.
+    fixture.rework(&first, "two.txt", "two\n");
+    let fake = FakeReview::new(
+        "review-increment-blocks-second",
+        &[review_object_message(
+            "the rework adds two.txt",
+            &[review_item(
+                "critical",
+                "two.txt",
+                1,
+                "the new line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.review_pre_existing, Some(0));
+    assert_eq!(
+        verdict.review.expect("a report").blocking.len(),
+        1,
+        "the item on the increment line stayed blocking"
+    );
+}
+
+/// Rule (b): an item in the same file as, and within 10 lines of, a blocking item of the
+/// previous review stays blocking, so an unfixed earlier item is not waved through. Mutation:
+/// drop rule (b) → the item is moved and the stage passes.
+#[test]
+fn a_blocking_item_near_an_unfixed_previous_item_still_blocks() {
+    let fixture = Fixture::new("review-near-previous");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "review-near-previous-first",
+        &[review_object_message(
+            "the change adds old.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                10,
+                "the tenth line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    fixture.rework(&first, "new.txt", "new\n");
+    let fake = FakeReview::new(
+        "review-near-previous-second",
+        &[review_object_message(
+            "the rework adds new.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                13,
+                "still the same problem",
+            )],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.review_pre_existing, Some(0));
+    assert!(
+        !verdict.review.expect("a report").blocking.is_empty(),
+        "an unfixed earlier item stopped blocking"
+    );
+}
+
+/// A main change merged in between is not part of the increment: the task's own diff leaves it
+/// out, so a blocking item on it is pre-existing. Mutation: use `previous..sha` alone as the
+/// increment → the stage blocks on main's file.
+#[test]
+fn a_main_change_merged_between_attempts_is_not_in_the_increment() {
+    let fixture = Fixture::new("review-main-increment");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "own.txt", "one\n");
+    let first_fake = FakeReview::new(
+        "review-main-increment-first",
+        &[review_object_message(
+            "the change adds own.txt",
+            &[review_item("major", "own.txt", 1, "the line is wrong")],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // Main moves; the rework merges it in and changes the task's own file.
+    fixture.repo.advance_main("main-only.txt", "main\n");
+    plan_ops::add_rework(&fixture.store, &fixture.task, "fix the review").expect("a rework brief");
+    let claim = attempt_ops::claim(&fixture.store, &fixture.task).expect("the next attempt");
+    let branch = format!("work/{}", fixture.task);
+    fixture.repo.git(&["checkout", &branch]);
+    fixture.repo.git(&["merge", "--no-ff", "--no-edit", "main"]);
+    write(&fixture.repo.repo.join("own.txt"), "one fixed\n");
+    fixture.repo.git(&["add", "own.txt"]);
+    fixture.repo.git(&["commit", "-m", "fix own.txt"]);
+    let second = fixture.repo.rev("HEAD");
+    fixture.repo.git(&["push", "origin", &branch]);
+    let finish = Finish {
+        attempt_id: claim.attempt_id.clone(),
+        token: claim.token.clone(),
+        exit_code: 0,
+        outcome: "completed".to_owned(),
+        base_sha: Some(fixture.base.clone()),
+        head_sha: Some(second.clone()),
+        pushed: true,
+        failure: None,
+    };
+    attempt_ops::apply(
+        &fixture.store,
+        &fixture.task,
+        claim.attempt,
+        Some(&finish),
+        None,
+        Some(0),
+    )
+    .expect("the rework result applies");
+
+    let fake = FakeReview::new(
+        "review-main-increment-second",
+        &[review_object_message(
+            "the rework fixes own.txt",
+            &[review_item(
+                "minor",
+                "main-only.txt",
+                1,
+                "main's line is odd",
+            )],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let prompt = fake.prompt(1);
+    assert!(prompt.contains("diff --git a/own.txt"), "{prompt}");
+    assert!(
+        !prompt.contains("diff --git a/main-only.txt"),
+        "main's change reached the increment:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("main: main-only.txt"),
+        "the commit list holds main's commit: {prompt}"
+    );
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.review_pre_existing, Some(1));
+}
+
+/// A failed review on a plan at `auto` `merge` writes `## Rework <n> (review)` with the items
+/// and moves the task to `todo.ready`, and counts one automatic rework. Mutation: write the
+/// rework when `auto` is `off` → this test's `auto` `off` twin fails instead.
+#[test]
+fn a_failed_review_with_auto_merge_writes_its_own_rework() {
+    let fixture = Fixture::new("review-auto-rework");
+    fixture.add_review_stage();
+    fixture.set_auto("merge");
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "review-auto-rework-fake",
+        &[review_object_message(
+            "the change adds one.txt",
+            &[
+                review_item("critical", "one.txt", 1, "the line is wrong"),
+                review_item("minor", "one.txt", 1, "and the name is odd"),
+            ],
+            &[],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("todo", "ready"),
+        "{verified:?}"
+    );
+    let rework = verified.review.clone().expect("the review rework");
+    assert_eq!(rework.items.len(), 2);
+    assert_eq!(
+        verified.line(),
+        format!(
+            "{} review blocking -> todo.ready (automatic rework)",
+            fixture.task
+        )
+    );
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "ready")
+    );
+    assert_eq!(stored.auto_rework, 1, "the rework counts");
+    assert!(stored.body.starts_with("the brief"), "{}", stored.body);
+    assert!(
+        stored.body.contains("## Rework 2 (review)"),
+        "{}",
+        stored.body
+    );
+    assert!(
+        stored.body.contains(
+            "The review found these items. Fix them and nothing else, append commits to the \
+             branch, and do not rebase."
+        ),
+        "{}",
+        stored.body
+    );
+    assert!(
+        stored
+            .body
+            .contains("- [critical] one.txt:1 the line is wrong"),
+        "{}",
+        stored.body
+    );
+    assert!(
+        stored
+            .body
+            .contains("- [minor] one.txt:1 and the name is odd"),
+        "{}",
+        stored.body
+    );
+    let verdict_path = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(fixture.attempt_label())
+        .join("verdicts/review.json");
+    assert!(
+        stored.body.contains(&format!(
+            "Read the verdict for detail: `{}`",
+            verdict_path.display()
+        )),
+        "{}",
+        stored.body
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&stored.plan)
+            .expect("the plan")
+            .item
+            .auto,
+        "merge",
+        "the plan is not paused by the first rework"
+    );
+}
+
+/// With `auto` `off` the task stays in `review.rework_pending` as before: no brief, no count.
+#[test]
+fn a_failed_review_with_auto_off_waits_for_the_lead() {
+    let fixture = Fixture::new("review-auto-off");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "review-auto-off-fake",
+        &[review_object_message(
+            "the change adds one.txt",
+            &[review_item("major", "one.txt", 1, "the line is wrong")],
+            &[],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    assert!(verified.review.is_none(), "no rework was written");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "rework_pending")
+    );
+    assert_eq!(stored.auto_rework, 0);
+    assert!(
+        !stored.body.contains("## Rework"),
+        "auto off wrote a brief: {}",
+        stored.body
+    );
+    let reason = review::rework_reason(&fixture.store, &stored).expect("a reason");
+    assert!(
+        reason.contains("[major] one.txt:1 the line is wrong"),
+        "{reason}"
+    );
+}
+
+/// `max_auto_rework` still pauses the plan: the third automatic review rework sets `auto` to
+/// `off`, the task stays in `review.rework_pending`, and `show` says why.
+#[test]
+fn a_review_rework_at_the_auto_rework_limit_pauses_the_plan() {
+    let fixture = Fixture::new("review-auto-limit");
+    fixture.add_review_stage();
+    fixture.set_auto("merge");
+    fixture
+        .store
+        .change_task(&fixture.task, |task| {
+            task.auto_rework = 2;
+            Ok(())
+        })
+        .expect("the count");
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "review-auto-limit-fake",
+        &[review_object_message(
+            "the change adds one.txt",
+            &[review_item("major", "one.txt", 1, "the line is wrong")],
+            &[],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("review", "rework_pending"),
+        "{verified:?}"
+    );
+    let paused = verified.paused.clone().expect("the pause");
+    assert_eq!(paused.count, 3);
+    assert_eq!(paused.max_auto_rework, 2);
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.auto_rework, 3);
+    assert!(
+        !stored.body.contains("## Rework"),
+        "a paused plan wrote a brief: {}",
+        stored.body
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&stored.plan)
+            .expect("the plan")
+            .item
+            .auto,
+        "off"
+    );
+    let reason = review::rework_reason(&fixture.store, &stored).expect("a reason");
+    assert!(reason.contains("automatic reworks"), "{reason}");
 }

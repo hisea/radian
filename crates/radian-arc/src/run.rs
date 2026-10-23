@@ -350,9 +350,17 @@ fn advance_verification(
                     Ok(verified) => {
                         transitions.push(verified.line());
                         let mut changed = true;
-                        if verified.phase == "rework_pending"
-                            && let Some(paused) = attempt_ops::record_auto_rework(store, task_id)?
-                        {
+                        // A review rework already counted itself and may have paused the plan;
+                        // every other failure to `rework_pending` counts here (ADR 0048
+                        // decisions 9 and 12).
+                        let paused = match &verified.paused {
+                            Some(paused) => Some(paused.clone()),
+                            None if verified.phase == "rework_pending" => {
+                                attempt_ops::record_auto_rework(store, task_id)?
+                            }
+                            None => None,
+                        };
+                        if let Some(paused) = paused {
                             transitions.push(format!("{} paused: {}", paused.plan, paused.text));
                             changed = true;
                         }

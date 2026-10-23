@@ -44,8 +44,12 @@ pub use config::{
 pub use error::GateError;
 pub use exclusive::ExclusiveLock;
 pub use integration::{IntegrationRun, merge_ready};
-pub use review::{OWNED_EXEC_ARGS, REVIEW_RUNS, REVIEW_TOOLS, ReviewRun, owned_name, parse_report};
+pub use review::{
+    OWNED_EXEC_ARGS, PRE_EXISTING_WINDOW, PREVIOUS_ITEM_WINDOW, PreviousReview, REVIEW_RUNS,
+    REVIEW_TOOLS, ReviewRun, owned_name, parse_report,
+};
 pub use verdict::{
-    CommandRecord, ReviewReport, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, attempt_dir,
-    now_utc, required_passed, valid_verdicts, verdict_path, verdict_set_digest,
+    CommandRecord, REVIEW_LEVELS, ReviewItem, ReviewReport, VERDICT_SCHEMA_VERSION, Verdict,
+    VerdictResult, attempt_dir, now_utc, required_passed, valid_verdicts, verdict_path,
+    verdict_set_digest,
 };

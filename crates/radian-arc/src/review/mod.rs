@@ -34,9 +34,10 @@ use serde_json::{Value, json};
 use sha2::Digest;
 
 use crate::gate::{
-    CommandRun, IntegrationRun, ReviewRun, Stage, StageSpec, Verdict, attempt_dir,
-    effective_stages, merge_ready, required_passed, verdict_path, verdict_set_digest,
+    CommandRun, IntegrationRun, PreviousReview, ReviewItem, ReviewRun, Stage, StageSpec, Verdict,
+    attempt_dir, effective_stages, merge_ready, required_passed, verdict_path, verdict_set_digest,
 };
+use crate::store::attempt_ops::Paused;
 use crate::store::{Error, Store, model};
 
 /// The file in an attempt's run directory that holds the last verify or merge reason.
@@ -142,6 +143,21 @@ fn conflict_line(task: &str, exhausted: bool) -> String {
     }
 }
 
+/// The review rework arc wrote itself (ADR 0048 decision 9): the task went to `todo.ready`
+/// with a brief that lists the review's blocking items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRework {
+    /// The attempt's review verdict, which the brief tells the worker to read.
+    pub verdict: PathBuf,
+    /// The blocking items the brief lists, as the verdict recorded them.
+    pub items: Vec<ReviewItem>,
+}
+
+/// The one line a review rework's transition prints.
+fn review_line(task: &str) -> String {
+    format!("{task} review blocking -> todo.ready (automatic rework)")
+}
+
 /// What one verification did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verified {
@@ -162,6 +178,11 @@ pub struct Verified {
     /// Set when a conflict with main wrote the next attempt's brief instead of waiting for
     /// the lead.
     pub conflict: Option<Conflict>,
+    /// Set when a failed review wrote the next attempt's brief instead of waiting for the lead.
+    pub review: Option<ReviewRework>,
+    /// Set when the automatic rework count paused the plan; the task stays in
+    /// `review.rework_pending` and `run` prints the pause.
+    pub paused: Option<Paused>,
 }
 
 impl Verified {
@@ -169,6 +190,11 @@ impl Verified {
     pub fn line(&self) -> String {
         if let Some(conflict) = &self.conflict {
             return conflict_line(&self.task, conflict.exhausted);
+        }
+        // A paused plan did not move the task to `todo.ready`, so it prints the failure line
+        // and the pause line follows it.
+        if self.review.is_some() && self.paused.is_none() {
+            return review_line(&self.task);
         }
         let reason = self
             .reason
@@ -502,6 +528,18 @@ pub fn run_stages(
                     .prompt_file
                     .as_ref()
                     .map(|file| store.repo().join(file));
+                // A review that follows an earlier one of this task is a rework round: the
+                // stage reviews the increment and judges the items arc moved (ADR 0048
+                // decision 10).
+                let earlier = previous_review(store, &task.id, &plan.label);
+                let earlier = earlier.as_ref().map(|(_, verdict)| PreviousReview {
+                    sha: verdict.sha.clone(),
+                    blocking: verdict
+                        .review
+                        .as_ref()
+                        .map(|review| review.blocking.clone())
+                        .unwrap_or_default(),
+                });
                 ReviewRun {
                     repository: store.repo(),
                     remote: &plan.remote,
@@ -512,6 +550,7 @@ pub fn run_stages(
                     main_ref: &plan.main_ref,
                     exec_args,
                     prompt_file: prompt_file.as_deref(),
+                    previous: earlier.as_ref(),
                     timeout: review.timeout(),
                     program: review_program,
                 }
@@ -604,6 +643,8 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
         digest: Some(digest),
         reused: Vec::new(),
         conflict: None,
+        review: None,
+        paused: None,
     })
 }
 
@@ -664,7 +705,7 @@ fn failed_stage(
     verdict: &Verdict,
     path: PathBuf,
 ) -> Result<Verified, Error> {
-    let reason = Reason::with_verdict("verify", verdict.stage, failure_text(verdict), path);
+    let reason = Reason::with_verdict("verify", verdict.stage, failure_text(verdict), path.clone());
     reason.record(store, &task.id, label);
     // A conflict with main starts the next attempt mid-merge, so arc writes its brief itself
     // when the profile runs `merge-main` before an attempt (ADR 0048 decision 9).
@@ -683,6 +724,30 @@ fn failed_stage(
             digest: None,
             reused: Vec::new(),
             conflict: Some(conflict),
+            review: None,
+            paused: None,
+        });
+    }
+    // A failed review writes its own rework when the plan is not at `auto` `off` (ADR 0048
+    // decision 9). The pause is the same limit the other automatic reworks use.
+    if let Some((review, paused)) = review_auto_rework(store, task, verdict, &path)? {
+        let paused_here = paused.is_some();
+        return Ok(Verified {
+            task: task.id.clone(),
+            attempt_id: label.to_owned(),
+            state: if paused_here { "review" } else { "todo" },
+            phase: if paused_here {
+                "rework_pending"
+            } else {
+                "ready"
+            }
+            .to_owned(),
+            reason: Some(reason),
+            digest: None,
+            reused: Vec::new(),
+            conflict: None,
+            review: Some(review),
+            paused,
         });
     }
     store.change_task(&task.id, |task| {
@@ -702,6 +767,8 @@ fn failed_stage(
         digest: None,
         reused: Vec::new(),
         conflict: None,
+        review: None,
+        paused: None,
     })
 }
 
@@ -787,6 +854,69 @@ fn conflict_rework_brief(conflict: &Conflict) -> String {
          commit the merge (`git commit --no-edit`), rebuild, run the touched crates' tests, and \
          change nothing else.",
         conflict.stage
+    )
+}
+
+/// The review rework arc writes itself (ADR 0048 decision 9): a `review` stage that failed with
+/// blocking items and a plan whose `auto` is not `off` returns the task to `todo.ready` with
+/// the next attempt's brief, or pauses the plan at `max_auto_rework` and leaves the task in
+/// `review.rework_pending`.
+///
+/// `None` when the verdict is not a review failure with blocking items, or the plan is at
+/// `auto` `off`: the caller then keeps the path to `review.rework_pending`.
+fn review_auto_rework(
+    store: &Store,
+    task: &model::TaskFile,
+    verdict: &Verdict,
+    path: &Path,
+) -> Result<Option<(ReviewRework, Option<Paused>)>, Error> {
+    if verdict.stage != Stage::Review || verdict.reason.as_deref() != Some("review_blocking") {
+        return Ok(None);
+    }
+    let Some(review) = verdict.review.as_ref() else {
+        return Ok(None);
+    };
+    if review.blocking.is_empty() {
+        return Ok(None);
+    }
+    let plan = store.load_plan(&task.plan)?;
+    if plan.changed_outside_arc || plan.item.auto == "off" {
+        return Ok(None);
+    }
+    // The count lives in `review.rework_pending`, where the pause rule and `show` read it
+    // (decision 12).
+    to_rework(store, &task.id)?;
+    let paused = crate::store::attempt_ops::record_auto_rework(store, &task.id)?;
+    let rework = ReviewRework {
+        verdict: path.to_path_buf(),
+        items: review.blocking.clone(),
+    };
+    if paused.is_some() {
+        return Ok(Some((rework, paused)));
+    }
+    let brief = review_rework_brief(&rework);
+    crate::store::plan_ops::add_rework_with(
+        store,
+        &task.id,
+        &brief,
+        crate::store::plan_ops::REVIEW_REWORK_SUFFIX,
+    )?;
+    Ok(Some((rework, None)))
+}
+
+/// The fixed brief of a review rework (ADR 0048 decision 9): what to fix, the blocking items as
+/// `[level] path:line text`, and the verdict to read for detail.
+fn review_rework_brief(rework: &ReviewRework) -> String {
+    let items = rework
+        .items
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "The review found these items. Fix them and nothing else, append commits to the \
+         branch, and do not rebase.\n\n{items}\n\nRead the verdict for detail: `{}`",
+        rework.verdict.display()
     )
 }
 
@@ -1395,7 +1525,15 @@ fn failure_text(verdict: &Verdict) -> String {
         && let Some(review) = &verdict.review
         && !review.blocking.is_empty()
     {
-        return format!("review_blocking: {}", review.blocking.join("; "));
+        return format!(
+            "review_blocking: {}",
+            review
+                .blocking
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
     }
     reason
 }
@@ -1641,6 +1779,22 @@ pub fn latest_review_verdict(store: &Store, task: &str) -> Option<(PathBuf, Verd
         .ok()?
         .into_iter()
         .rfind(|(_, verdict)| verdict.stage == Stage::Review)
+}
+
+/// The task's newest `review` verdict from an attempt other than `label`, with its path: the
+/// previous review of a rework round (ADR 0048 decision 10). A verdict with an empty `sha` is
+/// not one.
+#[must_use]
+pub fn previous_review(store: &Store, task: &str, label: &str) -> Option<(PathBuf, Verdict)> {
+    let current = verdict_path(store.repo(), task, label, Stage::Review).ok();
+    task_verdict_files(store, task)
+        .ok()?
+        .into_iter()
+        .rfind(|(path, verdict)| {
+            verdict.stage == Stage::Review
+                && !verdict.sha.is_empty()
+                && Some(path) != current.as_ref()
+        })
 }
 
 /// The digest of the verification set for `sha`: every counted verdict except the owner's

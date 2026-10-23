@@ -435,16 +435,30 @@ before `human` (a profile that lists both must list `commands` first). It runs o
 `[worker] exec_args`), and `[gate.review] timeout_secs`. The prompt is built from the brief,
 the commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The
 last fenced `json` block of the final message is parsed; an empty `blocking` list passes,
-any item fails with `review_blocking`. Unusable output (no block, a missing field, a timeout,
-a session error) runs the session once more; two unusable runs fail with `review_output`, or
-`review_timeout` when the last run timed out. The verdict records `review`,
-`review_session_ids` and `review_cost_micros`.
+any item fails with `review_blocking`. An item is `{level, file, line, text, pre_existing}`;
+a plain string is an item with only its text, so an old verdict reads and re-serializes
+unchanged (the digest is computed from the re-serialized verdict). Unusable output (no block,
+a missing field, a level outside `REVIEW_LEVELS`, a timeout, a session error) runs the session
+once more; two unusable runs fail with `review_output`, or `review_timeout` when the last run
+timed out. The verdict records `review`, `review_session_ids`, `review_cost_micros` and, in a
+rework round, `review_pre_existing`.
+
+A review that follows an earlier review of the task is a rework round
+(`review::previous_review`): its prompt holds the previous blocking items, the commits
+`<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
+`git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
+`suggestions` with `pre_existing` unless its `file:line` is within 3 lines of an increment
+line or within 10 lines of a previous blocking item in the same file (`ReworkRound`).
 
 Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
-such a failure, with reason `conflict` and the paths. When every required non-`human` stage
-passed, the task records `verified_sha` and `verdict_set_digest` and moves to
-`review.awaiting_human`. The digest covers the verification verdicts for `verified_sha`
-without the `human` and `integration` verdicts, which are written later.
+such a failure, with reason `conflict` and the paths. A `review_blocking` failure on a plan
+whose `auto` is not `off` instead writes `## Rework <n> (review)` itself
+(`review::review_auto_rework`), counts an automatic rework, and returns the task to
+`todo.ready`; at `max_auto_rework` the plan pauses and the task stays in
+`review.rework_pending`. When every required non-`human` stage passed, the task records
+`verified_sha` and `verdict_set_digest` and moves to `review.awaiting_human`. The digest covers
+the verification verdicts for `verified_sha` without the `human` and `integration` verdicts,
+which are written later.
 
 `review::rework_reason` is what `show` prints for a task in `review.verifying` or
 `review.rework_pending`: the owner's reject note (`reject.md`), the last verify/merge reason
