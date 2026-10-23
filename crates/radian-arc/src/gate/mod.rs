@@ -37,8 +37,9 @@ pub mod background;
 pub use checkout::{GateCheckout, gates_dir};
 pub use commands::CommandRun;
 pub use config::{
-    DEFAULT_COMMAND_TIMEOUT_SECS, DEFAULT_REVIEW_TIMEOUT_SECS, GateConfig, LISTED_STAGES, Profile,
-    ReviewConfig, STAGE_NAMES, Stage, StageSpec, effective_stages,
+    BEFORE_ATTEMPT_STEPS, DEFAULT_COMMAND_TIMEOUT_SECS, DEFAULT_REVIEW_TIMEOUT_SECS, GateConfig,
+    LISTED_STAGES, MERGE_MAIN, Profile, ReviewConfig, STAGE_NAMES, Stage, StageSpec,
+    default_before_attempt, effective_stages,
 };
 pub use error::GateError;
 pub use exclusive::ExclusiveLock;

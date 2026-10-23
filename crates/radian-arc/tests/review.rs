@@ -107,6 +107,19 @@ impl Fixture {
         self.tune("\nkey_commands = []", &format!("\nkey_commands = [{list}]"));
     }
 
+    /// Sets the profile's `before_attempt` steps.
+    fn before_attempt(&self, steps: &[&str]) {
+        let list = steps
+            .iter()
+            .map(|step| format!("\"{step}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.tune(
+            "before_attempt = [\"merge-main\"]",
+            &format!("before_attempt = [{list}]"),
+        );
+    }
+
     fn state(&self) -> (String, String) {
         let task = self
             .store
@@ -486,11 +499,13 @@ fn main_that_a_gate_command_needs_makes_the_task_pass() {
     assert!(fixture.repo.is_ancestor(&head, &candidate));
 }
 
-/// A conflicting commit on main: building the candidate is the failed stage. The task goes to
-/// rework with reason `conflict`, the path is listed, and nothing is pushed.
+/// A conflicting commit on main, with `merge-main` off: building the candidate is the failed
+/// stage. The task goes to rework with reason `conflict`, the path is listed, and nothing is
+/// pushed.
 #[test]
 fn a_verification_merge_conflict_makes_rework_pending_with_the_path() {
     let fixture = Fixture::new("verify-conflict");
+    fixture.before_attempt(&[]);
     let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
     fixture.commands(&["true"]);
     let moved = fixture.repo.advance_main("file.txt", "main side\n");
@@ -909,11 +924,12 @@ fn merge_integrates_again_when_main_moves_during_the_integration() {
     );
 }
 
-/// A conflict in the integration stage sends the task to rework, with the path and the
-/// verdict recorded, and leaves the remote main untouched.
+/// A conflict in the integration stage, with `merge-main` off, sends the task to rework with
+/// the path and the verdict recorded, and leaves the remote main untouched.
 #[test]
 fn a_conflict_makes_rework_pending() {
     let fixture = Fixture::new("merge-conflict");
+    fixture.before_attempt(&[]);
     let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
     assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
     let moved = fixture.repo.advance_main("file.txt", "main side\n");
@@ -946,6 +962,204 @@ fn a_conflict_makes_rework_pending() {
             .as_ref()
             .is_some_and(|text| text.contains("conflict: file.txt")),
         "{shown:?}"
+    );
+}
+
+// ---- the conflict rework arc writes (ADR 0048 decision 9) ------------------------------
+
+/// A verification-stage conflict with `merge-main` on: arc writes the next attempt's brief
+/// itself and returns the task to `todo.ready`, with the paths, and counts nothing in
+/// `auto_rework`. Mutations: drop the brief (no heading) or count the rework (auto_rework 1).
+#[test]
+fn a_verification_conflict_with_main_writes_the_next_brief_and_returns_to_ready() {
+    let fixture = Fixture::new("verify-conflict-rework");
+    let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
+    fixture.commands(&["true"]);
+    let moved = fixture.repo.advance_main("file.txt", "main side\n");
+
+    let verified = fixture.verifying_with(&head);
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("todo", "ready"),
+        "{verified:?}"
+    );
+    let conflict = verified.conflict.clone().expect("the conflict");
+    assert_eq!(conflict.stage, Stage::Commands);
+    assert_eq!(conflict.main_sha, moved);
+    assert_eq!(conflict.paths, vec!["file.txt".to_owned()]);
+    assert!(!conflict.exhausted);
+    assert_eq!(
+        verified.line(),
+        format!(
+            "{} conflict with main -> todo.ready (automatic rework)",
+            fixture.task
+        )
+    );
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "ready")
+    );
+    assert_eq!(
+        stored.auto_rework, 0,
+        "a conflict rework is not an automatic rework"
+    );
+    assert_eq!(stored.attempt, 1, "no new attempt is claimed");
+    let short = &moved[..7];
+    assert!(stored.body.starts_with("the brief"), "{}", stored.body);
+    assert!(
+        stored.body.contains("## Rework 2 (conflict with main)"),
+        "{}",
+        stored.body
+    );
+    assert!(
+        stored
+            .body
+            .contains(&format!("conflicted with main at `{short}` in `commands`")),
+        "{}",
+        stored.body
+    );
+    assert!(stored.body.contains("- file.txt"), "{}", stored.body);
+    assert!(
+        stored.body.contains("The next attempt starts mid-merge"),
+        "{}",
+        stored.body
+    );
+    assert!(
+        stored.body.contains("git commit --no-edit"),
+        "{}",
+        stored.body
+    );
+}
+
+/// An integration conflict takes the same path: the task returns to `todo.ready` with the
+/// brief arc writes, and main stays where it was.
+#[test]
+fn an_integration_conflict_with_main_writes_the_next_brief_and_returns_to_ready() {
+    let fixture = Fixture::new("merge-conflict-rework");
+    let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    let moved = fixture.repo.advance_main("file.txt", "main side\n");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge returns");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("todo", "ready"),
+        "{merged:?}"
+    );
+    let conflict = merged.conflict.clone().expect("the conflict");
+    assert_eq!(conflict.stage, Stage::Integration);
+    assert_eq!(conflict.main_sha, moved);
+    assert_eq!(conflict.paths, vec!["file.txt".to_owned()]);
+    assert_eq!(
+        merged.line(),
+        format!(
+            "{} conflict with main -> todo.ready (automatic rework)",
+            fixture.task
+        )
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.auto_rework, 0);
+    assert!(
+        stored.body.contains("## Rework 2 (conflict with main)"),
+        "{}",
+        stored.body
+    );
+    assert!(stored.body.contains("in `integration`"), "{}", stored.body);
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/main").as_deref(),
+        Some(moved.as_str()),
+        "a conflict never moves main"
+    );
+}
+
+/// A `command_failed` verdict keeps the path to `review.rework_pending`, even with
+/// `merge-main` on: the worker would not start mid-merge. Mutation: send every failure reason
+/// down the automatic path.
+#[test]
+fn a_command_failed_verdict_still_waits_for_the_lead() {
+    let fixture = Fixture::new("verify-command-failed");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    fixture.commands(&["false"]);
+
+    let verified = fixture.verifying_with(&head);
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    assert!(verified.conflict.is_none());
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "rework_pending")
+    );
+    assert!(
+        !stored.body.contains("conflict with main"),
+        "{}",
+        stored.body
+    );
+}
+
+/// `max_attempts` bounds the loop: when the attempt that conflicted is the task's last counted
+/// attempt, the task goes to `failed.exhausted` and no brief is written. Mutation: always write
+/// the rework and the task keeps conflicting.
+#[test]
+fn max_attempts_stops_a_task_that_keeps_conflicting() {
+    let fixture = Fixture::new("verify-conflict-exhausted");
+    fixture
+        .store
+        .change_task(&fixture.task, |task| {
+            task.max_attempts = Some(1);
+            Ok(())
+        })
+        .expect("the task limit");
+    let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
+    fixture.commands(&["true"]);
+    fixture.repo.advance_main("file.txt", "main side\n");
+
+    let verified = fixture.verifying_with(&head);
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("failed", "exhausted"),
+        "{verified:?}"
+    );
+    let conflict = verified.conflict.clone().expect("the conflict");
+    assert!(conflict.exhausted);
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("failed", "exhausted")
+    );
+    assert!(
+        !stored.body.contains("## Rework"),
+        "no brief was written: {}",
+        stored.body
+    );
+}
+
+/// A `reverify` attempt that conflicts takes the same path as a worker attempt.
+#[test]
+fn a_reverify_conflict_takes_the_same_path() {
+    let fixture = Fixture::new("verify-reverify-conflict");
+    // The first attempt waits for the lead (the step is off), so `reverify` may run.
+    fixture.before_attempt(&[]);
+    let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
+    fixture.commands(&["false"]);
+    assert_eq!(fixture.verifying_with(&head).phase, "rework_pending");
+
+    fixture.tune("before_attempt = []", "before_attempt = [\"merge-main\"]");
+    fixture.tune("commands = [\"false\"]", "commands = [\"true\"]");
+    fixture.repo.advance_main("file.txt", "main side\n");
+    let reverified = review::reverify(&fixture.store, &fixture.task).expect("reverify runs");
+    let verified = reverified.verification.expect("the verification runs");
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("todo", "ready"),
+        "{verified:?}"
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        stored.body.contains("## Rework 3 (conflict with main)"),
+        "{}",
+        stored.body
     );
 }
 
@@ -1398,6 +1612,44 @@ fn a_review_with_no_blocking_findings_passes_and_keeps_its_summary() {
         "{prompt}"
     );
     assert!(prompt.contains("\"blocking\""), "{prompt}");
+}
+
+/// The review session reviews the task's own change only. Main was merged into the branch
+/// before verification, so the range starts at the merge base of main and the commit, not at
+/// the recorded `base_sha`. Mutation: start the range at `base_sha` and the prompt holds
+/// main's file too.
+#[test]
+fn the_review_diff_after_a_merge_holds_only_the_tasks_own_files() {
+    let fixture = Fixture::new("review-diff-own");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    let head = fixture.publish(&fixture.base.clone(), "own.txt", "own\n");
+    fixture.repo.advance_main("main-only.txt", "main\n");
+
+    // The step before an attempt merged main into the branch, and the worker pushed it.
+    let branch = format!("work/{}", fixture.task);
+    fixture.repo.git(&["checkout", &branch]);
+    fixture.repo.git(&["merge", "--no-ff", "--no-edit", "main"]);
+    let merged = fixture.repo.rev("HEAD");
+    assert_ne!(merged, head, "the branch contains a merge commit");
+    fixture.repo.git(&["push", "origin", &branch]);
+
+    let fake = FakeReview::new(
+        "review-diff-own-fake",
+        &[review_message("The change adds own.txt.", &[], &[])],
+        0,
+    );
+    let verified = fixture.verifying_with_review(&merged, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let prompt = fake.prompt(1);
+    assert!(prompt.contains("own.txt"), "{prompt}");
+    assert!(
+        !prompt.contains("main-only.txt"),
+        "the prompt holds main's change:\n{prompt}"
+    );
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.sha, merged);
 }
 
 /// A blocking item fails the stage: the task goes to rework exactly as after a failed

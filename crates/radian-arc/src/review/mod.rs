@@ -3,9 +3,11 @@
 //!
 //! - [`verify`] runs the gate's built stages against the verification candidate for the
 //!   task's pushed `head_sha` and moves the task to `review.awaiting_human` or
-//!   `review.rework_pending`. It is split into [`plan_verification`], [`run_stages`] (which
-//!   writes verdicts only) and [`finish_verification`] (which moves the state), so a
-//!   background gate can run the stages and a later pass can apply them. The candidate is
+//!   `review.rework_pending`. A conflict with main, when the profile merges main before an
+//!   attempt, moves it to `todo.ready` with a brief arc writes itself (ADR 0048 decision 9).
+//!   It is split into [`plan_verification`], [`run_stages`] (which writes verdicts only) and
+//!   [`finish_verification`] (which moves the state), so a background gate can run the stages
+//!   and a later pass can apply them. The candidate is
 //!   `head_sha` when the remote main is its ancestor, else a merge of `head_sha` onto the
 //!   remote main (ADR 0048 decision 10); `verified_sha` stays the task's own commit.
 //! - [`merge`] takes the owner's approval for `verified_sha`, builds the integration
@@ -117,9 +119,34 @@ impl Reason {
     }
 }
 
+/// A conflict with main whose rework arc wrote itself (ADR 0048 decision 9). The task went to
+/// `todo.ready`, or to `failed.exhausted` when the attempt that conflicted was its last one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    /// The remote main commit the change conflicted with.
+    pub main_sha: String,
+    /// The stage that conflicted.
+    pub stage: Stage,
+    /// The conflicted paths, as the verdict lists them.
+    pub paths: Vec<String>,
+    /// The task went to `failed.exhausted` instead of `todo.ready`.
+    pub exhausted: bool,
+}
+
+/// The one line a conflict-with-main transition prints.
+fn conflict_line(task: &str, exhausted: bool) -> String {
+    if exhausted {
+        format!("{task} conflict with main -> failed.exhausted")
+    } else {
+        format!("{task} conflict with main -> todo.ready (automatic rework)")
+    }
+}
+
 /// What one verification did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verified {
+    /// The task the verification ran for.
+    pub task: String,
     /// The attempt the gate ran for.
     pub attempt_id: String,
     /// The state the task is in after verification.
@@ -132,11 +159,17 @@ pub struct Verified {
     pub digest: Option<String>,
     /// The stages whose existing verdicts were reused instead of rerun.
     pub reused: Vec<Stage>,
+    /// Set when a conflict with main wrote the next attempt's brief instead of waiting for
+    /// the lead.
+    pub conflict: Option<Conflict>,
 }
 
 impl Verified {
     /// The one line `radian arc start` prints for the verification.
     pub fn line(&self) -> String {
+        if let Some(conflict) = &self.conflict {
+            return conflict_line(&self.task, conflict.exhausted);
+        }
         let reason = self
             .reason
             .as_ref()
@@ -175,7 +208,7 @@ impl Reverified {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Merged {
     pub task: String,
-    /// `done` or `review`.
+    /// `done`, `review` or `todo`.
     pub state: &'static str,
     pub phase: String,
     /// The rework reason, when the integration failed.
@@ -186,11 +219,17 @@ pub struct Merged {
     pub rounds: u32,
     /// A cleanup step that failed after the merge; the merge itself is done.
     pub warning: Option<String>,
+    /// Set when a conflict with main wrote the next attempt's brief instead of waiting for
+    /// the lead.
+    pub conflict: Option<Conflict>,
 }
 
 impl Merged {
     /// The line `radian arc merge` prints.
     pub fn line(&self) -> String {
+        if let Some(conflict) = &self.conflict {
+            return conflict_line(&self.task, conflict.exhausted);
+        }
         let mut line = format!("{} {}.{}", self.task, self.state, self.phase);
         if let Some(candidate) = &self.candidate_sha {
             line.push_str(&format!(" ({candidate})"));
@@ -227,9 +266,10 @@ impl Rejected {
 /// `review.verifying` and the reason is recorded. A verdict that already exists for this
 /// attempt and stage is reused, so a crash between stages resumes instead of rerunning.
 ///
-/// A `commands`, `mutation` or `review` failure moves the task to `review.rework_pending`.
-/// Every required stage passing moves it to `review.awaiting_human`, with `verified_sha` and
-/// `verdict_set_digest` recorded.
+/// A `commands`, `mutation` or `review` failure moves the task to `review.rework_pending`, or
+/// to `todo.ready` with a brief arc writes when it is a conflict with main and the profile
+/// merges main before an attempt (ADR 0048 decision 9). Every required stage passing moves it
+/// to `review.awaiting_human`, with `verified_sha` and `verdict_set_digest` recorded.
 ///
 /// # Errors
 ///
@@ -442,15 +482,6 @@ pub fn run_stages(
             .run()
             .map_err(gate_error)?,
             Stage::Review => {
-                // The diff the session reviews is the task's own change (ADR 0048 decision
-                // 10), so the task must still carry the base it started from.
-                let base = task
-                    .base_sha
-                    .clone()
-                    .filter(|sha| !sha.is_empty())
-                    .ok_or_else(|| {
-                        Error::Refused(format!("task `{}` has no `base_sha`", task.id))
-                    })?;
                 let review = &plan.config.gate.review;
                 let (exec_args, key) = match &review.exec_args {
                     Some(args) => (args.as_slice(), "gate.review.exec_args"),
@@ -477,7 +508,6 @@ pub fn run_stages(
                     task: &task.id,
                     attempt: &plan.label,
                     sha: &plan.head,
-                    base_sha: &base,
                     brief: &task.body,
                     main_ref: &plan.main_ref,
                     exec_args,
@@ -566,12 +596,14 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
     // A pass leaves no rework reason behind for `show` to print.
     clear_reason(store, &task.id, &plan.label);
     Ok(Verified {
+        task: task.id.clone(),
         attempt_id: plan.label.clone(),
         state: "review",
         phase: "awaiting_human".to_owned(),
         reason: None,
         digest: Some(digest),
         reused: Vec::new(),
+        conflict: None,
     })
 }
 
@@ -634,6 +666,25 @@ fn failed_stage(
 ) -> Result<Verified, Error> {
     let reason = Reason::with_verdict("verify", verdict.stage, failure_text(verdict), path);
     reason.record(store, &task.id, label);
+    // A conflict with main starts the next attempt mid-merge, so arc writes its brief itself
+    // when the profile runs `merge-main` before an attempt (ADR 0048 decision 9).
+    if let Some(conflict) = conflict_auto_rework(store, task, verdict)? {
+        return Ok(Verified {
+            task: task.id.clone(),
+            attempt_id: label.to_owned(),
+            state: if conflict.exhausted { "failed" } else { "todo" },
+            phase: if conflict.exhausted {
+                "exhausted"
+            } else {
+                "ready"
+            }
+            .to_owned(),
+            reason: Some(reason),
+            digest: None,
+            reused: Vec::new(),
+            conflict: Some(conflict),
+        });
+    }
     store.change_task(&task.id, |task| {
         task.state = model::TaskState::Review;
         task.phase = "rework_pending".to_owned();
@@ -643,13 +694,100 @@ fn failed_stage(
         Ok(())
     })?;
     Ok(Verified {
+        task: task.id.clone(),
         attempt_id: label.to_owned(),
         state: "review",
         phase: "rework_pending".to_owned(),
         reason: Some(reason),
         digest: None,
         reused: Vec::new(),
+        conflict: None,
     })
+}
+
+/// The conflict rework arc writes itself (ADR 0048 decision 9): when the profile runs
+/// `merge-main` before an attempt, a stage that failed with reason `conflict` returns the task
+/// to `todo.ready` with the next attempt's brief instead of waiting for the lead.
+///
+/// `None` when the verdict is not a conflict or the profile does not run `merge-main`; the
+/// caller then keeps the path to `review.rework_pending`. A task on its last counted attempt
+/// goes to `failed.exhausted` instead, and no brief is written.
+fn conflict_auto_rework(
+    store: &Store,
+    task: &model::TaskFile,
+    verdict: &Verdict,
+) -> Result<Option<Conflict>, Error> {
+    if verdict.reason.as_deref() != Some("conflict") {
+        return Ok(None);
+    }
+    let config = store.config()?;
+    let Some(profile) = config.gate.selected_profile() else {
+        return Ok(None);
+    };
+    if !profile.runs_merge_main() {
+        return Ok(None);
+    }
+    // A verification verdict records `main_sha`; an integration verdict records the main it
+    // merged onto as `base_sha`.
+    let main_sha = verdict
+        .main_sha
+        .as_deref()
+        .filter(|sha| !sha.is_empty())
+        .or_else(|| verdict.base_sha.as_deref().filter(|sha| !sha.is_empty()))
+        .unwrap_or_default()
+        .to_owned();
+    let max = task.max_attempts.unwrap_or(config.limits.max_attempts);
+    let exhausted =
+        crate::store::attempt_ops::counted_attempt(store, &task.id, task.attempt) >= max;
+    let conflict = Conflict {
+        main_sha,
+        stage: verdict.stage,
+        paths: verdict.conflict_paths.clone(),
+        exhausted,
+    };
+    if exhausted {
+        store.change_task(&task.id, |task| {
+            if task.state == model::TaskState::Review {
+                task.state = model::TaskState::Failed;
+                task.phase = "exhausted".to_owned();
+                task.retry_at = None;
+            }
+            Ok(())
+        })?;
+        return Ok(Some(conflict));
+    }
+    let brief = conflict_rework_brief(&conflict);
+    crate::store::plan_ops::add_rework_with(
+        store,
+        &task.id,
+        &brief,
+        crate::store::plan_ops::CONFLICT_REWORK_SUFFIX,
+    )?;
+    Ok(Some(conflict))
+}
+
+/// The fixed, short brief of a conflict rework (ADR 0048 decision 9): the main it conflicted
+/// with, the stage, the paths, and what the next attempt does first.
+fn conflict_rework_brief(conflict: &Conflict) -> String {
+    let short = &conflict.main_sha[..conflict.main_sha.len().min(7)];
+    let paths = if conflict.paths.is_empty() {
+        "- none listed in the verdict".to_owned()
+    } else {
+        conflict
+            .paths
+            .iter()
+            .map(|path| format!("- {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "The change conflicted with main at `{short}` in `{}`.\n\n\
+         Conflicted paths:\n\n{paths}\n\n\
+         The next attempt starts mid-merge. Resolve the conflict keeping both sides' intent, \
+         commit the merge (`git commit --no-edit`), rebuild, run the touched crates' tests, and \
+         change nothing else.",
+        conflict.stage
+    )
 }
 
 /// The task's `extra_stages` as stage specs. Every name was checked when the task file was
@@ -1035,6 +1173,7 @@ fn finish_integration(
         candidate_sha: Some(candidate),
         rounds: round,
         warning,
+        conflict: None,
     }))
 }
 
@@ -1054,6 +1193,25 @@ fn integration_failed(
         integration_verdict(store, &context.task_id, integration_label)?,
     );
     reason.record(store, &context.task_id, &context.label);
+    // The same conflict path as a failed verification stage (ADR 0048 decision 9).
+    let task = store.load_task(&context.task_id)?.item;
+    if let Some(conflict) = conflict_auto_rework(store, &task, verdict)? {
+        return Ok(Merged {
+            task: context.task_id.clone(),
+            state: if conflict.exhausted { "failed" } else { "todo" },
+            phase: if conflict.exhausted {
+                "exhausted"
+            } else {
+                "ready"
+            }
+            .to_owned(),
+            reason: Some(reason.text()),
+            candidate_sha: None,
+            rounds: round,
+            warning: None,
+            conflict: Some(conflict),
+        });
+    }
     to_rework(store, &context.task_id)?;
     Ok(Merged {
         task: context.task_id.clone(),
@@ -1063,6 +1221,7 @@ fn integration_failed(
         candidate_sha: None,
         rounds: round,
         warning: None,
+        conflict: None,
     })
 }
 

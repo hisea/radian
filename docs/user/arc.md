@@ -248,6 +248,10 @@ A claim is refused with exit `3` and changes nothing when:
 The claim is one transaction: the task's `attempt` goes up by one, `attempt_id` becomes `<task>-<attempt>`, a random `token` is written, and the task moves to `doing.starting`.
 arc then runs the hidden `radian arc work` wrapper as a child, with the brief on its stdin; the wrapper moves the task to `doing.running`.
 
+Before the worker starts, the wrapper runs the profile's `before_attempt` steps in the worktree (see the `before_attempt` row below); a first attempt's steps do nothing.
+`merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; a conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see A conflict with main).
+A failed fetch or merge ends the attempt with git's message.
+
 The wrapper enforces the attempt's limits itself, so they hold even after the process that started the wrapper is gone:
 
 - no new line in `runs/<task>/attempts/<attempt id>/result.jsonl` for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the worker's process group;
@@ -344,7 +348,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   It runs after `commands` passes and before `human`; a profile that lists both must list `commands` first.
   For each run it starts one `radian exec` in its own checkout, `.radian/arc/gates/review/`, on the candidate, with the candidate as the workspace and only the `read`, `grep` and `glob` tools mounted: no shell tool, no write tool, and no MCP server.
   Its model route is `[gate.review] exec_args`, and `[gate.review] timeout_secs` limits one session.
-  The prompt is built in: the task's brief, the commit list and the diff `base_sha..verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
+  The prompt is built in: the task's brief, the commit list and the diff from the merge base of the remote main and `verified_sha` to `verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
   `[gate.review] prompt_file` is appended to it.
   The session must end with one fenced `json` block, and arc parses the last such block:
 
@@ -381,6 +385,16 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 
 `list` and `show` do not use the network: they do not check the remote and cannot see a branch that moved after the gate.
 `merge` checks the remote before it acts.
+
+### A conflict with main
+
+A verification stage (`commands`, `mutation`, `review`) or the integration stage can fail with reason `conflict`: the task's commit or branch does not merge with main.
+With `merge-main` on, the next attempt starts mid-merge, so arc writes its brief and moves the task to `todo.ready`.
+The heading is `## Rework <n> (conflict with main)`, with the lead's `add_rework` numbering.
+The text names the main commit (short sha) and the stage, lists the conflicted paths, says the next attempt starts mid-merge, and asks the worker to resolve the conflict keeping both sides' intent, commit the merge, rebuild, run the touched tests, and change nothing else.
+Every other reason, and a conflict without `merge-main`, keeps `review.rework_pending`; a `reverify` conflict takes the automatic path above.
+It never raises `auto_rework` and never pauses the plan, and it counts as an attempt: a task that keeps conflicting reaches `failed.exhausted` when its last counted attempt conflicts.
+`auto` decides whether the next attempt starts by itself.
 
 ## A gate for this repository
 
@@ -557,7 +571,7 @@ A one-shot `run` starts its work and exits without waiting for it; the next `run
 Use `--watch` (or the arc interface, when it exists) to keep advancing.
 
 `run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end.
-A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, and an integration prints `<task> integration started (pid <pid>)`.
+A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, and a conflict rework prints `<task> conflict with main -> todo.ready (automatic rework)`.
 When a pass changes nothing, a summary of what waits on whom ends the pass:
 
 ```text
@@ -702,7 +716,7 @@ A key you leave out takes its default.
 | `limits.max_wall_time_secs` | integer | `7200` | seconds | As an absolute limit on one attempt, on top of the stall timeout. |
 | `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
 | `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
-| `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. |
+| `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. A conflict rework that arc writes itself does not count. |
 | `worker.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | Before `start`, each `run` pass and `confirm` act, the line the worker would get is parsed with the `radian exec` parser; a rejected line exits `3`. Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
 | `ids.plan_prefix` | string | `"PL"` | 1 to 4 ASCII uppercase letters; must differ from `ids.task_prefix` | When a plan id is created. |
 | `ids.task_prefix` | string | `"TK"` | 1 to 4 ASCII uppercase letters; must differ from `ids.plan_prefix` | When a task id is created. |
@@ -714,6 +728,7 @@ A key you leave out takes its default.
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
 | `gate.profiles.<name>.stages` | array of tables | `[{ stage = "commands", required = true }, { stage = "human", required = true }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs, in order. `integration` is not a profile stage: it always runs at merge. |
 | `gate.profiles.<name>.commands` | array of strings | `[]` | Shell command lines | The `commands` stage runs them in order on its own checkout. |
+| `gate.profiles.<name>.before_attempt` | array of strings | `["merge-main"]` | `merge-main`, or `[]` for no step | Before each attempt that reuses the worktree. `merge-main` merges the remote main into the branch. |
 | `gate.profiles.<name>.key_commands` | array of strings | `[]` | Shell command lines | The integration stage runs them on the merge candidate. |
 
 `gate.profiles.<name>` above is written out as `gate.profiles.default` in the file `init` writes.
@@ -910,8 +925,8 @@ A worker never reads the rest of `.radian/arc/` from inside its checkout: the wo
 ## Not built yet
 
 The arc terminal interface is not built: `radian arc` with no subcommand says so and lists the subcommands.
-The gate stages `mutation`, `review`, and `ci` are not built: verification refuses a profile or task that lists one, and the task stays in `review.verifying`.
-The arc TUI does not hold `runner.lock`: a scheduling loop runs only while `radian arc run` does, a one-shot pass or its `--watch` loop.
+The gate stages `mutation` and `ci` are not built: verification refuses a profile or task that lists one, and the task stays in `review.verifying`.
+The arc TUI does not hold `runner.lock`: only `radian arc run` schedules.
 
 ## See also
 

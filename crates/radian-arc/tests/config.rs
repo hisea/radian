@@ -119,6 +119,7 @@ fn a_profile_cannot_list_integration_and_stage_names_are_a_closed_set() {
             stage: Stage::Commands,
             required: true,
         }],
+        before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
     };
@@ -136,6 +137,29 @@ fn a_profile_cannot_list_integration_and_stage_names_are_a_closed_set() {
 const BASE: &str = "schema_version = 1\n\
 [gate.profiles.default]\n\
 stages = [{ stage = \"commands\", required = true }]\n";
+
+/// A `before_attempt` step this build does not run is a config error that names it. The one
+/// step and an empty list parse. Mutation: accept any step and the wrapper would skip a merge
+/// it cannot know about.
+#[test]
+fn an_unknown_before_attempt_step_is_refused_by_name() {
+    let error = radian_arc::store::config::parse(&format!("{BASE}before_attempt = [\"rebase\"]\n"))
+        .expect_err("an unknown step must fail");
+    assert!(error.contains("rebase"), "{error}");
+    for value in ["[\"merge-main\"]", "[]"] {
+        let config = radian_arc::store::config::parse(&format!("{BASE}before_attempt = {value}\n"))
+            .expect("a valid step list parses");
+        assert!(
+            config
+                .gate
+                .profiles
+                .get("default")
+                .expect("the profile")
+                .validate()
+                .is_ok()
+        );
+    }
+}
 
 /// `gate.review.exec_args` must be an array of strings, and a non-array value is refused by
 /// name (not only by a TOML position).
