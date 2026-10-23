@@ -1881,8 +1881,8 @@ pub fn latest_review_verdict(store: &Store, task: &str) -> Option<(PathBuf, Verd
 }
 
 /// The task's newest `review` verdict from an attempt other than `label`, with its path: the
-/// previous review of a rework round (ADR 0048 decision 10). A verdict with an empty `sha` is
-/// not one.
+/// candidate previous review of a rework round (ADR 0048 decision 10). A verdict with an
+/// empty `sha` is not one, and the stage ignores it when its `sha` is the commit under review.
 #[must_use]
 pub fn previous_review(store: &Store, task: &str, label: &str) -> Option<(PathBuf, Verdict)> {
     let current = verdict_path(store.repo(), task, label, Stage::Review).ok();

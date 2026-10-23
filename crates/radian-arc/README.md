@@ -452,8 +452,9 @@ once more; two unusable runs fail with `review_output`, or `review_timeout` when
 timed out. The verdict records `review`, `review_session_ids`, `review_cost_micros` and, in a
 rework round, `review_pre_existing`.
 
-A review that follows an earlier review of the task is a rework round
-(`review::previous_review`): its prompt holds the previous blocking items, the commits
+A review that follows an earlier review of the task, of a different commit, is a rework round
+(`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)
+is a first review. A rework round's prompt holds the previous blocking items, the commits
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
 `git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
 `suggestions` with `pre_existing` unless its `file:line` is within 3 lines of an increment

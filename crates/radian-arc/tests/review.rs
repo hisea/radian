@@ -2455,6 +2455,67 @@ fn a_main_change_merged_between_attempts_is_not_in_the_increment() {
     assert_eq!(verdict.review_pre_existing, Some(1));
 }
 
+/// A review of the commit the previous review already reviewed is a first review: a `reverify`
+/// of an unchanged head still blocks on the same item even when the session reports it more than
+/// 10 lines from where it reported it before. Mutation: treat a same-sha review as a rework
+/// round → the item is moved and the stage passes.
+#[test]
+fn a_reverify_of_the_same_head_is_a_first_review_and_still_blocks() {
+    let fixture = Fixture::new("review-same-sha");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first = FakeReview::new(
+        "review-same-sha-first",
+        &[review_object_message(
+            "the change adds old.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, first.program()).phase,
+        "rework_pending"
+    );
+
+    let fake = FakeReview::new(
+        "review-same-sha-second",
+        &[review_object_message(
+            "the same problem, reported from elsewhere",
+            &[review_item("major", "old.txt", 30, "the same wrong line")],
+            &[],
+        )],
+        0,
+    );
+    let reverified = review::reverify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("reverify runs");
+    let verified = reverified.verification.expect("the verification runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+
+    let label = format!("{}-2", fixture.task);
+    let verdict = fixture.verdict(&label, Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.sha, head, "the same commit is reviewed again");
+    assert_eq!(
+        verdict.review_pre_existing, None,
+        "a first review moves nothing"
+    );
+    assert_eq!(
+        verdict.review.expect("a report").blocking.len(),
+        1,
+        "an item 29 lines from the previous one still blocks"
+    );
+    let prompt = fake.prompt(1);
+    assert!(prompt.contains("## The diff"), "{prompt}");
+    assert!(!prompt.contains("## The previous review"), "{prompt}");
+    assert!(prompt.contains("diff --git a/old.txt"), "{prompt}");
+}
+
 /// A failed review on a plan at `auto` `merge` writes `## Rework <n> (review)` with the items
 /// and moves the task to `todo.ready`, and counts one automatic rework. Mutation: write the
 /// rework when `auto` is `off` → this test's `auto` `off` twin fails instead.

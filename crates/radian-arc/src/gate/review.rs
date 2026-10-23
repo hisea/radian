@@ -325,7 +325,10 @@ impl ReviewRun<'_> {
         let mut prompt = match self.previous {
             // A previous sha this checkout does not have cannot be diffed: the review is a
             // first review, so nothing is treated as pre-existing (ADR 0048 decision 10).
-            Some(previous) if has_commit(checkout, &previous.sha)? => {
+            // Neither is a review of the commit the previous review already reviewed (a
+            // `reverify` of an unchanged head): the rework changed no line, so nothing could
+            // be pre-existing, and the same items must still block.
+            Some(previous) if previous.sha != self.sha && has_commit(checkout, &previous.sha)? => {
                 let range = format!("{}..{sha}", previous.sha);
                 let commits = super::git::ok(
                     checkout,
