@@ -743,7 +743,9 @@ struct AutoReverifyRecord {
 ///
 /// Two guards stop a loop: a `(head_sha, remote main)` pair is re-verified at most once (kept
 /// in [`AUTO_REVERIFY_FILE`]), and `[limits] max_auto_reverify` counts the automatic reverifies
-/// of one task; `0` turns the step off. The count is only spent when the claim happened.
+/// of one task; `0` turns the step off. The pair and the count are written before the claim, so
+/// a pass that dies in between spends them rather than running the pair twice; a claim that is
+/// refused gives them back.
 ///
 /// A refused claim is the ordinary "nothing ran" result: the task moved since it was read.
 ///
