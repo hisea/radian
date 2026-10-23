@@ -46,6 +46,9 @@ copy.
 | M34 | drop rule (b) of `ReworkRound::keeps` (an earlier unfixed item stops blocking) | `review::a_blocking_item_near_an_unfixed_previous_item_still_blocks` | ✅ failed |
 | M35 | write the review rework when the plan's `auto` is `off` | `review::a_failed_review_with_auto_off_waits_for_the_lead` | ✅ failed |
 | M36 | treat a review of the commit the previous review reviewed as a rework round (drop the `previous.sha != sha` guard) | `review::a_reverify_of_the_same_head_is_a_first_review_and_still_blocks` | ✅ failed |
+| M37 | let the loop claim a `todo.proposed` task (accept `proposed` in `run::start_ready`'s phase filter and in `attempt_ops::claim`) | `review::the_loop_does_not_claim_a_proposed_task_and_start_refuses_it` | ✅ failed |
+| M38 | move the plan back to `draft` on a task confirm | `review::confirm_makes_a_proposed_task_ready_and_leaves_the_plan_alone` | ✅ failed |
+| M39 | include the review verdict's `blocking` items in the follow-up task | `review::a_blocking_item_is_never_carried_into_the_followup` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -100,6 +103,12 @@ already restricted to the task's file; the rework-prompt test is the one that ca
 is the same-commit hole: with the guard gone a `reverify` of an unchanged head is a rework
 round with an empty increment, so an item reported 29 lines from the previous one is moved
 and the stage passes.
+
+M37–M39 were run against `d8777f47` (the proposed task and the review's follow-up), each from
+a copy under `.radian/mutations/` restored with `cp` and compared with `cmp`. M37 turns the
+follow-up into a `doing.running` attempt on the next pass; M38 leaves the plan `draft` after
+the task's confirm; M39 adds a task from a `blocking` item that the passing review in the test
+holds, which arc itself never writes (a non-empty `blocking` fails the stage).
 
 The old stale-main test (`a_rejected_push_never_overwrites_the_remote_main`) cannot survive
 the explicit main refspec: a main moved on the remote is now visible before the push, so the
