@@ -1598,6 +1598,408 @@ fn a_watch_pass_does_not_restart_a_gate_that_left_no_record() {
     assert_eq!(gate_starts(&repo, &task), 1);
 }
 
+/// A gate that writes `running` and then dies is restarted, and the deaths are counted: with
+/// the default `[limits] max_gate_deaths` of 2 the gate is started 3 times and the record is
+/// `died`, after which no pass starts it again while the inputs are unchanged. A changed
+/// `config.toml` allows one new start, and the count begins again. Mutation: restart a dead
+/// `running` gate without counting and every pass starts another gate.
+#[test]
+fn a_gate_that_dies_after_running_is_restarted_twice_then_left_died() {
+    let repo = Repo::new("run-gate-died");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-died");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    let env = [(background::DIE_AFTER_RUNNING_ENV, "1".to_owned())];
+    let note = format!("{task} verify cannot run: its gate died after it started");
+
+    let first = run_until_gate_record(&repo, &task, &env, |record| record["status"] == "died");
+    assert!(first.contains(&note), "the pass did not report it: {first}");
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["kind"], "verify", "{record}");
+    assert_eq!(record["attempt"], format!("{task}-1"), "{record}");
+    assert_eq!(
+        record["deaths"], 3,
+        "one start and two restarts before `died`: {record}"
+    );
+    assert!(
+        record["inputs"]
+            .as_str()
+            .is_some_and(|inputs| !inputs.is_empty()),
+        "the record kept the inputs the pass started with: {record}"
+    );
+    assert_eq!(gate_starts(&repo, &task), 3, "1 + max_gate_deaths starts");
+    let inputs = record["inputs"].clone();
+
+    // Later passes start nothing and print the same line.
+    for pass in 1..=2 {
+        let run = repo.radian_with_env(&["arc", "run"], &env);
+        assert_eq!(run.code, 0, "pass {pass}: {}", run.stderr);
+        assert!(
+            !run.stdout.contains("verify started"),
+            "pass {pass} restarted the gate: {}",
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains(&note),
+            "pass {pass} did not report it: {}",
+            run.stdout
+        );
+    }
+    assert_eq!(
+        gate_starts(&repo, &task),
+        3,
+        "the gate ran more than three times"
+    );
+    assert_eq!(
+        gate_record(&repo, &task).expect("the record")["inputs"],
+        inputs,
+        "the died record was rewritten"
+    );
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+
+    // `show` prints the same text as the `rework_reason`.
+    let show = repo.radian(&["arc", "show", &task]);
+    assert_eq!(show.code, 0, "show: {}", show.stderr);
+    assert!(show.stdout.contains("rework_reason"), "{}", show.stdout);
+    assert!(
+        show.stdout.contains("its gate died after it started"),
+        "{}",
+        show.stdout
+    );
+
+    // A changed `config.toml` changes the inputs: one new start, and the count begins at 0.
+    tune(
+        &repo,
+        "max_gate_deaths = 2",
+        "max_gate_deaths = 2 # a changed config",
+    );
+    let again = run_until_gate_record(&repo, &task, &env, |record| {
+        record["status"] == "died" && record["inputs"] != inputs
+    });
+    assert!(
+        again.contains("verify started"),
+        "a changed config started nothing: {again}"
+    );
+    assert_eq!(
+        gate_starts(&repo, &task),
+        6,
+        "the new inputs get their own 1 + max_gate_deaths starts"
+    );
+    assert_eq!(
+        gate_record(&repo, &task).expect("the record")["deaths"],
+        3,
+        "the count began again at 0"
+    );
+}
+
+/// `[limits] max_gate_deaths` of 0 stops at the first death: one start, and no restart.
+/// Mutation: compare the count with `>=` and a 0 limit still restarts once more.
+#[test]
+fn zero_max_gate_deaths_stops_at_the_first_death() {
+    let repo = Repo::new("run-gate-died-zero");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-died-zero");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    tune(&repo, "max_gate_deaths = 2", "max_gate_deaths = 0");
+    let env = [(background::DIE_AFTER_RUNNING_ENV, "1".to_owned())];
+
+    let output = run_until_gate_record(&repo, &task, &env, |record| record["status"] == "died");
+    assert!(
+        output.contains("its gate died after it started"),
+        "{output}"
+    );
+    assert_eq!(
+        gate_starts(&repo, &task),
+        1,
+        "0 deaths allowed means the first death stops it"
+    );
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["deaths"], 1, "{record}");
+}
+
+/// A gate the watch loop stops itself is `interrupted`, and the next loop starts it again
+/// without counting a death. Mutation: leave the `running` record behind and the restarted
+/// gate's record carries a death.
+#[test]
+fn a_stopped_gate_is_interrupted_and_restarted_without_a_death() {
+    let repo = Repo::new("run-gate-interrupted");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-interrupted");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let wake = repo.root.join("gate.wake");
+    commands(
+        &repo,
+        &format!("while [ ! -f '{}' ]; do sleep 0.2; done", wake.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+
+    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    wait_until(Duration::from_secs(30), "the gate's running record", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "running")
+    });
+    let gate = gate_record(&repo, &task).expect("the record")["pid"]
+        .as_u64()
+        .expect("the gate pid") as u32;
+    assert!(process_alive(gate), "the gate did not start");
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_until(Duration::from_secs(20), "the stopped gate to exit", || {
+        !process_alive(gate)
+    });
+
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["status"], "interrupted", "{record}");
+    assert_eq!(record["attempt"], format!("{task}-1"), "{record}");
+
+    // The next loop starts it again, and the restarted gate counts no death.
+    let restarted = repo.radian(&["arc", "run"]);
+    assert_eq!(restarted.code, 0, "run: {}", restarted.stderr);
+    assert!(
+        restarted.stdout.contains("verify started"),
+        "the stopped gate was not restarted: {}",
+        restarted.stdout
+    );
+    wait_until(
+        Duration::from_secs(30),
+        "the restarted gate's record",
+        || {
+            gate_record(&repo, &task).is_some_and(|record| {
+                record["status"] == "running"
+                    && record.get("deaths").and_then(Value::as_u64).unwrap_or(0) == 0
+            })
+        },
+    );
+
+    // Let the restarted gate finish so the test leaves nothing behind.
+    fs::write(&wake, "go\n").expect("the wake marker");
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "awaiting_human"
+    });
+}
+
+/// A gate that was started just before the stop signal has not written its `running` record
+/// yet; the gate lock is what says its process is there, and the loop stops it anyway and
+/// records `interrupted`. Mutation: stop only a `running` record, and the gate of a
+/// just-started task keeps running after the loop exits.
+#[test]
+fn sigterm_to_watch_stops_a_gate_that_has_not_written_running() {
+    let repo = Repo::new("run-stop-started");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "stop-started");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    let env = [(background::SLOW_START_ENV, "15000".to_owned())];
+
+    let watch =
+        repo.spawn_in_own_group_with_env(&["arc", "run", "--watch", "--interval", "30"], &env);
+    wait_until(
+        Duration::from_secs(30),
+        "the pass's started record with the gate's pid",
+        || {
+            gate_record(&repo, &task)
+                .is_some_and(|record| record["status"] == "started" && record["pid"].is_u64())
+        },
+    );
+    let gate = gate_record(&repo, &task).expect("the record")["pid"]
+        .as_u64()
+        .expect("the gate pid") as u32;
+    assert!(process_alive(gate), "the gate did not start");
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_until(
+        Duration::from_secs(20),
+        "the gate of a just-started task to stop",
+        || !process_alive(gate),
+    );
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["status"], "interrupted", "{record}");
+}
+
+/// `stop` with no recorded start time (the sandbox refuses `ps`) asks whether the pid is
+/// alive instead of assuming it: a gate that was already gone costs no wait. Mutation: treat
+/// an empty start time as alive and the call waits its whole grace.
+#[test]
+fn stop_without_a_start_time_returns_as_soon_as_the_gate_is_gone() {
+    let repo = Repo::new("run-stop-empty-start");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "stop-empty-start");
+    let task = add_task(&store, &plan, "work", &[]);
+
+    // A process that is already gone, the way a gate's pid is when it exited at once.
+    let mut child = std::process::Command::new("sleep")
+        .arg("0")
+        .spawn()
+        .expect("a child");
+    let pid = child.id();
+    child.wait().expect("the child ends");
+
+    write_gate_record(
+        &repo,
+        &task,
+        serde_json::json!({
+            "kind": "verify",
+            "attempt": format!("{task}-1"),
+            "status": "running",
+            "pid": pid,
+            "started_at": "2026-01-01T00:00:00Z",
+        }),
+    );
+
+    let started = Instant::now();
+    background::stop(&store, &task, Duration::from_secs(10));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "stop waited for a gate that was already gone: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        gate_record(&repo, &task).expect("the record")["status"],
+        "running",
+        "a gate that was already gone is not one arc stopped"
+    );
+}
+
+// ---- reverify of a stuck gate ---------------------------------------------------------
+
+/// A task stuck in `review.verifying` because its gate left no record is re-verified by the
+/// owner: `reverify` claims a new worker-less attempt and runs the gate for it at once.
+/// Mutation: refuse every `review.verifying` task and the command exits 3.
+#[test]
+fn reverify_reruns_a_task_whose_gate_left_no_record() {
+    let repo = Repo::new("run-reverify-no-record");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "reverify-no-record");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    background::write_no_record(&store, &task, "verify", &format!("{task}-1"), "inputs")
+        .expect("the record");
+
+    let reverified = repo.radian(&["arc", "reverify", &task]);
+    assert_eq!(reverified.code, 0, "reverify: {}", reverified.stderr);
+    assert!(
+        reverified
+            .stdout
+            .contains(&format!("{task}-2 reverify -> review.verifying")),
+        "{}",
+        reverified.stdout
+    );
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "awaiting_human".to_owned()),
+        "{}",
+        reverified.stdout
+    );
+    assert_eq!(attempt(&store, &task), 2);
+}
+
+/// The same for a gate that died after it wrote `running`.
+#[test]
+fn reverify_reruns_a_task_whose_gate_died() {
+    let repo = Repo::new("run-reverify-died");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "reverify-died");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    background::write_died(&store, &task, "verify", &format!("{task}-1"), "inputs", 3)
+        .expect("the record");
+
+    let reverified = repo.radian(&["arc", "reverify", &task]);
+    assert_eq!(reverified.code, 0, "reverify: {}", reverified.stderr);
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "awaiting_human".to_owned()),
+        "{}",
+        reverified.stdout
+    );
+    assert_eq!(attempt(&store, &task), 2);
+}
+
+/// A `review.verifying` task whose gate is running is still refused: only a gate that left no
+/// record or died is stuck. Mutation: accept every `review.verifying` task and `reverify`
+/// claims an attempt behind a running gate.
+#[test]
+fn reverify_refuses_a_verifying_task_whose_gate_runs() {
+    use fs2::FileExt as _;
+
+    let repo = Repo::new("run-reverify-running");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "reverify-running");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+
+    // A gate holds the lock and wrote its `running` record.
+    let lock_path = repo.arc().join("gates").join(format!("{task}.gate.lock"));
+    fs::create_dir_all(lock_path.parent().expect("gates")).expect("gates");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("the lock");
+    lock.lock_exclusive().expect("hold the gate lock");
+    write_gate_record(
+        &repo,
+        &task,
+        serde_json::json!({
+            "kind": "verify",
+            "attempt": format!("{task}-1"),
+            "status": "running",
+            "pid": std::process::id(),
+            "started_at": "2026-01-01T00:00:00Z",
+        }),
+    );
+
+    let refused = repo.radian(&["arc", "reverify", &task]);
+    assert_eq!(refused.code, 3, "reverify: {}", refused.stderr);
+    assert!(
+        refused.stderr.contains("review.verifying"),
+        "{}",
+        refused.stderr
+    );
+    assert_eq!(attempt(&store, &task), 1, "an attempt was claimed");
+}
+
 /// A wrapper that refuses an argument from `config.toml` fails after the attempt directory
 /// exists, so it leaves its record and the next pass applies it: the slot is free at once and
 /// the task waits for its retry. Mutation: let such a failure leave no record and the slot

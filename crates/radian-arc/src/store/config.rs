@@ -107,6 +107,9 @@ pub struct Limits {
     /// How many times a task a command failure blocked may be re-verified by itself once the
     /// remote main moved (ADR 0048 decision 9). `0` turns the step off.
     pub max_auto_reverify: u32,
+    /// How many times a gate may die after writing `running` for the same attempt and inputs
+    /// before the pass records `died` instead of starting it again (ADR 0048 decision 10).
+    pub max_gate_deaths: u32,
 }
 
 impl Default for Limits {
@@ -121,6 +124,7 @@ impl Default for Limits {
             max_auto_rework: 2,
             max_conflict_rework: 3,
             max_auto_reverify: 2,
+            max_gate_deaths: 2,
         }
     }
 }
@@ -267,6 +271,7 @@ cancel_grace_secs = 10
 max_auto_rework = 2
 max_conflict_rework = 3       # consecutive conflicts before the task waits for you
 max_auto_reverify = 2         # 0 turns the automatic reverify off
+max_gate_deaths = 2           # 0 stops at the first gate death
 
 [worker]
 exec_args = []                 # extra `radian exec` arguments for the worker

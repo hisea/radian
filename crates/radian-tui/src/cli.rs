@@ -2782,6 +2782,35 @@ mod tests {
         );
     }
 
+    /// The gate record's statuses are one closed list in the code, in order: both the gate page
+    /// and the file page name exactly them, in that order, in the sentence that says what a
+    /// record's `status` is. The source is `radian_arc::gate::background::STATUSES`, which the
+    /// parser refuses a value outside. A status added to the list fails here until both pages
+    /// list it.
+    #[test]
+    fn every_gate_record_status_appears_in_the_arc_pages() {
+        let statuses = radian_arc::gate::background::STATUSES;
+        assert!(!statuses.is_empty(), "the status list is empty");
+        let mut listed = String::new();
+        for (index, status) in statuses.iter().enumerate() {
+            if index > 0 {
+                listed.push_str(if index + 1 == statuses.len() {
+                    " and "
+                } else {
+                    ", "
+                });
+            }
+            listed.push_str(&format!("`{status}`"));
+        }
+        let sentence = format!("`status` is one of {listed}");
+        for (name, doc) in [
+            ("arc-gate.md", arc_gate_md()),
+            ("arc-files.md", arc_files_md()),
+        ] {
+            assert!(doc.contains(&sentence), "{name} must say {sentence}");
+        }
+    }
+
     /// The plan priorities are one closed list in the code, the same list the `priority`
     /// argument's help shows: the plan fields table's `priority` row lists every value and its
     /// default, the `radian arc priority` section of `arc.md` lists every value, and the
