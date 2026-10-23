@@ -252,12 +252,18 @@ pub fn meta_parts(card: &ToolCard, cancelled: bool) -> Vec<String> {
 /// (one `edit` may replace several ranges, and every range counts), falling back to the call's
 /// edits when the result carries none (an older journal entry); `write` counts the content it
 /// wrote (and the file's previous line count when the result carries one).
+///
+/// A failed `patch` changed nothing, so it shows no counts at all: the call's edits name text
+/// the file still has.
 pub(super) fn diff_meta(card: &ToolCard) -> Option<String> {
     let count = |value: Option<&Value>| -> usize {
         value.and_then(Value::as_str).map(text_lines).unwrap_or(0)
     };
     match card.name.as_str() {
         "patch" => {
+            if card.is_error {
+                return None;
+            }
             let hunks = patch_hunks(card);
             if !hunks.is_empty() {
                 let added: u64 = hunks.iter().map(|hunk| hunk.new_lines).sum();
@@ -556,8 +562,12 @@ pub fn result_display_text(card: &ToolCard, tool_text: &str) -> String {
 /// The hunks come from the result's structured `hunks` (`radian-coding`'s `patch`), and each
 /// hunk's `-`/`+` text is that hunk's `edit`. A result that carries no `hunks` (an older journal
 /// entry), or a hunk whose `edit` is missing or out of range, falls back to the call's edits in
-/// call order with no `@@` line; the diff body then draws it without a gutter.
+/// call order with no `@@` line; the diff body then draws it without a gutter. A **failed**
+/// patch changed nothing, so it has no diff at all: the card shows the tool's own error text.
 pub(super) fn patch_diff_text(card: &ToolCard) -> Option<String> {
+    if card.is_error {
+        return None;
+    }
     let edits = patch_call_edits(card);
     if edits.is_empty() {
         return None;

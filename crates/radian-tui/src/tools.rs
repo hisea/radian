@@ -60,6 +60,10 @@ pub struct ToolCard {
     /// **call** entry while the body lives on the result's, so the call entry can only know the
     /// count through this field, which the pairing fills ([`crate::app::App::push_message`]).
     pub result_lines: Option<usize>,
+    /// Whether the paired result is an error. A failed `patch` changed nothing, so its card
+    /// shows the tool's own error text instead of the call's edits, and no `+N −M`
+    /// (`crates/radian-tui/src/app/transcript.rs` sets it when the result arrives).
+    pub is_error: bool,
 }
 
 impl ToolCard {
@@ -71,6 +75,7 @@ impl ToolCard {
             structured: None,
             duration_ms: None,
             result_lines: None,
+            is_error: false,
         }
     }
 
@@ -1021,6 +1026,47 @@ mod tests {
                 "-old one\n+new one\n-old two\n+new two\n"
             );
         }
+    }
+
+    /// A failed `patch` applies nothing, so its card shows the tool's own error text (with its
+    /// closest-region hint) and no `+N −M` — for the `edits` form and the `old`/`new` pair
+    /// alike. A successful call keeps its diff and its counts.
+    #[test]
+    fn a_failed_patch_shows_the_error_text_and_no_counts() {
+        let error = "`old` does not appear in `f.txt`; the file is unchanged\n\
+                     The closest region is lines 3-3:\n3: gamma";
+        for arguments in [
+            json!({"path": "f.txt", "edits": [{"old": "alpha", "new": "ALPHA"}]}),
+            json!({"path": "f.txt", "old": "alpha", "new": "ALPHA"}),
+        ] {
+            let mut patch = card("patch", arguments.clone());
+            patch.is_error = true;
+            assert_eq!(
+                result_display_text(&patch, error),
+                error,
+                "a failed patch shows the tool's text: {arguments}"
+            );
+            assert!(
+                meta_parts(&patch, false).is_empty(),
+                "a failed patch claims no changed lines: {arguments}"
+            );
+        }
+
+        // A successful call is unchanged: the hunk body and the hunk sums.
+        let mut patch = card(
+            "patch",
+            json!({"path": "f.txt", "edits": [{"old": "alpha\n", "new": "ALPHA\n"}]}),
+        );
+        patch.structured = Some(json!({
+            "hunks": [
+                {"edit": 1, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1},
+            ],
+        }));
+        assert_eq!(meta_parts(&patch, false), vec!["+1 −1"]);
+        assert_eq!(
+            result_display_text(&patch, "replaced 1 occurrence across 1 edit in f.txt"),
+            "@@ -1,1 +1,1 @@\n-alpha\n+ALPHA\n"
+        );
     }
 
     /// A `patch` result that carries `hunks`: one `@@` block per replaced range, every row
