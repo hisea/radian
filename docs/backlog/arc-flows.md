@@ -46,6 +46,7 @@ allow_noop = false
 - plan 层不知道 flow。一个 plan 可以混：coding task 出功能，`after` 它的 marketing task 写文案。
 - 一个 task 的 flow 在创建后不变；返工 `--resume` 同一个 session，换 flow 等于换 worker 配置，应新建 task 并写 `supersedes`。
 - flow 的工具差异靠 `radian exec` 已有的输入注入（`--model`、`--mcp-config`、`--system-file`、`--config`），不公开隐藏的 `--tools`，不加新输入。
+- 一个 `gate.profiles.<name>` 还有 `before_attempt`：attempt 开工前（worker 启动前）由 wrapper 在 worktree 里按顺序执行的步骤列表。内置步骤 `merge-main`（返工时把远端 main 合进 `work/<task>`，冲突则留在合并中、在 brief 顶部列出冲突文件交给 worker）由 PL0022 先做出来，缺省 `["merge-main"]`，`[]` 等于不做。本步加自定义命令 `{ run = "<命令>", timeout_secs = <秒> }`（例：预编译、拉 LFS、生成文件）：在 worktree 里跑，计入 attempt 的 wall clock，输出写进 attempt 目录，失败算基础设施失败（按重试规则，不派 worker）。是否在沙箱里跑、命令能否往 brief 前面加文字，落地时定。
 - lead 的 brief 标准加一条：拆任务时写明 flow，选错 flow 的任务 gate 和工具全错。
 - 每个 flow 节的注释（或手册里每个内置 flow 的条目）回答五个问题，照 software-factory 的模板：什么触发它；它读写什么（worktree、远端、外部服务）；完成后触发什么；人从哪里重新进入；什么阻止两个 attempt 干同一件事。后四个 arc 对所有 flow 的答案相同（`after` 与 `auto`；worktree 与 `work/<task>`；gate 与 `awaiting_human`；claim 事务与 token），所以 flow 定义只需写第一个，直到第 4 步把 trigger 做出来。
 
