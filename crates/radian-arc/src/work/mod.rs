@@ -13,10 +13,10 @@
 //!    never run together); a first attempt fetches the configured remote's main branch and
 //!    starts from the fetched tip;
 //! 2. write the host-local attempt record under `<repository>/.radian/arc/attempts/`;
-//! 3. run `radian exec -p - --session-id <task> --workspace <worktree> --profile workspace
-//!    --yes --output jsonl` (with `--resume <task>` when the task's session already
-//!    exists, and the caller's extra arguments), the brief on its stdin, stdout into
-//!    `runs/…/result.jsonl`;
+//! 3. run `radian exec -p - --session-id <session> --workspace <worktree> --profile workspace
+//!    --yes --output jsonl` (with `--resume <session>` when this is a `resume`-mode later
+//!    attempt and the session exists, and the caller's extra arguments), the brief on its
+//!    stdin, stdout into `runs/…/result.jsonl`;
 //! 4. while the child runs, enforce the attempt's limits here: a stall, the wall time, or a
 //!    `cancel` records `signal.json`, sends SIGTERM to the child's process group and then
 //!    SIGKILL after the grace period. These limits belong to this process, so they hold after
@@ -56,15 +56,21 @@ const POLL: Duration = Duration::from_millis(100);
 
 /// The `radian arc work` flags. `radian-tui`'s `arc work` subcommand fills this.
 pub struct Options {
-    /// The task id: the session id, the branch suffix and the worktree name.
+    /// The task id: the branch suffix and the worktree name.
     pub task: String,
     /// The attempt number, 1-based.
     pub attempt: u32,
     /// The random token the scheduling loop expects back in `AttemptFinished`.
     pub token: String,
-    /// A later attempt: continue the task's session (`--resume <task>`) when it exists. An
-    /// earlier attempt that failed before the model started left no session, and this one
-    /// then starts it with `--session-id <task>` (ADR 0048 decision 7.2).
+    /// The worker's session id (ADR 0048 decision 4): the task id with `[worker]
+    /// rework_session = "resume"`, `<task>-<attempt>` with `fresh`. arc sets it from the
+    /// claim; absent on the command line, it is the task id.
+    pub session: String,
+    /// A `resume`-mode later attempt: continue the session (`--resume <session>`) when it
+    /// exists. A flag without a session file starts one, as before: an attempt that failed
+    /// before the model started leaves nothing to resume. Without this flag an attempt after
+    /// the first is a fresh session and gets the hand-off section, which is why the flag is
+    /// also the mode's signal here.
     pub resume: bool,
     /// Let a branch with no change past `base_sha` pass the delivery check (ADR 0048
     /// decision 8: a brief can allow a no-op).
@@ -375,12 +381,16 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
         }
     }
     // The profile's steps before an attempt: a reused worktree merges the remote main first
-    // (ADR 0048 decision 7). The brief the worker gets may start with a conflict section; the
-    // task file's brief is never changed.
-    let brief = before_attempt(o, s, created, brief)?;
+    // (ADR 0048 decision 7). A conflict leaves the worktree mid-merge, and its section goes
+    // first. The brief in the task file is never changed.
+    let conflict = before_attempt(o, s, created)?;
     let start_sha = branch_tip(&s.repo, &s.branch, &s.clock)?.ok_or_else(|| {
         Failure::error(format!("cannot read {} in {}", s.branch, s.repo.display()))
     })?;
+    // A fresh rework gets the previous attempt's end in front of the brief: its new session
+    // cannot see that conversation (ADR 0048 decision 7).
+    let handoff = handoff_section(o, s, &start_sha, &base_sha)?;
+    let brief = compose_brief(&[conflict.as_deref(), handoff.as_deref(), Some(&brief)]);
     let started_at = now();
     let deny = deny_paths(&s.arc);
     let mut child = spawn_child(o, &s.worktree, &deny, &result_path, &stderr_path, &brief)?;
@@ -405,7 +415,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             // record carries the wrapper's own identity too (decision 9).
             "wrapper_pid": s.wrapper_pid,
             "wrapper_process_started_at": wrapper_started_at,
-            "session_id": o.task,
+            "session_id": o.session,
             "worktree": s.worktree.display().to_string(),
             "branch": s.branch,
             "started_at": started_at,
@@ -451,7 +461,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             "pid": pid,
             "process_started_at": processor_started_at,
             "wrapper_pid": s.wrapper_pid,
-            "session_id": o.task,
+            "session_id": o.session,
             "worktree": s.worktree.display().to_string(),
             "branch": s.branch,
             "base_sha": base_sha,
@@ -832,6 +842,9 @@ fn validate_rest(o: &Options) -> Result<(), Failure> {
     if o.token.is_empty() {
         return Err(Failure::usage("--token needs a value"));
     }
+    // The session id becomes a file name in the worker's session directory, so it follows
+    // the same rule `radian exec` applies to `--session-id` and `--resume`.
+    radian_host::validate_session_id(&o.session).map_err(Failure::usage)?;
     // The internal remote and main-branch names end up as git arguments, so keep them to
     // characters a ref name uses and refuse a leading `-` (an option in disguise).
     for (flag, value) in [("--remote", &o.remote), ("--main-branch", &o.main_branch)] {
@@ -1078,21 +1091,22 @@ fn moved_outside(branch: &str) -> String {
 
 /// The steps the profile lists for before an attempt (ADR 0048 decision 7). A worktree this
 /// attempt created already starts from the fetched main, so no step runs for it. Returns the
-/// brief the worker receives: a step that leaves the worktree mid-merge puts its section
-/// first. The brief stored in the task file never changes.
-fn before_attempt(o: &Options, s: &Setup, created: bool, brief: String) -> Result<String, Failure> {
+/// section a step leaves in front of the brief: a `merge-main` that conflicted leaves the
+/// worktree mid-merge, and the worker resolves it first. The brief stored in the task file
+/// never changes.
+fn before_attempt(o: &Options, s: &Setup, created: bool) -> Result<Option<String>, Failure> {
     if created {
-        return Ok(brief);
+        return Ok(None);
     }
-    let mut brief = brief;
+    let mut conflict = None;
     for step in before_attempt_steps(&s.repo)? {
         if step == crate::gate::MERGE_MAIN
-            && let Some(conflict) = merge_main(&s.repo, &s.worktree, o, &s.branch, &s.clock)?
+            && let Some(found) = merge_main(&s.repo, &s.worktree, o, &s.branch, &s.clock)?
         {
-            brief = format!("{}\n\n{brief}", conflict_section(&conflict));
+            conflict = Some(conflict_section(&found));
         }
     }
-    Ok(brief)
+    Ok(conflict)
 }
 
 /// The selected profile's `before_attempt` steps. A repository arc is not set up in has no
@@ -1230,6 +1244,122 @@ fn conflict_section(conflict: &MergeConflict) -> String {
     )
 }
 
+/// The report's cap: how many characters of the previous attempt's final report a hand-off
+/// carries.
+const HANDOFF_REPORT_CHARS: usize = 8_000;
+
+/// The brief the worker receives, in order: the `merge-main` conflict section, a fresh
+/// rework's hand-off, then the brief arc handed over. An empty section takes no room.
+fn compose_brief(sections: &[Option<&str>]) -> String {
+    sections
+        .iter()
+        .flatten()
+        .map(|section| section.trim())
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The section a fresh rework gets in front of the brief (ADR 0048 decision 7): the previous
+/// attempt's final report, the commits of the task's own change, and its diff stat. `None` on
+/// the first attempt and for a `resume` attempt, whose session already holds the earlier
+/// turns. The worker can read the files, so the section hands over the end and points at the
+/// branch rather than repeating the conversation.
+fn handoff_section(
+    o: &Options,
+    s: &Setup,
+    head: &str,
+    base_sha: &str,
+) -> Result<Option<String>, Failure> {
+    if o.attempt <= 1 || o.resume {
+        return Ok(None);
+    }
+    let main = format!("refs/remotes/{}/{}", o.remote, o.main_branch);
+    // The task's own change, from the merge base with the remote main: a merge of main brings
+    // main's files in and is not the task's change (ADR 0048 decision 8). The recorded base
+    // covers a repository whose main ref cannot be read.
+    let own_base =
+        merge_base(&s.repo, &main, head, &s.clock)?.unwrap_or_else(|| base_sha.to_owned());
+    let range = format!("{own_base}..{head}");
+    let commits = git(&s.repo, &["log", "--oneline", &range], &s.clock)?;
+    let stat = git(&s.repo, &["diff", "--stat", &range], &s.clock)?;
+    let previous = o.attempt - 1;
+    // A worker-less attempt (a `reverify`) writes no `result.jsonl`, and those attempts are
+    // claimed by the loop by itself, so the attempt that just ended is often not the one with
+    // the report: the hand-off carries the newest one (ADR 0048 decision 7).
+    let report = match newest_report(&s.arc, &o.task, o.attempt) {
+        Some((from, report)) => {
+            let report = cap_report(&report);
+            if from == previous {
+                report
+            } else {
+                format!(
+                    "Attempt {from} is the newest attempt that wrote a final report; attempt \
+                     {previous} ended without one.\n\n{report}"
+                )
+            }
+        }
+        None => "The previous attempt wrote no final report: it ended without a result.".to_owned(),
+    };
+    let commits = or_placeholder(&commits, "(no commits of its own yet)");
+    let stat = or_placeholder(&stat, "(no file changes yet)");
+    Ok(Some(format!(
+        "## Where the previous attempt left off\n\n\
+         Attempt {previous} of this task ended, and this is a new session: its conversation is \
+         not carried over. The full history is on the branch `{}`; read the files you need \
+         rather than assume what the earlier attempt did.\n\n\
+         ### The previous attempt's final report\n\n\
+         {report}\n\n\
+         ### The commits on the branch\n\n\
+         ```text\n{commits}\n```\n\n\
+         ### The change so far\n\n\
+         ```text\n{stat}\n```",
+        s.branch,
+    )))
+}
+
+/// `text` trimmed, or `placeholder` when it holds nothing.
+fn or_placeholder(text: &str, placeholder: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        placeholder.to_owned()
+    } else {
+        text.to_owned()
+    }
+}
+
+/// The newest earlier attempt that wrote a final report: its number and the report. A
+/// worker-less attempt (a `reverify`) leaves no `result.jsonl`, and the scheduling loop claims
+/// those by itself, so the attempt before a rework is often one. An attempt before the first
+/// has nothing to offer.
+fn newest_report(arc: &Path, task: &str, attempt: u32) -> Option<(u32, String)> {
+    (1..attempt)
+        .rev()
+        .find_map(|earlier| report_of(arc, task, earlier).map(|report| (earlier, report)))
+}
+
+/// The worker's last assistant message of one attempt, from its `result.jsonl`.
+fn report_of(arc: &Path, task: &str, attempt: u32) -> Option<String> {
+    let path = arc
+        .join("runs")
+        .join(task)
+        .join("attempts")
+        .join(format!("{task}-{attempt}"))
+        .join("result.jsonl");
+    let text = last_result(&path)?.get("text")?.as_str()?.trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The report cut at [`HANDOFF_REPORT_CHARS`] characters, with a note when it was cut.
+fn cap_report(report: &str) -> String {
+    if report.chars().count() <= HANDOFF_REPORT_CHARS {
+        return report.to_owned();
+    }
+    let mut cut: String = report.chars().take(HANDOFF_REPORT_CHARS).collect();
+    cut.push_str("\n\n[... the previous attempt's report is cut at 8,000 characters ...]");
+    cut
+}
+
 /// The merge base of `a` and `b`, when git finds one.
 fn merge_base(repo: &Path, a: &str, b: &str, clock: &Clock) -> Result<Option<String>, Failure> {
     let out = git_raw(repo, &["merge-base", a, b], clock)?;
@@ -1317,13 +1447,13 @@ fn deny_paths(arc: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Whether the worker's session directory holds `<task>.jsonl`, the file `radian exec
-/// --resume <task>` opens. The directory is the one the worker resolves: a `--session-dir`
+/// Whether the worker's session directory holds `<session>.jsonl`, the file `radian exec
+/// --resume <session>` opens. The directory is the one the worker resolves: a `--session-dir`
 /// among the extra arguments, else `RADIAN_SESSION_DIR`, else the user's data directory.
-fn session_exists(task: &str, extra_args: &[String]) -> bool {
+fn session_exists(session: &str, extra_args: &[String]) -> bool {
     let flag = session_dir_arg(extra_args);
     radian_host::session_dir(flag.as_deref())
-        .is_ok_and(|dir| dir.join(format!("{task}.jsonl")).is_file())
+        .is_ok_and(|dir| dir.join(format!("{session}.jsonl")).is_file())
 }
 
 /// The last `--session-dir` value in `args` (`--session-dir <dir>` or `--session-dir=<dir>`).
@@ -1338,6 +1468,27 @@ fn session_dir_arg(args: &[String]) -> Option<PathBuf> {
         }
     }
     found
+}
+
+/// The worker's session flags for one attempt (ADR 0048 decisions 4 and 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionStart {
+    /// Start a new session: `--session-id <session>`.
+    New,
+    /// Continue the session: `--resume <session>`.
+    Continue,
+}
+
+/// What this attempt does with its session. A `resume`-mode later attempt continues the
+/// session only when its file exists: an earlier attempt that failed before the model started
+/// left none, and the next one then starts it. A session file alone never resumes, and a
+/// `fresh` attempt never does.
+fn session_start(resume: bool, exists: bool) -> SessionStart {
+    if resume && exists {
+        SessionStart::Continue
+    } else {
+        SessionStart::New
+    }
 }
 
 fn spawn_child(
@@ -1363,14 +1514,16 @@ fn spawn_child(
             })?;
             let mut command = Command::new(executable);
             command.arg("exec");
-            // `--session-id` and `--resume` are exclusive in `radian exec` (ADR 0022/0023): a
-            // later attempt resumes the task's session, and the attempt that creates it names
-            // it. The attempt number alone does not say which: a first attempt that failed
-            // before the model started (a bad worker argument) created nothing to resume.
-            if o.resume && session_exists(&o.task, &o.extra_args) {
-                command.arg("--resume").arg(&o.task);
-            } else {
-                command.arg("--session-id").arg(&o.task);
+            // `--session-id` and `--resume` are exclusive in `radian exec` (ADR 0022/0023). The
+            // session is the one the claim chose: the task id with `resume`, `<task>-<attempt>`
+            // with `fresh`. A `fresh` attempt is never resumed.
+            match session_start(o.resume, session_exists(&o.session, &o.extra_args)) {
+                SessionStart::Continue => {
+                    command.arg("--resume").arg(&o.session);
+                }
+                SessionStart::New => {
+                    command.arg("--session-id").arg(&o.session);
+                }
             }
             command
                 .arg("--workspace")
@@ -1742,6 +1895,61 @@ mod tests {
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    /// ADR 0048 decision 7: only a `resume`-mode attempt that finds its session continues it.
+    /// A session file alone never resumes (that is the mutation "pass `--resume` with
+    /// `fresh`"), and a fresh attempt never does.
+    #[test]
+    fn a_session_starts_new_and_only_a_resume_attempt_with_a_file_continues() {
+        assert_eq!(session_start(false, false), SessionStart::New);
+        assert_eq!(
+            session_start(false, true),
+            SessionStart::New,
+            "a fresh attempt never resumes, even when a file has that name"
+        );
+        assert_eq!(
+            session_start(true, false),
+            SessionStart::New,
+            "an earlier attempt that never reached the model left nothing to resume"
+        );
+        assert_eq!(session_start(true, true), SessionStart::Continue);
+    }
+
+    /// The brief's sections keep their order, and a missing one takes no blank line.
+    #[test]
+    fn the_brief_keeps_the_conflict_hand_off_and_body_order() {
+        assert_eq!(compose_brief(&[None, None, Some("body")]), "body");
+        assert_eq!(compose_brief(&[Some("a"), None, Some("b")]), "a\n\nb");
+        assert_eq!(
+            compose_brief(&[Some("conflict"), Some("hand-off"), Some("body")]),
+            "conflict\n\nhand-off\n\nbody"
+        );
+        assert_eq!(compose_brief(&[None, None, Some("  ")]), "");
+    }
+
+    /// The cap is 8,000 characters, and a cut report says so. A report at the cap is unchanged.
+    #[test]
+    fn a_long_report_is_cut_at_the_cap_with_a_note() {
+        assert_eq!(HANDOFF_REPORT_CHARS, 8_000);
+        let at_cap = "x".repeat(HANDOFF_REPORT_CHARS);
+        assert_eq!(cap_report(&at_cap), at_cap, "a report at the cap is whole");
+        let over = "x".repeat(HANDOFF_REPORT_CHARS + 1);
+        let cut = cap_report(&over);
+        assert!(cut.starts_with(&at_cap), "the first 8,000 characters stay");
+        assert!(
+            !cut.contains(&"x".repeat(HANDOFF_REPORT_CHARS + 1)),
+            "the rest is cut"
+        );
+        assert!(
+            cut.contains("cut at 8,000 characters"),
+            "the note says so: {cut}"
+        );
+        assert_eq!(
+            cap_report("héllo"),
+            "héllo",
+            "the cap counts characters, not bytes"
+        );
     }
 
     /// Decision 7.2: a later attempt resumes only a session that exists. A first attempt

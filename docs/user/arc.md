@@ -156,10 +156,11 @@ The id names one plan or task. An id that names both a plan and a task is refuse
 |---|---|---|
 | `--json` | — | Print one JSON object instead of fields. |
 
-The object holds the same keys as in `list --json`, plus `body`, `rework_reason`, and the newest review verdict's `review`, `review_verdict`, `review_session_ids` and `review_cost_micros`.
-An unset field is `null`; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a reject note, the automatic rework limit that paused the plan, or an automatic reverify count that is used up).
+The object holds the same keys as in `list --json`, plus `body`, `session_id`, `rework_reason`, and the newest review verdict's `review`, `review_verdict`, `review_session_ids` and `review_cost_micros`.
+An unset field is `null`; `session_id` is the current attempt's worker session id from its `execution.json`, and `null` when that attempt's wrapper wrote no record; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a reject note, the automatic rework limit that paused the plan, or an automatic reverify count that is used up).
 `review` is `{"summary", "blocking", "suggestions", "verified"}` from the newest `review` verdict, or `null`; each item of `blocking` and `suggestions` is an object with `text` and, when it has them, `level`, `file`, `line` and `pre_existing` (see [the review stage](arc-gate.md#the-gate-run)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none).
 For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_blocking`, `review_suggestions`, `review_verified`, `review_session_ids` and `review_cost_micros`.
+The text form prints `session_id` after `attempt_id`.
 An id that names nothing exits `1`.
 
 ## `radian arc adopt <ID>`
@@ -311,6 +312,13 @@ A claim is refused with exit `3` and changes nothing when:
 
 The claim is one transaction: the task's `attempt` goes up by one, `attempt_id` becomes `<task>-<attempt>`, a random `token` is written, and the task moves to `doing.starting`.
 arc then runs the hidden `radian arc work` wrapper as a child, with the brief on its stdin; the wrapper moves the task to `doing.running`.
+
+The worker runs in a session of its own: with [`worker.rework_session`](arc-files.md#configtoml) at `fresh`, which is the default, each attempt gets the session `<task>-<attempt>`.
+With `resume` the task has one session instead, the task id, and every attempt after the first continues it.
+The attempt's session id is in its `execution.json`, and `show` prints it as `session_id`.
+A fresh attempt after the first cannot see the earlier conversation, so its stdin opens with a hand-off section, `## Where the previous attempt left off`: the newest earlier attempt's final report (cut at 8,000 characters, with a note when it is cut; a `reverify` attempt runs no worker and writes none, so the section walks back to the attempt before it and names it), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote main and the branch tip.
+The section says the full history is on the branch and to read the files rather than assume.
+The brief follows it, and a `merge-main` conflict section still comes first.
 
 Before the worker starts, the wrapper runs the profile's `before_attempt` steps in the worktree (see the [`before_attempt` row](arc-files.md#configtoml)); a first attempt's steps do nothing.
 `merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; a conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see [A conflict with main](arc-gate.md#a-conflict-with-main)).

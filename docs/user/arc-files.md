@@ -26,6 +26,7 @@ A key you leave out takes its default.
 | `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. A review rework counts; a conflict rework that arc writes itself does not. |
 | `limits.max_auto_reverify` | integer | `2` | 0 or more; `0` turns the feature off | When a `commands` or integration command failure waits for a moved main: how many automatic reverifies one task gets. A hand `radian arc reverify` neither checks the count nor uses it up. |
 | `worker.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | Before `start`, each `run` pass and `confirm` act, the line the worker would get is parsed with the `radian exec` parser; a rejected line exits `3`. Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
+| `worker.rework_session` | string | `"fresh"` | `fresh`, `resume` | The session each worker attempt runs in. `fresh`: every attempt, a retry or a rework, starts a session of its own, `<task>-<attempt>`, and an attempt after the first gets a hand-off section in front of the brief ([what a rework receives](arc.md#radian-arc-start-task)). `resume`: one session per task, whose id is the task id, created by the first attempt that reaches the model and continued by every later one. A change takes effect at the next attempt. |
 | `ids.plan_prefix` | string | `"PL"` | 1 to 4 ASCII uppercase letters; must differ from `ids.task_prefix` | When a plan id is created. |
 | `ids.task_prefix` | string | `"TK"` | 1 to 4 ASCII uppercase letters; must differ from `ids.plan_prefix` | When a task id is created. |
 | `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
@@ -43,6 +44,10 @@ A key you leave out takes its default.
 `gate.profiles.<name>` above is written out as `gate.profiles.default` in the file `init` writes.
 A stage may be listed once per profile: a profile that lists a stage twice, or that lists `integration`, is refused by name.
 A per-task field of the same name overrides a `[limits]` value for that task; a plan budget adds to the task budgets.
+
+An attempt's worker session id is in `runs/<task>/attempts/<attempt id>/execution.json`.
+With `worker.rework_session = "fresh"` it is `<task>-<attempt>`; with `resume` it is the task id.
+`radian arc show` prints it as `session_id`, and `radian attach <session id>` opens that session's journal.
 
 ## Plan and task files
 
