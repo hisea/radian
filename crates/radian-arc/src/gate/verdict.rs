@@ -11,7 +11,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::ser::SerializeMap as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::config::{Profile, Stage, StageSpec, effective_stages};
@@ -44,6 +47,143 @@ pub struct CommandRecord {
     pub log: String,
 }
 
+/// The levels a review item may carry. One closed list: the review prompt, the parser, the
+/// manual and the drift test that reads it all use this list.
+pub const REVIEW_LEVELS: &[&str] = &["critical", "major", "minor"];
+
+/// One finding of a `review` session (ADR 0048 decision 10).
+///
+/// The object form is `{"level", "file", "line", "text", "pre_existing"}`: `text` is required
+/// and the other fields may be absent. A plain string is the same item with only its `text`,
+/// which is what a verdict written before the object form holds, so it still reads and still
+/// serializes as that string (the verdict set digest is computed from the re-serialized
+/// verdict).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewItem {
+    /// `critical`, `major` or `minor`; absent when the session did not grade the item.
+    pub level: Option<String>,
+    /// The path the finding is about.
+    pub file: Option<String>,
+    /// The line in `file` the finding is about.
+    pub line: Option<u32>,
+    /// What is wrong.
+    pub text: String,
+    /// arc, not the session, set this: a rework round moved the item out of `blocking`
+    /// because the rework did not touch it.
+    pub pre_existing: bool,
+}
+
+impl ReviewItem {
+    /// An item with only its text.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            level: None,
+            file: None,
+            line: None,
+            text: text.into(),
+            pre_existing: false,
+        }
+    }
+
+    /// Reads the object form, or a plain string as an item with only its `text`.
+    ///
+    /// `None` when the value is neither, when `text` is missing, when a present field has the
+    /// wrong type, or when `level` is not in [`REVIEW_LEVELS`].
+    #[must_use]
+    pub fn from_json(value: &Value) -> Option<Self> {
+        if let Some(text) = value.as_str() {
+            return Some(Self::text(text));
+        }
+        let object = value.as_object()?;
+        let text = object.get("text")?.as_str()?.to_owned();
+        let level = match object.get("level") {
+            None | Some(Value::Null) => None,
+            Some(level) => Some(
+                REVIEW_LEVELS
+                    .iter()
+                    .copied()
+                    .find(|known| level.as_str() == Some(*known))?
+                    .to_owned(),
+            ),
+        };
+        let file = match object.get("file") {
+            None | Some(Value::Null) => None,
+            Some(file) => Some(file.as_str()?.to_owned()),
+        };
+        let line = match object.get("line") {
+            None | Some(Value::Null) => None,
+            Some(line) => Some(u32::try_from(line.as_u64()?).ok()?),
+        };
+        let pre_existing = match object.get("pre_existing") {
+            None | Some(Value::Null) => false,
+            Some(flag) => flag.as_bool()?,
+        };
+        Some(Self {
+            level,
+            file,
+            line,
+            text,
+            pre_existing,
+        })
+    }
+}
+
+/// `[level] path:line text`, leaving out the parts the item does not have. A line without a
+/// file names no place, so only a file carries a location.
+impl std::fmt::Display for ReviewItem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(level) = &self.level {
+            write!(formatter, "[{level}] ")?;
+        }
+        if let Some(file) = &self.file {
+            write!(formatter, "{file}")?;
+            if let Some(line) = self.line {
+                write!(formatter, ":{line}")?;
+            }
+            formatter.write_str(" ")?;
+        }
+        formatter.write_str(&self.text)
+    }
+}
+
+impl Serialize for ReviewItem {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // A bare item is the plain string, so an old verdict keeps its bytes and its digest.
+        if self.level.is_none() && self.file.is_none() && self.line.is_none() && !self.pre_existing
+        {
+            return serializer.serialize_str(&self.text);
+        }
+        let mut map = serializer.serialize_map(None)?;
+        if let Some(level) = &self.level {
+            map.serialize_entry("level", level)?;
+        }
+        if let Some(file) = &self.file {
+            map.serialize_entry("file", file)?;
+        }
+        if let Some(line) = &self.line {
+            map.serialize_entry("line", line)?;
+        }
+        map.serialize_entry("text", &self.text)?;
+        if self.pre_existing {
+            map.serialize_entry("pre_existing", &true)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ReviewItem {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        Self::from_json(&value).ok_or_else(|| {
+            D::Error::custom(
+                "a review item is a string, or an object with a `text` and at most a `level` \
+                 of critical, major or minor, a `file`, a `line` and `pre_existing`",
+            )
+        })
+    }
+}
+
 /// The findings a `review` session reported (ADR 0048 decision 10).
 ///
 /// Field order is the serialized order. A review verdict records all four fields, empty
@@ -54,9 +194,9 @@ pub struct ReviewReport {
     /// 2 to 6 sentences on what the change does.
     pub summary: String,
     /// What must change before the change can merge. Empty: the stage passes.
-    pub blocking: Vec<String>,
+    pub blocking: Vec<ReviewItem>,
     /// Improvements that do not block.
-    pub suggestions: Vec<String>,
+    pub suggestions: Vec<ReviewItem>,
     /// What the session checked and found correct.
     pub verified: Vec<String>,
 }
@@ -118,6 +258,11 @@ pub struct Verdict {
     /// A `review` verdict only: the summed cost of the runs, in micros of a US dollar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cost_micros: Option<u64>,
+    /// A `review` verdict of a rework round only: how many blocking items arc moved to
+    /// `suggestions` because the rework did not touch them (ADR 0048 decision 10). Absent on a
+    /// first review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_pre_existing: Option<u32>,
 }
 
 impl Verdict {
@@ -149,6 +294,7 @@ impl Verdict {
             review: None,
             review_session_ids: Vec::new(),
             review_cost_micros: None,
+            review_pre_existing: None,
         }
     }
 

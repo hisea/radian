@@ -41,10 +41,15 @@ copy.
 | M29 | leave the gate in the loop's process group (drop `process_group(0)` from its spawn) | `run::sigint_to_a_gate_stops_its_stage` (`kill(-<pid>, SIGINT)` fails: the gate has no group of its own) | ✅ failed |
 | M30 | drop the no-record guard (the pass's `started` record is left alone and a new gate starts on every pass) | `run::a_gate_that_exits_without_a_record_is_reported_once_and_not_restarted`, `run::a_watch_pass_does_not_restart_a_gate_that_left_no_record`, `run::a_changed_head_starts_a_gate_that_left_no_record_once_more` | ✅ 3 failed |
 | M31 | skip the early finish record (`run_inner` returns the failure without `record_failure`) | `run::a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass`, `run::a_wrapper_whose_worktree_lock_is_held_frees_the_slot_in_the_next_pass`, `work::a_second_wrapper_for_the_same_task_fails_on_the_flock` | ✅ 3 failed |
-| M32 | drop the recorded-pair guard in `review::auto_reverify` | `run::the_same_head_and_main_are_reverified_automatically_once` | ✅ failed |
-| M33 | drop the count (`len >= u32::MAX` instead of `len >= max_auto_reverify`) | `run::max_auto_reverify_stops_the_step_and_says_why` | ✅ failed |
-| M34 | also reverify a review failure (`stage == "review"` passes the fixable check) | `run::only_a_command_failure_of_an_auto_plan_is_reverified` | ✅ failed |
-| M35 | drop the "remote main moved" condition (any failed `commands`/integration stage qualifies) | `run::a_command_failure_is_not_reverified_while_main_stands_still` | ✅ failed |
+| M32 | skip the rework round's `pre_existing` move (record 0 and move nothing) | `review::a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes` | ✅ failed |
+| M33 | treat the whole task's own diff as the increment (drop the intersection with `previous..sha`) | `review::a_rework_prompt_holds_the_increment_and_the_previous_items`, `review::a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes` | ✅ 2 failed |
+| M34 | drop rule (b) of `ReworkRound::keeps` (an earlier unfixed item stops blocking) | `review::a_blocking_item_near_an_unfixed_previous_item_still_blocks` | ✅ failed |
+| M35 | write the review rework when the plan's `auto` is `off` | `review::a_failed_review_with_auto_off_waits_for_the_lead` | ✅ failed |
+| M36 | treat a review of the commit the previous review reviewed as a rework round (drop the `previous.sha != sha` guard) | `review::a_reverify_of_the_same_head_is_a_first_review_and_still_blocks` | ✅ failed |
+| M37 | drop the recorded-pair guard in `review::auto_reverify` | `run::the_same_head_and_main_are_reverified_automatically_once` | ✅ failed |
+| M38 | drop the count (`len >= u32::MAX` instead of `len >= max_auto_reverify`) | `run::max_auto_reverify_stops_the_step_and_says_why` | ✅ failed |
+| M39 | also reverify a review failure (`stage == "review"` passes the fixable check) | `run::only_a_command_failure_of_an_auto_plan_is_reverified` | ✅ failed |
+| M40 | drop the "remote main moved" condition (any failed `commands`/integration stage qualifies) | `run::a_command_failure_is_not_reverified_while_main_stands_still` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -92,6 +97,14 @@ prints another `verify started` line. M31 is the old silence: a wrapper that ref
 arguments or finds the worktree lock held prints nothing and leaves no record, so reconcile
 judges it by its fresh heartbeat and the concurrency slot stays held for the stall window.
 
+M32–M36 were run against the review-increment change (the rework round, `pre_existing` and the
+review rework), from copies under `.radian/mutations/` restored with `cp` and compared with
+`cmp`. M33's main-merge test still passed under the mutation, because that test's own diff is
+already restricted to the task's file; the rework-prompt test is the one that catches it. M36
+is the same-commit hole: with the guard gone a `reverify` of an unchanged head is a rework
+round with an empty increment, so an item reported 29 lines from the previous one is moved
+and the stage passes.
+
 The old stale-main test (`a_rejected_push_never_overwrites_the_remote_main`) cannot survive
 the explicit main refspec: a main moved on the remote is now visible before the push, so the
 push is a fast-forward. Its replacement, `a_main_that_keeps_moving_is_never_overwritten`,
@@ -99,9 +112,9 @@ proves main keeps every commit the other writer pushed, but a `--force` push is 
 distinguishable there (the only non-fast-forward now needs a race between `merge_ready` and
 the push). The code still never forces.
 
-M32–M35 were run against `fd0651da` (M32–M34) and `f00e4c6c` (M35), each from a copy
+M37–M40 were run against `fd0651da` (M37–M39) and `f00e4c6c` (M40), each from a copy
 under `.radian/mut-auto/` restored with `cp` and compared with `cmp`. The ordinary repeat of
 an automatic reverify is already stopped by its own condition (the new failing verdict
-records the main it ran against, so "main moved since the failing verdict" is false); M32
+records the main it ran against, so "main moved since the failing verdict" is false); M37
 therefore drives the state a pass leaves when it dies between recording the `(head, main)`
 pair and claiming the attempt, which is the state the pair guard alone protects.

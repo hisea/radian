@@ -2330,6 +2330,28 @@ mod tests {
         }
     }
 
+    /// The review item's levels are one closed list in the code, and the gate page names every
+    /// one of them and nothing else. A level added to the list fails here until the page lists
+    /// it.
+    #[test]
+    fn every_review_level_appears_in_arc_gate_md() {
+        let doc = arc_gate_md();
+        let listed = radian_arc::gate::REVIEW_LEVELS
+            .iter()
+            .map(|level| format!("`{level}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(
+            doc.contains(&format!("`level` is one of {listed}")),
+            "arc-gate.md does not say `level` is one of {listed}"
+        );
+        // The report's example is the object form the parser reads.
+        assert!(
+            doc.contains("\"blocking\": [{\"level\""),
+            "arc-gate.md's report example is not the object form"
+        );
+    }
+
     /// One option of one arc command.
     struct ArcOptionRow {
         flag: String,

@@ -30,6 +30,10 @@ pub const REWORK_HEADING: &str = "## Rework";
 /// with main (ADR 0048 decision 9).
 pub const CONFLICT_REWORK_SUFFIX: &str = " (conflict with main)";
 
+/// What the heading says after its number when arc wrote the rework because the review stage
+/// failed with blocking items (ADR 0048 decision 9).
+pub const REVIEW_REWORK_SUFFIX: &str = " (review)";
+
 /// `radian arc confirm <plan>`: `draft` to `confirmed`.
 ///
 /// Refused when the plan has no tasks (nothing to deliver) and when it is already
@@ -172,8 +176,8 @@ pub fn add_rework(store: &Store, task: &str, brief: &str) -> Result<(), Error> {
 }
 
 /// [`add_rework`] with a suffix after the heading's number. The lead's tool passes `""`; the
-/// conflict rework arc writes itself passes [`CONFLICT_REWORK_SUFFIX`], so a reader can tell
-/// the two apart (ADR 0048 decision 9).
+/// reworks arc writes itself pass [`CONFLICT_REWORK_SUFFIX`] or [`REVIEW_REWORK_SUFFIX`], so a
+/// reader can tell the two apart (ADR 0048 decision 9).
 pub fn add_rework_with(
     store: &Store,
     task: &str,
@@ -354,6 +358,11 @@ mod tests {
         append_rework(&mut body, 2, "the conflict", CONFLICT_REWORK_SUFFIX);
         assert!(
             body.contains("## Rework 2 (conflict with main)\n\nthe conflict\n"),
+            "{body}"
+        );
+        append_rework(&mut body, 3, "the review", REVIEW_REWORK_SUFFIX);
+        assert!(
+            body.contains("## Rework 3 (review)\n\nthe review\n"),
             "{body}"
         );
     }
