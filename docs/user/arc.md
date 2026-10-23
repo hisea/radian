@@ -138,7 +138,7 @@ The id names one plan or task. An id that names both a plan and a task is refuse
 | `--json` | — | Print one JSON object instead of fields. |
 
 The object holds the same keys as in `list --json`, plus `body`, `rework_reason`, and the newest review verdict's `review`, `review_verdict`, `review_session_ids` and `review_cost_micros`.
-An unset field is `null`; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a reject note, or the automatic rework limit that paused the plan).
+An unset field is `null`; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a reject note, the automatic rework limit that paused the plan, or an automatic reverify count that is used up).
 `review` is `{"summary", "blocking", "suggestions", "verified"}` from the newest `review` verdict, or `null`; each item of `blocking` and `suggestions` is an object with `text` and, when it has them, `level`, `file`, `line` and `pre_existing` (see [the review stage](arc-gate.md#the-gate-run)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none).
 For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_blocking`, `review_suggestions`, `review_verified`, `review_session_ids` and `review_cost_micros`.
 An id that names nothing exits `1`.
@@ -354,6 +354,10 @@ It applies only when the task's `rework_reason`, if there is one, comes from a v
 A reject note, a failed delivery check, a failed integration, and every other state are refused with exit `3`.
 A plan paused by the automatic rework limit does not block `reverify` when the task's own reason is a failed verification stage.
 
+A task whose `commands` or integration stage failed with `command_failed` or `timeout` is also re-verified by `radian arc run` once main moved (see [A command failure and a moved main](arc-gate.md#a-command-failure-and-a-moved-main)).
+That automatic path is the only one that re-runs an integration failure.
+`reverify` ignores the automatic path's two guards: it runs whether or not the `(head_sha, main)` pair was re-verified before, and whether or not `limits.max_auto_reverify` is used up; it does not use up the count.
+
 A reverify claims a new attempt without a worker:
 
 - `attempt` goes up by one, and `attempt_id` and `token` are new;
@@ -469,9 +473,10 @@ One pass repeats until a pass changes nothing, in this order:
 
 1. reconcile every task in `doing` (see [Reconcile](arc-gate.md#reconcile)): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one;
 2. move every `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`;
-3. for every task in `review.verifying` (every plan, including a task that a moved branch or a changed digest sent back): apply the verdicts a background gate left, or start its gate in the background;
-4. for each confirmed plan at `auto` `run` or `merge`, claim every `todo.ready` task whose `after` tasks are merged, up to `[limits] concurrency` attempts in flight, and start each wrapper without waiting for it;
-5. for each plan at `auto` `merge`, approve a verified task and start its integration in the background, or finish an integration a gate left.
+3. re-verify, by itself, a task a `commands` or integration command failure blocked, once main moved (see [A command failure and a moved main](arc-gate.md#a-command-failure-and-a-moved-main)): claim a new attempt without a worker. The two guards of that path apply, and an automatic reverify does not count toward `max_attempts` or `auto_rework`;
+4. for every task in `review.verifying` (every plan, including a task that a moved branch or a changed digest sent back, and one step 3 just claimed): apply the verdicts a background gate left, or start its gate in the background;
+5. for each confirmed plan at `auto` `run` or `merge`, claim every `todo.ready` task whose `after` tasks are merged, up to `[limits] concurrency` attempts in flight, and start each wrapper without waiting for it;
+6. for each plan at `auto` `merge`, approve a verified task and start its integration in the background, or finish an integration a gate left.
    `run` writes the same `human` pass verdict `radian arc merge` writes, with `approver` `auto` in it.
 
 The long work runs outside the pass: a worker is a separate `radian arc work` process with its own limits and record, and a gate is a separate process with its own record.
@@ -483,7 +488,9 @@ A one-shot `run` starts its work and exits without waiting for it; the next `run
 Use `--watch` (or the arc interface, when it exists) to keep advancing.
 
 `run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end.
-A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, a conflict rework prints `<task> conflict with main -> todo.ready (automatic rework)`, and the follow-up task arc proposes when a task merges prints `<new task id> proposed (follow-ups from <task id>)` (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)).
+A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, a conflict rework prints `<task> conflict with main -> todo.ready (automatic rework)`, an automatic reverify prints `<task> main moved (<short sha>) -> auto reverify`, or when the task used its count, `<task> main moved (<short sha>) -> auto reverify limit reached: <reason>`, and the follow-up task arc proposes when a task merges prints `<new task id> proposed (follow-ups from <task id>)` (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)).
+The limit's `<reason>` is the text `show` prints as the `rework_reason`: `the task used <n> automatic reverifies and `[limits] max_auto_reverify` is <max>`.
+One line per `(head_sha, remote main)` pair is printed, so a summary that repeats every interval does not print it again.
 When a pass changes nothing, a summary of what waits on whom ends the pass:
 
 ```text

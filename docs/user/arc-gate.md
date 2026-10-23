@@ -134,6 +134,27 @@ Every other reason, and a conflict without `merge-main`, keeps `review.rework_pe
 It never raises `auto_rework` and never pauses the plan, and it counts as an attempt: a task that keeps conflicting reaches `failed.exhausted` when its last counted attempt conflicts.
 `auto` decides whether the next attempt starts by itself.
 
+### A command failure and a moved main
+
+A `commands` stage, or an integration key command, can fail because of the tree rather than the task: a flaky test, or a main that is broken itself.
+When the remote main is no longer the main the failing verdict recorded, `radian arc run` re-verifies the task by itself, the way `radian arc reverify` does: it claims a new attempt without a worker and starts its gate in the background ([`run`](arc.md#radian-arc-run)).
+
+It applies only when all of these hold:
+
+- the task's plan has `auto` other than `off`;
+- the task is `review.rework_pending` because a `commands` or integration stage failed with reason `command_failed` or `timeout`;
+- the remote main is not the `main_sha` the failing verdict recorded; an integration verdict records that main as `base_sha`.
+
+A review stage failure, a conflict, a reject note, a failed delivery check, and a task the lead returned to `todo.ready` are never re-verified by themselves.
+
+Two guards stop a loop:
+
+- each `(head_sha, remote main)` pair is re-verified by itself at most once, and the pairs are kept in `runs/<task>/auto_reverify.json`. A main that does not move runs nothing again.
+- [`limits.max_auto_reverify`](arc-files.md#configtoml) counts the automatic reverifies of one task. When the count is used up, the task stays in `review.rework_pending`, `radian arc run` prints one line with the reason, and `show` prints the same text as the `rework_reason`. The plan is not paused.
+
+An automatic reverify starts no worker, does not count toward `max_attempts`, and does not count toward `auto_rework`.
+A hand `radian arc reverify` ignores both guards and does not use up the count.
+
 ## A gate for this repository
 
 Two bash scripts in this repository are the gate. A gate profile's `commands` call them:

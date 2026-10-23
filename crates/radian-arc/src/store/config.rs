@@ -101,6 +101,9 @@ pub struct Limits {
     pub cancel_grace_secs: u64,
     /// How many automatic reworks one task may get before the plan pauses.
     pub max_auto_rework: u32,
+    /// How many times a task a command failure blocked may be re-verified by itself once the
+    /// remote main moved (ADR 0048 decision 9). `0` turns the step off.
+    pub max_auto_reverify: u32,
 }
 
 impl Default for Limits {
@@ -113,6 +116,7 @@ impl Default for Limits {
             max_cost_usd: None,
             cancel_grace_secs: 10,
             max_auto_rework: 2,
+            max_auto_reverify: 2,
         }
     }
 }
@@ -194,6 +198,7 @@ max_wall_time_secs = 7200
 # max_cost_usd = 5.0          # not set = no limit
 cancel_grace_secs = 10
 max_auto_rework = 2
+max_auto_reverify = 2         # 0 turns the automatic reverify off
 
 [worker]
 exec_args = []                 # extra `radian exec` arguments for the worker

@@ -56,6 +56,25 @@ fn commands(repo: &Repo, line: &str) {
     .expect("write config.toml");
 }
 
+/// The config's integration stage: one key command.
+fn key_commands(repo: &Repo, line: &str) {
+    let path = repo.arc().join("config.toml");
+    let text = fs::read_to_string(&path).expect("config.toml");
+    assert!(
+        text.contains("\nkey_commands = []"),
+        "the key is in the file"
+    );
+    fs::write(
+        &path,
+        text.replacen(
+            "\nkey_commands = []",
+            &format!("\nkey_commands = [\"{line}\"]"),
+            1,
+        ),
+    )
+    .expect("write config.toml");
+}
+
 /// The worker's model route: the mock server, plus any extra `radian exec` arguments.
 fn worker_args_with(repo: &Repo, base_url: &str, extra: &[&str]) {
     let path = repo.arc().join("config.toml");
@@ -2052,4 +2071,496 @@ fn run_with_deadline(repo: &Repo, args: &[&str], limit: Duration) -> std::proces
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+// ---- automatic reverify ---------------------------------------------------------------
+
+/// Puts `task` in `review.rework_pending` with the records a gate leaves when `stage` fails
+/// with `reason`: `review.json` in the attempt's run directory, and the verdict file it
+/// names. Returns the task's `head_sha`.
+fn record_failure(
+    repo: &Repo,
+    store: &Store,
+    plan: &str,
+    task: &str,
+    stage: Stage,
+    reason: &str,
+) -> String {
+    let head = publish_verifying(repo, store, plan, task);
+    let main = repo.main_sha();
+    let verdicts = repo.run_dir(task, 1).join("verdicts");
+    fs::create_dir_all(&verdicts).expect("the verdict directory");
+    let mut verdict = Verdict::human(head.clone(), false, Some(reason.to_owned()));
+    verdict.stage = stage;
+    if stage == Stage::Integration {
+        verdict.base_sha = Some(main);
+    } else {
+        verdict.main_sha = Some(main);
+    }
+    let path = verdicts.join(format!("{}.json", stage.as_str()));
+    verdict.write_new(&path).expect("the verdict");
+    let reason_file = serde_json::json!({
+        "action": if stage == Stage::Integration { "merge" } else { "verify" },
+        "stage": stage.as_str(),
+        "reason": reason,
+        "verdict": path.to_string_lossy(),
+        "text": format!("{stage}: {reason}"),
+        "at": "2026-01-01T00:00:00Z",
+    });
+    fs::write(
+        repo.run_dir(task, 1).join("review.json"),
+        reason_file.to_string(),
+    )
+    .expect("review.json");
+    store
+        .change_task(task, |task| {
+            task.phase = "rework_pending".to_owned();
+            Ok(())
+        })
+        .expect("rework_pending");
+    head
+}
+
+/// Commits one file on `main` in the clone, pushes it to the remote, and returns the commit
+/// id.
+fn advance_main(repo: &Repo, file: &str, content: &str) -> String {
+    repo.git(&["checkout", "main"]);
+    write(&repo.clone.join(file), content);
+    repo.git(&["add", file]);
+    repo.git(&["commit", "-m", file]);
+    let sha = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    repo.git(&["push", &repo.remote, &repo.main_branch]);
+    sha
+}
+
+/// The `attempt` field of a task.
+fn attempt(store: &Store, task: &str) -> u32 {
+    store.load_task(task).expect("the task reads").item.attempt
+}
+
+/// A `commands` failure that main fixes is re-verified by the next pass, for the same commit,
+/// and the task passes. Mutation: drop the step and the task waits in `review.rework_pending`.
+#[test]
+fn a_command_failure_is_reverified_automatically_once_main_moves() {
+    let repo = Repo::new("run-auto-reverify");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-reverify");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    // The tree is broken while the marker exists: the failure is main's, not the change's.
+    let marker = repo.root.join("broken-main");
+    fs::write(&marker, "broken\n").expect("the marker");
+    commands(&repo, &format!("test ! -f '{}'", marker.display()));
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    let first = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "rework_pending"
+    });
+    assert!(
+        first.contains(&format!("{task}-1 verify -> review.rework_pending")),
+        "{first}"
+    );
+    let head = store
+        .load_task(&task)
+        .expect("the task reads")
+        .item
+        .head_sha
+        .expect("a head");
+    assert_eq!(attempt(&store, &task), 1, "{first}");
+
+    fs::remove_file(&marker).expect("the marker is removed");
+    advance_main(&repo, "main-fix.txt", "fixed\n");
+    let moved = repo.remote_main_sha();
+    let short = &moved[..7];
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "awaiting_human"
+    });
+    assert!(
+        run.contains(&format!("{task} main moved ({short}) -> auto reverify")),
+        "{run}"
+    );
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "awaiting_human"),
+        "{run}"
+    );
+    assert_eq!(
+        stored.verified_sha.as_deref(),
+        Some(head.as_str()),
+        "the same commit was re-verified: {run}"
+    );
+    assert_eq!(stored.attempt, 2, "one worker-less attempt: {run}");
+    assert_eq!(
+        stored.auto_rework, 1,
+        "the automatic reverify is not an automatic rework: {run}"
+    );
+    let result: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&task, 2).join("attempt_result.json"))
+            .expect("attempt_result.json"),
+    )
+    .expect("attempt_result.json parses");
+    assert_eq!(result["class"], "reverify", "{result}");
+    assert!(
+        !repo.attempt_dir(&task, 2).join("identity.json").exists(),
+        "the automatic reverify started a worker"
+    );
+}
+
+/// While main stands still, the failure is not re-verified: nothing runs again.
+#[test]
+fn a_command_failure_is_not_reverified_while_main_stands_still() {
+    let repo = Repo::new("run-auto-reverify-still");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-still");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    commands(&repo, "false");
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "rework_pending"
+    });
+    for pass in 1..=2 {
+        let run = repo.radian(&["arc", "run"]);
+        assert_eq!(run.code, 0, "pass {pass}: {}", run.stderr);
+        assert!(
+            !run.stdout.contains("auto reverify"),
+            "pass {pass} re-verified a failure main did not move for: {}",
+            run.stdout
+        );
+    }
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "rework_pending".to_owned())
+    );
+    assert_eq!(attempt(&store, &task), 1);
+    assert!(!repo.run_dir(&task, 2).exists());
+}
+
+/// A recorded `(head, main)` pair is re-verified automatically at most once. The state below
+/// is the one a pass leaves when it dies between recording its inputs and claiming the
+/// attempt: the failing reason still names the older main, so only the record stops the pair
+/// from running again. Mutation: drop the pair guard and the next pass claims an attempt.
+///
+/// The "main did not move" half of the guard is the same test: the reason's main equals the
+/// remote main after a crash, so nothing runs either way.
+#[test]
+fn the_same_head_and_main_are_reverified_automatically_once() {
+    let repo = Repo::new("run-auto-reverify-pair");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-pair");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    commands(&repo, "false");
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "rework_pending"
+    });
+    let head = store
+        .load_task(&task)
+        .expect("the task reads")
+        .item
+        .head_sha
+        .expect("a head");
+    advance_main(&repo, "main-move.txt", "moved\n");
+    let moved = repo.remote_main_sha();
+
+    // The pass records the inputs it starts the automatic reverify with before it claims the
+    // attempt (ADR 0048 decision 9). The record is the guard: the same pair never runs twice.
+    let record = serde_json::json!({
+        "reverified": [{
+            "head_sha": head,
+            "main_sha": moved,
+            "at": "2026-01-01T00:00:00Z",
+        }],
+    });
+    let path = repo
+        .arc()
+        .join("runs")
+        .join(&task)
+        .join("auto_reverify.json");
+    fs::create_dir_all(path.parent().expect("the runs directory")).expect("the runs directory");
+    fs::write(&path, format!("{record}\n")).expect("auto_reverify.json");
+
+    for pass in 1..=2 {
+        let run = repo.radian(&["arc", "run"]);
+        assert_eq!(run.code, 0, "pass {pass}: {}", run.stderr);
+        assert!(
+            !run.stdout.contains("auto reverify"),
+            "pass {pass} re-ran the same pair: {}",
+            run.stdout
+        );
+    }
+    assert_eq!(attempt(&store, &task), 1);
+    assert!(!repo.run_dir(&task, 2).exists());
+    let stored: Value = serde_json::from_str(&fs::read_to_string(&path).expect("the record"))
+        .expect("auto_reverify.json parses");
+    assert_eq!(
+        stored["reverified"].as_array().map(Vec::len),
+        Some(1),
+        "the record changed: {stored}"
+    );
+}
+
+/// `max_auto_reverify` stops the step: the task stays in `review.rework_pending`, `run`
+/// prints the reason, and `show` prints the same text as the `rework_reason`. Mutation: drop
+/// the count and the third main move claims another attempt.
+#[test]
+fn max_auto_reverify_stops_the_step_and_says_why() {
+    let repo = Repo::new("run-auto-reverify-limit");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-limit");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(&repo, "max_auto_reverify = 2", "max_auto_reverify = 1");
+    tune(&repo, "max_auto_rework = 2", "max_auto_rework = 10");
+    commands(&repo, "false");
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "rework_pending"
+    });
+    advance_main(&repo, "main-one.txt", "one\n");
+    let first = run_until(&repo, Duration::from_secs(90), || {
+        attempt(&store, &task) == 2 && state(&store, &task).1 == "rework_pending"
+    });
+    assert!(first.contains("auto reverify"), "{first}");
+
+    advance_main(&repo, "main-two.txt", "two\n");
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert!(
+        run.stdout.contains("auto reverify limit reached"),
+        "run did not report the count: {}",
+        run.stdout
+    );
+    let text = "the task used 1 automatic reverifies and `[limits] max_auto_reverify` is 1";
+    assert!(run.stdout.contains(text), "{}", run.stdout);
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "rework_pending".to_owned()),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(attempt(&store, &task), 2, "{}", run.stdout);
+    assert!(!repo.run_dir(&task, 3).exists());
+    assert_eq!(plan_auto(&store, &plan), "run", "the plan was paused");
+
+    let shown = repo.radian(&["arc", "show", &task]);
+    assert_eq!(shown.code, 0, "show: {}", shown.stderr);
+    assert!(shown.stdout.contains("rework_reason"), "{}", shown.stdout);
+    assert!(
+        shown.stdout.contains(text),
+        "show does not print the same text: {}",
+        shown.stdout
+    );
+    // A second pass for the same pair reports nothing more.
+    let again = repo.radian(&["arc", "run"]);
+    assert_eq!(again.code, 0, "run: {}", again.stderr);
+    assert!(
+        !again.stdout.contains("auto reverify"),
+        "the count was reported twice: {}",
+        again.stdout
+    );
+}
+
+/// The owner's `reverify` ignores both guards: it runs after the count is used up and does
+/// not use up the count itself.
+#[test]
+fn a_hand_reverify_still_runs_after_the_count_is_used_up() {
+    let repo = Repo::new("run-auto-reverify-hand");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-hand");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(&repo, "max_auto_reverify = 2", "max_auto_reverify = 1");
+    tune(&repo, "max_auto_rework = 2", "max_auto_rework = 10");
+    let marker = repo.root.join("broken-main");
+    fs::write(&marker, "broken\n").expect("the marker");
+    commands(&repo, &format!("test ! -f '{}'", marker.display()));
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "rework_pending"
+    });
+    advance_main(&repo, "main-one.txt", "one\n");
+    run_until(&repo, Duration::from_secs(90), || {
+        attempt(&store, &task) == 2 && state(&store, &task).1 == "rework_pending"
+    });
+    advance_main(&repo, "main-two.txt", "two\n");
+    let limited = repo.radian(&["arc", "run"]);
+    assert_eq!(limited.code, 0, "run: {}", limited.stderr);
+    assert!(
+        limited.stdout.contains("auto reverify limit reached"),
+        "{}",
+        limited.stdout
+    );
+
+    // The tree is fixed: the owner's reverify re-runs the gate for the same commit.
+    fs::remove_file(&marker).expect("the marker is removed");
+    let reverified = repo.radian(&["arc", "reverify", &task]);
+    assert_eq!(reverified.code, 0, "reverify: {}", reverified.stderr);
+    assert!(
+        reverified
+            .stdout
+            .contains(&format!("{task}-3 reverify -> review.verifying")),
+        "{}",
+        reverified.stdout
+    );
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "awaiting_human".to_owned()),
+        "{}",
+        reverified.stdout
+    );
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(
+            repo.arc()
+                .join("runs")
+                .join(&task)
+                .join("auto_reverify.json"),
+        )
+        .expect("auto_reverify.json"),
+    )
+    .expect("auto_reverify.json parses");
+    assert_eq!(
+        record["reverified"].as_array().map(Vec::len),
+        Some(1),
+        "the hand reverify used up the count: {record}"
+    );
+}
+
+/// A review stage failure, a conflict, a delivery failure, and a task of a plan at `auto`
+/// `off` are never re-verified by themselves. Mutation: also reverify a review failure and
+/// the first task gains an attempt.
+#[test]
+fn only_a_command_failure_of_an_auto_plan_is_reverified() {
+    let repo = Repo::new("run-auto-reverify-not");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-not");
+    let reviewed = add_task(&store, &plan, "reviewed", &[]);
+    let conflicted = add_task(&store, &plan, "conflicted", &[]);
+    let undelivered = add_task(&store, &plan, "undelivered", &[]);
+    let off_plan = add_plan(&store, "auto-off");
+    let off = add_task(&store, &off_plan, "off", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::confirm(&store, &off_plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+
+    record_failure(
+        &repo,
+        &store,
+        &plan,
+        &reviewed,
+        Stage::Review,
+        "review_blocking: it is wrong",
+    );
+    record_failure(
+        &repo,
+        &store,
+        &plan,
+        &conflicted,
+        Stage::Commands,
+        "conflict: feature.txt",
+    );
+    // A delivery failure records no reason at all: arc writes no brief for it.
+    publish_verifying(&repo, &store, &plan, &undelivered);
+    let result = serde_json::json!({
+        "attempt_id": format!("{undelivered}-1"),
+        "outcome": "completed",
+        "class": "verification",
+        "reason": "the tree is dirty",
+        "state": "review",
+        "phase": "rework_pending",
+    });
+    let dir = repo.run_dir(&undelivered, 1);
+    fs::create_dir_all(&dir).expect("the run directory");
+    fs::write(dir.join("attempt_result.json"), result.to_string()).expect("attempt_result.json");
+    store
+        .change_task(&undelivered, |task| {
+            task.phase = "rework_pending".to_owned();
+            Ok(())
+        })
+        .expect("rework_pending");
+    record_failure(
+        &repo,
+        &store,
+        &off_plan,
+        &off,
+        Stage::Commands,
+        "command_failed",
+    );
+
+    advance_main(&repo, "main-move.txt", "moved\n");
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert!(
+        !run.stdout.contains("auto reverify"),
+        "a task that is not a command failure was re-verified: {}",
+        run.stdout
+    );
+    for task in [&reviewed, &conflicted, &undelivered, &off] {
+        assert_eq!(
+            state(&store, task),
+            ("review".to_owned(), "rework_pending".to_owned()),
+            "{task}: {}",
+            run.stdout
+        );
+        assert_eq!(attempt(&store, task), 1, "{task}: {}", run.stdout);
+    }
+}
+
+/// A failed integration key command is re-verified automatically too, once main moves.
+#[test]
+fn a_failed_integration_is_reverified_automatically_once_main_moves() {
+    let repo = Repo::new("run-auto-reverify-integration");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-integration");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    commands(&repo, "true");
+    let marker = repo.root.join("broken-main");
+    fs::write(&marker, "broken\n").expect("the marker");
+    key_commands(&repo, &format!("test ! -f '{}'", marker.display()));
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "awaiting_human"
+    });
+    let merged = repo.radian(&["arc", "merge", &task]);
+    assert_eq!(merged.code, 0, "merge: {}", merged.stderr);
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "rework_pending".to_owned()),
+        "{}",
+        merged.stdout
+    );
+    let reason: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&task, 1).join("review.json")).expect("review.json"),
+    )
+    .expect("review.json parses");
+    assert_eq!(reason["stage"], "integration", "{reason}");
+    assert_eq!(reason["reason"], "command_failed", "{reason}");
+
+    fs::remove_file(&marker).expect("the marker is removed");
+    advance_main(&repo, "main-fix.txt", "fixed\n");
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        attempt(&store, &task) == 2 && state(&store, &task).1 == "awaiting_human"
+    });
+    assert!(run.contains("auto reverify"), "{run}");
+    assert_eq!(attempt(&store, &task), 2, "{run}");
 }
