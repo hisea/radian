@@ -673,3 +673,24 @@ RF-2 **survived its first run**: the test's jobs parent did not exist, so `Priva
 failed, no file was ever created, and the assertion passed vacuously. The test now creates the
 session directory tree first, and the mutation then fails on the leftover file. The record keeps
 this because it is the honest picture: an error-cleanup test must prove the file existed first.
+
+## `write` creates a missing parent; `shell` clamp notes move (2026-10-23, branch `work/TK0023-write-parents-shell-clamp`)
+
+Base: the branch's ADR-only commit. Mutations were applied in place, each source file backed up
+under `.radian/mut/<letter>/` and restored from that copy, confirmed byte-identical with `cmp`;
+run with `cargo nextest run -p radian-coding --locked --profile sandbox --no-fail-fast -E '<tests>'`.
+New tests first ran against the unmodified source: `write_creates_missing_parent_directories_and_patch_does_not`
+failed with `not_found`, `the_write_spec_says_parents_are_created` failed on the old "parent
+directory must exist" text, and both clamp tests failed on the old text/position. The link-parent
+test and `a_timed_out_result_keeps_its_marker_before_exit_code` pass on the old source too: they
+are guards for the change (a mutation below proves each is live), not evidence of the feature.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| WP-1 | create the missing parents by path: `std::fs::create_dir_all(root.join(parents))` before the fd walk (the per-level variant is **not** a catching mutation: the walk refuses the link level first, so its `mkdirat` replacement never runs) | ✅ caught (`write_creates_no_level_under_a_symlinked_parent`: `create_dir_all` followed the link and created `outside/a`, so the outside directory held two entries) | `write_creates_no_level_under_a_symlinked_parent` |
+| WP-2 | do not refuse a link level: drop `O_NOFOLLOW` from the directory-level `openat` flags in `safe_fs::walk_dirs` | ✅ caught by both (`write_creates_no_level_under_a_symlinked_parent` wrote through the link; `every_file_tool_refuses_a_parent_symlink_to_outside_and_touches_nothing_there` returned `Ok` instead of the boundary refusal) | `write_creates_no_level_under_a_symlinked_parent`, `every_file_tool_refuses_a_parent_symlink_to_outside_and_touches_nothing_there` |
+| SC-1 | leave the timeout clamp note after the stderr section (emit it after `[output was not fully drained …]` instead of before `exit code:`) | ✅ caught (`a_clamped_timeout_is_a_marker_before_exit_code_with_both_numbers`: the marker was found only after `--- stderr ---`) | `a_clamped_timeout_is_a_marker_before_exit_code_with_both_numbers` |
+
+The `write` swap test (`write_and_patch_cannot_reach_outside_when_the_parent_is_swapped_after_the_check`)
+stays green under the real code: the missing-level creation never runs before the walk refuses the
+swapped link level.
