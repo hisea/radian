@@ -129,7 +129,8 @@ impl Reason {
 }
 
 /// A conflict with main whose rework arc wrote itself (ADR 0048 decision 9). The task went to
-/// `todo.ready`, or to `failed.exhausted` when the attempt that conflicted was its last one.
+/// `todo.ready`, or stayed in `review.rework_pending` when the run of conflicts reached
+/// `[limits] max_conflict_rework`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
     /// The remote main commit the change conflicted with.
@@ -138,16 +139,16 @@ pub struct Conflict {
     pub stage: Stage,
     /// The conflicted paths, as the verdict lists them.
     pub paths: Vec<String>,
-    /// The task went to `failed.exhausted` instead of `todo.ready`.
-    pub exhausted: bool,
+    /// The stop at `[limits] max_conflict_rework`: no brief was written, the task stays in
+    /// `review.rework_pending`, and this is why `run` and `show` say so.
+    pub stop: Option<String>,
 }
 
 /// The one line a conflict-with-main transition prints.
-fn conflict_line(task: &str, exhausted: bool) -> String {
-    if exhausted {
-        format!("{task} conflict with main -> failed.exhausted")
-    } else {
-        format!("{task} conflict with main -> todo.ready (automatic rework)")
+fn conflict_line(task: &str, conflict: &Conflict) -> String {
+    match &conflict.stop {
+        Some(text) => format!("{task} conflict with main -> review.rework_pending: {text}"),
+        None => format!("{task} conflict with main -> todo.ready (automatic rework)"),
     }
 }
 
@@ -197,7 +198,7 @@ impl Verified {
     /// The one line `radian arc start` prints for the verification.
     pub fn line(&self) -> String {
         if let Some(conflict) = &self.conflict {
-            return conflict_line(&self.task, conflict.exhausted);
+            return conflict_line(&self.task, conflict);
         }
         // A paused plan did not move the task to `todo.ready`, so it prints the failure line
         // and the pause line follows it.
@@ -282,7 +283,7 @@ impl Merged {
     /// The line `radian arc merge` prints.
     pub fn line(&self) -> String {
         if let Some(conflict) = &self.conflict {
-            return conflict_line(&self.task, conflict.exhausted);
+            return conflict_line(&self.task, conflict);
         }
         let mut line = format!("{} {}.{}", self.task, self.state, self.phase);
         if let Some(candidate) = &self.candidate_sha {
@@ -687,6 +688,8 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
         task.retry_at = None;
         Ok(())
     })?;
+    // Every required stage passed: this verification did not end in a conflict.
+    reset_conflict_rework(store, &task.id)?;
     // A pass leaves no rework reason behind for `show` to print.
     clear_reason(store, &task.id, &plan.label);
     Ok(Verified {
@@ -1024,21 +1027,26 @@ fn failed_stage(
     verdict: &Verdict,
     path: PathBuf,
 ) -> Result<Verified, Error> {
-    let reason = Reason::with_verdict("verify", verdict.stage, failure_text(verdict), path.clone());
-    reason.record(store, &task.id, label);
     // A conflict with main starts the next attempt mid-merge, so arc writes its brief itself
     // when the profile runs `merge-main` before an attempt (ADR 0048 decision 9).
-    if let Some(conflict) = conflict_auto_rework(store, task, verdict)? {
+    let conflict = conflict_auto_rework(store, task, verdict)?;
+    let mut text = failure_text(verdict);
+    if let Some(stop) = conflict
+        .as_ref()
+        .and_then(|conflict| conflict.stop.as_ref())
+    {
+        // The stop is part of the recorded reason, so `show` prints why the task waits.
+        text = format!("{text}; {stop}");
+    }
+    let reason = Reason::with_verdict("verify", verdict.stage, text, path.clone());
+    reason.record(store, &task.id, label);
+    if let Some(conflict) = conflict {
+        let stopped = conflict.stop.is_some();
         return Ok(Verified {
             task: task.id.clone(),
             attempt_id: label.to_owned(),
-            state: if conflict.exhausted { "failed" } else { "todo" },
-            phase: if conflict.exhausted {
-                "exhausted"
-            } else {
-                "ready"
-            }
-            .to_owned(),
+            state: if stopped { "review" } else { "todo" },
+            phase: if stopped { "rework_pending" } else { "ready" }.to_owned(),
             reason: Some(reason),
             digest: None,
             reused: Vec::new(),
@@ -1047,6 +1055,8 @@ fn failed_stage(
             paused: None,
         });
     }
+    // This verification did not end in a conflict, so the task's run of conflicts is over.
+    reset_conflict_rework(store, &task.id)?;
     // A failed review writes its own rework when the plan is not at `auto` `off` (ADR 0048
     // decision 9). The pause is the same limit the other automatic reworks use.
     if let Some((review, paused)) = review_auto_rework(store, task, verdict, &path)? {
@@ -1104,8 +1114,13 @@ fn failed_stage(
 /// to `todo.ready` with the next attempt's brief instead of waiting for the lead.
 ///
 /// `None` when the verdict is not a conflict or the profile does not run `merge-main`; the
-/// caller then keeps the path to `review.rework_pending`. A task on its last counted attempt
-/// goes to `failed.exhausted` instead, and no brief is written.
+/// caller then keeps the path to `review.rework_pending`.
+///
+/// `[limits] max_conflict_rework` bounds the conflict reworks arc writes in a row: while the
+/// count is below the limit, arc writes the brief and raises the count; when it has reached
+/// the limit, no brief is written and the task stays in `review.rework_pending` with the
+/// reason in [`Conflict::stop`]. `0` writes none. The lead's own rework and an attempt that
+/// does not conflict set the count back to `0` ([`reset_conflict_rework`]).
 fn conflict_auto_rework(
     store: &Store,
     task: &model::TaskFile,
@@ -1130,26 +1145,34 @@ fn conflict_auto_rework(
         .or_else(|| verdict.base_sha.as_deref().filter(|sha| !sha.is_empty()))
         .unwrap_or_default()
         .to_owned();
-    let max = task.max_attempts.unwrap_or(config.limits.max_attempts);
-    let exhausted =
-        crate::store::attempt_ops::counted_attempt(store, &task.id, task.attempt) >= max;
+    let limit = config.limits.max_conflict_rework;
+    let mut record = read_conflict_rework(store, &task.id);
     let conflict = Conflict {
         main_sha,
         stage: verdict.stage,
         paths: verdict.conflict_paths.clone(),
-        exhausted,
+        stop: None,
     };
-    if exhausted {
+    if record.reworks >= limit {
+        let conflict = Conflict {
+            stop: Some(format!(
+                "the task wrote {} conflict reworks in a row and `[limits] \
+                 max_conflict_rework` is {limit}; it waits for a rework from the lead",
+                record.reworks
+            )),
+            ..conflict
+        };
         store.change_task(&task.id, |task| {
             if task.state == model::TaskState::Review {
-                task.state = model::TaskState::Failed;
-                task.phase = "exhausted".to_owned();
+                task.phase = "rework_pending".to_owned();
                 task.retry_at = None;
             }
             Ok(())
         })?;
         return Ok(Some(conflict));
     }
+    record.reworks = record.reworks.saturating_add(1);
+    write_conflict_rework(store, &task.id, &record)?;
     let brief = conflict_rework_brief(&conflict);
     crate::store::plan_ops::add_rework_with(
         store,
@@ -1158,6 +1181,66 @@ fn conflict_auto_rework(
         crate::store::plan_ops::CONFLICT_REWORK_SUFFIX,
     )?;
     Ok(Some(conflict))
+}
+
+/// `runs/<task>/conflict_rework.json` (ADR 0048 decision 9): how many conflict reworks arc
+/// has written for the task in a row. It is not part of the task file: it is bookkeeping for
+/// one limit, like [`AUTO_REVERIFY_FILE`].
+pub const CONFLICT_REWORK_FILE: &str = "conflict_rework.json";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct ConflictReworkRecord {
+    /// How many conflict reworks arc has written for the task in a row. The lead's rework and
+    /// an attempt that does not conflict set it back to 0.
+    reworks: u32,
+}
+
+fn conflict_rework_path(store: &Store, task: &str) -> PathBuf {
+    store
+        .root()
+        .join("runs")
+        .join(task)
+        .join(CONFLICT_REWORK_FILE)
+}
+
+fn read_conflict_rework(store: &Store, task: &str) -> ConflictReworkRecord {
+    fs::read_to_string(conflict_rework_path(store, task))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_conflict_rework(
+    store: &Store,
+    task: &str,
+    record: &ConflictReworkRecord,
+) -> Result<(), Error> {
+    let path = conflict_rework_path(store, task);
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Failed(format!("{} has no directory", path.display())))?;
+    fs::create_dir_all(dir)
+        .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
+    let text = serde_json::to_string_pretty(record)
+        .map_err(|error| Error::Failed(format!("cannot encode {}: {error}", path.display())))?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, format!("{text}\n"))
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", temporary.display())))?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
+}
+
+/// A conflict rework arc wrote in a row is over: the lead's own rework, a verification that
+/// did not end in a conflict, and an attempt that never reached the gate all set the count back
+/// to 0 (ADR 0048 decision 9). Only a run of conflict reworks can reach
+/// `[limits] max_conflict_rework`; [`crate::store::attempt_ops::apply`] calls this for an
+/// attempt that ends without reaching the gate.
+pub(crate) fn reset_conflict_rework(store: &Store, task: &str) -> Result<(), Error> {
+    if read_conflict_rework(store, task).reworks == 0 {
+        return Ok(());
+    }
+    write_conflict_rework(store, task, &ConflictReworkRecord::default())
 }
 
 /// The fixed, short brief of a conflict rework (ADR 0048 decision 9): the main it conflicted
@@ -1768,25 +1851,29 @@ fn integration_failed(
     verdict: &Verdict,
     round: u32,
 ) -> Result<Merged, Error> {
+    // The same conflict path as a failed verification stage (ADR 0048 decision 9).
+    let task = store.load_task(&context.task_id)?.item;
+    let conflict = conflict_auto_rework(store, &task, verdict)?;
+    let mut text = failure_text(verdict);
+    if let Some(stop) = conflict
+        .as_ref()
+        .and_then(|conflict| conflict.stop.as_ref())
+    {
+        text = format!("{text}; {stop}");
+    }
     let reason = Reason::with_verdict(
         "merge",
         verdict.stage,
-        failure_text(verdict),
+        text,
         integration_verdict(store, &context.task_id, integration_label)?,
     );
     reason.record(store, &context.task_id, &context.label);
-    // The same conflict path as a failed verification stage (ADR 0048 decision 9).
-    let task = store.load_task(&context.task_id)?.item;
-    if let Some(conflict) = conflict_auto_rework(store, &task, verdict)? {
+    if let Some(conflict) = conflict {
+        let stopped = conflict.stop.is_some();
         return Ok(Merged {
             task: context.task_id.clone(),
-            state: if conflict.exhausted { "failed" } else { "todo" },
-            phase: if conflict.exhausted {
-                "exhausted"
-            } else {
-                "ready"
-            }
-            .to_owned(),
+            state: if stopped { "review" } else { "todo" },
+            phase: if stopped { "rework_pending" } else { "ready" }.to_owned(),
             reason: Some(reason.text()),
             candidate_sha: None,
             rounds: round,
@@ -1795,6 +1882,8 @@ fn integration_failed(
             followup: None,
         });
     }
+    // This integration did not end in a conflict, so the task's run of conflicts is over.
+    reset_conflict_rework(store, &context.task_id)?;
     to_rework(store, &context.task_id)?;
     Ok(Merged {
         task: context.task_id.clone(),

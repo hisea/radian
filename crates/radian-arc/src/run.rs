@@ -421,10 +421,13 @@ fn advance_verification(
                         let mut changed = true;
                         // A review rework already counted itself and may have paused the plan;
                         // every other failure to `rework_pending` counts here (ADR 0048
-                        // decisions 9 and 12).
+                        // decisions 9 and 12). A conflict that reached its own limit is never
+                        // an automatic rework: it does not pause the plan.
                         let paused = match &verified.paused {
                             Some(paused) => Some(paused.clone()),
-                            None if verified.phase == "rework_pending" => {
+                            None if verified.phase == "rework_pending"
+                                && verified.conflict.is_none() =>
+                            {
                                 attempt_ops::record_auto_rework(store, task_id)?
                             }
                             None => None,

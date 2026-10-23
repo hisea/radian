@@ -11,7 +11,8 @@ use agent_provider_openai_compatible::testing::Reply;
 use common::*;
 use radian_arc::attempt;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
-use radian_arc::store::{Exit, Store};
+use radian_arc::store::model::TaskState;
+use radian_arc::store::{Exit, Store, plan_ops};
 use serde_json::{Value, json};
 
 fn setup(prefix: &str) -> (Repo, Store) {
@@ -290,15 +291,16 @@ fn a_completed_but_undelivered_result_goes_to_rework_pending() {
     );
 }
 
-/// A retryable failure gets `retry_at` 10 s later, then 20 s, and `failed.exhausted` at
-/// `max_attempts` (3).
+/// A retryable failure gets `retry_at` 10 s later, then 20 s, then 40 s; the failure after
+/// `max_attempts` (3) retries is `failed.exhausted`. The count is the task's `retry_count`, not
+/// the attempt number (ADR 0048 decision 9).
 #[test]
 fn a_failed_outcome_retries_with_the_backoff_then_is_exhausted() {
     let (_repo, store) = setup("retry");
     let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
     let task = &tasks[0];
 
-    for (attempt, expected_delay) in [(1u32, 10i64), (2, 20)] {
+    for (attempt, retry_count, expected_delay) in [(1u32, 1u32, 10i64), (2, 2, 20), (3, 3, 40)] {
         if attempt > 1 {
             let retry_at = store.load_task(task).unwrap().item.retry_at.unwrap();
             let released = attempt_ops::release_retries(&store, &retry_at).expect("release");
@@ -313,11 +315,16 @@ fn a_failed_outcome_retries_with_the_backoff_then_is_exhausted() {
             format!("{task}-{attempt}"),
             "every fresh attempt has its own session"
         );
-        let finish = finish(&store, task, attempt, "failed", false, None);
+        let record = finish(&store, task, attempt, "failed", false, None);
         let applied =
-            attempt_ops::apply(&store, task, attempt, Some(&finish), None, Some(1)).expect("apply");
+            attempt_ops::apply(&store, task, attempt, Some(&record), None, Some(1)).expect("apply");
         assert_eq!(applied.class, Some(Class::Model));
         assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+        assert_eq!(
+            store.load_task(task).unwrap().item.retry_count,
+            retry_count,
+            "attempt {attempt} counts one retry"
+        );
         let retry_at = applied.retry_at.expect("a retry time");
         let now = chrono::Utc::now().timestamp();
         let delay = utc_seconds(&retry_at) - now;
@@ -333,11 +340,135 @@ fn a_failed_outcome_retries_with_the_backoff_then_is_exhausted() {
 
     let retry_at = store.load_task(task).unwrap().item.retry_at.unwrap();
     attempt_ops::release_retries(&store, &retry_at).expect("release");
-    attempt_ops::claim(&store, task).expect("claim 3");
-    let finish = finish(&store, task, 3, "failed", false, None);
-    let applied = attempt_ops::apply(&store, task, 3, Some(&finish), None, Some(1)).expect("apply");
+    attempt_ops::claim(&store, task).expect("claim 4");
+    let finish = finish(&store, task, 4, "failed", false, None);
+    let applied = attempt_ops::apply(&store, task, 4, Some(&finish), None, Some(1)).expect("apply");
     assert_eq!(state(&store, task), ("failed".into(), "exhausted".into()));
     assert_eq!(applied.retry_at, None);
+}
+
+/// A task reworked ten times keeps starting: every rework sets the retry count back to 0, so
+/// the rework's failing attempt retries however high the attempt number has grown. Mutation:
+/// count the attempt number again, or keep the count across a rework, and the second round is
+/// `failed.exhausted` instead of `todo.retry_wait`.
+#[test]
+fn a_reworked_task_keeps_starting_after_max_attempts_worth_of_attempts() {
+    let (_repo, store) = setup("rework-retries");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    let mut attempt = 1;
+
+    // The first pushed attempt the gate would send to rework.
+    attempt_ops::claim(&store, task).expect("claim");
+    let record = finish(&store, task, attempt, "completed", true, None);
+    attempt_ops::apply(&store, task, attempt, Some(&record), None, Some(0)).expect("apply");
+
+    for round in 1..=10u32 {
+        // The lead writes the next brief.
+        plan_ops::add_rework(&store, task, "one more round").expect("the rework");
+        assert_eq!(
+            store.load_task(task).unwrap().item.retry_count,
+            0,
+            "round {round}: a rework resets the retry count"
+        );
+        // The rework's first attempt fails: it retries, whatever the attempt number is.
+        attempt += 1;
+        attempt_ops::claim(&store, task).expect("the rework starts");
+        let record = finish(&store, task, attempt, "failed", false, None);
+        let applied =
+            attempt_ops::apply(&store, task, attempt, Some(&record), None, Some(1)).expect("apply");
+        assert_eq!(
+            state(&store, task),
+            ("todo".into(), "retry_wait".into()),
+            "round {round}: the rework's failure was not retried: {applied:?}"
+        );
+        assert_eq!(store.load_task(task).unwrap().item.retry_count, 1);
+        let retry_at = applied.retry_at.expect("a retry time");
+        attempt_ops::release_retries(&store, &retry_at).expect("release");
+        // The retry delivers, and the next round's rework resets the count again.
+        attempt += 1;
+        attempt_ops::claim(&store, task).expect("the retry starts");
+        let record = finish(&store, task, attempt, "completed", true, None);
+        attempt_ops::apply(&store, task, attempt, Some(&record), None, Some(0)).expect("apply");
+    }
+    assert_eq!(
+        attempt, 21,
+        "ten reworks each ran their attempt and its retry"
+    );
+}
+
+/// An attempt that ends without reaching the gate (a worker failure that retries, a delivery
+/// failure) did not conflict with main, so it sets the task's run of conflict reworks back to
+/// 0. The run is `runs/<task>/conflict_rework.json`. Mutation: keep the count across such an
+/// attempt and a task that keeps retrying would still stop at its old run.
+#[test]
+fn an_attempt_that_does_not_reach_the_gate_resets_the_conflict_count() {
+    let (_repo, store) = setup("conflict-reset");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    let path = store
+        .root()
+        .join("runs")
+        .join(task)
+        .join(radian_arc::review::CONFLICT_REWORK_FILE);
+    std::fs::create_dir_all(path.parent().unwrap()).expect("the run directory");
+    std::fs::write(&path, "{\n  \"reworks\": 2\n}\n").expect("the conflict record");
+
+    attempt_ops::claim(&store, task).expect("claim");
+    let record = finish(&store, task, 1, "failed", false, None);
+    attempt_ops::apply(&store, task, 1, Some(&record), None, Some(1)).expect("apply");
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+
+    let text = std::fs::read_to_string(&path).expect("the conflict record reads");
+    let value: Value = serde_json::from_str(&text).expect("the conflict record parses");
+    assert_eq!(value["reworks"], 0, "{text}");
+}
+
+/// `max_attempts` counts the retries since the last rework, not the attempt number: a task
+/// already five attempts in retries from 0 after a rework, gets `max_attempts` (3) retries, and
+/// the failure after them is `failed.exhausted`. Mutation: compare the attempt number and the
+/// first failure is exhausted.
+#[test]
+fn retries_after_a_rework_start_from_zero_and_stop_at_max_attempts() {
+    let (_repo, store) = setup("rework-retry-zero");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    store
+        .change_task(task, |task| {
+            task.attempt = 5;
+            task.state = TaskState::Review;
+            task.phase = "rework_pending".to_owned();
+            Ok(())
+        })
+        .expect("the task is in review");
+    plan_ops::add_rework(&store, task, "start over").expect("the rework");
+    assert_eq!(store.load_task(task).unwrap().item.retry_count, 0);
+
+    for (attempt, retry_count) in [(6u32, 1u32), (7, 2), (8, 3)] {
+        let claim = attempt_ops::claim(&store, task).expect("claim");
+        assert_eq!(claim.attempt, attempt);
+        let record = finish(&store, task, attempt, "failed", false, None);
+        let applied =
+            attempt_ops::apply(&store, task, attempt, Some(&record), None, Some(1)).expect("apply");
+        assert_eq!(
+            state(&store, task),
+            ("todo".into(), "retry_wait".into()),
+            "attempt {attempt}: {applied:?}"
+        );
+        assert_eq!(store.load_task(task).unwrap().item.retry_count, retry_count);
+        let retry_at = applied.retry_at.expect("a retry time");
+        attempt_ops::release_retries(&store, &retry_at).expect("release");
+    }
+
+    attempt_ops::claim(&store, task).expect("claim 9");
+    let finish = finish(&store, task, 9, "failed", false, None);
+    let applied = attempt_ops::apply(&store, task, 9, Some(&finish), None, Some(1)).expect("apply");
+    assert_eq!(
+        state(&store, task),
+        ("failed".into(), "exhausted".into()),
+        "{applied:?}"
+    );
+    assert_eq!(store.load_task(task).unwrap().item.retry_count, 3);
 }
 
 /// A poisoned session never retries (decision 4): `failed.irrecoverable`.

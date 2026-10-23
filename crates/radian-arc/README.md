@@ -161,6 +161,13 @@ plan budget also sets the plan's `auto` to `off`. `record_auto_rework` counts a 
 integration failure while the plan is not `off` in the task's `auto_rework`; past
 `[limits] max_auto_rework` it writes `paused.json` and sets the plan's `auto` to `off`.
 
+`attempt_ops::apply` counts retries, not attempts: a retryable failure raises the task's
+`retry_count` and sets `todo.retry_wait` while the count is below the task's `max_attempts`
+(else `[limits] max_attempts`), and the failure after the limit is `failed.exhausted`. Every
+rework (`plan_ops::add_rework_with`) sets `retry_count` back to `0`, so a rework's
+instructions get their own retries; a `reverify` attempt is not a retry and changes neither
+`retry_count` nor the decision.
+
 ## The scheduling loop
 
 `run::run` takes `runner.lock` without waiting (a held lock is exit 4). One pass repeats until
@@ -484,7 +491,14 @@ is a first review. A rework round's prompt holds the previous blocking items, th
 line or within 10 lines of a previous blocking item in the same file (`ReworkRound`).
 
 Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
-such a failure, with reason `conflict` and the paths. A `review_blocking` failure on a plan
+such a failure, with reason `conflict` and the paths. `review::conflict_auto_rework` writes
+the conflict brief while the task's run of conflict reworks (`runs/<task>/conflict_rework.json`,
+`CONFLICT_REWORK_FILE`) is below `[limits] max_conflict_rework`; once it has written the limit,
+no brief is written, the task stays in `review.rework_pending`, and the stop text is part of
+the recorded reason, so `show` prints it. A verification that does not end in a conflict, an
+attempt that never reaches the gate, and the lead's own rework (`plan_ops::add_rework`, the
+empty heading suffix) call `reset_conflict_rework`; arc's review and conflict reworks keep the
+run. A `review_blocking` failure on a plan
 whose `auto` is not `off` instead writes `## Rework <n> (review)` itself
 (`review::review_auto_rework`), counts an automatic rework, and returns the task to
 `todo.ready`; at `max_auto_rework` the plan pauses and the task stays in
@@ -502,7 +516,8 @@ which are written later.
 `head_sha` stays, the attempt result's class is `REVERIFY_CLASS`, and no `result.jsonl` is
 written. It applies when the task is `review.rework_pending` or `review.awaiting_human` and its
 rework reason is a verification stage; a reject note and a delivery failure are refused. The
-reverify attempt is left out of `max_attempts`, costs nothing, and is not an automatic rework.
+reverify attempt is not a retry: it changes neither `retry_count` nor `max_attempts`, costs
+nothing, and is not an automatic rework.
 
 ## Merge and reject
 
