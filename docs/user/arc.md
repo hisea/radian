@@ -282,7 +282,7 @@ arc then runs the hidden `radian arc work` wrapper as a child, with the brief on
 The worker runs in a session of its own: with [`worker.rework_session`](arc-files.md#configtoml) at `fresh`, which is the default, each attempt gets the session `<task>-<attempt>`.
 With `resume` the task has one session instead, the task id, and every attempt after the first continues it.
 The attempt's session id is in its `execution.json`, and `show` prints it as `session_id`.
-A fresh attempt after the first cannot see the earlier conversation, so its stdin opens with a hand-off section, `## Where the previous attempt left off`: the previous attempt's final report (cut at 8,000 characters, with a note when it is cut), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote main and the branch tip.
+A fresh attempt after the first cannot see the earlier conversation, so its stdin opens with a hand-off section, `## Where the previous attempt left off`: the newest earlier attempt's final report (cut at 8,000 characters, with a note when it is cut; a `reverify` attempt runs no worker and writes none, so the section walks back to the attempt before it and names it), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote main and the branch tip.
 The section says the full history is on the branch and to read the files rather than assume.
 The brief follows it, and a `merge-main` conflict section still comes first.
 

@@ -857,6 +857,86 @@ fn a_fresh_rework_starts_a_new_session_with_the_hand_off() {
     );
 }
 
+/// A `reverify` attempt in between writes no `result.jsonl`, so the hand-off walks back to
+/// the newest attempt that wrote a final report (attempt 1) and says which one it is.
+/// Mutation: read only attempt n-1, and the report is the "wrote no final report" line.
+#[test]
+fn the_hand_off_walks_back_past_a_reverify_attempt() {
+    let repo = Repo::new("fresh-reverify");
+    let task = "TK0015-reverify-between";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m 'first commit on the branch'",
+        ),
+        text_reply("the first attempt's report"),
+    ]);
+    let first_session = format!("{task}-1");
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-rb1",
+        &["--session", first_session.as_str()],
+        &model_args(mock1.base_url()),
+        "one",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+
+    // Attempt 2 is the scheduling loop's own worker-less reverify: the attempt is claimed and
+    // its records written, but no worker runs, so there is no `result.jsonl`.
+    let reverify = repo.run_dir(task, 2);
+    std::fs::create_dir_all(&reverify).expect("the reverify attempt's run directory");
+    std::fs::write(
+        reverify.join("attempt_result.json"),
+        "{\"class\":\"reverify\"}\n",
+    )
+    .expect("the reverify attempt's record");
+    assert!(
+        !reverify.join("result.jsonl").exists(),
+        "a reverify attempt has no worker stream"
+    );
+
+    let mock3 = Mock::start(vec![
+        shell_reply(
+            "c3",
+            "echo two > two.txt && git add two.txt && git commit -m two",
+        ),
+        text_reply("done"),
+    ]);
+    let third_session = format!("{task}-3");
+    let third = run(
+        &repo,
+        task,
+        3,
+        "tok-rb3",
+        &["--session", third_session.as_str()],
+        &model_args(mock3.base_url()),
+        "third",
+    );
+    assert_eq!(third.code, 0, "{}", third.stderr);
+    let result3 = last_result(&repo.run_dir(task, 3).join("result.jsonl"));
+    assert_eq!(result3["session_id"], json!(third_session));
+
+    let brief = brief_of(&mock3.requests()[0]);
+    let report = brief
+        .split("### The previous attempt's final report")
+        .nth(1)
+        .expect("the report section");
+    assert!(
+        report.contains("the first attempt's report"),
+        "the newest report survives the reverify attempt:\n{report}"
+    );
+    assert!(
+        report.contains("Attempt 1 is the newest attempt that wrote a final report"),
+        "the section names the attempt it came from:\n{report}"
+    );
+    assert!(
+        report.contains("attempt 2 ended without one"),
+        "the section says the attempt before it wrote none:\n{report}"
+    );
+}
+
 /// The hand-off cuts a long previous report at 8,000 characters and says so.
 #[test]
 fn a_long_previous_report_is_cut_at_the_cap_with_a_note() {

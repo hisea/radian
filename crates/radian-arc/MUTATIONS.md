@@ -56,6 +56,7 @@ copy.
 | M44 | pass `--resume` with `fresh`: `claim` sets `resume: number > 1` (the mode check dropped) | `attempt::a_fresh_claim_names_each_attempts_session_and_never_resumes`, `attempt::a_failed_outcome_retries_with_the_backoff_then_is_exhausted`, `review::rework_after_reject_starts_a_new_attempt_with_its_own_verdicts` | ✅ 3 failed |
 | M45 | drop the hand-off section (a fresh later attempt's stdin is the brief alone) | `work::a_fresh_rework_starts_a_new_session_with_the_hand_off`, `work::a_fresh_rework_keeps_the_conflict_section_first`, `work::a_long_previous_report_is_cut_at_the_cap_with_a_note` | ✅ 3 failed |
 | M46 | put the hand-off before the conflict section | `work::a_fresh_rework_keeps_the_conflict_section_first` | ✅ failed |
+| M47 | read only attempt `n-1` for the hand-off's report (`newest_report` does not walk back) | `work::the_hand_off_walks_back_past_a_reverify_attempt` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -141,3 +142,7 @@ the missing cap and the missing hand-off in the conflicted brief. M46 swaps the 
 sections in `compose_brief`'s argument list; only the conflicted-brief test compares their
 order (the unit test passes the order it asserts). The `run::a_watch_pass_does_not_restart_a_gate_that_left_no_record`
 failure that M45's run also showed is a timeout under load: it passes in every clean run.
+
+M47 was run against `26d29780`, from `.radian/mut/work_mod_walkback.rs` restored with `cp` and
+compared with `cmp`: `newest_report` reads `attempt - 1` instead of walking back, so the
+reverify attempt in the middle hides attempt 1's report and only the new work test fails.

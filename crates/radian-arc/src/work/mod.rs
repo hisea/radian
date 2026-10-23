@@ -1284,8 +1284,21 @@ fn handoff_section(
     let commits = git(&s.repo, &["log", "--oneline", &range], &s.clock)?;
     let stat = git(&s.repo, &["diff", "--stat", &range], &s.clock)?;
     let previous = o.attempt - 1;
-    let report = match previous_report(&s.arc, &o.task, previous) {
-        Some(report) => cap_report(&report),
+    // A worker-less attempt (a `reverify`) writes no `result.jsonl`, and those attempts are
+    // claimed by the loop by itself, so the attempt that just ended is often not the one with
+    // the report: the hand-off carries the newest one (ADR 0048 decision 7).
+    let report = match newest_report(&s.arc, &o.task, o.attempt) {
+        Some((from, report)) => {
+            let report = cap_report(&report);
+            if from == previous {
+                report
+            } else {
+                format!(
+                    "Attempt {from} is the newest attempt that wrote a final report; attempt \
+                     {previous} ended without one.\n\n{report}"
+                )
+            }
+        }
         None => "The previous attempt wrote no final report: it ended without a result.".to_owned(),
     };
     let commits = or_placeholder(&commits, "(no commits of its own yet)");
@@ -1315,8 +1328,18 @@ fn or_placeholder(text: &str, placeholder: &str) -> String {
     }
 }
 
-/// The worker's last assistant message of one earlier attempt, from its `result.jsonl`.
-fn previous_report(arc: &Path, task: &str, attempt: u32) -> Option<String> {
+/// The newest earlier attempt that wrote a final report: its number and the report. A
+/// worker-less attempt (a `reverify`) leaves no `result.jsonl`, and the scheduling loop claims
+/// those by itself, so the attempt before a rework is often one. An attempt before the first
+/// has nothing to offer.
+fn newest_report(arc: &Path, task: &str, attempt: u32) -> Option<(u32, String)> {
+    (1..attempt)
+        .rev()
+        .find_map(|earlier| report_of(arc, task, earlier).map(|report| (earlier, report)))
+}
+
+/// The worker's last assistant message of one attempt, from its `result.jsonl`.
+fn report_of(arc: &Path, task: &str, attempt: u32) -> Option<String> {
     let path = arc
         .join("runs")
         .join(task)

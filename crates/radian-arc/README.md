@@ -363,11 +363,13 @@ One run:
    child that stays in the group. Its stdout is `runs/<task>/attempts/<task>-<n>/result.jsonl`,
    its stderr `stderr.log`; the attempt fields, the session id included, go to
    `execution.json`. A fresh attempt after the first gets a hand-off section in front of the
-   brief (`## Where the previous attempt left off`): the previous attempt's `Result.text` cut
-   at 8,000 characters with a note, `git log --oneline` and `git diff --stat` of the task's
-   own change from the merge base with the remote main. A `merge-main` conflict section stays
-   first. A hidden `--worker-command <shell command>` replaces the `radian exec` child for the
-   forwarding tests; it exists only for tests and is not a user input.
+   brief (`## Where the previous attempt left off`): the newest earlier attempt's
+   `Result.text` cut at 8,000 characters with a note (a worker-less `reverify` attempt writes
+   none, so the section walks back and names the attempt it came from), `git log --oneline`
+   and `git diff --stat` of the task's own change from the merge base with the remote main. A
+   `merge-main` conflict section stays first. A hidden `--worker-command <shell command>`
+   replaces the `radian exec` child for the forwarding tests; it exists only for tests and is
+   not a user input.
    While the child runs, the wrapper enforces the limits itself: a stall, the wall time, or a
    `cancel` records `signal.json` with its class, sends SIGTERM to the child's group and then
    SIGKILL after the grace period. The scheduling loop does not watch the attempt. The wall
