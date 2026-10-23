@@ -1108,6 +1108,16 @@ fn process_alive(pid: u32) -> bool {
         .success()
 }
 
+/// Sends `signal` to the process group `pgid`, the way a terminal signals its foreground job.
+/// This is `kill(2)` and not the `kill` program: procps-ng reads a negative id that follows
+/// the signal flag (`kill -INT -123`) as an option and exits 1, where macOS' `kill` accepts
+/// it.
+fn signal_group(pgid: u32, signal: i32) -> bool {
+    // SAFETY: `kill(2)` takes plain integers and has no memory contract; a negative pid names
+    // the process group whose leader is `pgid`.
+    unsafe { libc::kill(-(pgid as libc::pid_t), signal) == 0 }
+}
+
 /// Makes `path` executable.
 fn executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -1509,11 +1519,8 @@ fn sigint_to_the_watch_group_leaves_the_worker_running() {
         .parse()
         .expect("a pid");
 
-    let sent = std::process::Command::new("kill")
-        .args(["-INT", &format!("-{}", watch.id())])
-        .status()
-        .expect("kill -INT -pgid");
-    assert!(sent.success(), "kill -INT -{}", watch.id());
+    let sent = signal_group(watch.id(), libc::SIGINT);
+    assert!(sent, "kill(-{}, SIGINT)", watch.id());
 
     let output = watch.wait_with_output().expect("the watch loop ends");
     assert_eq!(
@@ -1567,11 +1574,8 @@ fn sigint_to_a_gate_stops_its_stage() {
 
     // The gate leads its own process group; the stage child is in another, so this reaches
     // the gate alone.
-    let sent = std::process::Command::new("kill")
-        .args(["-INT", &format!("-{gate}")])
-        .status()
-        .expect("kill -INT -gate");
-    assert!(sent.success(), "kill -INT -{gate}");
+    let sent = signal_group(gate, libc::SIGINT);
+    assert!(sent, "kill(-{gate}, SIGINT)");
     wait_until(Duration::from_secs(20), "the stage child to stop", || {
         !process_alive(stage)
     });
