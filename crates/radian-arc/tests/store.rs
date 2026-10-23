@@ -856,3 +856,98 @@ fn a_task_file_parses_through_the_model() {
     assert_eq!(parsed.attempt, 0);
     assert_eq!(&parsed.body, "brief\n");
 }
+
+/// A plan file written before the `priority` field existed reads as `P3` and is written back
+/// unchanged: only `radian arc priority` adds the field. A hand edit of the field is the
+/// owner's field, so `adopt` refuses it, and a value outside the set is a parse error naming
+/// the set.
+#[test]
+fn an_old_plan_without_a_priority_reads_as_p3_and_keeps_its_bytes() {
+    let scratch = fixture("priority-old");
+    let store = initialized(&scratch);
+    let plan = store
+        .add_plan("old", "Old", "the request")
+        .expect("add a plan");
+    store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .expect("add a task");
+    let path = scratch
+        .repo()
+        .join(".radian/arc/plans")
+        .join(format!("{plan}.md"));
+
+    // A new plan file has no `priority` field: that is what an older file looks like too.
+    let before = read(&path);
+    assert!(!before.contains("priority:"), "{before}");
+    let loaded = store.load_plan(&plan).expect("the plan reads");
+    assert_eq!(loaded.item.priority(), model::DEFAULT_PRIORITY);
+    assert!(!loaded.changed_outside_arc);
+
+    // Another write (confirm, then auto) leaves the file without the field.
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("confirm");
+    let confirmed = read(&path);
+    assert!(!confirmed.contains("priority:"), "{confirmed}");
+    assert_eq!(
+        store
+            .load_plan(&plan)
+            .expect("the plan reads")
+            .item
+            .priority(),
+        "P3"
+    );
+
+    // A value outside the set is refused (exit 3) and writes nothing; the message lists every
+    // value.
+    for bad in ["P6", "p1", "high"] {
+        let error = radian_arc::store::plan_ops::set_priority(&store, &plan, bad)
+            .expect_err("a bad priority is refused");
+        assert_eq!(error.exit(), Exit::State, "{bad}: {}", error.message());
+        for value in model::PLAN_PRIORITIES {
+            assert!(
+                error.message().contains(value),
+                "{bad}: {}",
+                error.message()
+            );
+        }
+    }
+    assert_eq!(read(&path), confirmed, "a refusal writes nothing");
+
+    // Setting it writes the field once, and later writes keep it.
+    radian_arc::store::plan_ops::set_priority(&store, &plan, "P1").expect("P1");
+    let set = read(&path);
+    assert!(set.contains("\npriority: P1\n"), "{set}");
+    assert_eq!(
+        store
+            .load_plan(&plan)
+            .expect("the plan reads")
+            .item
+            .priority(),
+        "P1"
+    );
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    assert!(read(&path).contains("\npriority: P1\n"));
+
+    // An outside edit of the priority is the owner's field: `adopt` refuses it.
+    let hand_edited = read(&path).replace("priority: P1", "priority: P4");
+    fs::write(&path, &hand_edited).expect("the plan is writable");
+    let outside = store.load_plan(&plan).expect("the plan still parses");
+    assert!(outside.changed_outside_arc);
+    assert_eq!(outside.item.priority(), "P4");
+    let refused = store
+        .adopt(&plan)
+        .expect_err("adopt refuses the owner's field");
+    assert_eq!(refused.exit(), Exit::State, "{}", refused.message());
+    assert!(
+        refused.message().contains("priority"),
+        "{}",
+        refused.message()
+    );
+
+    // A value outside the set cannot even be read: the file names every value it may hold.
+    let broken = read(&path).replace("priority: P4", "priority: P6");
+    fs::write(&path, &broken).expect("the plan is writable");
+    let error = store.load_plan(&plan).expect_err("P6 does not parse");
+    for value in model::PLAN_PRIORITIES {
+        assert!(error.message().contains(value), "{}", error.message());
+    }
+}

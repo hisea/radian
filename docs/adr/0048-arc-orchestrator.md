@@ -20,7 +20,7 @@ radian arc <subcommand>       run one CLI operation and exit
 ```
 
 - `radian arc` with no subcommand opens the TUI. A subcommand runs the CLI. This follows `radian` (TUI) and `radian exec` (headless).
-- The CLI subcommands are `init`, `add`, `list`, `show`, `adopt`, `start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `reverify`, `run`, `mcp`, and the two internal ones a person does not run, `work` and `gate`.
+- The CLI subcommands are `init`, `add`, `list`, `show`, `adopt`, `start`, `merge`, `reject`, `auto`, `priority`, `confirm`, `pause`, `reset-budget`, `cancel`, `reverify`, `run`, `mcp`, and the two internal ones a person does not run, `work` and `gate`.
 - Exit codes: 0 success; 1 error; 2 usage error; 3 the state does not allow the operation (this includes a file changed outside arc); 4 a lock is held by another process. `list` and `show` take `--json`.
 - `rad arc` is the same command through the `rad` alias.
 
@@ -30,7 +30,7 @@ radian arc <subcommand>       run one CLI operation and exit
 - **arc**: the only writer of the backlog. It claims tasks, starts workers, reconciles attempts, checks delivery, runs the gate, records cost, and merges.
 - **worker**: one `radian exec` process for one attempt of one task. It has no interactive input. It exits when the attempt ends.
 - **gate**: a fixed sequence of stages. Each stage runs once against one commit and writes one verdict.
-- **owner**: the person. The owner confirms plans, starts tasks, merges, rejects, and sets the auto level.
+- **owner**: the person. The owner confirms plans, starts tasks, merges, rejects, sets the auto level, and sets the plan's priority.
 
 ### 3. Objects
 
@@ -38,7 +38,7 @@ arc has four objects.
 
 | Object | Meaning | Created by | State changed by |
 |---|---|---|---|
-| Plan | One product request: the request text, its tasks, and their order | lead | owner (confirm, auto, pause); arc |
+| Plan | One product request: the request text, its tasks, and their order | lead | owner (confirm, auto, pause, priority); arc |
 | Task | One unit of work in one plan, with a brief | lead; arc (the review's follow-up) | arc |
 | Attempt | One run of one task | arc | arc |
 | Verdict | One gate stage result for one commit | gate | nobody: a verdict is never changed |
@@ -48,6 +48,7 @@ arc has four objects.
 - To change a confirmed plan, the lead appends a change record. The plan returns to `draft` with `auto` `off`, the lead adds any new tasks with `add_task`, and the owner confirms the plan again; tasks that already started keep their state.
 - A confirmed plan does gain **proposed tasks**. The lead's MCP `add_task` on a confirmed plan creates a task in `todo.proposed`, and arc proposes one follow-up task when a task merges (decision 10). A proposed task belongs to the plan, but the scheduling loop never claims it and `start` refuses it; the owner makes it `todo.ready` with `radian arc confirm <task>`, which leaves the plan's `status` and `auto` alone. An owner who does not want it cancels it with `radian arc cancel` and it becomes `failed.cancelled`.
 - A task has a `plan` field and an `after` list. `after` can name tasks in the same plan or tasks that are already merged.
+- A plan has a `priority`: `P0`, `P1`, `P2`, `P3`, `P4` or `P5`, where `P0` is the highest. A plan file without the field reads as `P3`, and arc writes the field only once the owner sets it. A task has no priority of its own; it follows its plan. `radian arc priority <plan> <P0..P5>` sets it on a plan in any state, and refuses a value outside the set with exit `3` and a message that lists every value. There is no MCP tool for it: like `confirm` and `auto`, it is the owner's.
 - A plan has no branch. arc merges each task separately.
 
 ### 4. Identities
@@ -256,6 +257,7 @@ The change the delivery check counts is the attempt's own commits: the range fro
 - A one-shot `run` (no `--watch`) starts its work and exits without waiting for it: a worker and a gate are separate processes with their own records. The next `run` collects their results. To keep advancing, use `--watch`.
 - `radian arc run --watch [--interval <seconds>]` repeats that loop: after a pass that ends quiet it waits `--interval` seconds (integer, default 30, 5 to 3600) and runs another pass, until SIGINT or SIGTERM. It holds `runner.lock` for its whole life. It prints the summary only when it differs from the one it printed last. A pass that returns an error prints one `radian arc: <message>` line and the loop goes on with the next pass; the lock and the state stay as they are. The loop, each wrapper and each gate are separate process groups, and a wrapper and a gate treat SIGINT exactly as SIGTERM, so a terminal Ctrl-C reaches only the loop: it starts no new worker and no new gate; a running worker goes on, and the next pass or the next `run` collects it. A running gate gets `[limits] cancel_grace_secs` and is then killed after it has stopped the stage it runs; a gate that did not finish is started again by the next loop as unverified, and one that exited without writing any record at all is reported instead and not started again while its inputs are unchanged (decision 10). It prints the summary, releases the lock and exits `0`.
 - `[limits] concurrency` counts the tasks in `doing`. A running gate takes no slot.
+- **Claim order.** A pass claims ready tasks in claim order: the plan's `priority` (`P0` first), then the plan id from small to large, then the task's order in the plan and its `after` list. Priority decides which plan gets a free slot; it never preempts an attempt that is already running. The verification and merge steps of one pass use the same order, so the stage locks queue in it. `radian arc list` prints plans in claim order, and a plan line and the MCP `list` and `show` documents carry its `priority`.
 - The TUI and `radian arc run` use the same state machine and the same files.
 
 ### 14. v0 scope
@@ -308,3 +310,4 @@ The `[gate.review]` table configures the `review` stage:
 - Approval: the MCP tool list contains no tool to confirm, start, merge, reject, change `auto`, or approve.
 - Setup: `radian arc init` in a repository creates the files above, and adds the exclude lines once (without `config.toml`, `plans/`, and `tasks/` under `--track`). Without setup, `radian arc` names `radian arc init`. A worker cannot read the arc files outside its worktree. A task branch that changes a file under `.radian/arc/` fails its delivery check. `grep` from the repository root does not enter `.radian/arc/worktrees/` or `.radian/arc/gates/`.
 - Commands: `radian arc` opens the TUI. Each subcommand runs and exits with a documented code. `docs/user/` documents every subcommand, option, and file field (`AGENTS.md`).
+- Priority: of two confirmed plans at auto `run` with one free slot, the higher priority's task is claimed first, and two plans at the same priority keep id order; a priority change takes effect at the next pass and a higher priority does not preempt a running attempt; a value outside `P0`..`P5` is refused with exit `3` and the message lists every value; a plan file with no `priority` reads as `P3` and is written back unchanged; `list` prints plans in claim order.
