@@ -7,13 +7,15 @@
 //!
 //! 1. reconcile every task in `doing` (apply a result that is there, leave a live attempt);
 //! 2. release every retry whose `retry_at` has passed;
-//! 3. start the gate of every task in `review.verifying`, or apply the verdicts a background
+//! 3. re-verify, without a worker, every task a `commands` or integration command failure
+//!    blocked, once the remote main moved (ADR 0048 decision 9);
+//! 4. start the gate of every task in `review.verifying`, or apply the verdicts a background
 //!    gate left; this is also how a task a moved branch or a changed digest sent back reaches
 //!    `review.awaiting_human` again;
-//! 4. for every confirmed plan at `auto` `run` or `merge`, claim each `todo.ready` task whose
+//! 5. for every confirmed plan at `auto` `run` or `merge`, claim each `todo.ready` task whose
 //!    `after` tasks are merged, up to `[limits] concurrency` attempts in flight at once, and
 //!    start its wrapper without waiting for it;
-//! 5. for every plan at `auto` `merge`, approve a verified task and start its integration
+//! 6. for every plan at `auto` `merge`, approve a verified task and start its integration
 //!    gate, or finish the integration a gate left.
 //!
 //! Waiting for a person, a future `retry_at`, a worker, or a gate does not keep it running:
@@ -278,15 +280,21 @@ fn one_pass(
         changed = true;
     }
 
-    // 3. Verification, for every plan: a plan at `auto` `off` still advances here. The gate
+    // 3. Automatic reverify, for a task a command failure blocked once main moved (ADR 0048
+    // decision 9). The claim is worker-less; step 4 starts its gate in this same pass.
+    if !stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        changed |= auto_reverify_tasks(store, transitions)?;
+    }
+
+    // 4. Verification, for every plan: a plan at `auto` `off` still advances here. The gate
     // runs as a background process; this pass applies what an earlier gate left (ADR 0048
     // decision 10).
     for id in verifying_tasks(store)? {
         changed |= advance_verification(store, &id, transitions, stop)?;
     }
 
-    // 4. Start what the auto levels allow, and 5. merge what passed, unless a stop signal
-    // arrived while steps 1-3 ran: no new attempt and no new gate starts after it.
+    // 5. Start what the auto levels allow, and 6. merge what passed, unless a stop signal
+    // arrived while steps 1-4 ran: no new attempt and no new gate starts after it.
     if !stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
         changed |= start_ready(store, transitions)?;
         changed |= merge_auto(store, transitions, stop)?;
@@ -419,6 +427,58 @@ fn advance_verification(
         // One gate per task: the running one is the reason this pass starts none.
         None => Ok(false),
     }
+}
+
+/// Re-verifies by itself every task a moved main unblocked (ADR 0048 decision 9): a
+/// `review.rework_pending` task of a plan whose `auto` is not `off`, whose `commands` or
+/// integration stage failed with `command_failed` or `timeout`, once the remote main is no
+/// longer the main that verdict recorded. `true` when it claimed an attempt or reported the
+/// count stop.
+fn auto_reverify_tasks(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
+    let mut changed = false;
+    for id in rework_pending_tasks(store)? {
+        match crate::review::auto_reverify(store, &id)? {
+            crate::review::AutoReverify::Not => {}
+            crate::review::AutoReverify::Started { main_sha, .. } => {
+                transitions.push(format!(
+                    "{id} main moved ({}) -> auto reverify",
+                    short_sha(&main_sha)
+                ));
+                changed = true;
+            }
+            crate::review::AutoReverify::Limit { main_sha, text } => {
+                // The count is used up: `run` prints the reason, `show` prints the same text
+                // (ADR 0048 decision 9).
+                transitions.push(format!(
+                    "{id} main moved ({}) -> auto reverify limit reached: {text}",
+                    short_sha(&main_sha)
+                ));
+                changed = true;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// The first seven characters of a sha.
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
+
+/// Every task in `review.rework_pending`, in id order. A file that changed outside arc is
+/// skipped.
+fn rework_pending_tasks(store: &Store) -> Result<Vec<String>, Error> {
+    let mut ids = Vec::new();
+    for id in store.task_ids()? {
+        let loaded = store.load_task(&id)?;
+        if loaded.changed_outside_arc {
+            continue;
+        }
+        if loaded.item.state == TaskState::Review && loaded.item.phase == "rework_pending" {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
 }
 
 /// Every task in `review.verifying`, in id order. A file that changed outside arc is skipped.

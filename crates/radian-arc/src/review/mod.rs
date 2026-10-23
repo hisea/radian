@@ -30,6 +30,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Digest;
 
@@ -48,6 +49,13 @@ pub const MAX_INTEGRATION_ROUNDS: u32 = 3;
 /// The stages this build can run in verification. A listed stage outside it refuses with
 /// "stage <name> is not built yet".
 pub const BUILT_STAGES: [Stage; 2] = [Stage::Commands, Stage::Review];
+/// The file in a task's run directory that records the pass's automatic reverifies (ADR
+/// 0048 decision 9): the `(head_sha, remote main)` pairs already re-verified, and the text of
+/// the last `[limits] max_auto_reverify` stop.
+pub const AUTO_REVERIFY_FILE: &str = "auto_reverify.json";
+/// The failure reasons a moved main can fix: a `commands` or integration command that failed,
+/// or ran past its timeout (ADR 0048 decision 9).
+pub const AUTO_REVERIFY_REASONS: &[&str] = &["command_failed", "timeout"];
 
 /// Why a verify or merge did not advance the task: a stage that failed, a branch that
 /// moved, or a stage this build does not run yet.
@@ -677,6 +685,268 @@ pub fn reverify_with(
         attempt_id: claim.attempt_id,
         verification,
     })
+}
+
+// ---- automatic reverify ----------------------------------------------------------------
+
+/// What one scheduling pass's automatic reverify step did for one task (ADR 0048 decision 9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoReverify {
+    /// Nothing ran: the task is not one a moved main applies to, main has not moved, or this
+    /// `(head, remote main)` pair was re-verified already.
+    Not,
+    /// A new worker-less attempt was claimed. The pass that claimed it starts its gate.
+    Started {
+        attempt_id: String,
+        /// The remote main the pass saw when it claimed the attempt.
+        main_sha: String,
+    },
+    /// Main moved, but the task used its `[limits] max_auto_reverify` automatic reverifies.
+    /// `text` is what `run` prints after the task and the short sha, and what `show` puts in
+    /// `rework_reason`.
+    Limit { main_sha: String, text: String },
+}
+
+/// One `(head_sha, remote main)` pair an automatic reverify ran for. The pair is the first
+/// guard against a loop: the same inputs are re-verified automatically at most once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AutoReverifyPair {
+    head_sha: String,
+    main_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt_id: Option<String>,
+    at: String,
+}
+
+/// The last `[limits] max_auto_reverify` stop: the inputs it was reported for, and its text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AutoReverifyLimit {
+    head_sha: String,
+    main_sha: String,
+    text: String,
+    at: String,
+}
+
+/// `runs/<task>/auto_reverify.json` (ADR 0048 decision 9).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct AutoReverifyRecord {
+    /// The pairs already re-verified automatically, in order. Its length is the task's count.
+    reverified: Vec<AutoReverifyPair>,
+    /// The last count stop, so `show` can print it without the network.
+    limit: Option<AutoReverifyLimit>,
+}
+
+/// The scheduling loop's automatic reverify (ADR 0048 decision 9): re-run the gate, without a
+/// worker, for a task a `commands` or integration command failure blocked, once the remote
+/// main is no longer the main that failing verdict recorded.
+///
+/// Two guards stop a loop: a `(head_sha, remote main)` pair is re-verified at most once (kept
+/// in [`AUTO_REVERIFY_FILE`]), and `[limits] max_auto_reverify` counts the automatic reverifies
+/// of one task; `0` turns the step off. The count is only spent when the claim happened.
+///
+/// A refused claim is the ordinary "nothing ran" result: the task moved since it was read.
+///
+/// # Errors
+///
+/// The remote main or a stored file could not be read, or the claim failed for a reason other
+/// than the task having moved.
+pub fn auto_reverify(store: &Store, task_id: &str) -> Result<AutoReverify, Error> {
+    let Some((task, main_sha)) = auto_reverify_cause(store, task_id)? else {
+        return Ok(AutoReverify::Not);
+    };
+    let head = task.head_sha.clone().unwrap_or_default();
+    let mut record = read_auto_reverify(store, task_id);
+    if record
+        .reverified
+        .iter()
+        .any(|pair| pair.head_sha == head && pair.main_sha == main_sha)
+    {
+        return Ok(AutoReverify::Not);
+    }
+    let max = store.config()?.limits.max_auto_reverify;
+    if max == 0 {
+        return Ok(AutoReverify::Not);
+    }
+    if record.reverified.len() >= max as usize {
+        if record
+            .limit
+            .as_ref()
+            .is_some_and(|limit| limit.head_sha == head && limit.main_sha == main_sha)
+        {
+            // Reported once for these inputs: a later pass only waits for the lead.
+            return Ok(AutoReverify::Not);
+        }
+        let text = format!(
+            "the task used {} automatic reverifies and `[limits] max_auto_reverify` is {max}",
+            record.reverified.len()
+        );
+        record.limit = Some(AutoReverifyLimit {
+            head_sha: head,
+            main_sha: main_sha.clone(),
+            text: text.clone(),
+            at: crate::store::plan_ops::utc_now(),
+        });
+        write_auto_reverify(store, task_id, &record)?;
+        return Ok(AutoReverify::Limit { main_sha, text });
+    }
+    // The pair is spent before the claim: a pass that dies between the two leaves an input set
+    // that does not run again, never one that runs twice.
+    record.reverified.push(AutoReverifyPair {
+        head_sha: head.clone(),
+        main_sha: main_sha.clone(),
+        attempt_id: None,
+        at: crate::store::plan_ops::utc_now(),
+    });
+    write_auto_reverify(store, task_id, &record)?;
+    match crate::store::attempt_ops::claim_reverify_by(
+        store,
+        task_id,
+        crate::store::attempt_ops::ReverifyBy::Automatic,
+    ) {
+        Ok(claim) => {
+            let mut record = read_auto_reverify(store, task_id);
+            if let Some(pair) = record.reverified.iter_mut().find(|pair| {
+                pair.head_sha == head && pair.main_sha == main_sha && pair.attempt_id.is_none()
+            }) {
+                pair.attempt_id = Some(claim.attempt_id.clone());
+            }
+            write_auto_reverify(store, task_id, &record)?;
+            Ok(AutoReverify::Started {
+                attempt_id: claim.attempt_id,
+                main_sha,
+            })
+        }
+        Err(error) => {
+            // The claim changed nothing, so the count is not spent.
+            let mut record = read_auto_reverify(store, task_id);
+            record.reverified.retain(|pair| {
+                !(pair.head_sha == head && pair.main_sha == main_sha && pair.attempt_id.is_none())
+            });
+            write_auto_reverify(store, task_id, &record)?;
+            match error {
+                Error::Refused(_) => Ok(AutoReverify::Not),
+                other => Err(other),
+            }
+        }
+    }
+}
+
+/// The task and the remote main, when an automatic reverify applies to `task_id` (ADR 0048
+/// decision 9): the plan's `auto` is not `off`, the task is in `review.rework_pending` for a
+/// `commands` or integration command failure or timeout, and the remote main is no longer the
+/// main that failing verdict recorded.
+fn auto_reverify_cause(
+    store: &Store,
+    task_id: &str,
+) -> Result<Option<(model::TaskFile, String)>, Error> {
+    let loaded = store.load_task(task_id)?;
+    if loaded.changed_outside_arc {
+        return Ok(None);
+    }
+    let task = loaded.item;
+    if task.state != model::TaskState::Review || task.phase != "rework_pending" {
+        return Ok(None);
+    }
+    let plan = store.load_plan(&task.plan)?;
+    if plan.changed_outside_arc || plan.item.auto == "off" {
+        return Ok(None);
+    }
+    let Some(recorded_main) = recorded_failure_main(store, &task)? else {
+        return Ok(None);
+    };
+    let (remote, main_branch) = store.repository_names()?;
+    let Some(main_sha) = ls_remote_branch(store.repo(), &remote, &main_branch)? else {
+        return Ok(None);
+    };
+    if main_sha == recorded_main {
+        return Ok(None);
+    }
+    Ok(Some((task, main_sha)))
+}
+
+/// The main sha the failing verdict of `task`'s current attempt recorded, when the failure is
+/// one a moved main can fix (ADR 0048 decision 9): a `commands` or integration stage that
+/// failed with `command_failed` or `timeout`. `None` for every other reason, and for a reason
+/// no verdict records (a moved branch, a reject note, a delivery failure).
+fn recorded_failure_main(store: &Store, task: &model::TaskFile) -> Result<Option<String>, Error> {
+    let label = attempt_label(task)?;
+    let dir = attempt_dir(store.repo(), &task.id, &label).map_err(gate_error)?;
+    let Ok(text) = fs::read_to_string(dir.join(REVIEW_FILE)) else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Ok(None);
+    };
+    let stage = value
+        .get("stage")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let fixable = [Stage::Commands.as_str(), Stage::Integration.as_str()].contains(&stage)
+        && AUTO_REVERIFY_REASONS.contains(&reason);
+    if !fixable {
+        return Ok(None);
+    }
+    let Some(verdict_file) = value.get("verdict").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Ok(verdict) = Verdict::read(Path::new(verdict_file)) else {
+        return Ok(None);
+    };
+    if verdict.is_pass() || verdict.stage.as_str() != stage {
+        return Ok(None);
+    }
+    if Some(verdict.sha.as_str()) != task.head_sha.as_deref() {
+        return Ok(None);
+    }
+    // A verification verdict records `main_sha`; an integration verdict records the main it
+    // merged onto as `base_sha` (decision 10).
+    let main = verdict
+        .main_sha
+        .as_deref()
+        .filter(|sha| !sha.is_empty())
+        .or_else(|| verdict.base_sha.as_deref().filter(|sha| !sha.is_empty()));
+    Ok(main.map(str::to_owned))
+}
+
+/// `runs/<task>/auto_reverify.json`.
+fn auto_reverify_path(store: &Store, task: &str) -> PathBuf {
+    store
+        .root()
+        .join("runs")
+        .join(task)
+        .join(AUTO_REVERIFY_FILE)
+}
+
+fn read_auto_reverify(store: &Store, task: &str) -> AutoReverifyRecord {
+    fs::read_to_string(auto_reverify_path(store, task))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_auto_reverify(
+    store: &Store,
+    task: &str,
+    record: &AutoReverifyRecord,
+) -> Result<(), Error> {
+    let path = auto_reverify_path(store, task);
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Failed(format!("{} has no directory", path.display())))?;
+    fs::create_dir_all(dir)
+        .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
+    let text = serde_json::to_string_pretty(record)
+        .map_err(|error| Error::Failed(format!("cannot encode {}: {error}", path.display())))?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, format!("{text}\n"))
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", temporary.display())))?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
 }
 
 fn failed_stage(
@@ -1673,6 +1943,16 @@ pub fn rework_reason(store: &Store, task: &model::TaskFile) -> Option<String> {
         && !text.is_empty()
     {
         parts.push(text.to_owned());
+    }
+    // The automatic reverify count: the task stays in `rework_pending` and `show` says why
+    // (ADR 0048 decision 9). The text belongs to the attempt that hit the limit.
+    if task.phase == "rework_pending" {
+        let record = read_auto_reverify(store, &task.id);
+        if let Some(limit) = record.limit
+            && Some(limit.head_sha.as_str()) == task.head_sha.as_deref()
+        {
+            parts.push(limit.text);
+        }
     }
     (!parts.is_empty()).then(|| parts.join("; "))
 }
