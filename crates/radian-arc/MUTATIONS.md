@@ -44,6 +44,7 @@ copy.
 | M32 | drop the recorded-pair guard in `review::auto_reverify` | `run::the_same_head_and_main_are_reverified_automatically_once` | ✅ failed |
 | M33 | drop the count (`len >= u32::MAX` instead of `len >= max_auto_reverify`) | `run::max_auto_reverify_stops_the_step_and_says_why` | ✅ failed |
 | M34 | also reverify a review failure (`stage == "review"` passes the fixable check) | `run::only_a_command_failure_of_an_auto_plan_is_reverified` | ✅ failed |
+| M35 | drop the "remote main moved" condition (any failed `commands`/integration stage qualifies) | `run::a_command_failure_is_not_reverified_while_main_stands_still` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -98,9 +99,9 @@ proves main keeps every commit the other writer pushed, but a `--force` push is 
 distinguishable there (the only non-fast-forward now needs a race between `merge_ready` and
 the push). The code still never forces.
 
-M32–M34 were run against `fd0651da`, each from a copy under `.radian/mut-auto/` restored
-with `cp` and compared with `cmp`. The ordinary repeat of an automatic reverify is already
-stopped by its own condition (the new failing verdict records the main it ran against, so
-"main moved since the failing verdict" is false); M32 therefore drives the state a pass
-leaves when it dies between recording the `(head, main)` pair and claiming the attempt, which
-is the state the pair guard alone protects.
+M32–M35 were run against `fd0651da` (M32–M34) and `f00e4c6c` (M35), each from a copy
+under `.radian/mut-auto/` restored with `cp` and compared with `cmp`. The ordinary repeat of
+an automatic reverify is already stopped by its own condition (the new failing verdict
+records the main it ran against, so "main moved since the failing verdict" is false); M32
+therefore drives the state a pass leaves when it dies between recording the `(head, main)`
+pair and claiming the attempt, which is the state the pair guard alone protects.
