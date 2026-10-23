@@ -709,6 +709,111 @@ fn a_retry_time_is_printed_by_list_and_show() {
 }
 
 #[test]
+fn list_hides_finished_work_unless_all_and_json_is_unfiltered() {
+    let scratch = fixture("list-filter");
+    init(&scratch);
+    let store = radian_arc::store::Store::at(scratch.repo());
+    let merge = |task: &str| {
+        store
+            .change_task(task, |task| {
+                task.state = radian_arc::store::model::TaskState::Done;
+                task.phase = "merged".to_owned();
+                Ok(())
+            })
+            .expect("the task is merged");
+    };
+
+    let finished = add_plan(&scratch, "finished");
+    let finished_one = add_task(&scratch, &finished, "one", "the brief\n");
+    let finished_two = add_task(&scratch, &finished, "two", "the brief\n");
+    merge(&finished_one);
+    merge(&finished_two);
+
+    let mixed = add_plan(&scratch, "mixed");
+    let merged = add_task(&scratch, &mixed, "one", "the brief\n");
+    let ready = add_task(&scratch, &mixed, "two", "the brief\n");
+    merge(&merged);
+
+    let default = run(&scratch, &["arc", "list"], "");
+    assert_eq!(default.code, Some(0), "{default:?}");
+    assert!(
+        !default.out.contains(&finished),
+        "the finished plan is hidden: {}",
+        default.out
+    );
+    assert!(
+        !default.out.contains(&merged),
+        "the merged task is hidden: {}",
+        default.out
+    );
+    assert!(default.out.contains(&ready), "{}", default.out);
+    assert!(
+        default
+            .out
+            .contains(&format!("{mixed}  draft  auto: off  1/2 merged  a plan")),
+        "the shown plan counts what it hid: {}",
+        default.out
+    );
+    assert!(
+        default
+            .out
+            .ends_with("1 finished plan and 3 merged tasks hidden (--all to show)\n"),
+        "{}",
+        default.out
+    );
+
+    let all = run(&scratch, &["arc", "list", "--all"], "");
+    assert_eq!(all.code, Some(0), "{all:?}");
+    for id in [&finished, &finished_one, &finished_two, &merged, &ready] {
+        assert!(
+            all.out.contains(id.as_str()),
+            "`{id}` with --all: {}",
+            all.out
+        );
+    }
+    assert!(
+        !all.out.contains("hidden"),
+        "--all hides nothing: {}",
+        all.out
+    );
+
+    let plain = run(&scratch, &["arc", "list", "--json"], "");
+    let with_all = run(&scratch, &["arc", "list", "--json", "--all"], "");
+    assert_eq!(plain.code, Some(0), "{plain:?}");
+    assert_eq!(
+        plain.out, with_all.out,
+        "`--all` changes nothing about the JSON"
+    );
+    let value: serde_json::Value = serde_json::from_str(&plain.out).expect("list --json parses");
+    let plans = value.as_array().expect("an array of plans");
+    assert_eq!(plans.len(), 2, "every plan is in the JSON: {value}");
+    let finished_json = plans
+        .iter()
+        .find(|plan| plan["id"] == finished.as_str())
+        .expect("the finished plan is in the JSON");
+    assert_eq!(finished_json["tasks"].as_array().unwrap().len(), 2);
+    let mixed_json = plans
+        .iter()
+        .find(|plan| plan["id"] == mixed.as_str())
+        .expect("the mixed plan is in the JSON");
+    assert_eq!(mixed_json["tasks"].as_array().unwrap().len(), 2);
+
+    let one = run(&scratch, &["arc", "list", "--plan", &finished], "");
+    assert_eq!(one.code, Some(0), "{one:?}");
+    assert!(
+        one.out
+            .contains(&format!("{finished}  draft  auto: off  2/2 merged  a plan")),
+        "a finished plan named by --plan keeps its header: {}",
+        one.out
+    );
+    assert!(
+        one.out.ends_with("2 merged tasks hidden (--all to show)\n"),
+        "{}",
+        one.out
+    );
+}
+
+#[test]
 fn a_review_task_shows_its_rework_reason() {
     let scratch = fixture("rework-reason");
     init(&scratch);

@@ -51,8 +51,12 @@ pub enum Command {
         allow_noop: bool,
         stages: Vec<String>,
     },
-    /// `radian arc list [--plan <id>] [--json]`.
-    List { plan: Option<String>, json: bool },
+    /// `radian arc list [--plan <id>] [--all] [--json]`. `--all` does not change the JSON.
+    List {
+        plan: Option<String>,
+        all: bool,
+        json: bool,
+    },
     /// `radian arc show <id> [--json]`.
     Show { id: String, json: bool },
     /// `radian arc adopt <id>`.
@@ -97,7 +101,7 @@ pub fn run(command: Option<&Command>) -> u8 {
             allow_noop,
             stages,
         }) => add_task(plan, slug, title, after, *allow_noop, stages).map(emit),
-        Some(Command::List { plan, json }) => list(plan.as_deref(), *json).map(emit),
+        Some(Command::List { plan, all, json }) => list(plan.as_deref(), *all, *json).map(emit),
         Some(Command::Show { id, json }) => show(id, *json).map(emit),
         Some(Command::Adopt { id }) => adopt(id).map(emit),
         Some(Command::Confirm { plan }) => confirm(plan).map(emit),
@@ -253,30 +257,66 @@ fn add_task(
     Ok(format!("{id}\n"))
 }
 
-fn list(plan: Option<&str>, json: bool) -> Result<String, Error> {
+fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
     let store = open()?;
     if json {
+        // `--json` always holds every plan and every task, so `--all` changes nothing here:
+        // scripts and the MCP `list` tool read it.
         let value = list_json(&store, plan)?;
         return Ok(format!(
             "{}\n",
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_owned())
         ));
     }
-    let views = match plan {
-        Some(id) => vec![store.plan_view(id)?],
-        None => store.plans()?,
-    };
+    match plan {
+        Some(id) => Ok(list_plan_text(&store.plan_view(id)?, all)),
+        None => Ok(list_text(&store.plans()?, all)),
+    }
+}
+
+/// The text `radian arc list` prints (ADR 0048 decision 1, `list`). Unless `all`, a task in
+/// `done.merged` and a plan whose tasks are all merged are left out, and the last line counts
+/// what was left out. A plan with no tasks is shown too. Every other state, `failed.*`
+/// included, stays visible.
+pub fn list_text(views: &[PlanView], all: bool) -> String {
+    render(views, all, false)
+}
+
+/// The text `radian arc list --plan <id>` prints: the plan the user named is always shown,
+/// with an empty task list when it is finished, so the user sees that it exists. Its merged
+/// tasks follow the default filter.
+pub fn list_plan_text(view: &PlanView, all: bool) -> String {
+    render(std::slice::from_ref(view), all, true)
+}
+
+/// `named` keeps a finished plan's header line: `--plan` asked for that plan by name.
+fn render(views: &[PlanView], all: bool, named: bool) -> String {
     let mut out = String::new();
-    for view in &views {
+    let mut hidden_plans = 0usize;
+    let mut hidden_tasks = 0usize;
+    for view in views {
+        let merged = view.tasks.iter().filter(|task| is_merged(task)).count();
+        let finished = !view.tasks.is_empty() && merged == view.tasks.len();
+        if finished && !all && !named {
+            hidden_plans += 1;
+            hidden_tasks += merged;
+            continue;
+        }
         out.push_str(&format!(
-            "{}  {}  auto: {}  {}{}\n",
+            "{}  {}  auto: {}  {}/{} merged  {}{}\n",
             view.plan.item.id,
             view.plan.item.status,
             view.plan.item.auto,
+            merged,
+            view.tasks.len(),
             view.plan.item.title,
             changed_marker(view.plan.changed_outside_arc)
         ));
         for task in &view.tasks {
+            if is_merged(task) && !all {
+                hidden_tasks += 1;
+                continue;
+            }
             let retry = task
                 .item
                 .retry_at
@@ -295,10 +335,44 @@ fn list(plan: Option<&str>, json: bool) -> Result<String, Error> {
             ));
         }
     }
+    if hidden_plans > 0 || hidden_tasks > 0 {
+        out.push_str(&hidden_line(hidden_plans, hidden_tasks));
+    }
     if out.is_empty() {
         out.push_str("no plans\n");
     }
-    Ok(out)
+    out
+}
+
+/// Whether a task is `done.merged`: the one state the default `list` hides.
+fn is_merged(task: &Loaded<crate::store::model::TaskFile>) -> bool {
+    task.item.state == crate::store::model::TaskState::Done && task.item.phase == "merged"
+}
+
+/// The line that ends a filtered `list`: how many plans and tasks were left out. A zero part
+/// is omitted, and a count of one is singular.
+fn hidden_line(plans: usize, tasks: usize) -> String {
+    let plural = |n: usize, one: &str, many: &str| {
+        if n == 1 {
+            one.to_owned()
+        } else {
+            many.to_owned()
+        }
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if plans > 0 {
+        parts.push(format!(
+            "{plans} {}",
+            plural(plans, "finished plan", "finished plans")
+        ));
+    }
+    if tasks > 0 {
+        parts.push(format!(
+            "{tasks} {}",
+            plural(tasks, "merged task", "merged tasks")
+        ));
+    }
+    format!("{} hidden (--all to show)\n", parts.join(" and "))
 }
 
 fn changed_marker(changed: bool) -> &'static str {

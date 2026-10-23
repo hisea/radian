@@ -440,12 +440,15 @@ enum ArcCommand {
         command: ArcAddCommand,
     },
 
-    /// List plans, each with its tasks in order.
+    /// List plans, each with its tasks in order. Merged history is hidden unless `--all`.
     List {
         /// Only this plan's id: a 1 to 4 letter prefix, four digits, a dash and a slug.
         #[arg(long, value_name = "ID")]
         plan: Option<String>,
-        /// Print JSON.
+        /// Show every plan and every task, including finished plans and merged tasks.
+        #[arg(long)]
+        all: bool,
+        /// Print JSON. It always holds every plan and task.
         #[arg(long)]
         json: bool,
     },
@@ -709,7 +712,7 @@ impl ArcCommand {
                 allow_noop,
                 stages,
             },
-            ArcCommand::List { plan, json } => ArcRun::List { plan, json },
+            ArcCommand::List { plan, all, json } => ArcRun::List { plan, all, json },
             ArcCommand::Show { id, json } => ArcRun::Show { id, json },
             ArcCommand::Adopt { id } => ArcRun::Adopt { id },
             ArcCommand::Confirm { plan } => ArcRun::Confirm { plan },

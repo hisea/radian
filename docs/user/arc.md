@@ -107,15 +107,33 @@ Reads the brief from stdin to end of input, writes `tasks/<id>.md`, appends the 
 A task can only be added to a plan whose `status` is `draft`; a confirmed plan exits `3`.
 An `--after` id must name a task of the same plan or a task whose state is `done`; anything else exits `3`.
 
-## `radian arc list [--plan <ID>] [--json]`
+## `radian arc list [--plan <ID>] [--all] [--json]`
 
 Lists plans, each with its tasks in the plan's order.
+Each plan's header line shows its id, its `status`, its `auto` level, its progress as `<merged>/<tasks> merged`, and its title.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
+
+By default the finished work is left out, so the work in progress is what you see:
+
+- every task in `done.merged` is left out; a plan that is shown still counts those tasks in its `<merged>/<tasks> merged` header;
+- a plan whose tasks are all `done.merged` (a finished plan) is left out too; a plan with no tasks is always shown.
+
+Every other state is shown, `failed.*` included: a failed task needs attention.
+
+When the default left something out, the last line counts it:
+
+```text
+3 finished plans and 12 merged tasks hidden (--all to show)
+```
+
+The count covers every plan and every merged task that was not printed. A part that is `0` is left out of the line, and a count of `1` is singular: `1 finished plan and 1 merged task hidden (--all to show)`, or `2 merged tasks hidden (--all to show)` when no whole plan was left out.
+When everything is hidden, that line is the whole output. Nothing hidden means no such line.
 
 | Flag | Value | What it does |
 |---|---|---|
-| `--plan` | `ID` | Only this plan. |
-| `--json` | — | Print one JSON array instead of lines. |
+| `--plan` | `ID` | Only this plan. It follows the default filter: its merged tasks are hidden unless `--all`, and a finished plan is still printed with its header line, so you see that it exists. |
+| `--all` | — | No filter: print every plan and every task, `done.merged` history included. It takes no value. |
+| `--json` | — | Print one JSON array instead of lines. The array is never filtered: it holds every plan and every task, with or without `--all`. |
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
