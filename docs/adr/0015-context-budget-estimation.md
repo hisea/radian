@@ -31,6 +31,7 @@ Host display must mark the source: `Reported` can print an exact value. `Reporte
 - `Estimated`: `projected = tokens(now)`.
 - `bytes_per_token` defaults to 4 (**ASCII only**). The host can change it. It is a coarse early-warning ruler, not an audit number.
 - With `count_reasoning` on (default off), the estimate counts the assistant `reasoning` field. The host turns it on when the route opens `reasoning_replay` (ADR 0014 R6).
+- **An image counts by pixels, never by its base64 bytes.** A `ContentPart::Image` part does not contribute to `ascii_bytes`; instead it counts `ceil(w′ × h′ ÷ 750)` tokens, where `(w′, h′)` is `(w, h)` scaled down so that the long side is at most **1568** px with the aspect ratio kept (an image already within 1568 px is not scaled). When the dimensions cannot be read from the image data, the part counts a fixed **1600**. The constants are 750, 1568 and 1600. One rule serves every provider (OpenAI's tile rule stays within 2×). The code reads only the image header (`imagesize`, no decode) and decodes only the base64 prefix that header parse needs, never the whole image. The image part's JSON (the base64 string) never reaches `ascii_bytes`; the message's other fields count as before. `RequestSize::request_bytes` stays the real byte count.
 
 **Not a real tokenizer**: the code introduces no tokenizer and writes no exact ratio for any model. The rules above are only conservative rounding-up assumptions.
 
@@ -59,7 +60,7 @@ Host display must mark the source: `Reported` can print an exact value. `Reporte
 
 ### C6: `/context` shows the estimate by category
 
-- `/context` splits the next formal request shape by category: base system prompt, context files (ADR 0036), memory injection (ADR 0021), tool definitions, user messages in history, assistant text, reasoning (listed only with `count_reasoning` on), tool results. Each line shows estimated tokens and share. The last line is total estimate `T / B` (with window `C` when known, as `T / B (window C)`).
+- `/context` splits the next formal request shape by category: base system prompt, context files (ADR 0036), memory injection (ADR 0021), tool definitions, user messages in history, assistant text, reasoning (listed only with `count_reasoning` on), tool results, and images. The images line is the C2 pixel estimate of every image part, so the user sees how much of the estimate is images. Each line shows estimated tokens and share. The last line is total estimate `T / B` (with window `C` when known, as `T / B (window C)`).
 - Same estimate rule (C2), no tokenizer. Category sizes add first, then one `div_ceil` runs. The remainder goes to the category with the largest fraction: **category estimates sum exactly to the total estimate**.
 - Stack identity: category sum (used `T`) plus free space before auto-compact plus reserve buffer equals the window. Free space is threshold `B` minus used (0 when over budget). Buffer is window minus `B` (the gap from output reserve and input limit). `B` is the auto-compaction threshold (ADR 0018).
 - Report lines always carry separate labels (C1): the latest provider-reported input (`prompt_total()` of the last `ModelUsageRecorded` inside the current transcript revision; reset after `TranscriptReplaced`). With no report, the line reads "none yet". It never shares a label with an estimate.

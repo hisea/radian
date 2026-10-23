@@ -28,6 +28,7 @@ repository = "https://github.com/hisea/radian"
 
 [workspace.dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+imagesize = "0.15"
 jsonschema = { version = "0.58", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

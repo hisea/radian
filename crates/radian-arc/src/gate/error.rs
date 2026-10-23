@@ -82,4 +82,18 @@ pub enum GateError {
     /// A profile lists the same stage twice.
     #[error("stage {0} is listed twice")]
     DuplicateStage(crate::gate::Stage),
+
+    /// A profile lists a stage before the stage it depends on.
+    #[error("stage {stage} must come after {after} in a profile")]
+    StageOrder {
+        /// The stage that is too early.
+        stage: crate::gate::Stage,
+        /// The stage it must follow.
+        after: crate::gate::Stage,
+    },
+
+    /// A `--watch` stop reached the gate: the stage child was killed and no verdict is
+    /// written. The next loop starts the stage again as unverified (ADR 0048 decision 13).
+    #[error("the gate was stopped")]
+    Stopped,
 }

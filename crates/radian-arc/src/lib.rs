@@ -7,9 +7,11 @@
 //!   `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`,
 //!   `reset-budget`, `merge`, `reject`.
 //! - [`gate`]: a fixed sequence of stages against one commit, the separate checkout for each
-//!   stage, the `commands` stage, verdicts, and the integration candidate.
+//!   stage, the `commands` stage, verdicts, the integration candidate, and the background
+//!   gate process a scheduling pass starts.
 //! - [`review`]: verification, the owner's approval and the merge, and reject.
-//! - [`attempt`]: one attempt's claim, wrapper child, monitor and applied result.
+//! - [`attempt`]: one attempt's claim, wrapper child, applied result, cancel and heartbeat
+//!   liveness.
 //! - [`run`]: `radian arc run`, the scheduling loop that advances every auto level.
 //! - [`work`]: `radian arc work`, the trusted wrapper around one worker attempt. It is
 //!   internal: arc runs it, a person does not.

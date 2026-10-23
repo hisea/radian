@@ -596,3 +596,147 @@ async fn the_turn_budget_overrides_the_configured_one() {
         chat.context_budget_status()
     );
 }
+
+// ---------- ADR 0015 C2: an image counts by pixels ----------
+
+/// A minimal PNG header (24 bytes: signature, IHDR, width, height) with the given
+/// dimensions, base64-encoded. `total_chars` pads the string with valid base64
+/// characters: `imagesize` reads only the header, so the rest may be anything.
+fn png_base64(width: u32, height: u32, total_chars: usize) -> String {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes.extend_from_slice(&[0, 0, 0, 0]); // CRC: the header probe does not check it
+    let mut encoded = base64_encode(&bytes);
+    while encoded.len() < total_chars {
+        encoded.push('A');
+    }
+    encoded
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[(((b0 & 0b11) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(((b1 & 0b1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(b2 & 0b111111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn image_part(data: &str) -> ContentPart {
+    ContentPart::Image {
+        mime_type: "image/png".to_owned(),
+        data: data.to_owned(),
+        annotations: None,
+        meta: None,
+    }
+}
+
+fn request_with_parts(parts: Vec<ContentPart>) -> ModelRequest {
+    ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::User {
+            content: parts,
+            meta: MessageMeta::default(),
+        }],
+        tools: Vec::new(),
+        settings: Value::Null,
+    }
+}
+
+/// A 1 MB-class PNG is counted by its pixels, not by its 1.4 MB of base64. The
+/// old byte rule put it far past a 200k window; the pixel rule keeps the whole
+/// request under 1700 tokens.
+#[test]
+fn a_megabyte_png_counts_by_pixels_not_bytes() {
+    let data = png_base64(1200, 800, 1_400_000);
+    assert!(data.len() >= 1_400_000, "the test image is megabyte-class");
+    let part = image_part(&data);
+    assert_eq!(
+        radian_core::budget::image_tokens(&part),
+        1280,
+        "ceil(1200 × 800 ÷ 750)"
+    );
+    let request = request_with_parts(vec![ContentPart::text("look at this"), part]);
+    let estimate = estimate_tokens(&request, 4);
+    assert!(
+        estimate <= 1_700,
+        "an image must not count its bytes: {estimate}"
+    );
+    // `request_bytes` is the audit number and still holds every byte.
+    let size = radian_core::budget::request_size(&request);
+    assert!(size.total_bytes() >= 1_400_000, "{size:?}");
+    assert!(size.image_bytes >= data.len() as u64, "{size:?}");
+}
+
+/// ADR 0015 C2 scaling: a 4000×3000 image becomes 1568×1176, `ceil(…/750)` = 2459.
+#[test]
+fn an_over_long_image_scales_its_long_side_to_1568() {
+    let part = image_part(&png_base64(4000, 3000, 0));
+    assert_eq!(radian_core::budget::image_tokens(&part), 2459);
+}
+
+/// An image already within 1568 px is not scaled: 200×100 is `ceil(20000/750)` = 27.
+#[test]
+fn a_small_image_counts_its_own_pixels() {
+    let part = image_part(&png_base64(200, 100, 0));
+    assert_eq!(radian_core::budget::image_tokens(&part), 27);
+}
+
+/// Unreadable data counts the fixed 1600 (ADR 0015 C2), never the base64 bytes.
+#[test]
+fn unreadable_image_data_counts_a_fixed_1600() {
+    for data in ["", "AAAA", "not base64!", "!!!!"] {
+        assert_eq!(
+            radian_core::budget::image_tokens(&image_part(data)),
+            1_600,
+            "{data:?}"
+        );
+    }
+}
+
+/// The image's base64 is removed, but the text beside it is not.
+#[test]
+fn text_around_an_image_still_counts() {
+    let image = image_part(&png_base64(200, 100, 0));
+    let without_text = estimate_tokens(&request_with_parts(vec![image.clone()]), 4);
+    let with_text = estimate_tokens(
+        &request_with_parts(vec![ContentPart::text("x".repeat(4_000)), image]),
+        4,
+    );
+    assert!(
+        with_text >= without_text + 1_000,
+        "4000 ASCII bytes must add 1000 tokens: {without_text} -> {with_text}"
+    );
+}
+
+/// A session holding a 1 MB-class image stays under a 200k budget: the projection
+/// is a little over the image's 1280 pixels, not hundreds of thousands.
+#[test]
+fn a_session_with_an_image_does_not_trigger_auto_compaction() {
+    let request = request_with_parts(vec![
+        ContentPart::text("describe"),
+        image_part(&png_base64(1200, 800, 1_400_000)),
+    ]);
+    let size = radian_core::budget::request_size(&request);
+    let report = radian_core::budget::project(&ContextBudget::new(200_000), None, size);
+    assert!(!over_budget(&report), "{report:?}");
+    assert!(report.projected_tokens < 2_000, "{report:?}");
+}

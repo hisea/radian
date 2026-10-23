@@ -51,7 +51,8 @@ Pass `--search <TEXT>` to search this workspace sessions.
 Each hit prints an id, a time, and a one line part.
 Type `/compact <note>` to summarize history now.
 Type `/compact` with no note to summarize without guidance.
-Type `/context` to show the next request size by category.
+Compaction keeps your user messages; an attached file folds to `[file: P, N lines]` and an image to `[image: W×H]` (or `[image]` when its size cannot be read).
+Type `/context` to show the next request size by category, including a separate `images` line.
 Type `/usage` to show provider usage windows.
 
 Run `radian attach <id>` to view a session read only.

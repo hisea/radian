@@ -398,6 +398,25 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
             if let Some(reason) = crate::review::rework_reason(&store, item) {
                 field(&mut out, "rework_reason", &reason);
             }
+            if let Some((path, verdict)) = crate::review::latest_review_verdict(&store, &item.id) {
+                field(&mut out, "review_verdict", &path.display().to_string());
+                if let Some(review) = &verdict.review {
+                    field(&mut out, "review_summary", &review.summary);
+                    field(&mut out, "review_blocking", &joined(&review.blocking));
+                    field(&mut out, "review_suggestions", &joined(&review.suggestions));
+                    field(&mut out, "review_verified", &joined(&review.verified));
+                }
+                field(
+                    &mut out,
+                    "review_session_ids",
+                    &joined(&verdict.review_session_ids),
+                );
+                field(
+                    &mut out,
+                    "review_cost_micros",
+                    &optional_number(verdict.review_cost_micros),
+                );
+            }
             field(
                 &mut out,
                 "changed outside arc",
@@ -677,10 +696,42 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
         Item::Plan(view) => plan_json(&view, true),
         Item::Task(task) => {
             let mut value = task_json(&task, true);
+            let review = crate::review::latest_review_verdict(store, &task.item.id);
             if let Some(object) = value.as_object_mut() {
                 object.insert(
                     "rework_reason".to_owned(),
                     json!(crate::review::rework_reason(store, &task.item)),
+                );
+                // The newest review verdict's findings (ADR 0048 decision 10): `review` is
+                // `null` until a review ran, and stays `null` when its output was unusable.
+                let (path, verdict) = match review {
+                    Some((path, verdict)) => (Some(path), Some(verdict)),
+                    None => (None, None),
+                };
+                object.insert(
+                    "review_verdict".to_owned(),
+                    json!(path.map(|path| path.display().to_string())),
+                );
+                object.insert(
+                    "review".to_owned(),
+                    json!(verdict.as_ref().and_then(|verdict| verdict.review.as_ref())),
+                );
+                object.insert(
+                    "review_session_ids".to_owned(),
+                    json!(
+                        verdict
+                            .as_ref()
+                            .map(|verdict| verdict.review_session_ids.clone())
+                            .unwrap_or_default()
+                    ),
+                );
+                object.insert(
+                    "review_cost_micros".to_owned(),
+                    json!(
+                        verdict
+                            .as_ref()
+                            .and_then(|verdict| verdict.review_cost_micros)
+                    ),
                 );
             }
             value

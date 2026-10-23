@@ -76,6 +76,7 @@ fn tone_of(name: &str) -> CtxTone {
         "assistant text" => CtxTone::Assistant,
         "reasoning" => CtxTone::Reasoning,
         "tool results" => CtxTone::Results,
+        "images" => CtxTone::Images,
         _ => CtxTone::System,
     }
 }
@@ -813,6 +814,7 @@ mod tests {
             ("user messages", 4_100),
             ("assistant text", 9_800),
             ("tool results", 36_100),
+            ("images", 1_300),
         ];
         ContextReport {
             provider: Some("opencode".to_owned()),
@@ -825,10 +827,10 @@ mod tests {
                     share: 0.0,
                 })
                 .collect(),
-            total_tokens: 61_300,
+            total_tokens: 62_600,
             window: Some(200_000),
             threshold: Some(180_000),
-            free_tokens: Some(118_700),
+            free_tokens: Some(117_400),
             buffer_tokens: Some(20_000),
             reported: Some(59_270),
             message_count: 58,
@@ -965,6 +967,7 @@ mod tests {
             ("user messages", CtxTone::User),
             ("assistant text", CtxTone::Assistant),
             ("tool results", CtxTone::Results),
+            ("images", CtxTone::Images),
         ];
         for (name, tone) in expected {
             assert!(
@@ -974,6 +977,18 @@ mod tests {
             assert_eq!(tone_of(name), tone, "{name}");
         }
         assert_eq!(tone_of("reasoning"), CtxTone::Reasoning);
+    }
+
+    /// The images line reaches the transcript's `/context` text (ADR 0015 C6).
+    #[test]
+    fn the_images_line_is_rendered() {
+        let report = sample_report();
+        let entry = context_entry(&report, false);
+        assert!(
+            entry.text.contains("images: 1.3K"),
+            "the images line is missing: {}",
+            entry.text
+        );
     }
 
     /// Every real source offset points at its own character in the entry's

@@ -167,6 +167,7 @@ the free space and the compaction buffer):
 | `ctx_assistant` | The assistant messages cell. |
 | `ctx_reasoning` | The thinking cell. |
 | `ctx_results` | The tool results cell. |
+| `ctx_images` | The images cell. |
 | `ctx_free` | The free space. |
 | `ctx_buffer` | The compaction buffer. |
 

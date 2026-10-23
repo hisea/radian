@@ -94,6 +94,9 @@ impl CommandRun<'_> {
             candidate_sha: candidate.candidate_sha,
             conflict_paths: candidate.conflict_paths,
             approver: None,
+            review: None,
+            review_session_ids: Vec::new(),
+            review_cost_micros: None,
         };
         verdict.write_new(&verdict_path(
             self.repository,
@@ -210,6 +213,10 @@ fn run_one(
     })?;
     #[cfg(unix)]
     let pid = child.id();
+    // A stop from `--watch` reaches this child's group, so the next loop never finds a
+    // build writing in the checkout the gate left (ADR 0048 decision 10).
+    #[cfg(unix)]
+    let mut running = super::stage::Running::track(pid);
     let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
     let (status, timed_out) = loop {
         if let Some(status) = child.try_wait().map_err(|source| GateError::Io {
@@ -218,6 +225,8 @@ fn run_one(
         })? {
             break (status, false);
         }
+        #[cfg(unix)]
+        running.stopped();
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             #[cfg(unix)]
             kill_group(pid);
@@ -232,6 +241,11 @@ fn run_one(
         std::thread::sleep(Duration::from_millis(5));
     };
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A stop killed the child: this is not a result of the stage, and no verdict may be
+    // written for it (ADR 0048 decision 13).
+    if super::stage::stop_requested() {
+        return Err(GateError::Stopped);
+    }
     let outcome = if timed_out {
         SeriesOutcome::TimedOut
     } else if status.success() {
@@ -247,7 +261,7 @@ fn run_one(
 }
 
 #[cfg(unix)]
-fn kill_group(pid: u32) {
+pub(crate) fn kill_group(pid: u32) {
     // SAFETY: `kill` is a syscall with no memory operands; a negative pid signals the
     // process group whose id is `pid`, which `process_group(0)` made the child lead.
     // A group that already exited yields ESRCH, which is ignored.

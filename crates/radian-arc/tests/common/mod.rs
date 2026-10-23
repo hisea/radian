@@ -655,10 +655,38 @@ impl Repo {
         }
     }
 
+    /// Like [`Repo::radian`], with extra environment variables that win over the isolated
+    /// defaults. A test that must change `PATH` (or another process-wide variable) sets it
+    /// here, on the child, instead of calling `std::env::set_var` in the test process.
+    pub fn radian_with_env(&self, args: &[&str], envs: &[(&str, String)]) -> Run {
+        let mut command = self.radian_command(args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let output = command.stdin(Stdio::null()).output().expect("run radian");
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
     /// Runs one `radian` command in the clone and returns the running child: a test that needs
     /// to signal the process, or to run something else while it blocks, uses this.
     pub fn spawn(&self, args: &[&str]) -> std::process::Child {
         self.radian_command(args).spawn().expect("spawn radian")
+    }
+
+    /// Like [`Repo::spawn`], in a process group of its own: a test can signal that group the
+    /// way a terminal's Ctrl-C signals the foreground job.
+    pub fn spawn_in_own_group(&self, args: &[&str]) -> std::process::Child {
+        let mut command = self.radian_command(args);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        command.spawn().expect("spawn radian")
     }
 
     /// The `radian` binary in the clone, with the environment isolated from the machine: the

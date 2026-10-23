@@ -19,8 +19,8 @@ radian arc                    open the arc TUI
 radian arc <subcommand>       run one CLI operation and exit
 ```
 
-- `radian arc` with no subcommand opens the TUI. A subcommand runs the CLI. This follows `radian` (TUI) and `radian exec` (headless). The TUI's pages are `plans`, `task` and `merge`. The plans and task pages read the plans, the tasks, the attempt verdicts and a worker's journal and write nothing; the merge page is shown disabled.
-- The CLI subcommands are `init`, `add`, `list`, `show`, `adopt`, `start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `reverify`, `run`, `mcp`, and `work`.
+- `radian arc` with no subcommand opens the TUI. A subcommand runs the CLI. This follows `radian` (TUI) and `radian exec` (headless). The TUI's pages are `plans`, `task` and `merge`; the plans and task pages read the plans, the tasks, the attempt verdicts and a worker's journal and write nothing, and the merge page is shown disabled.
+- The CLI subcommands are `init`, `add`, `list`, `show`, `adopt`, `start`, `merge`, `reject`, `auto`, `confirm`, `pause`, `reset-budget`, `cancel`, `reverify`, `run`, `mcp`, and the two internal ones a person does not run, `work` and `gate`.
 - Exit codes: 0 success; 1 error; 2 usage error; 3 the state does not allow the operation (this includes a file changed outside arc); 4 a lock is held by another process. `list` and `show` take `--json`.
 - `rad arc` is the same command through the `rad` alias.
 
@@ -67,9 +67,14 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
   tasks/<task>.md                 task fields (state, phase, after, limits) and the brief
   ledger/                         for each plan and task file: state_version and content hash;
                                   approvals; verdict sets
-  runs/<task>/attempts/<attempt>/ execution.json, result.jsonl, attempt_finished.json, stderr.log, verdicts
-  attempts/<task>/<attempt>/      host-local attempt records (decision 7)
+  runs/<task>/attempts/<attempt>/ execution.json, result.jsonl, attempt_finished.json, signal.json,
+                                  stderr.log, verdicts
+  runs/<task>/gate.json            the last background gate's outcome, for the next pass
+  runs/<task>/gate.log             the output of the background gate process
+  attempts/<task>/<attempt>/      host-local attempt records (decision 7): start.json, identity.json,
+                                  status.json, heartbeat.json
   gates/<stage>/                  the separate checkout for each gate stage (decision 10)
+  gates/<task>.gate.lock          the lock one task's running gate holds (decision 10)
   state.lock                      short lock for each state change
   runner.lock                     held for the life of one scheduling loop
   worktrees/<task>/               the worker workspace for each task (decision 15)
@@ -96,7 +101,7 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
 | `doing.running` | `doing.reconciling` | arc cannot prove the state of the worker. arc does not start the task again. A person decides. |
 | `doing.running` | `todo.paused_budget` | A task or plan budget is used up. Only `reset-budget` returns the task to `ready`. |
 | `review.verifying` | `review.awaiting_human` | Each required stage passed for the same `verified_sha`. arc records `verdict_set_digest`. |
-| `review.verifying` | `review.rework_pending` | A `commands` or `mutation` stage failed. arc sends the result to the lead. |
+| `review.verifying` | `review.rework_pending` | A `commands`, `mutation` or `review` stage failed. arc sends the result to the lead. |
 | `review.awaiting_human` | `review.integrating` | The owner merges (or the plan is at auto level `merge`) with the sha equal to `verified_sha` and the digest unchanged. |
 | `review.integrating` | `review.ready_to_merge` | The integration stage passed against the current main as `base_sha`. |
 | `review.ready_to_merge` | `done.merged` | Main is still `base_sha`, main fast-forwards to `candidate_sha`, the push to `origin` succeeds, and `origin/main` contains `head_sha`. |
@@ -127,6 +132,8 @@ For each attempt, the scheduling loop runs `radian arc work`. `radian arc work` 
 5. Its last stdout line is its own `AttemptFinished` record: attempt id, token, exit code, outcome, `base_sha`, `head_sha`, dirty files, pushed, and remote sha. The radian `Result` is kept unchanged in `result.jsonl`.
 6. When the wrapper sees the worker exit without a `Result` (crash, kill), the outcome is `terminated` and the attempt fails. Only when arc cannot reach the wrapper at all does the task go to `reconciling`.
 7. It writes a host-local attempt record (token, pid and start time, session, worktree, branch, end result). After a restart, arc reads this record to reconcile. A flock on the worktree directory keeps two attempts of one task apart.
+8. **It enforces the attempt's limits itself; the scheduling loop does not wait for it.** The limits are the task's `stall_timeout_secs` and `max_wall_time_secs` (else the `[limits]` values) and `[limits] cancel_grace_secs`; arc passes them when it starts the wrapper. A stall is no new line on the result stream for `stall_timeout_secs`, and `max_wall_time_secs` is an absolute limit on top. **The wall clock starts when the wrapper starts and bounds every step of the attempt**, the wrapper's own git commands included: a fetch, a push or an `ls-remote` still running at the deadline is killed with its process group, `signal.json` gets `wall_time`, and the wrapper still writes its records. Over a limit, or when a `cancel` records its signal, the wrapper sends SIGTERM to the worker's process group, waits the grace period, sends SIGKILL, writes `signal.json` with the failure class, and still writes its `AttemptFinished`. The limits live in the wrapper, so they hold after the `run` process that started it exits or is killed.
+9. It writes a heartbeat to `attempts/<task>/<attempt>/heartbeat.json` (the worker's pid, its process start time, and the last beat time) from a thread that runs from the moment the attempt directory exists until the wrapper has written its end record. It keeps beating while the wrapper sets up the worktree, waits on the model, and checks and pushes the result. The interval is about 15 seconds and at most a third of the attempt's stall window, so the window always holds at least three beats. The heartbeat is how a later pass decides whether an attempt is alive (decision 9); no `ps` call is needed for that.
 
 The push credential is in the environment of the wrapper only. In v0 the wrapper and the model run as the same OS user, so this is not isolation.
 
@@ -138,19 +145,35 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 
 - Failure classes are infrastructure, model, verification, and cancel. Only infrastructure and model failures retry, with exponential backoff from 10 seconds to 5 minutes, within `max_attempts`. A cancel does not retry. A verification failure goes to the lead for rework; arc never writes a brief.
 - Defaults: `max_attempts` 3, `stall_timeout` 15 minutes, `max_wall_time` 2 hours, `max_cost` not set (no limit), cancel grace period 10 seconds.
-- A stall is no new line on the jsonl stream for `stall_timeout`. arc sends SIGTERM. `max_wall_time` is an absolute limit on top of it. Both record a failure class.
-- A cancel applies to one attempt: SIGTERM, a grace period, then SIGKILL. arc waits for the wrapper to confirm the end. Without that confirmation the task goes to `reconciling`.
-- arc keeps no state in memory. After a restart it takes `runner.lock`, reads each attempt in `doing/` from its host-local record, and checks the token and the process identity.
+- A stall is no new line on the jsonl stream for `stall_timeout`. The wrapper sends SIGTERM to the worker's process group, waits `cancel_grace_secs`, then sends SIGKILL. `max_wall_time` is an absolute limit on top of it, counted from the wrapper's first step and applied to every git command the wrapper runs. `signal.json` records the failure class of whichever limit was hit; the attempt result takes its class from that record. `AttemptFinished` carries the outcome, the exit code and the failure text, not a class field.
+- A cancel applies to one attempt: SIGTERM, a grace period, then SIGKILL. A command that waits for the attempt (`radian arc cancel`, `radian arc start`) takes the wrapper's `AttemptFinished`; a scheduling pass leaves it for the next pass. Without that confirmation the task goes to `reconciling`.
+- arc keeps no state in memory. After a restart it takes `runner.lock`, reads each attempt in `doing/` from its host-local record, and checks the token. Liveness comes from the wrapper's heartbeat: a last beat older than the attempt's stall window (its `stall_timeout_secs`, else `[limits] stall_timeout_secs`) means the wrapper is dead, and the retry rules apply. When both values are 0 the window is three beats, 45 seconds. A claim that has no heartbeat yet is judged by the age of its `start.json`. This path runs no `ps`: the `workspace` sandbox refuses it. `ps` is read only to compare a pid's start time before a signal is sent, so a reused pid is never signalled; when `ps` reports nothing (a sandboxed session) and a signal is due, the recorded pid alone is signalled.
 
 ### 10. Gate
 
 - A gate is a fixed profile: a list of stages. There are no conditions, no dynamic graph, and no override rules. A brief can add stages to the profile. It cannot remove a required stage.
+- **A scheduling pass starts a gate in the background and returns.** The gate is a separate `radian arc gate` process (an internal command, like `radian arc work`). It writes only its verdict files and its own run record (`runs/<task>/gate.json`); only a pass that holds `runner.lock` and `state.lock` moves the task's state, and it does so from what the gate left. A gate that a pass started keeps running after the pass, or the `run` process, exits.
+- One gate runs per task at a time. The gate process holds `<repository>/.radian/arc/gates/<task>.gate.lock` from the moment it starts: the pass opens and locks the file and the child inherits the descriptor. A pass that finds the lock held starts nothing, so one sha never has two gates. A gate that dies releases the lock; the next pass starts it again, and a verdict already written for this attempt, stage and sha is reused, so the stages resume where they stopped.
+- A gate records its outcome with the attempt it ran for: `done`, `refused` (a pre-stage check refused it: a moved branch, a stage this build does not run, a missing sha) or `error`. A pass reports a `refused` record and leaves the task in `review.verifying` with the reason recorded; it starts no new gate for that attempt until the attempt changes (`reverify` or `start` claims a new one) or the planning checks pass again (the branch came back, the profile changed). An `error` record is reported as an error, and the next pass starts the gate again. A stop reaches the stage the gate is running: the gate forwards SIGTERM to that stage's process group, waits for it, and exits without a record, so no build or session keeps writing in the checkout.
+- `integration` runs the same way: a pass takes the approval and starts the integration stage in the background, and a later pass reads its verdict, checks main, and pushes. The stage locks still queue as before: one `commands` stage at a time, one checkout per stage, the remote Verify lock. A running gate takes no `[limits] concurrency` slot.
+- The `review` stage does not queue behind the local `commands` lock. It is a read-only session that builds nothing, so it may run while another task's commands run. For one task it still runs only after that task's commands passed.
 - A verdict is never rewritten. `radian arc reverify <task>` re-runs the gate for the same commit by claiming a new attempt without a worker (decision 11): the attempt number goes up, `attempt_id` and `token` are new, `head_sha` does not change, the attempt result's class is `reverify`, and nothing is pushed. The new attempt's verdicts are its own: an earlier attempt's verdict is not reused. The remote `work/<task>` must still equal `head_sha`; when it moved, the command exits 3 with the moved-branch reason and the task stays in `review.verifying`.
 - Stages are `commands`, `mutation`, `review`, `ci`, `human`, and `integration`. Each stage runs once against the verification candidate and writes one verdict.
 - Before the verification stages run, arc fetches `[repository] remote` and builds the verification candidate in the stage's checkout. When the remote main is an ancestor of `verified_sha`, the candidate is `verified_sha` itself. Otherwise the candidate is a merge commit of `verified_sha` onto the remote main, made in that checkout and never pushed; the merge uses arc's own commit identity, so the same inputs build the same tree. A merge conflict is a failed stage: its reason is `conflict`, its verdict lists the conflicted paths, and the task goes to `review.rework_pending`. `verified_sha` stays the task's commit: the approval, the digest and the merge bind to it, and the candidate is evidence, not a new identity. A verification stage's verdict records `sha` (`verified_sha`), `main_sha` (the remote main the candidate was built on) and `candidate_sha` (the commit the stage ran on).
 - `commands` runs only the fixed commands of the profile on a separate checkout of the candidate. A brief cannot add a shell command.
 - `commands` and `mutation` are exclusive: one at a time, in separate trees, with no shared build state.
 - `review` is a read-only radian session. It is not the worker session.
+  For each verification it runs one `radian exec` in its own checkout of the verification candidate, with the candidate as the workspace and `--tools read,grep,glob`: no shell tool, no write tool, and no MCP tool is mounted. Its model route is `[gate.review] exec_args` (default: `[worker] exec_args`), and `[gate.review] timeout_secs` is its wall-time limit (default 900).
+  The prompt is built in: the task's brief, the commit list and the diff `base..verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the ADRs the brief names).
+  `[gate.review] prompt_file` is appended to it.
+  The session ends with one fenced `json` block, and arc parses the last such block: `{"summary": string, "blocking": [string], "suggestions": [string], "verified": [string]}`.
+  `summary` is 2 to 6 sentences on what the change does.
+  An empty `blocking` passes the stage; any item fails it with reason `review_blocking` and the rework reason lists the items.
+  `suggestions` and `verified` never fail the stage.
+  No parsable block, a missing field, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output` (or `review_timeout` when the last run timed out), and the verdict records both session ids.
+  The verdict records the four fields, the session ids and their cost beside the usual `sha`, `main_sha` and `candidate_sha`.
+  `review` runs after `commands` passes and before `human`; a profile that lists both must list `commands` first.
+  Its verdict is bound to `verified_sha` and is part of `verdict_set_digest`, and `radian arc reverify` runs it again.
 - `integration` merges `head_sha` onto the current main in a temporary tree and runs the key commands of the profile on the result. It records `base_sha` and `candidate_sha`. When main is still the task's `base_sha`, `candidate_sha` is `head_sha`. Otherwise it is a merge commit of `head_sha` onto main. arc never rebases a task branch, because a rebase changes the sha that the gate verified.
 - Each stage runs in its own checkout under `<repository>/.radian/arc/gates/<stage>/`.
 - The default profile is `commands` (required), then `human` (required). The radian repository profile is `commands` (required), `mutation`, `review`, then `human` (required).
@@ -181,13 +204,15 @@ The push credential is in the environment of the wrapper only. In v0 the wrapper
 ### 13. The scheduling loop
 
 - While the arc TUI is open, it holds `runner.lock` and is the scheduling loop. It advances plans at auto level `run` or `merge`. When the TUI closes, nothing advances. A read-only TUI — the plans and task pages without the merge page — holds no lock and advances nothing; `runner.lock` is what tells it that another process is the loop.
-- `radian arc run` is the same loop without a TUI. It makes every transition that it can make now, persists the state, and exits when nothing more can happen now. Waiting for a person, a retry time, or CI does not keep it running. It writes each transition line and flushes it when the transition happens, and prints the summary when the pass ends.
-- `radian arc run --watch [--interval <seconds>]` repeats that loop: after a pass that ends quiet it waits `--interval` seconds (integer, default 30, 5 to 3600) and runs another pass, until SIGINT or SIGTERM. It holds `runner.lock` for its whole life. It prints the summary only when it differs from the one it printed last. On SIGINT or SIGTERM it starts no new work, lets a running attempt finish (attempts are separate processes with their own records; the next `run` reconciles them), prints the summary, releases the lock and exits `0`.
+- `radian arc run` is the same loop without a TUI. A pass only schedules: it starts a worker or a gate, collects what a worker or a gate left, and moves the state, and it ends in seconds. Waiting for a person, a retry time, a worker or a gate does not keep it running. It writes each transition line and flushes it when the transition happens, and prints the summary when the pass ends.
+- A one-shot `run` (no `--watch`) starts its work and exits without waiting for it: a worker and a gate are separate processes with their own records. The next `run` collects their results. To keep advancing, use `--watch`.
+- `radian arc run --watch [--interval <seconds>]` repeats that loop: after a pass that ends quiet it waits `--interval` seconds (integer, default 30, 5 to 3600) and runs another pass, until SIGINT or SIGTERM. It holds `runner.lock` for its whole life. It prints the summary only when it differs from the one it printed last. A pass that returns an error prints one `radian arc: <message>` line and the loop goes on with the next pass; the lock and the state stay as they are. The loop, each wrapper and each gate are separate process groups, and a wrapper and a gate treat SIGINT exactly as SIGTERM, so a terminal Ctrl-C reaches only the loop: it starts no new worker and no new gate; a running worker goes on, and the next pass or the next `run` collects it. A running gate gets `[limits] cancel_grace_secs` and is then killed after it has stopped the stage it runs; a gate that did not finish is started again by the next loop as unverified. It prints the summary, releases the lock and exits `0`.
+- `[limits] concurrency` counts the tasks in `doing`. A running gate takes no slot.
 - The TUI and `radian arc run` use the same state machine and the same files.
 
 ### 14. v0 scope
 
-v0 runs on one host. Concurrency defaults to 1 task at a time. The v0 gate stages are `commands`, `human`, and `integration`; `mutation`, `review`, and `ci` come later. The host fields stay in the file format and are not used.
+v0 runs on one host. Concurrency defaults to 1 task at a time. The v0 gate stages are `commands`, `review`, `human`, and `integration`; `mutation` and `ci` come later. The host fields stay in the file format and are not used.
 
 v0 does not have: a resident daemon (`radian arc run --watch` is not one: it is a foreground loop that a person starts and stops); messages to a running worker (corrections go through rework); workers that read or write the backlog or hold the push credential; resume on a different host; more than one scheduling loop; a separate clone per task; automatic rework briefs written by arc; a gate language; load-based scheduling; worker kinds other than `radian exec`; plan branches or plan merges.
 
@@ -204,6 +229,12 @@ v0 does not have: a resident daemon (`radian arc run --watch` is not one: it is 
 - prints the command that registers `radian arc mcp` with the lead. It does not change the lead's configuration.
 
 The gate commands in `config.toml` are empty or the default profile. The owner writes them.
+
+The `[gate.review]` table configures the `review` stage:
+
+- `exec_args` (array of strings): the `radian exec` arguments of the review session, after the stage's own arguments. Unset, it is `[worker] exec_args`. It may not repeat an argument the stage sets (`--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p`).
+- `prompt_file` (string): a path relative to the repository root. It is appended to the built-in prompt. Unset: only the built-in prompt.
+- `timeout_secs` (integer, default 900): the wall-time limit of one review session; `0` waits forever.
 
 - **Tracking is the owner's choice.** With `--track`, git sees `config.toml`, `plans/`, and `tasks/`, and the owner commits them when the owner wants. arc never commits them. A checkout or pull that changes a plan or task file is an outside change (decision 5). The ledger, the runs, the attempt records, the locks, and the worktrees are always local.
 - The worktrees are inside the repository directory, so they get the repository's trust decision (ADR 0031) and need no extra flag.

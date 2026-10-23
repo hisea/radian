@@ -7,12 +7,13 @@ not a separate program. This crate is its control plane, in these modules:
   and the transactions that change them, behind `radian arc init`, `add`, `list`, `show`,
   `adopt`, `confirm`, `auto`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`,
   `reject` and `run`.
-- `attempt` — one attempt's life: the claim, the wrapper child, the stall and wall timers,
-  the applied result, cancel, and the reconcile step.
-- `run` — `radian arc run`, the scheduling loop: reconcile, release retries, verify, start
-  what the auto levels allow, and merge at auto level `merge`.
+- `attempt` — one attempt's life: the claim, the wrapper child, the applied result, cancel, and
+  the reconcile step.
+- `run` — `radian arc run`, the scheduling loop: reconcile, release retries, start the gate or
+  a worker, apply what they left, and merge at auto level `merge`. A pass only schedules.
 - `gate` — a fixed sequence of stages against the verification candidate: each stage's separate
-  checkout, the `commands` stage, verdicts and their digest, and the integration candidate.
+  checkout, the `commands` stage, verdicts and their digest, the integration candidate, and
+  `gate::background`, the gate as a separate process a pass starts and does not wait for.
 - `review` — verification of a pushed attempt, the owner's worker-less `reverify`, the
   owner's approval and merge, and reject.
 - `work` — `radian arc work`, the trusted wrapper around one worker attempt. It is internal:
@@ -41,6 +42,11 @@ can write changes what arc runs. On top of that the helper:
 
 The repository, global and system configuration files are otherwise unaffected.
 
+`run_with_timeout` is the wrapper's variant: the command leads its own process group, its
+pipes are drained, and a limit that runs out kills the whole group and reports `TimedOut`. The
+worker wrapper gives every git command the wall time that is left, so a fetch or a push cannot
+outlive the attempt.
+
 ## Configuration shape
 
 The `store` owns parsing `config.toml`; the `gate` owns these types, and the field names are
@@ -58,6 +64,11 @@ task_prefix = "TK"           # 1 to 4 uppercase letters; the first letters of a 
 profile = "default"
 command_timeout_secs = 3600
 
+[gate.review]
+exec_args = ["--model", "m"]  # unset: `[worker] exec_args`
+prompt_file = "review.md"      # unset: the built-in prompt only
+timeout_secs = 900
+
 [gate.profiles.default]
 stages = [{ stage = "commands", required = true }, { stage = "human", required = true }]
 commands = []        # shell command lines, run in order by the `commands` stage
@@ -65,9 +76,11 @@ key_commands = []    # shell command lines, run on the merge candidate by `integ
 ```
 
 - `Stage` is the closed set `commands`, `mutation`, `review`, `ci`, `human` plus
-  `integration`. `integration` always runs at merge and a profile cannot list it;
-  `Profile::validate` rejects it and duplicate stages. `LISTED_STAGES` is the closed list the
-  parser, `Profile::validate` and the manual's drift test read; `STAGE_NAMES` is its names.
+  `integration`. `integration` always runs at merge and a profile cannot list it.
+  `LISTED_STAGES` is the closed list the parser, `Profile::validate` and the manual's drift
+  test read; `STAGE_NAMES` is its names.
+- `Profile::validate` rejects `integration`, a duplicate stage, and `review` listed before
+  `commands` (the order ADR 0048 decision 10 fixes).
 - A profile stage's `required` defaults to `true` when the field is omitted.
 - `effective_stages(profile, extra)` adds a task's extra stages in their order. An existing
   stage merges into its profile entry and can only raise `required`: an extra stage can never
@@ -108,17 +121,32 @@ confirmed, an `after` task is not done, or `[limits] concurrency` tasks are alre
 `doing`. A task already in `review.verifying` resumes verification instead of being claimed.
 
 It then runs the current executable as `arc work --task … --attempt … --token … --remote …
---main-branch … [--resume] [--allow-noop] -- <[worker] exec_args>`, with the task body on
-stdin, and moves the task to `doing.running`. While the wrapper runs, no growth in
-`result.jsonl` for the stall timeout, or `max_wall_time_secs` in total, sends SIGTERM (then
-SIGKILL after `cancel_grace_secs`); the reason is in `signal.json`.
+--main-branch … --stall-timeout-secs … --max-wall-time-secs … --cancel-grace-secs …
+[--resume] [--allow-noop] -- <[worker] exec_args>`, with the task body on stdin, and moves the
+task to `doing.running`. The wrapper, not the caller, enforces the attempt's limits: no growth
+in `result.jsonl` for the stall timeout, or `max_wall_time_secs` in total, sends SIGTERM to
+the worker's process group (then SIGKILL after `cancel_grace_secs`); the reason is in
+`signal.json`. The limits travel with the wrapper, so they hold after the `run` process that
+started it exits or is killed. The wall clock starts at the wrapper's first step and bounds
+its own git commands too: a fetch or a push still running at the deadline is killed with its
+process group, `signal.json` gets `wall_time`, and the attempt still writes its records.
+
+The wrapper also writes `attempts/<task>/<attempt>/heartbeat.json` (worker pid, process start
+time, last beat) from the moment the attempt directory exists until both end records are
+written: a beat at most every 15 seconds and at least three inside the attempt's stall
+window, so a long worktree setup or push is not mistaken for a dead wrapper.
+
+`attempt::spawn_claim` starts the wrapper and returns; `attempt::run_claim` waits for it and
+applies the result (`start`). `radian arc run` uses `spawn_claim` and leaves the result to its
+next pass.
 
 The result is applied in one transaction, and only when its token and attempt id are the
 task's current ones. `radian arc cancel` signals the wrapper by the pid **and** start time in
 the attempt record, waits for its `AttemptFinished`, and leaves a task that never confirms in
-`doing.reconciling`. `attempt::reconcile` applies a result that is there, leaves a live
-wrapper or `start` process alone, and turns a dead attempt without a result into an
-`infrastructure` retry.
+`doing.reconciling`. `attempt::reconcile` applies a result that is there, leaves a liveness
+heartbeat younger than the attempt's stall window alone, and turns a dead attempt without a
+result into an `infrastructure` retry. It reads no process list; a claim without a heartbeat
+yet is judged by its `start.json`.
 
 `store::attempt_ops` holds the store side (`claim`, `claim_reverify`, `apply`, `release_retries`,
 `record_auto_rework`, `reset_budget`), the closed `FAILURE_CLASSES` list the manual's drift test
@@ -137,14 +165,20 @@ a pass changes nothing, in this order:
 
 1. `attempt::reconcile` for every task in `doing`;
 2. `attempt_ops::release_retries` for every due `todo.retry_wait`;
-3. `review::verify` for every task in `review.verifying`, for every plan (a plan at `auto`
-   `off` is verified too);
+3. for every task in `review.verifying` (every plan; a plan at `auto` `off` is verified too):
+   apply the record a background gate left, or start the gate with `gate::background::start`;
 4. for each confirmed plan at `auto` `run` or `merge`, claim every `todo.ready` task whose
-   `after` tasks are merged, up to `[limits] concurrency` claims, then run them on one thread
-   per claim (`attempt::run_claim`);
-5. for each confirmed plan at `auto` `merge`, `review::merge_as(store, task, Some("auto"))`
-   for every task in `review.awaiting_human`, and for a task an earlier merge left in
-   `integrating` or `ready_to_merge`.
+   `after` tasks are merged, up to `[limits] concurrency` claims, and start each wrapper with
+   `attempt::spawn_claim` without waiting for it;
+5. for each confirmed plan at `auto` `merge`, `review::merge_step` for every task in
+   `review.awaiting_human` (take the approval and start the integration gate), in
+   `review.integrating` (apply the integration verdict the gate left and push), or in
+   `review.ready_to_merge` (finish the last passing integration).
+
+The long work runs outside the pass: a worker is a separate `arc work` process and a gate is a
+separate `arc gate` process. A one-shot `run` therefore exits after starting work; `--watch`
+is what collects it. `[limits] concurrency` counts tasks in `doing`; a running gate takes no
+slot.
 
 A stage failure or a failed integration counts one automatic rework
 (`attempt_ops::record_auto_rework`); past the limit the plan's `auto` becomes `off` and the
@@ -159,7 +193,9 @@ summary with `Report::render_summary`.
 
 `run::watch` repeats the pass every `--interval` seconds (default 30, 5 to 3600) until SIGINT
 or SIGTERM; it holds `runner.lock` for the whole loop, prints the summary only when it changed,
-and lets a running attempt finish before it returns. A signal starts no new pass.
+prints a pass error as one `radian arc: <message>` line and runs the next pass, starts no new
+worker or gate once the signal arrived, leaves a running worker alone, and signals a running
+gate (`gate::background::stop`) before it returns.
 
 ## Gate checkout
 
@@ -281,11 +317,14 @@ still reads the current main.
 ## `work`: the trusted worker wrapper
 
 `radian arc work --task <id> --attempt <n> --token <token> [--resume] [--allow-noop]
-[--remote <name>] [--main-branch <name>] [-- <extra radian exec args>]` runs one attempt
+[--remote <name>] [--main-branch <name>] [--stall-timeout-secs <n>] [--max-wall-time-secs <n>]
+[--cancel-grace-secs <n>] [-- <extra radian exec args>]` runs one attempt
 of one task, the brief on stdin. It is an **internal** subcommand: arc runs it, a person does
-not. It is hidden from `--help` and has no manual page. `--remote` and `--main-branch` are
-internal too: `radian-tui` takes them from the repository's `[repository] remote` and
-`main_branch` when they are absent, and from `origin`/`main` when there is no `config.toml`.
+not. It is hidden from `--help` and has no manual page. `--remote`, `--main-branch` and the
+three limit flags are internal too: `radian-tui` takes the names from the repository's
+`[repository] remote` and `main_branch` when they are absent, and from `origin`/`main` when
+there is no `config.toml`; `--stall-timeout-secs` and `--max-wall-time-secs` of `0` mean no
+limit, while `--cancel-grace-secs` of `0` sends the worker SIGKILL right after SIGTERM.
 
 One run:
 
@@ -304,17 +343,23 @@ One run:
    nothing is pushed. Every attempt that ran ends by recording its branch tip there again.
 3. Writes the host-local attempt record `attempts/<task>/<attempt>/identity.json` (token,
    the worker's pid and process start time, the session id, the worktree, the branch, the
-   start time).
+   start time). The heartbeat writer already runs (it starts with the attempt directory, so
+   the worktree setup counts too) and picks up the worker's identity here.
 4. Runs the current executable as `radian exec -p - --session-id <task> --workspace
    <worktree> --profile workspace --yes --output jsonl` (a rework attempt passes
    `--resume <task>` instead of `--session-id`), with the caller's extra arguments and one
    hidden `--deny-read <path>` per entry of `.radian/arc/` except `worktrees/`. The worker
-   runs in its own process group, so the SIGTERM the wrapper forwards from a cancel reaches
-   it and every child that stays in the group. Its stdout is
-   `runs/<task>/attempts/<task>-<n>/result.jsonl`, its stderr `stderr.log`; the attempt
-   fields go to `execution.json`. A hidden `--worker-command <shell command>` replaces the
-   `radian exec` child for the forwarding tests; it exists only for tests and is not a user
-   input.
+   runs in its own process group, so a SIGTERM reaches it and every child that stays in the
+   group. Its stdout is `runs/<task>/attempts/<task>-<n>/result.jsonl`, its stderr
+   `stderr.log`; the attempt fields go to `execution.json`. A hidden
+   `--worker-command <shell command>` replaces the `radian exec` child for the forwarding
+   tests; it exists only for tests and is not a user input.
+   While the child runs, the wrapper enforces the limits itself: a stall, the wall time, or a
+   `cancel` records `signal.json` with its class, sends SIGTERM to the child's group and then
+   SIGKILL after the grace period. The scheduling loop does not watch the attempt. The wall
+   clock runs from `run_inner`'s first step; every wrapper git command (`crate::git::
+   run_with_timeout`) gets the time that is left, and a command still running at the deadline
+   is killed with its group, so the setup fetch and the push are bounded as well.
 5. After the child exits, reads the last `Result` line and the exit code, reads
    `head_sha`, lists uncommitted and untracked paths, and checks: the branch exists,
    `head_sha` descends from `base_sha` and from the tip the attempt started on, the worktree
@@ -346,16 +391,54 @@ plans, tasks, the ledger, the runs, the gate checkouts or another attempt's reco
 credential is in the wrapper's environment only; in v0 the wrapper and the model are the same
 OS user, so that is not isolation.
 
+## Background gates
+
+`gate::background` is the gate as a separate process (ADR 0048 decision 10). `start(store,
+task)` opens `gates/<task>.gate.lock`, locks it, clears the descriptor's `FD_CLOEXEC` and
+spawns `radian arc gate --task <task> --lock-fd <fd>`: the child inherits the lock, so no
+second gate can start for that task until it exits, and a gate killed without a record leaves
+the lock free for the next pass. The pass keeps no child handle it waits on; a thread reaps
+the child so a `--watch` loop collects no zombies.
+
+The child (`radian arc gate`) owns the lock for its life, reads the task and picks the gate by
+its phase: `review.verifying` plans the verification and runs its stages, and
+`review.integrating` runs `review::gate_integration` (the next free integration label). It
+writes only verdicts and `runs/<task>/gate.json`: `running` with its pid first, then `done`,
+`refused` or `error` with the attempt it ran for. A verification record also carries the
+`inputs` digest from `plan_verification` (config text, shas, extra stages, remote sha); a pass
+reports a `refused` record and starts no new gate while the digest is unchanged. It never
+changes the task's state; the pass holding `runner.lock` does that from the record.
+
+The gate installs its own SIGTERM handler (`gate::stage`); a stage tracks its child's group
+(`commands::run_one`, `ReviewRun::run_session`) and forwards the stop to it, SIGKILL after
+`[limits] cancel_grace_secs`. A stopped stage writes no verdict, and the gate exits without a
+completion record, so the next loop starts it again as unverified.
+
 ## Verification
 
-`radian arc start`, and `radian arc run` for every plan, run verification after a pushed
-attempt (`review::verify`): the remote's `work/<task>` must still equal the task's
-`head_sha`, then the effective stages of the profile plus the task's extra stages run in
-order, except `human`, each through the gate on the verification candidate (`candidate_for`:
-`verified_sha` when the remote main is its ancestor, else a merge of `verified_sha` onto the
-remote main). This build runs only `commands`; a profile or task that lists `mutation`,
-`review` or `ci` is refused with `stage <name> is not built yet` and the task stays in
-`review.verifying`. An existing verdict for the current attempt and stage is reused.
+`radian arc start` runs verification after a pushed attempt in the same process
+(`review::verify` = `plan_verification`, `run_stages`, `finish_verification`); a `radian arc
+run` pass starts the same stages in a background gate and calls `review::apply_verification`
+when the gate's record says `done`. Either way the remote's `work/<task>` must still equal the
+task's `head_sha`, then the effective stages of the profile plus the task's extra stages run
+in order, except `human`, each through the gate on the verification candidate
+(`candidate_for`: `verified_sha` when the remote main is its ancestor, else a merge of
+`verified_sha` onto the remote main). This build runs `commands` and `review`; a profile or
+task that lists `mutation` or `ci` is refused with `stage <name> is not built yet` and the
+task stays in `review.verifying`. An existing verdict for the current attempt and stage is
+reused, so a gate that died between stages resumes.
+
+`review` (`ReviewRun`) is a read-only session on the same candidate, after `commands` and
+before `human` (a profile that lists both must list `commands` first). It runs one
+`radian exec` per run in `gates/review/` with `--tools read,grep,glob`, no `--mcp-config` and
+`--no-config-mcp`, a model route from `[gate.review] exec_args` (default
+`[worker] exec_args`), and `[gate.review] timeout_secs`. The prompt is built from the brief,
+the commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The
+last fenced `json` block of the final message is parsed; an empty `blocking` list passes,
+any item fails with `review_blocking`. Unusable output (no block, a missing field, a timeout,
+a session error) runs the session once more; two unusable runs fail with `review_output`, or
+`review_timeout` when the last run timed out. The verdict records `review`,
+`review_session_ids` and `review_cost_micros`.
 
 Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
 such a failure, with reason `conflict` and the paths. When every required non-`human` stage
@@ -379,13 +462,18 @@ reverify attempt is left out of `max_attempts`, costs nothing, and is not an aut
 `radian arc merge <task>` requires `review.awaiting_human`, the remote `work/<task>` still at
 `verified_sha`, every required stage passed for that sha, and the recomputed digest equal to
 the recorded one. A changed digest returns the task to `review.verifying` with the reason,
-like a moved branch, so `run` or `start` verifies it again. It writes the owner's `human`
-pass verdict (`approver` absent, or `auto` when `merge_as` was called by `run`) and moves to
-`review.integrating`, runs `IntegrationRun` with the profile's `key_commands`, moves to
-`review.ready_to_merge`, and pushes `<candidate>:refs/heads/<main>` without force. A main
-that moved after integration, or a rejected push, makes it integrate again, at most three
-runs per command. On success the task is `done.merged` and its worktree is removed; the
-branch stays.
+like a moved branch, so `run` or `start` verifies it again. `prepare_merge` writes the owner's
+`human` pass verdict (`approver` absent, or `auto` when the loop approves) and moves to
+`review.integrating`; then `radian arc merge` runs `IntegrationRun` with the profile's
+`key_commands` and finishes the push in the same command, while `review::merge_step` starts
+the integration in a background gate and the next pass calls `finish_integration`. Either
+path moves to `review.ready_to_merge` and pushes `<candidate>:refs/heads/<main>` without
+force. A main that moved after integration, or a rejected push, makes it integrate again
+(one round per pass in the loop; at most three runs per `radian arc merge` command). On
+success the task is `done.merged` and its worktree is removed; the branch stays.
+
+`merge_step` reads `runs/<task>/gate.json` for a finished integration, and a
+`review.ready_to_merge` task finishes the newest passing integration verdict for its head.
 
 Each integration run writes its own verdict, under
 `runs/<task>/attempts/<attempt id>[.i<n>]/verdicts/integration.json`, so no verdict is ever
@@ -416,6 +504,10 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 - `checkout --detach --force` is used before `reset --hard`, so a modified tracked file from a
   previous command cannot block the prepare.
 - `0` seconds means no command timeout.
+- Reconcile decides liveness from the heartbeat's age, not from a process list: the
+  `workspace` sandbox refuses `ps`. Where a signal is due, `ps` is read to compare a pid's
+  start time (a reused pid is never signalled); without a reported start time the recorded pid
+  alone is signalled.
 - A merge that fails without conflicted paths writes reason `merge_failed: <git stderr>`; a
   merge that already contains `head_sha` yields the current main as the candidate.
 - The newest verdict per stage is what both the digest and `required_passed` count, so passing
