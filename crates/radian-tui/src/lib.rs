@@ -10,6 +10,7 @@
 extern crate self as radian_tui;
 
 pub mod app;
+pub mod arc;
 pub mod attach;
 pub mod bell;
 pub mod blocks;

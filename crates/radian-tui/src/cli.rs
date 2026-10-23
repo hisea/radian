@@ -32,6 +32,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::terminal;
 
+mod arc;
 mod attach;
 mod herdr;
 mod loop_context;
@@ -45,6 +46,7 @@ mod session;
 mod tty;
 mod ui;
 
+use arc::run_arc as run_arc_tui;
 use attach::run_attach;
 use herdr::{HerdrReporter, herdr_reporter};
 use loop_context::LoopContext;
@@ -359,8 +361,7 @@ enum RadianCommand {
     },
 
     /// The plan and task orchestrator: set arc up, and read and write plans and tasks.
-    /// A bare `radian arc` would open the arc interface, which this build does not have
-    /// yet.
+    /// A bare `radian arc` opens the read-only arc TUI; `radian arc <verb>` runs the CLI.
     Arc {
         #[command(subcommand)]
         command: Option<ArcCommand>,
@@ -739,7 +740,8 @@ enum ArcAddCommand {
 }
 
 impl ArcCommand {
-    /// The store operation, for every subcommand except the internal worker wrapper.
+    /// The store operation, for every subcommand except the internal commands a person does
+    /// not run (`work` and `gate`).
     fn into_store_command(self) -> Option<radian_arc::store::cli::Command> {
         use radian_arc::store::cli::Command as ArcRun;
         Some(match self {
@@ -835,12 +837,15 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             ) as u8)
         }
         Some(command) => {
-            let command = command.into_store_command();
-            ExitCode::from(radian_arc::store::cli::run(command.as_ref()))
+            // `work` returned `None` above: every remaining subcommand has a store operation.
+            let command = command
+                .into_store_command()
+                .expect("`work` and `gate` are dispatched above");
+            ExitCode::from(radian_arc::store::cli::run(&command))
         }
-        // A bare `radian arc`: without setup it refuses and names `radian arc init`; with
-        // setup, the TUI it would open does not exist in this build.
-        None => ExitCode::from(radian_arc::store::cli::run(None)),
+        // A bare `radian arc` opens the TUI (ADR 0048 §1). Without setup the one-line refusal
+        // names `radian arc init` before the terminal is entered.
+        None => run_arc_tui(),
     }
 }
 

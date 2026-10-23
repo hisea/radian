@@ -38,12 +38,13 @@ use radian_host::{JournalObserver, SessionObserver};
 use radian_session::EventData;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Entry, EntryKind};
 use crate::projection::TurnState;
+use crate::theme::Theme;
 
 /// The line a running session shows (ADR 0043 decision 7). `…` is one character, not three dots.
 pub const WORKING_LINE: &str = "working…";
@@ -335,6 +336,22 @@ impl AttachView {
         AttachKey::Redraw
     }
 
+    /// The theme the transcript draws with. The caller that owns a theme (`radian arc`) sets
+    /// it; a bare attach view keeps the default.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.app.theme = theme;
+    }
+
+    /// Scrolls the transcript one line at a time, up (`delta < 0`) or down.
+    pub fn scroll_lines(&mut self, delta: i32) {
+        self.app.scroll_by(delta);
+    }
+
+    /// Pins the transcript to its end (follow again).
+    pub fn follow_end(&mut self) {
+        self.app.scroll_to_bottom();
+    }
+
     /// The visible rows a page key moves: what the last frame measured.
     fn page(&self) -> usize {
         usize::from(self.app.session.view_height.max(1))
@@ -367,9 +384,16 @@ impl AttachView {
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
-        let transcript = chunks[0];
-        let width = transcript.width as usize;
-        let height = transcript.height as usize;
+        self.draw(frame, chunks[0]);
+        let footer = Line::from(Span::styled(self.footer_text(), self.app.theme.hint));
+        frame.render_widget(Paragraph::new(footer), chunks[1]);
+    }
+
+    /// Draws the transcript into `area` (no footer): the arc TUI's conversation tab puts the
+    /// same blocks inside its own frame, so an attached session and a task's journal agree.
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        let width = area.width as usize;
+        let height = area.height as usize;
         let theme = self.app.theme.clone();
         let modes = self.app.display_modes();
         // Measure first (the per-entry line counts are cached), then clamp the scroll position
@@ -384,7 +408,7 @@ impl AttachView {
             &theme,
             crate::spinner::Frame::default(),
         );
-        self.app.set_viewport(transcript.height, total);
+        self.app.set_viewport(area.height, total);
         let (_, visible) = crate::render::visible_lines_with(
             &mut self.app.session.entries,
             modes,
@@ -394,8 +418,6 @@ impl AttachView {
             &theme,
             crate::spinner::Frame::default(),
         );
-        frame.render_widget(Paragraph::new(visible), transcript);
-        let footer = Line::from(Span::styled(self.footer_text(), self.app.theme.hint));
-        frame.render_widget(Paragraph::new(footer), chunks[1]);
+        frame.render_widget(Paragraph::new(visible), area);
     }
 }

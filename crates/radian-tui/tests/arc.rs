@@ -301,19 +301,17 @@ fn git_path(repo: &Path, path: &str) -> PathBuf {
 }
 
 #[test]
-fn a_bare_arc_says_the_tui_is_not_built_and_exits_two() {
+fn a_bare_arc_without_a_terminal_refuses_and_never_enters_the_store() {
     let scratch = fixture("bare");
     init(&scratch);
+    // The test runner's stdout is a pipe, not a tty: entering the alternate screen fails, and
+    // the refusal is the same usage-class code as `attach` without one.
     let run = run(&scratch, &["arc"], "");
     assert_eq!(run.code, Some(2), "{run:?}");
-    assert!(run.out.contains("not built yet"), "{}", run.out);
-    for subcommand in radian_arc::store::cli::SUBCOMMANDS {
-        assert!(
-            run.out.contains(subcommand),
-            "lists {subcommand}: {}",
-            run.out
-        );
-    }
+    assert!(run.err.contains("terminal"), "{run:?}");
+    // Nothing in the store changed: a bare `radian arc` writes no plan, task or lock.
+    let before = fs::read_to_string(scratch.repo().join(".radian/arc/config.toml")).unwrap();
+    assert!(before.contains("schema_version"), "{before}");
 }
 
 #[test]
