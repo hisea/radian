@@ -397,7 +397,7 @@ A plan id runs these steps in this order:
 4. the plan's `status` becomes `cancelled`.
 
 A task a gate is running for is stopped as the task form stops it.
-If a task's cancel leaves it `doing.reconciling`, the plan still becomes `cancelled`; a later `radian arc run` ends the task by the retry rules (see [Reconcile](arc-gate.md#reconcile)).
+If a task's cancel leaves it `doing.reconciling`, the plan still becomes `cancelled`; the next `radian arc run` pass ends the task at `failed.cancelled`, after the same process check the task form makes (see [Reconcile](arc-gate.md#reconcile)).
 A plan that is already `cancelled` is refused with exit `3`.
 
 `cancel` prints one `<task> <state>.<phase>` line for each task it changed, in the plan's task order, then `<plan> cancelled`:
@@ -570,7 +570,7 @@ Before its first pass, and before each pass claims a task, it checks the worker'
 
 One pass repeats until a pass changes nothing, in this order:
 
-1. reconcile every task in `doing` (see [Reconcile](arc-gate.md#reconcile)): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one;
+1. reconcile every task in `doing` (see [Reconcile](arc-gate.md#reconcile)): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one. A `doing.reconciling` task of a `cancelled` plan is ended at `failed.cancelled` after the same process check `cancel` makes;
 2. move every `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`;
 3. re-verify, by itself, a task a `commands` or integration command failure blocked, once main moved (see [A command failure and a moved main](arc-gate.md#a-command-failure-and-a-moved-main)): claim a new attempt without a worker. The two guards of that path apply, and an automatic reverify is not a retry: it does not count toward `max_attempts` or `auto_rework`;
 4. for every task in `review.verifying` (every plan, including a task that a moved branch or a changed digest sent back, and one step 3 just claimed): apply the verdicts a background gate left, or start its gate in the background;
@@ -594,6 +594,7 @@ Use `--watch` (or the arc interface, when it exists) to keep advancing.
 `run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end.
 A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, a conflict rework prints `<task> conflict with main -> todo.ready (automatic rework)`, or when the task has had `limits.max_conflict_rework` conflict reworks in a row, `<task> conflict with main -> review.rework_pending: <reason>`, an automatic reverify prints `<task> main moved (<short sha>) -> auto reverify`, or when the task used its count, `<task> main moved (<short sha>) -> auto reverify limit reached: <reason>`, and the follow-up task arc proposes when a task merges prints `<new task id> proposed (follow-ups from <task id>)` (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)).
 The limit's `<reason>` is the text `show` prints as the `rework_reason`: `the task used <n> automatic reverifies and `[limits] max_auto_reverify` is <max>`.
+A task a plan cancel left at `doing.reconciling` prints `<task> doing.reconciling -> failed.cancelled (its plan is cancelled)`.
 One line per `(head_sha, remote main)` pair is printed, so a summary that repeats every interval does not print it again.
 When a pass changes nothing, a summary of what waits on whom ends the pass:
 

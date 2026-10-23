@@ -266,3 +266,4 @@ Before `start` or `cancel` acts, and after a restart, it reconciles every task i
 Reconcile never starts a task again.
 It reads no process list; `ps` is refused inside the `workspace` sandbox and is never needed here.
 `doing.reconciling` is left for you to resolve; `radian arc cancel` moves it to `failed.cancelled` after the same process check.
+The one exception is a task of a `cancelled` plan: the plan is final, so the next `radian arc run` pass ends it at `failed.cancelled` after that same process check, and it stops counting against `[limits] concurrency`.

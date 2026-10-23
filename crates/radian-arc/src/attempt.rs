@@ -499,19 +499,7 @@ fn cancel_task(store: &Store, task_id: &str) -> Result<Canceled, Error> {
         model::TaskState::Doing if task.phase == "reconciling" => {
             // The owner resolves a reconciling task with the same process check: only the
             // process the record names is stopped.
-            if let Some((pid, start)) = wrapper_process(store, task_id, task.attempt)
-                && still_running(pid, start.as_deref())
-            {
-                let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
-                process::signal(pid, process::SIGTERM);
-                let deadline = Instant::now() + grace;
-                while Instant::now() < deadline && still_running(pid, start.as_deref()) {
-                    std::thread::sleep(POLL);
-                }
-                if still_running(pid, start.as_deref()) {
-                    process::signal(pid, process::SIGKILL);
-                }
-            }
+            stop_attempt_process(store, task_id, task.attempt)?;
             store.change_task(task_id, |task| {
                 if task.state == model::TaskState::Doing && task.phase == "reconciling" {
                     task.state = model::TaskState::Failed;
@@ -562,6 +550,65 @@ fn cancel_task(store: &Store, task_id: &str) -> Result<Canceled, Error> {
             task.phase
         ))),
     }
+}
+
+/// Stops the process an attempt record names, the way the task form of `cancel` stops one:
+/// only the recorded pid and start time are signalled, SIGTERM, then SIGKILL after
+/// `[limits] cancel_grace_secs`. A record with no process, or one whose process is gone, does
+/// nothing.
+fn stop_attempt_process(store: &Store, task_id: &str, attempt: u32) -> Result<(), Error> {
+    let Some((pid, start)) = wrapper_process(store, task_id, attempt) else {
+        return Ok(());
+    };
+    if !still_running(pid, start.as_deref()) {
+        return Ok(());
+    }
+    let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
+    process::signal(pid, process::SIGTERM);
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline && still_running(pid, start.as_deref()) {
+        std::thread::sleep(POLL);
+    }
+    if still_running(pid, start.as_deref()) {
+        process::signal(pid, process::SIGKILL);
+    }
+    Ok(())
+}
+
+/// The scheduling pass's step for a cancelled plan (ADR 0048 decisions 3 and 9): ends every
+/// `doing.reconciling` task of a cancelled plan at `failed.cancelled`, after the process check
+/// the task form makes. The plan is final, so the pass does not wait for the owner; without
+/// this the task would stay in `doing` and count against `[limits] concurrency` for good.
+///
+/// Returns the tasks it ended, in id order. A task file that changed outside arc, and a task
+/// of a plan that is not cancelled, are left alone.
+pub fn end_reconciling_of_cancelled_plans(store: &Store) -> Result<Vec<String>, Error> {
+    let mut ended = Vec::new();
+    for id in store.task_ids()? {
+        let loaded = store.load_task(&id)?;
+        if loaded.changed_outside_arc
+            || loaded.item.state != model::TaskState::Doing
+            || loaded.item.phase != "reconciling"
+            || !store.load_plan(&loaded.item.plan)?.item.is_cancelled()
+        {
+            continue;
+        }
+        stop_attempt_process(store, &id, loaded.item.attempt)?;
+        let mut changed = false;
+        store.change_task(&id, |task| {
+            if task.state == model::TaskState::Doing && task.phase == "reconciling" {
+                task.state = model::TaskState::Failed;
+                task.phase = "cancelled".to_owned();
+                task.retry_at = None;
+                changed = true;
+            }
+            Ok(())
+        })?;
+        if changed {
+            ended.push(id);
+        }
+    }
+    Ok(ended)
 }
 
 /// Whether a gate is running for the task: its record is `started` or `running`.

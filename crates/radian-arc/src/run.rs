@@ -5,7 +5,9 @@
 //! pass and the next pass reads what it left (ADR 0048 decision 13). A pass, repeated until
 //! one changes nothing:
 //!
-//! 1. reconcile every task in `doing` (apply a result that is there, leave a live attempt);
+//! 1. reconcile every task in `doing` (apply a result that is there, leave a live attempt),
+//!    and end every `doing.reconciling` task a plan cancel left behind at
+//!    `failed.cancelled` (its plan is final);
 //! 2. release every retry whose `retry_at` has passed;
 //! 3. re-verify, without a worker, every task a `commands` or integration command failure
 //!    blocked, once the remote main moved (ADR 0048 decision 9);
@@ -275,6 +277,16 @@ fn one_pass(
     // 1. Doing: apply a finished attempt, leave a live one alone.
     for applied in crate::attempt::reconcile(store)? {
         transitions.push(format!("reconciled: {}", applied.line()));
+        changed = true;
+    }
+
+    // 1b. A task a plan cancel left at `doing.reconciling` stays in `doing` otherwise, and
+    // counts against the concurrency limit for good. The plan is final, so the pass ends the
+    // task instead of waiting for the owner (ADR 0048 decisions 3 and 9).
+    for id in crate::attempt::end_reconciling_of_cancelled_plans(store)? {
+        transitions.push(format!(
+            "{id} doing.reconciling -> failed.cancelled (its plan is cancelled)"
+        ));
         changed = true;
     }
 

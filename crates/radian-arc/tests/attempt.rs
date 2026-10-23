@@ -1055,6 +1055,10 @@ fn cancel_without_a_result_leaves_the_task_reconciling() {
         (canceled.state.as_str(), canceled.phase.as_str()),
         ("doing", "reconciling")
     );
+    // A plan that is not cancelled leaves the task for the owner: a pass does not end it.
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert_eq!(state(&store, task), ("doing".into(), "reconciling".into()));
     let _ = wrapper.wait();
 }
 
