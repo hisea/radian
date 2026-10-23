@@ -205,6 +205,7 @@ pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
         | Role::CtxAssistant
         | Role::CtxReasoning
         | Role::CtxResults
+        | Role::CtxImages
         | Role::CtxFree
         | Role::CtxBuffer => None,
     }

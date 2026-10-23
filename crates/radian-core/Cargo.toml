@@ -9,6 +9,7 @@ description = "Minimal headless agent runtime: turn loop, tools, hooks, steering
 
 [dependencies]
 futures-util.workspace = true
+imagesize.workspace = true
 jsonschema.workspace = true
 serde.workspace = true
 serde_json.workspace = true

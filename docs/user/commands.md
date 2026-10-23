@@ -74,6 +74,8 @@ notice, `list` prints every saved decision. See `cli.md`.
 | `/context` | `/context [all]` | Show the next request's estimated size by category, plus the reported line, the message count and the compactions. With `all`, list every context file. A pure read; works mid-turn. Applies at once. |
 | `/btw` | `/btw [question]` | Ask a side question from the current context. The question is the raw remainder of the line, so quotes survive. Nothing goes into the transcript and no tool runs. The answer streams into an overlay. With no question, reopen the last answer. Only one runs at a time; a second while one runs is refused. `esc` cancels a running question or closes the answer. Example: `/btw why does this test fail?` |
 
+The estimate counts ASCII bytes divided by 4, rounded up, plus one token per non-ASCII character. An image part is not counted by its bytes: it adds `ceil(w×h ÷ 750)` tokens after its long side is scaled down to at most 1568 px (an image already within 1568 is not scaled). When its dimensions cannot be read, it adds 1600 tokens. The `images` line is that sum.
+
 ## Goal and loop
 
 | Command | Syntax | What it does |

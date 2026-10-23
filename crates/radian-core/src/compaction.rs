@@ -710,8 +710,9 @@ pub fn user_message_budget(input_budget: Option<u64>) -> (u64, u64) {
 }
 
 /// One user message Core carries verbatim across a compaction: its text, with every attached
-/// file replaced by a `[file: P, N lines]` placeholder. It is also the shape written into the
-/// summary message's `origin`, so the list reads back exactly.
+/// file replaced by a `[file: P, N lines]` placeholder and every image by `[image: W×H]`
+/// (or `[image]`). It is also the shape written into the summary message's `origin`, so the
+/// list reads back exactly.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RetainedUserMessage {
     pub text: String,
@@ -754,16 +755,23 @@ fn retained_text(message: &Message) -> Option<String> {
     }
     let mut out = String::new();
     for part in content {
-        if let ContentPart::Text { text, .. } = part {
-            let rendered = match part.attachment_path() {
+        let rendered = match part {
+            ContentPart::Text { text, .. } => match part.attachment_path() {
                 Some(path) => format!("[file: {path}, {} lines]", text.lines().count()),
                 None => text.clone(),
-            };
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&rendered);
+            },
+            // ADR 0018: an image folds to one line, never its base64. The shape
+            // matches the file placeholder; unreadable dimensions drop the size.
+            ContentPart::Image { .. } => match budget::image_dimensions(part) {
+                Some((width, height)) => format!("[image: {width}×{height}]"),
+                None => "[image]".to_owned(),
+            },
+            _ => continue,
+        };
+        if !out.is_empty() {
+            out.push('\n');
         }
+        out.push_str(&rendered);
     }
     Some(out)
 }
@@ -816,7 +824,7 @@ fn truncate_text(text: &str, budget: u64) -> Option<String> {
 /// the ones that did not fit. The output is in chronological order.
 ///
 /// `newly_summarized` is scanned for user messages only ([`retained_text`]); an attached file
-/// becomes a `[file: P, N lines]` placeholder, never its body.
+/// becomes a `[file: P, N lines]` placeholder and an image `[image: W×H]`, never their body.
 pub fn select_user_messages(
     previous: &[RetainedUserMessage],
     newly_summarized: &[Message],
