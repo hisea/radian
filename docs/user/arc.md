@@ -157,7 +157,7 @@ The id names one plan or task. An id that names both a plan and a task is refuse
 | `--json` | — | Print one JSON object instead of fields. |
 
 The object holds the same keys as in `list --json`, plus `body`, `session_id`, `rework_reason`, and the newest review verdict's `review`, `review_verdict`, `review_session_ids` and `review_cost_micros`.
-An unset field is `null`; `session_id` is the current attempt's worker session id from its `execution.json`, and `null` when that attempt's wrapper wrote no record; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a reject note, the automatic rework limit that paused the plan, or an automatic reverify count that is used up).
+An unset field is `null`; `session_id` is the current attempt's worker session id from its `execution.json`, and `null` when that attempt's wrapper wrote no record; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a gate that died after it started, a reject note, the automatic rework limit that paused the plan, or an automatic reverify count that is used up).
 `review` is `{"summary", "blocking", "suggestions", "verified"}` from the newest `review` verdict, or `null`; each item of `blocking` and `suggestions` is an object with `text` and, when it has them, `level`, `file`, `line` and `pre_existing` (see [the review stage](arc-gate.md#the-gate-run)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none).
 For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_blocking`, `review_suggestions`, `review_verified`, `review_session_ids` and `review_cost_micros`.
 The text form prints `session_id` after `attempt_id`.
@@ -408,10 +408,12 @@ radian arc reverify <TASK>
 
 | Argument | Value | What it does |
 |---|---|---|
-| `<TASK>` | `ID` | The task id. Required. It must be `review.rework_pending` or `review.awaiting_human`. |
+| `<TASK>` | `ID` | The task id. Required. It must be `review.rework_pending`, `review.awaiting_human`, or `review.verifying` with a stuck gate. |
 
 It applies only when the task's `rework_reason`, if there is one, comes from a verification stage (`commands`, `mutation`, `review`, or `ci`).
 A reject note, a failed delivery check, a failed integration, and every other state are refused with exit `3`.
+A task in `review.verifying` is accepted when its gate is stuck: its `runs/<task>/gate.json` record names the task's current attempt with status `no_record` or `died` (see [the gate run](arc-gate.md#the-gate-run)), and no gate process holds the task's gate lock.
+Any other `review.verifying` task, including one whose gate is still running, is refused with exit `3`.
 A plan paused by the automatic rework limit does not block `reverify` when the task's own reason is a failed verification stage.
 
 A task whose `commands` or integration stage failed with `command_failed` or `timeout` is also re-verified by `radian arc run` once main moved (see [A command failure and a moved main](arc-gate.md#a-command-failure-and-a-moved-main)).
@@ -546,6 +548,7 @@ So the higher priority's task is verified, claimed, merged, and queued for a sta
 The long work runs outside the pass: a worker is a separate `radian arc work` process with its own limits and record, and a gate is a separate process with its own record.
 A stage this build does not run, or a branch that moved, is reported in the summary; the gate's refusal is recorded, and `run` starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt).
 A gate whose process exited without writing any record is reported as `<task> verify cannot run: its gate exited without a record` (or `<task> integration cannot run: …`), recorded for that attempt; no new gate starts while its inputs stay the same, and `show` prints the same text as the `rework_reason` (see [the gate run](arc-gate.md#the-gate-run)).
+A gate that wrote `running` and then died is restarted, and the death is counted: after [`limits.max_gate_deaths`](arc-files.md#configtoml) deaths for the same attempt and inputs the record becomes `died`, the summary prints `<task> verify cannot run: its gate died after it started`, `show` prints the same text as the `rework_reason`, and no gate starts while the inputs stay the same. A gate the loop stopped itself is `interrupted` instead, and the next loop starts it again without counting.
 The next pass applies a wrapper's early failure (a refused argument, a held worktree lock) the same way, so its concurrency slot is free at once (see [Reconcile](arc-gate.md#reconcile)).
 
 A one-shot `run` starts its work and exits without waiting for it; the next `run` collects the result.
@@ -582,7 +585,7 @@ A one-shot `run` prints the same line and exits `1` instead.
 On SIGINT or SIGTERM the loop starts no new worker and no new gate.
 A Ctrl-C in the terminal reaches the loop only: each worker and each gate runs in its own process group, and both treat SIGINT exactly as SIGTERM.
 A running worker is left alone: it is a separate process with its own limits and record, and the next pass (or the next `run`) collects it.
-A running gate is signalled and gets `[limits] cancel_grace_secs` before SIGKILL; the gate forwards the signal to the stage it is running (the `commands` shell or the review session), waits for it, and exits without a record; a gate that did not finish is started again by the next loop as unverified, and the verdicts it already wrote are reused, unless it exited without writing any record at all: then the next pass reports it and starts no gate while its inputs are unchanged (see [the gate run](arc-gate.md#the-gate-run)).
+A running gate is signalled and gets `[limits] cancel_grace_secs` before SIGKILL, and so is one whose record is still `started` while it holds the gate lock; the gate forwards the signal to the stage it is running (the `commands` shell or the review session), waits for it, and exits without a record; once it is gone its record becomes `interrupted`, so a gate that did not finish is started again by the next loop as unverified and counts no death, and the verdicts it already wrote are reused, unless it exited before writing any record at all: then the next pass reports it and starts no gate while its inputs are unchanged (see [the gate run](arc-gate.md#the-gate-run)).
 The loop then prints the summary, releases `runner.lock`, and exits `0`.
 
 It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or SIGTERM with `--watch`; `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.

@@ -13,7 +13,9 @@
 //!
 //! The record is `runs/<task>/gate.json`. The child writes `running` with its own pid as soon
 //! as it starts, and the outcome last, after its verdicts, so a record that says `done` means
-//! the verdicts are all there.
+//! the verdicts are all there. A gate the loop itself stopped is `interrupted`; a gate that
+//! died after it wrote `running` is counted, and `[limits] max_gate_deaths` turns it into
+//! `died` (ADR 0048 decision 10).
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -36,19 +38,64 @@ pub const GATE_LOG: &str = "gate.log";
 /// A record status: a pass wrote the inputs it started a gate with and the gate process has
 /// not written its own record yet.
 pub const STARTED: &str = "started";
+/// A record status: the gate process is running, with its pid and process start time.
+pub const RUNNING: &str = "running";
+/// A record status: the gate finished and its verdicts are all there.
+pub const DONE: &str = "done";
+/// A record status: a check before the stages refused the gate.
+pub const REFUSED: &str = "refused";
+/// A record status: the gate failed.
+pub const ERROR: &str = "error";
 /// A record status: a gate process exited without writing any record at all (a panic before
 /// its first write, a store that could not be opened).
 pub const NO_RECORD: &str = "no_record";
+/// A record status: a gate process wrote its `running` record and then died, more often than
+/// `[limits] max_gate_deaths` allows for the same attempt and inputs.
+pub const DIED: &str = "died";
+/// A record status: arc stopped the gate itself (a stop signal on the scheduling loop), so the
+/// next pass starts it again without counting a death.
+pub const INTERRUPTED: &str = "interrupted";
 /// The text a `no_record` gate is reported with: `radian arc run` prints it after the task id
 /// and `show` prints it as the `rework_reason`.
 pub const NO_RECORD_TEXT: &str = "its gate exited without a record";
+/// The text a `died` gate is reported with, the same two places.
+pub const DIED_TEXT: &str = "its gate died after it started";
+/// The text an `interrupted` record keeps.
+pub const INTERRUPTED_TEXT: &str = "arc stopped the gate";
+/// Every status a gate record can have, in one list: [`read`] refuses anything else, and the
+/// manual's drift test reads it (ADR 0048 decision 10).
+pub const STATUSES: &[&str] = &[
+    STARTED,
+    RUNNING,
+    DONE,
+    REFUSED,
+    ERROR,
+    NO_RECORD,
+    DIED,
+    INTERRUPTED,
+];
 /// Test-only (an input that exists only for tests is not in the manual): makes the gate
 /// process exit before it writes any record, the way a gate that panics before its first
 /// write does. `run.rs` sets it on the `radian arc run` process, which the gate child
 /// inherits. Never set by arc.
 pub const EXIT_WITHOUT_RECORD_ENV: &str = "RADIAN_ARC_GATE_TEST_EXIT_WITHOUT_RECORD";
+/// Test-only: makes the gate process exit right after it wrote its `running` record, the way
+/// a gate that crashes in a stage does. The record keeps `running`, so the next pass counts a
+/// death. Never set by arc.
+pub const DIE_AFTER_RUNNING_ENV: &str = "RADIAN_ARC_GATE_TEST_DIE_AFTER_RUNNING";
+/// Test-only: how long the gate process waits before its `running` record, so a test can
+/// signal the loop while only the pass's `started` record exists. Milliseconds. Never set by
+/// arc.
+pub const SLOW_START_ENV: &str = "RADIAN_ARC_GATE_TEST_SLOW_START_MS";
 /// How often [`stop`] looks at a signalled gate.
 const STOP_POLL: Duration = Duration::from_millis(100);
+/// How long [`stop`] waits for a gate that was started just before the signal to name its
+/// process: the pass writes the pid right after the spawn, and the gate writes `running` a
+/// moment later.
+const STOP_START_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long [`stop`] waits, after SIGKILL, for the gate to be gone: the record says arc
+/// stopped it only once the process is off the lock.
+const STOP_KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One gate's outcome, as a pass reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,17 +104,20 @@ pub struct Record {
     pub kind: String,
     /// The attempt id the gate wrote its verdicts under.
     pub attempt: String,
-    /// `running`, `done`, `refused` or `error`.
+    /// The record's status: one of [`STATUSES`].
     pub status: String,
-    /// The refusal or error text.
+    /// The refusal or error text, or the text a `no_record` or `died` record is reported with.
     pub text: Option<String>,
-    /// The gate process, while it is `running`.
+    /// The gate process, while the record is `running` or `started`.
     pub pid: Option<u32>,
-    /// The gate process's `ps` start time, while it is `running`.
+    /// The gate process's `ps` start time, while it is `running` or `started`.
     pub process_started_at: Option<String>,
     /// The digest of the inputs the gate saw (`plan_verification`'s `inputs`), when it could
     /// plan. A pass uses it to skip an unchanged refusal.
     pub inputs: Option<String>,
+    /// How many times a gate died after writing `running` for this attempt and these inputs
+    /// (ADR 0048 decision 10). A pass compares it with `[limits] max_gate_deaths`.
+    pub deaths: u32,
 }
 
 /// The record path for one task.
@@ -81,15 +131,19 @@ fn lock_path(repository: &Path, task: &str) -> PathBuf {
     crate::gate::gates_dir(repository).join(format!("{task}.gate.lock"))
 }
 
-/// The task's gate record, when one was written.
+/// The task's gate record, when one was written. A record whose status is not in [`STATUSES`]
+/// is not an arc record: it reads as none, and the next pass starts the gate again.
 #[must_use]
 pub fn read(store: &Store, task: &str) -> Option<Record> {
-    let text = fs::read_to_string(record_path(store, task)).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
+    let value = read_value(store, task)?;
+    let status = value.get("status")?.as_str()?;
+    if !STATUSES.contains(&status) {
+        return None;
+    }
     Some(Record {
         kind: value.get("kind")?.as_str()?.to_owned(),
         attempt: value.get("attempt")?.as_str()?.to_owned(),
-        status: value.get("status")?.as_str()?.to_owned(),
+        status: status.to_owned(),
         text: value.get("text").and_then(Value::as_str).map(str::to_owned),
         pid: value
             .get("pid")
@@ -104,7 +158,18 @@ pub fn read(store: &Store, task: &str) -> Option<Record> {
             .and_then(Value::as_str)
             .filter(|inputs| !inputs.is_empty())
             .map(str::to_owned),
+        deaths: value
+            .get("deaths")
+            .and_then(Value::as_u64)
+            .and_then(|deaths| u32::try_from(deaths).ok())
+            .unwrap_or(0),
     })
+}
+
+/// The record file as it was written, before any field is interpreted.
+fn read_value(store: &Store, task: &str) -> Option<Value> {
+    let text = fs::read_to_string(record_path(store, task)).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// Removes the record once a pass has applied it. A record left behind is harmless (the state
@@ -154,6 +219,94 @@ pub fn write_no_record(
     .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))
 }
 
+/// Records that a gate died after writing its `running` record once too often for the same
+/// attempt and the same inputs: the status [`DIED`] behaves exactly as [`NO_RECORD`] does, so
+/// a later pass compares the inputs the same way and starts no gate for the same ones (ADR
+/// 0048 decision 10).
+///
+/// # Errors
+///
+/// The record could not be written.
+pub fn write_died(
+    store: &Store,
+    task: &str,
+    kind: &str,
+    attempt: &str,
+    inputs: &str,
+    deaths: u32,
+) -> Result<(), Error> {
+    write(
+        store,
+        task,
+        &json!({
+            "kind": kind,
+            "attempt": attempt,
+            "status": DIED,
+            "text": DIED_TEXT,
+            "inputs": inputs,
+            "deaths": deaths,
+            "at": crate::store::plan_ops::utc_now(),
+        }),
+    )
+    .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))
+}
+
+/// What a pass does about a `running` record whose process is gone (ADR 0048 decision 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Death {
+    /// Nothing to count: the gate is started again as before.
+    Restart,
+    /// The gate died; it is started again with this many deaths in its record.
+    Count(u32),
+    /// It died once too often for these inputs: the record is `died` and nothing starts.
+    Stop,
+}
+
+/// Counts one death of a gate that wrote `running` and is gone. `inputs` is the digest of
+/// what the gate would read now: a death is counted only for the same inputs the gate was
+/// started with, and without a digest on both sides there is nothing to compare, so the gate
+/// is restarted as before. Also writes the `died` record when the count passes
+/// `[limits] max_gate_deaths`.
+///
+/// # Errors
+///
+/// The config or the record could not be read or written.
+pub fn count_death(
+    store: &Store,
+    task: &str,
+    kind: &str,
+    attempt: &str,
+    record: &Record,
+    inputs: Option<&str>,
+) -> Result<Death, Error> {
+    let Some(inputs) = inputs else {
+        return Ok(Death::Restart);
+    };
+    let deaths = if record.inputs.as_deref() == Some(inputs) {
+        record.deaths.saturating_add(1)
+    } else {
+        1
+    };
+    if deaths > store.config()?.limits.max_gate_deaths {
+        write_died(store, task, kind, attempt, inputs, deaths)?;
+        return Ok(Death::Stop);
+    }
+    Ok(Death::Count(deaths))
+}
+
+/// Whether the task's gate is stuck: its record names the task's current attempt with status
+/// `no_record` or `died`, and no gate process holds the task's gate lock. `radian arc
+/// reverify` accepts a `review.verifying` task only then (ADR 0048 decision 11).
+#[must_use]
+pub fn stuck(store: &Store, task: &str, attempt: &str) -> bool {
+    if running(store, task) {
+        return false;
+    }
+    read(store, task).is_some_and(|record| {
+        record.attempt == attempt && matches!(record.status.as_str(), NO_RECORD | DIED)
+    })
+}
+
 /// Whether a gate is running for this task. It looks at the lock only, never at a process:
 /// the `workspace` sandbox refuses `ps`.
 #[must_use]
@@ -200,7 +353,8 @@ pub fn lock_task(store: &Store, task: &str) -> Result<File, Error> {
 }
 
 /// What a pass starts: the kind of gate (`verify` or `integration`), the attempt it names
-/// its verdicts by, and the digest of the inputs the gate will read (ADR 0048 decision 10).
+/// its verdicts by, the digest of the inputs the gate will read, and how many times a gate
+/// already died for them (ADR 0048 decision 10).
 ///
 /// `inputs` is `None` when the pass could not plan the gate: the gate then writes its own
 /// refusal or error record, and a gate that exits without one is started again (there is no
@@ -209,6 +363,8 @@ pub struct Start {
     pub kind: &'static str,
     pub attempt: String,
     pub inputs: Option<String>,
+    /// The deaths this attempt and these inputs have behind them; the next death is one more.
+    pub deaths: u32,
 }
 
 /// Starts one background gate for `task`, unless one is already running. Returns the child's
@@ -219,10 +375,12 @@ pub struct Start {
 /// second gate for the same task: the lock is either held by the child or free because the
 /// child is gone.
 ///
-/// Before it spawns, the pass writes the inputs it started the gate with to the gate record
-/// ([`STARTED`]); the gate replaces it with `running` as its first write. The record a gate
-/// process that exits without writing anything leaves is what lets a later pass report it
-/// instead of starting it again.
+/// Before it spawns, the pass writes the inputs it started the gate with, and the deaths it
+/// already has, to the gate record ([`STARTED`]); the gate replaces the status with `running`
+/// as its first write and keeps both fields. The record a gate process that exits without
+/// writing anything leaves is what lets a later pass report it instead of starting it again.
+/// Once the child exists the pass names it in that record too, so a stop that finds only the
+/// `started` record has a process to signal.
 ///
 /// # Errors
 ///
@@ -266,20 +424,20 @@ pub fn start(store: &Store, task: &str, start: &Start) -> Result<Option<u32>, Er
         .map_err(|error| Error::Failed(format!("cannot open {}: {error}", log_path.display())))?;
 
     // The inputs this pass starts the gate with, before the process exists: a gate that exits
-    // without a record leaves the ones it was started with (ADR 0048 decision 10).
-    let started = start.inputs.as_ref().map(|inputs| {
-        json!({
-            "kind": start.kind,
-            "attempt": start.attempt,
-            "status": STARTED,
-            "inputs": inputs,
-            "started_at": crate::store::plan_ops::utc_now(),
-        })
+    // without a record leaves the ones it was started with, and a gate that dies after
+    // `running` leaves the count so far (ADR 0048 decision 10).
+    let mut started = json!({
+        "kind": start.kind,
+        "attempt": start.attempt,
+        "status": STARTED,
+        "deaths": start.deaths,
+        "started_at": crate::store::plan_ops::utc_now(),
     });
-    if let Some(record) = &started {
-        write(store, task, record)
-            .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))?;
+    if let Some(inputs) = &start.inputs {
+        started["inputs"] = json!(inputs);
     }
+    write(store, task, &started)
+        .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))?;
 
     let fd = file.as_raw_fd();
     inherit(&file, &path)?;
@@ -307,12 +465,11 @@ pub fn start(store: &Store, task: &str, start: &Start) -> Result<Option<u32>, Er
     let mut child = command.spawn().map_err(|error| {
         // The gate never ran, so the pass's record would make the next pass report a
         // no-record gate that never started.
-        if started.is_some() {
-            clear(store, task);
-        }
+        clear(store, task);
         Error::Failed(format!("cannot start `radian arc gate`: {error}"))
     })?;
     let pid = child.id();
+    remember_pid(store, task, pid);
     // The parent's copy goes now; the child's keeps the lock. A thread waits for the child so
     // a long `--watch` run does not collect zombies; the thread dies with this process, and
     // the child keeps running either way.
@@ -347,22 +504,55 @@ fn inherit(file: &File, path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Signals a running gate and gives it `grace` before SIGKILL. A `--watch` loop calls this
-/// after it stops: the gate never finishes, so the next loop starts it again as unverified.
-pub fn stop(store: &Store, task: &str, grace: Duration) {
-    let Some(record) = read(store, task) else {
+/// Names the gate process in the pass's `started` record, unless the gate has already written
+/// its own `running` record (which carries the same pid). A stop that arrives between the
+/// spawn and that write finds the process here.
+fn remember_pid(store: &Store, task: &str, pid: u32) {
+    let Some(mut value) = read_value(store, task) else {
         return;
     };
-    if record.status != "running" {
+    if value.get("status").and_then(Value::as_str) != Some(STARTED) {
+        return;
+    }
+    value["pid"] = json!(pid);
+    value["process_started_at"] = json!(crate::process::start_time(pid));
+    let _ = write(store, task, &value);
+}
+
+/// Signals the task's gate and gives it `grace` before SIGKILL, then records that arc stopped
+/// it (`interrupted`), so the next pass starts it again and counts no death (ADR 0048
+/// decision 10). A `--watch` loop calls this once it stops.
+///
+/// A gate is stopped when its record says `running`, and also when the record still says
+/// `started` and the gate lock is held: a gate started just before the signal has not written
+/// its `running` record yet, and its lock is the proof that the process is there. A gate the
+/// record no longer names as running (it finished, or it exited on its own) is left alone.
+pub fn stop(store: &Store, task: &str, grace: Duration) {
+    let Some(record) = wait_for_gate(store, task) else {
+        return;
+    };
+    let stopping = match record.status.as_str() {
+        RUNNING => true,
+        STARTED => running(store, task),
+        _ => false,
+    };
+    if !stopping {
         return;
     }
     let Some(pid) = record.pid else {
         return;
     };
     // Only the process the record names: a reused pid has another start time. Without a
-    // recorded start time (the sandbox refused `ps`) the pid is all there is.
+    // recorded start time (the sandbox refused `ps`) the pid alone is what identity there is,
+    // and it is checked rather than assumed.
     let started = record.process_started_at.unwrap_or_default();
-    let alive = || started.is_empty() || crate::process::same_process(pid, &started);
+    let alive = || {
+        if started.is_empty() {
+            crate::process::alive(pid)
+        } else {
+            crate::process::same_process(pid, &started)
+        }
+    };
     if !alive() {
         return;
     }
@@ -373,7 +563,56 @@ pub fn stop(store: &Store, task: &str, grace: Duration) {
     }
     if alive() {
         crate::process::signal(pid, crate::process::SIGKILL);
+        // The record says arc stopped the gate only once the gate is gone: while it is alive
+        // it still holds the lock, and the next loop would start nothing.
+        let deadline = Instant::now() + STOP_KILL_TIMEOUT;
+        while Instant::now() < deadline && alive() {
+            std::thread::sleep(STOP_POLL);
+        }
     }
+    write_interrupted(store, task);
+}
+
+/// The task's record once a gate process is behind it: `running`, or `started` with the gate's
+/// pid named. A gate that was started just before a stop signal gets a short while to write
+/// one of the two.
+fn wait_for_gate(store: &Store, task: &str) -> Option<Record> {
+    let deadline = Instant::now() + STOP_START_TIMEOUT;
+    loop {
+        let record = read(store, task)?;
+        if record.status == RUNNING
+            || (record.status == STARTED && record.pid.is_some() && running(store, task))
+        {
+            return Some(record);
+        }
+        if record.status != STARTED || Instant::now() >= deadline {
+            return Some(record);
+        }
+        std::thread::sleep(STOP_POLL);
+    }
+}
+
+/// Records that arc stopped the gate: `running` or `started` becomes `interrupted`, keeping
+/// the kind, the attempt and the inputs. A record the gate finished in the meantime is left
+/// as it is.
+fn write_interrupted(store: &Store, task: &str) {
+    let Some(record) = read(store, task) else {
+        return;
+    };
+    if !matches!(record.status.as_str(), RUNNING | STARTED) {
+        return;
+    }
+    let mut value = json!({
+        "kind": record.kind,
+        "attempt": record.attempt,
+        "status": INTERRUPTED,
+        "text": INTERRUPTED_TEXT,
+        "at": crate::store::plan_ops::utc_now(),
+    });
+    if let Some(inputs) = record.inputs {
+        value["inputs"] = json!(inputs);
+    }
+    let _ = write(store, task, &value);
 }
 
 // ---- the child side -------------------------------------------------------------------
@@ -394,6 +633,11 @@ pub fn run(options: Options) -> i32 {
     if std::env::var_os(EXIT_WITHOUT_RECORD_ENV).is_some() {
         eprintln!("radian arc gate: test: exiting without a record");
         return 1;
+    }
+    // Test-only (see [`SLOW_START_ENV`]): a gate that stays short of its `running` record, so
+    // a test can stop the loop while only the pass's `started` record exists.
+    if let Some(millis) = slow_start() {
+        std::thread::sleep(Duration::from_millis(millis));
     }
     // Own the descriptor: taking it keeps the lock held until this process exits; closing it
     // earlier would let another pass start a second gate.
@@ -421,6 +665,15 @@ pub fn run(options: Options) -> i32 {
             1
         }
     }
+}
+
+/// Test-only (see [`SLOW_START_ENV`]): how long the gate waits before its `running` record.
+fn slow_start() -> Option<u64> {
+    std::env::var_os(SLOW_START_ENV)?
+        .to_str()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Sets `FD_CLOEXEC` on the inherited lock descriptor: the gate holds the lock, a stage child
@@ -475,17 +728,37 @@ fn run_inner(options: &Options) -> Result<(), Error> {
     };
     // Filled in when the verification can be planned; a planning refusal has none.
     let mut inputs = String::new();
-    // While the gate runs, the record names this process, so a stop can signal it.
-    let running = json!({
+    // While the gate runs, the record names this process, so a stop can signal it. The fields
+    // the pass wrote are kept: the digest of the inputs it started the gate with and the
+    // deaths the same attempt and inputs already have (ADR 0048 decision 10).
+    let mut running = json!({
         "kind": kind,
         "attempt": label,
-        "status": "running",
+        "status": RUNNING,
         "pid": std::process::id(),
         "process_started_at": crate::process::start_time(std::process::id()),
         "started_at": crate::store::plan_ops::utc_now(),
     });
+    if let Some(written) = read_value(&store, &task.id) {
+        if let Some(inputs) = written
+            .get("inputs")
+            .and_then(Value::as_str)
+            .filter(|inputs| !inputs.is_empty())
+        {
+            running["inputs"] = json!(inputs);
+        }
+        if let Some(deaths) = written.get("deaths").and_then(Value::as_u64) {
+            running["deaths"] = json!(deaths);
+        }
+    }
     write(&store, &task.id, &running)
         .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))?;
+    // Test-only (see [`DIE_AFTER_RUNNING_ENV`]): a gate that wrote `running` and then died.
+    if std::env::var_os(DIE_AFTER_RUNNING_ENV).is_some() {
+        return Err(Error::Failed(
+            "test: dying after the running record".to_owned(),
+        ));
+    }
 
     let result = if kind == "verify" {
         match crate::review::plan_verification(&store, &task.id) {

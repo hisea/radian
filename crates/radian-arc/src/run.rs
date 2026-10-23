@@ -150,8 +150,8 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
     Ok(())
 }
 
-/// Stops the gates a watch loop leaves running: a short grace, then SIGKILL. The next loop
-/// starts a gate it did not finish again as unverified.
+/// Stops the gates a watch loop leaves running: a short grace, then SIGKILL. Each gate arc
+/// stopped records `interrupted`, so the next loop starts it again and counts no death.
 fn stop_gates(store: &Store) -> Result<(), Error> {
     let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
     for id in store.task_ids()? {
@@ -324,6 +324,8 @@ fn advance_verification(
     // A plan this pass could reuse when the unchanged refusal or no-record record lets it
     // start nothing; planning costs a fetch, so it happens only when a start is possible.
     let mut planned: Option<crate::review::Verification> = None;
+    // How many deaths this attempt and these inputs already have (ADR 0048 decision 10).
+    let mut deaths = 0;
     let record = crate::gate::background::read(store, task_id)
         .filter(|record| record.kind == "verify" && record.attempt == label);
     if let Some(record) = &record {
@@ -346,6 +348,34 @@ fn advance_verification(
                     return Ok(false);
                 }
             }
+            // A gate that wrote `running` and is gone died; arc's own stop (`interrupted`)
+            // is restarted below without counting (ADR 0048 decision 10).
+            crate::gate::background::RUNNING => {
+                if !crate::gate::background::running(store, task_id) {
+                    let planned_now = crate::review::plan_verification(store, task_id).ok();
+                    match crate::gate::background::count_death(
+                        store,
+                        task_id,
+                        "verify",
+                        &label,
+                        record,
+                        planned_now.as_ref().map(|plan| plan.inputs.as_str()),
+                    )? {
+                        crate::gate::background::Death::Stop => {
+                            transitions.note(format!(
+                                "{task_id} verify cannot run: {}",
+                                crate::gate::background::DIED_TEXT
+                            ));
+                            return Ok(false);
+                        }
+                        crate::gate::background::Death::Count(count) => {
+                            deaths = count;
+                            planned = planned_now;
+                        }
+                        crate::gate::background::Death::Restart => {}
+                    }
+                }
+            }
             "error" => {
                 crate::gate::background::clear(store, task_id);
                 return Err(Error::Failed(
@@ -359,10 +389,15 @@ fn advance_verification(
             // saw are unchanged: a repeat would rerun the same refusal (or the same missing
             // record) every interval. A new attempt, a changed config, or the branch coming
             // back changes the inputs (ADR 0048 decision 10).
-            crate::gate::background::NO_RECORD | "refused" => {
+            crate::gate::background::NO_RECORD
+            | crate::gate::background::DIED
+            | crate::gate::background::REFUSED => {
                 match crate::review::plan_verification(store, task_id) {
                     Ok(plan) if record.inputs.as_deref() == Some(plan.inputs.as_str()) => {
-                        let text = record.text.clone().unwrap_or_default();
+                        let text = record
+                            .text
+                            .clone()
+                            .unwrap_or_else(|| crate::gate::background::NO_RECORD_TEXT.to_owned());
                         transitions.note(format!("{task_id} verify cannot run: {text}"));
                         return Ok(false);
                     }
@@ -375,6 +410,9 @@ fn advance_verification(
                     Err(error) => return Err(error),
                 }
             }
+            // arc stopped the gate itself: the next pass starts it again at once and counts
+            // no death (ADR 0048 decision 10).
+            crate::gate::background::INTERRUPTED => {}
             "done" => {
                 crate::gate::background::clear(store, task_id);
                 return match crate::review::apply_verification(store, task_id) {
@@ -430,6 +468,7 @@ fn advance_verification(
             kind: "verify",
             attempt: label.clone(),
             inputs: planned.map(|plan| plan.inputs),
+            deaths,
         },
     )? {
         Some(pid) => {

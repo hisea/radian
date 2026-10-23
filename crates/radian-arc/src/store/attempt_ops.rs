@@ -442,9 +442,11 @@ pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
 ///
 /// The task must be `review.rework_pending` or `review.awaiting_human`, and a rework reason
 /// must come from a verification stage: a reject note, a delivery failure and any other
-/// reason are refused (exit 3). The claim keeps `head_sha`, gives the attempt a new number,
-/// `attempt_id` and `token`, clears the old approval, and records an attempt result whose
-/// class is [`REVERIFY_CLASS`]. No `result.jsonl` is written: no worker ran.
+/// reason are refused (exit 3). A `review.verifying` task is accepted when its gate is stuck
+/// (`no_record` or `died` for its current attempt, with no gate running). The claim keeps
+/// `head_sha`, gives the attempt a new number, `attempt_id` and `token`, clears the old
+/// approval, and records an attempt result whose class is [`REVERIFY_CLASS`]. No
+/// `result.jsonl` is written: no worker ran.
 pub fn claim_reverify(store: &Store, task_id: &str) -> Result<ReverifyClaim, Error> {
     claim_reverify_by(store, task_id, ReverifyBy::Owner)
 }
@@ -475,11 +477,19 @@ pub fn claim_reverify_by(
     let loaded = store.load_task(task_id)?;
     require_unchanged(task_id, loaded.changed_outside_arc)?;
     let mut task = loaded.item;
-    if task.state != TaskState::Review
-        || !matches!(task.phase.as_str(), "rework_pending" | "awaiting_human")
-    {
+    // A stuck gate: the task stayed in `review.verifying` because its gate left no record or
+    // died, and the owner wants it run again (ADR 0048 decisions 10 and 11).
+    let gate_stuck = task.state == TaskState::Review
+        && task.phase == "verifying"
+        && by == ReverifyBy::Owner
+        && crate::gate::background::stuck(store, task_id, &crate::review::attempt_label(&task)?);
+    let allowed = task.state == TaskState::Review
+        && (matches!(task.phase.as_str(), "rework_pending" | "awaiting_human") || gate_stuck);
+    if !allowed {
         return Err(Error::Refused(format!(
-            "task `{task_id}` is `{}.{}`; only a `review.rework_pending` or `review.awaiting_human` task is re-verified",
+            "task `{task_id}` is `{}.{}`; only a `review.rework_pending` or \
+             `review.awaiting_human` task, or a `review.verifying` one whose gate left no \
+             record or died, is re-verified",
             task.state.as_str(),
             task.phase
         )));
@@ -494,7 +504,7 @@ pub fn claim_reverify_by(
             "task `{task_id}` has no `head_sha`"
         )));
     }
-    if by == ReverifyBy::Owner {
+    if by == ReverifyBy::Owner && task.phase != "verifying" {
         reverify_reason_allowed(store, &task)?;
     }
     let number = task.attempt + 1;

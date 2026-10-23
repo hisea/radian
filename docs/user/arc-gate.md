@@ -52,16 +52,23 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   A verdict that already exists for this attempt and stage is reused instead of rerun, so a crash between stages resumes where it stopped.
 - One gate runs per task at a time.
   The gate process holds `gates/<task>.gate.lock` from the moment a pass starts it, so the pass that follows starts no second gate for the same commit.
-  A signalled or killed gate releases the lock; the next pass starts it again because it left its `running` record, and the verdicts already written are reused.
+  A signalled or killed gate releases the lock; the next pass starts it again, and the verdicts already written are reused.
   Stages of different tasks still queue on their own locks: one `commands` stage at a time, one checkout per stage, and the review stage has its own.
   The `review` stage is a read-only session, so it does not wait for another task's `commands`.
 - The gate's own output is `runs/<task>/gate.log`.
-- The gate records its outcome in `runs/<task>/gate.json` with the attempt it ran for: `done`, `refused` (a check before the stages refused: a moved branch, a stage this build does not run, no `head_sha`), or `error`.
-  A pass applies a `done` record; reports a `refused` one in the summary and starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt); and reports an `error` one as an error (exit `1` for a one-shot `run`).
+- `runs/<task>/gate.json` holds one record, with the attempt it ran for.
+  Its `status` is one of `started`, `running`, `done`, `refused`, `error`, `no_record`, `died` and `interrupted`.
+  A pass applies a `done` record; reports a `refused` one in the summary and starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt); reports an `error` one as an error (exit `1` for a one-shot `run`); and prints the text of a `no_record` or `died` one as the reason the verification cannot run.
   `radian arc show` keeps printing the recorded reason.
-- Before a pass starts a gate it writes the inputs the gate will read to that record (`status` `started`); the gate replaces them with `running`, and an integration gate is the same.
-  A gate that exits before writing any record leaves `started`: the next pass records `no_record` for that attempt with those inputs, reports it in the summary, starts no gate while they are unchanged, and does not count the pass as changed. A new `head_sha`, a new main or a changed `config.toml` allows one new start.
-  A gate that wrote `running` and then died is started again.
+- Before a pass starts a gate it writes the inputs the gate will read and how many times a gate already died for them to that record (`status` `started`), and names the gate process there once it exists; the gate replaces the status with `running`, keeps the inputs and the count, and an integration gate is the same.
+  A gate that exits before writing any record leaves `started`: the next pass records `no_record` for that attempt with those inputs, reports it in the summary as `<task> verify cannot run: its gate exited without a record`, starts no gate while they are unchanged, and does not count the pass as changed. A new `head_sha`, a new main or a changed `config.toml` allows one new start.
+- A gate that wrote `running` and then died is restarted, and the death is counted: the record's `deaths` goes up by one for that attempt and those inputs.
+  When the count would pass [`limits.max_gate_deaths`](arc-files.md#configtoml) (integer, default `2`, `0` or more), the pass starts no gate and records `died` instead, which behaves exactly like `no_record`: the summary prints `<task> verify cannot run: its gate died after it started`, `show` prints the same text as the `rework_reason`, no gate starts while the inputs are unchanged, and the pass does not count as changed.
+  A new `head_sha`, a new main or a changed `config.toml` allows one new start and begins again at 0 deaths; `0` stops at the first death, so the gate is started `1 + max_gate_deaths` times at most.
+  The count needs a digest on both sides: when the gate could not be planned, there is nothing to compare and the gate is started again as before.
+- A gate that the scheduling loop stops itself is `interrupted`, not a death.
+  On SIGINT or SIGTERM the loop stops the gate it finds (also one whose record is still `started` while it holds the gate lock), waits `[limits] cancel_grace_secs` and kills it; once the gate process is gone the record becomes `interrupted`, keeping the attempt and the inputs.
+  The next pass starts the gate again at once, reuses the verdicts already written, and counts nothing.
 - Any stage failing moves the task to `review.rework_pending`.
   The stage, its reason and the verdict path are in the task's `rework_reason` (`show` prints it).
   Main moving after a verification does not send the task back to `review.verifying` by itself; `merge` integrates onto the then-current main and runs the key commands there.

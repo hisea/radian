@@ -1878,12 +1878,34 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
         // A gate record of another kind belongs to verification.
         let record = crate::gate::background::read(store, task_id)
             .filter(|record| record.kind == "integration");
+        // How many deaths this attempt and these inputs already have (ADR 0048 decision 10).
+        let mut deaths = 0;
         if let Some(record) = &record {
             match record.status.as_str() {
-                // A start or a running gate is still the lock's business: the lock below is
-                // what decides, and a `running` record carries the integration label, not the
-                // attempt id.
-                "running" => {}
+                // A gate that wrote `running` and is gone died; arc's own stop (`interrupted`)
+                // is restarted below without counting.
+                crate::gate::background::RUNNING => {
+                    if !crate::gate::background::running(store, task_id) {
+                        let inputs = integration_inputs(store, task_id);
+                        match crate::gate::background::count_death(
+                            store,
+                            task_id,
+                            "integration",
+                            &attempt_label(&task)?,
+                            record,
+                            inputs.as_deref(),
+                        )? {
+                            crate::gate::background::Death::Stop => {
+                                return Ok(MergeStep::note(format!(
+                                    "{task_id} integration cannot run: {}",
+                                    crate::gate::background::DIED_TEXT
+                                )));
+                            }
+                            crate::gate::background::Death::Count(count) => deaths = count,
+                            crate::gate::background::Death::Restart => {}
+                        }
+                    }
+                }
                 // The pass wrote the inputs it started the integration with and the gate
                 // wrote nothing: a new start with the same inputs would only repeat it.
                 crate::gate::background::STARTED => {
@@ -1904,11 +1926,13 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                         )));
                     }
                 }
-                crate::gate::background::NO_RECORD => {
+                crate::gate::background::NO_RECORD | crate::gate::background::DIED => {
                     let current = integration_inputs(store, task_id);
                     let reported = format!(
                         "{task_id} integration cannot run: {}",
-                        crate::gate::background::NO_RECORD_TEXT
+                        record.text.clone().unwrap_or_else(|| {
+                            crate::gate::background::NO_RECORD_TEXT.to_owned()
+                        })
                     );
                     if record.attempt == attempt_label(&task)?
                         && current.as_deref() == record.inputs.as_deref()
@@ -1918,6 +1942,8 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                     // The inputs changed (a new head, a new main, a changed profile), or the
                     // record belongs to an earlier attempt: start one new gate below.
                 }
+                // arc stopped the gate itself: start it again at once, with no death counted.
+                crate::gate::background::INTERRUPTED => {}
                 _ => {
                     crate::gate::background::clear(store, task_id);
                     if record.status == "error" {
@@ -1967,6 +1993,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                 kind: "integration",
                 attempt: attempt_label(&task)?,
                 inputs: integration_inputs(store, task_id),
+                deaths,
             },
         )? {
             Some(pid) => Ok(MergeStep::line(format!(
@@ -2232,16 +2259,24 @@ pub fn rework_reason(store: &Store, task: &model::TaskFile) -> Option<String> {
     {
         parts.push(text.to_owned());
     }
-    // A gate that exited without a record: the pass that started it recorded the fact in the
-    // gate record, and `show` reports the same text `radian arc run` prints (ADR 0048
-    // decision 10).
+    // A gate that exited without a record, or one that died once too often after it wrote
+    // `running`: the pass recorded the fact in the gate record, and `show` reports the same
+    // text `radian arc run` prints (ADR 0048 decision 10).
     if parts.is_empty()
         && let Some(record) = crate::gate::background::read(store, &task.id)
         && record.kind == "verify"
-        && record.status == crate::gate::background::NO_RECORD
+        && matches!(
+            record.status.as_str(),
+            crate::gate::background::NO_RECORD | crate::gate::background::DIED
+        )
         && record.attempt == label
     {
-        parts.push(crate::gate::background::NO_RECORD_TEXT.to_owned());
+        parts.push(
+            record
+                .text
+                .clone()
+                .unwrap_or_else(|| crate::gate::background::NO_RECORD_TEXT.to_owned()),
+        );
     }
     // The automatic rework limit: the task stays in `rework_pending` and `show` says why the
     // plan stopped (ADR 0048 decision 12).

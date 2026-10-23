@@ -89,6 +89,14 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "RADIAN_ARC_GATE_TEST_EXIT_WITHOUT_RECORD",
         "read in radian-arc/src/gate/background.rs: makes the background gate exit before it writes any record, to exercise the no-record guard",
     ),
+    (
+        "RADIAN_ARC_GATE_TEST_DIE_AFTER_RUNNING",
+        "read in radian-arc/src/gate/background.rs: makes the background gate exit right after it wrote `running`, to exercise the death count and `died`",
+    ),
+    (
+        "RADIAN_ARC_GATE_TEST_SLOW_START_MS",
+        "read in radian-arc/src/gate/background.rs: milliseconds the background gate waits before its `running` record, so a test can stop it while only the pass's `started` record exists",
+    ),
 ];
 
 /// The headings whose tables list environment variables. Each heading is an anchor: a row
