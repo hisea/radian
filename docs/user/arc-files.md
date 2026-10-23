@@ -150,7 +150,7 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `ledger/tasks/<id>.json` | The same for a task. |
 | `ledger/tasks/<id>.last.md` | The task as arc last wrote it. |
 | `runs/<task>/attempts/<attempt id>/` | One attempt's output: the worker's `result.jsonl`, `stderr.log`, `execution.json`, the wrapper's `attempt_finished.json`, `signal.json` when the wrapper signalled the worker, arc's `attempt_result.json`, and `paused.json` when the automatic rework limit paused the plan. |
-| `runs/<task>/gate.json` | The background gate's outcome: `running`, then `done`, `refused` or `error`, with the attempt it ran for. |
+| `runs/<task>/gate.json` | The background gate's record: `started` while a pass has started the gate but the process has not written its own record yet, then `running`, then `done`, `refused` or `error`; `no_record` when the process exited without writing any record. It keeps the attempt it runs for and, for `started`, `refused` and `no_record`, the inputs the gate was started with. |
 | `runs/<task>/gate.log` | The background gate process's own output. |
 | `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). |
 | `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |
