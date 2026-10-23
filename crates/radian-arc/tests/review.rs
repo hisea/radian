@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use common::*;
 use radian_arc::gate::{
-    ReviewItem, Stage, Verdict, effective_stages, required_passed, verdict_set_digest,
+    ReviewItem, ReviewReport, Stage, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult,
+    effective_stages, required_passed, verdict_path, verdict_set_digest,
 };
 use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
@@ -2711,4 +2712,489 @@ fn a_review_rework_at_the_auto_rework_limit_pauses_the_plan() {
     );
     let reason = review::rework_reason(&fixture.store, &stored).expect("a reason");
     assert!(reason.contains("automatic reworks"), "{reason}");
+}
+
+// ---- the review's follow-up task (ADR 0048 decision 10) ------------------------------
+
+/// A review verdict arc never writes itself: a pass whose report lists `blocking` items. A
+/// non-empty `blocking` fails the stage, so this is the only way to reach a merge with a
+/// blocking item on record, and it is what proves the follow-up takes none of them.
+fn write_passing_review(fixture: &Fixture, head: &str, report: ReviewReport) {
+    let path = verdict_path(
+        fixture.store.repo(),
+        &fixture.task,
+        &fixture.attempt_label(),
+        Stage::Review,
+    )
+    .expect("the verdict path");
+    let at = "2026-01-01T00:00:00.000000Z".to_owned();
+    Verdict {
+        schema_version: VERDICT_SCHEMA_VERSION,
+        stage: Stage::Review,
+        sha: head.to_owned(),
+        main_sha: Some(fixture.base.clone()),
+        result: VerdictResult::Pass,
+        reason: None,
+        commands: Vec::new(),
+        started_at: at.clone(),
+        ended_at: at,
+        base_sha: None,
+        candidate_sha: Some(head.to_owned()),
+        conflict_paths: Vec::new(),
+        approver: None,
+        review: Some(report),
+        review_session_ids: vec!["hand-written".to_owned()],
+        review_cost_micros: None,
+        review_pre_existing: None,
+    }
+    .write_new(&path)
+    .expect("the review verdict is written once");
+}
+
+/// A merge whose review suggested an item: the plan gains one `todo.proposed` follow-up,
+/// `after` the merged task, whose brief lists the item and names the verdict.
+#[test]
+fn a_merge_with_review_suggestions_proposes_one_followup_task() {
+    let fixture = Fixture::new("followup");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "followup-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, fake.program()).phase,
+        "awaiting_human"
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
+    let followup = merged.followup.clone().expect("a follow-up task");
+    assert_eq!(followup.from, fixture.task);
+    let line = merged.line();
+    let lines: Vec<&str> = line.lines().collect();
+    assert!(
+        lines[0].starts_with(&format!("{} done.merged", fixture.task)),
+        "{line}"
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "{} proposed (follow-ups from {})",
+            followup.task, fixture.task
+        ),
+        "{line}"
+    );
+
+    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
+    let plan = fixture.store.load_plan(&plan_id).expect("the plan").item;
+    assert_eq!(plan.status, "confirmed", "the plan stays confirmed");
+    assert_eq!(plan.auto, "off", "the plan's auto level does not change");
+    assert_eq!(
+        plan.tasks,
+        vec![fixture.task.clone(), followup.task.clone()]
+    );
+    assert!(
+        followup.task.starts_with("TK0002-") && followup.task.ends_with("-followups"),
+        "the next id with the merged task's slug: {}",
+        followup.task
+    );
+
+    let task = fixture
+        .store
+        .load_task(&followup.task)
+        .expect("the task")
+        .item;
+    assert_eq!(
+        (task.state.as_str(), task.phase.as_str()),
+        ("todo", "proposed")
+    );
+    assert_eq!(task.plan, plan_id, "the same plan");
+    assert_eq!(
+        task.after,
+        vec![fixture.task.clone()],
+        "it waits on the merge"
+    );
+    assert_eq!(
+        task.title,
+        format!("Follow-ups from {}'s review", fixture.task)
+    );
+    assert_eq!(task.attempt, 0);
+    let (verdict_path, _) =
+        review::latest_review_verdict(&fixture.store, &fixture.task).expect("the review verdict");
+    assert!(
+        task.body.contains("[minor] feature.txt:3 a nicer name"),
+        "the item is in the brief: {}",
+        task.body
+    );
+    assert!(
+        task.body.contains(&format!(
+            "The items below are from the review of `{}`",
+            fixture.task
+        )),
+        "{}",
+        task.body
+    );
+    assert!(
+        task.body.contains(&verdict_path.display().to_string()),
+        "the verdict path is in the brief: {}",
+        task.body
+    );
+}
+
+/// The scheduling loop passes over a `todo.proposed` task, and `start` refuses it (exit 3,
+/// naming the phase).
+///
+/// Mutation: let `start_ready` claim a proposed task (and the claim accept it) → the pass
+/// moves the follow-up to `doing.starting` and this fails.
+#[test]
+fn the_loop_does_not_claim_a_proposed_task_and_start_refuses_it() {
+    let fixture = Fixture::new("followup-loop");
+    fixture.add_review_stage();
+    fixture.set_auto("run");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "followup-loop-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    fixture.verifying_with_review(&head, fake.program());
+    let followup = review::merge(&fixture.store, &fixture.task)
+        .expect("the merge runs")
+        .followup
+        .expect("a follow-up task")
+        .task;
+
+    let mut lines: Vec<String> = Vec::new();
+    let report = radian_arc::run::run(&fixture.store, &mut |line| lines.push(line.to_owned()))
+        .expect("the pass runs");
+    assert!(
+        report
+            .transitions
+            .iter()
+            .all(|line| !line.contains(&followup)),
+        "the loop claimed the proposed task: {:?}",
+        report.transitions
+    );
+    let stored = fixture.store.load_task(&followup).expect("the task").item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "proposed")
+    );
+    assert_eq!(stored.attempt, 0, "the loop claimed no attempt");
+    assert!(
+        report.waiting.iter().any(|line| line.contains(&followup)
+            && line.contains("todo.proposed")
+            && line.contains("waiting for you to confirm it")),
+        "the summary does not say it waits: {:?}",
+        report.waiting
+    );
+
+    let error = radian_arc::attempt::start(&fixture.store, &followup)
+        .expect_err("start refuses a proposal");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(
+        error.message().contains("todo.proposed"),
+        "{}",
+        error.message()
+    );
+}
+
+/// `confirm <task>` makes the task `todo.ready` and leaves the plan's `status` and `auto`
+/// alone.
+///
+/// Mutation: move the plan back to draft on a task confirm → this fails.
+#[test]
+fn confirm_makes_a_proposed_task_ready_and_leaves_the_plan_alone() {
+    let fixture = Fixture::new("followup-confirm");
+    fixture.add_review_stage();
+    fixture.set_auto("run");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "followup-confirm-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    fixture.verifying_with_review(&head, fake.program());
+    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
+    let followup = review::merge(&fixture.store, &fixture.task)
+        .expect("the merge runs")
+        .followup
+        .expect("a follow-up task")
+        .task;
+
+    let confirmed = plan_ops::confirm(&fixture.store, &followup).expect("the task is confirmed");
+    assert_eq!(confirmed.line(), format!("{followup} todo.ready"));
+    let stored = fixture.store.load_task(&followup).expect("the task").item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "ready")
+    );
+    assert_eq!(stored.attempt, 0);
+    let plan = fixture.store.load_plan(&plan_id).expect("the plan").item;
+    assert_eq!(plan.status, "confirmed");
+    assert_eq!(plan.auto, "run");
+}
+
+/// A task in any other state is refused (exit 3), and an id that names both a plan and a task
+/// is refused naming both files.
+#[test]
+fn confirm_refuses_a_task_that_is_not_proposed() {
+    let fixture = Fixture::new("followup-confirm-ready");
+    let error = plan_ops::confirm(&fixture.store, &fixture.task)
+        .expect_err("a `todo.ready` task is not confirmed");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(
+        error.message().contains("todo.ready"),
+        "{}",
+        error.message()
+    );
+    assert_eq!(
+        fixture.state(),
+        ("todo".to_owned(), "ready".to_owned()),
+        "a refusal writes nothing"
+    );
+
+    // An id that names both a plan and a task: the plan's id gets a task file too.
+    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
+    let plan_path = fixture
+        .store
+        .root()
+        .join("plans")
+        .join(format!("{plan_id}.md"));
+    fs::copy(
+        fixture
+            .store
+            .root()
+            .join("tasks")
+            .join(format!("{}.md", fixture.task)),
+        fixture
+            .store
+            .root()
+            .join("tasks")
+            .join(format!("{plan_id}.md")),
+    )
+    .expect("a task file that carries the plan's id");
+    assert!(plan_path.is_file());
+    let error = plan_ops::confirm(&fixture.store, &plan_id).expect_err("an id names one item");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(
+        error.message().contains("names both a plan and a task"),
+        "{}",
+        error.message()
+    );
+}
+
+/// A review that suggested nothing adds no task.
+#[test]
+fn a_merge_with_no_review_items_adds_no_followup() {
+    let fixture = Fixture::new("followup-none");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "followup-none-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, fake.program()).phase,
+        "awaiting_human"
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert!(merged.followup.is_none(), "{merged:?}");
+    assert_eq!(merged.line().lines().count(), 1, "{}", merged.line());
+    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&plan_id)
+            .expect("the plan")
+            .item
+            .tasks,
+        vec![fixture.task.clone()]
+    );
+}
+
+/// `gate.review.propose_followups = false` turns arc's follow-up off; the merge is unchanged.
+#[test]
+fn propose_followups_false_adds_no_task() {
+    let fixture = Fixture::new("followup-off");
+    fixture.add_review_stage();
+    fixture.tune("propose_followups = true", "propose_followups = false");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "followup-off-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, fake.program()).phase,
+        "awaiting_human"
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
+    assert!(merged.followup.is_none(), "{merged:?}");
+    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&plan_id)
+            .expect("the plan")
+            .item
+            .tasks,
+        vec![fixture.task.clone()]
+    );
+}
+
+/// The follow-up takes the suggestions and nothing from `blocking`.
+///
+/// Mutation: include `blocking` items in the follow-up → a task appears here.
+#[test]
+fn a_blocking_item_is_never_carried_into_the_followup() {
+    let fixture = Fixture::new("followup-blocking");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    fixture.set_verifying(&head);
+    write_passing_review(
+        &fixture,
+        &head,
+        ReviewReport {
+            summary: "the change adds feature.txt".to_owned(),
+            blocking: vec![ReviewItem {
+                level: Some("major".to_owned()),
+                file: Some("feature.txt".to_owned()),
+                line: Some(1),
+                text: "this must change".to_owned(),
+                pre_existing: false,
+            }],
+            suggestions: Vec::new(),
+            verified: Vec::new(),
+        },
+    );
+    assert_eq!(
+        review::verify(&fixture.store, &fixture.task)
+            .expect("verification runs")
+            .phase,
+        "awaiting_human"
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
+    assert!(
+        merged.followup.is_none(),
+        "a blocking item became a follow-up: {merged:?}"
+    );
+    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&plan_id)
+            .expect("the plan")
+            .item
+            .tasks,
+        vec![fixture.task.clone()]
+    );
+}
+
+/// A reverify, then a merge, still adds at most one follow-up.
+#[test]
+fn a_merge_after_a_reverify_adds_at_most_one_followup() {
+    let fixture = Fixture::new("followup-reverify");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let first = FakeReview::new(
+        "followup-reverify-first",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, first.program()).phase,
+        "awaiting_human"
+    );
+    let again = FakeReview::new(
+        "followup-reverify-again",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    let reverified = review::reverify_with(&fixture.store, &fixture.task, Some(again.program()))
+        .expect("the reverify runs");
+    assert!(reverified.verification.is_ok(), "{reverified:?}");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    let followup = merged.followup.expect("a follow-up task").task;
+    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
+    let plan = fixture.store.load_plan(&plan_id).expect("the plan").item;
+    assert_eq!(plan.tasks, vec![fixture.task.clone(), followup]);
+    let titled = plan
+        .tasks
+        .iter()
+        .filter(|id| {
+            fixture
+                .store
+                .load_task(id)
+                .is_ok_and(|task| task.item.title.contains("'s review"))
+        })
+        .count();
+    assert_eq!(titled, 1, "one follow-up: {:?}", plan.tasks);
+}
+
+/// A proposed task the owner does not want ends as `failed.cancelled`.
+#[test]
+fn cancel_ends_a_proposed_task_as_failed_cancelled() {
+    let fixture = Fixture::new("followup-cancel");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "followup-cancel-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    fixture.verifying_with_review(&head, fake.program());
+    let followup = review::merge(&fixture.store, &fixture.task)
+        .expect("the merge runs")
+        .followup
+        .expect("a follow-up task")
+        .task;
+
+    radian_arc::attempt::cancel(&fixture.store, &followup).expect("the cancel runs");
+    let stored = fixture.store.load_task(&followup).expect("the task").item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("failed", "cancelled")
+    );
 }

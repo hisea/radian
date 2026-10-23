@@ -220,6 +220,9 @@ pub struct ReviewConfig {
     pub prompt_file: Option<String>,
     /// Wall-time limit of one review session, in seconds. `0` waits forever.
     pub timeout_secs: u64,
+    /// Whether arc proposes the review's follow-up task when a task merges (ADR 0048
+    /// decision 10). `true` by default; `false` turns the follow-up off.
+    pub propose_followups: bool,
 }
 
 impl Default for ReviewConfig {
@@ -228,6 +231,7 @@ impl Default for ReviewConfig {
             exec_args: None,
             prompt_file: None,
             timeout_secs: DEFAULT_REVIEW_TIMEOUT_SECS,
+            propose_followups: true,
         }
     }
 }

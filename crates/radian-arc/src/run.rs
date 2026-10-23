@@ -669,6 +669,9 @@ fn task_reason(
             item.retry_at.as_deref().unwrap_or("an unrecorded time")
         ),
         (TaskState::Todo, "paused_budget") => "waiting for `radian arc reset-budget`".to_owned(),
+        (TaskState::Todo, phase) if phase == model::PROPOSED_PHASE => {
+            "waiting for you to confirm it (`radian arc confirm`)".to_owned()
+        }
         (TaskState::Todo, _) => "waiting for its `after` tasks".to_owned(),
         (TaskState::Doing, "starting" | "running") => "running its attempt".to_owned(),
         (TaskState::Doing, _) => "needs you: arc cannot prove what the worker did".to_owned(),

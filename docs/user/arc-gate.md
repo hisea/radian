@@ -39,7 +39,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   ```
 
   `summary` is 2 to 6 sentences. Each item of `blocking` and `suggestions` is an object: `text` is required, and `level`, `file` and `line` are optional. `level` is one of `critical`, `major`, `minor`. A plain string is an item with only its `text`, so a verdict written before the object form still reads.
-  `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage.
+  `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage; the suggestions a merged task's last review left become its follow-up task (see [The review's follow-up](#the-reviews-follow-up)).
   A blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items, each as `[level] path:line text` with the parts an item does not have left out.
   No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
   The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros` and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
@@ -100,6 +100,29 @@ The text says the review found these items, to fix them and nothing else, to app
 It counts as an automatic rework: it raises `auto_rework`, and `max_auto_rework` pauses the plan (see the [`limits.max_auto_rework` row](arc-files.md#configtoml)); the task then stays in `review.rework_pending`.
 With `auto` `off`, the task stays in `review.rework_pending` and waits for you, as before.
 `radian arc run` prints `<task> review blocking -> todo.ready (automatic rework)`.
+
+### The review's follow-up
+
+When a task reaches `done.merged`, arc reads the task's last `review` verdict and collects every `suggestions` item; the items a rework round moved (marked `pre_existing`) are in `suggestions`.
+Nothing from `blocking` is collected: the review passed for the merge only because no blocking item was left.
+
+When at least one item is left, and `[gate.review] propose_followups` is `true` (the default), arc adds one task to the same plan, and no more:
+
+- the id is the next task id;
+- the slug is `<merged task slug>-followups`, cut to the 48-character slug limit;
+- the title is `Follow-ups from <task id>'s review`;
+- its `after` is the merged task;
+- its phase is `todo.proposed`, so the loop never claims it until you confirm it (see [`confirm`](arc.md#radian-arc-confirm-id)).
+
+Its brief is fixed: one line saying the items are from the review of `<task id>`, which is now merged, and that each item is to be fixed or left with a one-line reason in the final answer; then the items, one per line, as `[level] path:line text`; then the path of the review verdict.
+
+A task gets at most one follow-up.
+A task merged without a review stage, or with no item left, gets none.
+With `propose_followups` `false` arc adds none (see the [`propose_followups` row](arc-files.md#configtoml)); the lead can still add a task to the plan with MCP `add_task`.
+`radian arc run` prints `<new task id> proposed (follow-ups from <task id>)`.
+
+A follow-up arc cannot add (the plan's file changed outside arc) leaves a `warning:` line after the merge and does not undo the merge.
+The plan keeps the state it had.
 
 ### A conflict with main
 

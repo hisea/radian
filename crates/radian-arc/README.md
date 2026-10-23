@@ -496,6 +496,13 @@ force. A main that moved after integration, or a rejected push, makes it integra
 (one round per pass in the loop; at most three runs per `radian arc merge` command). On
 success the task is `done.merged` and its worktree is removed; the branch stays.
 
+`finish_integration` then asks `review::propose_followup` for the task's review follow-up
+(ADR 0048 decision 10): the items of the task's newest `review` verdict's `suggestions` (the
+moved `pre_existing` items among them), never a `blocking` item, become one `todo.proposed`
+task of the same plan, `after` the merged task, when `[gate.review] propose_followups` is
+true and the plan does not already hold it. A failure to add it is a warning after the merge,
+not a failed merge.
+
 `merge_step` reads `runs/<task>/gate.json` for a finished integration, and a
 `review.ready_to_merge` task finishes the newest passing integration verdict for its head.
 
@@ -521,6 +528,11 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   (decision 7).
 - The merged task's worktree is removed with plain `git worktree remove`; a checkout with
   uncommitted files is left in place and reported as a warning, never forced away.
+- The follow-up's slug is `<merged task slug>-followups` cut from the end to
+  `SLUG_MAX_CHARS`, then a trailing `-` from the cut is removed so it stays a valid slug. A
+  plan that already holds the follow-up (the same title and `after`) gets no second one.
+- `confirm` of a task checks `worker_args` first, as `confirm` of a plan does, so a broken
+  worker line leaves the task `todo.proposed` instead of making it runnable.
 - The remote is always a parameter, never the literal `origin`: the caller passes
   `[repository] remote`.
 - A checkout that exists and is not a linked worktree is an error, unless it is an empty

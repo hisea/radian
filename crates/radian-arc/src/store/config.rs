@@ -209,6 +209,7 @@ command_timeout_secs = 3600
 [gate.review]
 # exec_args = ["--model", "m"]   # not set: the same as [worker] exec_args
 timeout_secs = 900              # wall-time limit of one review session; 0 waits forever
+propose_followups = true        # add the review's follow-up task when a task merges
 # prompt_file = "review.md"      # not set: the built-in prompt only
 
 [gate.profiles.default]

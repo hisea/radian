@@ -466,6 +466,48 @@ async fn add_rework_from_a_review_task_moves_it_to_ready() {
 }
 
 #[tokio::test]
+async fn add_task_on_a_confirmed_plan_is_proposed_and_the_plan_is_unchanged() {
+    let scratch = fixture("mcp-proposed");
+    let session = Session::open(&scratch).await;
+    let (plan, task) = plan_with_task(&session, "confirmed-plan").await;
+    let store = Store::at(scratch.repo());
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("confirmed");
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+
+    let proposed = session
+        .ok(
+            "add_task",
+            json!({
+                "plan": plan,
+                "slug": "follow",
+                "title": "Follow up",
+                "brief": "the follow-up",
+            }),
+        )
+        .await;
+    let id = proposed["id"].as_str().expect("a task id").to_owned();
+    assert_ne!(id, task, "a new task, not the draft one");
+
+    let shown = session.ok("show", json!({"id": id})).await;
+    assert_eq!(shown["state"], "todo");
+    assert_eq!(shown["phase"], "proposed");
+    assert_eq!(shown["plan"], plan);
+
+    // The plan keeps its status and auto, and the task is on it.
+    let listed = session.ok("list", json!({"plan": plan})).await;
+    assert_eq!(listed[0]["status"], "confirmed");
+    assert_eq!(listed[0]["auto"], "run");
+    assert_eq!(listed[0]["tasks"][0]["id"], task);
+    assert_eq!(listed[0]["tasks"][0]["phase"], "ready");
+    assert_eq!(listed[0]["tasks"][1]["id"], id.as_str());
+    assert_eq!(listed[0]["tasks"][1]["phase"], "proposed");
+
+    let text = fs::read_to_string(task_path(&scratch, &id)).expect("the task file is readable");
+    assert!(text.contains("phase: proposed"), "{text}");
+    session.close().await;
+}
+
+#[tokio::test]
 async fn a_hand_edited_task_makes_add_rework_fail_with_changed_outside_arc() {
     let scratch = fixture("mcp-outside");
     let session = Session::open(&scratch).await;

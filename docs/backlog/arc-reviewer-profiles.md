@@ -62,3 +62,7 @@
 - lead 往已 confirm 的 plan 里 `add_task` 得到 `todo.proposed`。
 - review 与 commands 同时开始；review 失败时 task 带着 arc 写的返工回到 `todo.ready`，`auto_rework` 加一。
 - 手册写全新的键：`gate.reviewers.<name>.*`、`gate.profiles.<name>.reviewer`、task 字段 `review_fix_level`，每个都写类型、缺省、全部允许值、何时生效。
+
+## 已落地
+
+第 6、7 条（没修的问题变成 `todo.proposed` 的收尾 task；task 级 propose / confirm）已实现；第 8 条（review 与 commands 并行）尚未。

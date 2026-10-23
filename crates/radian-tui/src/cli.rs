@@ -533,11 +533,13 @@ enum ArcCommand {
         lock_fd: Option<i32>,
     },
 
-    /// Confirm a draft plan. A plan with no tasks is refused, and so is a second confirm.
+    /// Confirm a draft plan, or a task arc or the lead proposed. A plan with no tasks is
+    /// refused, and so is a second confirm; a task that is not `todo.proposed` is refused,
+    /// and a confirmed task becomes `todo.ready` without changing its plan.
     Confirm {
-        /// The plan id.
-        #[arg(value_name = "PLAN")]
-        plan: String,
+        /// The plan id, or the id of a `todo.proposed` task.
+        #[arg(value_name = "ID")]
+        id: String,
     },
 
     /// Set a plan's auto level. Only a confirmed plan can use a level other than `off`.
@@ -712,7 +714,7 @@ impl ArcCommand {
             ArcCommand::List { plan, json } => ArcRun::List { plan, json },
             ArcCommand::Show { id, json } => ArcRun::Show { id, json },
             ArcCommand::Adopt { id } => ArcRun::Adopt { id },
-            ArcCommand::Confirm { plan } => ArcRun::Confirm { plan },
+            ArcCommand::Confirm { id } => ArcRun::Confirm { id },
             ArcCommand::Auto { plan, level } => ArcRun::Auto { plan, level },
             ArcCommand::Pause { plan } => ArcRun::Pause { plan },
             ArcCommand::Start { task } => ArcRun::Start { task },

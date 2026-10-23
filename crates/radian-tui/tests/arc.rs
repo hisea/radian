@@ -623,6 +623,52 @@ fn confirm_refuses_an_empty_plan_and_a_second_confirm() {
 }
 
 #[test]
+fn confirm_a_proposed_task_moves_it_to_ready_and_prints_the_phase() {
+    let scratch = fixture("confirm-task");
+    init(&scratch);
+    let plan = add_plan(&scratch, "proposed");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+    assert_eq!(run(&scratch, &["arc", "confirm", &plan], "").code, Some(0));
+    assert_eq!(
+        run(&scratch, &["arc", "auto", &plan, "run"], "").code,
+        Some(0)
+    );
+    radian_arc::store::Store::at(scratch.repo())
+        .change_task(&task, |task| {
+            task.phase = "proposed".to_owned();
+            Ok(())
+        })
+        .expect("the task is proposed");
+
+    // `start` refuses it and names the phase.
+    let refused = run(&scratch, &["arc", "start", &task], "");
+    assert_eq!(refused.code, Some(3), "{refused:?}");
+    assert!(refused.err.contains("todo.proposed"), "{refused:?}");
+    assert_eq!(stored_task(&scratch, &task).attempt, 0);
+
+    let confirmed = run(&scratch, &["arc", "confirm", &task], "");
+    assert_eq!(confirmed.code, Some(0), "{confirmed:?}");
+    assert_eq!(confirmed.out.trim(), format!("{task} todo.ready"));
+    let stored = stored_task(&scratch, &task);
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "ready")
+    );
+    let json = run(&scratch, &["arc", "list", "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&json.out).expect("list --json parses");
+    assert_eq!(value[0]["status"], "confirmed", "the plan stays confirmed");
+    assert_eq!(
+        value[0]["auto"], "run",
+        "the plan's auto level is unchanged"
+    );
+
+    // A task in any other state is refused.
+    let again = run(&scratch, &["arc", "confirm", &task], "");
+    assert_eq!(again.code, Some(3), "{again:?}");
+    assert!(again.err.contains("todo.ready"), "{again:?}");
+}
+
+#[test]
 fn auto_needs_a_confirmed_plan_and_a_level_from_the_set() {
     let scratch = fixture("auto");
     init(&scratch);
