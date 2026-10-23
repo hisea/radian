@@ -6,8 +6,9 @@
 //! file with the ledger, refuses a file that changed outside arc, and writes the file, its
 //! ledger entry and the `.last.md` copy in one step.
 //!
-//! - `confirm` moves a `draft` plan to `confirmed`. A plan with no tasks is not worth
-//!   confirming, so it is refused.
+//! - `confirm` moves a `draft` plan to `confirmed`, or a `todo.proposed` task to
+//!   `todo.ready`. A plan with no tasks is not worth confirming, so it is refused; a task in
+//!   any other state is refused too.
 //! - `auto` sets the plan's auto level. Only a `confirmed` plan may leave `off`.
 //! - `pause` sets the level back to `off`. It does not look at the tasks: the scheduling
 //!   loop that could be running one does not exist yet.
@@ -34,32 +35,76 @@ pub const CONFLICT_REWORK_SUFFIX: &str = " (conflict with main)";
 /// failed with blocking items (ADR 0048 decision 9).
 pub const REVIEW_REWORK_SUFFIX: &str = " (review)";
 
-/// `radian arc confirm <plan>`: `draft` to `confirmed`.
+/// What one `radian arc confirm` confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Confirmed {
+    /// The plan went from `draft` to `confirmed`.
+    Plan(String),
+    /// The task went from `todo.proposed` to `todo.ready`.
+    Task(String),
+}
+
+impl Confirmed {
+    /// The one line `radian arc confirm` prints.
+    pub fn line(&self) -> String {
+        match self {
+            Confirmed::Plan(id) => format!("{id} confirmed"),
+            Confirmed::Task(id) => format!("{id} todo.ready"),
+        }
+    }
+}
+
+/// `radian arc confirm <id>`: the owner's confirmation of a draft plan or of a proposed task
+/// (ADR 0048 decisions 3, 6 and 11).
 ///
-/// Refused when the plan has no tasks (nothing to deliver) and when it is already
-/// confirmed. A file that changed outside arc is refused by the transaction.
-pub fn confirm(store: &Store, plan: &str) -> Result<(), Error> {
-    // A confirmed plan is the owner's promise that its tasks can run, so the worker's command
-    // line is checked first: a wrong `[worker] exec_args` entry leaves the plan a draft
-    // (ADR 0048 decision 7).
+/// A plan is refused when it has no tasks (nothing to deliver) and when it is already
+/// confirmed. A task is refused with exit 3 unless it is `todo.proposed`; confirming it makes
+/// it `todo.ready` and leaves its plan's `status` and `auto` alone. A file that changed
+/// outside arc is refused by the transaction, and an id that names both a plan and a task is
+/// refused the way every command refuses it.
+pub fn confirm(store: &Store, id: &str) -> Result<Confirmed, Error> {
+    // A confirmed plan is the owner's promise that its tasks can run, and a confirmed task is
+    // the same promise for one task, so the worker's command line is checked first: a wrong
+    // `[worker] exec_args` entry leaves the plan a draft or the task proposed (ADR 0048
+    // decision 7).
     crate::worker_args::check(&store.config()?.worker.exec_args)?;
-    store.change_plan(plan, |plan| {
-        if plan.status == "confirmed" {
-            return Err(Error::Refused(format!(
-                "plan `{}` is already `confirmed`",
-                plan.id
-            )));
+    match store.resolve_kind(id)? {
+        super::Kind::Plan => {
+            store.change_plan(id, |plan| {
+                if plan.status == "confirmed" {
+                    return Err(Error::Refused(format!(
+                        "plan `{}` is already `confirmed`",
+                        plan.id
+                    )));
+                }
+                if plan.tasks.is_empty() {
+                    return Err(Error::Refused(format!(
+                        "plan `{}` has no tasks; add the tasks that deliver it first",
+                        plan.id
+                    )));
+                }
+                plan.status = "confirmed".to_owned();
+                Ok(())
+            })?;
+            Ok(Confirmed::Plan(id.to_owned()))
         }
-        if plan.tasks.is_empty() {
-            return Err(Error::Refused(format!(
-                "plan `{}` has no tasks; add the tasks that deliver it first",
-                plan.id
-            )));
+        super::Kind::Task => {
+            store.change_task(id, |task| {
+                if task.state != TaskState::Todo || task.phase != model::PROPOSED_PHASE {
+                    return Err(Error::Refused(format!(
+                        "task `{}` is `{}.{}`; only a `todo.{}` task is confirmed",
+                        task.id,
+                        task.state.as_str(),
+                        task.phase,
+                        model::PROPOSED_PHASE
+                    )));
+                }
+                task.phase = "ready".to_owned();
+                Ok(())
+            })?;
+            Ok(Confirmed::Task(id.to_owned()))
         }
-        plan.status = "confirmed".to_owned();
-        Ok(())
-    })?;
-    Ok(())
+    }
 }
 
 /// `radian arc auto <plan> <level>`: the plan's auto level (decision 12). `off` is allowed

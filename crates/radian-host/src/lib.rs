@@ -93,7 +93,8 @@ pub use catalog::{
     WindowSource, bundled_catalog, cache_path, check_context_window_flag, fetch_provider_models,
     host_of, input_budget, models_url_accepts_key, output_ceiling_warning, output_reservation,
     protocol_catalog, provider_for_host, provider_models_cache, provider_models_stale,
-    provider_models_url, read_provider_models, resolve, resolve_offline, write_provider_models,
+    provider_models_url, read_provider_models, resolve, resolve_offline, route_takes_images,
+    write_provider_models,
 };
 pub use chatgpt_usage::{
     ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE, USAGE_URL as CHATGPT_USAGE_URL,

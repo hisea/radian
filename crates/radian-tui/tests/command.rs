@@ -96,6 +96,7 @@ fn run_effect(workspace: &std::path::Path, effect: &Effect, service: &MemoryServ
         Effect::ExpandMentions { text } => vec![Input::MentionsExpanded(Ok(Expansion {
             text: text.clone(),
             attachments: Vec::new(),
+            images: Vec::new(),
             warnings: Vec::new(),
         }))],
         _ => Vec::new(),

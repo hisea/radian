@@ -69,7 +69,7 @@ impl ArcServer {
                 args.finish()?;
                 let id = self
                     .store
-                    .add_task(
+                    .add_task_proposed(
                         &plan,
                         &slug,
                         &title,

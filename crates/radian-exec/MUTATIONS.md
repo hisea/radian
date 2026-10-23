@@ -434,3 +434,15 @@ token（ADR 0026 禁止）。两个读点都改成走 `redaction_secrets()`（�
 |---|---|---|---|
 | MMC-1 | flag 的默认值回到 `radian_core::DEFAULT_MAX_MODEL_CALLS`（32） | `lib::tests::the_default_model_call_limit_is_the_shared_host_value`（`left: 32, right: 1000`） | ✅ 1 failed |
 | MMC-2 | `ui.rs` 的 `RunStatus::BudgetExceeded` 分支删掉（回到 `[turn] ended as …`） | `exec::a_budget_exceeded_turn_names_the_limit_and_the_flag`（stderr 不含那行） | ✅ 1 failed |
+
+## rework 5: `--image` is not read whole before a check (2026-10-23, branch `work/TK0013-image-inputs`)
+
+`load_images` now calls the shared `radian_coding::image::load_path`, which reads a bounded
+64 KiB head, checks the metadata size against 5 MiB, and reads the body only for an accepted
+image. The mutation puts the old whole-file `std::fs::read` back; the test-only path read
+counter (the `testing` feature) makes the miss visible on a 2 GiB `set_len` sparse file.
+Restored from `.radian/setup.rs.bak` byte-identically.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RW5-1 | `load_images` reads the whole file (`std::fs::read`) before the magic/size checks | ✅ 2 failed | `setup::tests::a_large_non_image_is_refused_without_reading_it_whole` and `setup::tests::an_over_limit_image_is_refused_without_reading_its_body` (0 bytes through the bounded reader) |

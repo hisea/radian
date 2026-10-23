@@ -33,6 +33,7 @@ A key you leave out takes its default.
 | `gate.review.exec_args` | array of strings | not set: `[worker] exec_args` | any `radian exec` argument except `--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p` | The review session's model route, after the stage's own arguments. Every review run. |
 | `gate.review.prompt_file` | string | not set: only the built-in prompt | a path relative to the repository root, without `..` | Appended to the built-in review prompt when the `review` stage runs. |
 | `gate.review.timeout_secs` | integer | `900` | seconds; `0` waits forever | The wall-time limit of one review session. |
+| `gate.review.propose_followups` | boolean | `true` | `true`, `false` | When a task merges: `true` lets arc add one `todo.proposed` task with the items the task's last review suggested but the merge left unfixed (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)); `false` turns it off. The lead's MCP `add_task` on a confirmed plan is not affected. |
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
 | `gate.profiles.<name>.stages` | array of tables | `[{ stage = "commands", required = true }, { stage = "human", required = true }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs, in order. `integration` is not a profile stage: it always runs at merge. |
 | `gate.profiles.<name>.commands` | array of strings | `[]` | Shell command lines | The `commands` stage runs them in order on its own checkout. |
@@ -111,13 +112,14 @@ The body is the brief.
 
 | State | Phases |
 |---|---|
-| `todo` | `ready`, `blocked`, `retry_wait`, `paused_budget` |
+| `todo` | `ready`, `blocked`, `retry_wait`, `paused_budget`, `proposed` |
 | `doing` | `starting`, `running`, `reconciling` |
 | `review` | `verifying`, `rework_pending`, `awaiting_human`, `integrating`, `ready_to_merge` |
 | `done` | `merged` |
 | `failed` | `exhausted`, `cancelled`, `irrecoverable` |
 
 A new task is `todo` / `ready`.
+A task the lead adds to a confirmed plan (MCP `add_task`) or arc proposes from a merged task's review is `todo` / `proposed`: the scheduling loop never claims it and `start` refuses it until you run `radian arc confirm <task>`.
 A plan is done when all of its tasks are merged; `done` is not a stored plan status.
 
 ### The review states
@@ -138,6 +140,8 @@ A task leaves `doing` for `review.verifying` when a pushed attempt ends.
 | `review.rework_pending`, `review.awaiting_human` | `review.verifying` | `radian arc reverify`, or `radian arc run` reverifying a `commands` or integration command failure by itself once main moved: a new attempt is claimed without a worker; its verdicts are its own. |
 | `review.verifying` | `review.awaiting_human` (again) | `radian arc run` or `radian arc start` re-verifies a task a moved branch or a changed digest sent back. |
 | `review` (any phase) | `todo.ready` | The lead adds a rework brief (`add_rework`); the next claim starts the next attempt. |
+| `todo.proposed` | `todo.ready` | `radian arc confirm <task>`: the task is confirmed, and its plan's `status` and `auto` do not change. |
+| `todo.proposed` | `failed.cancelled` | `radian arc cancel <task>`. |
 
 ## The `.radian/arc/` layout
 

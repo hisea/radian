@@ -233,6 +233,7 @@ fn enable_loop(app: &mut App) {
                 radian_tui::mention::Expansion {
                     text,
                     attachments: Vec::new(),
+                    images: Vec::new(),
                     warnings: Vec::new(),
                 },
             )));

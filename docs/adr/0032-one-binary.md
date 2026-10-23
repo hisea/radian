@@ -12,6 +12,7 @@ One binary `radian` exists. `rad` stays an alias. No argument opens the fullscre
 radian                        fullscreen TUI (default)
 radian exec                   interactive line mode
 radian exec "…" / -p "…"      one-shot: run one turn plus the chain it wakes (with background jobs wait for completion, see ADR 0044 §2a), stdout carries only model text
+radian exec -p "…" --image PATH  the same, with each image attached to the prompt's user message in order (repeatable)
 radian exec <other flags and subcommands>
 radian arc                    the arc TUI: plans and tasks across worker processes (ADR 0048)
 radian arc <subcommand>       one arc CLI operation (ADR 0048)
@@ -24,7 +25,7 @@ radian login | logout | memory | config import-pi | trust | theme | footer | doc
 
 ### A2 Where each function lives
 
-- **Kept**: fullscreen TUI (default), `exec` line mode and `-p`, `--list`/`--search`/`--export`/`--fork` and output options, TUI `/…` commands, TUI `--pick` and test hooks.
+- **Kept**: fullscreen TUI (default), `exec` line mode and `-p`, `--image <PATH>` (repeatable, with `-p`) whose path the host reads itself, `--list`/`--search`/`--export`/`--fork` and output options, TUI `/…` commands, TUI `--pick` and test hooks.
 - **Top level**: `memory`, `config import-pi`, `login`/`logout`, `trust`, `theme import`, `footer export`, `docs [topic]`. They touch no model. They open no session.
 - **`arc`**: `radian arc` opens the arc TUI and `radian arc <subcommand>` runs the arc CLI (ADR 0048). arc opens no session in its own process. It starts each worker as a separate `radian exec` process. Shared names match TUI `/login`, `/memory`, and similar.
 - **`exec` and TUI share** `radian_host::open_session`, config read, `~/.radian/` layout, tool set, auth, and session data layer.
@@ -38,7 +39,7 @@ radian login | logout | memory | config import-pi | trust | theme | footer | doc
 | `exec` line mode and `-p` | **Only model text** (`-p` whole block; line mode streams; `--output jsonl` see ADR 0044 §1) | Status, reasoning, errors | Exit code by outcome, see ADR 0044 §3 (2 usage/setup, 130 second Ctrl-C unchanged) |
 | `--list`/`--search`/`--export`/`memory`/`config`/`trust`/`theme`/`footer`/`docs` | The result itself | Reports and hints | 0; usage 2; real error 1; stdout broken pipe 0, silent |
 
-- Usage and setup errors exit 2 in every mode. This includes TUI startup refusal. Clap usage errors already exit 2. 0 means normal. 1 means turn failure. 101 means panic. 128+signal stays unchanged.
+- Usage and setup errors exit 2 in every mode. This includes TUI startup refusal and a `--image` path that is not a PNG/JPEG/GIF/WebP image, is over 5 MiB, or has a side over 8000 px: the message names the path and the reason. Clap usage errors already exit 2. 0 means normal. 1 means turn failure. 101 means panic. 128+signal stays unchanged.
 - The `-p` stdout contract stays unchanged: only model text. `radian exec -p … > out.txt` stays stable. Status lines use stderr.
 - `--export --format md|json`, `--search`, and `--list` line formats stay unchanged. Entry points move. Formats stay unchanged.
 

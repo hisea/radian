@@ -51,7 +51,16 @@ pub const TASK_STATES: &[&str] = &["todo", "doing", "review", "done", "failed"];
 
 /// Each state's phases. A task's `phase` is one of its state's entries, and nothing else.
 pub const TASK_PHASES: &[(&str, &[&str])] = &[
-    ("todo", &["ready", "blocked", "retry_wait", "paused_budget"]),
+    (
+        "todo",
+        &[
+            "ready",
+            "blocked",
+            "retry_wait",
+            "paused_budget",
+            "proposed",
+        ],
+    ),
     ("doing", &["starting", "running", "reconciling"]),
     (
         "review",
@@ -69,6 +78,11 @@ pub const TASK_PHASES: &[(&str, &[&str])] = &[
 
 /// The longest slug, in characters.
 pub const SLUG_MAX_CHARS: usize = 48;
+
+/// The one phase a task waits in while a person has not confirmed it: the lead's `add_task` on
+/// a confirmed plan and arc's review follow-up create it there. The scheduling loop never
+/// claims it and `start` refuses it (ADR 0048 decisions 3 and 6).
+pub const PROPOSED_PHASE: &str = "proposed";
 
 /// The longest id prefix, in characters.
 pub const PREFIX_MAX_CHARS: usize = 4;
@@ -888,6 +902,21 @@ mod tests {
         assert_eq!(id_number("TK0042-a-b"), Some(42));
         assert_eq!(id_prefix("TK0042-a-b"), Some("TK"));
         assert_eq!(id_number("0042-a"), None);
+    }
+
+    #[test]
+    fn a_proposed_task_is_a_todo_phase_the_loop_never_starts() {
+        assert!(valid_phase(TaskState::Todo, PROPOSED_PHASE));
+        assert_eq!(
+            TaskState::Todo.phases(),
+            &[
+                "ready",
+                "blocked",
+                "retry_wait",
+                "paused_budget",
+                PROPOSED_PHASE
+            ]
+        );
     }
 
     #[test]

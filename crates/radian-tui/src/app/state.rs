@@ -353,6 +353,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::Runtime(_)
         | Input::Pending(..)
         | Input::MentionsExpanded(_)
+        | Input::DroppedLoaded { .. }
         | Input::CompletionReady(_)
         | Input::CompletionsReady { .. }
         | Input::MemoryCommandDone(_)

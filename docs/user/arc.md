@@ -107,17 +107,34 @@ Reads the brief from stdin to end of input, writes `tasks/<id>.md`, appends the 
 A task can only be added to a plan whose `status` is `draft`; a confirmed plan exits `3`.
 An `--after` id must name a task of the same plan or a task whose state is `done`; anything else exits `3`.
 
-## `radian arc list [--plan <ID>] [--json]`
+## `radian arc list [--plan <ID>] [--all] [--json]`
 
 Lists plans, each with its tasks in the plan's order.
 Plans print in claim order, the order `radian arc run` serves them in: the higher `priority` first (`P0` before `P1`), then the plan id from small to large.
-Each plan line shows `status`, `auto`, and `priority`.
+Each plan's header line shows its id, its `status`, its `auto` level, its `priority`, its progress as `<merged>/<tasks> merged`, and its title.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
+
+By default the finished work is left out, so the work in progress is what you see:
+
+- every task in `done.merged` is left out; a plan that is shown still counts those tasks in its `<merged>/<tasks> merged` header;
+- a plan whose tasks are all `done.merged` (a finished plan) is left out too; a plan with no tasks is always shown.
+
+Every other state is shown, `failed.*` included: a failed task needs attention.
+
+When the default left something out, the last line counts it:
+
+```text
+3 finished plans and 12 merged tasks hidden (--all to show)
+```
+
+The count covers every plan and every merged task that was not printed. A part that is `0` is left out of the line, and a count of `1` is singular: `1 finished plan and 1 merged task hidden (--all to show)`, or `2 merged tasks hidden (--all to show)` when no whole plan was left out.
+When everything is hidden, that line is the whole output. Nothing hidden means no such line.
 
 | Flag | Value | What it does |
 |---|---|---|
-| `--plan` | `ID` | Only this plan. |
-| `--json` | — | Print one JSON array instead of lines. |
+| `--plan` | `ID` | Only this plan. It follows the default filter: its merged tasks are hidden unless `--all`, and a finished plan is still printed with its header line, so you see that it exists. |
+| `--all` | — | No filter: print every plan and every task, `done.merged` history included. It takes no value. |
+| `--json` | — | Print one JSON array instead of lines. The array is never filtered: it holds every plan and every task, with or without `--all`. |
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
@@ -165,18 +182,28 @@ It refuses with exit `3` when the id names both a plan and a task (see [Plan and
 A file that already matches the ledger is a no-op and prints so.
 Without a recorded version to compare against, `adopt` refuses: it cannot tell which fields changed.
 
-## `radian arc confirm <PLAN>`
+## `radian arc confirm <ID>`
 
-`confirm` moves a plan from `draft` to `confirmed`.
-A confirmed plan gets no new tasks, and its request text can only gain change records (see [Plan and task files](arc-files.md#plan-and-task-files)).
+`confirm` is your action: it accepts a draft plan, or a task arc or the lead proposed.
+
+A plan moves from `draft` to `confirmed`.
+A confirmed plan gets no new `todo.ready` tasks, and its request text can only gain change records (see [Plan and task files](arc-files.md#plan-and-task-files)).
 A plan's `auto` level may only be other than `off` once it is confirmed.
+
+A task moves from `todo.proposed` to `todo.ready`.
+The plan's `status` and `auto` do not change, and the plan does not return to `draft`.
+A task waits in `todo.proposed` until you confirm it when arc proposed it from a review (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)) or when the lead added it to a confirmed plan with the MCP `add_task` tool; the scheduling loop passes over it, and `start` refuses it.
+A proposed task you do not want is ended with `radian arc cancel` (`failed.cancelled`).
 
 | Argument | Value | What it does |
 |---|---|---|
-| `<PLAN>` | `ID` | The plan id. Required. |
+| `<ID>` | a plan id, or a task id | Required. An id that names both a plan and a task is refused (`3`), naming both files. |
 
-It refuses with exit `3` when the plan has no tasks, when it is already confirmed, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and [`worker.exec_args`](arc-files.md#configtoml)).
+A plan confirm refuses with exit `3` when the plan has no tasks, when it is already confirmed, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and [`worker.exec_args`](arc-files.md#configtoml)).
+A task confirm refuses with exit `3` for a task in any state other than `todo.proposed`, for a file that changed outside arc, and for a rejected worker line.
 A refusal writes nothing.
+
+It prints `<plan> confirmed` or `<task> todo.ready`.
 
 ## `radian arc auto <PLAN> <LEVEL>`
 
@@ -277,7 +304,7 @@ Before it claims anything it reconciles every task in `doing` (see [Reconcile](a
 
 A claim is refused with exit `3` and changes nothing when:
 
-- the task is not `todo.ready`;
+- the task is not `todo.ready`; a `todo.proposed` task names its phase and waits for `radian arc confirm`;
 - its plan is not `confirmed`;
 - an `after` task is not `done`;
 - `[limits] concurrency` tasks are already in `doing`.
@@ -447,7 +474,7 @@ Then it:
    The task's branch stays on the remote.
 
 `merge` never checks out or updates the main checkout's working tree: it fetches, pushes, and reads refs only.
-On `done.merged` it prints `<task> done.merged (<candidate sha>)`; a failed worktree removal is a `warning:` line after it and does not undo the merge.
+On `done.merged` it prints `<task> done.merged (<candidate sha>)`; a failed worktree removal is a `warning:` line after it and does not undo the merge, and so is a follow-up task that could not be added (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)).
 
 The exit codes are the command's own:
 
@@ -517,7 +544,7 @@ A one-shot `run` starts its work and exits without waiting for it; the next `run
 Use `--watch` (or the arc interface, when it exists) to keep advancing.
 
 `run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end.
-A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, a conflict rework prints `<task> conflict with main -> todo.ready (automatic rework)`, and an automatic reverify prints `<task> main moved (<short sha>) -> auto reverify`, or when the task used its count, `<task> main moved (<short sha>) -> auto reverify limit reached: <reason>`.
+A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, a conflict rework prints `<task> conflict with main -> todo.ready (automatic rework)`, an automatic reverify prints `<task> main moved (<short sha>) -> auto reverify`, or when the task used its count, `<task> main moved (<short sha>) -> auto reverify limit reached: <reason>`, and the follow-up task arc proposes when a task merges prints `<new task id> proposed (follow-ups from <task id>)` (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)).
 The limit's `<reason>` is the text `show` prints as the `rework_reason`: `the task used <n> automatic reverifies and `[limits] max_auto_reverify` is <max>`.
 One line per `(head_sha, remote main)` pair is printed, so a summary that repeats every interval does not print it again.
 When a pass changes nothing, a summary of what waits on whom ends the pass:
@@ -606,12 +633,12 @@ Every tool is one of the store's transactions: a plan or task file that changed 
 | `list` | `plan` (string, optional: only this plan) | the JSON array `radian arc list --json` prints |
 | `show` | `id` (string, required) | the JSON object `radian arc show --json` prints |
 
-There is no tool to confirm a plan, start a task, merge, reject, change `auto`, or approve: those are yours (see `confirm`, `auto`, and `pause` above).
+There is no tool to confirm a plan or a task, start a task, merge, reject, change `auto`, or approve: those are yours (see `confirm`, `auto`, and `pause` above).
 
 `add_plan` creates a `draft` plan with `auto` `off`.
 The `slug` rule and the title rule are the ones on this page; an empty title is refused.
 
-`add_task` keeps the rules of `radian arc add task`: the plan must be `draft`, each `after` id must name a task of the same plan or a task whose state is `done`, and each `extra_stages` name must be a gate stage.
+`add_task` depends on the plan's state. On a `draft` plan it keeps the rules of `radian arc add task`, and the new task is `todo.ready`: it is confirmed with the plan. On a `confirmed` plan the new task is `todo.proposed`, and it waits for you to confirm it with `radian arc confirm <task>`; the plan keeps its `status` and `auto`. In both cases each `after` id must name a task of the same plan or a task whose state is `done`, and each `extra_stages` name must be a gate stage.
 
 `update_plan` depends on the plan's state:
 

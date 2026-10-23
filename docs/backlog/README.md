@@ -52,7 +52,7 @@
 | `herdr-prompt-radian.md` | decided（跟踪上游 #4732） | 0034 | herdr 的 `agent prompt`/`send-keys` 只认编译进去的 agent 种类，自报的 radian 被拒；不提 PR（herdr 只收名单内 PR），在 herdr #4732 补复现；我们用 `pane send-text` + `send-keys enter` |
 | `prompt-deliver-first.md` | idea | 0036 | 提示词：先交付能跑的版本再迭代、用参照物差分；cobol smoke 是现成复现 |
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
-| `arc-rework-fresh-session.md` | idea | 0048、0018 | 返工开新 session（brief、最新返工说明、上一轮报告、diff 摘要），不 `--resume` 旧上下文：一夜里返工轮开工就 53–68 万 tokens，改一行要 690 万输入 tokens；备选是 resume 前超阈值先压缩 |
+| `arc-rework-fresh-session.md` | decided | 0048、0018 | 返工开新 session（brief、最新返工说明、上一轮报告、diff 摘要），不 `--resume` 旧上下文：一夜里返工轮开工就 53–68 万 tokens，改一行要 690 万输入 tokens；备选是 resume 前超阈值先压缩 |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
 | `arc.md` | idea | 0032、0043、0044、0038、0020、0024、0013、0037、0022 | 替代 herdr 的派发与闸门：文件 backlog 单写者、一次性 worker、固定 sha 的 gate；产品形态为三界面 app 加 plan 层与全自动 |
 | `test-temp-leak.md` | idea | 0048 | 测试泄漏临时目录（Linux gate 机 tmpfs inode 被占满导致成批假红）：统一会删除的临时目录 helper，`verify.sh` / `arc-gate.sh` 开跑前查 inode；环境问题是否扣返工次数待定 |

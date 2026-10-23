@@ -8,6 +8,7 @@ use radian_host::memory::commands::CommandError;
 use super::USAGE_ERROR;
 
 /// Why startup failed. The message must not contain the key.
+#[derive(Debug)]
 pub(crate) struct SetupError(pub(crate) String);
 
 /// Why a "print and exit" command (`--list`, `--search`, `--export`, `radian memory`) stopped.

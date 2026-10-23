@@ -144,9 +144,9 @@ async fn radian_core_accepts_the_ask_user_spec() {
     chat.close().await.unwrap();
 }
 
-/// ADR 0043 decision 1: `read` on a directory lists it. The description says so in one
-/// sentence (decision 5's budget: the serialized spec stays within 150 bytes of the
-/// file-only definition it replaced).
+/// ADR 0043 decision 1: `read` on a directory lists it; the image branch says what it does.
+/// The description says both in one sentence each (decision 5's budget: the serialized spec
+/// stays within 1500 bytes).
 #[tokio::test]
 async fn the_read_spec_names_directory_listing() {
     let dir = TempDir::new("read-dir-spec");
@@ -161,16 +161,17 @@ async fn the_read_spec_names_directory_listing() {
         .collect();
     let read = specs["read"];
     assert!(
-        read.description.contains("list a directory"),
+        read.description.contains("a directory") && read.description.contains("image"),
         "{}",
         read.description
     );
-    // The slimmed size budget: the STE rewrite serializes to 1078 bytes (measured
-    // 2026-10-20); the pin leaves a little room above that.
+    // The size budget: the directory description fit 1078 bytes (measured 2026-10-20); the
+    // image branch adds its format, limits and error code, which cannot fit under the old
+    // 1100. The pin leaves a little room above the measured 1430.
     let bytes = serde_json::to_vec(read).unwrap().len();
     assert!(
-        bytes <= 1100,
-        "the read definition grew to {bytes} bytes, past the 1100 budget"
+        bytes <= 1500,
+        "the read definition grew to {bytes} bytes, past the 1500 budget"
     );
     // No removed name is advertised: a call to one is an unknown tool.
     for name in [

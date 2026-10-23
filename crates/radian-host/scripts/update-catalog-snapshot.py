@@ -8,7 +8,8 @@ and keeps only:
 * the providers radian has a built-in descriptor for (``opencode-go``, ``anthropic``,
   ``openai``) plus the ones ``catalog::provider_for_host`` maps a base URL to
   (``opencode``, ``deepseek``, ``openrouter``, ``moonshotai-cn``);
-* per model, only the fields radian reads: ``limit``, ``cost``, ``interleaved`` and the
+* per model, only the fields radian reads: ``limit``, ``cost``, ``interleaved``, ``modalities``
+  (its ``input`` list decides whether the model takes images, ADR 0018) and the
   entry-level ``provider`` object (its ``npm`` decides the wire protocol);
 * per provider, only the default ``npm`` (the entry-level fallback).
 
@@ -38,7 +39,7 @@ KNOWN_PROVIDERS = [
     "moonshotai-cn",
 ]
 
-MODEL_FIELDS = ["limit", "cost", "interleaved"]
+MODEL_FIELDS = ["limit", "cost", "interleaved", "modalities"]
 
 
 def trim(catalog):

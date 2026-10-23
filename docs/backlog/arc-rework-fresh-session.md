@@ -1,6 +1,6 @@
 # arc：返工开新 session，不接着旧上下文跑
 
-- 状态：idea（待 owner 定）
+- 状态：decided（owner：先做；缺省 `fresh`，可配置回 `resume`）
 - 涉及 ADR：0048（§7 worker、返工）、0018（自动压缩）
 - 关联：`arc-reviewer-profiles.md`（返工轮只审增量）、`compaction-threshold.md`
 
@@ -28,7 +28,8 @@ worker 的 session id 就是 task id，返工用 `--resume` 接着同一个 sess
 2. 可选：留一个配置，`[worker] rework_session = "fresh" | "resume"`，缺省 `fresh`。
 3. TUI 的 conversation 标签和 attach 按 attempt 列出 session（与 TK0018 计划中的 review 会话选择器同一处）。
 
-## 待决
+## 决定（已定）
 
-- 默认 `fresh` 还是 `resume`：resume 能保留"已经读过哪些文件"的记忆，代价是上下文越滚越大。
-- 改为压缩的方案：仍用 resume，但开新一轮前，prompt 超过阈值（例如 20 万）就先 `/compact`。这改的是 radian 侧，不是 arc 侧，跟 `compaction-threshold.md` 有关。
+1. 每次返工开新 session，第 1 条的输入照想法；缺省就是这样。
+2. 配置 `[worker] rework_session`，闭集 `fresh`、`resume`，缺省 `fresh`；`resume` 保留今天的行为。
+3. 压缩方案（resume 前超阈值先压缩）不在本项，留给 `compaction-threshold.md`。

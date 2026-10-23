@@ -79,13 +79,13 @@ pub const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "add_task",
-        description: "Add a task to a draft plan. Returns its new id.",
+        description: "Add a task to a plan. On a draft plan the task is todo.ready and is confirmed with the plan. On a confirmed plan the task is todo.proposed: it waits for the owner to confirm it, and the plan keeps its status and auto level. Returns its new id.",
         input_schema: r#"{
   "type": "object",
   "properties": {
     "plan": {
       "type": "string",
-      "description": "The id of the draft plan the task belongs to."
+      "description": "The id of the plan the task belongs to: a draft plan, or a confirmed plan (the task is then todo.proposed)."
     },
     "slug": {
       "type": "string",

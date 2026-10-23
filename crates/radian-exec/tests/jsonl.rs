@@ -525,3 +525,99 @@ async fn exec_help_names_the_output_format_and_dash_p() {
     assert!(out.contains("jsonl"), "{out}");
     assert!(out.contains("stdin"), "{out}");
 }
+
+/// A minimal PNG header with these dimensions (24 bytes).
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes.extend_from_slice(&[0, 0, 0, 0]);
+    bytes
+}
+
+/// The user `MessageAppended` line of a jsonl run.
+fn user_message(durable: &[String]) -> Value {
+    durable
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| {
+            value["event"] == "MessageAppended" && value["data"]["message"].get("user").is_some()
+        })
+        .expect("a durable user message")
+}
+
+/// `--image` attaches each image to the `-p` prompt's user message, in order, and the provider
+/// request carries it (Q7, ADR 0032 A2).
+#[tokio::test]
+async fn exec_image_attaches_to_the_prompt_user_message_in_order() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let env = Env::fresh("image");
+    let files = scratch("image-files");
+    let first = files.join("a.png");
+    let second = files.join("b.png");
+    std::fs::write(&first, png(10, 10)).unwrap();
+    std::fs::write(&second, png(20, 30)).unwrap();
+    let (code, durable, _live, _result, err) = run_jsonl(
+        &server.base_url,
+        &env,
+        "sid-image",
+        &[
+            "--image",
+            first.to_str().unwrap(),
+            "--image",
+            second.to_str().unwrap(),
+        ],
+        "describe",
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{err}");
+    let user = user_message(&durable);
+    let content = user["data"]["message"]["user"]["content"]
+        .as_array()
+        .expect("content parts");
+    assert_eq!(content[0]["text"]["text"], "describe");
+    assert_eq!(content[1]["image"]["mime_type"], "image/png");
+    assert_eq!(content[1]["image"]["annotations"]["name"], "a.png");
+    assert_eq!(content[2]["image"]["annotations"]["name"], "b.png");
+    assert_eq!(content[2]["image"]["annotations"]["height"], 30);
+
+    // The provider request has the images as data URLs (openai-compatible).
+    let body = server.requests()[0].json().to_string();
+    assert!(body.contains("data:image/png;base64,"), "{body}");
+}
+
+/// A `--image` that is not an image (or is over a limit) is a usage error: exit 2, naming the
+/// path and the reason (ADR 0032 A3).
+#[tokio::test]
+async fn a_bad_image_is_a_usage_error() {
+    let server = MockServer::start(Vec::new()).await;
+    let env = Env::fresh("bad-image");
+    let files = scratch("bad-image-files");
+    let bad = files.join("notes.png");
+    std::fs::write(&bad, "plain text").unwrap();
+    let (code, _out, err) = feed(
+        spawn(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--image",
+                bad.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &env,
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--image"), "{err}");
+    assert!(err.contains("notes.png"), "{err}");
+    assert!(err.contains("not a PNG"), "{err}");
+}
