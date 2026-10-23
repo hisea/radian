@@ -1665,9 +1665,23 @@ pub fn provider_models_url(provider_id: &str, base_url: &str) -> String {
     format!("{}/models", base_url.trim_end_matches('/'))
 }
 
+/// Whether a model-list refresh may send its key to `url` (ADR 0026 D2): a key never rides
+/// plain `http` to a host that is not this machine — the rule the adapters enforce at
+/// construction (`ConfigError::InsecureKey`), applied here because a background refresh builds
+/// no adapter to refuse it. `https`, and `http` on a [local](crate::is_local_base_url) host, are
+/// fetched as before; anything else is refused.
+pub fn models_url_accepts_key(url: &str) -> bool {
+    match url.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("https") => true,
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("http") => crate::is_local_base_url(url),
+        _ => false,
+    }
+}
+
 /// One model-list refresh (ADR 0026 D0): `GET` of [`provider_models_url`] with the key, the
 /// OpenAI shape (`{"data":[{"id":…}]}`). The zen discovery endpoint answers this shape (lead
-/// 2026-10-20); anything unreadable is ignored. `None` on any failure (silent, per D0).
+/// 2026-10-20); anything unreadable is ignored. `None` on any failure (silent, per D0), and on
+/// a URL [`models_url_accepts_key`] refuses.
 pub async fn fetch_provider_models(
     provider_id: &str,
     base_url: &str,
@@ -1677,8 +1691,13 @@ pub async fn fetch_provider_models(
 }
 
 /// One model-list `GET` of `url` with the key. A mock server stands in for the endpoint in
-/// tests, so the request and the OpenAI shape are covered without network.
+/// tests, so the request and the OpenAI shape are covered without network. A key is never sent
+/// over plain `http` off this machine ([`models_url_accepts_key`]): such a URL is a silent
+/// `None`, the same as any other failure, so the caller records the retry marker.
 async fn fetch_models_url(url: &str, key: &str) -> Option<Vec<String>> {
+    if !models_url_accepts_key(url) {
+        return None;
+    }
     let client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .build()
@@ -1769,8 +1788,18 @@ mod provider_models_tests {
         status_line: &'static str,
         body: &'static str,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
+        capturing_server_on("127.0.0.1", status_line, body)
+    }
+
+    /// [`capturing_server`] on an explicit local address, so a test can name a host that is not
+    /// itself loopback (the plain-`http` refusal below).
+    fn capturing_server_on(
+        bind: &str,
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = std::net::TcpListener::bind((bind, 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1784,7 +1813,36 @@ mod provider_models_tests {
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
-        (format!("http://{addr}"), rx)
+        (format!("http://{bind}:{}", addr.port()), rx)
+    }
+
+    /// ADR 0026 D2: a key never rides plain `http` to a host that is not this machine. The
+    /// decision is the pinned one: remote `http` is refused; local `http` and `https` pass.
+    #[test]
+    fn a_key_is_never_sent_over_plain_http_to_a_remote_host() {
+        assert!(!models_url_accepts_key("http://198.51.100.7/v1/models"));
+        assert!(!models_url_accepts_key("HTTP://198.51.100.7/v1/models"));
+        assert!(!models_url_accepts_key("http://0.0.0.0:8080/v1/models"));
+        assert!(models_url_accepts_key("http://127.0.0.1:8080/v1/models"));
+        assert!(models_url_accepts_key("http://localhost:8080/v1/models"));
+        assert!(models_url_accepts_key("http://[::1]:8080/v1/models"));
+        assert!(models_url_accepts_key("https://api.example.com/v1/models"));
+    }
+
+    /// ADR 0026 D2: the refusal is in the fetch itself, so the key never leaves the process.
+    /// A server on a non-loopback `http` address is never contacted; removing the guard in
+    /// [`fetch_models_url`] sends the request and fails this test.
+    #[tokio::test]
+    async fn a_remote_plain_http_model_list_is_never_fetched() {
+        let (base, request) = capturing_server_on("0.0.0.0", "200 OK", r#"{"data":[{"id":"m"}]}"#);
+        let models = fetch_provider_models("corp", &format!("{base}/v1"), "sk-test").await;
+        assert!(models.is_none(), "a remote plain-http list is refused");
+        assert!(
+            request
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "the key must never reach a remote plain-http host"
+        );
     }
 
     /// The refresh GETs the discovery path with Bearer auth and reads the OpenAI list shape

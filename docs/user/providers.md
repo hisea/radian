@@ -29,6 +29,7 @@ A named provider uses its own `base_url`.
 The answer is cached under `~/.radian/cache/providers/<name>.json` for 1 hour.
 Radian refreshes the list in the background after a session starts, and when `/model` opens with a missing or stale list.
 A failed fetch stays silent and retries after 5 minutes.
+A key is never sent to a plain `http` address that is not this machine; such a list is not fetched.
 Set `model.provider`, `model.base_url`, and `model.model` in the config file for defaults.
 
 Pass `--max-tokens <n>` for Anthropic requests.
