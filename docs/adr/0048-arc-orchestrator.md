@@ -75,8 +75,8 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
   runs/<task>/gate.log             the output of the background gate process
   runs/<task>/auto_reverify.json   the (head_sha, remote main) pairs the loop reverified on
                                   its own, and the last max_auto_reverify stop
-  runs/<task>/conflict_rework.json how many conflicts with main the task has had in a row; a
-                                  verification that does not conflict resets it
+  runs/<task>/conflict_rework.json how many conflicts with main the task has had in a row; an
+                                  attempt that does not conflict resets it
   attempts/<task>/<attempt>/      host-local attempt records (decision 7): start.json, identity.json,
                                   status.json, heartbeat.json
   gates/<stage>/                  the separate checkout for each gate stage (decision 10)
@@ -164,7 +164,7 @@ The change the delivery check counts is the attempt's own commits: the range fro
   - arc appends the brief to the task body and moves the task to `todo.ready` the way the lead's rework does (decision 6), with the heading `## Rework <n> (conflict with main)`. No new task state is added.
   - The text is fixed and short: the change conflicted with main at `<main short sha>` in `<stage>`; it lists the conflicted paths; the next attempt starts mid-merge; and it asks the worker to resolve the conflict keeping both sides' intent, commit the merge, rebuild, run the touched crates' tests, and change nothing else.
   - It never sends the task to `failed.exhausted` and never counts toward `max_attempts`: a conflict rework is not a retry, and it sets the task's `retry_count` back to `0`. It does not count as an automatic rework either: it does not change `auto_rework` and never pauses the plan. The plan's `auto` level decides, as before, whether the next attempt is claimed by itself.
-  - `[limits] max_conflict_rework` (default `3`, `0` or more) bounds a run of conflicts. It counts the task's consecutive conflicts, including the one arc is handling; while the count is below the limit, arc writes the brief and the task goes to `todo.ready`. When the count reaches the limit, arc writes no brief and the task stays in `review.rework_pending`: `radian arc run` prints `<task> conflict with main -> review.rework_pending: <reason>` and `show` prints the same text as the `rework_reason`. A verification that does not end in a conflict sets the count back to `0`, so only a run of conflicts reaches the limit, and `0` makes the first conflict wait for the lead.
+  - `[limits] max_conflict_rework` (default `3`, `0` or more) bounds a run of conflicts. It counts the task's consecutive conflicts, including the one arc is handling; while the count is below the limit, arc writes the brief and the task goes to `todo.ready`. When the count reaches the limit, arc writes no brief and the task stays in `review.rework_pending`: `radian arc run` prints `<task> conflict with main -> review.rework_pending: <reason>` and `show` prints the same text as the `rework_reason`. An attempt that does not conflict sets the count back to `0` (a verification that ends in anything else, and an attempt that never reaches the gate), so only a run of conflicts reaches the limit, and `0` makes the first conflict wait for the lead.
   - A `reverify` attempt that fails on a conflict takes the same path.
   - Every other reason, and every conflict when the profile does not contain `merge-main`, keeps today's path to `review.rework_pending` and waits for the lead: the worker would not start mid-merge. The one exception is a `review` stage that failed with blocking items (the next bullet).
   - `radian arc run` prints `<task> conflict with main -> todo.ready (automatic rework)` for the transition.
