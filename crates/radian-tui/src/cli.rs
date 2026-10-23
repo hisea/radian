@@ -360,8 +360,7 @@ enum RadianCommand {
     },
 
     /// The plan and task orchestrator: set arc up, and read and write plans and tasks.
-    /// A bare `radian arc` would open the arc interface, which this build does not have
-    /// yet.
+    /// A bare `radian arc` opens the read-only arc TUI; `radian arc <verb>` runs the CLI.
     Arc {
         #[command(subcommand)]
         command: Option<ArcCommand>,

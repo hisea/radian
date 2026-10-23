@@ -16,8 +16,6 @@ It also has `radian arc mcp`, the MCP server a lead writes plans and tasks throu
 `radian arc` with no subcommand opens the read-only TUI; its pages and keys are in [The arc TUI](#the-arc-tui).
 Without setup, `radian arc` and every subcommand except `init` refuse with a line that names `radian arc init` and exit `3`; without a terminal, `radian arc` exits `2`.
 
-Without setup, `radian arc` and every subcommand except `init` refuse with a line that names `radian arc init` and exit `3`.
-
 ## `radian arc init [--track]`
 
 `init` sets arc up for this repository.
@@ -909,9 +907,9 @@ A worker never reads the rest of `.radian/arc/` from inside its checkout: the wo
 
 ## The arc TUI
 
-`radian arc` opens a read-only view of plans, tasks, verdicts and journals; it writes nothing and probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · task · merge` (`merge` disabled), `main <sha>` and loop state.
+`radian arc` opens a read-only view of plans, tasks, verdicts and journals; it writes no arc state and probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · task · merge` (`merge` disabled), `main <sha>` and loop state.
 
-Plan marks: `✓` (merged, green), `●` (confirmed, accent), `◻` (draft, weak), then id and `auto <level> · <merged>/<total> · <cost>` (`draft · ` first for a draft; `—` when no cost). Frame: `<id> <status> · auto <level> · <n>/<m> merged · <cost>`, then title, tasks: a task after a plan task sits under its first parent (`├─`/`└─`), other parents are `also after <ids>`, roots in plan order, each task once. A row: mark, id, `state.phase` (mark's color), `#attempt`, cost, and `waits <ids>` for an unmerged-parent todo. Marks: `✓` done.merged green, `×` failed red, `●` doing/verifying accent, `!` awaiting_human/rework_pending accent bold (you or the lead acts), `◻` todo weak. Keys: `↑`/`↓` move (after `Tab`/`→`: tasks), `→`/`←` focus tasks/plans, `Tab`/`Enter` open the task page, `g` toggles the flat list (`after <ids>`), `Esc`/`q`/`Ctrl-C` quit.
+Plan marks: `✓` (merged, green), `●` (confirmed, accent), `◻` (draft, weak), then id and `auto <level> · <merged>/<total> · <cost>` (`draft · ` first for a draft; `—` when no cost). Frame: `<id> <status> · auto <level> · <n>/<m> merged · <cost>`, then title, tasks: a task after a plan task sits under its first parent (`├─`/`└─`), other parents are `also after <ids>`, roots in plan order, each task once. A row: mark, id, `state.phase` (mark's color), `#attempt`, cost, and `waits <ids>` for an unmerged-parent todo. Marks: `✓` done.merged green, `×` failed red, `●` doing/verifying accent, `!` awaiting_human/rework_pending accent bold (you or the lead acts), `◻` todo weak. Keys: `↑`/`↓` move in the focused column (the plan list, or the task list after `→`), `→`/`←` focus the task list/plan list, `Tab`/`Enter` open the task page (`Tab` on it goes back), `g` toggles the flat list (`after <ids>`), `Esc`/`q`/`Ctrl-C` quit.
 
 Task frame: `<id> <state.phase> · attempt <N> · <cost> · plan <id>`, the title, `conversation · diff · attempts` and `attempt 1 2 3` (latest by default; `[`/`]` switch). Conversation: `~/.radian/sessions/<id>.jsonl` through the attach view (one weak line if none); `j`/`k` scroll, `f` follows. Diff: the merge commit's first-parent diff when merged, else `base_sha..head_sha`; files show `+N`/`-N`, the selected file's diff is a frame titled with its path, `n`/`p` file, `j`/`k` scroll, `f` end. Attempts: each attempt's verdicts (`✓ commands`, `× integration (conflict)`). `h`/`l` (or `←`/`→`) change tab, `[`/`]` attempt, `Tab`/`Esc` back, `q`/`Ctrl-C` quit.
 
