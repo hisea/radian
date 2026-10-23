@@ -50,6 +50,9 @@ copy.
 | M38 | drop the count (`len >= u32::MAX` instead of `len >= max_auto_reverify`) | `run::max_auto_reverify_stops_the_step_and_says_why` | ✅ failed |
 | M39 | also reverify a review failure (`stage == "review"` passes the fixable check) | `run::only_a_command_failure_of_an_auto_plan_is_reverified` | ✅ failed |
 | M40 | drop the "remote main moved" condition (any failed `commands`/integration stage qualifies) | `run::a_command_failure_is_not_reverified_while_main_stands_still` | ✅ failed |
+| M41 | ignore the priority in the claim order (`claim_order` compares the ids only) | `run::a_higher_priority_plan_gets_the_free_slot_first`, `run::a_priority_change_takes_effect_on_the_next_pass_and_does_not_preempt`, `arc::priority_is_set_listed_and_shown_and_a_bad_value_exits_three` (the `list` order) | ✅ 3 failed |
+| M42 | let a higher priority preempt a running attempt (`start_ready` ignores the tasks in `doing`) | `run::two_plans_at_the_same_priority_keep_id_order`, `run::a_higher_priority_plan_gets_the_free_slot_first`, `run::a_priority_change_takes_effect_on_the_next_pass_and_does_not_preempt` | ✅ 3 failed |
+| M43 | accept `P6` (drop the set check when a plan file is read and in `set_priority`) | `store::model::tests::a_priority_outside_the_set_is_refused_and_the_order_is_priority_then_id`, `store::an_old_plan_without_a_priority_reads_as_p3_and_keeps_its_bytes`, `arc::priority_is_set_listed_and_shown_and_a_bad_value_exits_three` | ✅ 3 failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -118,3 +121,10 @@ an automatic reverify is already stopped by its own condition (the new failing v
 records the main it ran against, so "main moved since the failing verdict" is false); M37
 therefore drives the state a pass leaves when it dies between recording the `(head, main)`
 pair and claiming the attempt, which is the state the pair guard alone protects.
+
+M41–M43 were run against `a95de60e` (the priority change), each through `git restore` of the
+mutated file and verified byte for byte with `git diff --exit-code`. M41 leaves the id order
+alone, so `two_plans_at_the_same_priority_keep_id_order` still passes under it: the priority
+tests and the `list` order catch it. M42 claims every ready task, so all three priority tests
+fail, the same-priority one included. M43's parse and command checks are one decision in two
+places; both are dropped in the one mutation, and the unit, store and CLI tests catch it.
