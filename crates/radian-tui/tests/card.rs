@@ -537,7 +537,7 @@ fn a_patch_block_shows_its_diff_body() {
                 "path": "src/a.rs",
                 "replaced": 1,
                 "matched": "exact",
-                "hunks": [{"old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1}],
+                "hunks": [{"edit": 1, "old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1}],
             })),
             is_error: false,
             error_code: None,

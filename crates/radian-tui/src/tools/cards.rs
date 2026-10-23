@@ -248,26 +248,25 @@ pub fn meta_parts(card: &ToolCard, cancelled: bool) -> Vec<String> {
     parts
 }
 
-/// The `+N −M` a `patch` or `write` head shows: `patch` counts the call's `old`/`new` lines,
-/// `write` the content it wrote (and the file's previous line count when the result carries
-/// one).
+/// The `+N −M` a `patch` or `write` head shows: `patch` sums the result's structured `hunks`
+/// (one `edit` may replace several ranges, and every range counts), falling back to the call's
+/// edits when the result carries none (an older journal entry); `write` counts the content it
+/// wrote (and the file's previous line count when the result carries one).
 pub(super) fn diff_meta(card: &ToolCard) -> Option<String> {
     let count = |value: Option<&Value>| -> usize {
-        value
-            .and_then(Value::as_str)
-            .map(|text| {
-                if text.is_empty() {
-                    0
-                } else {
-                    text.lines().count()
-                }
-            })
-            .unwrap_or(0)
+        value.and_then(Value::as_str).map(text_lines).unwrap_or(0)
     };
     match card.name.as_str() {
         "patch" => {
-            let removed = count(card.arguments.get("old"));
-            let added = count(card.arguments.get("new"));
+            let hunks = patch_hunks(card);
+            if !hunks.is_empty() {
+                let added: u64 = hunks.iter().map(|hunk| hunk.new_lines).sum();
+                let removed: u64 = hunks.iter().map(|hunk| hunk.old_lines).sum();
+                return Some(format!("+{added} −{removed}"));
+            }
+            let edits = patch_call_edits(card);
+            let removed: usize = edits.iter().map(|(old, _)| text_lines(old)).sum();
+            let added: usize = edits.iter().map(|(_, new)| text_lines(new)).sum();
             Some(format!("+{added} −{removed}"))
         }
         "write" => {
@@ -554,37 +553,102 @@ pub fn result_display_text(card: &ToolCard, tool_text: &str) -> String {
 /// the diff roles paint. There are no context lines: the call carries no surrounding text, and
 /// the renderer must not pretend it does (ADR 0028 R4).
 ///
-/// The headers are built from the result's structured `hunks` (`radian-coding`'s `patch`); a
-/// result that carries none (an older journal entry) keeps the numberless form, and the diff
-/// body then draws it without a gutter.
+/// The hunks come from the result's structured `hunks` (`radian-coding`'s `patch`), and each
+/// hunk's `-`/`+` text is that hunk's `edit`. A result that carries no `hunks` (an older journal
+/// entry), or a hunk whose `edit` is missing or out of range, falls back to the call's edits in
+/// call order with no `@@` line; the diff body then draws it without a gutter.
 pub(super) fn patch_diff_text(card: &ToolCard) -> Option<String> {
-    let old = string_field(&card.arguments, "old")?;
-    let new = string_field(&card.arguments, "new")?;
+    let edits = patch_call_edits(card);
+    if edits.is_empty() {
+        return None;
+    }
     let hunks = patch_hunks(card);
+    let addressed = !hunks.is_empty()
+        && hunks.iter().all(|hunk| {
+            hunk.edit
+                .is_some_and(|edit| (1..=edits.len()).contains(&edit))
+        });
     let mut out = String::new();
-    for index in 0..hunks.len().max(1) {
-        if let Some((old_start, old_lines, new_start, new_lines)) = hunks.get(index) {
-            out.push_str(&format!(
-                "@@ -{old_start},{old_lines} +{new_start},{new_lines} @@\n"
-            ));
+    if addressed {
+        for hunk in &hunks {
+            // `addressed` guarantees every hunk names one of the call's edits.
+            if let Some(edit) = hunk.edit {
+                out.push_str(&format!(
+                    "@@ -{},{} +{},{} @@\n",
+                    hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+                ));
+                let (old, new) = &edits[edit - 1];
+                push_diff_lines(&mut out, old, new);
+            }
         }
-        for line in old.lines() {
-            out.push('-');
-            out.push_str(line);
-            out.push('\n');
-        }
-        for line in new.lines() {
-            out.push('+');
-            out.push_str(line);
-            out.push('\n');
+    } else {
+        for (old, new) in &edits {
+            push_diff_lines(&mut out, old, new);
         }
     }
     Some(out)
 }
 
-/// The result's `hunks`: `(old_start, old_lines, new_start, new_lines)` per replaced range, in
-/// file order (ADR 0028). Empty when the result carries none.
-pub(super) fn patch_hunks(card: &ToolCard) -> Vec<(u64, u64, u64, u64)> {
+/// One edit's `-old` / `+new` rows, in that order.
+fn push_diff_lines(out: &mut String, old: &str, new: &str) {
+    for line in old.lines() {
+        out.push('-');
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in new.lines() {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+/// A text's line count for the `+N −M` meta: `str::lines`, so a trailing newline ends the last
+/// line instead of adding an empty one, and an empty text counts zero.
+fn text_lines(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
+    }
+}
+
+/// The call's edits in **call order**, each as its `(old, new)` text: the single `old`/`new`
+/// pair, or one entry per item of the `edits` array. Empty when the call carries neither.
+pub(super) fn patch_call_edits(card: &ToolCard) -> Vec<(String, String)> {
+    if let Some(edits) = card.arguments.get("edits").and_then(Value::as_array) {
+        return edits
+            .iter()
+            .map(|edit| {
+                (
+                    string_field(edit, "old").unwrap_or_default(),
+                    string_field(edit, "new").unwrap_or_default(),
+                )
+            })
+            .collect();
+    }
+    match (
+        string_field(&card.arguments, "old"),
+        string_field(&card.arguments, "new"),
+    ) {
+        (Some(old), Some(new)) => vec![(old, new)],
+        _ => Vec::new(),
+    }
+}
+
+/// One replaced range from the result's `hunks` (ADR 0028): its start line and line count in
+/// each file, and the 1-based edit of the call that produced it (`None` for a result written
+/// before the `edit` field existed).
+pub(super) struct PatchHunk {
+    old_start: u64,
+    old_lines: u64,
+    new_start: u64,
+    new_lines: u64,
+    edit: Option<usize>,
+}
+
+/// The result's `hunks` in file order. Empty when the result carries none.
+pub(super) fn patch_hunks(card: &ToolCard) -> Vec<PatchHunk> {
     card.structured
         .as_ref()
         .and_then(|value| value.get("hunks"))
@@ -594,12 +658,13 @@ pub(super) fn patch_hunks(card: &ToolCard) -> Vec<(u64, u64, u64, u64)> {
                 .iter()
                 .filter_map(|hunk| {
                     let field = |name: &str| hunk.get(name).and_then(Value::as_u64);
-                    Some((
-                        field("old_start")?,
-                        field("old_lines")?,
-                        field("new_start")?,
-                        field("new_lines")?,
-                    ))
+                    Some(PatchHunk {
+                        old_start: field("old_start")?,
+                        old_lines: field("old_lines")?,
+                        new_start: field("new_start")?,
+                        new_lines: field("new_lines")?,
+                        edit: field("edit").map(|edit| edit as usize),
+                    })
                 })
                 .collect()
         })
