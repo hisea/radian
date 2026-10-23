@@ -59,6 +59,8 @@ copy.
 | M44 | compare `max_attempts` with the attempt number again (`attempt < max_attempts`) | `attempt::a_reworked_task_keeps_starting_after_max_attempts_worth_of_attempts`, `attempt::retries_after_a_rework_start_from_zero_and_stop_at_max_attempts`, `attempt::a_failed_outcome_retries_with_the_backoff_then_is_exhausted` | ✅ 3 failed |
 | M45 | do not reset `retry_count` on a rework (`plan_ops::add_rework_with` drops the reset) | `attempt::a_reworked_task_keeps_starting_after_max_attempts_worth_of_attempts` (round 2 keeps the count at 1) | ✅ failed |
 | M46 | drop the conflict limit (`if false && record.conflicts >= limit`) | `review::max_conflict_rework_stops_a_run_of_conflicts_and_says_why` (the third conflict returns to `todo.ready`), `review::a_zero_conflict_limit_never_writes_the_rework` (the brief is written at `0`) | ✅ 2 failed |
+| M47 | the conflict path consults `max_attempts` again (`task.attempt >= max_attempts \|\| …`) | `review::a_conflict_on_the_old_last_attempt_still_gets_the_conflict_rework` (the third attempt with `max_attempts` 1 stops instead of returning to `todo.ready`) | ✅ failed |
+| M48 | drop `retry_count` from the task JSON (`store::cli::task_json`) | `arc::the_retry_count_is_a_field_of_show_and_list_json` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -147,3 +149,9 @@ test only: a task whose retry count is still 0 cannot show the missing reset, so
 test is the one that sees the count cross the rework. M46 leaves the streak record itself in
 place (each conflict still counts); only the stop is gone, so both conflict-limit tests fail
 and every other conflict test still passes.
+
+M47–M48 were run against `4b6a9619`, each from a copy under `.radian/mutations/` restored with
+`cp` and compared with `cmp`. M47 is what the old conflict path did; it leaves the conflict
+limit itself in place, so only the test for an old-last-attempt conflict fails. M48 is the
+JSON field alone: the text form still prints `retry_count`, so the drift-style tests pass and
+the CLI test catches it.
