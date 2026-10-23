@@ -1656,7 +1656,7 @@ pub fn write_provider_models_at(
 /// The URL one model-list refresh GETs (ADR 0026 D0): the descriptor's own model-list URL
 /// when it names one (`opencode-go`'s discovery endpoint), else `<base>/models`. Pure, so the
 /// refresh and its tests name the same endpoint.
-fn provider_models_url(provider_id: &str, base_url: &str) -> String {
+pub fn provider_models_url(provider_id: &str, base_url: &str) -> String {
     if let Some(descriptor) = crate::descriptor(provider_id)
         && let Some(url) = descriptor.models_url
     {

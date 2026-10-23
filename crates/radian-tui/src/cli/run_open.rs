@@ -410,7 +410,7 @@ pub(super) fn open_session_and_refresh(
     provider_name: &str,
     model_name: &str,
     provider_ref: &radian_host::ProviderRef,
-    key_id: &str,
+    config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
 ) -> Result<radian_host::LocalSession, RunError> {
     let SessionInputs {
         sandbox,
@@ -542,53 +542,13 @@ pub(super) fn open_session_and_refresh(
     if let Some(server) = &control {
         server.serve(runtime.handle(), radian_host::ControlTarget::of(&session));
     }
-    // The providers worth refreshing now: the one this run started with. `/model`'s other
-    // targets refresh on their next use (the fetch itself is on the loop's runtime).
-    let refresh_targets = vec![key_id.to_owned()];
-    // ADR 0026 D0: refresh the switched-to providers' model list in the background (their
-    // descriptor's own URL when named, else `/v1/models`). It never blocks startup and its
-    // failures are silent (the next `/model` just sees the old cache).
-    runtime.spawn(async move {
-        for provider_id in refresh_targets {
-            let Some(key) = radian_host::auth::resolve_key(&provider_id)
-                .ok()
-                .flatten()
-                .map(|resolved| resolved.key)
-            else {
-                continue;
-            };
-            // The retry rule (D0): skip when the cache is fresh, or when a fetch failed less
-            // than the retry delay ago (the failure marker is an empty `models` write).
-            let age = radian_host::provider_models_cache(&provider_id).and_then(|path| {
-                std::fs::metadata(path).ok().and_then(|meta| {
-                    meta.modified()
-                        .ok()
-                        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
-                })
-            });
-            let cached = radian_host::auth::resolve_key(&provider_id)
-                .ok()
-                .flatten()
-                .and_then(|resolved| {
-                    radian_host::read_provider_models(&provider_id, &resolved.key)
-                });
-            let cached_models = cached.as_ref().map_or(0, |cache| cache.models.len());
-            if !radian_host::provider_models_stale(age, cached_models) {
-                continue;
-            }
-            let base_url = radian_host::descriptor(&provider_id)
-                .map(|descriptor| descriptor.default_base_url.to_owned())
-                .unwrap_or_default();
-            match radian_host::fetch_provider_models(&provider_id, &base_url, &key).await {
-                Some(models) => {
-                    let _ = radian_host::write_provider_models(&provider_id, &key, models);
-                }
-                None => {
-                    // The failure marker: an empty list, so the retry delay applies (D0).
-                    let _ = radian_host::write_provider_models(&provider_id, &key, Vec::new());
-                }
-            }
-        }
-    });
+    // ADR 0026 D0/D10: every provider `/model` would offer refreshes in the background, each
+    // from its own base URL (a named provider's declaration or its `auth.json` entry's env; a
+    // built-in descriptor keeps its own models URL). It never blocks startup and its failures
+    // are silent (the next `/model` just sees the old cache). `/model` itself spawns the same
+    // pass, so a provider added with `/login` mid-session shows on the next open.
+    let refresh_targets = model_refresh_targets(Some(provider_name), config_providers);
+    let refresh_config = config_providers.clone();
+    runtime.spawn(refresh_provider_models(refresh_targets, refresh_config));
     Ok(session)
 }

@@ -276,6 +276,14 @@ async fn handle(
     let Some(request) = read_request(&mut stream).await else {
         return;
     };
+    // ADR 0026 D0: the host refreshes a provider's model list with `GET <base>/models`. Answer
+    // it here, outside the scripted queue (a real endpoint serves it too), so the background
+    // refresh cannot consume a reply a test scripted for a chat call. It is not recorded:
+    // `requests()` stays the model calls a test asserts on.
+    if request.method == "GET" && request.path.trim_end_matches('/').ends_with("/models") {
+        let _ = write_plain(&mut stream, 200, &[], r#"{"object":"list","data":[]}"#).await;
+        return;
+    }
     requests.lock().unwrap().push(request);
     let reply = replies.lock().unwrap().pop_front();
     let _ = respond(&mut stream, reply).await;
