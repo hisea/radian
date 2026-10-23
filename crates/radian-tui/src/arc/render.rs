@@ -725,11 +725,7 @@ fn diff_lines(
     let mut out = Vec::new();
     for (index, raw) in lines.iter().enumerate() {
         let raw = *raw;
-        if raw.starts_with("diff --git")
-            || raw.starts_with("index ")
-            || raw.starts_with("--- ")
-            || raw.starts_with("+++ ")
-        {
+        if super::is_diff_metadata(raw) {
             continue;
         }
         if raw.starts_with("@@") {

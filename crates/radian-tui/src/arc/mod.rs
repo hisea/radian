@@ -270,6 +270,19 @@ impl TaskPage {
         self.diff.as_ref()?.files.get(self.file_sel)
     }
 
+    /// The selected file's diff body rows: exactly the rows the diff frame draws (the
+    /// metadata lines are skipped). It does not depend on the width, so the key handlers can
+    /// clamp the scroll to the end of the body.
+    pub fn diff_body_len(&self) -> usize {
+        let Some(file) = self.selected_file() else {
+            return 0;
+        };
+        file.text
+            .lines()
+            .filter(|line| !is_diff_metadata(line))
+            .count()
+    }
+
     fn switch_attempt(&mut self, delta: i32) {
         if self.attempts.is_empty() {
             return;
@@ -717,7 +730,8 @@ impl ArcApp {
             }
             KeyCode::Char('j') | KeyCode::Down => match page.tab {
                 TaskTab::Diff => {
-                    page.diff_scroll = page.diff_scroll.saturating_add(1);
+                    let end = page.diff_body_len().saturating_sub(1);
+                    page.diff_scroll = page.diff_scroll.saturating_add(1).min(end);
                     ArcKey::Redraw
                 }
                 TaskTab::Conversation => {
@@ -739,7 +753,9 @@ impl ArcApp {
             },
             KeyCode::Char('f') => {
                 match page.tab {
-                    TaskTab::Diff => page.diff_scroll = usize::MAX,
+                    // Follow the end means the last body row is the first visible one; it is
+                    // stored, so `k` moves up from there instead of from a sentinel.
+                    TaskTab::Diff => page.diff_scroll = page.diff_body_len().saturating_sub(1),
                     TaskTab::Conversation => page.pending_follow = true,
                     TaskTab::Attempts => {}
                 }
@@ -976,6 +992,15 @@ fn row(task: &TaskFile, connector: String, also_after: Vec<String>, waits: Vec<S
         waits,
         after: Vec::new(),
     }
+}
+
+/// A diff line the task page does not draw: the `diff --git` line, the index line and the
+/// old/new file headers. The path is the diff frame's title instead.
+pub fn is_diff_metadata(line: &str) -> bool {
+    line.starts_with("diff --git")
+        || line.starts_with("index ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
 }
 
 /// One cost, as the pages print it: `$1.23`, or `—` when nothing was recorded.

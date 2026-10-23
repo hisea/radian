@@ -617,6 +617,64 @@ fn a_stale_diff_reply_does_not_block_the_next_attempt() {
 }
 
 #[test]
+fn follow_then_k_scrolls_the_diff_up_from_the_end() {
+    use radian_arc::read::{DiffFile, TaskDiff};
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    let id = app.task.as_ref().unwrap().id.clone();
+    let attempt = app.task.as_ref().unwrap().attempt.unwrap();
+    let text: String = (1..=40).map(|i| format!("+line {i}\n")).collect();
+    let file = DiffFile {
+        path: "big.txt".to_owned(),
+        added: 40,
+        removed: 0,
+        text,
+    };
+    app.apply_diff(&id, attempt, Ok(TaskDiff { files: vec![file] }));
+
+    app.on_key(&key(KeyCode::Char('f')));
+    assert_eq!(
+        app.task.as_ref().unwrap().diff_scroll,
+        39,
+        "f goes to the last body row"
+    );
+    let text = screen(&mut app, 120, 40);
+    let first = first_diff_body_row(&text);
+    assert!(first.contains("line 40"), "{first}");
+
+    app.on_key(&key(KeyCode::Char('k')));
+    assert_eq!(
+        app.task.as_ref().unwrap().diff_scroll,
+        38,
+        "k moves up one line"
+    );
+    let text = screen(&mut app, 120, 40);
+    let first = first_diff_body_row(&text);
+    assert!(first.contains("line 39"), "{first}");
+
+    app.on_key(&key(KeyCode::Char('j')));
+    app.on_key(&key(KeyCode::Char('j')));
+    assert_eq!(
+        app.task.as_ref().unwrap().diff_scroll,
+        39,
+        "j stops at the end"
+    );
+}
+
+/// The first body row under the diff frame titled with `big.txt`.
+fn first_diff_body_row(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let title = lines
+        .iter()
+        .position(|line| line.contains("╭─ big.txt"))
+        .expect("the diff frame is drawn");
+    lines[title + 1].to_string()
+}
+
+#[test]
 fn the_task_page_has_the_frame_the_tabs_and_the_attempt_selector() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
