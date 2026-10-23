@@ -68,6 +68,11 @@ copy.
 | M53 | drop the reset after a passing verification (`finish_verification`) | `review::a_non_conflicting_verification_resets_the_conflict_count` (the second conflict after the pass stops the task) | ✅ failed |
 | M54 | drop the reset in `attempt_ops::apply` for an attempt that never reached the gate | `attempt::an_attempt_that_does_not_reach_the_gate_resets_the_conflict_count` (the run stays at 2) | ✅ failed |
 | M55 | do not reset the conflict run for the lead's `add_rework` (`plan_ops::add_rework_with` drops the empty-suffix reset) | `review::a_lead_rework_resets_the_conflict_run` (the record keeps `reworks: 3` after the lead's brief) | ✅ failed |
+| M56 | the pass restarts a dead `running` verify gate without counting (`advance_verification` drops the `count_death` call) | `run::a_gate_that_dies_after_running_is_restarted_twice_then_left_died`, `run::zero_max_gate_deaths_stops_at_the_first_death` (both run to the 60 s limit, with an `verify started` line on every pass) | ✅ 2 failed |
+| M57 | the loop's own stop leaves `running` instead of writing `interrupted` (`background::stop` skips `write_interrupted`) | `run::a_stopped_gate_is_interrupted_and_restarted_without_a_death` (the record says `running`) | ✅ failed |
+| M58 | `radian arc reverify` refuses a stuck `review.verifying` task again (`attempt_ops` sets `gate_stuck = false`) | `run::reverify_reruns_a_task_whose_gate_left_no_record`, `run::reverify_reruns_a_task_whose_gate_died` (exit 3, no attempt) | ✅ 2 failed |
+| M59 | `background::stop` ignores a gate whose record is still `started` (`STARTED => false`, no lock check) | `run::sigterm_to_watch_stops_a_gate_that_has_not_written_running` (the gate outlives the loop and later writes `done`) | ✅ failed |
+| M60 | `background::stop` assumes a gate with no start time is alive (`started.is_empty() \|\| …`); the extra mutation of the brief's item (d) | `run::stop_without_a_start_time_returns_as_soon_as_the_gate_is_gone` (waits its whole grace and then the kill window) | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -186,3 +191,17 @@ before the fourth conflict stops; the lead's rework resets the run), when M50's 
 was changed from "count the conflicts" to "count the conflict reworks arc wrote", each from a
 copy under `.radian/mutations/` restored with `cp` and compared with `cmp`. M55 is caught by
 `a_lead_rework_resets_the_conflict_run` alone; the run record it leaves shows `reworks: 3`.
+
+M56–M60 were run against `73e6ce26` (the gate deaths, `interrupted`, and the stuck-gate
+`reverify`), each applied to the committed file and restored with `git checkout --`, with
+`git status --short` empty afterwards and `cargo build -p radian-tui --bin radian -p
+agent-extensions --bin mcp-fixture` before every run (the sync tests refuse a binary older
+than its sources). M56 is the old spin: a dead `running` record starts another gate on every
+pass, so both death tests run to their 60 s deadline without ever seeing `died`. M57 is
+caught by the first assertion of its test (the record still says `running`, and the restart
+would carry a death); M58 is the old refusal, caught by the two `no_record`/`died` reverify
+tests only, and its reverse (`gate_stuck` true for every `review.verifying` task) is what
+`reverify_refuses_a_verifying_task_whose_gate_runs` pins. M59 leaves the gate of a
+just-started task alone: it survives the loop, finishes its 15 s test-only delay, and writes
+`done`. M60 is the item (d) mutation: with no start time it waits the full grace and then the
+kill window, so the test's 2 s bound fails at 15 s.
