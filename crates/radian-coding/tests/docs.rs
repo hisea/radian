@@ -4,6 +4,7 @@
 mod common;
 
 use common::{TempDir, call, structured, text, tools};
+use regex::Regex;
 use serde_json::json;
 
 /// Every embedded page name, from the table itself.
@@ -204,6 +205,84 @@ fn the_user_manual_has_no_design_numbers_or_slices() {
         assert!(!text.contains("ADR"), "{name} mentions ADR");
         assert!(!text.contains("slice"), "{name} mentions slice");
     }
+}
+
+/// Plan wording that must never reach an ADR. The test reads this one list. An ordinary word such
+/// as "time slices" does not match: a slice identifier needs a space and then a letter or digit.
+const ADR_PLAN_WORDING: &[(&str, &str)] = &[
+    ("a backlog path", r"docs/backlog"),
+    ("a slice identifier", r"(?i)\bslice\s+[A-Za-z0-9]"),
+    (
+        "a named slice",
+        r"(?i)\b(?:next|previous|this|last) slice\b",
+    ),
+    ("a named task", r"(?i)\b(?:next|later) task\b"),
+];
+
+/// An ADR is a snapshot of the decisions in force: it never links the backlog and never names a
+/// slice or a next/later piece of work. The manual has the same rule for its own pages.
+#[test]
+fn the_adrs_are_snapshots_not_plans() {
+    // The patterns must catch plan wording and leave ordinary prose alone, or the sweep below
+    // would pass for the wrong reason.
+    for (sample, expected) in [
+        ("docs/backlog/goal-mode.md", true),
+        ("(ADR 0045 slice A)", true),
+        ("(bwrap, slice 0)", true),
+        ("see the next slice", true),
+        ("a later task", true),
+        ("per-frame time slices remeasure", false),
+        ("During time-sliced remeasure", false),
+    ] {
+        let hit = ADR_PLAN_WORDING.iter().any(|(what, pattern)| {
+            Regex::new(pattern)
+                .unwrap_or_else(|error| panic!("{what} is a valid pattern: {error}"))
+                .is_match(sample)
+        });
+        assert_eq!(hit, expected, "patterns on {sample:?}");
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = manifest.join("../../docs/adr");
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .expect("docs/adr exists")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "docs/adr holds ADRs");
+
+    let patterns: Vec<(&str, Regex)> = ADR_PLAN_WORDING
+        .iter()
+        .map(|(what, pattern)| {
+            let regex = Regex::new(pattern)
+                .unwrap_or_else(|error| panic!("{what} is a valid pattern: {error}"));
+            (*what, regex)
+        })
+        .collect();
+    let mut hits: Vec<String> = Vec::new();
+    for path in &paths {
+        let name = path.file_name().expect("an ADR has a file name");
+        let text = std::fs::read_to_string(path).expect("an ADR reads");
+        for (index, line) in text.lines().enumerate() {
+            for (what, pattern) in &patterns {
+                if let Some(found) = pattern.find(line) {
+                    hits.push(format!(
+                        "docs/adr/{}:{}: {what} `{}`",
+                        name.to_string_lossy(),
+                        index + 1,
+                        found.as_str()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "an ADR states only the decisions in force:\n{}",
+        hits.join("\n")
+    );
 }
 
 /// Every built-in tool name appears in the manual.
