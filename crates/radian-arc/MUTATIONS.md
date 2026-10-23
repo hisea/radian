@@ -56,6 +56,9 @@ copy.
 | M41 | let the loop claim a `todo.proposed` task (accept `proposed` in `run::start_ready`'s phase filter and in `attempt_ops::claim`) | `review::the_loop_does_not_claim_a_proposed_task_and_start_refuses_it` | ✅ failed |
 | M42 | move the plan back to `draft` on a task confirm | `review::confirm_makes_a_proposed_task_ready_and_leaves_the_plan_alone` | ✅ failed |
 | M43 | include the review verdict's `blocking` items in the follow-up task | `review::a_blocking_item_is_never_carried_into_the_followup` | ✅ failed |
+| M44 | compare `max_attempts` with the attempt number again (`attempt < max_attempts`) | `attempt::a_reworked_task_keeps_starting_after_max_attempts_worth_of_attempts`, `attempt::retries_after_a_rework_start_from_zero_and_stop_at_max_attempts`, `attempt::a_failed_outcome_retries_with_the_backoff_then_is_exhausted` | ✅ 3 failed |
+| M45 | do not reset `retry_count` on a rework (`plan_ops::add_rework_with` drops the reset) | `attempt::a_reworked_task_keeps_starting_after_max_attempts_worth_of_attempts` (round 2 keeps the count at 1) | ✅ failed |
+| M46 | drop the conflict limit (`if false && record.conflicts >= limit`) | `review::max_conflict_rework_stops_a_run_of_conflicts_and_says_why` (the third conflict returns to `todo.ready`), `review::a_zero_conflict_limit_never_writes_the_rework` (the brief is written at `0`) | ✅ 2 failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -137,3 +140,10 @@ alone, so `two_plans_at_the_same_priority_keep_id_order` still passes under it: 
 tests and the `list` order catch it. M42 claims every ready task, so all three priority tests
 fail, the same-priority one included. M43's parse and command checks are one decision in two
 places; both are dropped in the one mutation, and the unit, store and CLI tests catch it.
+
+M44–M46 were run against `9d3fdf67` (the retry count and the conflict limit), each from a copy
+under `.radian/mutations/` restored with `cp` and compared with `cmp`. M45 is caught by one
+test only: a task whose retry count is still 0 cannot show the missing reset, so the ten-round
+test is the one that sees the count cross the rework. M46 leaves the streak record itself in
+place (each conflict still counts); only the stop is gone, so both conflict-limit tests fail
+and every other conflict test still passes.
