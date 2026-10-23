@@ -36,6 +36,12 @@ pub fn same_process(pid: u32, started_at: &str) -> bool {
     start_time(pid).is_some_and(|start| start == started_at.trim())
 }
 
+/// Whether `pid` exists, whatever it is running. This is `kill(pid, 0)`: a signal probe,
+/// not a `ps` call, so it works where the `workspace` sandbox refuses `ps`.
+pub fn alive(pid: u32) -> bool {
+    pid != 0 && signal(pid, 0)
+}
+
 /// Sends `signal` to `pid`. `false` when the process could not be signalled (already gone,
 /// or not ours).
 pub fn signal(pid: u32, signal: i32) -> bool {
@@ -80,6 +86,9 @@ mod tests {
             "a live pid with another start time is another process"
         );
         assert!(!same_process(0, &mine));
+        // `alive` is the probe used where `ps` is refused, and needs no start time.
+        assert!(alive(me));
+        assert!(!alive(0));
     }
 
     #[test]

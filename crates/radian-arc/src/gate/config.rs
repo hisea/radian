@@ -14,6 +14,9 @@ use super::error::GateError;
 /// The default per-command timeout in seconds (the sample value of ADR 0048 decision 15).
 pub const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 3600;
 
+/// The default wall-time limit of one `review` session, in seconds (ADR 0048 decision 15).
+pub const DEFAULT_REVIEW_TIMEOUT_SECS: u64 = 900;
+
 /// One gate stage.
 ///
 /// `commands`, `mutation`, `review`, `ci` and `human` are the stages a profile can list.
@@ -116,11 +119,13 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Rejects a profile that lists `integration` or lists one stage twice.
+    /// Rejects a profile that lists `integration`, lists one stage twice, or lists `review`
+    /// before `commands` (the order ADR 0048 decision 10 fixes).
     ///
     /// # Errors
     ///
-    /// [`GateError::UnlistedStage`] or [`GateError::DuplicateStage`].
+    /// [`GateError::UnlistedStage`], [`GateError::DuplicateStage`] or
+    /// [`GateError::StageOrder`].
     pub fn validate(&self) -> Result<(), GateError> {
         let mut seen = Vec::with_capacity(self.stages.len());
         for spec in &self.stages {
@@ -132,7 +137,67 @@ impl Profile {
             }
             seen.push(spec.stage);
         }
+        // `review` reads the change the `commands` stage accepted: a profile that lists both
+        // must run `commands` first (ADR 0048 decision 10).
+        let commands = self
+            .stages
+            .iter()
+            .position(|spec| spec.stage == Stage::Commands);
+        let review = self
+            .stages
+            .iter()
+            .position(|spec| spec.stage == Stage::Review);
+        if let (Some(commands), Some(review)) = (commands, review)
+            && review < commands
+        {
+            return Err(GateError::StageOrder {
+                stage: Stage::Review,
+                after: Stage::Commands,
+            });
+        }
         Ok(())
+    }
+}
+
+/// The `[gate.review]` table: how the `review` stage runs its read-only session (ADR 0048
+/// decision 10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ReviewConfig {
+    /// Extra `radian exec` arguments of the review session, after the stage's own. Unset:
+    /// `[worker] exec_args`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_args: Option<Vec<String>>,
+    /// A file appended to the built-in prompt, relative to the repository root. Unset: only
+    /// the built-in prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_file: Option<String>,
+    /// Wall-time limit of one review session, in seconds. `0` waits forever.
+    pub timeout_secs: u64,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            exec_args: None,
+            prompt_file: None,
+            timeout_secs: DEFAULT_REVIEW_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl ReviewConfig {
+    /// The arguments the review session gets after its own: the configured list, else the
+    /// worker's (`[gate.review] exec_args` defaults to `[worker] exec_args`).
+    #[must_use]
+    pub fn exec_args<'a>(&'a self, worker: &'a [String]) -> &'a [String] {
+        self.exec_args.as_deref().unwrap_or(worker)
+    }
+
+    /// The wall-time limit as a [`Duration`]. Zero seconds means no timeout.
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_secs)
     }
 }
 
@@ -149,6 +214,9 @@ pub struct GateConfig {
     /// The profiles, by name.
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
+    /// The `review` stage's session configuration.
+    #[serde(default)]
+    pub review: ReviewConfig,
 }
 
 fn default_profile_name() -> String {
@@ -165,6 +233,7 @@ impl Default for GateConfig {
             profile: default_profile_name(),
             command_timeout_secs: DEFAULT_COMMAND_TIMEOUT_SECS,
             profiles: BTreeMap::new(),
+            review: ReviewConfig::default(),
         }
     }
 }

@@ -18,6 +18,9 @@ fn verdict(stage: Stage, sha: &str, result: VerdictResult, ended_at: &str) -> Ve
         candidate_sha: None,
         conflict_paths: Vec::new(),
         approver: None,
+        review: None,
+        review_session_ids: Vec::new(),
+        review_cost_micros: None,
     }
 }
 

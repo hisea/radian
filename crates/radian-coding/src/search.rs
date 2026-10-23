@@ -85,7 +85,7 @@ pub(crate) fn ancestor_matchers(root_fd: &File, base_rel: &Path) -> Vec<Gitignor
         let dir: Option<File> = if index == 0 {
             None
         } else {
-            safe_fs::walk_dirs(root_fd, Path::new(""), &parts[..index]).ok()
+            safe_fs::walk_dirs(root_fd, Path::new(""), &parts[..index], false).ok()
         };
         let dir_ref = dir.as_ref().unwrap_or(root_fd);
         let Ok(entries) = safe_fs::read_dir(dir_ref) else {
@@ -146,7 +146,7 @@ fn walk_dir(
             // Descend through the fd: a symlink here is refused by `O_NOFOLLOW` (it was not
             // one at `fstatat` time, so this only matters for a swap in between).
             let Ok(child) =
-                safe_fs::walk_dirs(dir, Path::new(""), std::slice::from_ref(&entry.name))
+                safe_fs::walk_dirs(dir, Path::new(""), std::slice::from_ref(&entry.name), false)
             else {
                 continue;
             };
@@ -214,8 +214,8 @@ fn ignore_rules(dir: &File, rel: &Path, entries: &[safe_fs::DirEntry]) -> Option
     };
     let mut sources: Vec<String> = Vec::new();
     if has(".git", EntryKind::Dir)
-        && let Ok(git) = safe_fs::walk_dirs(dir, Path::new(""), &[OsString::from(".git")])
-        && let Ok(info) = safe_fs::walk_dirs(&git, Path::new(""), &[OsString::from("info")])
+        && let Ok(git) = safe_fs::walk_dirs(dir, Path::new(""), &[OsString::from(".git")], false)
+        && let Ok(info) = safe_fs::walk_dirs(&git, Path::new(""), &[OsString::from("info")], false)
         && let Ok(file) = open_child_file(&info, OsStr::new("exclude"))
         && let Ok(text) = safe_fs::read_to_string(&file)
     {
@@ -245,7 +245,14 @@ fn ignore_rules(dir: &File, rel: &Path, entries: &[safe_fs::DirEntry]) -> Option
 }
 
 fn open_child_file(dir: &File, name: &OsStr) -> Result<File, ()> {
-    safe_fs::open_file(dir, Path::new(""), &[name.to_os_string()], OpenMode::Read).map_err(|_| ())
+    safe_fs::open_file(
+        dir,
+        Path::new(""),
+        &[name.to_os_string()],
+        OpenMode::Read,
+        false,
+    )
+    .map_err(|_| ())
 }
 
 pub(crate) fn compile_glob(pattern: &str) -> Result<GlobMatcher, ToolFailure> {

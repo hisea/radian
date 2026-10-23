@@ -38,8 +38,8 @@ pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "write".into(),
         description: "Write `content` to a file. The call creates the file or overwrites \
-                      it. The call adds no trailing newline. The parent directory must exist. \
-                      The call does not follow symlinks. The call refuses a hard-linked \
+                      it. The call adds no trailing newline. Missing parent directories are \
+                      created. The call does not follow symlinks. The call refuses a hard-linked \
                       destination."
             .into(),
         input_schema: schema(),
@@ -64,8 +64,9 @@ pub(crate) async fn run(
         ));
     }
 
-    // ADR 0039 decision 2: parents are walked by fd with `O_NOFOLLOW | O_DIRECTORY`, the
-    // destination is opened with `O_CREAT | O_NOFOLLOW` relative to its parent's fd, and the
+    // ADR 0039 decision 2: parents are walked by fd with `O_NOFOLLOW | O_DIRECTORY` (a missing
+    // level is created with `mkdirat` on the level above's fd, then opened by the same rule),
+    // the destination is opened with `O_CREAT | O_NOFOLLOW` relative to its parent's fd, and the
     // regular-file and hard-link checks run on the open fd **before** it is truncated. Nothing
     // is re-opened by path, so a parent swapped for a link mid-call is refused, not followed.
     let opened = root.open_write(&args.path, true)?;

@@ -332,20 +332,49 @@ async fn write_into_an_outside_symlinked_directory_is_refused() {
 }
 
 #[tokio::test]
-async fn write_to_a_missing_parent_directory_is_not_found() {
-    let dir = TempDir::new("write-no-parent");
+async fn write_creates_missing_parent_directories_and_patch_does_not() {
+    let dir = TempDir::new("write-missing-parent");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
     let tools = tools(&root);
 
-    let failure = call(
+    // Two missing levels: both are created and the file lands in the deepest one.
+    let output = call(
         &tools,
         "write",
-        json!({"path": "no/such/dir/f.txt", "content": "x"}),
+        json!({"path": "a/b/c.txt", "content": "deep"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(structured(&output)["bytes_written"], 4);
+    assert_eq!(read(&root.join("a/b/c.txt")), "deep");
+    assert!(root.join("a").is_dir(), "the first level was created");
+    assert!(root.join("a/b").is_dir(), "the second level was created");
+
+    // `patch` only edits existing files: a missing file is still refused and leaf/parent
+    // are not created.
+    let failure = call(
+        &tools,
+        "patch",
+        json!({"path": "a/b/missing.txt", "old": "x", "new": "y"}),
     )
     .await
     .unwrap_err();
     assert_eq!(failure.code, "not_found", "{failure:?}");
+    assert!(!root.join("a/b/missing.txt").exists());
+
+    let failure = call(
+        &tools,
+        "patch",
+        json!({"path": "new/deep/f.txt", "old": "x", "new": "y"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "not_found", "{failure:?}");
+    assert!(
+        !root.join("new").exists(),
+        "patch creates no parent directory"
+    );
 }
 
 #[tokio::test]
@@ -373,6 +402,17 @@ async fn write_absolute_and_dotdot_paths_are_refused() {
     .await
     .unwrap_err();
     assert_outside(&failure, "../outside/dotdot.txt");
+
+    // A missing parent outside the workspace is refused before anything is created there.
+    let failure = call(
+        &tools,
+        "write",
+        json!({"path": "../outside/new/deep/file.txt", "content": "x"}),
+    )
+    .await
+    .unwrap_err();
+    assert_outside(&failure, "../outside/new/deep/file.txt");
+    assert!(!outside.join("new").exists(), "no directory outside");
     assert!(!outside.join("abs.txt").exists());
     assert!(!outside.join("dotdot.txt").exists());
 }

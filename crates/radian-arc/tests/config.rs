@@ -131,3 +131,86 @@ fn a_profile_cannot_list_integration_and_stage_names_are_a_closed_set() {
     );
     assert!(stages[0].required, "an extra stage weakened a required one");
 }
+
+/// A base file whose only profile is valid, so a test can add one broken table.
+const BASE: &str = "schema_version = 1\n\
+[gate.profiles.default]\n\
+stages = [{ stage = \"commands\", required = true }]\n";
+
+/// `gate.review.exec_args` must be an array of strings, and a non-array value is refused by
+/// name (not only by a TOML position).
+#[test]
+fn a_non_array_review_exec_args_is_refused_by_name() {
+    for addition in [
+        "[gate.review]\nexec_args = \"--model m\"\n",
+        "[gate.review]\nexec_args = [1]\n",
+        "[gate.review]\nexec_args = [true]\n",
+    ] {
+        let error = radian_arc::store::config::parse(&format!("{BASE}{addition}"))
+            .expect_err("a non-array exec_args must fail");
+        assert!(error.contains("gate.review.exec_args"), "{error}");
+    }
+}
+
+/// `review` reads the change `commands` accepted: a profile that lists both must list
+/// `commands` first.
+#[test]
+fn review_before_commands_is_refused_by_name() {
+    let text = "schema_version = 1\n[gate.profiles.default]\nstages = [\
+                { stage = \"review\", required = true }, \
+                { stage = \"commands\", required = true }]\n";
+    let error = radian_arc::store::config::parse(text).expect_err("review before commands");
+    assert!(error.contains("review"), "{error}");
+    assert!(error.contains("commands"), "{error}");
+
+    // `review` with no `commands` at all is a non-code flow's gate and is allowed.
+    let text = "schema_version = 1\n[gate.profiles.default]\nstages = [\
+                { stage = \"review\", required = true }, \
+                { stage = \"human\", required = true }]\n";
+    let config = radian_arc::store::config::parse(text).expect("review alone is allowed");
+    assert_eq!(config.gate.review.timeout_secs, 900);
+    assert!(config.gate.review.exec_args.is_none());
+}
+
+/// `gate.review.prompt_file` is read from the repository root: it must be relative and may
+/// not climb out.
+#[test]
+fn a_prompt_file_outside_the_repository_is_refused() {
+    for value in ["/etc/passwd", "../outside.md", ""] {
+        let text = format!("{BASE}[gate.review]\nprompt_file = \"{value}\"\n");
+        let error = radian_arc::store::config::parse(&text).expect_err("a bad prompt_file");
+        assert!(error.contains("gate.review.prompt_file"), "{error}");
+    }
+    let text = format!("{BASE}[gate.review]\nprompt_file = \"docs/review.md\"\n");
+    let config = radian_arc::store::config::parse(&text).expect("a relative file is allowed");
+    assert_eq!(
+        config.gate.review.prompt_file.as_deref(),
+        Some("docs/review.md")
+    );
+}
+
+/// The review table's defaults: the worker's `exec_args` until one is set, the built-in
+/// prompt until a file is set, and 900 seconds.
+#[test]
+fn the_review_table_defaults_are_the_adr_values() {
+    let config = radian_arc::store::config::parse(BASE).expect("the base file");
+    let worker = vec!["--model".to_owned(), "m".to_owned()];
+    assert_eq!(config.gate.review.exec_args(&worker), worker);
+    assert_eq!(
+        config.gate.review.timeout(),
+        std::time::Duration::from_secs(900)
+    );
+    assert!(config.gate.review.prompt_file.is_none());
+
+    let text = format!("{BASE}[gate.review]\nexec_args = []\ntimeout_secs = 0\n");
+    let config = radian_arc::store::config::parse(&text).expect("an explicit table");
+    assert!(
+        config.gate.review.exec_args(&worker).is_empty(),
+        "an explicit empty list wins over the worker's"
+    );
+    assert_eq!(
+        config.gate.review.timeout(),
+        std::time::Duration::ZERO,
+        "0 waits forever"
+    );
+}

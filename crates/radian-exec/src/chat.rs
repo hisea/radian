@@ -309,6 +309,11 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             turn_options: TurnOptions {
                 max_model_calls: Some(setup.max_model_calls),
                 deadline: None,
+                // The hidden, test-only `--tool-cancel-grace-ms` overrides the 5 s default.
+                tool_cancel_grace: cli.tool_cancel_grace_ms.map_or(
+                    radian_core::DEFAULT_TOOL_CANCEL_GRACE,
+                    Duration::from_millis,
+                ),
                 ..TurnOptions::default()
             },
             turn_timeout: setup.turn_timeout_secs.map(Duration::from_secs),

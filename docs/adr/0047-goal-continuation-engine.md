@@ -4,7 +4,7 @@ Status: accepted
 
 ## Background
 
-`/loop` resubmits one prompt unchanged each turn. Its turn-end decision point, resubmit path, and cap semantics live in ADR 0011 L7. This ADR only cites L7. `/goal` is continuation-engine step three (`docs/backlog/goal-mode.md`): Codex with omp `/goal` all mean "goals persist, turn ends auto-continue, done stops". radian dogfood often showed "read-only runs" with resume waiting for humans to say "continue". Goal mode reuses `/loop` turn-end decision points, changing only what to post and when to stop. Done judgments take tools, never text matches.
+`/loop` resubmits one prompt unchanged each turn. Its turn-end decision point, resubmit path, and cap semantics live in ADR 0011 L7. This ADR only cites L7. `/goal` is the goal half of the continuation engine: Codex with omp `/goal` all mean "goals persist, turn ends auto-continue, done stops". radian dogfood often showed "read-only runs" with resume waiting for humans to say "continue". Goal mode reuses `/loop` turn-end decision points, changing only what to post and when to stop. Done judgments take tools, never text matches.
 
 ## Decisions
 

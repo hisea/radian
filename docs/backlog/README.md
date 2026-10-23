@@ -35,7 +35,9 @@
 | `turn-end-continuation.md` | A item 4 open；B 已落地 | 0036、0037、0008、0045、0011、0021、0034、0005、0017 | 轮末「只说不做」（`Now X.` 后无工具调用）：A 部分落地（删掉无效的结束回合规则、工作区外可见加任务文本例外、通知以 omp 形状收尾并修少换行、显式转后台返回文本按 opencode 形状、取消自动转后台即后台只走显式 `background: true` 且前台缺省 300 s），只剩查 lead 记忆漏进 worker（第 4 项）；B `Stop` 路径内建续跑已落地（保守规则粗筛 + 一条 System 续跑交模型判断，每回合一次、连续两次后 herdr `blocked`，计入唤醒闸门，stdin 加 `last_assistant_message`）；研究笔记 `research/2026-10-21-intent-stop.md` |
 | `build-cache-and-verify-time.md` | idea（3、4；1、2 已落地） | 无；第 4 项新 ADR | Linux worker 依赖缓存（sccache / ZFS block cloning）与合并测试二进制为 idea |
 | `images.md` | decided | 0015、0018、0028、0039、0032、0043 | 图像输入：`read` 读图、`@` 贴图、拖拽、Ctrl-V 剪贴板、`exec --image` 一次做全，host 拿字节不落盘；transcript 用 ratatui-image 渲染；硬前提是 ADR 0015 估算改按像素，否则一张图就触发压缩 |
-| `arc-run-nonblocking.md` | decided | 0048 | `arc run` 一轮只调度：worker 启动即返回、上限由包装进程执行、心跳判活、gate 在后台跑、名额只算 worker、review 不排本地锁 |
+| `arc-landing.md` | decided | 0048 | 合并方式可配置（`push` 三种 style、`pr`、`command`，arc 只保证验过的内容落地）与钩子（`after_merge`/`after_fail`/`after_rework` 跑配置里的命令，失败只警告）；默认钩子删 worktree 与 `work/<task>` 分支 |
+| `arc-plan-priority.md` | decided | 0048 | plan 优先级 `P0`–`P5`（`P0` 最高，默认 `P3`）：领取、gate 与合并按优先级再按编号；owner 命令 `radian arc priority`，不抢占在跑的 attempt |
+| `arc-start-skips-retry-wait.md` | decided | 0048 | owner 的 `radian arc start` 也接受 `todo.retry_wait`，当场领取不等退避；调度循环照旧等 `retry_at` |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
@@ -54,7 +56,7 @@
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
 | `arc.md` | idea | 0032、0043、0044、0038、0020、0024、0013、0037、0022 | 替代 herdr 的派发与闸门：文件 backlog 单写者、一次性 worker、固定 sha 的 gate；产品形态为三界面 app 加 plan 层与全自动 |
 | `test-temp-leak.md` | idea | 0048 | 测试泄漏临时目录（Linux gate 机 tmpfs inode 被占满导致成批假红）：统一会删除的临时目录 helper，`verify.sh` / `arc-gate.sh` 开跑前查 inode；环境问题是否扣返工次数待定 |
-| `arc-gate-batch.md` | idea | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
+| `arc-gate-batch.md` | decided（排在 `arc-landing.md` 之后） | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
 | `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 
 只占索引行（暂无文件；来源都是总报告 `research/2026-10-18-area-deep-dive/README.md`）：

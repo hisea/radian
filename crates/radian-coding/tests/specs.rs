@@ -81,6 +81,34 @@ async fn the_read_spec_offers_offset_and_limit() {
     );
 }
 
+/// `write` creates a missing parent directory, and its description says so instead of the old
+/// "parent directory must exist" rule (ADR 0039 decision 2).
+#[tokio::test]
+async fn the_write_spec_says_parents_are_created() {
+    let dir = TempDir::new("write-spec");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let coding = tools(&root);
+    let session = coding.open_session().await.unwrap();
+    let write = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "write")
+        .expect("the write spec");
+    assert!(
+        write
+            .description
+            .contains("Missing parent directories are created"),
+        "{}",
+        write.description
+    );
+    assert!(
+        !write.description.contains("parent directory must exist"),
+        "{}",
+        write.description
+    );
+}
+
 /// ADR 0024 Q1: with a prompter, `ask_user` is appended and its schema passes the same
 /// preflight (`ToolRegistry::new` compiles every `input_schema` and rejects duplicates).
 #[tokio::test]

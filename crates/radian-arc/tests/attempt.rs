@@ -481,15 +481,17 @@ fn run_with_deadline(repo: &Repo, args: &[&str], limit: Duration) -> std::proces
     }
 }
 
-fn pid_start(pid: u32) -> String {
-    let output = std::process::Command::new("ps")
+/// A process start time from `ps`, empty when `ps` cannot run (the `workspace` sandbox
+/// refuses it). The identity records only need a value the test controls.
+fn pid_start_or_empty(pid: u32) -> String {
+    std::process::Command::new("ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
-        // The same locale `radian_arc` records the start time under.
         .env("LC_ALL", "C")
         .env("LC_TIME", "C")
         .output()
-        .expect("ps");
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_default()
 }
 
 fn kill(pid: u32, signal: &str) {
@@ -727,9 +729,9 @@ fn cancel_without_a_result_leaves_the_task_reconciling() {
         "attempt_id": format!("{task}-1"),
         "token": "t",
         "pid": pid + 1,
-        "process_started_at": pid_start(pid),
+        "process_started_at": pid_start_or_empty(pid),
         "wrapper_pid": pid,
-        "wrapper_process_started_at": pid_start(pid),
+        "wrapper_process_started_at": pid_start_or_empty(pid),
     });
     let dir = repo.attempt_dir(task, 1);
     std::fs::create_dir_all(&dir).unwrap();
@@ -835,7 +837,9 @@ fn reconcile_leaves_a_live_wrapper_and_applies_a_finished_one() {
     assert_ne!(state(&store, &task), ("doing".into(), "running".into()));
 }
 
-/// A dead wrapper with no result is an `infrastructure` (terminated) retry.
+/// A dead wrapper with no result is an `infrastructure` (terminated) retry. Liveness is the
+/// heartbeat's age (ADR 0048 decision 9), so the test makes the last beat old: the wrapper is
+/// dead even though `stall_timeout_secs` is long.
 #[test]
 fn reconcile_retries_a_dead_wrapper_without_a_result() {
     let repo = Repo::new("reconcile-dead");
@@ -859,9 +863,98 @@ fn reconcile_retries_a_dead_wrapper_without_a_result() {
     kill(wrapper, "-9");
     kill(worker, "-9");
     std::thread::sleep(Duration::from_millis(200));
+    // The wrapper stopped beating: an old beat is a dead attempt.
+    let heartbeat = repo.attempt_dir(&task, 1).join("heartbeat.json");
+    let mut value: Value = serde_json::from_str(
+        &std::fs::read_to_string(&heartbeat).expect("the wrapper wrote a heartbeat"),
+    )
+    .expect("the heartbeat parses");
+    value["last_beat"] = json!("2020-01-01T00:00:00Z");
+    std::fs::write(&heartbeat, value.to_string()).expect("a stale heartbeat");
 
     let applied = attempt::reconcile(&store).expect("reconcile");
     assert_eq!(applied.len(), 1, "{applied:?}");
     assert_eq!(applied[0].class, Some(Class::Infrastructure));
     assert_eq!(state(&store, &task), ("todo".into(), "retry_wait".into()));
+}
+
+/// ADR 0048 decision 9: reconcile decides liveness from the heartbeat's age, and it calls no
+/// `ps` (the `workspace` sandbox refuses it). A fake `ps` on `PATH` records any call, and the
+/// recorded wrapper pid is a live process: the old process check would call it, find the
+/// process alive, and leave the attempt alone; the stale heartbeat is what makes it dead.
+#[test]
+fn reconcile_judges_a_stale_heartbeat_dead_without_calling_ps() {
+    let repo = Repo::new("heartbeat-stale");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    attempt_ops::claim(&store, task).expect("claim");
+    store
+        .change_task(task, |task| {
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("running");
+
+    let mut stand_in = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("a stand-in wrapper process");
+    let pid = stand_in.id();
+    let dir = repo.attempt_dir(task, 1);
+    std::fs::create_dir_all(&dir).expect("the attempt directory");
+    // The wrapper is "alive" by pid, and its last beat is two hours old.
+    let identity = json!({
+        "attempt_id": format!("{task}-1"),
+        "token": "t",
+        "pid": pid,
+        "wrapper_pid": pid,
+        "wrapper_process_started_at": pid_start_or_empty(pid),
+    });
+    std::fs::write(dir.join("identity.json"), identity.to_string()).expect("identity");
+    let heartbeat = json!({
+        "attempt_id": format!("{task}-1"),
+        "pid": pid,
+        "last_beat": "2020-01-01T00:00:00Z",
+    });
+    std::fs::write(dir.join("heartbeat.json"), heartbeat.to_string()).expect("heartbeat");
+
+    // A `ps` that records every call, and finds every process alive. `PATH` is set only on
+    // the `radian arc run` child below: a process-wide `set_var` would be unsafe under plain
+    // `cargo test`, where other tests share this process.
+    let fake = repo.root.join("fake-bin");
+    std::fs::create_dir_all(&fake).expect("the fake bin directory");
+    let marker = repo.root.join("ps-called");
+    let ps = fake.join("ps");
+    std::fs::write(
+        &ps,
+        format!(
+            "#!/bin/sh\ntouch '{}'\necho 'Thu Jan  1 00:00:00 1970'\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .expect("the fake ps");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&ps).expect("the fake ps").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&ps, permissions).expect("executable");
+    }
+    let path = format!(
+        "{}:{}",
+        fake.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = repo.radian_with_env(&["arc", "run"], &[("PATH", path)]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+
+    assert!(
+        !marker.exists(),
+        "reconcile called `ps`; it must decide liveness from the heartbeat"
+    );
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+
+    kill(pid, "-9");
+    let _ = stand_in.wait();
 }

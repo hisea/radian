@@ -165,22 +165,22 @@ pub(crate) async fn run(
 
     // All ranges are offsets into the original file. Sorting by start and applying from the end
     // keeps every earlier offset valid; the conflict check above guarantees they do not overlap.
-    let mut replacements: Vec<(Range<usize>, String)> = resolved
+    let mut replacements: Vec<(Range<usize>, String, usize)> = resolved
         .iter()
         .flat_map(|edit| {
             edit.ranges
                 .iter()
                 .cloned()
-                .map(|range| (range, edit.replacement.clone()))
+                .map(|range| (range, edit.replacement.clone(), edit.index))
         })
         .collect();
-    replacements.sort_by_key(|(range, _)| range.start);
+    replacements.sort_by_key(|(range, _, _)| range.start);
     // Where each replaced range sits in the old file and in the new one (ADR 0028
     // decision 5). The TUI draws one hunk block per range, with each row's line number; the
     // result **text** does not change.
     let hunks = replacement_hunks(&content, &replacements);
     let mut updated = content;
-    for (range, replacement) in replacements.iter().rev() {
+    for (range, replacement, _) in replacements.iter().rev() {
         updated.replace_range(range.clone(), replacement);
     }
     if updated.len() > limits.max_write_bytes {
@@ -466,7 +466,8 @@ fn render_result(
 }
 
 /// One hunk per replaced range, in file order: the range's 1-based start line and line count in
-/// the old file, and its replacement's in the new file.
+/// the old file, its replacement's in the new file, and the 1-based edit of the call that
+/// produced it (always 1 for the single `old`/`new` form).
 ///
 /// `replacements` are ascending by start offset (the caller sorts the original file's ranges), so
 /// a hunk's new-file start is its old-file start plus the line delta every **earlier** hunk
@@ -474,17 +475,21 @@ fn render_result(
 /// down. The TUI numbers the rows from these (ADR 0028). A line count comes
 /// from `str::lines`, which counts a trailing newline as the end of the last line (`a\nb\n` is
 /// two lines) and strips a `\r` (so a CRLF file counts the same as an LF one).
-fn replacement_hunks(content: &str, replacements: &[(Range<usize>, String)]) -> serde_json::Value {
+fn replacement_hunks(
+    content: &str,
+    replacements: &[(Range<usize>, String, usize)],
+) -> serde_json::Value {
     let mut delta: i64 = 0;
     let hunks: Vec<serde_json::Value> = replacements
         .iter()
-        .map(|(range, replacement)| {
+        .map(|(range, replacement, edit)| {
             let new_lines = replacement.lines().count();
             let old_start = line_of_offset(content, range.start);
             let old_lines = content[range.clone()].lines().count();
             let new_start = old_start as i64 + delta;
             delta += new_lines as i64 - old_lines as i64;
             json!({
+                "edit": edit + 1,
                 "old_start": old_start,
                 "old_lines": old_lines,
                 // Always >= 1: the lines before a hunk are unchanged, so the new file has at

@@ -105,8 +105,8 @@ fn a_patch_body_numbers_its_rows_once_per_hunk() {
             "replaced": 2,
             "matched": "exact",
             "hunks": [
-                {"old_start": 10, "old_lines": 2, "new_start": 10, "new_lines": 3},
-                {"old_start": 40, "old_lines": 2, "new_start": 41, "new_lines": 3},
+                {"edit": 1, "old_start": 10, "old_lines": 2, "new_start": 10, "new_lines": 3},
+                {"edit": 1, "old_start": 40, "old_lines": 2, "new_start": 41, "new_lines": 3},
             ],
         }),
     );

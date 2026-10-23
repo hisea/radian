@@ -1,18 +1,20 @@
 //! Running one attempt and stopping it (ADR 0048 decisions 6, 7, 9 and 12).
 //!
-//! The owner drives one task at a time in v0: `radian arc start <task>` claims the task, runs
-//! the trusted wrapper as a child (`radian arc work`, the current executable), watches the
-//! attempt's jsonl stream for a stall and its clock for `max_wall_time_secs`, and applies the
-//! wrapper's result in one transaction. `radian arc cancel <task>` stops a running attempt
-//! the same way: SIGTERM to the wrapper, a grace period, then SIGKILL.
+//! [`spawn_claim`] starts the trusted wrapper as a child (`radian arc work`, the current
+//! executable), hands it the brief and returns; the wrapper owns the attempt's limits (stall,
+//! wall time, cancel) from then on. [`run_claim`] waits for it and applies the result in one
+//! transaction, which is what `radian arc start` does; a scheduling pass uses [`spawn_claim`]
+//! and leaves the result to its next [`reconcile`].
 //!
-//! There is no in-process scheduling loop here: [`crate::run`] owns the loop and calls
-//! [`run_claim`] for every attempt it claims. [`reconcile`] is the restart step the loop and
-//! `start` and `cancel` call (decision 9, last bullet).
+//! `radian arc cancel <task>` stops a running attempt: SIGTERM to the wrapper, a grace
+//! period, then SIGKILL. [`reconcile`] is the restart step the loop and `start` and `cancel`
+//! call (decision 9, last bullet); it decides liveness from the wrapper's heartbeat and never
+//! from `ps`, which the `workspace` sandbox refuses.
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::process;
@@ -97,15 +99,38 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
     })
 }
 
-/// Runs one claimed attempt: the wrapper child, its monitor, and the result transaction.
-/// The scheduling loop claims several tasks and calls this for each, from one thread per
-/// attempt when `[limits] concurrency` is greater than one.
+/// Runs one claimed attempt and waits for it: the wrapper child, then the result transaction.
+/// `radian arc start` uses this; the scheduling loop uses [`spawn_claim`] and leaves the
+/// result for its next pass (ADR 0048 decision 13).
 pub fn run_claim(
     store: &Store,
     claim: &Claim,
     task: &model::TaskFile,
     config: &crate::store::config::Config,
 ) -> Result<Applied, Error> {
+    let mut spawned = spawn_claim(store, claim, task, config)?;
+    let status = spawned
+        .child
+        .wait()
+        .map_err(|error| Error::Failed(format!("cannot wait for the wrapper: {error}")))?;
+    apply_finished(store, claim, status.code())
+}
+
+/// One wrapper child this process started, and its attempt's run directory.
+pub struct Spawned {
+    pub child: Child,
+    pub run_dir: PathBuf,
+}
+
+/// Starts the wrapper for one claim, hands it the brief, moves the task to `doing.running`
+/// and returns at once. The wrapper owns the attempt's limits from here (ADR 0048 decisions
+/// 7.8 and 13).
+pub fn spawn_claim(
+    store: &Store,
+    claim: &Claim,
+    task: &model::TaskFile,
+    config: &crate::store::config::Config,
+) -> Result<Spawned, Error> {
     let task_id = claim.task.as_str();
     let (remote, main_branch) = store.repository_names()?;
     let run_dir = attempt_ops::run_dir(store, task_id, claim.attempt);
@@ -113,7 +138,6 @@ pub fn run_claim(
         .map_err(|error| Error::Failed(format!("cannot create {}: {error}", run_dir.display())))?;
     let stdout_path = run_dir.join("wrapper.stdout.log");
     let stderr_path = run_dir.join("wrapper.stderr.log");
-    let started_at = Instant::now();
 
     let executable = std::env::current_exe()
         .map_err(|error| Error::Failed(format!("cannot find the current executable: {error}")))?;
@@ -137,6 +161,14 @@ pub fn run_claim(
     if claim.allow_noop {
         command.arg("--allow-noop");
     }
+    let limits = Limits::of(task, config);
+    command
+        .arg("--stall-timeout-secs")
+        .arg(limits.stall.as_secs().to_string())
+        .arg("--max-wall-time-secs")
+        .arg(limits.wall.as_secs().to_string())
+        .arg("--cancel-grace-secs")
+        .arg(limits.grace.as_secs().to_string());
     command.arg("--");
     command.args(&config.worker.exec_args);
     let stdout = File::create(&stdout_path).map_err(|error| {
@@ -149,6 +181,15 @@ pub fn run_claim(
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // Its own process group: a terminal Ctrl-C reaches the scheduling loop only. The
+        // wrapper handles a signal sent to it alone and leaves the worker bounded; the loop's
+        // stop path leaves this worker running for the next pass to collect (ADR 0048
+        // decision 13).
+        command.process_group(0);
+    }
     let mut child = command
         .spawn()
         .map_err(|error| Error::Failed(format!("cannot start `radian arc work`: {error}")))?;
@@ -172,26 +213,24 @@ pub fn run_claim(
         let _ = child.wait();
         return Err(error);
     }
+    Ok(Spawned { child, run_dir })
+}
 
-    let limits = Limits::of(task, config);
-    let status = monitor(
-        store,
-        task_id,
-        claim.attempt,
-        &run_dir,
-        &mut child,
-        &limits,
-        started_at,
-    )?;
-    let signal = attempt_ops::read_signal(store, task_id, claim.attempt);
-    let finish = attempt_ops::read_finish(store, task_id, claim.attempt);
+/// Reads what a finished wrapper left and applies it in one transaction (decision 9).
+pub fn apply_finished(
+    store: &Store,
+    claim: &Claim,
+    exit_code: Option<i32>,
+) -> Result<Applied, Error> {
+    let signal = attempt_ops::read_signal(store, &claim.task, claim.attempt);
+    let finish = attempt_ops::read_finish(store, &claim.task, claim.attempt);
     attempt_ops::apply(
         store,
-        task_id,
+        &claim.task,
         claim.attempt,
         finish.as_ref(),
         signal,
-        status.code(),
+        exit_code,
     )
 }
 
@@ -213,75 +252,16 @@ impl Limits {
     }
 }
 
-/// Waits for the wrapper, and stops it with SIGTERM (then SIGKILL after the grace period)
-/// when the attempt stalls, runs past its wall time, or a cancel recorded a signal.
-fn monitor(
-    store: &Store,
-    task_id: &str,
-    attempt: u32,
-    run_dir: &std::path::Path,
-    child: &mut Child,
-    limits: &Limits,
-    started_at: Instant,
-) -> Result<ExitStatus, Error> {
-    let stream = run_dir.join("result.jsonl");
-    let mut last_len = file_len(&stream);
-    let mut last_growth = Instant::now();
-    let mut signalled: Option<Class> = None;
-    let mut kill_at: Option<Instant> = None;
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| Error::Failed(format!("cannot wait for the wrapper: {error}")))?
-        {
-            return Ok(status);
-        }
-        let now = Instant::now();
-        let len = file_len(&stream);
-        if len != last_len {
-            last_len = len;
-            last_growth = now;
-        }
-        if signalled.is_none() {
-            // A cancel from another process writes its own signal; the monitor does not add a
-            // second reason.
-            let reason = if let Some(reason) = attempt_ops::read_signal(store, task_id, attempt)
-                && reason == Class::Cancel
-            {
-                Some(Class::Cancel)
-            } else if !limits.wall.is_zero() && now.duration_since(started_at) >= limits.wall {
-                Some(Class::WallTime)
-            } else if !limits.stall.is_zero() && now.duration_since(last_growth) >= limits.stall {
-                Some(Class::Stall)
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
-                attempt_ops::write_signal(store, task_id, attempt, reason)?;
-                process::signal(child.id(), process::SIGTERM);
-                signalled = Some(reason);
-                kill_at = Some(now + limits.grace);
-            }
-        }
-        if let Some(at) = kill_at
-            && now >= at
-        {
-            process::signal(child.id(), process::SIGKILL);
-            kill_at = None;
-        }
-        std::thread::sleep(POLL);
-    }
-}
-
-fn file_len(path: &std::path::Path) -> u64 {
-    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
-}
-
 /// The reconcile step (decision 9, last bullet): for every task in `doing`, apply a result
 /// that is there, leave a live attempt alone, and turn a dead attempt without a result into
 /// an `infrastructure` (terminated) retry. It never starts a task, and it leaves
 /// `doing.reconciling` for the owner.
+///
+/// Liveness comes from the wrapper's heartbeat, never from `ps`: the `workspace` sandbox
+/// refuses `ps`, so a pass that ran inside one could not tell a dead wrapper from a live one
+/// any other way.
 pub fn reconcile(store: &Store) -> Result<Vec<Applied>, Error> {
+    let config = store.config()?;
     let mut applied = Vec::new();
     for id in store.task_ids()? {
         let loaded = store.load_task(&id)?;
@@ -303,17 +283,10 @@ pub fn reconcile(store: &Store) -> Result<Vec<Applied>, Error> {
                 applied.push(result);
                 continue;
             }
-            // An old attempt's record is not this attempt's result: the process check below
+            // An old attempt's record is not this attempt's result: the heartbeat below
             // decides.
         }
-        if wrapper_process(store, &id, attempt)
-            .is_some_and(|(pid, start)| process::same_process(pid, &start))
-        {
-            continue;
-        }
-        if start_process(store, &id, attempt)
-            .is_some_and(|(pid, start)| process::same_process(pid, &start))
-        {
+        if attempt_is_live(store, &task, &config) {
             continue;
         }
         let result = attempt_ops::apply(store, &id, attempt, None, signal, None)?;
@@ -324,25 +297,47 @@ pub fn reconcile(store: &Store) -> Result<Vec<Applied>, Error> {
     Ok(applied)
 }
 
-/// The wrapper's `(pid, start time)` from the attempt record.
-fn wrapper_process(store: &Store, task: &str, attempt: u32) -> Option<(u32, String)> {
+/// Whether the attempt's wrapper is still alive, from its heartbeat: a last beat older than
+/// the attempt's stall window means dead. A claim whose wrapper has not beaten yet is judged
+/// by the claim's own `start.json`, which it wrote in the same transaction as `doing`.
+fn attempt_is_live(
+    store: &Store,
+    task: &model::TaskFile,
+    config: &crate::store::config::Config,
+) -> bool {
+    let stall = task
+        .stall_timeout_secs
+        .unwrap_or(config.limits.stall_timeout_secs);
+    let window = attempt_ops::liveness_window_secs(stall);
+    if let Some(beat) = attempt_ops::read_heartbeat(store, &task.id, task.attempt) {
+        return attempt_ops::utc_age_secs(&beat).is_some_and(|age| age <= window);
+    }
+    attempt_ops::read_start_time(store, &task.id, task.attempt)
+        .and_then(|at| attempt_ops::utc_age_secs(&at))
+        .is_some_and(|age| age <= window)
+}
+
+/// The wrapper's `(pid, start time)` from the attempt record. The start time is `None` when
+/// `ps` could not report it (the `workspace` sandbox refuses `ps`).
+fn wrapper_process(store: &Store, task: &str, attempt: u32) -> Option<(u32, Option<String>)> {
     let record = read_json(&attempt_ops::attempt_dir(store, task, attempt).join("identity.json"))?;
     Some((
         record.get("wrapper_pid")?.as_u64()? as u32,
         record
-            .get("wrapper_process_started_at")?
-            .as_str()?
-            .to_owned(),
+            .get("wrapper_process_started_at")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
     ))
 }
 
-/// The `start` process's `(pid, start time)` from the claim's record.
-fn start_process(store: &Store, task: &str, attempt: u32) -> Option<(u32, String)> {
-    let record = read_json(&attempt_ops::attempt_dir(store, task, attempt).join("start.json"))?;
-    Some((
-        record.get("pid")?.as_u64()? as u32,
-        record.get("process_started_at")?.as_str()?.to_owned(),
-    ))
+/// Whether the process the record names is still there. A recorded start time is compared, so
+/// a reused pid is never signalled; without one (the sandbox refused `ps`) the pid alone is
+/// the best identity arc has.
+fn still_running(pid: u32, started: Option<&str>) -> bool {
+    match started.filter(|start| !start.is_empty()) {
+        Some(start) => process::same_process(pid, start),
+        None => process::alive(pid),
+    }
 }
 
 fn read_json(path: &std::path::Path) -> Option<serde_json::Value> {
@@ -381,15 +376,15 @@ pub fn cancel(store: &Store, task_id: &str) -> Result<Canceled, Error> {
             // The owner resolves a reconciling task with the same process check: only the
             // process the record names is stopped.
             if let Some((pid, start)) = wrapper_process(store, task_id, task.attempt)
-                && process::same_process(pid, &start)
+                && still_running(pid, start.as_deref())
             {
                 let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
                 process::signal(pid, process::SIGTERM);
                 let deadline = Instant::now() + grace;
-                while Instant::now() < deadline && process::same_process(pid, &start) {
+                while Instant::now() < deadline && still_running(pid, start.as_deref()) {
                     std::thread::sleep(POLL);
                 }
-                if process::same_process(pid, &start) {
+                if still_running(pid, start.as_deref()) {
                     process::signal(pid, process::SIGKILL);
                 }
             }
@@ -424,7 +419,7 @@ fn cancel_running(store: &Store, task_id: &str, task: &model::TaskFile) -> Resul
     let config = store.config()?;
     let grace = Duration::from_secs(config.limits.cancel_grace_secs);
     if let Some((pid, start)) = wrapper_process(store, task_id, attempt)
-        && process::same_process(pid, &start)
+        && still_running(pid, start.as_deref())
     {
         process::signal(pid, process::SIGTERM);
         let deadline = Instant::now() + grace;
@@ -434,9 +429,9 @@ fn cancel_running(store: &Store, task_id: &str, task: &model::TaskFile) -> Resul
             std::thread::sleep(POLL);
         }
         if attempt_ops::read_finish(store, task_id, attempt).is_none() {
-            // The grace period ran out: SIGKILL, but only the process that still has the
-            // recorded start time.
-            if process::same_process(pid, &start) {
+            // The grace period ran out: SIGKILL, but only the process that is still the one
+            // the record names.
+            if still_running(pid, start.as_deref()) {
                 process::signal(pid, process::SIGKILL);
             }
         }

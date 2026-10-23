@@ -241,7 +241,7 @@ async fn a_hunk_names_the_replaced_range_in_both_files() {
     .unwrap();
     assert_eq!(
         structured(&output)["hunks"],
-        json!([{"old_start": 2, "old_lines": 2, "new_start": 2, "new_lines": 1}]),
+        json!([{"edit": 1, "old_start": 2, "old_lines": 2, "new_start": 2, "new_lines": 1}]),
     );
     assert_eq!(
         text(&output),
@@ -275,8 +275,8 @@ async fn several_hunks_carry_the_line_delta_of_the_earlier_ones() {
     assert_eq!(
         structured(&output)["hunks"],
         json!([
-            {"old_start": 2, "old_lines": 2, "new_start": 2, "new_lines": 1},
-            {"old_start": 5, "old_lines": 2, "new_start": 4, "new_lines": 1},
+            {"edit": 1, "old_start": 2, "old_lines": 2, "new_start": 2, "new_lines": 1},
+            {"edit": 1, "old_start": 5, "old_lines": 2, "new_start": 4, "new_lines": 1},
         ]),
     );
     assert_eq!(
@@ -296,8 +296,8 @@ async fn several_hunks_carry_the_line_delta_of_the_earlier_ones() {
     assert_eq!(
         structured(&output)["hunks"],
         json!([
-            {"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 2},
-            {"old_start": 3, "old_lines": 1, "new_start": 4, "new_lines": 2},
+            {"edit": 1, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 2},
+            {"edit": 1, "old_start": 3, "old_lines": 1, "new_start": 4, "new_lines": 2},
         ]),
     );
     assert_eq!(
@@ -325,7 +325,7 @@ async fn a_crlf_file_numbers_its_hunks() {
     .unwrap();
     assert_eq!(
         structured(&output)["hunks"],
-        json!([{"old_start": 2, "old_lines": 1, "new_start": 2, "new_lines": 2}]),
+        json!([{"edit": 1, "old_start": 2, "old_lines": 1, "new_start": 2, "new_lines": 2}]),
     );
     assert_eq!(
         std::fs::read_to_string(root.join("f.txt")).unwrap(),
@@ -351,7 +351,7 @@ async fn a_hunk_at_the_first_and_at_the_last_line() {
     .unwrap();
     assert_eq!(
         structured(&output)["hunks"],
-        json!([{"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}]),
+        json!([{"edit": 1, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}]),
     );
 
     // The last line, with no trailing newline: one line, and it is the file's third.
@@ -365,7 +365,7 @@ async fn a_hunk_at_the_first_and_at_the_last_line() {
     .unwrap();
     assert_eq!(
         structured(&output)["hunks"],
-        json!([{"old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1}]),
+        json!([{"edit": 1, "old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1}]),
     );
     assert_eq!(
         std::fs::read_to_string(root.join("last.txt")).unwrap(),
@@ -417,11 +417,60 @@ async fn two_edits_apply_in_one_call() {
         ]),
         "{value}"
     );
-    // One hunk per replaced range, in file order.
-    assert_eq!(value["hunks"].as_array().unwrap().len(), 3, "{value}");
+    // One hunk per replaced range, in file order; each names the edit that produced it, so the
+    // second edit's `replace_all` gives two hunks with `edit: 2`.
+    assert_eq!(
+        value["hunks"],
+        json!([
+            {"edit": 1, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1},
+            {"edit": 2, "old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1},
+            {"edit": 2, "old_start": 4, "old_lines": 1, "new_start": 4, "new_lines": 1}
+        ]),
+        "{value}"
+    );
     assert_eq!(
         text(&output),
         "replaced 3 occurrences across 2 edits in f.txt"
+    );
+}
+
+/// The hunks stay in **file** order even when the call's edits are in another order: the first
+/// edit's text is the file's third line, the second edit's `replace_all` matches the first and
+/// fourth, so `edit` goes 2, 1, 2 down the list.
+#[tokio::test]
+async fn hunks_keep_file_order_across_edits_given_in_call_order() {
+    let dir = TempDir::new("patch-multi-file-order");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    dir.write("ws/f.txt", "TWO\nkeep\nONE\nTWO again\n");
+    let tools = tools(&root);
+
+    let output = call(
+        &tools,
+        "patch",
+        json!({
+            "path": "f.txt",
+            "edits": [
+                {"old": "ONE", "new": "one"},
+                {"old": "TWO", "new": "two", "replace_all": true}
+            ]
+        }),
+    )
+    .await
+    .unwrap();
+    let value = structured(&output);
+    assert_eq!(
+        value["hunks"],
+        json!([
+            {"edit": 2, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1},
+            {"edit": 1, "old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1},
+            {"edit": 2, "old_start": 4, "old_lines": 1, "new_start": 4, "new_lines": 1}
+        ]),
+        "{value}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "two\nkeep\none\ntwo again\n"
     );
 }
 
@@ -448,7 +497,7 @@ async fn the_legacy_single_edit_form_is_unchanged() {
             "path": "f.txt",
             "replaced": 1,
             "matched": "exact",
-            "hunks": [{"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}],
+            "hunks": [{"edit": 1, "old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1}],
         })
     );
     assert_eq!(

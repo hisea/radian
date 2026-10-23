@@ -13,6 +13,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -34,10 +35,45 @@ pub const ATTEMPT_RESULT_FILE: &str = "attempt_result.json";
 pub const REVERIFY_CLASS: &str = "reverify";
 /// The record that the plan paused because this task used its automatic reworks.
 pub const PAUSED_FILE: &str = "paused.json";
+/// The wrapper's heartbeat, in the host-local attempt directory (ADR 0048 decision 7.9).
+pub const HEARTBEAT_FILE: &str = "heartbeat.json";
+
+/// The longest gap between two heartbeats: 15 seconds, or a third of the stall window when
+/// that is shorter.
+pub const HEARTBEAT_MAX: Duration = Duration::from_secs(15);
+
+/// How often the wrapper writes its heartbeat: a third of the attempt's stall window, and 15
+/// seconds when the window is longer than 45 seconds. Every window therefore holds at least
+/// three beats (a 1-second window gives 333 ms). Without a stall limit, the beats are 15
+/// seconds apart and the liveness window is three beats, 45 seconds.
+pub fn heartbeat_interval(stall_secs: u64) -> Duration {
+    if stall_secs == 0 {
+        HEARTBEAT_MAX
+    } else {
+        (Duration::from_secs(stall_secs) / 3).min(HEARTBEAT_MAX)
+    }
+}
+
+/// How old a last heartbeat may be before a pass calls the attempt dead: the attempt's stall
+/// window, or three beats when the attempt has no stall limit (ADR 0048 decision 9).
+pub fn liveness_window_secs(stall_secs: u64) -> u64 {
+    if stall_secs == 0 {
+        heartbeat_interval(0).as_secs() * 3
+    } else {
+        stall_secs
+    }
+}
+
+/// How many seconds ago `text` (an RFC 3339 UTC time) was. `None` when it cannot be read.
+pub fn utc_age_secs(text: &str) -> Option<u64> {
+    let at = chrono::DateTime::parse_from_rfc3339(text).ok()?;
+    let age = chrono::Utc::now().signed_duration_since(at.with_timezone(&chrono::Utc));
+    u64::try_from(age.num_seconds()).ok()
+}
 
 /// The failure classes of decision 9, as one closed list the manual's drift test reads.
-/// `stall` and `wall_time` are written by arc when it signalled the wrapper; the other four
-/// are the ADR's classes.
+/// `stall` and `wall_time` are written by the wrapper when it signalled the worker; the other
+/// four are the ADR's classes.
 pub const FAILURE_CLASSES: &[&str] = &[
     "infrastructure",
     "model",
@@ -252,6 +288,27 @@ pub fn read_signal(store: &Store, task: &str, attempt: u32) -> Option<Class> {
         .get("reason")
         .and_then(Value::as_str)
         .and_then(Class::parse)
+}
+
+/// The wrapper's last heartbeat time for one attempt, as it wrote it.
+pub fn read_heartbeat(store: &Store, task: &str, attempt: u32) -> Option<String> {
+    let text = fs::read_to_string(attempt_dir(store, task, attempt).join(HEARTBEAT_FILE)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("last_beat")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// The time the claim that created the attempt recorded, for a wrapper that has not beaten
+/// yet. `start.json` is written in the same transaction as the task's move to `doing`.
+pub fn read_start_time(store: &Store, task: &str, attempt: u32) -> Option<String> {
+    let text = fs::read_to_string(attempt_dir(store, task, attempt).join(START_FILE)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("started_at")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// Records why arc signalled the wrapper. The first reason wins: a stall followed by a wall
@@ -577,10 +634,10 @@ fn random_token() -> Result<String, Error> {
 
 /// Applies one attempt's result (decision 9) in one transaction.
 ///
-/// `finish` is the wrapper's record. `signal` is set when arc signalled the wrapper: `cancel`
-/// ends the task at `failed.cancelled`, `stall` and `wall_time` are the attempt's class.
-/// `wrapper_exit` is the wrapper's own exit code, used when it wrote no record (a crash or a
-/// lock refusal).
+/// `finish` is the wrapper's record. `signal` is set when the attempt was signalled: `cancel`
+/// ends the task at `failed.cancelled`; `stall` and `wall_time` are written by the wrapper
+/// when it stopped its own worker, and are the attempt's class. `wrapper_exit` is the
+/// wrapper's own exit code, used when it wrote no record (a crash or a lock refusal).
 ///
 /// The token must be the task's current attempt's, and the attempt number must be the
 /// current one; otherwise nothing changes and the result is `ignored`.
@@ -1075,6 +1132,27 @@ pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every stall window holds at least three beats, and no stall limit gives the 45-second
+    /// window of three 15-second beats. Mutation: return a flat 15 seconds and a 1-second
+    /// window gets one beat.
+    #[test]
+    fn the_heartbeat_fits_three_beats_in_every_stall_window() {
+        for stall in [0, 1, 3, 5, 45, 900] {
+            let interval = heartbeat_interval(stall);
+            let window = Duration::from_secs(liveness_window_secs(stall));
+            assert!(
+                interval * 3 <= window,
+                "stall {stall}: interval {interval:?} does not fit three times in {window:?}"
+            );
+        }
+        assert_eq!(heartbeat_interval(0), Duration::from_secs(15));
+        assert_eq!(liveness_window_secs(0), 45);
+        assert_eq!(heartbeat_interval(1), Duration::from_secs(1) / 3);
+        assert_eq!(heartbeat_interval(45), Duration::from_secs(15));
+        assert_eq!(heartbeat_interval(900), Duration::from_secs(15));
+        assert_eq!(liveness_window_secs(5), 5);
+    }
 
     /// The closed class list and the class spellings cannot drift.
     #[test]

@@ -490,7 +490,9 @@ impl WorkspaceRoot {
     /// Opens `user` for an in-place overwrite: parents walked by fd, the leaf opened with
     /// `O_NOFOLLOW` (created when `create`), then checked to be a regular file with one hard
     /// link **before** anything is truncated. `write` passes `create = true`; `patch` requires
-    /// the file to exist.
+    /// the file to exist. With `create`, a missing parent level is created by `mkdirat` on the
+    /// level above's fd and opened by the same `O_NOFOLLOW | O_DIRECTORY` rule (ADR 0039
+    /// decision 2), so nothing is created through a link.
     pub(crate) fn open_write(&self, user: &str, create: bool) -> Result<OpenedFile, ToolFailure> {
         let relative = self.checked_relative(user)?;
         if relative.as_os_str().is_empty() {
@@ -502,12 +504,15 @@ impl WorkspaceRoot {
         // to the write-only create and let `write` skip the count (review fix 1). `patch` edits
         // an existing file and always reads it.
         let (file, readable) = if create {
-            match self.dir.file(&relative, OpenMode::WriteCreateReadWrite) {
+            match self
+                .dir
+                .file_creating_parents(&relative, OpenMode::WriteCreateReadWrite)
+            {
                 Ok(file) => (file, true),
                 Err(error) if is_permission_denied(&error) => {
                     let file = self
                         .dir
-                        .file(&relative, OpenMode::WriteCreate)
+                        .file_creating_parents(&relative, OpenMode::WriteCreate)
                         .map_err(|error| self.map_error(user, error))?;
                     (file, false)
                 }

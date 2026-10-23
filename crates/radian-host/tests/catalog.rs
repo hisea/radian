@@ -1,11 +1,15 @@
 //! The model catalog against a local mock HTTP server (ADR 0018 §目录). These tests never
-//! touch the real network: the URL points at the adapter's in-process mock.
+//! touch the real network: the URL points at the adapter's in-process mock, or — for the one
+//! test that must see the client hang up — at a local listener that stalls.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::{MockServer, Reply};
-use radian_host::{Catalog, ModelLimit, WindowQuery, WindowSource, resolve};
+use radian_host::{Catalog, FETCH_TIMEOUT, ModelLimit, WindowQuery, WindowSource, resolve};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 /// A small `api.json` in the real shape: `opencode` with a model that has an `input` limit and
 /// one whose `context` is `0`.
@@ -42,6 +46,10 @@ fn scratch(label: &str) -> PathBuf {
 }
 
 fn query(cache: &Path, server: &MockServer, model: &str) -> WindowQuery {
+    query_at(cache, &server.base_url, model)
+}
+
+fn query_at(cache: &Path, base_url: &str, model: &str) -> WindowQuery {
     WindowQuery {
         explicit: None,
         catalog_provider: Some("opencode".into()),
@@ -51,7 +59,7 @@ fn query(cache: &Path, server: &MockServer, model: &str) -> WindowQuery {
         request_max_output: None,
         offline: false,
         cache_path: cache.join("catalog/models.json"),
-        url: format!("{}/api.json", server.base_url),
+        url: format!("{base_url}/api.json"),
     }
 }
 
@@ -131,21 +139,107 @@ async fn a_stale_cache_survives_a_500() {
     let _ = std::fs::remove_dir_all(&cache);
 }
 
+/// A local server whose catalog response never ends: it reads the GET, writes the status line
+/// and the SSE headers, and then sends nothing, like a stalled catalog. It records when the
+/// request arrived and when the client hung up, so the test can time the **fetch** alone — the
+/// arc between those two moments — instead of `resolve` plus everything around it (the reqwest
+/// client build, the cache read, the test process's own start-up and teardown).
+///
+/// The adapter's `MockServer` cannot report the hang-up: `Reply::SseThenHang` writes its head
+/// and parks in `std::future::pending()` without looking at the socket again. Teaching the
+/// shared fixture to watch for EOF would change every provider suite that uses it, so this one
+/// test keeps its own tiny server.
+struct HangingCatalog {
+    /// `http://127.0.0.1:<port>/v1`, the same shape as `MockServer::base_url`.
+    base_url: String,
+    /// Fires when the client closes the connection, with `(arrived, closed)`.
+    closed: oneshot::Receiver<(Instant, Instant)>,
+}
+
+async fn hanging_catalog() -> HangingCatalog {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("address").port();
+    let (tx, closed) = oneshot::channel();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        // The GET has arrived once its head is complete.
+        let mut buffer = Vec::new();
+        let mut scratch = [0u8; 4096];
+        loop {
+            if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+            match stream.read(&mut scratch).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buffer.extend_from_slice(&scratch[..n]),
+            }
+        }
+        let arrived = Instant::now();
+        // A complete head; the chunked body never ends and no chunk is ever sent.
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                  transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        // Silence. The client gives up at its own timeout and closes the socket; that EOF is
+        // when the fetch ended.
+        let mut sink = [0u8; 1024];
+        loop {
+            match stream.read(&mut sink).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        let _ = tx.send((arrived, Instant::now()));
+    });
+    HangingCatalog {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        closed,
+    }
+}
+
 /// Acceptance 2 (the timeout half): a hanging fetch times out and falls back to the cache.
+///
+/// The assertion is on the fetch's own duration, not on `resolve`'s: the timeout it must prove
+/// is the 3 s one in `fetch`, and a slow machine can spend seconds before the request or after
+/// it without the timeout ever being late.
 #[tokio::test]
 async fn a_hanging_fetch_times_out_and_the_stale_cache_is_used() {
     let cache = scratch("stale-timeout");
-    let server = MockServer::start(vec![Reply::SseThenHang { pieces: vec![] }]).await;
+    let server = hanging_catalog().await;
     std::fs::create_dir_all(cache.join("catalog")).unwrap();
     std::fs::write(cache_file(&cache), API_JSON).unwrap();
     age_file(&cache_file(&cache), Duration::from_secs(25 * 60 * 60));
 
-    let started = std::time::Instant::now();
-    let window = resolve(&query(&cache, &server, "context-only")).await;
-    assert_eq!(window.budget, Some(111_616));
+    // A backstop only: without it a fetch that is never cut off would hang the test instead of
+    // failing it. It is far above the 3 s timeout this test is about.
+    let window = tokio::time::timeout(
+        Duration::from_secs(30),
+        resolve(&query_at(&cache, &server.base_url, "context-only")),
+    )
+    .await
+    .expect("resolve must return: the fetch was not cut off by its timeout");
+    assert_eq!(window.budget, Some(111_616), "the stale cache is used");
+
+    let (arrived, closed) = tokio::time::timeout(Duration::from_secs(30), server.closed)
+        .await
+        .expect("the client must hang up on the hanging server")
+        .expect("the server records its two timestamps");
+    let fetch = closed.duration_since(arrived);
+    // It really did hang for about the timeout — an immediate disconnect would prove nothing.
+    let least = FETCH_TIMEOUT.saturating_sub(Duration::from_secs(1));
     assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "the 3 s timeout must bound the fetch"
+        fetch >= least,
+        "the fetch gave up before its {FETCH_TIMEOUT:?} timeout: {fetch:?}"
+    );
+    // Absolute, not relative to `FETCH_TIMEOUT`: raising the timeout well past it must still
+    // fail this test. 3 s is observed; the rest is headroom for a busy machine.
+    assert!(
+        fetch < Duration::from_secs(8),
+        "the {FETCH_TIMEOUT:?} timeout must cut the fetch: {fetch:?}"
     );
     let _ = std::fs::remove_dir_all(&cache);
 }

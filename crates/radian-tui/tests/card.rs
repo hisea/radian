@@ -537,7 +537,7 @@ fn a_patch_block_shows_its_diff_body() {
                 "path": "src/a.rs",
                 "replaced": 1,
                 "matched": "exact",
-                "hunks": [{"old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1}],
+                "hunks": [{"edit": 1, "old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1}],
             })),
             is_error: false,
             error_code: None,
@@ -550,6 +550,67 @@ fn a_patch_block_shows_its_diff_body() {
     assert_eq!(block[1], "│ @@ -3,1 +3,1 @@", "{block:?}");
     assert_eq!(block[2], "│    3 - old one", "{block:?}");
     assert_eq!(block[3], "│    3 + new one", "{block:?}");
+}
+
+/// A failed `patch` changed nothing: the card body is the tool's own error text (its
+/// closest-region hint included), and the head claims no `+N −M` — for the `edits` form too,
+/// which is what models send by default. The call's edit text must never be drawn as a change.
+#[test]
+fn a_failed_patch_shows_the_error_text_and_no_counts() {
+    let mut app = App::new("m", "s");
+    app.tool_display = ToolDisplay {
+        fold: ToolFold::Expanded,
+        preview_lines: 5,
+    };
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "patch".into(),
+            arguments: json!({
+                "path": "src/a.rs",
+                "edits": [
+                    {"old": "alpha", "new": "ALPHA"},
+                    {"old": "gamma", "new": "GAMMA"}
+                ]
+            }),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text(
+                "`old` does not appear in `src/a.rs`; the file is unchanged\n\
+                 The closest region is lines 3-3:\n3: gamma",
+            )],
+            structured: None,
+            is_error: true,
+            error_code: Some("patch_not_found".into()),
+        },
+        meta: Default::default(),
+    });
+    let lines = rows(&render(&mut app, 80, 16), 80, 16);
+    let block = block_rows(&lines);
+    assert_eq!(block[0], "◻ patch src/a.rs ×", "{block:?}");
+    assert!(
+        block[1].contains("does not appear in `src/a.rs`"),
+        "{block:?}"
+    );
+    assert!(
+        block[2].starts_with("│ The closest region is lines 3-3"),
+        "{block:?}"
+    );
+    assert!(block[3].starts_with("│ 3: gamma"), "{block:?}");
+    for row in &block {
+        assert!(
+            !row.contains("@@") && !row.contains("-alpha") && !row.contains("−"),
+            "a failed patch draws no diff and no counts: {row:?}"
+        );
+    }
 }
 
 /// The count mirror: `blocks::line_count` equals the rows `blocks::layout` draws for a tool
