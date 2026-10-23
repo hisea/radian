@@ -30,17 +30,19 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   For each run it starts one `radian exec` in its own checkout, `.radian/arc/gates/review/`, on the candidate, with the candidate as the workspace and only the `read`, `grep` and `glob` tools mounted: no shell tool, no write tool, and no MCP server.
   Its model route is `[gate.review] exec_args`, and `[gate.review] timeout_secs` limits one session.
   The prompt is built in: the task's brief, the commit list and the diff from the merge base of the remote main and `verified_sha` to `verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
+  A rework round's prompt holds the increment instead of the full diff (see [A rework round](#a-rework-round)).
   `[gate.review] prompt_file` is appended to it.
   The session must end with one fenced `json` block, and arc parses the last such block:
 
   ```json
-  {"summary": "what the change does", "blocking": [], "suggestions": [], "verified": []}
+  {"summary": "what the change does", "blocking": [{"level": "major", "file": "path", "line": 12, "text": "what is wrong"}], "suggestions": [], "verified": []}
   ```
 
-  `summary` is 2 to 6 sentences. `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage.
-  Any blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items.
-  No parsable block, a missing field, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
-  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids` and `review_cost_micros` beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
+  `summary` is 2 to 6 sentences. Each item of `blocking` and `suggestions` is an object: `text` is required, and `level`, `file` and `line` are optional. `level` is one of `critical`, `major`, `minor`. A plain string is an item with only its `text`, so a verdict written before the object form still reads.
+  `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage.
+  A blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items, each as `[level] path:line text` with the parts an item does not have left out.
+  No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
+  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros` and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
 - `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), and `review_timeout` (the last run hit `[gate.review] timeout_secs`).
 - This build runs `commands` and `review`.
   A profile or a task that lists `mutation` or `ci` is refused with `stage <name> is not built yet`; the task stays in `review.verifying` and `show` prints that reason.
@@ -69,6 +71,35 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 
 `list` and `show` do not use the network: they do not check the remote and cannot see a branch that moved after the gate.
 `merge` checks the remote before it acts.
+
+### A rework round
+
+A review is a rework round when an earlier attempt of the same task has a review verdict for a `sha` other than the commit under review; the newest such verdict is the previous review.
+A review of the same commit as the previous review (a `reverify` of an unchanged head) is a first review: it gets the full diff, and no item is pre-existing.
+The first review of a task is unchanged.
+
+A rework round's prompt holds the brief, the previous review's blocking items, the commit list `<previous sha>..<sha>`, and the increment instead of the full diff.
+It asks the session to check that each previous blocking item is fixed, to review the increment, and to list every problem it finds; the session can read the files.
+
+The increment is the task's own diff restricted to the hunks that hold a line the rework changed.
+A line is an increment line when it is a new-side line of `git diff <previous sha> <sha>` and also a new-side line of the task's own diff, which starts at the merge base of the remote main and `sha`.
+A line that came in only with a merge of main is not in the task's own diff, so it drops out.
+
+arc, not the session, decides whether a blocking item is pre-existing.
+After a rework round's report is parsed, an item is moved to `suggestions` and marked `"pre_existing": true` unless its `file:line` is within 3 lines of an increment line in that file, or it is in the same file as and within 10 lines of a blocking item of the previous review, so an item that was not fixed stays blocking.
+An item with no `file` or no `line` is moved.
+The stage passes when no blocking item is left, and the verdict records how many items arc moved as `review_pre_existing`.
+
+When a rework round's review still fails with blocking items and the plan's `auto` is not `off`, arc writes the next attempt's brief itself (see [A failed review](#a-failed-review)).
+
+### A failed review
+
+A review that failed with `review_blocking` returns the task to `todo.ready` with a brief arc writes, the way a conflict with main does, when the plan's `auto` is not `off`.
+The heading is `## Rework <n> (review)`, with the lead's `add_rework` numbering.
+The text says the review found these items, to fix them and nothing else, to append commits and not to rebase; it lists the blocking items, one per line, as `[level] path:line text`; and it names the review verdict to read for detail.
+It counts as an automatic rework: it raises `auto_rework`, and `max_auto_rework` pauses the plan (see the [`limits.max_auto_rework` row](arc-files.md#configtoml)); the task then stays in `review.rework_pending`.
+With `auto` `off`, the task stays in `review.rework_pending` and waits for you, as before.
+`radian arc run` prints `<task> review blocking -> todo.ready (automatic rework)`.
 
 ### A conflict with main
 

@@ -41,6 +41,11 @@ copy.
 | M29 | leave the gate in the loop's process group (drop `process_group(0)` from its spawn) | `run::sigint_to_a_gate_stops_its_stage` (`kill(-<pid>, SIGINT)` fails: the gate has no group of its own) | ✅ failed |
 | M30 | drop the no-record guard (the pass's `started` record is left alone and a new gate starts on every pass) | `run::a_gate_that_exits_without_a_record_is_reported_once_and_not_restarted`, `run::a_watch_pass_does_not_restart_a_gate_that_left_no_record`, `run::a_changed_head_starts_a_gate_that_left_no_record_once_more` | ✅ 3 failed |
 | M31 | skip the early finish record (`run_inner` returns the failure without `record_failure`) | `run::a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass`, `run::a_wrapper_whose_worktree_lock_is_held_frees_the_slot_in_the_next_pass`, `work::a_second_wrapper_for_the_same_task_fails_on_the_flock` | ✅ 3 failed |
+| M32 | skip the rework round's `pre_existing` move (record 0 and move nothing) | `review::a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes` | ✅ failed |
+| M33 | treat the whole task's own diff as the increment (drop the intersection with `previous..sha`) | `review::a_rework_prompt_holds_the_increment_and_the_previous_items`, `review::a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes` | ✅ 2 failed |
+| M34 | drop rule (b) of `ReworkRound::keeps` (an earlier unfixed item stops blocking) | `review::a_blocking_item_near_an_unfixed_previous_item_still_blocks` | ✅ failed |
+| M35 | write the review rework when the plan's `auto` is `off` | `review::a_failed_review_with_auto_off_waits_for_the_lead` | ✅ failed |
+| M36 | treat a review of the commit the previous review reviewed as a rework round (drop the `previous.sha != sha` guard) | `review::a_reverify_of_the_same_head_is_a_first_review_and_still_blocks` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -87,6 +92,14 @@ one-shot `run`'s gate on every pass, so no `no_record` record is ever written an
 prints another `verify started` line. M31 is the old silence: a wrapper that refuses its
 arguments or finds the worktree lock held prints nothing and leaves no record, so reconcile
 judges it by its fresh heartbeat and the concurrency slot stays held for the stall window.
+
+M32–M36 were run against the review-increment change (the rework round, `pre_existing` and the
+review rework), from copies under `.radian/mutations/` restored with `cp` and compared with
+`cmp`. M33's main-merge test still passed under the mutation, because that test's own diff is
+already restricted to the task's file; the rework-prompt test is the one that catches it. M36
+is the same-commit hole: with the guard gone a `reverify` of an unchanged head is a rework
+round with an empty increment, so an item reported 29 lines from the previous one is moved
+and the stage passes.
 
 The old stale-main test (`a_rejected_push_never_overwrites_the_remote_main`) cannot survive
 the explicit main refspec: a main moved on the remote is now visible before the push, so the
