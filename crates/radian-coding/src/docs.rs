@@ -72,6 +72,7 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/subagent-and-jobs.md"),
     ),
     ("themes.md", include_str!("../../../docs/user/themes.md")),
+    ("tools.md", include_str!("../../../docs/user/tools.md")),
     (
         "troubleshooting.md",
         include_str!("../../../docs/user/troubleshooting.md"),

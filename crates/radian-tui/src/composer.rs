@@ -6,6 +6,7 @@
 //! split. The cursor's on-screen cell uses `unicode-width`, so a CJK character or an emoji
 //! occupies its real width.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use unicode_width::UnicodeWidthChar;
@@ -77,6 +78,21 @@ impl Composer {
         let count = inserted.len();
         self.chars.splice(self.cursor..self.cursor, inserted);
         self.cursor += count;
+    }
+
+    /// Removes the chars in `range` (a dropped path that became an attachment). The cursor
+    /// moves to the range's start, clamped to the buffer.
+    pub fn remove_range(&mut self, range: Range<usize>) {
+        let start = range.start.min(self.chars.len());
+        let end = range.end.min(self.chars.len()).max(start);
+        self.chars.drain(start..end);
+        self.cursor = if self.cursor <= start {
+            self.cursor
+        } else if self.cursor >= end {
+            self.cursor - (end - start)
+        } else {
+            start
+        };
     }
 
     pub fn left(&mut self) -> bool {

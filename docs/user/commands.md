@@ -171,6 +171,27 @@ In an untrusted project it also carries the git safety keys (see
 An empty command is a usage notice. Ask about radian itself in plain words
 to read the built-in manual.
 
+## Attaching files
+
+Type `@path` in the composer to attach a workspace file.
+The `@` must start the line or follow whitespace.
+Tab completes a partial `@` reference.
+A text file folds to one `[file: P, N lines]` line in your message; the model reads the file.
+A PNG, JPEG, GIF or WebP file is attached as an image: the transcript shows
+`[image: <file name>, W×H, N KB]`, and the model receives the image itself.
+The format is judged by the file's magic number, not its extension.
+
+Drop a file onto the terminal to attach an image.
+The terminal inserts the file's absolute path as text; Radian recognises it at the cursor,
+removes the path from your message, and attaches the image.
+A path with escaped spaces, a single- or double-quoted path, and a trailing space all work.
+A path outside the workspace is accepted: Radian reads the bytes itself and the model receives the image, not the path.
+Backspace on an empty input removes the newest image attachment.
+A path that does not exist stays as ordinary text, with no error.
+
+An image over either limit makes the message unsendable and names the limit.
+See `tools` for the `read` tool's image branch, its two error codes and its limits.
+
 ## While a turn runs
 
 A submitted `Enter` on an idle composer opens a turn at once. While a turn

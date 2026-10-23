@@ -79,6 +79,9 @@ pub(crate) struct Setup {
     /// URL, only for a provider that takes an override. `None` lets the child resolve it from
     /// the config, the auth entry or the provider default, exactly as the parent did.
     pub(crate) base_url: Option<String>,
+    /// The `--image` paths, already read and checked (Q7). Each joins the `-p` prompt's user
+    /// message in order; a bad path is a usage error before any session file exists.
+    pub(crate) images: Vec<radian_coding::LoadedImage>,
 }
 
 pub(crate) async fn setup(
@@ -602,5 +605,92 @@ pub(crate) async fn setup(
             paths
         },
         allow_env: config.sandbox.allow_env.clone(),
+        images: load_images(cli)?,
     })
+}
+
+/// Reads each `--image` path with the host's own bytes and runs the shared image pipeline. A
+/// missing file, a non-image, or a limit crossed is a usage error (exit 2, ADR 0032) naming
+/// the path and the reason; nothing is read lazily later.
+fn load_images(cli: &Cli) -> Result<Vec<radian_coding::LoadedImage>, SetupError> {
+    let mut images = Vec::new();
+    for path in &cli.image {
+        let bytes = std::fs::read(path)
+            .map_err(|error| SetupError(format!("--image {}: {error}", path.display())))?;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let image = radian_coding::image::load(&name, &bytes)
+            .map_err(|error| SetupError(format!("--image {}: {error}", path.display())))?;
+        images.push(image);
+    }
+    Ok(images)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes
+    }
+
+    /// `--image` is repeatable, keeps the command line order, and needs `-p`; a path that is
+    /// not an image is refused with the path and the reason (the caller exits 2).
+    #[test]
+    fn load_images_keeps_order_and_names_a_bad_path() {
+        let dir = std::env::temp_dir().join(format!("radian-exec-image-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("a.png");
+        let second = dir.join("b.png");
+        let bad = dir.join("notes.png");
+        std::fs::write(&first, png(10, 10)).unwrap();
+        std::fs::write(&second, png(20, 30)).unwrap();
+        std::fs::write(&bad, "plain text").unwrap();
+
+        let cli = Cli::try_parse_from([
+            "radian",
+            "-p",
+            "describe",
+            "--image",
+            first.to_str().unwrap(),
+            "--image",
+            second.to_str().unwrap(),
+        ])
+        .expect("the flags parse");
+        let images = load_images(&cli).expect("two valid images");
+        assert_eq!(
+            images
+                .iter()
+                .map(|image| image.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a.png", "b.png"]
+        );
+        assert_eq!(images[1].height, 30);
+
+        let cli =
+            Cli::try_parse_from(["radian", "-p", "describe", "--image", bad.to_str().unwrap()])
+                .expect("the flags parse");
+        let error = load_images(&cli).unwrap_err();
+        assert!(error.0.contains("--image"), "{error:?}");
+        assert!(error.0.contains("notes.png"), "{error:?}");
+        assert!(error.0.contains("not a PNG"), "{error:?}");
+
+        // Without `-p` the flag is a usage error at parse time.
+        assert!(
+            Cli::try_parse_from(["radian", "--image", first.to_str().unwrap()]).is_err(),
+            "--image needs -p"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

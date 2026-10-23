@@ -234,6 +234,36 @@ fn every_tool_name_appears_in_the_manual() {
     }
 }
 
+/// The manual's image limits come from the code, not from prose that can drift: the byte limit,
+/// the per-side limit and the provider-scaling threshold are the constants themselves.
+#[test]
+fn the_manual_names_the_image_limits_from_the_code() {
+    let text = radian_coding::docs::find("tools.md").expect("tools.md is in the table");
+    let mib = radian_coding::MAX_IMAGE_BYTES / (1024 * 1024);
+    assert!(
+        text.contains(&format!("{mib} MiB")),
+        "tools.md names the {mib} MiB byte limit"
+    );
+    assert!(
+        text.contains(&radian_coding::MAX_IMAGE_BYTES.to_string()),
+        "tools.md names the exact byte limit"
+    );
+    assert!(
+        text.contains(&radian_coding::MAX_IMAGE_SIDE.to_string()),
+        "tools.md names the {} px side limit",
+        radian_coding::MAX_IMAGE_SIDE
+    );
+    assert!(
+        text.contains(&radian_coding::SCALE_NOTICE_SIDE.to_string()),
+        "tools.md names the {} px scaling threshold",
+        radian_coding::SCALE_NOTICE_SIDE
+    );
+    // And the two error codes the image branch can return.
+    for code in ["image_too_large", "image_offset"] {
+        assert!(text.contains(code), "tools.md names `{code}`");
+    }
+}
+
 /// The hand-written table matches `docs/user/` on disk.
 #[test]
 fn the_table_matches_docs_user_on_disk() {

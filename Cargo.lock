@@ -2289,9 +2289,11 @@ dependencies = [
 name = "radian-coding"
 version = "0.2.0"
 dependencies = [
+ "agent-provider-anthropic",
  "futures-util",
  "globset",
  "ignore",
+ "imagesize",
  "libc",
  "radian-coding",
  "radian-core",

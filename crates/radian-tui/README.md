@@ -212,6 +212,10 @@ everywhere and stay the fallback.
 inside the workspace like the `read` tool (no absolute path, no `..`, a symlink that leaves is
 refused), at most 100 KiB per file and 400 KiB in total, and a binary file makes the message
 unsendable with the input kept. The transcript folds each attachment to `[file: P, N lines]`.
+A PNG/JPEG/GIF/WebP `@path` attaches the image instead (`[image: name, W×H, N KB]`), and so does
+an absolute image path dropped into the composer (quoted, backslash-escaped or with a trailing
+space; outside the workspace is accepted, the host reads the bytes). An image over 5 MiB or
+8000 px a side is unsendable; Backspace on an empty input removes the newest composer image.
 `Tab` completes the path; the menu is at most 10 rows plus `+N more`, clipped to the terminal
 width, and never covers an approval prompt. The first (best) row is highlighted with the theme's
 `selection` (reversed in `mono`); `Up`/`Down` (or `Ctrl-N`) move the highlight and wrap, `Enter`
@@ -672,7 +676,7 @@ The transcript owns its scrolling:
 | 15 | `--mcp-config` mounts the fixture; its tool runs through the approval dialog; the status bar shows the connected servers/tools; the startup notice names the MCP sandbox gap | `tests/pty.rs` |
 | 16 | the status bar shows the tier, reported usage (or `none`) and the MCP counts; a 60-column terminal drops the long segments and marks it | `tests/status.rs` |
 | 17 | `--version` prints `<program> <CARGO_PKG_VERSION>` and exits 0 without entering the terminal | `tests/version.rs` |
-| 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs` |
+| 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept; an image attaches as a part and shows `[image: name, W×H, N KB]` (also after a journal round trip), a dropped absolute path becomes an attachment outside the workspace too, and Backspace removes it | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs`, `tests/images.rs` |
 | 19 | `--pick` lists this workspace's sessions, filters, full-text searches, resumes the choice (the next request carries its history), `n` starts new, `Esc` exits 0 with no session file; `/sessions` lists a copyable `--resume`; `/export` writes and refuses to overwrite without `--force` | `tests/pty.rs`, `tests/sessions.rs` (host) |
 | 20 | Ctrl-C: idle with text, the first press clears it into the history (not a quit); idle and empty, the first press only shows `Press Ctrl-C again to quit` and a second inside 2 s quits with the exit line; a key in between, or the window closing, disarms | `tests/quit.rs`, `tests/pty.rs` |
 | 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |

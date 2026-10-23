@@ -27,6 +27,7 @@
 
 use std::borrow::Cow;
 
+use radian_coding::image::{self, ImageError, LoadedImage};
 use radian_core::{ContentPart, Message, MessageMeta};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -63,30 +64,34 @@ pub struct Attachment {
 }
 
 /// A message after expansion: the user's text (attachments are **not** spliced into it), the
-/// files attached in first-reference order, and non-fatal warnings to show.
+/// files attached in first-reference order, the images attached by `@` or by a dropped path
+/// (the dropped path itself is removed from `text`), and non-fatal warnings to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expansion {
     pub text: String,
     pub attachments: Vec<Attachment>,
+    pub images: Vec<LoadedImage>,
     pub warnings: Vec<String>,
 }
 
 impl Expansion {
-    /// The attached paths, for the notice.
+    /// The attached paths and image names, for the notice.
     pub fn attached(&self) -> Vec<&str> {
         self.attachments
             .iter()
             .map(|attachment| attachment.path.as_str())
+            .chain(self.images.iter().map(|image| image.name.as_str()))
             .collect()
     }
 }
 
-/// The message one send carries (ADR 0018): the user's text as one part, then one
-/// [`ContentPart::attachment`] part per file. The provider sees the same text it always did
-/// (joined), but the parts are separate, so Core can replace an attachment with a placeholder
-/// when it keeps the user's words verbatim.
-pub fn user_message(text: &str, attachments: &[Attachment]) -> Message {
+/// The message one send carries (ADR 0018): the user's text as one part, one
+/// [`ContentPart::Image`] per image, then one [`ContentPart::attachment`] part per file. The
+/// provider sees the same text it always did (joined), but the parts are separate, so Core can
+/// replace an attachment with a placeholder when it keeps the user's words verbatim.
+pub fn user_message(text: &str, attachments: &[Attachment], images: &[LoadedImage]) -> Message {
     let mut content = vec![ContentPart::text(text)];
+    content.extend(images.iter().map(LoadedImage::part));
     for attachment in attachments {
         content.push(ContentPart::attachment(
             attachment.content.clone(),
@@ -100,15 +105,22 @@ pub fn user_message(text: &str, attachments: &[Attachment]) -> Message {
 }
 
 /// The display text of a user message's parts: an attachment part becomes
-/// `[file: P, N lines]`, never its content.
+/// `[file: P, N lines]`, an image part `[image: <name>, W×H, N KB]` (ADR 0028 R5); neither
+/// ever shows its content.
 pub fn display_parts(parts: &[ContentPart]) -> String {
     let mut lines: Vec<String> = Vec::new();
     for part in parts {
-        if let ContentPart::Text { text, .. } = part {
-            match part.attachment_path() {
+        match part {
+            ContentPart::Text { text, .. } => match part.attachment_path() {
                 Some(path) => lines.push(format!("[file: {path}, {} lines]", text.lines().count())),
                 None => lines.push(text.clone()),
+            },
+            ContentPart::Image { .. } => {
+                if let Some(line) = image::part_placeholder(part) {
+                    lines.push(line);
+                }
             }
+            _ => {}
         }
     }
     lines.join("\n\n")
@@ -168,37 +180,52 @@ pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
         .as_deref()
         .and_then(|root| radian_coding::safe_fs::RootDir::open(root).ok());
     let mut attachments: Vec<Attachment> = Vec::new();
+    let mut images: Vec<LoadedImage> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut rejections: Vec<Rejection> = Vec::new();
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut total = 0usize;
 
-    for candidate in candidates(text) {
+    // Q7: an absolute path to an existing image, dropped or typed as a whole token, becomes an
+    // image attachment and the path leaves the text: the host reads the bytes, the model gets
+    // the image and not the path. This does not go through the sandbox or the read roots.
+    let mut text = text.to_string();
+    let mut removals: Vec<Range<usize>> = Vec::new();
+    for dropped in dropped_paths(&text) {
+        match load_dropped(&dropped.path) {
+            DroppedImage::Loaded(image) => {
+                images.push(image);
+                removals.push(dropped.range);
+            }
+            DroppedImage::Unusable(reason) => rejections.push(Rejection {
+                path: dropped.path.display().to_string(),
+                reason,
+            }),
+            DroppedImage::NotImage => {
+                // A missing path, or an existing non-image: it stays as written.
+            }
+        }
+    }
+    for range in removals.into_iter().rev() {
+        remove_range(&mut text, range);
+    }
+
+    for candidate in candidates(text.as_str()) {
         match resolve(&candidate, workspace, root.as_deref()) {
             Resolve::File(path) => {
                 // The same file reached by two spellings is attached once.
                 if seen.contains(&path) {
                     continue;
                 }
-                // Check the size before reading: a huge file must not be read into memory on
-                // the UI thread just to be rejected.
-                if let Ok(meta) = std::fs::metadata(&path)
-                    && meta.len() > MAX_FILE_BYTES as u64
-                {
-                    rejections.push(Rejection {
-                        path: candidate,
-                        reason: format!(
-                            "{} bytes, over the {} KiB per-file limit",
-                            meta.len(),
-                            MAX_FILE_BYTES / 1024
-                        ),
-                    });
-                    continue;
-                }
+                // Check the text size before reading it: a huge text file must not be read
+                // into memory just to be rejected. An image may be larger (up to its own 5
+                // MiB limit), so the magic number is read first below.
+                let metadata = std::fs::metadata(&path).ok();
+                let total_bytes = metadata.map(|meta| meta.len()).unwrap_or(0);
                 // ADR 0039 decision 2: the file is opened through the workspace root's
                 // directory fd (`openat(O_NOFOLLOW)` per component), never by the path
                 // string the resolve step checked; a symlink anywhere in it is a rejection.
-                let bytes = match root_dir
+                let file = match root_dir
                     .as_ref()
                     .ok_or_else(|| "the workspace root cannot be opened".to_string())
                     .and_then(|root_dir| {
@@ -206,15 +233,11 @@ pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
                             radian_coding::safe_fs::components(Path::new(&candidate))
                                 .map(|parts| parts.iter().collect())
                                 .map_err(|error| error.to_string())?;
-                        let file = root_dir
+                        root_dir
                             .file(&rel, radian_coding::safe_fs::OpenMode::Read)
-                            .map_err(|error| error.to_string())?;
-                        let mut bytes = Vec::new();
-                        std::io::Read::read_to_end(&mut &file, &mut bytes)
-                            .map_err(|error| error.to_string())?;
-                        Ok(bytes)
+                            .map_err(|error| error.to_string())
                     }) {
-                    Ok(bytes) => bytes,
+                    Ok(file) => file,
                     Err(reason) => {
                         rejections.push(Rejection {
                             path: candidate,
@@ -223,6 +246,87 @@ pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
                         continue;
                     }
                 };
+                let mut reader = &file;
+                let mut head = [0u8; 12];
+                let mut filled = 0usize;
+                let mut read_failed = false;
+                while filled < head.len() {
+                    match std::io::Read::read(&mut reader, &mut head[filled..]) {
+                        Ok(0) => break,
+                        Ok(n) => filled += n,
+                        Err(error) => {
+                            rejections.push(Rejection {
+                                path: candidate.clone(),
+                                reason: error.to_string(),
+                            });
+                            read_failed = true;
+                            break;
+                        }
+                    }
+                }
+                if read_failed {
+                    continue;
+                }
+                // The kind comes from the magic number, never the extension (Q3).
+                if image::ImageKind::from_magic(&head[..filled]).is_some() {
+                    if total_bytes > image::MAX_IMAGE_BYTES {
+                        rejections.push(Rejection {
+                            path: candidate,
+                            reason: format!(
+                                "{total_bytes} bytes, over the {} MiB image limit",
+                                image::MAX_IMAGE_BYTES / (1024 * 1024)
+                            ),
+                        });
+                        continue;
+                    }
+                    let mut bytes = head[..filled].to_vec();
+                    if let Err(error) = std::io::Read::read_to_end(&mut reader, &mut bytes) {
+                        rejections.push(Rejection {
+                            path: candidate,
+                            reason: error.to_string(),
+                        });
+                        continue;
+                    }
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| candidate.clone());
+                    match image::load(&name, &bytes) {
+                        Ok(image) => {
+                            seen.push(path);
+                            images.push(image);
+                        }
+                        // The metadata said image, the bytes say otherwise (a short read or a
+                        // swapped file): keep the existing binary rejection.
+                        Err(ImageError::NotImage) => rejections.push(Rejection {
+                            path: candidate,
+                            reason: "binary (not valid UTF-8)".into(),
+                        }),
+                        Err(error) => rejections.push(Rejection {
+                            path: candidate,
+                            reason: error.to_string(),
+                        }),
+                    }
+                    continue;
+                }
+                if total_bytes > MAX_FILE_BYTES as u64 {
+                    rejections.push(Rejection {
+                        path: candidate,
+                        reason: format!(
+                            "{total_bytes} bytes, over the {} KiB per-file limit",
+                            MAX_FILE_BYTES / 1024
+                        ),
+                    });
+                    continue;
+                }
+                let mut bytes = head[..filled].to_vec();
+                if let Err(error) = std::io::Read::read_to_end(&mut reader, &mut bytes) {
+                    rejections.push(Rejection {
+                        path: candidate,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
                 let content = match String::from_utf8(bytes) {
                     Ok(content) if !content.contains('\0') => content,
                     Ok(_) => {
@@ -281,8 +385,9 @@ pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
         return Err(ExpandError::Unusable(rejections));
     }
     Ok(Expansion {
-        text: text.to_string(),
+        text,
         attachments,
+        images,
         warnings,
     })
 }
@@ -353,6 +458,153 @@ fn resolve(candidate: &str, workspace: &Path, root: Option<&Path>) -> Resolve {
         Ok(metadata) if metadata.is_file() => Resolve::File(real),
         _ => Resolve::NotAFile,
     }
+}
+
+/// One absolute path token found in the composer text: the char range it occupies (quotes
+/// included) and the path after unescaping and `~` expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedPath {
+    pub range: Range<usize>,
+    pub path: PathBuf,
+}
+
+/// What reading a dropped path produced (Q7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DroppedImage {
+    Loaded(LoadedImage),
+    /// The path exists and has an image magic number, but a limit (or the header) refused it.
+    Unusable(String),
+    /// Missing, unreadable, or not a PNG/JPEG/GIF/WebP: the text stays as written.
+    NotImage,
+}
+
+/// The absolute path token that ends at `cursor` (a trailing run of whitespace is allowed),
+/// if any. Pure: the shape only; [`load_dropped`] reads the bytes.
+pub fn dropped_path(text: &str, cursor: usize) -> Option<DroppedPath> {
+    let last = dropped_paths(text).into_iter().last()?;
+    if cursor < last.range.end {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars[last.range.end.min(chars.len())..cursor.min(chars.len())]
+        .iter()
+        .any(|c| !c.is_whitespace())
+    {
+        return None;
+    }
+    Some(last)
+}
+
+/// Every absolute path token in `text`. Terminals insert a dropped path in different shapes:
+/// backslash-escaped spaces, a single- or double-quoted path, and often a trailing space. All
+/// are recognised; relative paths are not (a dropped path is absolute). Quotes and escapes are
+/// removed from the path and included in the range.
+pub fn dropped_paths(text: &str) -> Vec<DroppedPath> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        let start = i;
+        let (value, end) = if chars[i] == '\'' || chars[i] == '"' {
+            let quote = chars[i];
+            let mut j = i + 1;
+            let mut raw = String::new();
+            while j < chars.len() && chars[j] != quote {
+                raw.push(chars[j]);
+                j += 1;
+            }
+            let end = if j < chars.len() { j + 1 } else { j };
+            (unescape(&raw), end)
+        } else {
+            let mut j = i;
+            let mut raw = String::new();
+            while j < chars.len() && !chars[j].is_whitespace() {
+                if chars[j] == '\\' && j + 1 < chars.len() {
+                    raw.push(chars[j]);
+                    raw.push(chars[j + 1]);
+                    j += 2;
+                } else {
+                    raw.push(chars[j]);
+                    j += 1;
+                }
+            }
+            (unescape(&raw), j)
+        };
+        // A dropped path is absolute. A single leading slash names a root-level path but is
+        // also how every slash command starts, so it is not taken as a drop; a real dropped
+        // path has another separator or the `~/` prefix.
+        let absolute =
+            value.starts_with("~/") || (value.starts_with('/') && value[1..].contains('/'));
+        if absolute {
+            out.push(DroppedPath {
+                range: start..end,
+                path: expand_tilde(&value),
+            });
+        }
+        i = end.max(i + 1);
+    }
+    out
+}
+
+/// Reads one dropped path with the host's own bytes: outside the workspace is accepted (Q7),
+/// the model gets the image and not the path, and the sandbox and read roots do not change.
+pub fn load_dropped(path: &Path) -> DroppedImage {
+    let Ok(bytes) = std::fs::read(path) else {
+        return DroppedImage::NotImage;
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    match image::load(&name, &bytes) {
+        Ok(image) => DroppedImage::Loaded(image),
+        Err(ImageError::NotImage) => DroppedImage::NotImage,
+        Err(error) => DroppedImage::Unusable(error.to_string()),
+    }
+}
+
+fn expand_tilde(value: &str) -> PathBuf {
+    if (value == "~" || value.starts_with("~/"))
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let rest = value.trim_start_matches('~');
+        return PathBuf::from(home).join(rest.trim_start_matches('/'));
+    }
+    PathBuf::from(value)
+}
+
+fn unescape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(next) if matches!(next, ' ' | '\'' | '"' | '\\') => out.push(next),
+                Some(next) => {
+                    out.push('\\');
+                    out.push(next);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn remove_range(text: &mut String, range: Range<usize>) {
+    let mut chars: Vec<char> = text.chars().collect();
+    let start = range.start.min(chars.len());
+    let end = range.end.min(chars.len());
+    chars.drain(start..end);
+    *text = chars.into_iter().collect();
 }
 
 /// Folds every `<file path="P">…</file>` block in a message into one `[file: P, N lines]`
@@ -668,6 +920,133 @@ mod tests {
         let expansion = expand("just words", dir.path()).unwrap();
         assert_eq!(expansion.text, "just words");
         assert!(expansion.attached().is_empty());
+    }
+
+    // ---------- images ----------
+
+    /// A minimal PNG header with these dimensions (24 bytes).
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn an_at_mention_of_a_png_attaches_the_image_and_shows_the_placeholder() {
+        let dir = TempDir::new("mention-image");
+        dir.write("shot.png", png(1200, 800));
+        let expansion = expand("look at @shot.png", dir.path()).unwrap();
+        assert!(expansion.attachments.is_empty());
+        assert_eq!(expansion.images.len(), 1);
+        assert_eq!(expansion.images[0].name, "shot.png");
+        assert_eq!(expansion.text, "look at @shot.png");
+
+        let message = user_message(&expansion.text, &expansion.attachments, &expansion.images);
+        let Message::User { content, .. } = &message else {
+            panic!("a user message");
+        };
+        assert!(
+            matches!(content[1], ContentPart::Image { .. }),
+            "{content:?}"
+        );
+        assert_eq!(
+            display_parts(content),
+            "look at @shot.png\n\n[image: shot.png, 1200×800, 1 KB]"
+        );
+
+        // A journal round trip keeps the same line (the annotations travel with the part).
+        let stored = serde_json::to_string(&message).unwrap();
+        let read_back: Message = serde_json::from_str(&stored).unwrap();
+        let Message::User { content, .. } = read_back else {
+            panic!("a user message");
+        };
+        assert_eq!(
+            display_parts(&content),
+            "look at @shot.png\n\n[image: shot.png, 1200×800, 1 KB]"
+        );
+    }
+
+    #[test]
+    fn the_extension_does_not_decide_and_an_image_over_the_limit_is_unusable() {
+        let dir = TempDir::new("mention-kind");
+        // Text named `.png` stays a text attachment.
+        dir.write("notes.png", "hello\n");
+        let expansion = expand("@notes.png", dir.path()).unwrap();
+        assert!(expansion.images.is_empty());
+        assert_eq!(expansion.attachments.len(), 1);
+        // A PNG named `.txt` is an image.
+        dir.write("shot.txt", png(10, 10));
+        let expansion = expand("@shot.txt", dir.path()).unwrap();
+        assert!(expansion.attachments.is_empty());
+        assert_eq!(expansion.images.len(), 1);
+
+        // Over 5 MiB: the message is not sendable and the reason names the limit.
+        let mut huge = png(10, 10);
+        huge.resize(radian_coding::MAX_IMAGE_BYTES as usize + 1, 0);
+        dir.write("huge.png", &huge);
+        let error = expand("@huge.png", dir.path()).unwrap_err();
+        let ExpandError::Unusable(rejections) = error;
+        assert!(
+            rejections[0].reason.contains("5 MiB image limit"),
+            "{rejections:?}"
+        );
+    }
+
+    #[test]
+    fn a_dropped_absolute_path_accepts_escaped_spaces_quotes_and_a_trailing_space() {
+        let workspace = TempDir::new("drop-ws");
+        let outside = TempDir::new("drop-outside");
+        outside.write("shot one.png", png(10, 10));
+        let path = outside.path().join("shot one.png");
+        let escaped = path.display().to_string().replace(' ', "\\ ");
+        let shapes = [
+            format!("see {escaped}"),
+            format!("see {escaped} "),
+            format!("see '{}' ", path.display()),
+            format!("see \"{}\"", path.display()),
+        ];
+        for text in shapes {
+            let cursor = text.chars().count();
+            let dropped =
+                dropped_path(&text, cursor).unwrap_or_else(|| panic!("a dropped path in {text:?}"));
+            assert_eq!(dropped.path, path, "{text:?}");
+            // The workspace is a different directory: a dropped path is outside it and still
+            // accepted (the host reads the bytes itself).
+            let expansion = expand(&text, workspace.path()).unwrap();
+            assert_eq!(expansion.images.len(), 1, "{text:?}");
+            assert_eq!(expansion.images[0].name, "shot one.png");
+            assert!(!expansion.text.contains("shot one.png"), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_dropped_path_stays_text_and_a_partial_one_is_not_a_drop() {
+        let workspace = TempDir::new("drop-missing");
+        let text = "see /no/such/dir/shot.png";
+        let dropped = dropped_path(text, text.chars().count()).expect("the shape is a path");
+        assert_eq!(load_dropped(&dropped.path), DroppedImage::NotImage);
+        let expansion = expand(text, workspace.path()).unwrap();
+        assert!(expansion.images.is_empty());
+        assert_eq!(expansion.text, text);
+
+        // The cursor before the path's end is not a completed drop.
+        assert!(dropped_path(text, 8).is_none());
+        // A slash command is not an absolute path drop.
+        assert!(dropped_paths("/model").is_empty());
+    }
+
+    #[test]
+    fn a_bmp_is_still_binary_not_an_image() {
+        let dir = TempDir::new("mention-bmp");
+        dir.write("old.bmp", b"BM\xFF\xFE");
+        let error = expand("@old.bmp", dir.path()).unwrap_err();
+        let ExpandError::Unusable(rejections) = error;
+        assert!(rejections[0].reason.contains("binary"), "{rejections:?}");
     }
 
     // ---------- folding ----------

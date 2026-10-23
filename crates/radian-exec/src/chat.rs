@@ -507,7 +507,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         command_hooks.note_turn_started();
     }));
     let done: LoopDone = if let Some(prompt) = cli.prompt {
-        one_shot(&mut run, prompt).await
+        one_shot(&mut run, prompt, setup.images).await
     } else {
         interactive_loop(&mut run, &lines).await
     };

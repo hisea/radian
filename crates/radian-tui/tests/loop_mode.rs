@@ -36,6 +36,7 @@ fn submit(app: &mut App, line: &str) -> Vec<Effect> {
                 app.update(Input::MentionsExpanded(Ok(Expansion {
                     text: text.clone(),
                     attachments: Vec::new(),
+                    images: Vec::new(),
                     warnings: Vec::new(),
                 })))
                 .effects,

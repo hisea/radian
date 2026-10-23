@@ -673,3 +673,14 @@ RF-2 **survived its first run**: the test's jobs parent did not exist, so `Priva
 failed, no file was ever created, and the assertion passed vacuously. The test now creates the
 session directory tree first, and the mutation then fails on the leftover file. The record keeps
 this because it is the honest picture: an error-cleanup test must prove the file existed first.
+
+## image inputs: `read`, `@`, dropped path, `exec --image` (2026-10-22, branch `work/TK0013-image-inputs`)
+
+One pipeline (`src/image.rs`) does magic number → limits → part. Backups were `cp`ed under
+`.radian/` and restored byte-identically.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| IMG-1 | the kind comes from the extension instead of the magic number (`load` matches `name.rsplit('.')`) | ✅ 1 failed | `radian-coding::images::the_extension_never_decides_the_kind` (a text `.png` became an image, a PNG `.txt` did not) |
+| IMG-2 | the image part is sent even when `ImageSupport` says the model takes none (`if true`) | ✅ 1 failed | `radian-coding::images::a_model_known_blind_gets_only_the_text_and_the_omission_line` (two parts instead of one) |
+| IMG-3 | the 5 MiB byte limit is dropped (`MAX_IMAGE_BYTES = u64::MAX`) | ✅ 1 failed | `radian-coding::images::the_byte_and_pixel_limits_are_image_too_large` and `image::tests::the_limits_are_named_in_the_error` |

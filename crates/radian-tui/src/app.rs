@@ -121,6 +121,14 @@ pub enum Effect {
     },
     /// Expand the `@` references in `text` (reads files).
     ExpandMentions { text: String },
+    /// Read a dropped absolute path at the cursor (Q7). The host reads the bytes itself; the
+    /// answer is [`Input::DroppedLoaded`]. `text` is the composer text the range belongs to,
+    /// so a result for a line that has since changed is ignored.
+    LoadDropped {
+        text: String,
+        path: PathBuf,
+        range: std::ops::Range<usize>,
+    },
     /// Complete the `@` reference at the cursor (reads a directory).
     CompleteMention { text: String, cursor: usize },
     /// List one level's candidates in the host (I/O): the loop answers with
@@ -697,6 +705,9 @@ pub struct App {
     pub footer_context: std::sync::Arc<radian_host::FooterContext>,
     /// The input composer: text plus a cursor (ADR 0009 Phase 4).
     pub input: Composer,
+    /// Images attached in the composer by a dropped absolute path (Q7). They join the next
+    /// message after its text; Backspace on an empty input removes the newest.
+    pub composer_images: Vec<radian_coding::LoadedImage>,
     pub quit: bool,
     /// `/new` was accepted: the loop leaves, the host ends this session and opens a fresh
     /// one in the same terminal. Set with `quit` (the same exit), read by the loop's caller;

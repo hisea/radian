@@ -13,6 +13,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-fable-5-1": {
@@ -25,6 +32,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-haiku-4-5": {
@@ -37,6 +51,13 @@
     "limit": {
      "context": 200000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-haiku-4-5-20251001": {
@@ -49,6 +70,13 @@
     "limit": {
      "context": 200000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-haiku-5-5": {
@@ -73,6 +101,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-opus-4-5": {
@@ -85,6 +120,13 @@
     "limit": {
      "context": 200000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-opus-4-5-20251101": {
@@ -97,6 +139,13 @@
     "limit": {
      "context": 200000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-opus-4-6": {
@@ -109,6 +158,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-opus-4-7": {
@@ -121,6 +177,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-opus-4-8": {
@@ -133,6 +196,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-opus-5": {
@@ -145,6 +215,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-opus-5-5": {
@@ -157,6 +234,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-sonnet-4-5": {
@@ -169,6 +253,13 @@
     "limit": {
      "context": 200000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-sonnet-4-5-20250929": {
@@ -181,6 +272,13 @@
     "limit": {
      "context": 200000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-sonnet-4-6": {
@@ -193,6 +291,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-sonnet-5": {
@@ -205,6 +310,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "claude-sonnet-5-5": {
@@ -217,6 +329,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    }
   },
@@ -237,6 +356,12 @@
     "limit": {
      "context": 1000000,
      "output": 393216
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "deepseek-v4-flash": {
@@ -252,6 +377,12 @@
     "limit": {
      "context": 1000000,
      "output": 393216
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "deepseek-v4-flash-vision-exp": {
@@ -267,6 +398,12 @@
     "limit": {
      "context": 1000000,
      "output": 393216
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "deepseek-v4-pro": {
@@ -282,6 +419,11 @@
     "limit": {
      "context": 1000000,
      "output": 393216
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    }
   },
@@ -301,6 +443,13 @@
     "limit": {
      "context": 262144,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "kimi-k2.7-code": {
@@ -315,6 +464,13 @@
     "limit": {
      "context": 262144,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "kimi-k2.7-code-highspeed": {
@@ -329,6 +485,13 @@
     "limit": {
      "context": 262144,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "kimi-k3": {
@@ -344,6 +507,13 @@
     "limit": {
      "context": 1048576,
      "output": 1048576
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    }
   },
@@ -356,6 +526,12 @@
      "context": 0,
      "input": 0,
      "output": 0
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-3.5-turbo": {
@@ -367,6 +543,11 @@
     "limit": {
      "context": 16385,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "gpt-4": {
@@ -377,6 +558,11 @@
     "limit": {
      "context": 8192,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "gpt-4-turbo": {
@@ -387,6 +573,12 @@
     "limit": {
      "context": 128000,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-4.1": {
@@ -398,6 +590,13 @@
     "limit": {
      "context": 1047576,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-4.1-mini": {
@@ -409,6 +608,13 @@
     "limit": {
      "context": 1047576,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-4.1-nano": {
@@ -420,6 +626,12 @@
     "limit": {
      "context": 1047576,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-4o": {
@@ -431,6 +643,13 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-4o-2024-05-13": {
@@ -441,6 +660,12 @@
     "limit": {
      "context": 128000,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-4o-2024-08-06": {
@@ -452,6 +677,12 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-4o-2024-11-20": {
@@ -463,6 +694,12 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-4o-mini": {
@@ -474,6 +711,13 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-5": {
@@ -486,6 +730,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5-mini": {
@@ -498,6 +748,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5-nano": {
@@ -510,6 +766,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5-pro": {
@@ -521,6 +783,12 @@
      "context": 400000,
      "input": 272000,
      "output": 272000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5.1": {
@@ -533,6 +801,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5.2": {
@@ -545,6 +819,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5.2-chat-latest": {
@@ -567,6 +847,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5.3-chat-latest": {
@@ -590,6 +876,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-5.3-codex-spark": {
@@ -602,6 +895,13 @@
      "context": 128000,
      "input": 100000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-5.4": {
@@ -630,6 +930,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-5.4-mini": {
@@ -642,6 +949,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5.4-nano": {
@@ -654,6 +967,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5.4-pro": {
@@ -679,6 +998,12 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-5.5": {
@@ -707,6 +1032,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-5.5-pro": {
@@ -732,6 +1064,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-5.6": {
@@ -763,6 +1102,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-5.6-luna": {
@@ -794,6 +1140,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-5.6-sol": {
@@ -825,6 +1178,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-5.6-terra": {
@@ -856,6 +1216,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-6-astra": {
@@ -887,6 +1254,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-6-luna": {
@@ -918,6 +1292,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-6-sol": {
@@ -949,6 +1330,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-6.1-sol": {
@@ -980,6 +1368,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-daybreak-blue-latest": {
@@ -1011,6 +1406,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "gpt-daybreak-red-latest": {
@@ -1024,6 +1426,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-image-1": {
@@ -1031,6 +1439,12 @@
      "context": 0,
      "input": 0,
      "output": 0
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-image-1-mini": {
@@ -1038,6 +1452,12 @@
      "context": 0,
      "input": 0,
      "output": 0
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-image-1.5": {
@@ -1045,6 +1465,12 @@
      "context": 0,
      "input": 0,
      "output": 0
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-image-2": {
@@ -1057,6 +1483,12 @@
      "context": 0,
      "input": 0,
      "output": 0
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gpt-realtime-2.1": {
@@ -1071,6 +1503,13 @@
      "context": 128000,
      "input": 96000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "audio",
+      "image"
+     ]
     }
    },
    "o1": {
@@ -1082,6 +1521,13 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "o1-pro": {
@@ -1092,6 +1538,12 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "o3": {
@@ -1103,6 +1555,13 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "o3-mini": {
@@ -1114,6 +1573,11 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "o3-pro": {
@@ -1124,6 +1588,12 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "o4-mini": {
@@ -1135,6 +1605,12 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "text-embedding-3-large": {
@@ -1145,6 +1621,11 @@
     "limit": {
      "context": 8191,
      "output": 3072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "text-embedding-3-small": {
@@ -1155,6 +1636,11 @@
     "limit": {
      "context": 8191,
      "output": 1536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "text-embedding-ada-002": {
@@ -1165,6 +1651,11 @@
     "limit": {
      "context": 8192,
      "output": 1536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    }
   },
@@ -1184,6 +1675,11 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "big-pickle": {
@@ -1200,6 +1696,11 @@
      "context": 200000,
      "input": 160000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "cat-jam-free": {
@@ -1214,6 +1715,11 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "claude-3-5-haiku": {
@@ -1226,6 +1732,13 @@
     "limit": {
      "context": 200000,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -1242,6 +1755,13 @@
      "context": 1000000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1257,6 +1777,13 @@
      "context": 1000000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1271,6 +1798,13 @@
     "limit": {
      "context": 200000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -1299,6 +1833,13 @@
      "context": 1000000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1313,6 +1854,13 @@
     "limit": {
      "context": 200000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -1329,6 +1877,13 @@
      "context": 200000,
      "output": 64000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1343,6 +1898,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -1359,6 +1921,13 @@
      "context": 1000000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1373,6 +1942,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -1389,6 +1965,13 @@
      "context": 1000000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1403,6 +1986,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -1437,6 +2027,13 @@
      "context": 1000000,
      "output": 64000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1471,6 +2068,13 @@
      "context": 1000000,
      "output": 64000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1487,6 +2091,13 @@
      "context": 1000000,
      "output": 64000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1502,6 +2113,13 @@
      "context": 1000000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -1516,6 +2134,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -1533,6 +2158,11 @@
     "limit": {
      "context": 1000000,
      "output": 384000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek-v4-flash-free": {
@@ -1547,6 +2177,11 @@
     "limit": {
      "context": 200000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek-v4-flash-vision-exp": {
@@ -1561,6 +2196,12 @@
     "limit": {
      "context": 1000000,
      "output": 384000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "deepseek-v4-pro": {
@@ -1575,6 +2216,11 @@
     "limit": {
      "context": 1000000,
      "output": 384000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek-v4.1-flash": {
@@ -1589,6 +2235,12 @@
     "limit": {
      "context": 1000000,
      "output": 384000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "deepseek-v4.1-flash-free": {
@@ -1603,6 +2255,12 @@
     "limit": {
      "context": 200000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "exo-free": {
@@ -1613,6 +2271,12 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "fledge-alpha-free": {
@@ -1623,6 +2287,12 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gemini-3-flash": {
@@ -1634,6 +2304,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/google"
@@ -1665,6 +2344,15 @@
      "context": 1048576,
      "output": 65536
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/google"
     }
@@ -1695,6 +2383,15 @@
      "context": 1048576,
      "output": 65536
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/google"
     }
@@ -1710,6 +2407,15 @@
      "context": 1048576,
      "output": 65536
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/google"
     }
@@ -1723,6 +2429,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/google"
@@ -1739,6 +2454,15 @@
      "context": 1048576,
      "output": 65536
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/google"
     }
@@ -1753,6 +2477,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/google"
@@ -1769,6 +2502,15 @@
      "context": 1048576,
      "output": 65536
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/google"
     }
@@ -1784,6 +2526,15 @@
      "context": 1048576,
      "output": 65536
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/google"
     }
@@ -1797,6 +2548,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-4.7": {
@@ -1811,6 +2567,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-4.7-free": {
@@ -1825,6 +2586,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-5": {
@@ -1839,6 +2605,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-5-free": {
@@ -1853,6 +2624,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-5.1": {
@@ -1867,6 +2643,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-5.2": {
@@ -1881,6 +2662,11 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-5.3": {
@@ -1895,6 +2681,11 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-5.3-flash": {
@@ -1909,6 +2700,14 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf"
+     ]
     }
    },
    "glm-5.3-flash-free": {
@@ -1923,6 +2722,14 @@
     "limit": {
      "context": 200000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf"
+     ]
     }
    },
    "gpt-5": {
@@ -1935,6 +2742,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -1951,6 +2764,12 @@
      "input": 272000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -1965,6 +2784,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -1981,6 +2806,12 @@
      "input": 272000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -1995,6 +2826,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2011,6 +2848,12 @@
      "input": 272000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2025,6 +2868,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2041,6 +2890,12 @@
      "input": 272000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2055,6 +2910,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2071,6 +2933,13 @@
      "input": 272000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2085,6 +2954,11 @@
      "context": 128000,
      "input": 128000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2117,6 +2991,13 @@
      "input": 922000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2131,6 +3012,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2147,6 +3035,13 @@
      "input": 272000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2161,6 +3056,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2193,6 +3095,13 @@
      "input": 922000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2207,6 +3116,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2242,6 +3158,13 @@
      "input": 922000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2275,6 +3198,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2310,6 +3240,13 @@
      "input": 922000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2344,6 +3281,13 @@
      "input": 922000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2377,6 +3321,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2412,6 +3363,13 @@
      "input": 922000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2446,6 +3404,13 @@
      "input": 922000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2475,6 +3440,12 @@
     "limit": {
      "context": 500000,
      "output": 500000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2506,6 +3477,12 @@
      "context": 500000,
      "output": 500000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2536,6 +3513,13 @@
      "context": 500000,
      "output": 500000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -2549,6 +3533,13 @@
     "limit": {
      "context": 256000,
      "output": 256000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2564,6 +3555,11 @@
     "limit": {
      "context": 256000,
      "output": 256000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "hy3-free": {
@@ -2579,6 +3575,11 @@
      "context": 190000,
      "input": 192000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "hy3-preview-free": {
@@ -2590,6 +3591,11 @@
     "limit": {
      "context": 256000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "kimi-k2": {
@@ -2601,6 +3607,11 @@
     "limit": {
      "context": 262144,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "kimi-k2-thinking": {
@@ -2615,6 +3626,11 @@
     "limit": {
      "context": 262144,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "kimi-k2.5": {
@@ -2629,6 +3645,13 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "kimi-k2.5-free": {
@@ -2643,6 +3666,13 @@
     "limit": {
      "context": 262144,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "kimi-k2.6": {
@@ -2657,6 +3687,13 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "kimi-k2.7-code": {
@@ -2671,6 +3708,13 @@
     "limit": {
      "context": 262144,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "kimi-k3": {
@@ -2685,6 +3729,13 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "laguna-s-2.1-free": {
@@ -2696,6 +3747,11 @@
     "limit": {
      "context": 256000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "ling-2.6-flash-free": {
@@ -2706,6 +3762,11 @@
     "limit": {
      "context": 262100,
      "output": 32800
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "ling-3.0-flash-fin-free": {
@@ -2717,6 +3778,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "ling-3.0-flash-free": {
@@ -2728,6 +3794,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "ling-3.0-tiny-free": {
@@ -2738,6 +3809,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "ling-3.1-flash-free": {
@@ -2749,6 +3825,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "ll-alpha-free": {
@@ -2763,6 +3844,11 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "longcat-2.0-free": {
@@ -2777,6 +3863,11 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "longcat-2.5-preview-free": {
@@ -2791,6 +3882,12 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "mimo-v2-flash-free": {
@@ -2805,6 +3902,11 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "mimo-v2-omni-free": {
@@ -2819,6 +3921,14 @@
     "limit": {
      "context": 262144,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "mimo-v2-pro-free": {
@@ -2833,6 +3943,11 @@
     "limit": {
      "context": 1048576,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "mimo-v2.5-free": {
@@ -2847,6 +3962,14 @@
     "limit": {
      "context": 200000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "mimo-v2.6-flash-free": {
@@ -2861,6 +3984,14 @@
     "limit": {
      "context": 200000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "minimax-m2.1": {
@@ -2875,6 +4006,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "minimax-m2.1-free": {
@@ -2886,6 +4022,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -2903,6 +4044,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "minimax-m2.5-free": {
@@ -2914,6 +4060,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -2931,6 +4082,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "minimax-m3": {
@@ -2945,6 +4101,13 @@
     "limit": {
      "context": 512000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "minimax-m3-free": {
@@ -2956,6 +4119,13 @@
     "limit": {
      "context": 200000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -2971,6 +4141,12 @@
      "context": 524288,
      "output": 262144
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/mistral"
     }
@@ -2984,6 +4160,15 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf",
+      "audio"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -2999,6 +4184,15 @@
      "context": 1048576,
      "output": 131072
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf",
+      "audio"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -3013,6 +4207,15 @@
      "context": 1048576,
      "output": 131072
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf",
+      "audio"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -3026,6 +4229,15 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf",
+      "audio"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -3043,6 +4255,11 @@
     "limit": {
      "context": 204800,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nemotron-3-ultra-free": {
@@ -3057,6 +4274,11 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nemotron-3.5-lightning-free": {
@@ -3071,6 +4293,11 @@
     "limit": {
      "context": 262144,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nemotron-3.5-super-vl-free": {
@@ -3086,6 +4313,12 @@
      "context": 1048576,
      "input": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "north-mini-code-free": {
@@ -3099,6 +4332,11 @@
     "limit": {
      "context": 256000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen3-coder": {
@@ -3109,6 +4347,11 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen3.5-plus": {
@@ -3121,6 +4364,13 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -3137,6 +4387,13 @@
      "context": 262144,
      "output": 65536
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -3150,6 +4407,13 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -3166,6 +4430,13 @@
      "context": 1000000,
      "output": 131072
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -3180,6 +4451,12 @@
     "limit": {
      "context": 262144,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "ring-2.6-1t-free": {
@@ -3193,6 +4470,11 @@
     "limit": {
      "context": 262000,
      "output": 66000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "space-bunny-free": {
@@ -3209,6 +4491,13 @@
      "context": 1048576,
      "input": 524288,
      "output": 524288
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "step-5-preview-free": {
@@ -3224,6 +4513,13 @@
      "context": 1000000,
      "input": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "trinity-large-preview-free": {
@@ -3234,6 +4530,11 @@
     "limit": {
      "context": 131072,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "x-preview-f-free": {
@@ -3248,6 +4549,13 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    }
   },
@@ -3267,6 +4575,11 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "cat-jam-free": {
@@ -3281,6 +4594,11 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "claude-haiku-5-5": {
@@ -3306,6 +4624,13 @@
      "context": 1000000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -3322,6 +4647,11 @@
     "limit": {
      "context": 1000000,
      "output": 384000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek-v4.1-flash": {
@@ -3336,6 +4666,12 @@
     "limit": {
      "context": 1000000,
      "output": 384000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gemini-4-argon-contributor": {
@@ -3348,6 +4684,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/google"
@@ -3365,6 +4710,11 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-5.3": {
@@ -3379,6 +4729,11 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "glm-5.3-flash": {
@@ -3393,6 +4748,14 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf"
+     ]
     }
    },
    "gpt-5.6-luna": {
@@ -3424,6 +4787,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -3459,6 +4829,13 @@
      "input": 922000,
      "output": 128000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -3489,6 +4866,13 @@
      "context": 500000,
      "output": 500000
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -3503,6 +4887,11 @@
      "context": 256000,
      "input": 192000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "hy4-preview": {
@@ -3514,6 +4903,11 @@
     "limit": {
      "context": 1024000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "kimi-k2.7-code": {
@@ -3528,6 +4922,13 @@
     "limit": {
      "context": 262144,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "kimi-k3": {
@@ -3542,6 +4943,13 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "longcat-2.0": {
@@ -3556,6 +4964,11 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "longcat-2.5-preview-free": {
@@ -3570,6 +4983,12 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "mimo-v2.5": {
@@ -3584,6 +5003,14 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "mimo-v2.5-pro": {
@@ -3598,6 +5025,11 @@
     "limit": {
      "context": 1048576,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "mimo-v2.6-flash": {
@@ -3612,6 +5044,14 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "mimo-v2.6-pro": {
@@ -3626,6 +5066,14 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "minimax-m2.7": {
@@ -3638,6 +5086,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -3669,6 +5122,13 @@
      "context": 1000000,
      "output": 131072
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -3683,6 +5143,15 @@
      "context": 1048576,
      "output": 131072
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf",
+      "audio"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/openai"
     }
@@ -3696,6 +5165,15 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf",
+      "audio"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/openai"
@@ -3730,6 +5208,13 @@
      "context": 1000000,
      "output": 65536
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -3745,6 +5230,13 @@
      "context": 1000000,
      "output": 131072
     },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
+    },
     "provider": {
      "npm": "@ai-sdk/anthropic"
     }
@@ -3759,6 +5251,13 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     },
     "provider": {
      "npm": "@ai-sdk/anthropic"
@@ -3778,6 +5277,13 @@
      "context": 1048576,
      "input": 524288,
      "output": 524288
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "step-5-preview": {
@@ -3793,6 +5299,13 @@
      "context": 1000000,
      "input": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "step-5-preview-free": {
@@ -3808,6 +5321,13 @@
      "context": 1000000,
      "input": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    }
   },
@@ -3824,6 +5344,11 @@
     "limit": {
      "context": 131072,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "aion-labs/aion-3.0": {
@@ -3835,6 +5360,11 @@
     "limit": {
      "context": 131072,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "aion-labs/aion-3.0-mini": {
@@ -3846,6 +5376,11 @@
     "limit": {
      "context": 131072,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "aion-labs/aion-3.5": {
@@ -3857,6 +5392,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "aion-labs/aion-3.5-mini": {
@@ -3868,6 +5408,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "aion-labs/aion-rp-llama-3.1-8b": {
@@ -3878,6 +5423,11 @@
     "limit": {
      "context": 32768,
      "output": 29491
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "amazon/nova-2-lite-v1": {
@@ -3888,6 +5438,14 @@
     "limit": {
      "context": 1000000,
      "output": 65535
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf"
+     ]
     }
    },
    "amazon/nova-lite-v1": {
@@ -3898,6 +5456,12 @@
     "limit": {
      "context": 300000,
      "output": 5120
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "amazon/nova-micro-v1": {
@@ -3908,6 +5472,11 @@
     "limit": {
      "context": 128000,
      "output": 5120
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "amazon/nova-premier-v1": {
@@ -3919,6 +5488,12 @@
     "limit": {
      "context": 1000000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "amazon/nova-pro-v1": {
@@ -3929,6 +5504,12 @@
     "limit": {
      "context": 300000,
      "output": 5120
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "anthracite-org/magnum-v4-72b": {
@@ -3939,6 +5520,11 @@
     "limit": {
      "context": 32768,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "anthropic/claude-fable-5": {
@@ -3951,6 +5537,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-fable-5.1": {
@@ -3963,6 +5556,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-haiku-4.5": {
@@ -3975,6 +5575,13 @@
     "limit": {
      "context": 200000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-haiku-5.5": {
@@ -3999,6 +5606,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-opus-4.1": {
@@ -4011,6 +5625,13 @@
     "limit": {
      "context": 200000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-opus-4.5": {
@@ -4023,6 +5644,13 @@
     "limit": {
      "context": 200000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-opus-4.6": {
@@ -4053,6 +5681,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-opus-4.7": {
@@ -4083,6 +5718,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-opus-4.8": {
@@ -4095,6 +5737,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-opus-5": {
@@ -4107,6 +5756,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-opus-5.5": {
@@ -4119,6 +5775,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-sonnet-4.5": {
@@ -4149,6 +5812,13 @@
     "limit": {
      "context": 1000000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-sonnet-4.6": {
@@ -4179,6 +5849,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-sonnet-5": {
@@ -4191,6 +5868,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "anthropic/claude-sonnet-5.5": {
@@ -4203,6 +5887,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "arcee-ai/trinity-large-thinking": {
@@ -4214,6 +5905,11 @@
     "limit": {
      "context": 262144,
      "output": 80000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "bytedance-seed/seed-1.6": {
@@ -4234,6 +5930,13 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "bytedance-seed/seed-1.6-flash": {
@@ -4254,6 +5957,13 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "bytedance-seed/seed-2-1-turbo": {
@@ -4264,6 +5974,13 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "bytedance-seed/seed-2.0-code": {
@@ -4284,6 +6001,13 @@
     "limit": {
      "context": 262144,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "bytedance-seed/seed-2.0-lite": {
@@ -4304,6 +6028,13 @@
     "limit": {
      "context": 262144,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "bytedance-seed/seed-2.0-mini": {
@@ -4324,6 +6055,13 @@
     "limit": {
      "context": 262144,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "bytedance/ui-tars-1.5-7b": {
@@ -4335,6 +6073,12 @@
     "limit": {
      "context": 128000,
      "output": 2048
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text"
+     ]
     }
    },
    "cognitivecomputations/dolphin-mistral-24b-venice-edition": {
@@ -4345,6 +6089,11 @@
     "limit": {
      "context": 128000,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "cohere/command-a": {
@@ -4355,6 +6104,11 @@
     "limit": {
      "context": 256000,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "cohere/command-a-plus": {
@@ -4366,6 +6120,12 @@
     "limit": {
      "context": 192000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "cohere/command-r-08-2024": {
@@ -4376,6 +6136,11 @@
     "limit": {
      "context": 128000,
      "output": 4000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "cohere/command-r-plus-08-2024": {
@@ -4386,6 +6151,11 @@
     "limit": {
      "context": 128000,
      "output": 4000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "cohere/command-r7b-12-2024": {
@@ -4396,6 +6166,11 @@
     "limit": {
      "context": 128000,
      "output": 4000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "cohere/north-mini-code:free": {
@@ -4406,6 +6181,11 @@
     "limit": {
      "context": 256000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-chat": {
@@ -4416,6 +6196,11 @@
     "limit": {
      "context": 163840,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-chat-v3-0324": {
@@ -4427,6 +6212,11 @@
     "limit": {
      "context": 163840,
      "output": 115200
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-chat-v3.1": {
@@ -4438,6 +6228,11 @@
     "limit": {
      "context": 163840,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-r1": {
@@ -4459,6 +6254,11 @@
     "limit": {
      "context": 163840,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-v3.1-terminus": {
@@ -4469,6 +6269,11 @@
     "limit": {
      "context": 163840,
      "output": 147456
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-v3.2": {
@@ -4480,6 +6285,11 @@
     "limit": {
      "context": 163840,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-v3.2-exp": {
@@ -4490,6 +6300,11 @@
     "limit": {
      "context": 163840,
      "output": 147456
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-v4-flash": {
@@ -4504,6 +6319,11 @@
     "limit": {
      "context": 1048576,
      "output": 943717
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-v4-flash-0731": {
@@ -4515,6 +6335,11 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-v4-flash-vision-exp": {
@@ -4526,6 +6351,12 @@
     "limit": {
      "context": 1048576,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "deepseek/deepseek-v4-pro": {
@@ -4540,6 +6371,11 @@
     "limit": {
      "context": 1048576,
      "output": 384000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-v4-pro-0813": {
@@ -4551,6 +6387,11 @@
     "limit": {
      "context": 1048576,
      "output": 393216
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "deepseek/deepseek-v4.1-flash": {
@@ -4562,6 +6403,12 @@
     "limit": {
      "context": 1048576,
      "output": 393216
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "deepseek/deepseek-v4.1-flash-1017": {
@@ -4573,6 +6420,12 @@
     "limit": {
      "context": 1048576,
      "output": 393216
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "dots-studio/dots-3-note-preview:free": {
@@ -4583,6 +6436,12 @@
     "limit": {
      "context": 512000,
      "output": 460800
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "elorian/glimpse": {
@@ -4594,6 +6453,13 @@
     "limit": {
      "context": 262144,
      "output": 256000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "fireworks/ember-1": {
@@ -4605,6 +6471,12 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "google/gemini-2.5-flash": {
@@ -4618,6 +6490,15 @@
     "limit": {
      "context": 1048576,
      "output": 65535
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video",
+      "pdf"
+     ]
     }
    },
    "google/gemini-2.5-flash-image": {
@@ -4630,6 +6511,12 @@
     "limit": {
      "context": 32768,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "google/gemini-2.5-flash-lite": {
@@ -4643,6 +6530,15 @@
     "limit": {
      "context": 1048576,
      "output": 65535
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video",
+      "pdf"
+     ]
     }
    },
    "google/gemini-2.5-pro": {
@@ -4672,6 +6568,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video",
+      "pdf"
+     ]
     }
    },
    "google/gemini-2.5-pro-preview": {
@@ -4701,6 +6606,14 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text",
+      "audio"
+     ]
     }
    },
    "google/gemini-3-flash-preview": {
@@ -4717,6 +6630,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-3-pro-image": {
@@ -4730,6 +6652,12 @@
     "limit": {
      "context": 131072,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "google/gemini-3-pro-image-preview": {
@@ -4743,6 +6671,12 @@
     "limit": {
      "context": 65536,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "google/gemini-3.1-flash-image": {
@@ -4753,6 +6687,12 @@
     "limit": {
      "context": 131072,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text"
+     ]
     }
    },
    "google/gemini-3.1-flash-image-preview": {
@@ -4763,6 +6703,12 @@
     "limit": {
      "context": 65536,
      "output": 58982
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text"
+     ]
     }
    },
    "google/gemini-3.1-flash-lite": {
@@ -4776,6 +6722,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-3.1-flash-lite-image": {
@@ -4786,6 +6741,12 @@
     "limit": {
      "context": 65536,
      "output": 58982
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "google/gemini-3.1-flash-lite-preview": {
@@ -4799,6 +6760,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-3.1-pro-preview": {
@@ -4831,6 +6801,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-3.1-pro-preview-customtools": {
@@ -4863,6 +6842,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-3.5-flash": {
@@ -4876,6 +6864,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-3.5-flash-lite": {
@@ -4889,6 +6886,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-3.6-flash": {
@@ -4902,6 +6908,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-3.7-flash": {
@@ -4915,6 +6930,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-3.8-flash": {
@@ -4928,6 +6952,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-4-argon": {
@@ -4941,6 +6974,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "google/gemini-nano-banana-2.1": {
@@ -4951,6 +6993,12 @@
     "limit": {
      "context": 65536,
      "output": 58982
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text"
+     ]
     }
    },
    "google/gemma-2-27b-it": {
@@ -4961,6 +7009,11 @@
     "limit": {
      "context": 8192,
      "output": 2048
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "google/gemma-3-12b-it": {
@@ -4971,6 +7024,12 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "google/gemma-3-27b-it": {
@@ -4982,6 +7041,12 @@
     "limit": {
      "context": 131072,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "google/gemma-3-4b-it": {
@@ -4992,6 +7057,12 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "google/gemma-4-26b-a4b-it": {
@@ -5003,6 +7074,13 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "video"
+     ]
     }
    },
    "google/gemma-4-26b-a4b-it:free": {
@@ -5013,6 +7091,13 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "video"
+     ]
     }
    },
    "google/gemma-4-31b-it": {
@@ -5023,6 +7108,13 @@
     "limit": {
      "context": 262144,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "video"
+     ]
     }
    },
    "google/gemma-4-31b-it:free": {
@@ -5033,6 +7125,13 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "video"
+     ]
     }
    },
    "google/lyria-3-clip-preview": {
@@ -5043,6 +7142,12 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "google/lyria-3-pro-preview": {
@@ -5053,6 +7158,12 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "gryphe/mythomax-l2-13b": {
@@ -5063,6 +7174,11 @@
     "limit": {
      "context": 8192,
      "output": 3686
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "ibm-granite/granite-4.0-h-micro": {
@@ -5073,6 +7189,11 @@
     "limit": {
      "context": 131000,
      "output": 117900
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "ibm-granite/granite-4.2-8b": {
@@ -5084,6 +7205,11 @@
     "limit": {
      "context": 131072,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "inception/mercury-2": {
@@ -5095,6 +7221,11 @@
     "limit": {
      "context": 128000,
      "output": 50000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "inception/mercury-2.5": {
@@ -5106,6 +7237,11 @@
     "limit": {
      "context": 260000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "inclusionai/ling-3.0-flash": {
@@ -5117,6 +7253,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "inclusionai/ling-3.0-flash-vl": {
@@ -5128,6 +7269,13 @@
     "limit": {
      "context": 131072,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "inclusionai/ling-3.1-flash": {
@@ -5139,6 +7287,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "inference-net/schematron-v2-small": {
@@ -5150,6 +7303,11 @@
     "limit": {
      "context": 128000,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "inference-net/schematron-v2-turbo": {
@@ -5161,6 +7319,11 @@
     "limit": {
      "context": 128000,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "liquid/lfm-2.5-2.6b:free": {
@@ -5171,6 +7334,11 @@
     "limit": {
      "context": 65536,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "liquid/lfm-2.5-24b-a2b": {
@@ -5182,6 +7350,11 @@
     "limit": {
      "context": 128000,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "mancer/weaver": {
@@ -5192,6 +7365,11 @@
     "limit": {
      "context": 8000,
      "output": 6000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "meituan/longcat-2.0": {
@@ -5203,6 +7381,11 @@
     "limit": {
      "context": 1048756,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "meta-llama/llama-3.1-70b-instruct": {
@@ -5213,6 +7396,11 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "meta-llama/llama-3.1-8b-instruct": {
@@ -5224,6 +7412,11 @@
     "limit": {
      "context": 131072,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "meta-llama/llama-3.2-1b-instruct": {
@@ -5234,6 +7427,11 @@
     "limit": {
      "context": 60000,
      "output": 54000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "meta-llama/llama-3.2-3b-instruct": {
@@ -5244,6 +7442,11 @@
     "limit": {
      "context": 131072,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "meta-llama/llama-3.3-70b-instruct": {
@@ -5254,6 +7457,11 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "meta-llama/llama-4-maverick": {
@@ -5265,6 +7473,12 @@
     "limit": {
      "context": 1048576,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "meta-llama/llama-4-scout": {
@@ -5275,6 +7489,12 @@
     "limit": {
      "context": 1310720,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "meta-llama/llama-guard-4-12b": {
@@ -5285,6 +7505,12 @@
     "limit": {
      "context": 163840,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "meta/muse-glimmer-30b": {
@@ -5296,6 +7522,12 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "meta/muse-spark-1.1": {
@@ -5307,6 +7539,14 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf",
+      "video"
+     ]
     }
    },
    "meta/muse-spark-1.2": {
@@ -5318,6 +7558,14 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf"
+     ]
     }
    },
    "meta/muse-spark-1.2-contributor": {
@@ -5329,6 +7577,14 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf"
+     ]
     }
    },
    "meta/muse-spark-1.3": {
@@ -5340,6 +7596,14 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf"
+     ]
     }
    },
    "meta/muse-spark-1.3-contributor": {
@@ -5351,6 +7615,14 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf"
+     ]
     }
    },
    "meta/muse-spark-open": {
@@ -5362,6 +7634,15 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf",
+      "audio"
+     ]
     }
    },
    "meta/muse-wonder": {
@@ -5373,6 +7654,15 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf",
+      "audio"
+     ]
     }
    },
    "microsoft/phi-4": {
@@ -5383,6 +7673,11 @@
     "limit": {
      "context": 16384,
      "output": 14745
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "microsoft/wizardlm-2-8x22b": {
@@ -5403,6 +7698,12 @@
     "limit": {
      "context": 1000192,
      "output": 40000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "minimax/minimax-m1": {
@@ -5413,6 +7714,11 @@
     "limit": {
      "context": 1000000,
      "output": 40000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "minimax/minimax-m2": {
@@ -5426,6 +7732,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "minimax/minimax-m2-her": {
@@ -5437,6 +7748,11 @@
     "limit": {
      "context": 65536,
      "output": 2048
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "minimax/minimax-m2.1": {
@@ -5451,6 +7767,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "minimax/minimax-m2.5": {
@@ -5465,6 +7786,11 @@
     "limit": {
      "context": 204800,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "minimax/minimax-m2.7": {
@@ -5476,6 +7802,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "minimax/minimax-m3": {
@@ -5487,6 +7818,13 @@
     "limit": {
      "context": 1048576,
      "output": 512000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "mistralai/codestral-2508": {
@@ -5498,6 +7836,12 @@
     "limit": {
      "context": 256000,
      "output": 204800
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "pdf"
+     ]
     }
    },
    "mistralai/devstral-2512": {
@@ -5509,6 +7853,12 @@
     "limit": {
      "context": 262144,
      "output": 209715
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "pdf"
+     ]
     }
    },
    "mistralai/ministral-14b-2512": {
@@ -5520,6 +7870,12 @@
     "limit": {
      "context": 262144,
      "output": 209715
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "mistralai/ministral-3b-2512": {
@@ -5531,6 +7887,12 @@
     "limit": {
      "context": 131072,
      "output": 104857
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "mistralai/ministral-8b-2512": {
@@ -5542,6 +7904,12 @@
     "limit": {
      "context": 262144,
      "output": 209715
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "mistralai/mistral-large": {
@@ -5553,6 +7921,12 @@
     "limit": {
      "context": 128000,
      "output": 102400
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "pdf"
+     ]
     }
    },
    "mistralai/mistral-large-2407": {
@@ -5564,6 +7938,12 @@
     "limit": {
      "context": 131072,
      "output": 104857
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "pdf"
+     ]
     }
    },
    "mistralai/mistral-large-2512": {
@@ -5575,6 +7955,13 @@
     "limit": {
      "context": 262144,
      "output": 209715
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "mistralai/mistral-large-4-0": {
@@ -5586,6 +7973,12 @@
     "limit": {
      "context": 1048576,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "mistralai/mistral-medium-3": {
@@ -5597,6 +7990,13 @@
     "limit": {
      "context": 131072,
      "output": 104857
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "mistralai/mistral-medium-3-5": {
@@ -5607,6 +8007,13 @@
     "limit": {
      "context": 262144,
      "output": 209715
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "mistralai/mistral-medium-3.1": {
@@ -5618,6 +8025,13 @@
     "limit": {
      "context": 131072,
      "output": 104857
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "mistralai/mistral-nemo": {
@@ -5628,6 +8042,11 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "mistralai/mistral-saba": {
@@ -5639,6 +8058,12 @@
     "limit": {
      "context": 32768,
      "output": 26214
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "pdf"
+     ]
     }
    },
    "mistralai/mistral-small-24b-instruct-2501": {
@@ -5649,6 +8074,11 @@
     "limit": {
      "context": 32768,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "mistralai/mistral-small-2603": {
@@ -5660,6 +8090,12 @@
     "limit": {
      "context": 262144,
      "output": 209715
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "mistralai/mistral-small-3.1-24b-instruct": {
@@ -5670,6 +8106,12 @@
     "limit": {
      "context": 128000,
      "output": 102400
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "mistralai/mistral-small-3.2-24b-instruct": {
@@ -5680,6 +8122,12 @@
     "limit": {
      "context": 256000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text"
+     ]
     }
    },
    "mistralai/mixtral-8x22b-instruct": {
@@ -5691,6 +8139,12 @@
     "limit": {
      "context": 65536,
      "output": 52428
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "pdf"
+     ]
     }
    },
    "mistralai/voxtral-small-24b-2507": {
@@ -5702,6 +8156,13 @@
     "limit": {
      "context": 32768,
      "output": 26214
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "audio",
+      "pdf"
+     ]
     }
    },
    "moondream/moondream3-preview": {
@@ -5712,6 +8173,12 @@
     "limit": {
      "context": 32000,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "moondream/moondream3.1-9b-a2b": {
@@ -5722,6 +8189,12 @@
     "limit": {
      "context": 32000,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "moonshotai/kimi-k2": {
@@ -5732,6 +8205,11 @@
     "limit": {
      "context": 131072,
      "output": 98304
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "moonshotai/kimi-k2-0905": {
@@ -5742,6 +8220,11 @@
     "limit": {
      "context": 262144,
      "output": 98304
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "moonshotai/kimi-k2-thinking": {
@@ -5756,6 +8239,11 @@
     "limit": {
      "context": 262144,
      "output": 98304
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "moonshotai/kimi-k2.5": {
@@ -5770,6 +8258,12 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "moonshotai/kimi-k2.6": {
@@ -5784,6 +8278,12 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "moonshotai/kimi-k2.7-code": {
@@ -5795,6 +8295,12 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "moonshotai/kimi-k3": {
@@ -5806,6 +8312,13 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "morph/morph-v3-fast": {
@@ -5816,6 +8329,11 @@
     "limit": {
      "context": 81920,
      "output": 38000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "morph/morph-v3-large": {
@@ -5826,6 +8344,11 @@
     "limit": {
      "context": 262144,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nex-agi/nex-n2.5-mini": {
@@ -5837,6 +8360,12 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "nex-agi/nex-n2.5-pro": {
@@ -5848,6 +8377,12 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "nousresearch/hermes-3-llama-3.1-405b": {
@@ -5858,6 +8393,11 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nousresearch/hermes-3-llama-3.1-70b": {
@@ -5868,6 +8408,11 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nousresearch/hermes-4-405b": {
@@ -5878,6 +8423,11 @@
     "limit": {
      "context": 131072,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nvidia/nemotron-3-nano-30b-a3b": {
@@ -5888,6 +8438,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
@@ -5898,6 +8453,14 @@
     "limit": {
      "context": 256000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio"
+     ]
     }
    },
    "nvidia/nemotron-3-super-120b-a12b": {
@@ -5908,6 +8471,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nvidia/nemotron-3-super-120b-a12b:free": {
@@ -5918,6 +8486,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nvidia/nemotron-3-ultra-550b-a55b": {
@@ -5929,6 +8502,11 @@
     "limit": {
      "context": 262144,
      "output": 182520
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nvidia/nemotron-3-ultra-550b-a55b:free": {
@@ -5939,6 +8517,11 @@
     "limit": {
      "context": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nvidia/nemotron-3.5-content-safety": {
@@ -5949,6 +8532,12 @@
     "limit": {
      "context": 131072,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "nvidia/nemotron-3.5-content-safety:free": {
@@ -5959,6 +8548,12 @@
     "limit": {
      "context": 128000,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "nvidia/nemotron-3.5-lightning": {
@@ -5970,6 +8565,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nvidia/nemotron-3.5-lightning:free": {
@@ -5980,6 +8580,11 @@
     "limit": {
      "context": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "nvidia/nemotron-3.5-super-vl": {
@@ -5991,6 +8596,13 @@
     "limit": {
      "context": 1048576,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "nvidia/nemotron-3.5-super-vl:free": {
@@ -6001,6 +8613,13 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "openai/gpt-3.5-turbo": {
@@ -6011,6 +8630,11 @@
     "limit": {
      "context": 16385,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openai/gpt-3.5-turbo-0613": {
@@ -6021,6 +8645,11 @@
     "limit": {
      "context": 4095,
      "output": 3685
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openai/gpt-3.5-turbo-16k": {
@@ -6031,6 +8660,11 @@
     "limit": {
      "context": 16385,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openai/gpt-3.5-turbo-instruct": {
@@ -6041,6 +8675,11 @@
     "limit": {
      "context": 4095,
      "output": 3685
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openai/gpt-4": {
@@ -6051,6 +8690,11 @@
     "limit": {
      "context": 8191,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openai/gpt-4-turbo": {
@@ -6061,6 +8705,12 @@
     "limit": {
      "context": 128000,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "openai/gpt-4.1": {
@@ -6072,6 +8722,13 @@
     "limit": {
      "context": 1047576,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-4.1-mini": {
@@ -6083,6 +8740,13 @@
     "limit": {
      "context": 1047576,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-4.1-nano": {
@@ -6094,6 +8758,13 @@
     "limit": {
      "context": 1047576,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-4o": {
@@ -6105,6 +8776,13 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-4o-2024-05-13": {
@@ -6115,6 +8793,13 @@
     "limit": {
      "context": 128000,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-4o-2024-08-06": {
@@ -6126,6 +8811,13 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-4o-2024-11-20": {
@@ -6137,6 +8829,13 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-4o-mini": {
@@ -6148,6 +8847,13 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-4o-mini-2024-07-18": {
@@ -6159,6 +8865,13 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5": {
@@ -6171,6 +8884,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5-image": {
@@ -6182,6 +8902,13 @@
     "limit": {
      "context": 400000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5-image-mini": {
@@ -6193,6 +8920,13 @@
     "limit": {
      "context": 400000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "openai/gpt-5-mini": {
@@ -6205,6 +8939,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5-nano": {
@@ -6217,6 +8958,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5-pro": {
@@ -6228,6 +8976,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.1": {
@@ -6240,6 +8995,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.1-codex": {
@@ -6252,6 +9014,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "openai/gpt-5.1-codex-max": {
@@ -6264,6 +9032,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "openai/gpt-5.1-codex-mini": {
@@ -6276,6 +9050,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "openai/gpt-5.2": {
@@ -6288,6 +9068,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "openai/gpt-5.2-chat": {
@@ -6299,6 +9086,13 @@
     "limit": {
      "context": 128000,
      "output": 32000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "openai/gpt-5.2-codex": {
@@ -6311,6 +9105,12 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "openai/gpt-5.2-pro": {
@@ -6322,6 +9122,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.3-codex": {
@@ -6334,6 +9141,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.4": {
@@ -6362,6 +9176,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.4-image-2": {
@@ -6373,6 +9194,13 @@
     "limit": {
      "context": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.4-mini": {
@@ -6385,6 +9213,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "openai/gpt-5.4-nano": {
@@ -6397,6 +9232,13 @@
      "context": 400000,
      "input": 272000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "openai/gpt-5.4-pro": {
@@ -6422,6 +9264,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.5": {
@@ -6450,6 +9299,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.5-pro": {
@@ -6475,6 +9331,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.6-luna": {
@@ -6506,6 +9369,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.6-luna-pro": {
@@ -6537,6 +9407,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.6-sol": {
@@ -6568,6 +9445,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.6-sol-pro": {
@@ -6599,6 +9483,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.6-terra": {
@@ -6630,6 +9521,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-5.6-terra-pro": {
@@ -6661,6 +9559,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-6-astra": {
@@ -6692,6 +9597,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-6-astra-pro": {
@@ -6722,6 +9634,13 @@
     "limit": {
      "context": 1050000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "openai/gpt-6-luna": {
@@ -6753,6 +9672,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-6-luna-pro": {
@@ -6783,6 +9709,13 @@
     "limit": {
      "context": 1050000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "openai/gpt-6-sol": {
@@ -6814,6 +9747,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-6-sol-pro": {
@@ -6844,6 +9784,13 @@
     "limit": {
      "context": 1050000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "openai/gpt-6.1-sol": {
@@ -6875,6 +9822,13 @@
      "context": 1050000,
      "input": 922000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-6.1-sol-pro": {
@@ -6905,6 +9859,13 @@
     "limit": {
      "context": 1050000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "openai/gpt-audio": {
@@ -6915,6 +9876,12 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "audio"
+     ]
     }
    },
    "openai/gpt-audio-mini": {
@@ -6925,6 +9892,12 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "audio"
+     ]
     }
    },
    "openai/gpt-chat-latest": {
@@ -6936,6 +9909,13 @@
     "limit": {
      "context": 400000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/gpt-oss-120b": {
@@ -6947,6 +9927,11 @@
     "limit": {
      "context": 131072,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openai/gpt-oss-20b": {
@@ -6958,6 +9943,11 @@
     "limit": {
      "context": 131072,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openai/gpt-oss-safeguard-20b": {
@@ -6969,6 +9959,11 @@
     "limit": {
      "context": 131072,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openai/o1": {
@@ -6980,6 +9975,13 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/o1-pro": {
@@ -6990,6 +9992,13 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/o3": {
@@ -7001,6 +10010,13 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "openai/o3-mini": {
@@ -7012,6 +10028,12 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "pdf"
+     ]
     }
    },
    "openai/o3-mini-high": {
@@ -7023,6 +10045,12 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "pdf"
+     ]
     }
    },
    "openai/o3-pro": {
@@ -7033,6 +10061,13 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "pdf",
+      "image"
+     ]
     }
    },
    "openai/o4-mini": {
@@ -7044,6 +10079,13 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "pdf"
+     ]
     }
    },
    "openai/o4-mini-high": {
@@ -7055,18 +10097,39 @@
     "limit": {
      "context": 200000,
      "output": 100000
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "pdf"
+     ]
     }
    },
    "openrouter/auto": {
     "limit": {
      "context": 2000000,
      "output": 2000000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "pdf",
+      "video"
+     ]
     }
    },
    "openrouter/bodybuilder": {
     "limit": {
      "context": 128000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openrouter/free": {
@@ -7078,18 +10141,34 @@
      "context": 200000,
      "input": 200000,
      "output": 8000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "openrouter/fusion": {
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "openrouter/pareto-code": {
     "limit": {
      "context": 2000000,
      "output": 200000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "perceptron/perceptron-mk1": {
@@ -7100,6 +10179,13 @@
     "limit": {
      "context": 32768,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "perceptron/perceptron-mk1.5": {
@@ -7110,6 +10196,14 @@
     "limit": {
      "context": 36864,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio"
+     ]
     }
    },
    "perplexity/sonar": {
@@ -7120,6 +10214,12 @@
     "limit": {
      "context": 127072,
      "output": 114364
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "perplexity/sonar-deep-research": {
@@ -7131,6 +10231,11 @@
     "limit": {
      "context": 128000,
      "output": 115200
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "perplexity/sonar-pro": {
@@ -7141,6 +10246,12 @@
     "limit": {
      "context": 200000,
      "output": 8000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "perplexity/sonar-pro-search": {
@@ -7151,6 +10262,12 @@
     "limit": {
      "context": 200000,
      "output": 8000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "perplexity/sonar-reasoning-pro": {
@@ -7161,6 +10278,12 @@
     "limit": {
      "context": 128000,
      "output": 115200
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "poolside/laguna-s-2.1": {
@@ -7172,6 +10295,11 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "poolside/laguna-s-2.1:free": {
@@ -7182,6 +10310,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "poolside/laguna-xs-2.1": {
@@ -7193,6 +10326,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "poolside/laguna-xs-2.1:free": {
@@ -7203,6 +10341,11 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "prism-ml/ternary-bonsai-2-27b": {
@@ -7214,6 +10357,12 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "qwen/qwen-2.5-72b-instruct": {
@@ -7224,6 +10373,11 @@
     "limit": {
      "context": 32768,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen-2.5-7b-instruct": {
@@ -7234,6 +10388,11 @@
     "limit": {
      "context": 32768,
      "output": 29491
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen-2.5-coder-32b-instruct": {
@@ -7244,6 +10403,11 @@
     "limit": {
      "context": 32768,
      "output": 29491
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen-plus": {
@@ -7274,6 +10438,11 @@
     "limit": {
      "context": 1000000,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen2.5-vl-72b-instruct": {
@@ -7285,6 +10454,12 @@
     "limit": {
      "context": 128000,
      "output": 115200
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "qwen/qwen3-14b": {
@@ -7295,6 +10470,11 @@
     "limit": {
      "context": 40960,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-235b-a22b-2507": {
@@ -7305,6 +10485,11 @@
     "limit": {
      "context": 262144,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-235b-a22b-thinking-2507": {
@@ -7315,6 +10500,11 @@
     "limit": {
      "context": 128000,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-30b-a3b": {
@@ -7325,6 +10515,11 @@
     "limit": {
      "context": 40960,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-30b-a3b-instruct-2507": {
@@ -7335,6 +10530,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-32b": {
@@ -7345,6 +10545,11 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-coder": {
@@ -7356,6 +10561,11 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-coder-30b-a3b-instruct": {
@@ -7366,6 +10576,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-coder-flash": {
@@ -7400,6 +10615,11 @@
     "limit": {
      "context": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-coder-next": {
@@ -7411,6 +10631,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-next-80b-a3b-instruct": {
@@ -7421,6 +10646,11 @@
     "limit": {
      "context": 262144,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-next-80b-a3b-thinking": {
@@ -7431,6 +10661,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3-vl-235b-a22b-instruct": {
@@ -7442,6 +10677,12 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "qwen/qwen3-vl-30b-a3b-instruct": {
@@ -7452,6 +10693,12 @@
     "limit": {
      "context": 262144,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "qwen/qwen3-vl-30b-a3b-thinking": {
@@ -7462,6 +10709,12 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "qwen/qwen3-vl-8b-instruct": {
@@ -7473,6 +10726,12 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text"
+     ]
     }
    },
    "qwen/qwen3.5-122b-a10b": {
@@ -7483,6 +10742,13 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.5-27b": {
@@ -7493,6 +10759,13 @@
     "limit": {
      "context": 262144,
      "output": 81920
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.5-35b-a3b": {
@@ -7504,6 +10777,13 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.5-397b-a17b": {
@@ -7515,6 +10795,13 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.5-9b": {
@@ -7525,6 +10812,13 @@
     "limit": {
      "context": 262144,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.5-flash-02-23": {
@@ -7535,6 +10829,13 @@
     "limit": {
      "context": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.5-plus-02-15": {
@@ -7559,6 +10860,13 @@
     "limit": {
      "context": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.5-plus-20260420": {
@@ -7586,6 +10894,13 @@
     "limit": {
      "context": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.6-27b": {
@@ -7597,6 +10912,13 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.6-35b-a3b": {
@@ -7608,6 +10930,13 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.6-flash": {
@@ -7635,6 +10964,13 @@
     "limit": {
      "context": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.6-plus": {
@@ -7662,6 +10998,13 @@
     "limit": {
      "context": 1000000,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.7-flash": {
@@ -7697,6 +11040,13 @@
      "context": 1000000,
      "input": 991808,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.7-max": {
@@ -7709,6 +11059,11 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3.7-plus": {
@@ -7739,6 +11094,12 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "qwen/qwen3.8-2.4t-a95b": {
@@ -7750,6 +11111,11 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "qwen/qwen3.8-27b": {
@@ -7761,6 +11127,13 @@
     "limit": {
      "context": 1000000,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.8-flash": {
@@ -7772,6 +11145,13 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.8-max-0902": {
@@ -7783,6 +11163,13 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.8-max-prime": {
@@ -7794,6 +11181,13 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "qwen/qwen3.8-omni-flash": {
@@ -7805,6 +11199,14 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "reflection/beam-1.0-501b-a23b": {
@@ -7816,6 +11218,11 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "rekaai/reka-edge": {
@@ -7826,6 +11233,13 @@
     "limit": {
      "context": 16384,
      "output": 14745
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "video"
+     ]
     }
    },
    "rekaai/reka-flash-3": {
@@ -7836,6 +11250,11 @@
     "limit": {
      "context": 65536,
      "output": 58982
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "relace/relace-apply-3": {
@@ -7846,6 +11265,11 @@
     "limit": {
      "context": 256000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "relace/relace-search": {
@@ -7856,6 +11280,11 @@
     "limit": {
      "context": 256000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "sakana/fugu-max": {
@@ -7867,6 +11296,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "sakana/fugu-ultra": {
@@ -7894,6 +11330,12 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "sakana/fugu-ultra-v2": {
@@ -7921,6 +11363,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "sakana/sakana-namazu": {
@@ -7932,6 +11381,13 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "sao10k/l3-lunaris-8b": {
@@ -7942,6 +11398,11 @@
     "limit": {
      "context": 8192,
      "output": 7372
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "sao10k/l3.1-euryale-70b": {
@@ -7952,6 +11413,11 @@
     "limit": {
      "context": 131072,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "sao10k/l3.3-euryale-70b": {
@@ -7972,6 +11438,13 @@
     "limit": {
      "context": 1000000,
      "output": 900000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "scaledown/summarize": {
@@ -7982,6 +11455,13 @@
     "limit": {
      "context": 1000000,
      "output": 4000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "stepfun/step-3.5-flash": {
@@ -7992,6 +11472,11 @@
     "limit": {
      "context": 262144,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "stepfun/step-3.7-flash": {
@@ -8004,6 +11489,13 @@
      "context": 262144,
      "input": 256000,
      "output": 230400
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "stepfun/step-5-preview": {
@@ -8016,6 +11508,13 @@
      "context": 1048576,
      "input": 1000000,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "tencent/hunyuan-a13b-instruct": {
@@ -8026,6 +11525,11 @@
     "limit": {
      "context": 131072,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "tencent/hy-mt2-1.8b": {
@@ -8036,6 +11540,11 @@
     "limit": {
      "context": 8192,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "tencent/hy-mt2-30b-a3b": {
@@ -8046,6 +11555,11 @@
     "limit": {
      "context": 8192,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "tencent/hy-mt2-7b": {
@@ -8056,6 +11570,11 @@
     "limit": {
      "context": 8192,
      "output": 4096
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "tencent/hy3": {
@@ -8068,6 +11587,11 @@
      "context": 262144,
      "input": 192000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "tencent/hy3-preview": {
@@ -8079,6 +11603,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "tencent/hy4-preview": {
@@ -8090,6 +11619,11 @@
     "limit": {
      "context": 1048576,
      "output": 64000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "thedrummer/cydonia-24b-v4.1": {
@@ -8101,6 +11635,11 @@
     "limit": {
      "context": 131072,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "thedrummer/skyfall-36b-v2": {
@@ -8112,6 +11651,11 @@
     "limit": {
      "context": 32768,
      "output": 29491
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "thedrummer/unslopnemo-12b": {
@@ -8122,6 +11666,11 @@
     "limit": {
      "context": 1024000,
      "output": 819200
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "thinkingmachines/inkling": {
@@ -8133,6 +11682,13 @@
     "limit": {
      "context": 524288,
      "output": 471859
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio"
+     ]
     }
    },
    "thinkingmachines/inkling-small": {
@@ -8144,6 +11700,13 @@
     "limit": {
      "context": 524288,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio"
+     ]
     }
    },
    "thinkingmachines/inkling-small:free": {
@@ -8154,6 +11717,13 @@
     "limit": {
      "context": 1048576,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio"
+     ]
     }
    },
    "thinkingmachines/inkling:free": {
@@ -8164,6 +11734,13 @@
     "limit": {
      "context": 1048576,
      "output": 262144
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio"
+     ]
     }
    },
    "unbiased/pareto-26.9": {
@@ -8175,6 +11752,12 @@
     "limit": {
      "context": 262144,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "undi95/remm-slerp-l2-13b": {
@@ -8185,6 +11768,11 @@
     "limit": {
      "context": 6144,
      "output": 5529
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "upstage/solar-mini4": {
@@ -8196,6 +11784,11 @@
     "limit": {
      "context": 524288,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "upstage/solar-pro-3": {
@@ -8207,6 +11800,11 @@
     "limit": {
      "context": 131072,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "upstage/solar-pro4": {
@@ -8218,6 +11816,11 @@
     "limit": {
      "context": 524288,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "writer/palmyra-x5": {
@@ -8228,6 +11831,11 @@
     "limit": {
      "context": 1040000,
      "output": 8192
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "x-ai/grok-4.20": {
@@ -8255,6 +11863,13 @@
     "limit": {
      "context": 2000000,
      "output": 1800000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "x-ai/grok-4.20-multi-agent": {
@@ -8282,6 +11897,13 @@
     "limit": {
      "context": 2000000,
      "output": 1800000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "x-ai/grok-4.3": {
@@ -8309,6 +11931,13 @@
     "limit": {
      "context": 1000000,
      "output": 900000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "x-ai/grok-4.5": {
@@ -8336,6 +11965,13 @@
     "limit": {
      "context": 500000,
      "output": 450000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "x-ai/grok-4.6": {
@@ -8363,6 +11999,13 @@
     "limit": {
      "context": 500000,
      "output": 450000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "x-ai/grok-4.7": {
@@ -8390,6 +12033,13 @@
     "limit": {
      "context": 500000,
      "output": 450000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "x-ai/grok-build-0.1": {
@@ -8417,6 +12067,13 @@
     "limit": {
      "context": 256000,
      "output": 230400
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "xiaomi/mimo-v2.5": {
@@ -8431,6 +12088,14 @@
     "limit": {
      "context": 1050000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "xiaomi/mimo-v2.5-pro": {
@@ -8445,6 +12110,11 @@
     "limit": {
      "context": 1050000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "xiaomi/mimo-v2.6-flash": {
@@ -8456,6 +12126,14 @@
     "limit": {
      "context": 1050000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "xiaomi/mimo-v2.6-pro": {
@@ -8467,6 +12145,14 @@
     "limit": {
      "context": 1050000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "xiaomi/mimo-v2.6-pro-ultraspeed": {
@@ -8478,6 +12164,14 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "audio",
+      "video"
+     ]
     }
    },
    "xingchen-agi/xing4.0-29b-a4b:free": {
@@ -8488,6 +12182,11 @@
     "limit": {
      "context": 262144,
      "output": 235929
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-4.5": {
@@ -8499,6 +12198,11 @@
     "limit": {
      "context": 131072,
      "output": 98304
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-4.5-air": {
@@ -8510,6 +12214,11 @@
     "limit": {
      "context": 131072,
      "output": 98304
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-4.5v": {
@@ -8521,6 +12230,12 @@
     "limit": {
      "context": 65536,
      "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "z-ai/glm-4.6": {
@@ -8532,6 +12247,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-4.6v": {
@@ -8543,6 +12263,13 @@
     "limit": {
      "context": 131072,
      "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "z-ai/glm-4.7": {
@@ -8557,6 +12284,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-4.7-flash": {
@@ -8570,6 +12302,11 @@
     "limit": {
      "context": 200000,
      "output": 117964
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-5": {
@@ -8584,6 +12321,11 @@
     "limit": {
      "context": 204800,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-5-turbo": {
@@ -8598,6 +12340,11 @@
     "limit": {
      "context": 202752,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-5.1": {
@@ -8612,6 +12359,11 @@
     "limit": {
      "context": 204800,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-5.2": {
@@ -8626,6 +12378,11 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-5.3": {
@@ -8637,6 +12394,11 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-5.3-flash": {
@@ -8648,6 +12410,13 @@
     "limit": {
      "context": 1048576,
      "output": 943717
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "z-ai/glm-5.3-flashx": {
@@ -8659,6 +12428,13 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "z-ai/glm-5.3-prime": {
@@ -8670,6 +12446,11 @@
     "limit": {
      "context": 1000000,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "z-ai/glm-5v-turbo": {
@@ -8681,6 +12462,13 @@
     "limit": {
      "context": 202752,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "image",
+      "text",
+      "video"
+     ]
     }
    },
    "~anthropic/claude-fable-latest": {
@@ -8693,6 +12481,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "~anthropic/claude-haiku-latest": {
@@ -8717,6 +12512,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "~anthropic/claude-opus-latest": {
@@ -8729,6 +12531,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "~anthropic/claude-sonnet-latest": {
@@ -8741,6 +12550,13 @@
     "limit": {
      "context": 1000000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "~deepseek/deepseek-flash-latest": {
@@ -8752,6 +12568,12 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "~deepseek/deepseek-pro-latest": {
@@ -8763,6 +12585,11 @@
     "limit": {
      "context": 1048576,
      "output": 393216
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "~deepseek/deepseek-v4-flash-latest": {
@@ -8774,6 +12601,11 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    },
    "~google/gemini-flash-latest": {
@@ -8787,6 +12619,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "pdf",
+      "audio"
+     ]
     }
    },
    "~google/gemini-pro-latest": {
@@ -8816,6 +12657,15 @@
     "limit": {
      "context": 1048576,
      "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "audio",
+      "pdf",
+      "image",
+      "text",
+      "video"
+     ]
     }
    },
    "~moonshotai/kimi-latest": {
@@ -8827,6 +12677,13 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "~openai/gpt-astra-latest": {
@@ -8857,6 +12714,13 @@
     "limit": {
      "context": 1050000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "~openai/gpt-luna-latest": {
@@ -8887,6 +12751,13 @@
     "limit": {
      "context": 1050000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "~openai/gpt-mini-latest": {
@@ -8898,6 +12769,13 @@
     "limit": {
      "context": 400000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "~openai/gpt-sol-latest": {
@@ -8928,6 +12806,13 @@
     "limit": {
      "context": 1050000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "~openai/gpt-terra-latest": {
@@ -8958,6 +12843,13 @@
     "limit": {
      "context": 1050000,
      "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "pdf",
+      "image",
+      "text"
+     ]
     }
    },
    "~unbiased/pareto-latest": {
@@ -8969,6 +12861,12 @@
     "limit": {
      "context": 262144,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ]
     }
    },
    "~x-ai/grok-latest": {
@@ -8996,6 +12894,13 @@
     "limit": {
      "context": 500000,
      "output": 450000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ]
     }
    },
    "~z-ai/glm-flash-latest": {
@@ -9007,6 +12912,13 @@
     "limit": {
      "context": 1048576,
      "output": 943718
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video"
+     ]
     }
    },
    "~z-ai/glm-latest": {
@@ -9018,6 +12930,11 @@
     "limit": {
      "context": 1048576,
      "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ]
     }
    }
   },

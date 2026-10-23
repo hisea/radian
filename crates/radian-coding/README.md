@@ -10,7 +10,7 @@ via `GIT_CONFIG_*` in untrusted projects, ADR 0039 decision 5). See the crate do
 
 | Tool | Concurrency | What it does |
 |---|---|---|
-| `read` | `Shared` | Read a UTF-8 file, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). Every returned line is prefixed with its file line number, `N: ` (that prefix is not file content). `offset` (1-based first line) and `limit` (lines) read a large file in sections. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; a missing file names up to three close names in its directory; refuses non-UTF-8. A file under a read-only root (cargo-registry or toolchain sources, or a discovered skill's directory) may also be named as an absolute or `~` path (read-only; see below); in the `full` tier any other absolute or `~` path reads too, except the sandbox's deny set. A directory path lists it instead: sorted entries with kind and size, symlinks shown but not followed; `limit` then caps entries (default 500, hard cap 5000), `offset`/`max_bytes` are ignored and said once. |
+| `read` | `Shared` | Read a UTF-8 file, a directory, or an image, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). Every returned text line is prefixed with its file line number, `N: ` (that prefix is not file content). `offset` (1-based first line) and `limit` (lines) read a large file in sections. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; a missing file names up to three close names in its directory; refuses non-UTF-8. **An image** (PNG/JPEG/GIF/WebP by magic number, never the extension) returns a text line plus the image part: raw bytes ≤ 5 MiB and each side ≤ 8000 px (`image_too_large`), `offset`/`limit` are `image_offset`, and a model the catalog knows takes no images gets only the text line with the omission sentence. A file under a read-only root (cargo-registry or toolchain sources, or a discovered skill's directory) may also be named as an absolute or `~` path (read-only; see below); in the `full` tier any other absolute or `~` path reads too, except the sandbox's deny set. A directory path lists it instead: sorted entries with kind and size, symlinks shown but not followed; `limit` then caps entries (default 500, hard cap 5000), `offset`/`max_bytes` are ignored and said once. |
 | `write` | `Exclusive` | Create or overwrite a file with exact content (no newline added). Parent must exist. Never follows a symlink at the destination. |
 | `patch` | `Exclusive` | Replace `old` with `new`, or apply an `edits` array atomically. A match is located by layer (exact, then typographic normalisation, then line-by-line ignoring trailing whitespace) and must be unique unless `replace_all` is set. With `edits`, every edit is located in the original file, ranges must be disjoint, and if any edit fails nothing is written. A CRLF file is matched on an LF view and stays CRLF. Zero matches refuse the edit and report the closest region with line numbers. |
 | `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore`/`.ignore` respected (workspace root down to the search base), `.git` skipped, symlinks never followed; capped by `max_results`. A read-only root base (registry/toolchain sources, a skill's directory) works too, as does any other absolute or `~` path in the `full` tier except the sandbox's deny set, and its results are absolute paths. |
@@ -80,6 +80,19 @@ shape for "use the default"; a **required** `""` is kept, because `write`'s `con
 `patch`'s `new` may legitimately be empty. `minimum`/`maximum` stay the tools' own checks so
 a limit that is exceeded keeps its semantic code (`read_limit_exceeded`, `glob_limit_exceeded`,
 …).
+
+## Images
+
+One pipeline (`src/image.rs`) turns file or host bytes into `ContentPart::Image`: the kind
+comes from the magic number (PNG, JPEG, GIF, WebP; BMP and everything else are not images),
+then the limits (raw bytes ≤ `MAX_IMAGE_BYTES` = 5 MiB, each side ≤ `MAX_IMAGE_SIDE` = 8000),
+then the base64 part with its display facts in `annotations` (`kind`, `name`, `width`,
+`height`, `bytes`). No decode, no re-encode, no local resize; `imagesize` reads the header.
+`read`, the TUI's `@path`/dropped path and `exec --image` all call it. `read` returns
+`Read image file [<mime>] W×H` plus the part, adds the provider-scaling sentence over
+`SCALE_NOTICE_SIDE` (1568 px), and, when the host-supplied `ImageSupport` says the current
+model takes no images, returns only the text with the omission sentence. The TUI's transcript
+line is `[image: <name>, W×H, N KB]`; `--export` keeps `[<mime> image omitted]`.
 
 ## Search (`glob`, `grep`)
 

@@ -140,6 +140,10 @@ pub enum CodingToolsError {
 pub struct CodingTools {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
+    /// Whether the current model takes images (ADR 0018). The host supplies a closure over the
+    /// live route, so a `/model` switch changes the `read` tool's answer at the next call; the
+    /// default counts as taking images (the catalog's rule for an unknown model).
+    image_support: crate::ImageSupport,
     /// The sandbox `shell`/jobs read at the start of every call (ADR 0038 slice 2). The host
     /// keeps a clone and swaps it when `/access` changes the tier; a call already running
     /// holds the `Arc` it cloned and is unaffected.
@@ -239,6 +243,7 @@ impl CodingTools {
         Self {
             root: Arc::new(root),
             limits: Limits::default(),
+            image_support: crate::image::images_allowed(),
             sandbox,
             jobs,
         }
@@ -246,6 +251,13 @@ impl CodingTools {
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Supply the current model's image capability (ADR 0018). The host's closure reads the
+    /// live route and the catalog; the default takes images.
+    pub fn with_image_support(mut self, image_support: crate::ImageSupport) -> Self {
+        self.image_support = image_support;
         self
     }
 
@@ -307,6 +319,7 @@ impl ToolProvider for CodingTools {
         Ok(CodingSession {
             root: Arc::clone(&self.root),
             limits: self.limits,
+            image_support: Arc::clone(&self.image_support),
             sandbox: self.sandbox.clone(),
             specs: specs(shell),
             jobs,
@@ -320,6 +333,8 @@ impl ToolProvider for CodingTools {
 pub struct CodingSession {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
+    /// The current model's image capability (ADR 0018), asked at each `read` call.
+    image_support: crate::ImageSupport,
     sandbox: SandboxSlot,
     specs: Vec<ToolSpec>,
     jobs: Arc<jobs::Jobs>,
@@ -379,7 +394,15 @@ impl ToolSession for CodingSession {
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
         match call.name.as_str() {
-            "read" => read::run(&self.root, &self.limits, &call.arguments).await,
+            "read" => {
+                read::run(
+                    &self.root,
+                    &self.limits,
+                    &self.image_support,
+                    &call.arguments,
+                )
+                .await
+            }
             "write" => write::run(&self.root, &self.limits, &call.arguments).await,
             "patch" => patch::run(&self.root, &self.limits, &call.arguments).await,
             "glob" => glob::run(&self.root, &self.limits, &call.arguments).await,

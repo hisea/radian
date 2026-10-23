@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 use radian_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec};
 use serde::Deserialize;
@@ -6,6 +6,7 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
+use crate::image::{self, ImageError, ImageSupport, MAX_IMAGE_BYTES};
 use crate::provider::Limits;
 use crate::workspace::{WorkspaceRoot, io_failure};
 
@@ -25,7 +26,7 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "path": {
                 "type": "string",
-                "description": "File or directory to read. Workspace-relative, or absolute \
+                "description": "File, directory or image to read. Workspace-relative, or absolute \
                                 or `~`: roots (registry, toolchain, skill dirs) read in both \
                                 tiers; `full` reads other paths too, except the deny set. \
                                 Manual: `radian://docs/<page>.md`."
@@ -38,13 +39,15 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "offset": {
                 "type": "integer",
-                "description": "First line to read (1-based). Default: 1. Negative counts from the end."
+                "description": "First line to read (1-based). Default: 1. Negative counts from the end. \
+                                Not for an image: the error is `image_offset`."
             },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
                 "description": "Maximum lines to read. For a directory, it caps entries \
-                                instead. Default: 500. Maximum: 5000."
+                                instead. Default: 500. Maximum: 5000. Not for an image: the \
+                                error is `image_offset`."
             }
         },
         "required": ["path"],
@@ -55,11 +58,14 @@ pub(crate) fn schema() -> serde_json::Value {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "read".into(),
-        description: "Read a UTF-8 text file or list a directory. Each line starts with \
-                      its line number and `\": \"`. This prefix is not part of the file. \
+        description: "Read a UTF-8 text file, a directory, or an image. Each text line starts \
+                      with its line number and `\": \"`. This prefix is not part of the file. \
                       Remove it before you use the text in `patch`. For a large file, read one \
                       part at a time with `offset` and `limit`. Do not increase `max_bytes` \
-                      to get a later part."
+                      to get a later part. An image (PNG, JPEG, GIF or WebP, judged by its \
+                      magic number, never its extension) returns a text line and the image \
+                      itself; images are limited to 5 MiB and 8000 px per side (`image_too_large` \
+                      when over), and `offset` or `limit` on one is the error `image_offset`."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
@@ -194,6 +200,7 @@ fn run_docs_dir(
 pub(crate) async fn run(
     root: &WorkspaceRoot,
     limits: &Limits,
+    image_support: &ImageSupport,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
     let args: ReadArgs = args::parse("read", &schema(), arguments)?;
@@ -216,6 +223,7 @@ pub(crate) async fn run(
     let scan = BlockingRead {
         root: root.clone(),
         limits: *limits,
+        image_support: image_support.clone(),
         path: args.path,
         offset,
         limit,
@@ -243,6 +251,7 @@ pub(crate) async fn run(
 struct BlockingRead {
     root: WorkspaceRoot,
     limits: Limits,
+    image_support: ImageSupport,
     path: String,
     offset: i64,
     limit: Option<usize>,
@@ -255,6 +264,7 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
     let BlockingRead {
         root,
         limits,
+        image_support,
         path,
         offset,
         limit,
@@ -305,13 +315,108 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
     match opened.source {
         crate::workspace::OpenedSource::File(file) => {
             let mut reader = BufReader::new(file);
+            if let Some(image_output) = read_image(
+                &mut reader,
+                &path,
+                total,
+                offset_given,
+                limit.is_some(),
+                &image_support,
+            )? {
+                return Ok(image_output);
+            }
             finish_read(&mut reader, &path, total, budget, offset, limit)
         }
         crate::workspace::OpenedSource::Embedded(bytes) => {
             let mut reader = std::io::Cursor::new(bytes);
+            if let Some(image_output) = read_image(
+                &mut reader,
+                &path,
+                total,
+                offset_given,
+                limit.is_some(),
+                &image_support,
+            )? {
+                return Ok(image_output);
+            }
             finish_read(&mut reader, &path, total, budget, offset, limit)
         }
     }
+}
+
+/// The image branch: when the leading bytes carry an accepted image magic number, the whole
+/// file is read (bounded by [`MAX_IMAGE_BYTES`]) and turned into the text line plus, unless
+/// the current model is known blind, the image part. `Ok(None)` means "not an image: read it
+/// as text". `offset` and `limit` are file arguments with no meaning for an image.
+fn read_image<R: BufRead + Read>(
+    reader: &mut R,
+    path: &str,
+    total: u64,
+    offset_given: bool,
+    limit_given: bool,
+    image_support: &ImageSupport,
+) -> Result<Option<ToolOutput>, ToolFailure> {
+    let kind = {
+        let head = reader.fill_buf().map_err(|error| io_failure(path, error))?;
+        image::ImageKind::from_magic(head)
+    };
+    let Some(_kind) = kind else {
+        return Ok(None);
+    };
+    if offset_given || limit_given {
+        return Err(fail(
+            "image_offset",
+            format!("`{path}` is an image; `offset` and `limit` apply to text only"),
+        ));
+    }
+    if total > MAX_IMAGE_BYTES {
+        return Err(fail(
+            "image_too_large",
+            format!(
+                "`{path}` is {total} bytes, over the {} MiB image limit",
+                MAX_IMAGE_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(total as usize);
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_failure(path, error))?;
+    let name = path
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path);
+    let loaded = image::load(name, &bytes).map_err(|error| match error {
+        ImageError::TooManyPixels { .. } | ImageError::TooLarge { .. } => {
+            fail("image_too_large", format!("`{path}`: {error}"))
+        }
+        ImageError::Unreadable => fail(
+            "not_utf8",
+            format!("`{path}`: the image header could not be read"),
+        ),
+        ImageError::NotImage => fail("not_utf8", format!("`{path}`: {error}")),
+    })?;
+    let supports_images = image_support();
+    let mut content = vec![ContentPart::text(image::read_description(
+        &loaded,
+        supports_images,
+    ))];
+    if supports_images {
+        content.push(loaded.part());
+    }
+    Ok(Some(ToolOutput {
+        content,
+        structured: Some(json!({
+            "path": path,
+            "image": {
+                "mime_type": loaded.mime,
+                "width": loaded.width,
+                "height": loaded.height,
+                "bytes": loaded.bytes,
+            },
+        })),
+    }))
 }
 
 /// The tail of a bounded read once the budget and total are known: negative-offset

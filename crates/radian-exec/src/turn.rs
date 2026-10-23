@@ -64,7 +64,7 @@ pub(crate) struct Run {
 async fn enqueue_input(
     inbox: &Arc<Inbox>,
     hooks: &PermissionHooks,
-    text: String,
+    text: impl Into<radian_core::Message>,
     source: InputSource,
     turn_in_flight: bool,
 ) -> Result<radian_core::MessageId, InboxError> {
@@ -84,8 +84,13 @@ async fn enqueue_input(
 /// for it the same way it waited for the first. The exit code and the `Result` record
 /// come from the last turn (ADR 0044). With no background job the loop below breaks at
 /// once and the run is exactly what it was before.
-pub(crate) async fn one_shot(run: &mut Run, prompt: String) -> LoopDone {
-    if let Err(error) = enqueue_input(&run.inbox, &run.hooks, prompt, TERMINAL_SOURCE, false).await
+pub(crate) async fn one_shot(
+    run: &mut Run,
+    prompt: String,
+    images: Vec<radian_coding::LoadedImage>,
+) -> LoopDone {
+    let message = radian_coding::image_message(prompt, &images);
+    if let Err(error) = enqueue_input(&run.inbox, &run.hooks, message, TERMINAL_SOURCE, false).await
     {
         eprintln!("radian: {}", redact(&error.to_string(), &run.secrets));
         let _ = shutdown(&run.inbox, &run.ui, &run.session).await;
