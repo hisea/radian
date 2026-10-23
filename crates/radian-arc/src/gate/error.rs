@@ -92,6 +92,12 @@ pub enum GateError {
         after: crate::gate::Stage,
     },
 
+    /// A profile lists a `before_attempt` step this build does not run.
+    #[error(
+        "`{0}` is not a step a profile can run before an attempt; the only step is `merge-main`"
+    )]
+    UnknownBeforeAttemptStep(String),
+
     /// A `--watch` stop reached the gate: the stage child was killed and no verdict is
     /// written. The next loop starts the stage again as unverified (ADR 0048 decision 13).
     #[error("the gate was stopped")]

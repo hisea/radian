@@ -442,15 +442,6 @@ pub fn run_stages(
             .run()
             .map_err(gate_error)?,
             Stage::Review => {
-                // The diff the session reviews is the task's own change (ADR 0048 decision
-                // 10), so the task must still carry the base it started from.
-                let base = task
-                    .base_sha
-                    .clone()
-                    .filter(|sha| !sha.is_empty())
-                    .ok_or_else(|| {
-                        Error::Refused(format!("task `{}` has no `base_sha`", task.id))
-                    })?;
                 let review = &plan.config.gate.review;
                 let (exec_args, key) = match &review.exec_args {
                     Some(args) => (args.as_slice(), "gate.review.exec_args"),
@@ -477,7 +468,6 @@ pub fn run_stages(
                     task: &task.id,
                     attempt: &plan.label,
                     sha: &plan.head,
-                    base_sha: &base,
                     brief: &task.body,
                     main_ref: &plan.main_ref,
                     exec_args,

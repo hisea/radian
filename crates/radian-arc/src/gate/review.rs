@@ -7,7 +7,8 @@
 //! comes from `[gate.review] exec_args`.
 //!
 //! The prompt is built in ([`build_prompt`]): the task's brief, the commit list and the diff
-//! `base..verified_sha`, and the instruction to check the change against the brief and the
+//! from the merge base of the remote main and `verified_sha` to `verified_sha` (the task's own
+//! change, not main's), and the instruction to check the change against the brief and the
 //! repository's rules. A configured `prompt_file` is appended.
 //!
 //! The session ends with one fenced `json` block ([`ReviewReport`]). arc parses the last such
@@ -94,8 +95,6 @@ pub struct ReviewRun<'a> {
     pub attempt: &'a str,
     /// The task's `verified_sha`: the verdict's `sha` and the change the session reviews.
     pub sha: &'a str,
-    /// The commit the task's branch started from: the diff is `base_sha..sha`.
-    pub base_sha: &'a str,
     /// The task's brief, as the worker got it.
     pub brief: &'a str,
     /// The ref that names the remote main after a fetch, typically
@@ -144,7 +143,7 @@ impl ReviewRun<'_> {
         let mut report = None;
         let mut reason = candidate.failure.clone();
         if candidate.failure.is_none() {
-            let prompt = self.prompt(&checkout.path(), &candidate.sha)?;
+            let prompt = self.prompt(&checkout.path(), &candidate.sha, &candidate.main_sha)?;
             let mut unusable = Unusable::Output;
             for run in 1..=REVIEW_RUNS {
                 let session_id = format!("{}-review-{run}", self.attempt);
@@ -214,14 +213,18 @@ impl ReviewRun<'_> {
     }
 
     /// The built-in prompt, with the configured file appended.
-    fn prompt(&self, checkout: &Path, sha: &str) -> Result<String, GateError> {
+    fn prompt(&self, checkout: &Path, sha: &str, main_sha: &str) -> Result<String, GateError> {
+        // The range starts at the merge base of the remote main and the task's commit: main's
+        // commits reach the branch through the merge the step before an attempt makes, and
+        // those are not the task's change (ADR 0048 decisions 7 and 10).
+        let base = super::git::ok(checkout, &["merge-base", main_sha, sha])?;
         let commits = super::git::ok(
             checkout,
             &[
                 "log",
                 "--no-decorate",
                 "--format=%h %s",
-                &format!("{}..{sha}", self.base_sha),
+                &format!("{base}..{sha}"),
             ],
         )?;
         let diff = super::git::ok(
@@ -230,10 +233,10 @@ impl ReviewRun<'_> {
                 "diff",
                 "--no-ext-diff",
                 "--no-textconv",
-                &format!("{}..{sha}", self.base_sha),
+                &format!("{base}..{sha}"),
             ],
         )?;
-        let mut prompt = build_prompt(self.task, self.brief, self.base_sha, sha, &commits, &diff);
+        let mut prompt = build_prompt(self.task, self.brief, &base, sha, &commits, &diff);
         if let Some(path) = self.prompt_file {
             let extra = fs::read_to_string(path).map_err(|source| GateError::Io {
                 path: path.to_path_buf(),

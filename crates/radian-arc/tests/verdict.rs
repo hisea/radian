@@ -42,6 +42,7 @@ fn optional(stage: Stage) -> StageSpec {
 fn a_verdict_for_an_old_sha_does_not_count_after_the_branch_moves() {
     let profile = Profile {
         stages: vec![required(Stage::Commands), required(Stage::Human)],
+        before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
     };
@@ -79,6 +80,7 @@ fn a_verdict_for_an_old_sha_does_not_count_after_the_branch_moves() {
 fn extra_stages_cannot_drop_a_required_stage() {
     let profile = Profile {
         stages: vec![required(Stage::Commands), required(Stage::Human)],
+        before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
     };
@@ -102,6 +104,7 @@ fn extra_stages_cannot_drop_a_required_stage() {
     // A task may turn an optional stage into a required one.
     let optional_human = Profile {
         stages: vec![required(Stage::Commands), optional(Stage::Human)],
+        before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
     };
@@ -111,12 +114,14 @@ fn extra_stages_cannot_drop_a_required_stage() {
     assert!(profile.validate().is_ok());
     let invalid = Profile {
         stages: vec![required(Stage::Integration)],
+        before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
     };
     assert!(invalid.validate().is_err());
     let duplicate = Profile {
         stages: vec![required(Stage::Review), optional(Stage::Review)],
+        before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
     };
@@ -127,6 +132,7 @@ fn extra_stages_cannot_drop_a_required_stage() {
 fn a_newer_attempt_decides_whether_a_required_stage_passed() {
     let profile = Profile {
         stages: vec![required(Stage::Commands), required(Stage::Human)],
+        before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
     };

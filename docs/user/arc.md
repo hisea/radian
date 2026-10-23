@@ -204,6 +204,7 @@ A value outside the set is a usage error (`2`).
 A failed stage or a failed integration sends a task to `review.rework_pending`.
 While the task's plan has an `auto` level other than `off`, arc counts that rework in the task's `auto_rework` field.
 When the count would go past `[limits] max_auto_rework`, arc pauses the whole plan: its `auto` becomes `off`, the task stays in `review.rework_pending`, and both `radian arc run` and `show` (as part of `rework_reason`) say why.
+A conflict rework that arc writes itself (see A conflict with main) is not counted here: it never raises `auto_rework` and never pauses the plan.
 arc never resets a task's count.
 A plan budget pausing the plan also sets `auto` to `off`; `run` starts and merges nothing for a plan at `off`.
 
@@ -247,6 +248,14 @@ A claim is refused with exit `3` and changes nothing when:
 
 The claim is one transaction: the task's `attempt` goes up by one, `attempt_id` becomes `<task>-<attempt>`, a random `token` is written, and the task moves to `doing.starting`.
 arc then runs the hidden `radian arc work` wrapper as a child, with the brief on its stdin; the wrapper moves the task to `doing.running`.
+
+Before the worker starts, the wrapper runs the steps of the selected profile's `before_attempt` in the task's worktree, in order (see the `gate.profiles.<name>.before_attempt` row of `config.toml` below).
+A first attempt created its worktree from the fetched main, so its steps do nothing then.
+The only step is `merge-main`: it fetches the remote main and does nothing when the remote main is already an ancestor of `work/<task>`; otherwise it merges it into the branch with `git merge --no-ff --no-edit`, because the repository's configuration refuses fast-forwards.
+A merge that conflicts leaves the worktree mid-merge, with the conflict markers in the files, and the brief the worker receives on its stdin starts with a section that names the merged main and its short sha, lists the conflicted paths, and asks the worker to resolve them first, keeping both sides' intent, and commit the merge with `git commit --no-edit` before anything else.
+The brief stored in the task file does not change.
+A failed fetch, or a merge that fails for a reason other than a conflict, ends the attempt with the git message.
+The attempt's wall clock covers the fetch and the merge.
 
 The wrapper enforces the attempt's limits itself, so they hold even after the process that started the wrapper is gone:
 
@@ -344,7 +353,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   It runs after `commands` passes and before `human`; a profile that lists both must list `commands` first.
   For each run it starts one `radian exec` in its own checkout, `.radian/arc/gates/review/`, on the candidate, with the candidate as the workspace and only the `read`, `grep` and `glob` tools mounted: no shell tool, no write tool, and no MCP server.
   Its model route is `[gate.review] exec_args`, and `[gate.review] timeout_secs` limits one session.
-  The prompt is built in: the task's brief, the commit list and the diff `base_sha..verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
+  The prompt is built in: the task's brief, the commit list and the diff from the merge base of the remote main and `verified_sha` to `verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
   `[gate.review] prompt_file` is appended to it.
   The session must end with one fenced `json` block, and arc parses the last such block:
 
@@ -381,6 +390,20 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 
 `list` and `show` do not use the network: they do not check the remote and cannot see a branch that moved after the gate.
 `merge` checks the remote before it acts.
+
+### A conflict with main
+
+A verification stage (`commands`, `mutation` or `review`) or the integration stage can fail with reason `conflict`: the task's commit does not merge with the remote main (during verification), or the branch does not merge into main (during integration).
+When the profile's `before_attempt` lists `merge-main`, the next attempt would start mid-merge, so arc writes that attempt's brief itself and moves the task to `todo.ready` instead of `review.rework_pending`: the lead sees nothing to do.
+The brief is appended to the task body under `## Rework <n> (conflict with main)`, where `n` is the task's `attempt` plus one, the same numbering the lead's `add_rework` uses.
+It names the main commit the change conflicted with (its short sha) and the stage, lists the conflicted paths, says that the next attempt starts mid-merge, and asks the worker to resolve the conflict keeping both sides' intent, commit the merge, rebuild, run the touched crates' tests, and change nothing else.
+Every other failure reason, and every conflict when the profile does not list `merge-main`, keeps the path to `review.rework_pending`.
+A `reverify` attempt that conflicts takes the same path.
+
+The conflict rework does not change the task's `auto_rework` and never pauses the plan.
+It does count as one of the task's attempts: a task that keeps conflicting goes to `failed.exhausted` when the attempt that conflicted was its last one under `max_attempts`, and no brief is written then.
+The plan's `auto` level decides whether the next attempt starts by itself: at `off` the task waits in `todo.ready` for you, and at `run` or `merge` the next pass claims it.
+`radian arc run` prints `<task> conflict with main -> todo.ready (automatic rework)` for the transition.
 
 ## A gate for this repository
 
@@ -557,7 +580,7 @@ A one-shot `run` starts its work and exits without waiting for it; the next `run
 Use `--watch` (or the arc interface, when it exists) to keep advancing.
 
 `run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end.
-A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, and an integration prints `<task> integration started (pid <pid>)`.
+A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, and a conflict rework arc wrote prints `<task> conflict with main -> todo.ready (automatic rework)`.
 When a pass changes nothing, a summary of what waits on whom ends the pass:
 
 ```text
@@ -702,7 +725,7 @@ A key you leave out takes its default.
 | `limits.max_wall_time_secs` | integer | `7200` | seconds | As an absolute limit on one attempt, on top of the stall timeout. |
 | `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
 | `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
-| `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. |
+| `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. A conflict rework that arc writes itself does not count. |
 | `worker.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | Before `start`, each `run` pass and `confirm` act, the line the worker would get is parsed with the `radian exec` parser; a rejected line exits `3`. Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
 | `ids.plan_prefix` | string | `"PL"` | 1 to 4 ASCII uppercase letters; must differ from `ids.task_prefix` | When a plan id is created. |
 | `ids.task_prefix` | string | `"TK"` | 1 to 4 ASCII uppercase letters; must differ from `ids.plan_prefix` | When a task id is created. |
@@ -714,6 +737,7 @@ A key you leave out takes its default.
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
 | `gate.profiles.<name>.stages` | array of tables | `[{ stage = "commands", required = true }, { stage = "human", required = true }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs, in order. `integration` is not a profile stage: it always runs at merge. |
 | `gate.profiles.<name>.commands` | array of strings | `[]` | Shell command lines | The `commands` stage runs them in order on its own checkout. |
+| `gate.profiles.<name>.before_attempt` | array of strings | `["merge-main"]` | `merge-main`, or `[]` for no step | At the next attempt: the wrapper runs the steps in the task's worktree before the worker starts. `merge-main` merges the remote main into the branch; a conflict leaves the worktree mid-merge and the worker's brief starts with the conflicted paths. |
 | `gate.profiles.<name>.key_commands` | array of strings | `[]` | Shell command lines | The integration stage runs them on the merge candidate. |
 
 `gate.profiles.<name>` above is written out as `gate.profiles.default` in the file `init` writes.
@@ -812,6 +836,7 @@ A task leaves `doing` for `review.verifying` when a pushed attempt ends.
 | `review.awaiting_human` | `review.verifying` | The remote `work/<task>` is no longer `verified_sha`, or the verdict set no longer matches the recorded digest: every verdict and the approval of the old commit are invalid. |
 | `review.rework_pending`, `review.awaiting_human` | `review.verifying` | `radian arc reverify`: a new attempt is claimed without a worker; its verdicts are its own. |
 | `review.verifying` | `review.awaiting_human` (again) | `radian arc run` or `radian arc start` re-verifies a task a moved branch or a changed digest sent back. |
+| `review` (a failed verification or integration stage) | `todo.ready` | A conflict with main, when the profile's `before_attempt` lists `merge-main`: arc writes the next attempt's brief itself. With `auto` `off` the task waits for you; otherwise the next pass claims it. |
 | `review` (any phase) | `todo.ready` | The lead adds a rework brief (`add_rework`); the next claim starts the next attempt. |
 
 ## Failures, retries and the budget

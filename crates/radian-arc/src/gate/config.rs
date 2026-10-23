@@ -103,13 +103,33 @@ fn default_required() -> bool {
     true
 }
 
-/// One gate profile: the stages, the acceptance commands and the merge-candidate commands.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The names of the steps a profile's `before_attempt` may list, in order. This is the one
+/// closed list: [`Profile::validate`], the `config.toml` parser and the manual's drift test all
+/// read it.
+pub const BEFORE_ATTEMPT_STEPS: [&str; 1] = [MERGE_MAIN];
+
+/// The one step a profile can list in `before_attempt`: merge the remote main into the task's
+/// branch before the worker starts (ADR 0048 decision 7).
+pub const MERGE_MAIN: &str = "merge-main";
+
+/// What a profile's `before_attempt` holds when the key is absent (ADR 0048 decision 10).
+#[must_use]
+pub fn default_before_attempt() -> Vec<String> {
+    vec![MERGE_MAIN.to_owned()]
+}
+
+/// One gate profile: the stages, the steps before an attempt, and the acceptance and
+/// merge-candidate commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     /// The stages the profile runs, in order.
     #[serde(default)]
     pub stages: Vec<StageSpec>,
+    /// The steps the wrapper runs in the task's worktree before the worker starts, in order.
+    /// Absent: [`default_before_attempt`].
+    #[serde(default = "default_before_attempt")]
+    pub before_attempt: Vec<String>,
     /// Shell command lines the `commands` stage runs, in order.
     #[serde(default)]
     pub commands: Vec<String>,
@@ -118,15 +138,32 @@ pub struct Profile {
     pub key_commands: Vec<String>,
 }
 
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            stages: Vec::new(),
+            before_attempt: default_before_attempt(),
+            commands: Vec::new(),
+            key_commands: Vec::new(),
+        }
+    }
+}
+
 impl Profile {
-    /// Rejects a profile that lists `integration`, lists one stage twice, or lists `review`
-    /// before `commands` (the order ADR 0048 decision 10 fixes).
+    /// Rejects a profile that lists `integration`, lists one stage twice, lists `review`
+    /// before `commands`, or lists a `before_attempt` step this build does not run (the order
+    /// and the step list ADR 0048 decisions 7 and 10 fix).
     ///
     /// # Errors
     ///
-    /// [`GateError::UnlistedStage`], [`GateError::DuplicateStage`] or
-    /// [`GateError::StageOrder`].
+    /// [`GateError::UnlistedStage`], [`GateError::DuplicateStage`],
+    /// [`GateError::StageOrder`] or [`GateError::UnknownBeforeAttemptStep`].
     pub fn validate(&self) -> Result<(), GateError> {
+        for step in &self.before_attempt {
+            if !BEFORE_ATTEMPT_STEPS.contains(&step.as_str()) {
+                return Err(GateError::UnknownBeforeAttemptStep(step.clone()));
+            }
+        }
         let mut seen = Vec::with_capacity(self.stages.len());
         for spec in &self.stages {
             if !spec.stage.is_listed() {
@@ -156,6 +193,15 @@ impl Profile {
             });
         }
         Ok(())
+    }
+
+    /// Whether the profile merges the remote main into the task's branch before an attempt.
+    /// The one place the `merge-main` step is asked about: the wrapper runs it, and the review
+    /// half of the state machine writes a conflict rework only when it is on (ADR 0048
+    /// decisions 7 and 9).
+    #[must_use]
+    pub fn runs_merge_main(&self) -> bool {
+        self.before_attempt.iter().any(|step| step == MERGE_MAIN)
     }
 }
 

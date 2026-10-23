@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::gate::{
     DEFAULT_COMMAND_TIMEOUT_SECS, GateConfig, Profile, ReviewConfig, Stage, StageSpec,
+    default_before_attempt,
 };
 use crate::store::model::{PREFIX_MAX_CHARS, valid_prefix};
 
@@ -170,6 +171,7 @@ fn default_profile() -> Profile {
                 required: true,
             },
         ],
+        before_attempt: default_before_attempt(),
         commands: Vec::new(),
         key_commands: Vec::new(),
     }
@@ -211,6 +213,7 @@ timeout_secs = 900              # wall-time limit of one review session; 0 waits
 
 [gate.profiles.default]
 stages = [{{ stage = "commands", required = true }}, {{ stage = "human", required = true }}]
+before_attempt = ["merge-main"]   # steps the wrapper runs in the worktree before the worker; [] runs none
 commands = []                 # shell command lines, run in order on the gate checkout
 key_commands = []             # what the integration stage runs on the merge candidate
 "#

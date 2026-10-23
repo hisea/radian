@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::Reply;
 use common::*;
+use radian_arc::store::Store;
 use serde_json::{Value, json};
 
 fn run(
@@ -50,6 +51,65 @@ fn wait_for_pid(identity: &Path) -> u32 {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Arc set up for the repository, so the wrapper reads a `[gate] profile` and its
+/// `before_attempt` steps (`init` writes the default profile, which lists `merge-main`).
+fn init(repo: &Repo) {
+    Store::init(&repo.clone, false).expect("arc init");
+}
+
+/// Replaces one piece of `config.toml`.
+fn tune(repo: &Repo, from: &str, to: &str) {
+    let path = repo.arc().join("config.toml");
+    let text = std::fs::read_to_string(&path).expect("config.toml");
+    assert!(text.contains(from), "config.toml has `{from}`:\n{text}");
+    std::fs::write(&path, text.replacen(from, to, 1)).expect("write config.toml");
+}
+
+/// The merge commits on `work/<task>`, newest first.
+fn merge_commits(repo: &Repo, task: &str) -> Vec<String> {
+    let out = repo.git(&[
+        "log",
+        "--merges",
+        "--format=%H",
+        &format!("refs/heads/work/{task}"),
+    ]);
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Commits `file` on main in a second clone and pushes it, returning the new main tip. The
+/// main clone's `origin/main` stays stale, the way a remote that moved after this clone last
+/// fetched leaves it.
+fn advance_main(repo: &Repo, file: &str, content: &str) -> String {
+    let other = repo.second_clone("other-main");
+    repo.git_at(&other, &["config", "user.email", "arc@example.invalid"]);
+    repo.git_at(&other, &["config", "user.name", "arc test"]);
+    write(&other.join(file), content);
+    repo.git_at(&other, &["add", file]);
+    repo.git_at(&other, &["commit", "-m", &format!("main: {file}")]);
+    repo.git_at(&other, &["push", "origin", &repo.main_branch]);
+    repo.git_at(&other, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+/// The brief the worker got on stdin: the last user message of a request. A resumed session's
+/// request repeats the earlier turns first.
+fn brief_of(request: &agent_provider_openai_compatible::testing::RecordedRequest) -> String {
+    request.json()["messages"]
+        .as_array()
+        .expect("the request has messages")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .next_back()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// The model commits a change; the wrapper pushes `work/<task>`, `ls-remote` equals
@@ -947,6 +1007,370 @@ fn the_wrapper_fetches_and_pushes_the_configured_remote_and_main_branch() {
         newer,
         "the fetch updated the local tracking ref"
     );
+}
+
+/// A later attempt whose main moved runs `merge-main` before the worker: the branch holds the
+/// merge commit when the worker starts, and the brief the worker gets is unchanged. Mutation:
+/// skip the step and the worker's parent is the previous tip, not a merge commit.
+#[test]
+fn a_second_attempt_merges_main_before_the_worker_runs() {
+    let repo = Repo::new("merge-main-clean");
+    init(&repo);
+    let task = "TK0101-merge-main";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m one",
+        ),
+        text_reply("done"),
+    ]);
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-m1",
+        &[],
+        &model_args(mock1.base_url()),
+        "first",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert_eq!(first.finished()["pushed"], json!(true));
+
+    let moved = advance_main(&repo, "main.txt", "main\n");
+
+    let mock2 = Mock::start(vec![
+        shell_reply(
+            "c2",
+            "echo two > two.txt && git add two.txt && git commit -m two",
+        ),
+        text_reply("done"),
+    ]);
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-m2",
+        &["--resume"],
+        &model_args(mock2.base_url()),
+        "second",
+    );
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    let finished = second.finished();
+    assert_eq!(finished["pushed"], json!(true));
+    let head = finished["head_sha"].as_str().expect("head_sha").to_owned();
+
+    // The worker's commit sits on the merge commit: `head^` has two parents.
+    let parent = repo
+        .git(&["rev-parse", &format!("{head}^")])
+        .trim()
+        .to_owned();
+    let parents = repo.git(&["log", "-1", "--format=%P", &parent]);
+    assert_eq!(
+        parents.split_whitespace().count(),
+        2,
+        "the worker started on a merge commit (parents {parents})"
+    );
+    assert_eq!(
+        repo.git(&["merge-base", &moved, &head]).trim(),
+        moved,
+        "the branch contains the moved main"
+    );
+    assert_eq!(merge_commits(&repo, task).len(), 1, "exactly one merge");
+
+    // The brief is the one the task's body holds: no conflict section.
+    let brief = brief_of(&mock2.requests()[0]);
+    assert!(brief.contains("second"), "{brief}");
+    assert!(!brief.contains("Before you start"), "{brief}");
+    assert!(!brief.contains("mid-merge"), "{brief}");
+}
+
+/// Main moved with a change that conflicts with the task's: the wrapper leaves the worktree
+/// mid-merge and the worker's stdin brief starts with the conflict section naming the path. A
+/// worker that resolves the conflict and commits the merge delivers normally. Mutation: drop
+/// the section and the worker commits without resolving.
+#[test]
+fn a_conflicting_main_starts_the_worker_mid_merge_with_the_path() {
+    let repo = Repo::new("merge-main-conflict");
+    init(&repo);
+    let task = "TK0102-merge-conflict";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "printf 'task side\\n' > file.txt && git add file.txt && git commit -m task",
+        ),
+        text_reply("done"),
+    ]);
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-c1",
+        &[],
+        &model_args(mock1.base_url()),
+        "task side",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert_eq!(first.finished()["pushed"], json!(true));
+
+    let moved = advance_main(&repo, "file.txt", "main side\n");
+    let short = &moved[..7];
+
+    let mock2 = Mock::start(vec![
+        shell_reply(
+            "c2",
+            "printf 'resolved\\n' > file.txt && git add file.txt && git commit --no-edit",
+        ),
+        text_reply("done"),
+    ]);
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-c2",
+        &["--resume"],
+        &model_args(mock2.base_url()),
+        "resolve it",
+    );
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    let finished = second.finished();
+    assert_eq!(finished["pushed"], json!(true), "{finished}");
+    let head = finished["head_sha"].as_str().expect("head_sha").to_owned();
+    let parents = repo.git(&["log", "-1", "--format=%P", &head]);
+    assert_eq!(
+        parents.split_whitespace().count(),
+        2,
+        "the worker committed the merge (parents {parents})"
+    );
+
+    let brief = brief_of(&mock2.requests()[0]);
+    assert!(
+        brief.starts_with("## Before you start: the worktree is merging"),
+        "the conflict section is first:\n{brief}"
+    );
+    assert!(
+        brief.contains(&format!("origin/main ({short})")),
+        "the section names the merged main:\n{brief}"
+    );
+    assert!(brief.contains("- file.txt"), "{brief}");
+    assert!(brief.contains("git commit --no-edit"), "{brief}");
+}
+
+/// Main did not move: no merge commit, and the worker starts on the previous tip. Mutation:
+/// merge unconditionally and this test sees a merge commit.
+#[test]
+fn main_that_did_not_move_merges_nothing() {
+    let repo = Repo::new("merge-main-same");
+    init(&repo);
+    let task = "TK0103-merge-same";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m one",
+        ),
+        text_reply("done"),
+    ]);
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-s1",
+        &[],
+        &model_args(mock1.base_url()),
+        "one",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    let first_head = first.finished()["head_sha"].as_str().unwrap().to_owned();
+
+    let mock2 = Mock::start(vec![
+        shell_reply(
+            "c2",
+            "echo two > two.txt && git add two.txt && git commit -m two",
+        ),
+        text_reply("done"),
+    ]);
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-s2",
+        &["--resume"],
+        &model_args(mock2.base_url()),
+        "two",
+    );
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert!(
+        merge_commits(&repo, task).is_empty(),
+        "a merge commit appeared"
+    );
+    let parent = repo
+        .git(&["rev-parse", &format!("{first_head}^")])
+        .trim()
+        .to_owned();
+    assert!(!parent.is_empty());
+    // The second worker's commit has one parent: the first attempt's commit.
+    let head = second.finished()["head_sha"].as_str().unwrap().to_owned();
+    let parents = repo.git(&["log", "-1", "--format=%P", &head]);
+    assert_eq!(parents.split_whitespace().count(), 1, "{parents}");
+}
+
+/// The first attempt starts from the fetched main, so it has nothing to merge even when main
+/// moved since this clone last fetched.
+#[test]
+fn a_first_attempt_merges_nothing() {
+    let repo = Repo::new("merge-main-first");
+    init(&repo);
+    let task = "TK0104-first";
+    let moved = advance_main(&repo, "main.txt", "main\n");
+    assert_ne!(repo.main_sha(), moved, "the clone's tracking ref is stale");
+
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo change > change.txt && git add change.txt && git commit -m change",
+        ),
+        text_reply("done"),
+    ]);
+    let run = run(
+        &repo,
+        task,
+        1,
+        "tok-f1",
+        &[],
+        &model_args(mock.base_url()),
+        "change",
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.finished()["base_sha"], json!(moved.as_str()));
+    assert!(
+        merge_commits(&repo, task).is_empty(),
+        "a first attempt merged"
+    );
+}
+
+/// `before_attempt = []` runs nothing: no fetch, no merge. Mutation: run the step whatever the
+/// profile says and the local main ref moves after the remote did.
+#[test]
+fn an_empty_before_attempt_does_not_fetch_or_merge() {
+    let repo = Repo::new("merge-main-off");
+    init(&repo);
+    tune(
+        &repo,
+        "before_attempt = [\"merge-main\"]",
+        "before_attempt = []",
+    );
+    let task = "TK0105-off";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m one",
+        ),
+        text_reply("done"),
+    ]);
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-o1",
+        &[],
+        &model_args(mock1.base_url()),
+        "one",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    let stale = repo.main_sha();
+    advance_main(&repo, "main.txt", "main\n");
+    assert_ne!(repo.remote_main_sha(), stale);
+
+    let mock2 = Mock::start(vec![
+        shell_reply(
+            "c2",
+            "echo two > two.txt && git add two.txt && git commit -m two",
+        ),
+        text_reply("done"),
+    ]);
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-o2",
+        &["--resume"],
+        &model_args(mock2.base_url()),
+        "two",
+    );
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert!(merge_commits(&repo, task).is_empty(), "it merged main");
+    assert_eq!(repo.main_sha(), stale, "it fetched the remote main");
+}
+
+/// A clean merge with no worker commit is a no-op attempt: the merge did not move the branch
+/// past the tip the attempt started on. The attempt still records that tip, so the next
+/// attempt's moved-ref check passes. Mutations: count the merge as delivery (the first attempt
+/// below pushes), or record no tip (the second refuses).
+#[test]
+fn a_clean_merge_with_no_worker_commit_is_a_no_op_attempt() {
+    let repo = Repo::new("merge-main-noop");
+    init(&repo);
+    let task = "TK0106-noop";
+    let mock1 = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo one > one.txt && git add one.txt && git commit -m one",
+        ),
+        text_reply("done"),
+    ]);
+    let first = run(
+        &repo,
+        task,
+        1,
+        "tok-n1",
+        &[],
+        &model_args(mock1.base_url()),
+        "one",
+    );
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    advance_main(&repo, "main.txt", "main\n");
+
+    let mock2 = Mock::start(vec![text_reply("nothing")]);
+    let second = run(
+        &repo,
+        task,
+        2,
+        "tok-n2",
+        &["--resume"],
+        &model_args(mock2.base_url()),
+        "nothing",
+    );
+    let finished = second.finished();
+    assert_eq!(second.code, 1, "{}", second.stderr);
+    assert_eq!(finished["pushed"], json!(false));
+    assert!(
+        finished["failure"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no change"),
+        "{finished}"
+    );
+    assert_eq!(merge_commits(&repo, task).len(), 1, "the merge did happen");
+
+    // The merge commit is the recorded tip: the next attempt's guard passes and its worker
+    // delivers normally.
+    let mock3 = Mock::start(vec![
+        shell_reply(
+            "c3",
+            "echo three > three.txt && git add three.txt && git commit -m three",
+        ),
+        text_reply("done"),
+    ]);
+    let third = run(
+        &repo,
+        task,
+        3,
+        "tok-n3",
+        &["--resume"],
+        &model_args(mock3.base_url()),
+        "three",
+    );
+    assert_eq!(third.code, 0, "{}", third.stderr);
+    assert_eq!(third.finished()["pushed"], json!(true));
 }
 
 /// `radian arc init` followed by one attempt leaves the main checkout clean: the exclude

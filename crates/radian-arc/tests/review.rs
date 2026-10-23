@@ -1400,6 +1400,44 @@ fn a_review_with_no_blocking_findings_passes_and_keeps_its_summary() {
     assert!(prompt.contains("\"blocking\""), "{prompt}");
 }
 
+/// The review session reviews the task's own change only. Main was merged into the branch
+/// before verification, so the range starts at the merge base of main and the commit, not at
+/// the recorded `base_sha`. Mutation: start the range at `base_sha` and the prompt holds
+/// main's file too.
+#[test]
+fn the_review_diff_after_a_merge_holds_only_the_tasks_own_files() {
+    let fixture = Fixture::new("review-diff-own");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    let head = fixture.publish(&fixture.base.clone(), "own.txt", "own\n");
+    fixture.repo.advance_main("main-only.txt", "main\n");
+
+    // The step before an attempt merged main into the branch, and the worker pushed it.
+    let branch = format!("work/{}", fixture.task);
+    fixture.repo.git(&["checkout", &branch]);
+    fixture.repo.git(&["merge", "--no-ff", "--no-edit", "main"]);
+    let merged = fixture.repo.rev("HEAD");
+    assert_ne!(merged, head, "the branch contains a merge commit");
+    fixture.repo.git(&["push", "origin", &branch]);
+
+    let fake = FakeReview::new(
+        "review-diff-own-fake",
+        &[review_message("The change adds own.txt.", &[], &[])],
+        0,
+    );
+    let verified = fixture.verifying_with_review(&merged, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let prompt = fake.prompt(1);
+    assert!(prompt.contains("own.txt"), "{prompt}");
+    assert!(
+        !prompt.contains("main-only.txt"),
+        "the prompt holds main's change:\n{prompt}"
+    );
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.sha, merged);
+}
+
 /// A blocking item fails the stage: the task goes to rework exactly as after a failed
 /// `commands`, and the reason lists the item for the lead.
 #[test]

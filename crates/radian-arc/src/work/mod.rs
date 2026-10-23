@@ -331,6 +331,10 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             Err(failure) => return refuse(o, s, &base_sha, &failure.message),
         }
     }
+    // The profile's steps before an attempt: a reused worktree merges the remote main first
+    // (ADR 0048 decision 7). The brief the worker gets may start with a conflict section; the
+    // task file's brief is never changed.
+    let brief = before_attempt(o, s, created, brief)?;
     let start_sha = branch_tip(&s.repo, &s.branch, &s.clock)?.ok_or_else(|| {
         Failure::error(format!("cannot read {} in {}", s.branch, s.repo.display()))
     })?;
@@ -394,6 +398,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
         Err(failure) if failure.wall => return Err(failure),
         Err(failure) => (Vec::new(), Err(failure)),
     };
+    let main_ref = format!("refs/remotes/{}/{}", o.remote, o.main_branch);
     write_json(
         &s.runs.join("execution.json"),
         &json!({
@@ -428,6 +433,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
                 branch: &s.branch,
                 base: &base_sha,
                 start: &start_sha,
+                main: &main_ref,
                 head: head_sha.as_deref(),
                 status_paths: &status_paths,
                 allow_noop: o.allow_noop,
@@ -1020,6 +1026,170 @@ fn moved_outside(branch: &str) -> String {
     format!("{branch} moved outside this task")
 }
 
+/// The steps the profile lists for before an attempt (ADR 0048 decision 7). A worktree this
+/// attempt created already starts from the fetched main, so no step runs for it. Returns the
+/// brief the worker receives: a step that leaves the worktree mid-merge puts its section
+/// first. The brief stored in the task file never changes.
+fn before_attempt(o: &Options, s: &Setup, created: bool, brief: String) -> Result<String, Failure> {
+    if created {
+        return Ok(brief);
+    }
+    let mut brief = brief;
+    for step in before_attempt_steps(&s.repo)? {
+        if step == crate::gate::MERGE_MAIN
+            && let Some(conflict) = merge_main(&s.repo, &s.worktree, o, &s.branch, &s.clock)?
+        {
+            brief = format!("{}\n\n{brief}", conflict_section(&conflict));
+        }
+    }
+    Ok(brief)
+}
+
+/// The selected profile's `before_attempt` steps. A repository arc is not set up in has no
+/// profile, so no step runs there, the same way the remote and main flags fall back to the git
+/// defaults. A `config.toml` that does not parse fails the attempt instead of being ignored:
+/// a skipped merge would reach the gate as a conflict (ADR 0048 decisions 7 and 10).
+fn before_attempt_steps(repo: &Path) -> Result<Vec<String>, Failure> {
+    match crate::store::Store::open(repo) {
+        Ok(store) => {
+            let config = store
+                .config()
+                .map_err(|error| Failure::error(error.message()))?;
+            Ok(config
+                .gate
+                .selected_profile()
+                .map(|profile| profile.before_attempt.clone())
+                .unwrap_or_default())
+        }
+        Err(crate::store::Error::NotInitialized) => Ok(Vec::new()),
+        Err(error) => Err(Failure::error(error.message())),
+    }
+}
+
+/// One merge of the remote main that conflicted: what the section of the brief reports.
+struct MergeConflict {
+    /// The ref that was merged, `<remote>/<main>`.
+    main_ref: String,
+    /// The remote main commit the merge started from.
+    main_sha: String,
+    /// The conflicted paths, sorted.
+    paths: Vec<String>,
+}
+
+/// `merge-main`: fetch the remote main with the worktree setup's explicit refspec and merge it
+/// into the branch with `--no-ff` (the repository sets `merge.ff=only`, and arc never
+/// rebases). `None` when main is already an ancestor or the merge was clean; `Some` when the
+/// merge conflicted and the worktree stays mid-merge. A fetch, or a merge that fails for
+/// another reason, fails the attempt with git's message, the way a failed worktree setup does.
+fn merge_main(
+    repo: &Path,
+    worktree: &Path,
+    o: &Options,
+    branch: &str,
+    clock: &Clock,
+) -> Result<Option<MergeConflict>, Failure> {
+    let main_ref = format!("refs/remotes/{}/{}", o.remote, o.main_branch);
+    let short_ref = format!("{}/{}", o.remote, o.main_branch);
+    let refspec = format!("+refs/heads/{0}:{1}", o.main_branch, main_ref);
+    match git(repo, &["fetch", &o.remote, &refspec], clock) {
+        Ok(_) => {}
+        Err(failure) if failure.wall => return Err(failure),
+        Err(failure) => {
+            return Err(Failure::error(format!(
+                "cannot fetch {} {}: {}",
+                o.remote, o.main_branch, failure.message
+            )));
+        }
+    }
+    // `merge-base --is-ancestor` answers with its exit code: 0 when main is already in the
+    // branch, and anything else means a merge is needed (or the ref could not be read, which
+    // the merge below then reports).
+    let ancestor = git_raw(
+        worktree,
+        &["merge-base", "--is-ancestor", &main_ref, branch],
+        clock,
+    )?;
+    if ancestor.status.success() {
+        return Ok(None);
+    }
+    let main_sha = git(repo, &["rev-parse", &main_ref], clock)?
+        .trim()
+        .to_owned();
+    let merge = git_raw(
+        worktree,
+        &["merge", "--no-ff", "--no-edit", &main_ref],
+        clock,
+    )?;
+    if merge.status.success() {
+        return Ok(None);
+    }
+    let paths = conflicted_paths(worktree, clock)?;
+    if paths.is_empty() {
+        return Err(Failure::error(format!(
+            "cannot merge {short_ref} into {branch}: {}",
+            merge.stderr.trim()
+        )));
+    }
+    Ok(Some(MergeConflict {
+        main_ref: short_ref,
+        main_sha,
+        paths,
+    }))
+}
+
+/// The paths a conflicted merge left unmerged, sorted.
+fn conflicted_paths(worktree: &Path, clock: &Clock) -> Result<Vec<String>, Failure> {
+    let out = git_raw(
+        worktree,
+        &["diff", "--name-only", "--diff-filter=U", "-z"],
+        clock,
+    )?;
+    if !out.status.success() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<String> = out
+        .stdout
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// The section that goes at the top of the brief when `merge-main` left the worktree
+/// mid-merge: the ref and its short sha, the conflicted paths, and what to do first.
+fn conflict_section(conflict: &MergeConflict) -> String {
+    let short = &conflict.main_sha[..conflict.main_sha.len().min(7)];
+    let paths = conflict
+        .paths
+        .iter()
+        .map(|path| format!("- {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "## Before you start: the worktree is merging {} ({short})\n\n\
+         The worktree is mid-merge: {ref} ({short}) is being merged into your branch, and these \
+         paths conflict:\n\n\
+         {paths}\n\n\
+         Resolve those conflicts first, keeping both sides' intent, and commit the merge with \
+         `git commit --no-edit` before you do anything else.",
+        conflict.main_ref,
+        ref = conflict.main_ref,
+    )
+}
+
+/// The merge base of `a` and `b`, when git finds one.
+fn merge_base(repo: &Path, a: &str, b: &str, clock: &Clock) -> Result<Option<String>, Failure> {
+    let out = git_raw(repo, &["merge-base", a, b], clock)?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let sha = out.stdout.trim();
+    Ok((!sha.is_empty()).then(|| sha.to_owned()))
+}
+
 /// A start refusal: no child runs and nothing is pushed, but the attempt still ends with its
 /// `AttemptFinished` record so the scheduling loop reads the reason. The record is not
 /// written as `last_head`: the moved tip is exactly what a later attempt must keep refusing.
@@ -1203,8 +1373,11 @@ struct Delivery<'a> {
     worktree: &'a Path,
     branch: &'a str,
     base: &'a str,
-    /// The `work/<task>` tip this attempt started from.
+    /// The `work/<task>` tip this attempt started from: the merge the steps made, if any, is
+    /// already in it.
     start: &'a str,
+    /// The ref that names the remote main, for the task's own change against main.
+    main: &'a str,
     head: Option<&'a str>,
     status_paths: &'a Result<Vec<String>, Failure>,
     allow_noop: bool,
@@ -1268,13 +1441,20 @@ fn check_delivery(d: &Delivery<'_>, clock: &Clock) -> Result<(), Failure> {
             dirty.join(", ")
         )));
     }
-    let changed = changed_paths(d.repo, d.base, head, clock)?;
+    let changed = changed_paths(d.repo, d.start, head, clock)?;
     if changed.is_empty() && !d.allow_noop {
         return Err(Failure::error(format!(
             "no change: {head} adds nothing to {}",
-            d.base
+            d.start
         )));
     }
+    // A merge of main brings main's files into the branch. The arc check reads the task's own
+    // change against the main the attempt ran on, so a merge commit never trips it (ADR 0048
+    // decision 8); a fallback to the recorded base covers a repository whose main ref could
+    // not be read.
+    let against_main =
+        merge_base(d.repo, d.main, head, clock)?.unwrap_or_else(|| d.base.to_owned());
+    let changed = changed_paths(d.repo, &against_main, head, clock)?;
     let arc_paths: Vec<&str> = changed
         .iter()
         .map(String::as_str)
