@@ -15,6 +15,14 @@ pub const VIRTUAL_PREFIX: &str = "radian://";
 
 /// One page: the file name and its full text, frontmatter included.
 pub const DOCS: &[(&str, &str)] = &[
+    (
+        "arc-files.md",
+        include_str!("../../../docs/user/arc-files.md"),
+    ),
+    (
+        "arc-gate.md",
+        include_str!("../../../docs/user/arc-gate.md"),
+    ),
     ("arc.md", include_str!("../../../docs/user/arc.md")),
     ("cli.md", include_str!("../../../docs/user/cli.md")),
     (

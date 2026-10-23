@@ -189,7 +189,10 @@ impl Failure {
 }
 
 fn run_inner(o: &Options) -> Result<i32, Failure> {
-    validate(o)?;
+    // The task id names a directory and a branch, so it is checked before anything is
+    // created. Every other check runs once the attempt directories exist, so a refused
+    // argument still leaves the record the next pass applies (ADR 0048 decision 9).
+    validate_task(o)?;
     // ADR 0048 decision 9: arc cancels an attempt with SIGTERM and expects the wrapper to
     // pass it on, wait for the worker, and still write `AttemptFinished`. Without a handler
     // the wrapper would die at once and leave no record for arc to apply.
@@ -216,22 +219,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         fs::create_dir_all(dir)
             .map_err(|error| Failure::error(format!("cannot create {}: {error}", dir.display())))?;
     }
-    // The heartbeat starts with the attempt directory and lives until both end records are
-    // written: the worktree setup, the model wait and the delivery and push checks all count
-    // as alive (ADR 0048 decisions 7.9 and 9). `set_worker` fills in the worker's identity
-    // once it is spawned.
     let wrapper_pid = std::process::id();
-    let mut heartbeat = Heartbeat::start(
-        &attempt_dir,
-        Beat {
-            attempt_id: format!("{}-{}", o.task, o.attempt),
-            pid: None,
-            process_started_at: None,
-            wrapper_pid,
-            wrapper_started_at: process::start_time(wrapper_pid),
-        },
-        o.stall_timeout_secs,
-    )?;
     let signal = runs.join(SIGNAL_FILE);
     let setup = Setup {
         repo,
@@ -243,15 +231,70 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         wrapper_pid,
         clock: Clock::new(started, Duration::from_secs(o.max_wall_time_secs), signal),
     };
-    let result = match run_attempt(o, &setup, &heartbeat) {
+    // From here on every failure writes the attempt's finish record before the wrapper exits:
+    // the next pass applies it and frees the attempt's `[limits] concurrency` slot at once
+    // (ADR 0048 decision 9). Only a failure before the two directories exist (a task id that
+    // names no path, a directory that cannot be created) has no record to leave; reconcile
+    // then applies the attempt after the stall window.
+    attempt(o, &setup).map_err(|failure| record_failure(o, &setup, failure))
+}
+
+/// The rest of the attempt: the remaining argument checks, the heartbeat, and the work itself.
+/// The heartbeat starts with the attempt directory and lives until both end records are
+/// written: the worktree setup, the model wait and the delivery and push checks all count as
+/// alive (ADR 0048 decisions 7.9 and 9).
+fn attempt(o: &Options, s: &Setup) -> Result<i32, Failure> {
+    validate_rest(o)?;
+    let mut heartbeat = Heartbeat::start(
+        &s.attempt_dir,
+        Beat {
+            attempt_id: format!("{}-{}", o.task, o.attempt),
+            pid: None,
+            process_started_at: None,
+            wrapper_pid: s.wrapper_pid,
+            wrapper_started_at: process::start_time(s.wrapper_pid),
+        },
+        o.stall_timeout_secs,
+    )?;
+    let result = match run_attempt(o, s, &heartbeat) {
         Ok(code) => Ok(code),
         // The wall clock ran out (a git command was killed or a later step saw it expired):
         // the attempt still ends with its records and the `wall_time` class.
-        Err(failure) if failure.wall => finish_wall(o, &setup),
+        Err(failure) if failure.wall => finish_wall(o, s),
         Err(failure) => Err(failure),
     };
     heartbeat.stop();
     result
+}
+
+/// Writes the attempt's finish record for a failure and returns the failure unchanged. The
+/// record is what the next pass applies, so a wrapper that fails at once (a refused argument,
+/// a held worktree lock) frees its concurrency slot in that pass instead of after the stall
+/// window (ADR 0048 decision 9). A failure to record it never hides the failure itself.
+fn record_failure(o: &Options, s: &Setup, failure: Failure) -> Failure {
+    let base_sha = recorded_base_sha(&s.arc, &o.task);
+    let _ = write_finish(
+        o,
+        s,
+        Finish {
+            base_sha: &base_sha,
+            head_sha: None,
+            dirty: Vec::new(),
+            pushed: false,
+            remote_sha: None,
+            outcome: "terminated",
+            exit_code: failure.code,
+            failure: Some(failure.message.clone()),
+        },
+    );
+    failure
+}
+
+/// The base commit a first attempt recorded, when it did: the early finish records name it.
+fn recorded_base_sha(arc: &Path, task: &str) -> String {
+    fs::read_to_string(arc.join("attempts").join(task).join("base_sha"))
+        .map(|text| text.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// The paths one attempt works in, and its wall clock.
@@ -331,6 +374,10 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             Err(failure) => return refuse(o, s, &base_sha, &failure.message),
         }
     }
+    // The profile's steps before an attempt: a reused worktree merges the remote main first
+    // (ADR 0048 decision 7). The brief the worker gets may start with a conflict section; the
+    // task file's brief is never changed.
+    let brief = before_attempt(o, s, created, brief)?;
     let start_sha = branch_tip(&s.repo, &s.branch, &s.clock)?.ok_or_else(|| {
         Failure::error(format!("cannot read {} in {}", s.branch, s.repo.display()))
     })?;
@@ -394,6 +441,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
         Err(failure) if failure.wall => return Err(failure),
         Err(failure) => (Vec::new(), Err(failure)),
     };
+    let main_ref = format!("refs/remotes/{}/{}", o.remote, o.main_branch);
     write_json(
         &s.runs.join("execution.json"),
         &json!({
@@ -428,6 +476,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
                 branch: &s.branch,
                 base: &base_sha,
                 start: &start_sha,
+                main: &main_ref,
                 head: head_sha.as_deref(),
                 status_paths: &status_paths,
                 allow_noop: o.allow_noop,
@@ -533,9 +582,7 @@ fn finish_wall(o: &Options, s: &Setup) -> Result<i32, Failure> {
     if let Some(tip) = loose_branch_tip(&s.repo, &s.branch) {
         let _ = write_text(&last_head_path(&s.arc, &o.task), &tip);
     }
-    let base_sha = fs::read_to_string(s.arc.join("attempts").join(&o.task).join("base_sha"))
-        .map(|text| text.trim().to_owned())
-        .unwrap_or_default();
+    let base_sha = recorded_base_sha(&s.arc, &o.task);
     write_finish(
         o,
         s,
@@ -754,8 +801,10 @@ fn write_signal(path: &Path, reason: &str) -> Result<(), Failure> {
 }
 
 /// The task id is a file name and a branch suffix: keep it to characters that are safe in
-/// both, so a caller cannot walk out of the arc directory or name an option.
-fn validate(o: &Options) -> Result<(), Failure> {
+/// both, so a caller cannot walk out of the arc directory or name an option. It is checked
+/// before the wrapper creates anything; the rest of the flags are checked by
+/// [`validate_rest`], after the attempt directories exist.
+fn validate_task(o: &Options) -> Result<(), Failure> {
     if o.task.is_empty() || o.task.len() > 64 {
         return Err(Failure::usage("--task needs 1 to 64 characters"));
     }
@@ -770,6 +819,13 @@ fn validate(o: &Options) -> Result<(), Failure> {
             "--task takes ASCII letters, digits, `-`, `_` and `.` only",
         ));
     }
+    Ok(())
+}
+
+/// The other flags. They are checked after the attempt directory exists, so a refused value
+/// (example: a remote name from `config.toml` with a character a ref cannot hold) still
+/// leaves the `AttemptFinished` record the next pass applies (ADR 0048 decision 9).
+fn validate_rest(o: &Options) -> Result<(), Failure> {
     if o.attempt == 0 {
         return Err(Failure::usage("--attempt is 1-based"));
     }
@@ -1020,6 +1076,170 @@ fn moved_outside(branch: &str) -> String {
     format!("{branch} moved outside this task")
 }
 
+/// The steps the profile lists for before an attempt (ADR 0048 decision 7). A worktree this
+/// attempt created already starts from the fetched main, so no step runs for it. Returns the
+/// brief the worker receives: a step that leaves the worktree mid-merge puts its section
+/// first. The brief stored in the task file never changes.
+fn before_attempt(o: &Options, s: &Setup, created: bool, brief: String) -> Result<String, Failure> {
+    if created {
+        return Ok(brief);
+    }
+    let mut brief = brief;
+    for step in before_attempt_steps(&s.repo)? {
+        if step == crate::gate::MERGE_MAIN
+            && let Some(conflict) = merge_main(&s.repo, &s.worktree, o, &s.branch, &s.clock)?
+        {
+            brief = format!("{}\n\n{brief}", conflict_section(&conflict));
+        }
+    }
+    Ok(brief)
+}
+
+/// The selected profile's `before_attempt` steps. A repository arc is not set up in has no
+/// profile, so no step runs there, the same way the remote and main flags fall back to the git
+/// defaults. A `config.toml` that does not parse fails the attempt instead of being ignored:
+/// a skipped merge would reach the gate as a conflict (ADR 0048 decisions 7 and 10).
+fn before_attempt_steps(repo: &Path) -> Result<Vec<String>, Failure> {
+    match crate::store::Store::open(repo) {
+        Ok(store) => {
+            let config = store
+                .config()
+                .map_err(|error| Failure::error(error.message()))?;
+            Ok(config
+                .gate
+                .selected_profile()
+                .map(|profile| profile.before_attempt.clone())
+                .unwrap_or_default())
+        }
+        Err(crate::store::Error::NotInitialized) => Ok(Vec::new()),
+        Err(error) => Err(Failure::error(error.message())),
+    }
+}
+
+/// One merge of the remote main that conflicted: what the section of the brief reports.
+struct MergeConflict {
+    /// The ref that was merged, `<remote>/<main>`.
+    main_ref: String,
+    /// The remote main commit the merge started from.
+    main_sha: String,
+    /// The conflicted paths, sorted.
+    paths: Vec<String>,
+}
+
+/// `merge-main`: fetch the remote main with the worktree setup's explicit refspec and merge it
+/// into the branch with `--no-ff` (the repository sets `merge.ff=only`, and arc never
+/// rebases). `None` when main is already an ancestor or the merge was clean; `Some` when the
+/// merge conflicted and the worktree stays mid-merge. A fetch, or a merge that fails for
+/// another reason, fails the attempt with git's message, the way a failed worktree setup does.
+fn merge_main(
+    repo: &Path,
+    worktree: &Path,
+    o: &Options,
+    branch: &str,
+    clock: &Clock,
+) -> Result<Option<MergeConflict>, Failure> {
+    let main_ref = format!("refs/remotes/{}/{}", o.remote, o.main_branch);
+    let short_ref = format!("{}/{}", o.remote, o.main_branch);
+    let refspec = format!("+refs/heads/{0}:{1}", o.main_branch, main_ref);
+    match git(repo, &["fetch", &o.remote, &refspec], clock) {
+        Ok(_) => {}
+        Err(failure) if failure.wall => return Err(failure),
+        Err(failure) => {
+            return Err(Failure::error(format!(
+                "cannot fetch {} {}: {}",
+                o.remote, o.main_branch, failure.message
+            )));
+        }
+    }
+    // `merge-base --is-ancestor` answers with its exit code: 0 when main is already in the
+    // branch, and anything else means a merge is needed (or the ref could not be read, which
+    // the merge below then reports).
+    let ancestor = git_raw(
+        worktree,
+        &["merge-base", "--is-ancestor", &main_ref, branch],
+        clock,
+    )?;
+    if ancestor.status.success() {
+        return Ok(None);
+    }
+    let main_sha = git(repo, &["rev-parse", &main_ref], clock)?
+        .trim()
+        .to_owned();
+    let merge = git_raw(
+        worktree,
+        &["merge", "--no-ff", "--no-edit", &main_ref],
+        clock,
+    )?;
+    if merge.status.success() {
+        return Ok(None);
+    }
+    let paths = conflicted_paths(worktree, clock)?;
+    if paths.is_empty() {
+        return Err(Failure::error(format!(
+            "cannot merge {short_ref} into {branch}: {}",
+            merge.stderr.trim()
+        )));
+    }
+    Ok(Some(MergeConflict {
+        main_ref: short_ref,
+        main_sha,
+        paths,
+    }))
+}
+
+/// The paths a conflicted merge left unmerged, sorted.
+fn conflicted_paths(worktree: &Path, clock: &Clock) -> Result<Vec<String>, Failure> {
+    let out = git_raw(
+        worktree,
+        &["diff", "--name-only", "--diff-filter=U", "-z"],
+        clock,
+    )?;
+    if !out.status.success() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<String> = out
+        .stdout
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// The section that goes at the top of the brief when `merge-main` left the worktree
+/// mid-merge: the ref and its short sha, the conflicted paths, and what to do first.
+fn conflict_section(conflict: &MergeConflict) -> String {
+    let short = &conflict.main_sha[..conflict.main_sha.len().min(7)];
+    let paths = conflict
+        .paths
+        .iter()
+        .map(|path| format!("- {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "## Before you start: the worktree is merging {} ({short})\n\n\
+         The worktree is mid-merge: {ref} ({short}) is being merged into your branch, and these \
+         paths conflict:\n\n\
+         {paths}\n\n\
+         Resolve those conflicts first, keeping both sides' intent, and commit the merge with \
+         `git commit --no-edit` before you do anything else.",
+        conflict.main_ref,
+        ref = conflict.main_ref,
+    )
+}
+
+/// The merge base of `a` and `b`, when git finds one.
+fn merge_base(repo: &Path, a: &str, b: &str, clock: &Clock) -> Result<Option<String>, Failure> {
+    let out = git_raw(repo, &["merge-base", a, b], clock)?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let sha = out.stdout.trim();
+    Ok((!sha.is_empty()).then(|| sha.to_owned()))
+}
+
 /// A start refusal: no child runs and nothing is pushed, but the attempt still ends with its
 /// `AttemptFinished` record so the scheduling loop reads the reason. The record is not
 /// written as `last_head`: the moved tip is exactly what a later attempt must keep refusing.
@@ -1203,8 +1423,11 @@ struct Delivery<'a> {
     worktree: &'a Path,
     branch: &'a str,
     base: &'a str,
-    /// The `work/<task>` tip this attempt started from.
+    /// The `work/<task>` tip this attempt started from: the merge the steps made, if any, is
+    /// already in it.
     start: &'a str,
+    /// The ref that names the remote main, for the task's own change against main.
+    main: &'a str,
     head: Option<&'a str>,
     status_paths: &'a Result<Vec<String>, Failure>,
     allow_noop: bool,
@@ -1268,13 +1491,20 @@ fn check_delivery(d: &Delivery<'_>, clock: &Clock) -> Result<(), Failure> {
             dirty.join(", ")
         )));
     }
-    let changed = changed_paths(d.repo, d.base, head, clock)?;
+    let changed = changed_paths(d.repo, d.start, head, clock)?;
     if changed.is_empty() && !d.allow_noop {
         return Err(Failure::error(format!(
             "no change: {head} adds nothing to {}",
-            d.base
+            d.start
         )));
     }
+    // A merge of main brings main's files into the branch. The arc check reads the task's own
+    // change against the main the attempt ran on, so a merge commit never trips it (ADR 0048
+    // decision 8); a fallback to the recorded base covers a repository whose main ref could
+    // not be read.
+    let against_main =
+        merge_base(d.repo, d.main, head, clock)?.unwrap_or_else(|| d.base.to_owned());
+    let changed = changed_paths(d.repo, &against_main, head, clock)?;
     let arc_paths: Vec<&str> = changed
         .iter()
         .map(String::as_str)

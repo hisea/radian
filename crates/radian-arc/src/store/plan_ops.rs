@@ -26,6 +26,14 @@ pub const CHANGE_RECORDS_HEADING: &str = "## Change records";
 /// The heading each rework brief is appended under, with its number.
 pub const REWORK_HEADING: &str = "## Rework";
 
+/// What the heading says after its number when arc, not the lead, wrote the rework: a conflict
+/// with main (ADR 0048 decision 9).
+pub const CONFLICT_REWORK_SUFFIX: &str = " (conflict with main)";
+
+/// What the heading says after its number when arc wrote the rework because the review stage
+/// failed with blocking items (ADR 0048 decision 9).
+pub const REVIEW_REWORK_SUFFIX: &str = " (review)";
+
 /// `radian arc confirm <plan>`: `draft` to `confirmed`.
 ///
 /// Refused when the plan has no tasks (nothing to deliver) and when it is already
@@ -164,6 +172,18 @@ pub fn update_plan(
 /// task moves to `todo.ready`. New tasks are refused: a rework brief continues the task's
 /// session, so it belongs to the task that session ran.
 pub fn add_rework(store: &Store, task: &str, brief: &str) -> Result<(), Error> {
+    add_rework_with(store, task, brief, "")
+}
+
+/// [`add_rework`] with a suffix after the heading's number. The lead's tool passes `""`; the
+/// reworks arc writes itself pass [`CONFLICT_REWORK_SUFFIX`] or [`REVIEW_REWORK_SUFFIX`], so a
+/// reader can tell the two apart (ADR 0048 decision 9).
+pub fn add_rework_with(
+    store: &Store,
+    task: &str,
+    brief: &str,
+    heading_suffix: &str,
+) -> Result<(), Error> {
     if brief.trim().is_empty() {
         return Err(Error::Usage("the rework brief is empty".to_owned()));
     }
@@ -177,7 +197,7 @@ pub fn add_rework(store: &Store, task: &str, brief: &str) -> Result<(), Error> {
             )));
         }
         let number = task.attempt + 1;
-        append_rework(&mut task.body, number, brief);
+        append_rework(&mut task.body, number, brief, heading_suffix);
         task.state = TaskState::Todo;
         task.phase = "ready".to_owned();
         Ok(())
@@ -217,15 +237,15 @@ fn append_change_record(body: &mut String, now: &str, record: &str) {
     body.push_str(&format!("\n### {now}\n\n{}\n", record.trim_end()));
 }
 
-/// Appends one rework brief as its own section.
-fn append_rework(body: &mut String, number: u32, brief: &str) {
+/// Appends one rework brief as its own section, with `heading_suffix` after its number.
+fn append_rework(body: &mut String, number: u32, brief: &str, heading_suffix: &str) {
     let head = body.trim_end().to_owned();
     body.clear();
     if !head.is_empty() {
         body.push_str(&head);
         body.push_str("\n\n");
     }
-    body.push_str(&format!("{REWORK_HEADING} {number}\n\n"));
+    body.push_str(&format!("{REWORK_HEADING} {number}{heading_suffix}\n\n"));
     body.push_str(brief.trim_end());
     body.push('\n');
 }
@@ -321,12 +341,29 @@ mod tests {
     #[test]
     fn a_rework_section_is_numbered_and_keeps_the_brief() {
         let mut body = model::brief_body("the brief");
-        append_rework(&mut body, 1, "do it again\n");
+        append_rework(&mut body, 1, "do it again\n", "");
         assert_eq!(body, "the brief\n\n## Rework 1\n\ndo it again\n");
-        append_rework(&mut body, 2, "and again");
+        append_rework(&mut body, 2, "and again", "");
         assert!(body.contains("## Rework 2\n\nand again\n"), "{body}");
         let mut empty = String::new();
-        append_rework(&mut empty, 1, "only this");
+        append_rework(&mut empty, 1, "only this", "");
         assert_eq!(empty, "## Rework 1\n\nonly this\n");
+    }
+
+    /// The conflict rework arc writes says so in its heading, so a reader can tell it apart
+    /// from the lead's (ADR 0048 decision 9).
+    #[test]
+    fn a_conflict_rework_heading_says_arc_wrote_it() {
+        let mut body = model::brief_body("the brief");
+        append_rework(&mut body, 2, "the conflict", CONFLICT_REWORK_SUFFIX);
+        assert!(
+            body.contains("## Rework 2 (conflict with main)\n\nthe conflict\n"),
+            "{body}"
+        );
+        append_rework(&mut body, 3, "the review", REVIEW_REWORK_SUFFIX);
+        assert!(
+            body.contains("## Rework 3 (review)\n\nthe review\n"),
+            "{body}"
+        );
     }
 }

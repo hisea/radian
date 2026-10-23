@@ -576,7 +576,7 @@ fn write_reverify_result(
 /// `reverify` attempts before it (ADR 0048 decision 11). A reverify attempt costs no worker
 /// and does not use up a retry, so it is invisible to the limit; for a task with no reverify
 /// attempt this is the attempt number itself, as before.
-fn counted_attempt(store: &Store, task: &str, attempt: u32) -> u32 {
+pub(crate) fn counted_attempt(store: &Store, task: &str, attempt: u32) -> u32 {
     attempt.saturating_sub(reverify_attempts(store, task))
 }
 

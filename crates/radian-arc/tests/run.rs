@@ -508,6 +508,112 @@ fn max_auto_rework_pauses_the_plan_and_sets_auto_off() {
     );
 }
 
+/// Publishes `work/<task>` with a commit on `feature.txt`, sets the task to
+/// `review.verifying`, and moves main with a conflicting `feature.txt` in the main clone. The
+/// gate's candidate build then conflicts. Returns the moved main.
+fn a_conflicting_main(repo: &Repo, store: &Store, plan: &str, task: &str) -> String {
+    publish_verifying(repo, store, plan, task);
+    repo.git(&["checkout", "main"]);
+    write(&repo.clone.join("feature.txt"), "main side\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "main side"]);
+    repo.git(&["push", "origin", "main"]);
+    repo.git(&["rev-parse", "HEAD"]).trim().to_owned()
+}
+
+/// A `commands` conflict at the gate returns the task to `todo.ready` by itself, with the brief
+/// arc wrote and its own line; `auto_rework` is untouched. The blocked dependency keeps the
+/// next attempt from being claimed, so the assertions see the state the conflict left.
+/// Mutations: drop the brief, count the rework in `auto_rework`, or use `base_sha` as the
+/// automatic path's trigger — the paths and the line fail.
+#[test]
+fn a_commands_conflict_returns_the_task_to_todo_ready_by_itself() {
+    let repo = Repo::new("run-conflict");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "conflict");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let task = add_task(&store, &plan, "work", &[&blocker]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    store
+        .change_task(&blocker, |task| {
+            task.phase = "blocked".to_owned();
+            Ok(())
+        })
+        .expect("the blocker waits");
+    commands(&repo, "true");
+    let moved = a_conflicting_main(&repo, &store, &plan, &task);
+
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task) == ("todo".to_owned(), "ready".to_owned())
+    });
+    assert!(
+        run.contains(&format!(
+            "{task} conflict with main -> todo.ready (automatic rework)"
+        )),
+        "{run}"
+    );
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        stored.auto_rework, 0,
+        "a conflict rework raised auto_rework: {run}"
+    );
+    assert_eq!(plan_auto(&store, &plan), "run", "{run}");
+    assert_eq!(stored.attempt, 1, "the next attempt was claimed: {run}");
+    assert!(
+        !repo.attempt_dir(&task, 2).exists(),
+        "the next attempt was claimed"
+    );
+    let short = &moved[..7];
+    assert!(
+        stored.body.contains("## Rework 2 (conflict with main)"),
+        "{}",
+        stored.body
+    );
+    assert!(
+        stored
+            .body
+            .contains(&format!("conflicted with main at `{short}` in `commands`")),
+        "{}",
+        stored.body
+    );
+    assert!(stored.body.contains("- feature.txt"), "{}", stored.body);
+}
+
+/// A plan at its automatic rework limit is not paused by a conflict: the conflict rework is
+/// not an automatic rework. Mutation: count it and the plan pauses (`auto` becomes `off`).
+#[test]
+fn a_plan_at_its_auto_rework_limit_is_not_paused_by_a_conflict() {
+    let repo = Repo::new("run-conflict-limit");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "conflict-limit");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let task = add_task(&store, &plan, "work", &[&blocker]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    store
+        .change_task(&blocker, |task| {
+            task.phase = "blocked".to_owned();
+            Ok(())
+        })
+        .expect("the blocker waits");
+    tune(&repo, "max_auto_rework = 2", "max_auto_rework = 0");
+    commands(&repo, "true");
+    a_conflicting_main(&repo, &store, &plan, &task);
+
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task) == ("todo".to_owned(), "ready".to_owned())
+    });
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(stored.auto_rework, 0, "{run}");
+    assert_eq!(
+        plan_auto(&store, &plan),
+        "run",
+        "the conflict paused the plan: {run}"
+    );
+    assert!(!run.contains("paused"), "{run}");
+}
+
 /// A plan budget pauses the plan; `run` respects the pause and starts nothing more.
 #[test]
 fn run_respects_a_plan_budget_pause() {
@@ -1262,6 +1368,333 @@ fn a_refused_gate_is_reported_once_and_not_restarted() {
         gate_record(&repo, &task).is_some_and(|record| record["status"] == "refused"),
         "the refusal record was cleared"
     );
+}
+
+// ---- a gate or a wrapper that fails at once -------------------------------------------
+
+/// How many gate processes appended to `runs/<task>/gate.log`: the gate logs one line per
+/// start, so this counts the starts rather than the lines a pass printed.
+fn gate_starts(repo: &Repo, task: &str) -> usize {
+    fs::read_to_string(repo.arc().join("runs").join(task).join("gate.log"))
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+/// Runs one-shot passes until a gate record with `status` and these inputs is there, and
+/// returns what the passes printed. The first pass that records a no-record gate may be a
+/// later pass of the run that started it, or the next run: a gate process takes a moment to
+/// exit, so the test does not assume which.
+fn run_until_gate_record(
+    repo: &Repo,
+    task: &str,
+    env: &[(&str, String)],
+    done: impl Fn(&Value) -> bool,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut output = String::new();
+    loop {
+        let run = repo.radian_with_env(&["arc", "run"], env);
+        assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
+        output.push_str(&run.stdout);
+        if let Some(record) = gate_record(repo, task)
+            && done(&record)
+        {
+            return output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the gate record did not reach the expected state within the limit:\n{output}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A gate process that exits before writing any record is reported once and started at most
+/// once per input: one-shot passes settle instead of starting a gate on every pass. Mutation:
+/// drop the no-record guard and a `run` starts a gate until it reaches its pass limit.
+#[test]
+fn a_gate_that_exits_without_a_record_is_reported_once_and_not_restarted() {
+    let repo = Repo::new("run-gate-no-record");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "no-record");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    let env = [(background::EXIT_WITHOUT_RECORD_ENV, "1".to_owned())];
+    let note = format!("{task} verify cannot run: its gate exited without a record");
+
+    let first = run_until_gate_record(&repo, &task, &env, |record| record["status"] == "no_record");
+    assert_eq!(
+        first.matches("verify started").count(),
+        1,
+        "the pass started more than one gate: {first}"
+    );
+    assert!(first.contains(&note), "the pass did not report it: {first}");
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["kind"], "verify", "{record}");
+    assert_eq!(record["attempt"], format!("{task}-1"), "{record}");
+    assert!(
+        record["inputs"]
+            .as_str()
+            .is_some_and(|inputs| !inputs.is_empty()),
+        "the record kept the inputs the pass started with: {record}"
+    );
+    let inputs = record["inputs"].clone();
+
+    // Later passes start nothing and print the same line.
+    for pass in 1..=2 {
+        let run = repo.radian_with_env(&["arc", "run"], &env);
+        assert_eq!(run.code, 0, "pass {pass}: {}", run.stderr);
+        assert!(
+            !run.stdout.contains("verify started"),
+            "pass {pass} restarted the gate: {}",
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains(&note),
+            "pass {pass} did not report it: {}",
+            run.stdout
+        );
+    }
+    assert_eq!(gate_starts(&repo, &task), 1, "the gate ran more than once");
+    assert_eq!(
+        gate_record(&repo, &task).expect("the record")["inputs"],
+        inputs,
+        "the record was rewritten"
+    );
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+
+    // `show` prints the same text as the `rework_reason`.
+    let show = repo.radian(&["arc", "show", &task]);
+    assert_eq!(show.code, 0, "show: {}", show.stderr);
+    assert!(show.stdout.contains("rework_reason"), "{}", show.stdout);
+    assert!(
+        show.stdout.contains("its gate exited without a record"),
+        "{}",
+        show.stdout
+    );
+}
+
+/// A changed head allows one new start: the inputs the no-record record kept no longer match.
+#[test]
+fn a_changed_head_starts_a_gate_that_left_no_record_once_more() {
+    let repo = Repo::new("run-gate-no-record-head");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "no-record-head");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    let env = [(background::EXIT_WITHOUT_RECORD_ENV, "1".to_owned())];
+
+    run_until_gate_record(&repo, &task, &env, |record| record["status"] == "no_record");
+    assert_eq!(gate_starts(&repo, &task), 1);
+    let before = gate_record(&repo, &task).expect("the record")["inputs"].clone();
+
+    // A new commit on the same attempt: a new head, so a new start, and the pass of the run
+    // that records it may be a later one.
+    let branch = format!("work/{task}");
+    repo.git(&["checkout", &branch]);
+    write(&repo.clone.join("second.txt"), "second\n");
+    repo.git(&["add", "second.txt"]);
+    repo.git(&["commit", "-m", "second"]);
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    repo.git(&["push", "origin", &branch]);
+    store
+        .change_task(&task, |task| {
+            task.head_sha = Some(head.clone());
+            Ok(())
+        })
+        .expect("the new head");
+
+    let output = run_until_gate_record(&repo, &task, &env, |record| {
+        record["status"] == "no_record" && record["inputs"] != before
+    });
+    assert_eq!(
+        output.matches("verify started").count(),
+        1,
+        "the new head did not start exactly one gate: {output}"
+    );
+    assert_eq!(
+        gate_starts(&repo, &task),
+        2,
+        "the gate was not started again"
+    );
+}
+
+/// Under `--watch`, a gate that left no record is not started again across intervals.
+#[test]
+fn a_watch_pass_does_not_restart_a_gate_that_left_no_record() {
+    let repo = Repo::new("run-gate-no-record-watch");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "no-record-watch");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    let env = [(background::EXIT_WITHOUT_RECORD_ENV, "1".to_owned())];
+
+    let watch =
+        repo.spawn_in_own_group_with_env(&["arc", "run", "--watch", "--interval", "5"], &env);
+    wait_until(Duration::from_secs(60), "the no-record gate record", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "no_record")
+    });
+    let at = gate_record(&repo, &task).expect("the record")["at"].clone();
+
+    // Two intervals later the gate has not been started again.
+    std::thread::sleep(Duration::from_secs(11));
+    assert_eq!(
+        gate_starts(&repo, &task),
+        1,
+        "a watch interval restarted the gate"
+    );
+    assert_eq!(
+        gate_record(&repo, &task).expect("the record")["at"],
+        at,
+        "the no-record record was rewritten across intervals"
+    );
+
+    // The loop is in its own process group: signal the group the way Ctrl-C would.
+    assert!(
+        signal_group(watch.id(), libc::SIGTERM),
+        "SIGTERM the watch group"
+    );
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.matches("verify started").count(),
+        1,
+        "the watch loop started the gate more than once: {stdout}"
+    );
+    assert_eq!(gate_starts(&repo, &task), 1);
+}
+
+/// A wrapper that refuses an argument from `config.toml` fails after the attempt directory
+/// exists, so it leaves its record and the next pass applies it: the slot is free at once and
+/// the task waits for its retry. Mutation: let such a failure leave no record and the slot
+/// stays held until the stall window.
+#[test]
+fn a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass() {
+    let repo = Repo::new("run-wrapper-usage");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "wrapper-usage");
+    let a = add_task(&store, &plan, "a", &[]);
+    let b = add_task(&store, &plan, "b", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    // A remote name the wrapper refuses: it never reaches a worker, and it never fetches.
+    tune(&repo, "remote = \"origin\"", "remote = \"orig in\"");
+
+    let output = run_until(&repo, Duration::from_secs(30), || {
+        state(&store, &a) == ("todo".to_owned(), "retry_wait".to_owned())
+            && state(&store, &b).0 == "doing"
+    });
+    assert_eq!(
+        state(&store, &a),
+        ("todo".to_owned(), "retry_wait".to_owned()),
+        "A keeps the slot until its stall window: {output}"
+    );
+    assert!(
+        output.contains(&format!("{b}-1 started -> doing.running")),
+        "the freed slot did not start B: {output}"
+    );
+    let result: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&a, 1).join("attempt_result.json"))
+            .expect("A's attempt result"),
+    )
+    .expect("the attempt result parses");
+    assert_eq!(result["class"], "infrastructure", "{result}");
+    assert!(
+        result["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("--remote")),
+        "the reason names the refused argument: {result}"
+    );
+    assert_eq!(
+        store.load_task(&a).expect("A reads").item.auto_rework,
+        0,
+        "a retry is not a rework"
+    );
+}
+
+/// A wrapper whose task worktree is locked by another attempt fails the same way: it records
+/// the exit `4` and the next pass applies it, freeing the slot at once.
+#[test]
+fn a_wrapper_whose_worktree_lock_is_held_frees_the_slot_in_the_next_pass() {
+    use fs2::FileExt as _;
+
+    let repo = Repo::new("run-wrapper-locked");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "wrapper-locked");
+    let a = add_task(&store, &plan, "a", &[]);
+    let b = add_task(&store, &plan, "b", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    commands(&repo, "true");
+    let mock = Mock::start(vec![commit_reply("c1", "b.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    // The worktree a first attempt would have left, held by another attempt.
+    let base = repo.main_sha();
+    let worktree = repo.worktree(&a);
+    fs::create_dir_all(worktree.parent().expect("the worktrees directory"))
+        .expect("the worktrees directory");
+    let branch = format!("work/{a}");
+    repo.git(&[
+        "worktree",
+        "add",
+        "-b",
+        &branch,
+        worktree.to_str().expect("a utf-8 path"),
+        &base,
+    ]);
+    let lock = fs::File::open(&worktree).expect("the worktree opens");
+    lock.lock_exclusive().expect("hold the worktree lock");
+
+    let output = run_until(&repo, Duration::from_secs(30), || {
+        state(&store, &a) == ("todo".to_owned(), "retry_wait".to_owned())
+            && state(&store, &b).0 == "doing"
+    });
+    assert_eq!(
+        state(&store, &a),
+        ("todo".to_owned(), "retry_wait".to_owned()),
+        "A keeps the slot until its stall window: {output}"
+    );
+    assert!(
+        output.contains(&format!("{b}-1 started -> doing.running")),
+        "the freed slot did not start B: {output}"
+    );
+    let result: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&a, 1).join("attempt_result.json"))
+            .expect("A's attempt result"),
+    )
+    .expect("the attempt result parses");
+    assert_eq!(result["class"], "infrastructure", "{result}");
+    assert!(
+        result["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("another attempt holds the lock")),
+        "the reason names the held worktree lock: {result}"
+    );
+
+    // Let the attempt that held the lock go, cancel A so its retry cannot run another worker,
+    // and let B finish so the test leaves nothing behind.
+    drop(lock);
+    let canceled = repo.radian(&["arc", "cancel", &a]);
+    assert_eq!(canceled.code, 0, "cancel A: {}", canceled.stderr);
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &b).1 == "awaiting_human"
+    });
 }
 
 /// The heartbeat covers the whole wrapper: a push that takes longer than the stall window

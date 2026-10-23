@@ -141,7 +141,7 @@ A bare `radian arc` would open its interface, which this build does not have yet
 The subcommands are `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, `reset-budget`, and `mcp`; run `radian arc --help`.
 arc's exit codes are its own: `3` means the state does not allow the operation and `4`
 means a lock is held.
-See [`arc`](arc.md) for every subcommand, flag, file field, and exit code.
+See [`arc`](arc.md) for every subcommand, flag, and exit code, [`arc-gate`](arc-gate.md) for the gate and its failures, and [`arc-files`](arc-files.md) for every file field and configuration key.
 
 ```sh
 radian arc init

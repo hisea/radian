@@ -12,7 +12,7 @@
 - `arc-gate.sh quick|full`: the arc gate. `quick` is fmt, clippy, the two builds,
   and nextest for the crates changed since `origin/main` plus `radian-tui`; `full`
   is `verify.sh`, here or on `$ARC_GATE_HOST` inside `$ARC_GATE_TREE`. Both are
-  documented in `docs/user/arc.md`, including the absolute-path trust rule.
+  documented in `docs/user/arc-gate.md`, including the absolute-path trust rule.
 
 ## Release
 

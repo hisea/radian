@@ -3,9 +3,11 @@
 //!
 //! - [`verify`] runs the gate's built stages against the verification candidate for the
 //!   task's pushed `head_sha` and moves the task to `review.awaiting_human` or
-//!   `review.rework_pending`. It is split into [`plan_verification`], [`run_stages`] (which
-//!   writes verdicts only) and [`finish_verification`] (which moves the state), so a
-//!   background gate can run the stages and a later pass can apply them. The candidate is
+//!   `review.rework_pending`. A conflict with main, when the profile merges main before an
+//!   attempt, moves it to `todo.ready` with a brief arc writes itself (ADR 0048 decision 9).
+//!   It is split into [`plan_verification`], [`run_stages`] (which writes verdicts only) and
+//!   [`finish_verification`] (which moves the state), so a background gate can run the stages
+//!   and a later pass can apply them. The candidate is
 //!   `head_sha` when the remote main is its ancestor, else a merge of `head_sha` onto the
 //!   remote main (ADR 0048 decision 10); `verified_sha` stays the task's own commit.
 //! - [`merge`] takes the owner's approval for `verified_sha`, builds the integration
@@ -32,9 +34,10 @@ use serde_json::{Value, json};
 use sha2::Digest;
 
 use crate::gate::{
-    CommandRun, IntegrationRun, ReviewRun, Stage, StageSpec, Verdict, attempt_dir,
-    effective_stages, merge_ready, required_passed, verdict_path, verdict_set_digest,
+    CommandRun, IntegrationRun, PreviousReview, ReviewItem, ReviewRun, Stage, StageSpec, Verdict,
+    attempt_dir, effective_stages, merge_ready, required_passed, verdict_path, verdict_set_digest,
 };
+use crate::store::attempt_ops::Paused;
 use crate::store::{Error, Store, model};
 
 /// The file in an attempt's run directory that holds the last verify or merge reason.
@@ -117,9 +120,49 @@ impl Reason {
     }
 }
 
+/// A conflict with main whose rework arc wrote itself (ADR 0048 decision 9). The task went to
+/// `todo.ready`, or to `failed.exhausted` when the attempt that conflicted was its last one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    /// The remote main commit the change conflicted with.
+    pub main_sha: String,
+    /// The stage that conflicted.
+    pub stage: Stage,
+    /// The conflicted paths, as the verdict lists them.
+    pub paths: Vec<String>,
+    /// The task went to `failed.exhausted` instead of `todo.ready`.
+    pub exhausted: bool,
+}
+
+/// The one line a conflict-with-main transition prints.
+fn conflict_line(task: &str, exhausted: bool) -> String {
+    if exhausted {
+        format!("{task} conflict with main -> failed.exhausted")
+    } else {
+        format!("{task} conflict with main -> todo.ready (automatic rework)")
+    }
+}
+
+/// The review rework arc wrote itself (ADR 0048 decision 9): the task went to `todo.ready`
+/// with a brief that lists the review's blocking items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRework {
+    /// The attempt's review verdict, which the brief tells the worker to read.
+    pub verdict: PathBuf,
+    /// The blocking items the brief lists, as the verdict recorded them.
+    pub items: Vec<ReviewItem>,
+}
+
+/// The one line a review rework's transition prints.
+fn review_line(task: &str) -> String {
+    format!("{task} review blocking -> todo.ready (automatic rework)")
+}
+
 /// What one verification did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verified {
+    /// The task the verification ran for.
+    pub task: String,
     /// The attempt the gate ran for.
     pub attempt_id: String,
     /// The state the task is in after verification.
@@ -132,11 +175,27 @@ pub struct Verified {
     pub digest: Option<String>,
     /// The stages whose existing verdicts were reused instead of rerun.
     pub reused: Vec<Stage>,
+    /// Set when a conflict with main wrote the next attempt's brief instead of waiting for
+    /// the lead.
+    pub conflict: Option<Conflict>,
+    /// Set when a failed review wrote the next attempt's brief instead of waiting for the lead.
+    pub review: Option<ReviewRework>,
+    /// Set when the automatic rework count paused the plan; the task stays in
+    /// `review.rework_pending` and `run` prints the pause.
+    pub paused: Option<Paused>,
 }
 
 impl Verified {
     /// The one line `radian arc start` prints for the verification.
     pub fn line(&self) -> String {
+        if let Some(conflict) = &self.conflict {
+            return conflict_line(&self.task, conflict.exhausted);
+        }
+        // A paused plan did not move the task to `todo.ready`, so it prints the failure line
+        // and the pause line follows it.
+        if self.review.is_some() && self.paused.is_none() {
+            return review_line(&self.task);
+        }
         let reason = self
             .reason
             .as_ref()
@@ -175,7 +234,7 @@ impl Reverified {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Merged {
     pub task: String,
-    /// `done` or `review`.
+    /// `done`, `review` or `todo`.
     pub state: &'static str,
     pub phase: String,
     /// The rework reason, when the integration failed.
@@ -186,11 +245,17 @@ pub struct Merged {
     pub rounds: u32,
     /// A cleanup step that failed after the merge; the merge itself is done.
     pub warning: Option<String>,
+    /// Set when a conflict with main wrote the next attempt's brief instead of waiting for
+    /// the lead.
+    pub conflict: Option<Conflict>,
 }
 
 impl Merged {
     /// The line `radian arc merge` prints.
     pub fn line(&self) -> String {
+        if let Some(conflict) = &self.conflict {
+            return conflict_line(&self.task, conflict.exhausted);
+        }
         let mut line = format!("{} {}.{}", self.task, self.state, self.phase);
         if let Some(candidate) = &self.candidate_sha {
             line.push_str(&format!(" ({candidate})"));
@@ -227,9 +292,10 @@ impl Rejected {
 /// `review.verifying` and the reason is recorded. A verdict that already exists for this
 /// attempt and stage is reused, so a crash between stages resumes instead of rerunning.
 ///
-/// A `commands`, `mutation` or `review` failure moves the task to `review.rework_pending`.
-/// Every required stage passing moves it to `review.awaiting_human`, with `verified_sha` and
-/// `verdict_set_digest` recorded.
+/// A `commands`, `mutation` or `review` failure moves the task to `review.rework_pending`, or
+/// to `todo.ready` with a brief arc writes when it is a conflict with main and the profile
+/// merges main before an attempt (ADR 0048 decision 9). Every required stage passing moves it
+/// to `review.awaiting_human`, with `verified_sha` and `verdict_set_digest` recorded.
 ///
 /// # Errors
 ///
@@ -387,6 +453,29 @@ fn verification_inputs(store: &Store, task: &model::TaskFile, remote_sha: &str) 
     format!("{:x}", hasher.finalize())
 }
 
+/// A digest of what an integration depends on: `config.toml`, the task's `head_sha` and
+/// `base_sha`, and the remote main over the wire. A pass records it when it starts an
+/// integration gate, so a gate that exits without a record is not started again while these
+/// inputs are unchanged, and a new head, a new main or a changed profile allows one new start
+/// (ADR 0048 decision 10). `None` when the config, the task or the remote cannot be read.
+#[must_use]
+pub fn integration_inputs(store: &Store, task_id: &str) -> Option<String> {
+    let task = store.load_task(task_id).ok()?.item;
+    let config = fs::read(store.root().join(crate::store::CONFIG_FILE)).unwrap_or_default();
+    let (remote, main_branch) = store.repository_names().ok()?;
+    let main = ls_remote_branch(store.repo(), &remote, &main_branch).ok()??;
+    let fields = json!({
+        "kind": "integration",
+        "head": task.head_sha,
+        "base": task.base_sha,
+        "main": main,
+    });
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&config);
+    hasher.update(fields.to_string().as_bytes());
+    Some(format!("{:x}", hasher.finalize()))
+}
+
 /// Runs the stages the plan lists that have no verdict yet, in order, and stops at the first
 /// failure. A verdict already written for this attempt and stage is reused, so a gate that
 /// died between stages resumes instead of rerunning (ADR 0048 decision 10). This writes
@@ -442,15 +531,6 @@ pub fn run_stages(
             .run()
             .map_err(gate_error)?,
             Stage::Review => {
-                // The diff the session reviews is the task's own change (ADR 0048 decision
-                // 10), so the task must still carry the base it started from.
-                let base = task
-                    .base_sha
-                    .clone()
-                    .filter(|sha| !sha.is_empty())
-                    .ok_or_else(|| {
-                        Error::Refused(format!("task `{}` has no `base_sha`", task.id))
-                    })?;
                 let review = &plan.config.gate.review;
                 let (exec_args, key) = match &review.exec_args {
                     Some(args) => (args.as_slice(), "gate.review.exec_args"),
@@ -471,17 +551,29 @@ pub fn run_stages(
                     .prompt_file
                     .as_ref()
                     .map(|file| store.repo().join(file));
+                // A review that follows an earlier one of this task is a rework round: the
+                // stage reviews the increment and judges the items arc moved (ADR 0048
+                // decision 10).
+                let earlier = previous_review(store, &task.id, &plan.label);
+                let earlier = earlier.as_ref().map(|(_, verdict)| PreviousReview {
+                    sha: verdict.sha.clone(),
+                    blocking: verdict
+                        .review
+                        .as_ref()
+                        .map(|review| review.blocking.clone())
+                        .unwrap_or_default(),
+                });
                 ReviewRun {
                     repository: store.repo(),
                     remote: &plan.remote,
                     task: &task.id,
                     attempt: &plan.label,
                     sha: &plan.head,
-                    base_sha: &base,
                     brief: &task.body,
                     main_ref: &plan.main_ref,
                     exec_args,
                     prompt_file: prompt_file.as_deref(),
+                    previous: earlier.as_ref(),
                     timeout: review.timeout(),
                     program: review_program,
                 }
@@ -566,12 +658,16 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
     // A pass leaves no rework reason behind for `show` to print.
     clear_reason(store, &task.id, &plan.label);
     Ok(Verified {
+        task: task.id.clone(),
         attempt_id: plan.label.clone(),
         state: "review",
         phase: "awaiting_human".to_owned(),
         reason: None,
         digest: Some(digest),
         reused: Vec::new(),
+        conflict: None,
+        review: None,
+        paused: None,
     })
 }
 
@@ -632,8 +728,59 @@ fn failed_stage(
     verdict: &Verdict,
     path: PathBuf,
 ) -> Result<Verified, Error> {
-    let reason = Reason::with_verdict("verify", verdict.stage, failure_text(verdict), path);
+    let reason = Reason::with_verdict("verify", verdict.stage, failure_text(verdict), path.clone());
     reason.record(store, &task.id, label);
+    // A conflict with main starts the next attempt mid-merge, so arc writes its brief itself
+    // when the profile runs `merge-main` before an attempt (ADR 0048 decision 9).
+    if let Some(conflict) = conflict_auto_rework(store, task, verdict)? {
+        return Ok(Verified {
+            task: task.id.clone(),
+            attempt_id: label.to_owned(),
+            state: if conflict.exhausted { "failed" } else { "todo" },
+            phase: if conflict.exhausted {
+                "exhausted"
+            } else {
+                "ready"
+            }
+            .to_owned(),
+            reason: Some(reason),
+            digest: None,
+            reused: Vec::new(),
+            conflict: Some(conflict),
+            review: None,
+            paused: None,
+        });
+    }
+    // A failed review writes its own rework when the plan is not at `auto` `off` (ADR 0048
+    // decision 9). The pause is the same limit the other automatic reworks use.
+    if let Some((review, paused)) = review_auto_rework(store, task, verdict, &path)? {
+        let paused_here = paused.is_some();
+        // The rework path below records the sha it failed on and drops the digest; the task
+        // keeps that record whether it returns to `todo.ready` or pauses here.
+        store.change_task(&task.id, |task| {
+            task.verified_sha = Some(head.to_owned());
+            task.verdict_set_digest = None;
+            task.retry_at = None;
+            Ok(())
+        })?;
+        return Ok(Verified {
+            task: task.id.clone(),
+            attempt_id: label.to_owned(),
+            state: if paused_here { "review" } else { "todo" },
+            phase: if paused_here {
+                "rework_pending"
+            } else {
+                "ready"
+            }
+            .to_owned(),
+            reason: Some(reason),
+            digest: None,
+            reused: Vec::new(),
+            conflict: None,
+            review: Some(review),
+            paused,
+        });
+    }
     store.change_task(&task.id, |task| {
         task.state = model::TaskState::Review;
         task.phase = "rework_pending".to_owned();
@@ -643,13 +790,165 @@ fn failed_stage(
         Ok(())
     })?;
     Ok(Verified {
+        task: task.id.clone(),
         attempt_id: label.to_owned(),
         state: "review",
         phase: "rework_pending".to_owned(),
         reason: Some(reason),
         digest: None,
         reused: Vec::new(),
+        conflict: None,
+        review: None,
+        paused: None,
     })
+}
+
+/// The conflict rework arc writes itself (ADR 0048 decision 9): when the profile runs
+/// `merge-main` before an attempt, a stage that failed with reason `conflict` returns the task
+/// to `todo.ready` with the next attempt's brief instead of waiting for the lead.
+///
+/// `None` when the verdict is not a conflict or the profile does not run `merge-main`; the
+/// caller then keeps the path to `review.rework_pending`. A task on its last counted attempt
+/// goes to `failed.exhausted` instead, and no brief is written.
+fn conflict_auto_rework(
+    store: &Store,
+    task: &model::TaskFile,
+    verdict: &Verdict,
+) -> Result<Option<Conflict>, Error> {
+    if verdict.reason.as_deref() != Some("conflict") {
+        return Ok(None);
+    }
+    let config = store.config()?;
+    let Some(profile) = config.gate.selected_profile() else {
+        return Ok(None);
+    };
+    if !profile.runs_merge_main() {
+        return Ok(None);
+    }
+    // A verification verdict records `main_sha`; an integration verdict records the main it
+    // merged onto as `base_sha`.
+    let main_sha = verdict
+        .main_sha
+        .as_deref()
+        .filter(|sha| !sha.is_empty())
+        .or_else(|| verdict.base_sha.as_deref().filter(|sha| !sha.is_empty()))
+        .unwrap_or_default()
+        .to_owned();
+    let max = task.max_attempts.unwrap_or(config.limits.max_attempts);
+    let exhausted =
+        crate::store::attempt_ops::counted_attempt(store, &task.id, task.attempt) >= max;
+    let conflict = Conflict {
+        main_sha,
+        stage: verdict.stage,
+        paths: verdict.conflict_paths.clone(),
+        exhausted,
+    };
+    if exhausted {
+        store.change_task(&task.id, |task| {
+            if task.state == model::TaskState::Review {
+                task.state = model::TaskState::Failed;
+                task.phase = "exhausted".to_owned();
+                task.retry_at = None;
+            }
+            Ok(())
+        })?;
+        return Ok(Some(conflict));
+    }
+    let brief = conflict_rework_brief(&conflict);
+    crate::store::plan_ops::add_rework_with(
+        store,
+        &task.id,
+        &brief,
+        crate::store::plan_ops::CONFLICT_REWORK_SUFFIX,
+    )?;
+    Ok(Some(conflict))
+}
+
+/// The fixed, short brief of a conflict rework (ADR 0048 decision 9): the main it conflicted
+/// with, the stage, the paths, and what the next attempt does first.
+fn conflict_rework_brief(conflict: &Conflict) -> String {
+    let short = &conflict.main_sha[..conflict.main_sha.len().min(7)];
+    let paths = if conflict.paths.is_empty() {
+        "- none listed in the verdict".to_owned()
+    } else {
+        conflict
+            .paths
+            .iter()
+            .map(|path| format!("- {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "The change conflicted with main at `{short}` in `{}`.\n\n\
+         Conflicted paths:\n\n{paths}\n\n\
+         The next attempt starts mid-merge. Resolve the conflict keeping both sides' intent, \
+         commit the merge (`git commit --no-edit`), rebuild, run the touched crates' tests, and \
+         change nothing else.",
+        conflict.stage
+    )
+}
+
+/// The review rework arc writes itself (ADR 0048 decision 9): a `review` stage that failed with
+/// blocking items and a plan whose `auto` is not `off` returns the task to `todo.ready` with
+/// the next attempt's brief, or pauses the plan at `max_auto_rework` and leaves the task in
+/// `review.rework_pending`.
+///
+/// `None` when the verdict is not a review failure with blocking items, or the plan is at
+/// `auto` `off`: the caller then keeps the path to `review.rework_pending`.
+fn review_auto_rework(
+    store: &Store,
+    task: &model::TaskFile,
+    verdict: &Verdict,
+    path: &Path,
+) -> Result<Option<(ReviewRework, Option<Paused>)>, Error> {
+    if verdict.stage != Stage::Review || verdict.reason.as_deref() != Some("review_blocking") {
+        return Ok(None);
+    }
+    let Some(review) = verdict.review.as_ref() else {
+        return Ok(None);
+    };
+    if review.blocking.is_empty() {
+        return Ok(None);
+    }
+    let plan = store.load_plan(&task.plan)?;
+    if plan.changed_outside_arc || plan.item.auto == "off" {
+        return Ok(None);
+    }
+    // The count lives in `review.rework_pending`, where the pause rule and `show` read it
+    // (decision 12).
+    to_rework(store, &task.id)?;
+    let paused = crate::store::attempt_ops::record_auto_rework(store, &task.id)?;
+    let rework = ReviewRework {
+        verdict: path.to_path_buf(),
+        items: review.blocking.clone(),
+    };
+    if paused.is_some() {
+        return Ok(Some((rework, paused)));
+    }
+    let brief = review_rework_brief(&rework);
+    crate::store::plan_ops::add_rework_with(
+        store,
+        &task.id,
+        &brief,
+        crate::store::plan_ops::REVIEW_REWORK_SUFFIX,
+    )?;
+    Ok(Some((rework, None)))
+}
+
+/// The fixed brief of a review rework (ADR 0048 decision 9): what to fix, the blocking items as
+/// `[level] path:line text`, and the verdict to read for detail.
+fn review_rework_brief(rework: &ReviewRework) -> String {
+    let items = rework
+        .items
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "The review found these items. Fix them and nothing else, append commits to the \
+         branch, and do not rebase.\n\n{items}\n\nRead the verdict for detail: `{}`",
+        rework.verdict.display()
+    )
 }
 
 /// The task's `extra_stages` as stage specs. Every name was checked when the task file was
@@ -1035,6 +1334,7 @@ fn finish_integration(
         candidate_sha: Some(candidate),
         rounds: round,
         warning,
+        conflict: None,
     }))
 }
 
@@ -1054,6 +1354,25 @@ fn integration_failed(
         integration_verdict(store, &context.task_id, integration_label)?,
     );
     reason.record(store, &context.task_id, &context.label);
+    // The same conflict path as a failed verification stage (ADR 0048 decision 9).
+    let task = store.load_task(&context.task_id)?.item;
+    if let Some(conflict) = conflict_auto_rework(store, &task, verdict)? {
+        return Ok(Merged {
+            task: context.task_id.clone(),
+            state: if conflict.exhausted { "failed" } else { "todo" },
+            phase: if conflict.exhausted {
+                "exhausted"
+            } else {
+                "ready"
+            }
+            .to_owned(),
+            reason: Some(reason.text()),
+            candidate_sha: None,
+            rounds: round,
+            warning: None,
+            conflict: Some(conflict),
+        });
+    }
     to_rework(store, &context.task_id)?;
     Ok(Merged {
         task: context.task_id.clone(),
@@ -1063,6 +1382,7 @@ fn integration_failed(
         candidate_sha: None,
         rounds: round,
         warning: None,
+        conflict: None,
     })
 }
 
@@ -1123,43 +1443,100 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
         )));
     }
     if phase == "integrating" {
-        if let Some(record) = crate::gate::background::read(store, task_id)
-            && record.kind == "integration"
-            && record.status != "running"
-        {
-            crate::gate::background::clear(store, task_id);
-            if record.status == "error" {
-                return Err(Error::Failed(
-                    record
-                        .text
-                        .unwrap_or_else(|| "the integration gate failed".to_owned()),
-                ));
+        // A gate record of another kind belongs to verification.
+        let record = crate::gate::background::read(store, task_id)
+            .filter(|record| record.kind == "integration");
+        if let Some(record) = &record {
+            match record.status.as_str() {
+                // A start or a running gate is still the lock's business: the lock below is
+                // what decides, and a `running` record carries the integration label, not the
+                // attempt id.
+                "running" => {}
+                // The pass wrote the inputs it started the integration with and the gate
+                // wrote nothing: a new start with the same inputs would only repeat it.
+                crate::gate::background::STARTED => {
+                    if !crate::gate::background::running(store, task_id)
+                        && record.attempt == attempt_label(&task)?
+                        && let Some(inputs) = record.inputs.clone()
+                    {
+                        crate::gate::background::write_no_record(
+                            store,
+                            task_id,
+                            "integration",
+                            &record.attempt,
+                            &inputs,
+                        )?;
+                        return Ok(MergeStep::note(format!(
+                            "{task_id} integration cannot run: {}",
+                            crate::gate::background::NO_RECORD_TEXT
+                        )));
+                    }
+                }
+                crate::gate::background::NO_RECORD => {
+                    let current = integration_inputs(store, task_id);
+                    let reported = format!(
+                        "{task_id} integration cannot run: {}",
+                        crate::gate::background::NO_RECORD_TEXT
+                    );
+                    if record.attempt == attempt_label(&task)?
+                        && current.as_deref() == record.inputs.as_deref()
+                    {
+                        return Ok(MergeStep::note(reported));
+                    }
+                    // The inputs changed (a new head, a new main, a changed profile), or the
+                    // record belongs to an earlier attempt: start one new gate below.
+                }
+                _ => {
+                    crate::gate::background::clear(store, task_id);
+                    if record.status == "error" {
+                        return Err(Error::Failed(
+                            record
+                                .text
+                                .clone()
+                                .unwrap_or_else(|| "the integration gate failed".to_owned()),
+                        ));
+                    }
+                    if record.status == "refused" {
+                        return Ok(MergeStep::note(format!(
+                            "{task_id} integration cannot run: {}",
+                            record.text.clone().unwrap_or_default()
+                        )));
+                    }
+                    let path =
+                        verdict_path(store.repo(), task_id, &record.attempt, Stage::Integration)
+                            .map_err(gate_error)?;
+                    let verdict = Verdict::read(&path).map_err(gate_error)?;
+                    let context = prepare_merge(store, task_id, Some("auto"))?;
+                    if !verdict.is_pass() {
+                        let merged =
+                            integration_failed(store, &context, &record.attempt, &verdict, 1)?;
+                        return Ok(MergeStep::line(merged.line()));
+                    }
+                    return match finish_integration(store, &context, &verdict, 1)? {
+                        Integration::Merged(merged) => Ok(MergeStep::line(merged.line())),
+                        Integration::Again(reason) => Ok(MergeStep::line(format!(
+                            "{task_id} integration -> review.integrating ({reason})"
+                        ))),
+                    };
+                }
             }
-            if record.status == "refused" {
-                return Ok(MergeStep::note(format!(
-                    "{task_id} integration cannot run: {}",
-                    record.text.unwrap_or_default()
-                )));
-            }
-            let path = verdict_path(store.repo(), task_id, &record.attempt, Stage::Integration)
-                .map_err(gate_error)?;
-            let verdict = Verdict::read(&path).map_err(gate_error)?;
-            let context = prepare_merge(store, task_id, Some("auto"))?;
-            if !verdict.is_pass() {
-                let merged = integration_failed(store, &context, &record.attempt, &verdict, 1)?;
-                return Ok(MergeStep::line(merged.line()));
-            }
-            return match finish_integration(store, &context, &verdict, 1)? {
-                Integration::Merged(merged) => Ok(MergeStep::line(merged.line())),
-                Integration::Again(reason) => Ok(MergeStep::line(format!(
-                    "{task_id} integration -> review.integrating ({reason})"
-                ))),
-            };
+        }
+        // A gate that is still running is the reason this pass starts none.
+        if crate::gate::background::running(store, task_id) {
+            return Ok(MergeStep::quiet());
         }
         if stop {
             return Ok(MergeStep::quiet());
         }
-        return match crate::gate::background::start(store, task_id)? {
+        return match crate::gate::background::start(
+            store,
+            task_id,
+            &crate::gate::background::Start {
+                kind: "integration",
+                attempt: attempt_label(&task)?,
+                inputs: integration_inputs(store, task_id),
+            },
+        )? {
             Some(pid) => Ok(MergeStep::line(format!(
                 "{task_id} integration started (pid {pid})"
             ))),
@@ -1236,7 +1613,15 @@ fn failure_text(verdict: &Verdict) -> String {
         && let Some(review) = &verdict.review
         && !review.blocking.is_empty()
     {
-        return format!("review_blocking: {}", review.blocking.join("; "));
+        return format!(
+            "review_blocking: {}",
+            review
+                .blocking
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
     }
     reason
 }
@@ -1415,6 +1800,17 @@ pub fn rework_reason(store: &Store, task: &model::TaskFile) -> Option<String> {
     {
         parts.push(text.to_owned());
     }
+    // A gate that exited without a record: the pass that started it recorded the fact in the
+    // gate record, and `show` reports the same text `radian arc run` prints (ADR 0048
+    // decision 10).
+    if parts.is_empty()
+        && let Some(record) = crate::gate::background::read(store, &task.id)
+        && record.kind == "verify"
+        && record.status == crate::gate::background::NO_RECORD
+        && record.attempt == label
+    {
+        parts.push(crate::gate::background::NO_RECORD_TEXT.to_owned());
+    }
     // The automatic rework limit: the task stays in `rework_pending` and `show` says why the
     // plan stopped (ADR 0048 decision 12).
     if let Ok(text) = fs::read_to_string(dir.join(crate::store::attempt_ops::PAUSED_FILE))
@@ -1482,6 +1878,22 @@ pub fn latest_review_verdict(store: &Store, task: &str) -> Option<(PathBuf, Verd
         .ok()?
         .into_iter()
         .rfind(|(_, verdict)| verdict.stage == Stage::Review)
+}
+
+/// The task's newest `review` verdict from an attempt other than `label`, with its path: the
+/// candidate previous review of a rework round (ADR 0048 decision 10). A verdict with an
+/// empty `sha` is not one, and the stage ignores it when its `sha` is the commit under review.
+#[must_use]
+pub fn previous_review(store: &Store, task: &str, label: &str) -> Option<(PathBuf, Verdict)> {
+    let current = verdict_path(store.repo(), task, label, Stage::Review).ok();
+    task_verdict_files(store, task)
+        .ok()?
+        .into_iter()
+        .rfind(|(path, verdict)| {
+            verdict.stage == Stage::Review
+                && !verdict.sha.is_empty()
+                && Some(path) != current.as_ref()
+        })
 }
 
 /// The digest of the verification set for `sha`: every counted verdict except the owner's

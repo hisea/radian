@@ -198,6 +198,22 @@ fn the_embedded_manual_has_a_size_cap() {
     assert!(!radian_coding::docs::DOCS.is_empty(), "at least one page");
 }
 
+/// Every page stays under 56 KiB (57,344 bytes), below the read tool's 65,536-byte
+/// default cap: a page that drifts up would no longer read whole, which is what
+/// `a_docs_page_reads_like_a_file` and `radian docs <topic>` rely on. The failure names
+/// the page and its size.
+#[test]
+fn every_user_manual_page_is_at_most_56_kib() {
+    const CAP: usize = 56 * 1024;
+    for (name, text) in radian_coding::docs::DOCS {
+        assert!(
+            text.len() <= CAP,
+            "docs/user/{name} is {} bytes, over the {CAP}-byte page cap",
+            text.len()
+        );
+    }
+}
+
 /// The user manual never mentions internal design numbers and never uses the word slice.
 #[test]
 fn the_user_manual_has_no_design_numbers_or_slices() {

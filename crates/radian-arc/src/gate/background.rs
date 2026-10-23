@@ -33,6 +33,20 @@ use super::stage;
 pub const GATE_FILE: &str = "gate.json";
 /// The background gate process's output, next to the record.
 pub const GATE_LOG: &str = "gate.log";
+/// A record status: a pass wrote the inputs it started a gate with and the gate process has
+/// not written its own record yet.
+pub const STARTED: &str = "started";
+/// A record status: a gate process exited without writing any record at all (a panic before
+/// its first write, a store that could not be opened).
+pub const NO_RECORD: &str = "no_record";
+/// The text a `no_record` gate is reported with: `radian arc run` prints it after the task id
+/// and `show` prints it as the `rework_reason`.
+pub const NO_RECORD_TEXT: &str = "its gate exited without a record";
+/// Test-only (an input that exists only for tests is not in the manual): makes the gate
+/// process exit before it writes any record, the way a gate that panics before its first
+/// write does. `run.rs` sets it on the `radian arc run` process, which the gate child
+/// inherits. Never set by arc.
+pub const EXIT_WITHOUT_RECORD_ENV: &str = "RADIAN_ARC_GATE_TEST_EXIT_WITHOUT_RECORD";
 /// How often [`stop`] looks at a signalled gate.
 const STOP_POLL: Duration = Duration::from_millis(100);
 
@@ -111,6 +125,35 @@ fn write(store: &Store, task: &str, value: &Value) -> io::Result<()> {
     fs::rename(&temporary, &path)
 }
 
+/// Records that a gate a pass started exited without writing any record: the same record and
+/// `inputs` field a `refused` gate leaves, so a later pass compares the inputs the same way
+/// and starts no gate for the same ones (ADR 0048 decision 10).
+///
+/// # Errors
+///
+/// The record could not be written.
+pub fn write_no_record(
+    store: &Store,
+    task: &str,
+    kind: &str,
+    attempt: &str,
+    inputs: &str,
+) -> Result<(), Error> {
+    write(
+        store,
+        task,
+        &json!({
+            "kind": kind,
+            "attempt": attempt,
+            "status": NO_RECORD,
+            "text": NO_RECORD_TEXT,
+            "inputs": inputs,
+            "at": crate::store::plan_ops::utc_now(),
+        }),
+    )
+    .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))
+}
+
 /// Whether a gate is running for this task. It looks at the lock only, never at a process:
 /// the `workspace` sandbox refuses `ps`.
 #[must_use]
@@ -156,6 +199,18 @@ pub fn lock_task(store: &Store, task: &str) -> Result<File, Error> {
     Ok(file)
 }
 
+/// What a pass starts: the kind of gate (`verify` or `integration`), the attempt it names
+/// its verdicts by, and the digest of the inputs the gate will read (ADR 0048 decision 10).
+///
+/// `inputs` is `None` when the pass could not plan the gate: the gate then writes its own
+/// refusal or error record, and a gate that exits without one is started again (there is no
+/// digest to compare).
+pub struct Start {
+    pub kind: &'static str,
+    pub attempt: String,
+    pub inputs: Option<String>,
+}
+
 /// Starts one background gate for `task`, unless one is already running. Returns the child's
 /// pid when it started one.
 ///
@@ -164,10 +219,16 @@ pub fn lock_task(store: &Store, task: &str) -> Result<File, Error> {
 /// second gate for the same task: the lock is either held by the child or free because the
 /// child is gone.
 ///
+/// Before it spawns, the pass writes the inputs it started the gate with to the gate record
+/// ([`STARTED`]); the gate replaces it with `running` as its first write. The record a gate
+/// process that exits without writing anything leaves is what lets a later pass report it
+/// instead of starting it again.
+///
 /// # Errors
 ///
-/// The lock file, the gate's log, or the child process could not be created.
-pub fn start(store: &Store, task: &str) -> Result<Option<u32>, Error> {
+/// The lock file, the gate's log, the pass's own record, or the child process could not be
+/// created.
+pub fn start(store: &Store, task: &str, start: &Start) -> Result<Option<u32>, Error> {
     let path = lock_path(store.repo(), task);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -204,6 +265,22 @@ pub fn start(store: &Store, task: &str) -> Result<Option<u32>, Error> {
         .try_clone()
         .map_err(|error| Error::Failed(format!("cannot open {}: {error}", log_path.display())))?;
 
+    // The inputs this pass starts the gate with, before the process exists: a gate that exits
+    // without a record leaves the ones it was started with (ADR 0048 decision 10).
+    let started = start.inputs.as_ref().map(|inputs| {
+        json!({
+            "kind": start.kind,
+            "attempt": start.attempt,
+            "status": STARTED,
+            "inputs": inputs,
+            "started_at": crate::store::plan_ops::utc_now(),
+        })
+    });
+    if let Some(record) = &started {
+        write(store, task, record)
+            .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))?;
+    }
+
     let fd = file.as_raw_fd();
     inherit(&file, &path)?;
     let executable = std::env::current_exe()
@@ -227,9 +304,14 @@ pub fn start(store: &Store, task: &str) -> Result<Option<u32>, Error> {
         // then stops the gate through `stop` so the gate can stop its stage child first.
         command.process_group(0);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| Error::Failed(format!("cannot start `radian arc gate`: {error}")))?;
+    let mut child = command.spawn().map_err(|error| {
+        // The gate never ran, so the pass's record would make the next pass report a
+        // no-record gate that never started.
+        if started.is_some() {
+            clear(store, task);
+        }
+        Error::Failed(format!("cannot start `radian arc gate`: {error}"))
+    })?;
     let pid = child.id();
     // The parent's copy goes now; the child's keeps the lock. A thread waits for the child so
     // a long `--watch` run does not collect zombies; the thread dies with this process, and
@@ -307,6 +389,12 @@ pub struct Options {
 
 /// Runs one background gate and returns the process exit code.
 pub fn run(options: Options) -> i32 {
+    // Test-only (see [`EXIT_WITHOUT_RECORD_ENV`]): a gate that exits before writing anything,
+    // the way one that panics before its first write does.
+    if std::env::var_os(EXIT_WITHOUT_RECORD_ENV).is_some() {
+        eprintln!("radian arc gate: test: exiting without a record");
+        return 1;
+    }
     // Own the descriptor: taking it keeps the lock held until this process exits; closing it
     // earlier would let another pass start a second gate.
     let _lock = options.lock_fd.map(|fd| {

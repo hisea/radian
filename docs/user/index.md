@@ -19,7 +19,9 @@ Each line names one page and what it covers.
 ## Use
 
 - `commands`: every slash command and `!` shell escape in the full-screen interface.
-- `arc`: plan and task orchestration: setup, plans, tasks, the files arc keeps, and the lead's MCP server.
+- `arc`: plan and task orchestration: every subcommand, the lead's MCP server, and the exit codes.
+- `arc-gate`: the gate: verification stages, the review stage, failures, retries, the budget, and reconcile.
+- `arc-files`: the files arc keeps: `config.toml`, plan and task files, and the `.radian/arc/` layout.
 - `keybindings`: every key in the full-screen interface, by area, and how to rebind it.
 - `sessions`: resume, list, search, fork, export, and attach to sessions.
 - `tools`: the built-in file tools, `read`'s text, directory and image branches, its limits and error codes.

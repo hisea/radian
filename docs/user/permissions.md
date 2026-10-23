@@ -97,6 +97,9 @@ Deny rules still deny with `--yes`.
 The sandbox still applies with `--yes`.
 A value of `auto` in the file has no effect under `full`.
 
+Managing the session's own background jobs needs no approval, because the
+command was approved when it started.
+
 Allow named shell prefixes with `--allow-shell-command "<prefix>"`.
 Repeat the flag for more prefixes.
 Only a simple command matches.
