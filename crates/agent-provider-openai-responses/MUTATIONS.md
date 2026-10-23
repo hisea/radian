@@ -1,5 +1,7 @@
 # `agent-provider-openai-responses` mutation record
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 Each mutation was applied to the working tree, the whole crate suite was run with
 `--no-fail-fast`, and the source was restored by a reverse edit (no `git checkout --`). The
 mutations the brief asked for are M1–M4 (M5–M6 are the ones the usage-limit slice asked for); the

@@ -1,5 +1,7 @@
 # `radian-runtime` mutation record
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 Two passes, both in one-shot worktrees (`/tmp/runtime-mut`, `/tmp/runtime-mut2`), every
 mutation run with `--no-fail-fast`, `git checkout --` after each, `git status --short`
 empty at the end.

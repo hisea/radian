@@ -1,5 +1,7 @@
 # 变异记录：sandbox 后端（Phase 3）
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 日期：2026-10-12。变异在一次性检出 `/tmp/sandbox-mut`（`git worktree add`，HEAD = 本提交）里做，
 每条改完恢复源码、提交前 `git status --short` 为空。测试一律 `--no-fail-fast`。
 

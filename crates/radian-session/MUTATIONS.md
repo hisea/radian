@@ -1,5 +1,7 @@
 # `radian-session` mutation record (Phase 1 / A)
 
+New rows use the id `<task id>-M<n>` (for example `TK0034-M1`); see "Mutation records" in `AGENTS.md`.
+
 Base: `f350a13` · one-shot worktree `/tmp/session-mut` (created from HEAD, deleted after) · method: apply a mutation, run the listed test binary, expect a non-zero exit; `git checkout --` after each. `git status --short` was empty at the end.
 
 | # | Mutation | Caught by | Result |

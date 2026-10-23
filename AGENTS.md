@@ -14,6 +14,10 @@ The user manual in `docs/user/` is compiled into the binary, and it is the only 
 
 Each entry gives the name, the type, the default from the code, every allowed value of a closed set (never "for example" in place of the list), limits and units, what it does, and when it takes effect. A nested structure is documented at every level; a built-in preset is shown in full. One fact lives on one page, and other pages link to it. The docs drift tests read names, value sets and defaults from the code. A new closed set gets one list that the parser and the test both read.
 
+## Mutation records
+
+A mutation check breaks the new code once by hand, runs the tests, names the test that fails, and restores the code. Each crate records its checks in its own `MUTATIONS.md`. A new row's id is the arc task id followed by `-M` and a number that starts at 1 for each task: `TK0034-M1`, `TK0034-M2`. A change that has no task id uses its branch name without the prefix: `gate-died-M1` for `fix/gate-died`. Two branches then never pick the same id, and a merge never renumbers a row. The older rows keep their `M<n>` ids.
+
 ## Verify
 
 Run these before you say a change is done. All of them must pass. The `journal-selfcheck` runs replay every session's journal against its transcript, so they check every transcript write. The minimum Rust version is 1.99.1.
