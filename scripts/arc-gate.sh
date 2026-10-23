@@ -16,7 +16,7 @@
 # a script read from that checkout would let a task change its own gate. The arc
 # configuration must therefore call this script by the *main checkout's absolute
 # path* (/abs/path/to/repo/scripts/arc-gate.sh), never a relative `scripts/...`
-# path. The same rule is in docs/user/arc.md. full runs the verify.sh next to
+# path. The same rule is in docs/user/arc-gate.md. full runs the verify.sh next to
 # this script, so the command list comes from the trusted checkout too.
 #
 # CARGO_TARGET_DIR is the caller's business: this script never sets it.
