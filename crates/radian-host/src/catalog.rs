@@ -18,7 +18,7 @@
 //! ).
 
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
@@ -1015,26 +1015,18 @@ pub fn catalog_reasoning_replay(provider: &str, model: &str) -> Option<String> {
     catalog.reasoning_replay(provider, model)
 }
 
-/// Writes the cache atomically (temp file + rename) with owner-only permissions.
+/// Writes the cache atomically with owner-only permissions. The temp name is unique per write
+/// (pid + counter + nanoseconds), so two refreshes for the same provider cannot share it.
 fn write_cache(path: &Path, text: &str) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "cache path has no directory")
     })?;
     radian_session::ensure_private_dir(dir)?;
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(radian_session::PRIVATE_FILE_MODE);
-        }
-        let mut file = options.open(&tmp)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
+    crate::atomic_write::write_atomic(
+        path,
+        text.as_bytes(),
+        Some(radian_session::PRIVATE_FILE_MODE),
+    )
 }
 
 /// One read-only GET with a short timeout, no key and no custom headers.
@@ -1823,9 +1815,20 @@ mod provider_models_tests {
         assert!(!models_url_accepts_key("http://198.51.100.7/v1/models"));
         assert!(!models_url_accepts_key("HTTP://198.51.100.7/v1/models"));
         assert!(!models_url_accepts_key("http://0.0.0.0:8080/v1/models"));
+        // Userinfo is never the host: these requests go to the remote authority.
+        assert!(!models_url_accepts_key(
+            "http://[::1]@198.51.100.7/v1/models"
+        ));
+        assert!(!models_url_accepts_key(
+            "http://[localhost]@evil.com/v1/models"
+        ));
+        assert!(!models_url_accepts_key(
+            "http://[::1]:80@evil.com/v1/models"
+        ));
         assert!(models_url_accepts_key("http://127.0.0.1:8080/v1/models"));
         assert!(models_url_accepts_key("http://localhost:8080/v1/models"));
         assert!(models_url_accepts_key("http://[::1]:8080/v1/models"));
+        assert!(models_url_accepts_key("http://user@localhost/v1/models"));
         assert!(models_url_accepts_key("https://api.example.com/v1/models"));
     }
 
