@@ -40,7 +40,7 @@ allow_noop = false
 ```
 
 - flow 节的键：`exec_args`（同今天的 `worker.exec_args`）、`gate_profile`（必须是一个 `gate.profiles.<name>`）、`allow_noop`（task 未指定时的缺省）。每个键按手册规矩写全名称、类型、缺省、允许值、何时生效。
-- 一个 `gate.profiles.<name>` 可以带自己的 review 设置：`review_exec_args`、`review_prompt_file`、`review_timeout_secs`，含义同 `[gate.review]` 的三个键，写了就覆盖全局的那一项，没写就用全局的。这样不同 flow 的 review 可以用不同的模型和评审标准（一个只改文档的 flow 也可以用不含 `review` 的 profile）。
+- 一个 `gate.profiles.<name>` 用 `reviewer = "<name>"` 选一个 reviewer profile（模型、prompt、时限、`fix_level`），见 `arc-reviewer-profiles.md`。这样不同 flow 的 review 可以用不同的模型和评审标准（一个只改文档的 flow 也可以用不含 `review` 的 profile）。
 - `worker.exec_args` 与 `gate.profile` 保留为 `flows.default` 的别名还是直接迁移（`schema_version` 升 2，按 0008 迁移），落地时定；两者只能留一个，不能两处都有值。
 - task 文件加 `flow` 字段（字符串，缺省 `default`，必须是一个 `flows.<name>`）；`add_task` MCP 工具和 `radian arc add` 加同名参数。`show --json` 输出它。
 - plan 层不知道 flow。一个 plan 可以混：coding task 出功能，`after` 它的 marketing task 写文案。
