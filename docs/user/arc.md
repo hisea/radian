@@ -340,7 +340,7 @@ A task in `review.verifying` is checked against `verified_sha`, which is the pus
   It runs after `commands` passes and before `human`; a profile that lists both must list `commands` first.
   For each run it starts one `radian exec` in its own checkout, `.radian/arc/gates/review/`, on the candidate, with the candidate as the workspace and only the `read`, `grep` and `glob` tools mounted: no shell tool, no write tool, and no MCP server.
   Its model route is `[gate.review] exec_args`, and `[gate.review] timeout_secs` limits one session.
-  The prompt is built in: the task's brief, the commit list and the diff `base_sha..verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the ADRs the brief names).
+  The prompt is built in: the task's brief, the commit list and the diff `base_sha..verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
   `[gate.review] prompt_file` is appended to it.
   The session must end with one fenced `json` block, and arc parses the last such block:
 
