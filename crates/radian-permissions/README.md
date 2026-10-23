@@ -52,6 +52,13 @@ session's own goal state and journals it — no workspace file, no command — s
 for it would only stall the continuation it serves. (`goal_is_allowed_in_every_tier` in
 `src/profile.rs`.)
 
+`job` (ADR 0037 decision 8) is `allow` in **both** tiers for the same reason: it only
+reads, waits on or stops the session's own background jobs, and the command was approved
+when it started, so reading its output later adds no rights. A user `deny`/`ask` rule for
+`job` still wins, and a session whose allow-list gate denies `job` stays refused — the
+rule never mounts a tool the tier or session does not offer. (`job_is_allowed_in_every_tier`
+in `src/profile.rs`, `tests/job.rs`.)
+
 ## Shell matching (the part most likely to hide a hole)
 
 This is a deliberate conservative approximation, **not a shell parser**.
@@ -252,6 +259,7 @@ transcript record, so it never appears in `journal_records`/`replay`.
 | 25 | a project config cannot create a prefix grant (grants are per-session state) | `tests/session_prefix.rs` |
 | 26 | a non-human turn cannot borrow a prefix grant | `tests/session_prefix.rs` |
 | 27 | a prefix grant never crosses the sandbox boundary | `tests/session_prefix.rs` |
+| 28 | `job` is fixed `allow` in every tier (sandboxed `workspace` too), `ask`/`deny` user rules still win, and `approval = never` keeps it (ADR 0037 decision 8) | `tests/job.rs`, `src/profile.rs` |
 
 ## Not verified / limits
 
