@@ -157,6 +157,8 @@ pub fn run(options: Options) -> i32 {
 struct Failure {
     message: String,
     code: i32,
+    /// The attempt's wall clock ran out; the caller records the attempt as `wall_time`.
+    wall: bool,
 }
 
 impl Failure {
@@ -164,6 +166,7 @@ impl Failure {
         Self {
             message: message.into(),
             code: EXIT_ERROR,
+            wall: false,
         }
     }
 
@@ -171,6 +174,15 @@ impl Failure {
         Self {
             message: message.into(),
             code: EXIT_USAGE,
+            wall: false,
+        }
+    }
+
+    fn wall() -> Self {
+        Self {
+            message: "max_wall_time_secs reached".to_owned(),
+            code: EXIT_ERROR,
+            wall: true,
         }
     }
 }
@@ -181,6 +193,10 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     // pass it on, wait for the worker, and still write `AttemptFinished`. Without a handler
     // the wrapper would die at once and leave no record for arc to apply.
     install_sigterm_handler();
+    // The wall clock starts here and covers everything this process does for the attempt: the
+    // worktree and its fetch, the model, the delivery checks and the push (ADR 0048
+    // decisions 7.8 and 9). Every wrapper git command gets the time that is left.
+    let started = Instant::now();
     let repo = repo_root()?;
     let arc = repo.join(".radian").join("arc");
     let worktree = arc.join("worktrees").join(&o.task);
@@ -215,30 +231,111 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         },
         o.stall_timeout_secs,
     )?;
+    let signal = runs.join(SIGNAL_FILE);
+    let setup = Setup {
+        repo,
+        arc,
+        worktree,
+        branch,
+        runs,
+        attempt_dir,
+        wrapper_pid,
+        clock: Clock::new(started, Duration::from_secs(o.max_wall_time_secs), signal),
+    };
+    let result = match run_attempt(o, &setup, &heartbeat) {
+        Ok(code) => Ok(code),
+        // The wall clock ran out (a git command was killed or a later step saw it expired):
+        // the attempt still ends with its records and the `wall_time` class.
+        Err(failure) if failure.wall => finish_wall(o, &setup),
+        Err(failure) => Err(failure),
+    };
+    heartbeat.stop();
+    result
+}
 
-    let created = ensure_worktree(&repo, &worktree, &branch, &o.remote, &o.main_branch)?;
+/// The paths one attempt works in, and its wall clock.
+struct Setup {
+    repo: PathBuf,
+    arc: PathBuf,
+    worktree: PathBuf,
+    branch: String,
+    runs: PathBuf,
+    attempt_dir: PathBuf,
+    wrapper_pid: u32,
+    clock: Clock,
+}
+
+/// The attempt's wall clock. `deadline` is `None` when `max_wall_time_secs` is 0.
+struct Clock {
+    deadline: Option<Instant>,
+    signal: PathBuf,
+}
+
+impl Clock {
+    fn new(started: Instant, wall: Duration, signal: PathBuf) -> Self {
+        Self {
+            deadline: (!wall.is_zero()).then(|| started + wall),
+            signal,
+        }
+    }
+
+    /// The time left, or `None` when the attempt has no wall limit.
+    fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+
+    fn expired(&self) -> bool {
+        self.remaining()
+            .is_some_and(|remaining| remaining.is_zero())
+    }
+
+    /// Records that the attempt ran out of wall time. The first signal wins, so a cancel or a
+    /// stall that was recorded first stays.
+    fn mark(&self) -> Result<(), Failure> {
+        write_signal(&self.signal, "wall_time")
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+}
+
+/// The `runs/<task>/attempts/<task>-<n>` path of one attempt.
+fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Failure> {
+    let created = ensure_worktree(
+        &s.repo,
+        &s.worktree,
+        &s.branch,
+        &o.remote,
+        &o.main_branch,
+        &s.clock,
+    )?;
     // Held until this function returns: one attempt of one task at a time.
-    let _lock = lock_worktree(&worktree)?;
+    let _lock = lock_worktree(&s.worktree)?;
 
-    let result_path = runs.join("result.jsonl");
-    let stderr_path = runs.join("stderr.log");
+    let result_path = s.runs.join("result.jsonl");
+    let stderr_path = s.runs.join("stderr.log");
     let brief = read_stdin()?;
-    let base_sha = base_sha(&repo, &arc, o, &branch, created)?;
+    let base_sha = base_sha(&s.repo, &s.arc, o, &s.branch, created, &s.clock)?;
     // The moved-ref guard: a later attempt may only run when `work/<task>` still points at
     // the tip the previous attempt ended on. Another worker can move the ref from inside its
     // `workspace` sandbox (the common git directory's refs are writable, ADR 0038), and with
     // a matching tree every delivery check would pass; so this check runs before the child,
     // and nothing is recorded for the next attempt when it fails.
-    if let Some(last) = last_head(&arc, &o.task)
-        && let Err(reason) = check_start(&repo, &worktree, &branch, &last)
-    {
-        return refuse(o, &runs, &attempt_dir, &base_sha, &reason);
+    if let Some(last) = last_head(&s.arc, &o.task) {
+        match check_start(&s.repo, &s.worktree, &s.branch, &last, &s.clock) {
+            Ok(()) => {}
+            Err(failure) if failure.wall => return Err(failure),
+            Err(failure) => return refuse(o, s, &base_sha, &failure.message),
+        }
     }
-    let start_sha = branch_tip(&repo, &branch)
-        .ok_or_else(|| Failure::error(format!("cannot read {branch} in {}", repo.display())))?;
+    let start_sha = branch_tip(&s.repo, &s.branch, &s.clock)?.ok_or_else(|| {
+        Failure::error(format!("cannot read {} in {}", s.branch, s.repo.display()))
+    })?;
     let started_at = now();
-    let deny = deny_paths(&arc);
-    let mut child = spawn_child(o, &worktree, &deny, &result_path, &stderr_path, &brief)?;
+    let deny = deny_paths(&s.arc);
+    let mut child = spawn_child(o, &s.worktree, &deny, &result_path, &stderr_path, &brief)?;
     let pid = child.id();
     CHILD_PID.store(pid as i32, Ordering::SeqCst);
     // A SIGTERM that arrived during the worktree setup is forwarded as soon as there is a
@@ -247,9 +344,10 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         process::signal_group(pid, process::SIGTERM);
     }
     let processor_started_at = process_start(pid).unwrap_or_else(|| started_at.clone());
-    let wrapper_started_at = process::start_time(wrapper_pid);
+    let wrapper_started_at = process::start_time(s.wrapper_pid);
+    heartbeat.set_worker(pid, &processor_started_at);
     write_json(
-        &attempt_dir.join("identity.json"),
+        &s.attempt_dir.join("identity.json"),
         &json!({
             "attempt_id": format!("{}-{}", o.task, o.attempt),
             "token": o.token,
@@ -257,22 +355,22 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
             "process_started_at": processor_started_at,
             // The scheduling side signals the wrapper, not the worker, so the attempt
             // record carries the wrapper's own identity too (decision 9).
-            "wrapper_pid": wrapper_pid,
+            "wrapper_pid": s.wrapper_pid,
             "wrapper_process_started_at": wrapper_started_at,
             "session_id": o.task,
-            "worktree": worktree.display().to_string(),
-            "branch": branch,
+            "worktree": s.worktree.display().to_string(),
+            "branch": s.branch,
             "started_at": started_at,
         }),
     )?;
-    heartbeat.set_worker(pid, &processor_started_at);
     // The limits belong to this process, not to the scheduling loop that started it: a
     // one-shot `run`, or a killed one, leaves the worker bounded (decision 7.8).
     let status = monitor_child(
         &mut child,
         &result_path,
-        &runs.join(SIGNAL_FILE),
+        &s.runs.join(SIGNAL_FILE),
         &Limits::of(o),
+        s.clock.deadline(),
     )?;
     CHILD_PID.store(0, Ordering::SeqCst);
     let ended_at = now();
@@ -285,24 +383,28 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| "terminated".to_owned());
-    let head_sha = git(&worktree, &["rev-parse", "HEAD"])
-        .ok()
-        .map(|sha| sha.trim().to_owned())
-        .filter(|sha| !sha.is_empty());
-    let status_paths = dirty_paths(&worktree);
-    let dirty = status_paths.clone().unwrap_or_default();
+    let head_sha = match git(&s.worktree, &["rev-parse", "HEAD"], &s.clock) {
+        Ok(sha) => Some(sha.trim().to_owned()).filter(|sha| !sha.is_empty()),
+        Err(failure) if failure.wall => return Err(failure),
+        Err(_) => None,
+    };
+    let (dirty, status_paths) = match dirty_paths(&s.worktree, &s.clock) {
+        Ok(paths) => (paths.clone(), Ok(paths)),
+        Err(failure) if failure.wall => return Err(failure),
+        Err(failure) => (Vec::new(), Err(failure)),
+    };
     write_json(
-        &runs.join("execution.json"),
+        &s.runs.join("execution.json"),
         &json!({
             "attempt_id": format!("{}-{}", o.task, o.attempt),
             "host": hostname(),
             "token": o.token,
             "pid": pid,
             "process_started_at": processor_started_at,
-            "wrapper_pid": wrapper_pid,
+            "wrapper_pid": s.wrapper_pid,
             "session_id": o.task,
-            "worktree": worktree.display().to_string(),
-            "branch": branch,
+            "worktree": s.worktree.display().to_string(),
+            "branch": s.branch,
             "base_sha": base_sha,
             "head_sha": head_sha,
             "started_at": started_at,
@@ -318,26 +420,32 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     if outcome != "completed" {
         failure = Some(format!("outcome {outcome}"));
     } else {
-        let check = check_delivery(&Delivery {
-            repo: &repo,
-            worktree: &worktree,
-            branch: &branch,
-            base: &base_sha,
-            start: &start_sha,
-            head: head_sha.as_deref(),
-            status_paths: &status_paths,
-            allow_noop: o.allow_noop,
-        });
+        let check = check_delivery(
+            &Delivery {
+                repo: &s.repo,
+                worktree: &s.worktree,
+                branch: &s.branch,
+                base: &base_sha,
+                start: &start_sha,
+                head: head_sha.as_deref(),
+                status_paths: &status_paths,
+                allow_noop: o.allow_noop,
+            },
+            &s.clock,
+        );
         match check {
-            Err(reason) => failure = Some(reason),
+            Err(problem) if problem.wall => return Err(problem),
+            Err(problem) => failure = Some(problem.message),
             Ok(()) => {
                 let head = head_sha.as_deref().unwrap_or_default();
-                match push(&repo, &o.remote, &branch) {
-                    Err(reason) => failure = Some(reason),
+                match push(&s.repo, &o.remote, &s.branch, &s.clock) {
+                    Err(problem) if problem.wall => return Err(problem),
+                    Err(problem) => failure = Some(problem.message),
                     Ok(()) => {
                         pushed = true;
-                        match remote_sha_of(&repo, &o.remote, &branch) {
-                            Err(reason) => failure = Some(reason),
+                        match remote_sha_of(&s.repo, &o.remote, &s.branch, &s.clock) {
+                            Err(problem) if problem.wall => return Err(problem),
+                            Err(problem) => failure = Some(problem.message),
                             Ok(remote) => {
                                 if remote != head {
                                     failure =
@@ -352,43 +460,104 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         }
     }
 
-    let attempt_failed = failure.is_some();
     // Every attempt that ran records the branch tip it ended on (host-local): a later attempt
     // must still find that tip on `work/<task>` before it starts (the guard above). A tip
     // that cannot be read (the child removed the branch) leaves the previous record in
     // place, so the next attempt refuses instead of running on a branch it cannot trust.
-    if let Some(tip) = branch_tip(&repo, &branch) {
-        write_text(&last_head_path(&arc, &o.task), &tip)?;
+    if let Some(tip) = branch_tip(&s.repo, &s.branch, &s.clock)? {
+        write_text(&last_head_path(&s.arc, &o.task), &tip)?;
     }
+    write_finish(
+        o,
+        s,
+        Finish {
+            base_sha: &base_sha,
+            head_sha,
+            dirty,
+            pushed,
+            remote_sha,
+            outcome: &outcome,
+            exit_code,
+            failure,
+        },
+    )
+}
+
+/// One `AttemptFinished` record, written to both places arc reads it from.
+struct Finish<'a> {
+    base_sha: &'a str,
+    head_sha: Option<String>,
+    dirty: Vec<String>,
+    pushed: bool,
+    remote_sha: Option<String>,
+    outcome: &'a str,
+    exit_code: i32,
+    failure: Option<String>,
+}
+
+fn write_finish(o: &Options, s: &Setup, finish: Finish<'_>) -> Result<i32, Failure> {
+    let attempt_failed = finish.failure.is_some();
     let record = json!({
         "type": "AttemptFinished",
         "attempt_id": format!("{}-{}", o.task, o.attempt),
         "token": o.token,
-        "exit_code": exit_code,
-        "outcome": outcome,
-        "base_sha": base_sha,
-        "head_sha": head_sha,
-        "dirty": dirty,
-        "pushed": pushed,
-        "remote_sha": remote_sha,
-        "failure": failure,
+        "exit_code": finish.exit_code,
+        "outcome": finish.outcome,
+        "base_sha": finish.base_sha,
+        "head_sha": finish.head_sha,
+        "dirty": finish.dirty,
+        "pushed": finish.pushed,
+        "remote_sha": finish.remote_sha,
+        "failure": finish.failure,
     });
     let line = serde_json::to_string(&record)
         .map_err(|error| Failure::error(format!("cannot serialize AttemptFinished: {error}")))?;
-    write_text(&runs.join("attempt_finished.json"), &line)?;
-    write_text(&attempt_dir.join("status.json"), &line)?;
+    write_text(&s.runs.join("attempt_finished.json"), &line)?;
+    write_text(&s.attempt_dir.join("status.json"), &line)?;
     println!("{line}");
-    // Both end records are on disk: from here the attempt is over, and a pass reads the
-    // result rather than the heartbeat.
-    heartbeat.stop();
 
     // ADR 0044 section 3: the child's exit code passes through. A check that failed after a
     // `completed` (exit 0) child is this wrapper's own failure: exit 1.
-    Ok(if attempt_failed && exit_code == 0 {
+    Ok(if attempt_failed && finish.exit_code == 0 {
         EXIT_ERROR
     } else {
-        exit_code
+        finish.exit_code
     })
+}
+
+/// The wall clock ran out: record `wall_time`, keep the branch tip from the loose ref (no
+/// further git call), and write the attempt's records. The retry rules then apply.
+fn finish_wall(o: &Options, s: &Setup) -> Result<i32, Failure> {
+    s.clock.mark()?;
+    if let Some(tip) = loose_branch_tip(&s.repo, &s.branch) {
+        let _ = write_text(&last_head_path(&s.arc, &o.task), &tip);
+    }
+    let base_sha = fs::read_to_string(s.arc.join("attempts").join(&o.task).join("base_sha"))
+        .map(|text| text.trim().to_owned())
+        .unwrap_or_default();
+    write_finish(
+        o,
+        s,
+        Finish {
+            base_sha: &base_sha,
+            head_sha: None,
+            dirty: Vec::new(),
+            pushed: false,
+            remote_sha: None,
+            outcome: "terminated",
+            exit_code: EXIT_ERROR,
+            failure: Some("max_wall_time_secs reached".to_owned()),
+        },
+    )
+}
+
+/// The branch tip from its loose ref file, without running git. A commit writes the loose
+/// ref; `git gc` would pack it, and a missing file just leaves the previous record.
+fn loose_branch_tip(repo: &Path, branch: &str) -> Option<String> {
+    let text =
+        fs::read_to_string(repo.join(".git").join("refs").join("heads").join(branch)).ok()?;
+    let sha = text.trim();
+    (!sha.is_empty()).then(|| sha.to_owned())
 }
 
 /// What the heartbeat thread writes: the attempt's identity. The worker's fields are filled
@@ -490,10 +659,10 @@ fn write_beat(path: &Path, beat: &std::sync::Mutex<Beat>) -> Result<(), Failure>
         .map_err(|error| Failure::error(format!("cannot write {}: {error}", path.display())))
 }
 
-/// One attempt's limits, as the wrapper enforces them (ADR 0048 decisions 7.8 and 9).
+/// One attempt's limits, as the wrapper enforces them (ADR 0048 decisions 7.8 and 9). The
+/// wall clock lives in [`Clock`], because it also bounds the wrapper's git commands.
 struct Limits {
     stall: Duration,
-    wall: Duration,
     grace: Duration,
 }
 
@@ -501,24 +670,23 @@ impl Limits {
     fn of(o: &Options) -> Self {
         Self {
             stall: Duration::from_secs(o.stall_timeout_secs),
-            wall: Duration::from_secs(o.max_wall_time_secs),
             grace: Duration::from_secs(o.cancel_grace_secs),
         }
     }
 }
 
 /// Waits for the worker and stops it with SIGTERM (then SIGKILL after the grace period) when
-/// it stalls, runs past its wall time, or a `cancel` recorded a signal. The scheduling loop
-/// does not watch the attempt any more: this process owns the limits.
+/// it stalls, runs past the attempt's wall deadline, or a `cancel` recorded a signal. The
+/// scheduling loop does not watch the attempt any more: this process owns the limits.
 fn monitor_child(
     child: &mut Child,
     result_path: &Path,
     signal_path: &Path,
     limits: &Limits,
+    wall_deadline: Option<Instant>,
 ) -> Result<ExitStatus, Failure> {
-    let started_at = Instant::now();
+    let mut last_growth = Instant::now();
     let mut last_len = file_len(result_path);
-    let mut last_growth = started_at;
     let mut signalled = false;
     let mut kill_at: Option<Instant> = None;
     loop {
@@ -540,7 +708,7 @@ fn monitor_child(
             let reason = if signal_path.is_file() {
                 // `radian arc cancel` wrote its own reason; this process adds none.
                 Some("cancel")
-            } else if !limits.wall.is_zero() && now.duration_since(started_at) >= limits.wall {
+            } else if wall_deadline.is_some_and(|deadline| now >= deadline) {
                 Some("wall_time")
             } else if !limits.stall.is_zero() && now.duration_since(last_growth) >= limits.stall {
                 Some("stall")
@@ -630,9 +798,17 @@ fn validate(o: &Options) -> Result<(), Failure> {
 fn repo_root() -> Result<PathBuf, Failure> {
     let cwd = std::env::current_dir()
         .map_err(|error| Failure::error(format!("cannot read the current directory: {error}")))?;
-    let top = git(&cwd, &["rev-parse", "--show-toplevel"])
+    // Local `rev-parse`, before the attempt's clock exists; it names no remote and cannot
+    // wait on one.
+    let out = crate::git::run(&cwd, &["rev-parse", "--show-toplevel"])
         .map_err(|_| Failure::error(format!("{} is not inside a git repository", cwd.display())))?;
-    let root = PathBuf::from(top.trim());
+    if !out.status.success() {
+        return Err(Failure::error(format!(
+            "{} is not inside a git repository",
+            cwd.display()
+        )));
+    }
+    let root = PathBuf::from(out.stdout.trim());
     if root.join(".git").is_file() {
         return Err(Failure::error(format!(
             "{} is a linked worktree; run `radian arc work` from the main checkout",
@@ -657,6 +833,7 @@ fn ensure_worktree(
     branch: &str,
     remote: &str,
     main_branch: &str,
+    clock: &Clock,
 ) -> Result<bool, Failure> {
     let parent = worktree
         .parent()
@@ -681,13 +858,17 @@ fn ensure_worktree(
         ))
     })?;
     if worktree.join(".git").exists() {
-        let top = git(worktree, &["rev-parse", "--show-toplevel"]).map_err(|error| {
-            Failure::error(format!(
-                "{} exists but is not a usable worktree: {}",
-                worktree.display(),
-                error.message
-            ))
-        })?;
+        let top = match git(worktree, &["rev-parse", "--show-toplevel"], clock) {
+            Ok(top) => top,
+            Err(failure) if failure.wall => return Err(failure),
+            Err(failure) => {
+                return Err(Failure::error(format!(
+                    "{} exists but is not a usable worktree: {}",
+                    worktree.display(),
+                    failure.message
+                )));
+            }
+        };
         if !same_path(Path::new(top.trim()), worktree) {
             return Err(Failure::error(format!(
                 "{} is not the worktree of {}",
@@ -695,12 +876,16 @@ fn ensure_worktree(
                 repo.display()
             )));
         }
-        let common = git(worktree, &["rev-parse", "--git-common-dir"]).map_err(|error| {
-            Failure::error(format!(
-                "cannot read the worktree's common git directory: {}",
-                error.message
-            ))
-        })?;
+        let common = match git(worktree, &["rev-parse", "--git-common-dir"], clock) {
+            Ok(common) => common,
+            Err(failure) if failure.wall => return Err(failure),
+            Err(failure) => {
+                return Err(Failure::error(format!(
+                    "cannot read the worktree's common git directory: {}",
+                    failure.message
+                )));
+            }
+        };
         if !same_path(Path::new(common.trim()), &repo.join(".git")) {
             return Err(Failure::error(format!(
                 "{} does not belong to {}",
@@ -718,24 +903,32 @@ fn ensure_worktree(
     }
     let path = worktree.to_string_lossy().into_owned();
     let branch_ref = format!("refs/heads/{branch}");
-    let branch_exists = git_raw(repo, &["rev-parse", "--verify", "--quiet", &branch_ref])?
-        .status
-        .success();
+    let branch_exists = git_raw(
+        repo,
+        &["rev-parse", "--verify", "--quiet", &branch_ref],
+        clock,
+    )?
+    .status
+    .success();
     if branch_exists {
-        git(repo, &["worktree", "add", &path, branch])?;
+        git(repo, &["worktree", "add", &path, branch], clock)?;
     } else {
         // The first attempt starts from the current remote main, not from whatever this
         // clone last fetched. The refspec names the tracking ref explicitly so a remote
         // with a different fetch configuration cannot leave it stale.
         let start = format!("{remote}/{main_branch}");
         let refspec = format!("+refs/heads/{main_branch}:refs/remotes/{start}");
-        git(repo, &["fetch", remote, &refspec]).map_err(|error| {
-            Failure::error(format!(
-                "cannot fetch {remote} {main_branch}: {}",
-                error.message
-            ))
-        })?;
-        if !git_raw(repo, &["rev-parse", "--verify", "--quiet", &start])?
+        match git(repo, &["fetch", remote, &refspec], clock) {
+            Ok(_) => {}
+            Err(failure) if failure.wall => return Err(failure),
+            Err(failure) => {
+                return Err(Failure::error(format!(
+                    "cannot fetch {remote} {main_branch}: {}",
+                    failure.message
+                )));
+            }
+        }
+        if !git_raw(repo, &["rev-parse", "--verify", "--quiet", &start], clock)?
             .status
             .success()
         {
@@ -743,7 +936,11 @@ fn ensure_worktree(
                 "{start} does not exist; a first attempt starts from the remote's main branch"
             )));
         }
-        git(repo, &["worktree", "add", "-b", branch, &path, &start])?;
+        git(
+            repo,
+            &["worktree", "add", "-b", branch, &path, &start],
+            clock,
+        )?;
     }
     Ok(true)
 }
@@ -757,6 +954,7 @@ fn base_sha(
     o: &Options,
     branch: &str,
     created: bool,
+    clock: &Clock,
 ) -> Result<String, Failure> {
     let main = format!("{}/{}", o.remote, o.main_branch);
     let dir = arc.join("attempts").join(&o.task);
@@ -770,9 +968,9 @@ fn base_sha(
         }
     }
     let base = if created {
-        git(repo, &["rev-parse", &main])?
+        git(repo, &["rev-parse", &main], clock)?
     } else {
-        git(repo, &["merge-base", &main, branch])?
+        git(repo, &["merge-base", &main, branch], clock)?
     };
     let base = base.trim().to_owned();
     write_text(&path, &base)?;
@@ -793,18 +991,26 @@ fn last_head_path(arc: &Path, task: &str) -> PathBuf {
 /// The start check: before a reused worktree's child runs, `work/<task>` must still point at
 /// the tip the previous attempt recorded, and the worktree HEAD must still be on that
 /// branch. Anything else means the ref moved outside this task, and this attempt does not
-/// run.
-fn check_start(repo: &Path, worktree: &Path, branch: &str, last: &str) -> Result<(), String> {
+/// run. A failure with `wall` set is the clock, not a moved ref.
+fn check_start(
+    repo: &Path,
+    worktree: &Path,
+    branch: &str,
+    last: &str,
+    clock: &Clock,
+) -> Result<(), Failure> {
     let reference = format!("refs/heads/{branch}");
-    let tip = git_raw(repo, &["rev-parse", "--verify", "--quiet", &reference])
-        .map_err(|error| error.message)?;
+    let tip = git_raw(
+        repo,
+        &["rev-parse", "--verify", "--quiet", &reference],
+        clock,
+    )?;
     if !tip.status.success() || tip.stdout.trim() != last {
-        return Err(moved_outside(branch));
+        return Err(Failure::error(moved_outside(branch)));
     }
-    let head =
-        git_raw(worktree, &["symbolic-ref", "--short", "HEAD"]).map_err(|error| error.message)?;
+    let head = git_raw(worktree, &["symbolic-ref", "--short", "HEAD"], clock)?;
     if !head.status.success() || head.stdout.trim() != branch {
-        return Err(moved_outside(branch));
+        return Err(Failure::error(moved_outside(branch)));
     }
     Ok(())
 }
@@ -816,43 +1022,36 @@ fn moved_outside(branch: &str) -> String {
 /// A start refusal: no child runs and nothing is pushed, but the attempt still ends with its
 /// `AttemptFinished` record so the scheduling loop reads the reason. The record is not
 /// written as `last_head`: the moved tip is exactly what a later attempt must keep refusing.
-fn refuse(
-    o: &Options,
-    runs: &Path,
-    attempt_dir: &Path,
-    base_sha: &str,
-    reason: &str,
-) -> Result<i32, Failure> {
-    let record = json!({
-        "type": "AttemptFinished",
-        "attempt_id": format!("{}-{}", o.task, o.attempt),
-        "token": o.token,
-        "exit_code": EXIT_ERROR,
-        "outcome": "terminated",
-        "base_sha": base_sha,
-        "head_sha": Value::Null,
-        "dirty": Vec::<String>::new(),
-        "pushed": false,
-        "remote_sha": Value::Null,
-        "failure": reason,
-    });
-    let line = serde_json::to_string(&record)
-        .map_err(|error| Failure::error(format!("cannot serialize AttemptFinished: {error}")))?;
-    write_text(&runs.join("attempt_finished.json"), &line)?;
-    write_text(&attempt_dir.join("status.json"), &line)?;
-    println!("{line}");
-    Ok(EXIT_ERROR)
+fn refuse(o: &Options, s: &Setup, base_sha: &str, reason: &str) -> Result<i32, Failure> {
+    write_finish(
+        o,
+        s,
+        Finish {
+            base_sha,
+            head_sha: None,
+            dirty: Vec::new(),
+            pushed: false,
+            remote_sha: None,
+            outcome: "terminated",
+            exit_code: EXIT_ERROR,
+            failure: Some(reason.to_owned()),
+        },
+    )
 }
 
 /// `refs/heads/<branch>` in the main clone, when it exists.
-fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
+fn branch_tip(repo: &Path, branch: &str, clock: &Clock) -> Result<Option<String>, Failure> {
     let reference = format!("refs/heads/{branch}");
-    let out = git_raw(repo, &["rev-parse", "--verify", "--quiet", &reference]).ok()?;
+    let out = git_raw(
+        repo,
+        &["rev-parse", "--verify", "--quiet", &reference],
+        clock,
+    )?;
     if !out.status.success() {
-        return None;
+        return Ok(None);
     }
     let sha = out.stdout.trim().to_owned();
-    (!sha.is_empty()).then_some(sha)
+    Ok((!sha.is_empty()).then_some(sha))
 }
 
 /// Takes the exclusive flock on the worktree directory. A second attempt of the same task
@@ -869,6 +1068,7 @@ fn lock_worktree(worktree: &Path) -> Result<File, Failure> {
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Err(Failure {
             message: format!("another attempt holds the lock on {}", worktree.display()),
             code: EXIT_LOCKED,
+            wall: false,
         }),
         Err(error) => Err(Failure::error(format!(
             "cannot lock {}: {error}",
@@ -1005,56 +1205,74 @@ struct Delivery<'a> {
     /// The `work/<task>` tip this attempt started from.
     start: &'a str,
     head: Option<&'a str>,
-    status_paths: &'a Result<Vec<String>, String>,
+    status_paths: &'a Result<Vec<String>, Failure>,
     allow_noop: bool,
 }
 
 /// The checks of ADR 0048 decisions 7.4 and 8, in order. The first failure names its
-/// reason; nothing is pushed when one fails.
-fn check_delivery(d: &Delivery<'_>) -> Result<(), String> {
+/// reason; nothing is pushed when one fails. A failure with `wall` set is the clock, not a
+/// delivery reason.
+fn check_delivery(d: &Delivery<'_>, clock: &Clock) -> Result<(), Failure> {
     let branch = d.branch;
     let branch_ref = format!("refs/heads/{branch}");
-    let exists = git_raw(d.repo, &["rev-parse", "--verify", "--quiet", &branch_ref])
-        .map_err(|error| error.message)?;
+    let exists = git_raw(
+        d.repo,
+        &["rev-parse", "--verify", "--quiet", &branch_ref],
+        clock,
+    )?;
     if !exists.status.success() {
-        return Err(format!("branch {branch} does not exist"));
+        return Err(Failure::error(format!("branch {branch} does not exist")));
     }
     let head = d
         .head
-        .ok_or_else(|| "cannot read the worktree HEAD".to_owned())?;
-    let ancestor = git_raw(d.repo, &["merge-base", "--is-ancestor", d.base, head])
-        .map_err(|error| error.message)?;
+        .ok_or_else(|| Failure::error("cannot read the worktree HEAD".to_owned()))?;
+    let ancestor = git_raw(
+        d.repo,
+        &["merge-base", "--is-ancestor", d.base, head],
+        clock,
+    )?;
     if !ancestor.status.success() {
-        return Err(format!("head {head} does not descend from base {}", d.base));
+        return Err(Failure::error(format!(
+            "head {head} does not descend from base {}",
+            d.base
+        )));
     }
     // The child may have rewritten its own branch. It must still contain the tip this
     // attempt started from; otherwise the attempt would deliver a rollback.
-    let from_start = git_raw(d.repo, &["merge-base", "--is-ancestor", d.start, head])
-        .map_err(|error| error.message)?;
+    let from_start = git_raw(
+        d.repo,
+        &["merge-base", "--is-ancestor", d.start, head],
+        clock,
+    )?;
     if !from_start.status.success() {
-        return Err(format!(
+        return Err(Failure::error(format!(
             "head {head} does not descend from the start {}",
             d.start
-        ));
+        )));
     }
-    let head_ref =
-        git_raw(d.worktree, &["symbolic-ref", "--short", "HEAD"]).map_err(|error| error.message)?;
+    let head_ref = git_raw(d.worktree, &["symbolic-ref", "--short", "HEAD"], clock)?;
     if !head_ref.status.success() || head_ref.stdout.trim() != branch {
-        return Err(format!("the worktree HEAD is not on {branch}"));
+        return Err(Failure::error(format!(
+            "the worktree HEAD is not on {branch}"
+        )));
     }
     let dirty = match d.status_paths {
         Ok(paths) => paths,
-        Err(reason) => return Err(reason.clone()),
+        Err(failure) if failure.wall => return Err(Failure::wall()),
+        Err(failure) => return Err(Failure::error(failure.message.clone())),
     };
     if !dirty.is_empty() {
-        return Err(format!(
+        return Err(Failure::error(format!(
             "uncommitted or untracked files: {}",
             dirty.join(", ")
-        ));
+        )));
     }
-    let changed = changed_paths(d.repo, d.base, head)?;
+    let changed = changed_paths(d.repo, d.base, head, clock)?;
     if changed.is_empty() && !d.allow_noop {
-        return Err(format!("no change: {head} adds nothing to {}", d.base));
+        return Err(Failure::error(format!(
+            "no change: {head} adds nothing to {}",
+            d.base
+        )));
     }
     let arc_paths: Vec<&str> = changed
         .iter()
@@ -1062,15 +1280,20 @@ fn check_delivery(d: &Delivery<'_>) -> Result<(), String> {
         .filter(|path| *path == ".radian/arc" || path.starts_with(".radian/arc/"))
         .collect();
     if !arc_paths.is_empty() {
-        return Err(format!(
+        return Err(Failure::error(format!(
             "the branch changes files under .radian/arc/: {}",
             arc_paths.join(", ")
-        ));
+        )));
     }
     Ok(())
 }
 
-fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String> {
+fn changed_paths(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    clock: &Clock,
+) -> Result<Vec<String>, Failure> {
     let range = format!("{base}..{head}");
     let out = git_raw(
         repo,
@@ -1082,13 +1305,13 @@ fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, Str
             "--no-textconv",
             &range,
         ],
-    )
-    .map_err(|error| error.message)?;
+        clock,
+    )?;
     if !out.status.success() {
-        return Err(format!(
+        return Err(Failure::error(format!(
             "cannot list the branch's changes: {}",
             out.stderr.trim()
-        ));
+        )));
     }
     Ok(out
         .stdout
@@ -1099,17 +1322,17 @@ fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, Str
 }
 
 /// Uncommitted and untracked paths of the worktree, from `git status --porcelain -z`.
-fn dirty_paths(worktree: &Path) -> Result<Vec<String>, String> {
+fn dirty_paths(worktree: &Path, clock: &Clock) -> Result<Vec<String>, Failure> {
     let out = git_raw(
         worktree,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )
-    .map_err(|error| error.message)?;
+        clock,
+    )?;
     if !out.status.success() {
-        return Err(format!(
+        return Err(Failure::error(format!(
             "cannot list the worktree status: {}",
             out.stderr.trim()
-        ));
+        )));
     }
     Ok(out
         .stdout
@@ -1119,20 +1342,31 @@ fn dirty_paths(worktree: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-fn push(repo: &Path, remote: &str, branch: &str) -> Result<(), String> {
+fn push(repo: &Path, remote: &str, branch: &str, clock: &Clock) -> Result<(), Failure> {
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    let out = git_raw(repo, &["push", remote, &refspec]).map_err(|error| error.message)?;
+    let out = git_raw(repo, &["push", remote, &refspec], clock)?;
     if !out.status.success() {
-        return Err(format!("push failed: {}", out.stderr.trim()));
+        return Err(Failure::error(format!(
+            "push failed: {}",
+            out.stderr.trim()
+        )));
     }
     Ok(())
 }
 
-fn remote_sha_of(repo: &Path, remote: &str, branch: &str) -> Result<String, String> {
+fn remote_sha_of(
+    repo: &Path,
+    remote: &str,
+    branch: &str,
+    clock: &Clock,
+) -> Result<String, Failure> {
     let reference = format!("refs/heads/{branch}");
-    let out = git_raw(repo, &["ls-remote", remote, &reference]).map_err(|error| error.message)?;
+    let out = git_raw(repo, &["ls-remote", remote, &reference], clock)?;
     if !out.status.success() {
-        return Err(format!("ls-remote failed: {}", out.stderr.trim()));
+        return Err(Failure::error(format!(
+            "ls-remote failed: {}",
+            out.stderr.trim()
+        )));
     }
     Ok(out
         .stdout
@@ -1162,13 +1396,26 @@ fn last_result(path: &Path) -> Option<Value> {
 }
 
 /// A git command of the wrapper: the crate's one helper, so hooks are empty, the system
-/// configuration is out, and an unattended command never waits on a credential prompt.
-fn git_raw(cwd: &Path, args: &[&str]) -> Result<GitOutput, Failure> {
-    crate::git::run(cwd, args).map_err(|error| Failure::error(error.to_string()))
+/// configuration is out, and an unattended command never waits on a credential prompt. The
+/// attempt's clock bounds it: a command still running at the deadline is killed with its
+/// process group, `signal.json` gets `wall_time`, and the caller sees a `wall` failure.
+fn git_raw(cwd: &Path, args: &[&str], clock: &Clock) -> Result<GitOutput, Failure> {
+    if clock.expired() {
+        clock.mark()?;
+        return Err(Failure::wall());
+    }
+    match crate::git::run_with_timeout(cwd, args, clock.remaining()) {
+        Ok(crate::git::TimedRun::Done(output)) => Ok(output),
+        Ok(crate::git::TimedRun::TimedOut) => {
+            clock.mark()?;
+            Err(Failure::wall())
+        }
+        Err(error) => Err(Failure::error(error.to_string())),
+    }
 }
 
-fn git(cwd: &Path, args: &[&str]) -> Result<String, Failure> {
-    let out = git_raw(cwd, args)?;
+fn git(cwd: &Path, args: &[&str], clock: &Clock) -> Result<String, Failure> {
+    let out = git_raw(cwd, args, clock)?;
     if !out.status.success() {
         return Err(Failure::error(format!(
             "git {} failed: {}",

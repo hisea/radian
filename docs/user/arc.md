@@ -251,7 +251,7 @@ arc then runs the hidden `radian arc work` wrapper as a child, with the brief on
 The wrapper enforces the attempt's limits itself, so they hold even after the process that started the wrapper is gone:
 
 - no new line in `runs/<task>/attempts/<attempt id>/result.jsonl` for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the worker's process group;
-- `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the attempt started does the same;
+- `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the wrapper started does the same; this clock also bounds the wrapper's own git steps, so a fetch or a push still running at the limit is stopped the same way.
 - after `[limits] cancel_grace_secs` the worker gets SIGKILL.
 
 A limit of `0` means no limit for that timer.

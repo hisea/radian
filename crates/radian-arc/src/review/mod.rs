@@ -697,7 +697,8 @@ pub fn merge(store: &Store, task_id: &str) -> Result<Merged, Error> {
 /// `radian arc merge`, `Some("auto")` is the scheduling loop at auto level `merge` (ADR 0048
 /// decision 12).
 ///
-/// This is the synchronous at once: approval, integration and push in one call.
+/// This is the synchronous path: approval, integration and push in one call. The scheduling
+/// loop uses `merge_step`, which starts the integration in the background.
 pub fn merge_as(store: &Store, task_id: &str, approver: Option<&str>) -> Result<Merged, Error> {
     let context = prepare_merge(store, task_id, approver)?;
     let mut last = String::new();

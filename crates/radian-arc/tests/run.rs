@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use agent_provider_openai_compatible::testing::{Barrier, Reply};
 use common::*;
 use radian_arc::attempt;
+use radian_arc::gate::background;
 use radian_arc::gate::{Stage, Verdict};
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, plan_ops};
@@ -1357,4 +1358,119 @@ fn sigterm_to_watch_kills_the_running_gate_stage() {
         "watch: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The wall clock covers the wrapper's own push: a remote that never answers is killed at
+/// `max_wall_time_secs`, the attempt records `wall_time`, and `start` returns instead of
+/// waiting forever. Mutation: start the clock after the worktree setup and leave the git
+/// commands unbounded, and `start` never returns.
+#[test]
+fn a_hanging_push_ends_the_attempt_at_the_wall_time() {
+    let repo = Repo::new("run-wall-push");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "wall-push");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    tune(&repo, "max_wall_time_secs = 7200", "max_wall_time_secs = 3");
+    tune(
+        &repo,
+        "stall_timeout_secs = 900",
+        "stall_timeout_secs = 600",
+    );
+    // The push waits forever: only the wrapper's clock can end it.
+    let script = repo.root.join("hanging-receive-pack.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nsleep 60\nexec git-receive-pack \"$@\"\n",
+    )
+    .expect("the hanging receive-pack");
+    executable(&script);
+    repo.git(&[
+        "config",
+        "remote.origin.receivepack",
+        script.to_str().unwrap(),
+    ]);
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    let started = Instant::now();
+    let output = run_with_deadline(&repo, &["arc", "start", &task], Duration::from_secs(40));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "start: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(25),
+        "start waited {:?} for a hanging push",
+        started.elapsed()
+    );
+
+    let signal: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&task, 1).join("signal.json")).expect("signal.json"),
+    )
+    .expect("signal.json parses");
+    assert_eq!(signal["reason"], "wall_time", "{signal}");
+    let result: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&task, 1).join("attempt_result.json"))
+            .expect("attempt_result.json"),
+    )
+    .expect("attempt_result.json parses");
+    assert_eq!(result["class"], "wall_time", "{result}");
+    assert_eq!(
+        state(&store, &task),
+        ("todo".to_owned(), "retry_wait".to_owned())
+    );
+}
+
+/// The gate's lock is the gate's alone: a stage command that leaves a background process
+/// behind must not keep `gates/<task>.gate.lock` after the gate exits. Mutation: leave the
+/// inherited descriptor inheritable and the orphan holds the lock.
+#[test]
+fn a_stage_child_does_not_keep_the_gate_lock() {
+    let repo = Repo::new("run-gate-lock");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-lock");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    // The shell exits at once; its `sleep` lives on with whatever descriptors it inherited.
+    commands(&repo, "sleep 15 & true");
+    publish_verifying(&repo, &store, &plan, &task);
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    wait_until(Duration::from_secs(30), "the gate's record", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "done")
+    });
+    // The gate exits right after writing the record; an orphan `sleep` must not hold the
+    // lock (it lives 15 s, well past this deadline).
+    wait_until(Duration::from_secs(8), "the gate lock to be free", || {
+        !background::running(&store, &task)
+    });
+}
+
+/// Runs one `radian` command with a deadline, so a hung `start` fails the test instead of
+/// hanging until nextest's own timeout.
+fn run_with_deadline(repo: &Repo, args: &[&str], limit: Duration) -> std::process::Output {
+    let mut child = repo.spawn(args);
+    let deadline = Instant::now() + limit;
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return child.wait_with_output().expect("the command's output");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .expect("the killed command's output");
+            panic!(
+                "`{}` did not finish within {limit:?}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

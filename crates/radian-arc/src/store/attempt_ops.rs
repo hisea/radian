@@ -38,19 +38,19 @@ pub const PAUSED_FILE: &str = "paused.json";
 /// The wrapper's heartbeat, in the host-local attempt directory (ADR 0048 decision 7.9).
 pub const HEARTBEAT_FILE: &str = "heartbeat.json";
 
-/// The longest and shortest gap between two heartbeats: about 15 seconds at most, and never
-/// more than a third of a stall window (down to a tenth of a second, for a 1-second window).
+/// The longest gap between two heartbeats: 15 seconds, or a third of the stall window when
+/// that is shorter.
 pub const HEARTBEAT_MAX: Duration = Duration::from_secs(15);
-pub const HEARTBEAT_MIN: Duration = Duration::from_millis(100);
 
-/// How often the wrapper writes its heartbeat: at most 15 seconds, and at most a third of the
-/// attempt's stall window, so every window holds at least three beats. Without a stall limit,
-/// the window is three beats of 15 seconds, 45 seconds.
+/// How often the wrapper writes its heartbeat: a third of the attempt's stall window, and 15
+/// seconds when the window is longer than 45 seconds. Every window therefore holds at least
+/// three beats (a 1-second window gives 333 ms). Without a stall limit, the beats are 15
+/// seconds apart and the liveness window is three beats, 45 seconds.
 pub fn heartbeat_interval(stall_secs: u64) -> Duration {
     if stall_secs == 0 {
         HEARTBEAT_MAX
     } else {
-        (Duration::from_secs(stall_secs) / 3).clamp(HEARTBEAT_MIN, HEARTBEAT_MAX)
+        (Duration::from_secs(stall_secs) / 3).min(HEARTBEAT_MAX)
     }
 }
 
@@ -72,8 +72,8 @@ pub fn utc_age_secs(text: &str) -> Option<u64> {
 }
 
 /// The failure classes of decision 9, as one closed list the manual's drift test reads.
-/// `stall` and `wall_time` are written by arc when it signalled the wrapper; the other four
-/// are the ADR's classes.
+/// `stall` and `wall_time` are written by the wrapper when it signalled the worker; the other
+/// four are the ADR's classes.
 pub const FAILURE_CLASSES: &[&str] = &[
     "infrastructure",
     "model",
@@ -1132,6 +1132,27 @@ pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every stall window holds at least three beats, and no stall limit gives the 45-second
+    /// window of three 15-second beats. Mutation: return a flat 15 seconds and a 1-second
+    /// window gets one beat.
+    #[test]
+    fn the_heartbeat_fits_three_beats_in_every_stall_window() {
+        for stall in [0, 1, 3, 5, 45, 900] {
+            let interval = heartbeat_interval(stall);
+            let window = Duration::from_secs(liveness_window_secs(stall));
+            assert!(
+                interval * 3 <= window,
+                "stall {stall}: interval {interval:?} does not fit three times in {window:?}"
+            );
+        }
+        assert_eq!(heartbeat_interval(0), Duration::from_secs(15));
+        assert_eq!(liveness_window_secs(0), 45);
+        assert_eq!(heartbeat_interval(1), Duration::from_secs(1) / 3);
+        assert_eq!(heartbeat_interval(45), Duration::from_secs(15));
+        assert_eq!(heartbeat_interval(900), Duration::from_secs(15));
+        assert_eq!(liveness_window_secs(5), 5);
+    }
 
     /// The closed class list and the class spellings cannot drift.
     #[test]

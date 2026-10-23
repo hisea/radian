@@ -42,6 +42,11 @@ can write changes what arc runs. On top of that the helper:
 
 The repository, global and system configuration files are otherwise unaffected.
 
+`run_with_timeout` is the wrapper's variant: the command leads its own process group, its
+pipes are drained, and a limit that runs out kills the whole group and reports `TimedOut`. The
+worker wrapper gives every git command the wall time that is left, so a fetch or a push cannot
+outlive the attempt.
+
 ## Configuration shape
 
 The `store` owns parsing `config.toml`; the `gate` owns these types, and the field names are
@@ -122,7 +127,9 @@ task to `doing.running`. The wrapper, not the caller, enforces the attempt's lim
 in `result.jsonl` for the stall timeout, or `max_wall_time_secs` in total, sends SIGTERM to
 the worker's process group (then SIGKILL after `cancel_grace_secs`); the reason is in
 `signal.json`. The limits travel with the wrapper, so they hold after the `run` process that
-started it exits or is killed.
+started it exits or is killed. The wall clock starts at the wrapper's first step and bounds
+its own git commands too: a fetch or a push still running at the deadline is killed with its
+process group, `signal.json` gets `wall_time`, and the attempt still writes its records.
 
 The wrapper also writes `attempts/<task>/<attempt>/heartbeat.json` (worker pid, process start
 time, last beat) from the moment the attempt directory exists until both end records are
@@ -348,7 +355,10 @@ One run:
    tests; it exists only for tests and is not a user input.
    While the child runs, the wrapper enforces the limits itself: a stall, the wall time, or a
    `cancel` records `signal.json` with its class, sends SIGTERM to the child's group and then
-   SIGKILL after the grace period. The scheduling loop does not watch the attempt.
+   SIGKILL after the grace period. The scheduling loop does not watch the attempt. The wall
+   clock runs from `run_inner`'s first step; every wrapper git command (`crate::git::
+   run_with_timeout`) gets the time that is left, and a command still running at the deadline
+   is killed with its group, so the setup fetch and the push are bounded as well.
 5. After the child exits, reads the last `Result` line and the exit code, reads
    `head_sha`, lists uncommitted and untracked paths, and checks: the branch exists,
    `head_sha` descends from `base_sha` and from the tip the attempt started on, the worktree

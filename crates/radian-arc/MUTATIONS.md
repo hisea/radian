@@ -36,6 +36,8 @@ copy.
 | M24 | write `""` as the attempt of a refused gate record | `run::a_refused_gate_is_reported_once_and_not_restarted` | ✅ failed |
 | M25 | stop the heartbeat when the worker exits, before the delivery and push checks | `run::a_wrapper_pushing_past_the_stall_window_is_not_judged_dead` | ✅ failed |
 | M26 | install no SIGTERM handler in the gate (the stop reaches only the gate pid) | `run::sigterm_to_watch_kills_the_running_gate_stage` | ✅ failed |
+| M27 | leave the wrapper's git commands unbounded (the wall clock starts at the model child again) | `run::a_hanging_push_ends_the_attempt_at_the_wall_time` (40 s deadline: `start` never returned) | ✅ failed |
+| M28 | leave the inherited gate-lock descriptor inheritable (no `FD_CLOEXEC` reset) | `run::a_stage_child_does_not_keep_the_gate_lock` (the lock stayed held by an orphan `sleep`) | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -66,6 +68,9 @@ stayed at one. The test now also requires the first pass's whole run to print ex
 
 M24–M26 were run against the gate records, the whole-life heartbeat and the stage stop, each
 from a copy under `.radian/mut2/` restored with `cp` and compared with `cmp`.
+
+M27–M28 were run against the wrapper's whole-life wall clock and the gate lock's `FD_CLOEXEC`,
+each from a copy under `.radian/mut3/` restored with `cp` and compared with `cmp`.
 
 The old stale-main test (`a_rejected_push_never_overwrites_the_remote_main`) cannot survive
 the explicit main refspec: a main moved on the remote is now visible before the push, so the

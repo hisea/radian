@@ -39,7 +39,7 @@ const STOP_POLL: Duration = Duration::from_millis(100);
 /// One gate's outcome, as a pass reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
-    /// `verify`, `integration`, or `pending` while the child has not planned the gate yet.
+    /// `verify` or `integration`.
     pub kind: String,
     /// The attempt id the gate wrote its verdicts under.
     pub attempt: String,
@@ -305,6 +305,15 @@ pub fn run(options: Options) -> i32 {
         // by `--lock-fd`; `from_raw_fd` takes ownership of it exactly once.
         unsafe { File::from_raw_fd(fd) }
     });
+    // The gate keeps the lock; its stage children must not inherit it. Without this, a
+    // `commands` shell (or anything it leaves running) keeps `gates/<task>.gate.lock` after
+    // the gate is gone, and the task wedges with no message.
+    if let Some(lock) = &_lock
+        && let Err(error) = cloexec(lock)
+    {
+        eprintln!("radian arc gate: {}", error.message());
+        return 1;
+    }
     // A `--watch` stop reaches this process; its stage child must get it too, or the child
     // would keep writing in the checkout after the gate is gone.
     stage::install_handler();
@@ -315,6 +324,29 @@ pub fn run(options: Options) -> i32 {
             1
         }
     }
+}
+
+/// Sets `FD_CLOEXEC` on the inherited lock descriptor: the gate holds the lock, a stage child
+/// does not.
+fn cloexec(file: &File) -> Result<(), Error> {
+    let fd = file.as_raw_fd();
+    // SAFETY: `fcntl` on a descriptor this process owns, with integer arguments and no
+    // pointer.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(Error::Failed(format!(
+            "cannot read the gate lock descriptor: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: as above; `F_SETFD` sets a per-descriptor flag.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(Error::Failed(format!(
+            "cannot close the gate lock on exec: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 fn run_inner(options: &Options) -> Result<(), Error> {
