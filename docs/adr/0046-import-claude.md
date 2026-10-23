@@ -25,7 +25,7 @@ Project level (`--project`):
 - `.claude/commands/*.md` → `<project>/.agents/skills/<name>/SKILL.md` (same user-level shaping).
 - `.claude/skills/<name>/SKILL.md` → `<project>/.agents/skills/<name>/SKILL.md` (character-for-character copies. Missing frontmatter `name`/`description` normalizes with reports. Commands-occupied same names skip with reports).
 - `.mcp.json` → never translates: reports state trust-gate handling.
-- `.claude/settings.json` `hooks` → `<project>/.radian/hooks.json` (ADR 0045 slice B): the same subset and the same tool-name translation as the user `[hooks]` import. Off-subset entries drop with one report line each.
+- `.claude/settings.json` `hooks` → `<project>/.radian/hooks.json` (ADR 0045 §1): the same subset and the same tool-name translation as the user `[hooks]` import. Off-subset entries drop with one report line each.
 
 ### Never imports (one report row per class)
 
