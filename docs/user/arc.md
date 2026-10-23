@@ -468,7 +468,7 @@ A gate whose process exited without writing any record is reported as `<task> ve
 The next pass applies a wrapper's early failure (a refused argument, a held worktree lock) the same way, so its concurrency slot is free at once (see [Reconcile](arc-gate.md#reconcile)).
 
 A one-shot `run` starts its work and exits without waiting for it; the next `run` collects the result.
-Use `--watch` (or the arc interface, when it exists) to keep advancing.
+Use `--watch` to keep advancing.
 
 `run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end.
 A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, and a conflict rework prints `<task> conflict with main -> todo.ready (automatic rework)`.
