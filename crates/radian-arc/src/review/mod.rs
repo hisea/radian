@@ -238,6 +238,23 @@ impl Reverified {
     }
 }
 
+/// The follow-up task arc proposed for a merged task's review (ADR 0048 decision 10): the
+/// items the task's last review suggested, which the merge left unfixed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Followup {
+    /// The new task's id.
+    pub task: String,
+    /// The merged task whose review's items it carries.
+    pub from: String,
+}
+
+impl Followup {
+    /// The one line the merge prints for it.
+    pub fn line(&self) -> String {
+        format!("{} proposed (follow-ups from {})", self.task, self.from)
+    }
+}
+
 /// What one merge did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Merged {
@@ -256,6 +273,9 @@ pub struct Merged {
     /// Set when a conflict with main wrote the next attempt's brief instead of waiting for
     /// the lead.
     pub conflict: Option<Conflict>,
+    /// The follow-up task arc proposed from the merged task's review, if any (ADR 0048
+    /// decision 10).
+    pub followup: Option<Followup>,
 }
 
 impl Merged {
@@ -270,6 +290,10 @@ impl Merged {
         }
         if let Some(reason) = &self.reason {
             line.push_str(&format!(" ({reason})"));
+        }
+        if let Some(followup) = &self.followup {
+            line.push('\n');
+            line.push_str(&followup.line());
         }
         line
     }
@@ -1223,6 +1247,106 @@ fn review_rework_brief(rework: &ReviewRework) -> String {
     )
 }
 
+// ---- the review's follow-up task (ADR 0048 decision 10) -------------------------------
+
+/// The review's follow-up task of one merged task (ADR 0048 decision 10): the items the
+/// task's last review suggested become one `todo.proposed` task of the same plan, `after` the
+/// merged task. Nothing from `blocking` is carried: the review passed for the merge only
+/// because none was left.
+///
+/// `None` when `[gate.review] propose_followups` is `false`, when the task has no review
+/// verdict, when the review suggested nothing, or when the plan already holds this task's
+/// follow-up: a task gets at most one.
+fn propose_followup(store: &Store, task: &model::TaskFile) -> Result<Option<Followup>, Error> {
+    if !store.config()?.gate.review.propose_followups {
+        return Ok(None);
+    }
+    let Some((verdict_path, verdict)) = latest_review_verdict(store, &task.id) else {
+        return Ok(None);
+    };
+    let items = verdict
+        .review
+        .as_ref()
+        .map(|review| review.suggestions.clone())
+        .unwrap_or_default();
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let plan = store.load_plan(&task.plan)?;
+    if plan.changed_outside_arc {
+        return Err(Error::ChangedOutsideArc(task.plan.clone()));
+    }
+    if has_followup(store, &plan.item, &task.id)? {
+        return Ok(None);
+    }
+    let id = store.add_task_proposed(
+        &task.plan,
+        &followup_slug(&task.id),
+        &followup_title(&task.id),
+        vec![task.id.clone()],
+        false,
+        Vec::new(),
+        &followup_brief(&task.id, &items, &verdict_path),
+    )?;
+    Ok(Some(Followup {
+        task: id,
+        from: task.id.clone(),
+    }))
+}
+
+/// Whether the plan already holds `task`'s follow-up: a task whose title and `after` are the
+/// ones arc gives it. A task gets at most one, even when a second merge path reaches the same
+/// merge.
+fn has_followup(store: &Store, plan: &model::PlanFile, task: &str) -> Result<bool, Error> {
+    for id in &plan.tasks {
+        let Ok(loaded) = store.load_task(id) else {
+            continue;
+        };
+        if loaded.item.title == followup_title(task) && loaded.item.after.as_slice() == [task] {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The slug of `task`'s follow-up: `<merged task slug>-followups`, cut to the 48-character
+/// slug limit, with a trailing `-` removed so the cut stays a valid slug.
+fn followup_slug(task: &str) -> String {
+    let slug = model::split_id(task)
+        .map(|(_, _, slug)| slug)
+        .unwrap_or(task);
+    let mut text: String = format!("{slug}-followups")
+        .chars()
+        .take(model::SLUG_MAX_CHARS)
+        .collect();
+    while text.ends_with('-') {
+        text.pop();
+    }
+    text
+}
+
+/// The title arc gives `task`'s follow-up.
+fn followup_title(task: &str) -> String {
+    format!("Follow-ups from {task}'s review")
+}
+
+/// The fixed brief of `task`'s follow-up (ADR 0048 decision 10): the line that says where the
+/// items come from and what to do with each, the items as `[level] path:line text`, and the
+/// review verdict to read for detail.
+fn followup_brief(task: &str, items: &[ReviewItem], verdict: &Path) -> String {
+    let items = items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "The items below are from the review of `{task}`, which is now merged; fix each one, \
+         or leave it with a one-line reason in the final answer.\n\n{items}\n\n\
+         Read the verdict for detail: `{}`",
+        verdict.display()
+    )
+}
+
 /// The task's `extra_stages` as stage specs. Every name was checked when the task file was
 /// read; the profile's stages are only added, never weakened.
 fn extra_stages(task: &model::TaskFile) -> Vec<StageSpec> {
@@ -1280,7 +1404,7 @@ pub fn merge_as(store: &Store, task_id: &str, approver: Option<&str>) -> Result<
             return integration_failed(store, &context, &integration_label, &verdict, round);
         }
         match finish_integration(store, &context, &verdict, round)? {
-            Integration::Merged(merged) => return Ok(merged),
+            Integration::Merged(merged) => return Ok(*merged),
             Integration::Again(reason) => last = reason,
         }
     }
@@ -1522,7 +1646,8 @@ pub fn gate_integration(store: &Store, task_id: &str) -> Result<String, Error> {
 
 /// What a passing integration did.
 enum Integration {
-    Merged(Merged),
+    /// Boxed: the result is much larger than the other variant.
+    Merged(Box<Merged>),
     /// Main moved or the push was rejected: the task is back in `review.integrating` and
     /// needs another round.
     Again(String),
@@ -1597,8 +1722,31 @@ fn finish_integration(
         task.retry_at = None;
         Ok(())
     })?;
-    let warning = remove_worktree(store, task_id).err();
-    Ok(Integration::Merged(Merged {
+    let mut warning = remove_worktree(store, task_id).err();
+    // The merge stands whatever the follow-up does: a plan that changed outside arc leaves a
+    // warning, not a failed merge.
+    let followup = match store.load_task(task_id) {
+        Ok(merged) => match propose_followup(store, &merged.item) {
+            Ok(followup) => followup,
+            Err(error) => {
+                let failure = format!("cannot propose the follow-up task: {}", error.message());
+                warning = Some(match warning {
+                    Some(warning) => format!("{warning}; {failure}"),
+                    None => failure,
+                });
+                None
+            }
+        },
+        Err(error) => {
+            let failure = format!("cannot read the merged task: {}", error.message());
+            warning = Some(match warning {
+                Some(warning) => format!("{warning}; {failure}"),
+                None => failure,
+            });
+            None
+        }
+    };
+    Ok(Integration::Merged(Box::new(Merged {
         task: task_id.to_owned(),
         state: "done",
         phase: "merged".to_owned(),
@@ -1607,7 +1755,8 @@ fn finish_integration(
         rounds: round,
         warning,
         conflict: None,
-    }))
+        followup,
+    })))
 }
 
 /// A failed integration verdict: record the reason and send the task to
@@ -1643,6 +1792,7 @@ fn integration_failed(
             rounds: round,
             warning: None,
             conflict: Some(conflict),
+            followup: None,
         });
     }
     to_rework(store, &context.task_id)?;
@@ -1655,6 +1805,7 @@ fn integration_failed(
         rounds: round,
         warning: None,
         conflict: None,
+        followup: None,
     })
 }
 
@@ -1683,6 +1834,15 @@ impl MergeStep {
         Self {
             line: None,
             note: Some(note),
+        }
+    }
+
+    /// A merged task: its line (and the follow-up task's, when arc proposed one), with the
+    /// warning a cleanup step left after the merge as the summary's note.
+    fn merged(merged: Merged) -> Self {
+        Self {
+            line: Some(merged.line()),
+            note: merged.warning,
         }
     }
 }
@@ -1785,7 +1945,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                         return Ok(MergeStep::line(merged.line()));
                     }
                     return match finish_integration(store, &context, &verdict, 1)? {
-                        Integration::Merged(merged) => Ok(MergeStep::line(merged.line())),
+                        Integration::Merged(merged) => Ok(MergeStep::merged(*merged)),
                         Integration::Again(reason) => Ok(MergeStep::line(format!(
                             "{task_id} integration -> review.integrating ({reason})"
                         ))),
@@ -1821,7 +1981,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
     match latest_integration_verdict(store, task_id, &context.head) {
         Some((_, verdict)) if verdict.is_pass() => {
             match finish_integration(store, &context, &verdict, 1)? {
-                Integration::Merged(merged) => Ok(MergeStep::line(merged.line())),
+                Integration::Merged(merged) => Ok(MergeStep::merged(*merged)),
                 Integration::Again(reason) => Ok(MergeStep::line(format!(
                     "{task_id} integration -> review.integrating ({reason})"
                 ))),
@@ -2306,4 +2466,56 @@ fn remove_worktree(store: &Store, task: &str) -> Result<(), String> {
         return Err(format!("git worktree prune failed: {}", out.stderr.trim()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The follow-up's slug is the merged task's slug plus the marker, cut to the slug limit
+    /// and still a valid slug: the cut never leaves a trailing `-`.
+    #[test]
+    fn the_followup_slug_carries_the_merged_slug_and_stays_a_slug() {
+        assert_eq!(followup_slug("TK0001-work"), "work-followups");
+        let longest = "a".repeat(model::SLUG_MAX_CHARS);
+        let cut = followup_slug(&format!("TK0002-{longest}"));
+        assert_eq!(cut, longest, "the marker is cut off first: {cut}");
+        assert!(model::valid_slug(&cut), "{cut}");
+        let shorter = "a".repeat(model::SLUG_MAX_CHARS - 1);
+        let cut = followup_slug(&format!("TK0003-{shorter}"));
+        assert_eq!(cut, shorter, "the bare `-` at the cut is removed: {cut}");
+        assert!(model::valid_slug(&cut), "{cut}");
+        assert_eq!(
+            followup_title("TK0001-work"),
+            "Follow-ups from TK0001-work's review"
+        );
+    }
+
+    /// The brief has the fixed form: the one line, one item per line as `[level] path:line
+    /// text`, and the verdict path.
+    #[test]
+    fn the_followup_brief_names_the_task_the_items_and_the_verdict() {
+        let items = vec![ReviewItem {
+            level: Some("minor".to_owned()),
+            file: Some("a.rs".to_owned()),
+            line: Some(7),
+            text: "a nicer name".to_owned(),
+            pre_existing: true,
+        }];
+        let brief = followup_brief("TK0001-work", &items, Path::new("/r/verdicts/review.json"));
+        assert!(
+            brief.contains(
+                "The items below are from the review of `TK0001-work`, which is now merged"
+            ),
+            "{brief}"
+        );
+        assert!(brief.contains("one-line reason"), "{brief}");
+        assert!(
+            brief
+                .lines()
+                .any(|line| line == "[minor] a.rs:7 a nicer name"),
+            "{brief}"
+        );
+        assert!(brief.contains("/r/verdicts/review.json"), "{brief}");
+    }
 }

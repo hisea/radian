@@ -50,6 +50,9 @@ copy.
 | M38 | drop the count (`len >= u32::MAX` instead of `len >= max_auto_reverify`) | `run::max_auto_reverify_stops_the_step_and_says_why` | ✅ failed |
 | M39 | also reverify a review failure (`stage == "review"` passes the fixable check) | `run::only_a_command_failure_of_an_auto_plan_is_reverified` | ✅ failed |
 | M40 | drop the "remote main moved" condition (any failed `commands`/integration stage qualifies) | `run::a_command_failure_is_not_reverified_while_main_stands_still` | ✅ failed |
+| M41 | let the loop claim a `todo.proposed` task (accept `proposed` in `run::start_ready`'s phase filter and in `attempt_ops::claim`) | `review::the_loop_does_not_claim_a_proposed_task_and_start_refuses_it` | ✅ failed |
+| M42 | move the plan back to `draft` on a task confirm | `review::confirm_makes_a_proposed_task_ready_and_leaves_the_plan_alone` | ✅ failed |
+| M43 | include the review verdict's `blocking` items in the follow-up task | `review::a_blocking_item_is_never_carried_into_the_followup` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -104,6 +107,12 @@ already restricted to the task's file; the rework-prompt test is the one that ca
 is the same-commit hole: with the guard gone a `reverify` of an unchanged head is a rework
 round with an empty increment, so an item reported 29 lines from the previous one is moved
 and the stage passes.
+
+M41–M43 were run against `d8777f47` (the proposed task and the review's follow-up), each from
+a copy under `.radian/mutations/` restored with `cp` and compared with `cmp`. M41 turns the
+follow-up into a `doing.running` attempt on the next pass; M42 leaves the plan `draft` after
+the task's confirm; M43 adds a task from a `blocking` item that the passing review in the test
+holds, which arc itself never writes (a non-empty `blocking` fails the stage).
 
 The old stale-main test (`a_rejected_push_never_overwrites_the_remote_main`) cannot survive
 the explicit main refspec: a main moved on the remote is now visible before the push, so the

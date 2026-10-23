@@ -141,7 +141,7 @@ impl Error {
 
 /// Which of the two stored objects a path or an id names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Plan,
     Task,
 }
@@ -516,7 +516,7 @@ impl Store {
     // ---- writing ----------------------------------------------------------------------
 
     /// Appends one task to a plan, in one transaction: the task file, its ledger entry, and
-    /// the plan's `tasks` list.
+    /// the plan's `tasks` list. `radian arc add task` uses this: a confirmed plan gets no task.
     #[allow(clippy::too_many_arguments)]
     pub fn add_task(
         &self,
@@ -527,6 +527,58 @@ impl Store {
         allow_noop: bool,
         extra_stages: Vec<String>,
         brief: &str,
+    ) -> Result<String, Error> {
+        self.add_task_in(
+            plan_id,
+            slug,
+            title,
+            after,
+            allow_noop,
+            extra_stages,
+            brief,
+            false,
+        )
+    }
+
+    /// The lead's MCP `add_task` and arc's review follow-up (ADR 0048 decisions 3 and 11): a
+    /// draft plan gets a `todo.ready` task, exactly as `radian arc add task` makes it, and a
+    /// confirmed plan gets a `todo.proposed` task, which waits for the owner's `confirm`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_task_proposed(
+        &self,
+        plan_id: &str,
+        slug: &str,
+        title: &str,
+        after: Vec<String>,
+        allow_noop: bool,
+        extra_stages: Vec<String>,
+        brief: &str,
+    ) -> Result<String, Error> {
+        self.add_task_in(
+            plan_id,
+            slug,
+            title,
+            after,
+            allow_noop,
+            extra_stages,
+            brief,
+            true,
+        )
+    }
+
+    /// [`Store::add_task`], with `allow_confirmed` naming whether a confirmed plan takes the
+    /// task as `todo.proposed` (`true`) or refuses it (`false`).
+    #[allow(clippy::too_many_arguments)]
+    fn add_task_in(
+        &self,
+        plan_id: &str,
+        slug: &str,
+        title: &str,
+        after: Vec<String>,
+        allow_noop: bool,
+        extra_stages: Vec<String>,
+        brief: &str,
+        allow_confirmed: bool,
     ) -> Result<String, Error> {
         check_new(slug, title)?;
         check_id(plan_id)?;
@@ -541,12 +593,16 @@ impl Store {
         let _lock = self.lock_state()?;
         let plan = self.load_plan(plan_id)?;
         require_unchanged(plan_id, plan.changed_outside_arc)?;
-        if plan.item.status != "draft" {
+        let proposed = if plan.item.status == "draft" {
+            false
+        } else if plan.item.status == "confirmed" && allow_confirmed {
+            true
+        } else {
             return Err(Error::Refused(format!(
                 "plan `{plan_id}` is `{}`; a confirmed plan gets no new tasks",
                 plan.item.status
             )));
-        }
+        };
         for dependency in &after {
             check_id(dependency)?;
             let dependency_path = self.path(Kind::Task, dependency);
@@ -563,7 +619,7 @@ impl Store {
             }
         }
         let id = self.next_id(Kind::Task, slug)?;
-        let task = model::TaskFile::new(
+        let mut task = model::TaskFile::new(
             id.clone(),
             plan_id.to_owned(),
             title.trim().to_owned(),
@@ -572,6 +628,9 @@ impl Store {
             extra_stages,
             brief,
         );
+        if proposed {
+            task.phase = model::PROPOSED_PHASE.to_owned();
+        }
         // The task file comes first: a crash between the two writes leaves an unlisted task
         // file, which is visible, instead of a plan that names a file that does not exist.
         self.write_item(Kind::Task, &id, &task.to_text(), 1)?;
@@ -673,7 +732,8 @@ impl Store {
 
     /// Which kind `id` names. An id that names both a plan and a task is refused (exit 3,
     /// naming both files): an id names one item, and no command picks one of the two.
-    fn resolve_kind(&self, id: &str) -> Result<Kind, Error> {
+    pub(crate) fn resolve_kind(&self, id: &str) -> Result<Kind, Error> {
+        check_id(id)?;
         let plan = self.path(Kind::Plan, id);
         let task = self.path(Kind::Task, id);
         match (plan.is_file(), task.is_file()) {

@@ -39,13 +39,14 @@ arc has four objects.
 | Object | Meaning | Created by | State changed by |
 |---|---|---|---|
 | Plan | One product request: the request text, its tasks, and their order | lead | owner (confirm, auto, pause); arc |
-| Task | One unit of work in one plan, with a brief | lead | arc |
+| Task | One unit of work in one plan, with a brief | lead; arc (the review's follow-up) | arc |
 | Attempt | One run of one task | arc | arc |
 | Verdict | One gate stage result for one commit | gate | nobody: a verdict is never changed |
 
 - A plan has `status` `draft` or `confirmed`. A plan is done when all its tasks are merged; `done` is not a stored status.
 - After a plan is confirmed, its request text can only get appended change records. The text is never rewritten, because rework briefs use it as context.
-- A confirmed plan gets no new tasks. To change a confirmed plan, the lead appends a change record (with any new tasks). The plan then returns to `draft` with `auto` `off`, and the owner confirms it again. Tasks that already started keep their state.
+- To change a confirmed plan, the lead appends a change record. The plan returns to `draft` with `auto` `off`, the lead adds any new tasks with `add_task`, and the owner confirms the plan again; tasks that already started keep their state.
+- A confirmed plan does gain **proposed tasks**. The lead's MCP `add_task` on a confirmed plan creates a task in `todo.proposed`, and arc proposes one follow-up task when a task merges (decision 10). A proposed task belongs to the plan, but the scheduling loop never claims it and `start` refuses it; the owner makes it `todo.ready` with `radian arc confirm <task>`, which leaves the plan's `status` and `auto` alone. An owner who does not want it cancels it with `radian arc cancel` and it becomes `failed.cancelled`.
 - A task has a `plan` field and an `after` list. `after` can name tasks in the same plan or tasks that are already merged.
 - A plan has no branch. arc merges each task separately.
 
@@ -82,7 +83,7 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
   worktrees/<task>/               the worker workspace for each task (decision 15)
 ```
 
-- A task file keeps its path for its whole life. Its `state` (`todo`, `doing`, `review`, `done`, `failed`) and its `phase` are front-matter fields. Phases: `todo` has `ready`, `blocked`, `retry_wait`, `paused_budget`; `doing` has `starting`, `running`, `reconciling`; `review` has `verifying`, `rework_pending`, `awaiting_human`, `integrating`, `ready_to_merge`; `done` has `merged`; `failed` has `exhausted`, `cancelled`, `irrecoverable`.
+- A task file keeps its path for its whole life. Its `state` (`todo`, `doing`, `review`, `done`, `failed`) and its `phase` are front-matter fields. Phases: `todo` has `ready`, `blocked`, `retry_wait`, `paused_budget`, `proposed`; `doing` has `starting`, `running`, `reconciling`; `review` has `verifying`, `rework_pending`, `awaiting_human`, `integrating`, `ready_to_merge`; `done` has `merged`; `failed` has `exhausted`, `cancelled`, `irrecoverable`.
 - arc is the only writer. The lead changes plans and tasks only through the `radian arc mcp` tools. The owner changes them only through the arc TUI and CLI.
 - **Outside changes.** Each time arc writes a plan or task file, it records the file's `state_version` and content hash in the ledger. Before arc acts on a file, it compares the file with the ledger. When they differ, someone changed the file outside arc: arc does not act on that plan or task, and it shows it as changed outside arc until the owner resolves it. `radian arc adopt <id>` resolves it: arc records the current content as its own. `adopt` refuses (exit 3) when the outside change touched `state`, `phase`, an approval, or a verdict field. This finds mistakes and casual edits. It does not stop a lead that changes the ledger too (decision 11).
 - arc reads `config.toml`, plans, tasks, and the ledger only in the main checkout, never in a worktree.
@@ -108,10 +109,13 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
 | `review.integrating` | `review.ready_to_merge` | The integration stage passed against the current main as `base_sha`. |
 | `review.ready_to_merge` | `done.merged` | Main is still `base_sha`, main fast-forwards to `candidate_sha`, the push to `origin` succeeds, and `origin/main` contains `head_sha`. |
 | `review.awaiting_human` | `review.rework_pending` | The owner rejects the task with a note. |
+| `todo.proposed` | `todo.ready` | The owner runs `radian arc confirm <task>`. The plan's `status` and `auto` do not change. |
+| `todo.proposed` | `failed.cancelled` | The owner runs `radian arc cancel <task>`. |
 | `review.*` | `todo.ready` | The lead adds a rework brief. The attempt number goes up by one. |
 | `review.rework_pending`, `review.awaiting_human` | `review.verifying` | `radian arc reverify` (decision 11), or the scheduling loop's automatic reverify of a command failure once main moved (decisions 9 and 10): arc claims a new attempt without a worker. |
 | any | `failed.*` | Retries or budget used up (`exhausted`), cancel (`cancelled`), or a session that cannot continue (`irrecoverable`). |
 
+- A `todo.proposed` task is not a `todo.ready` task: the scheduling loop passes over it, `start` refuses it (exit 3, naming the phase), and a task whose `after` names it waits, because `after` waits for `done.merged`. `list` and `show` print it like every other phase.
 - When the branch moves after the gate (`head_sha` changes), all verdicts and approvals for the old sha become invalid, and the task returns to `review.verifying`.
 - When main moves after integration (it is no longer `base_sha`), the task returns to `review.integrating`.
 
@@ -206,6 +210,14 @@ The change the delivery check counts is the attempt's own commits: the range fro
   A rework round's prompt holds the brief, the previous review's blocking items, the commit list `<previous sha>..<sha>`, and the increment instead of the full diff. It asks the session to check that each previous blocking item is fixed, to review the increment, and to list every problem it finds. The full diff is not in the prompt; the session can read the files. A previous sha that is not a commit in the checkout makes the review a first review, so nothing is treated as pre-existing.
 - **The increment.** The reviewed lines are the new-side lines of `git diff <previous sha> <sha>` that are also new-side lines of the task's own diff. A line that came in only with a merge of main is not in the task's own diff, so it drops out. The increment diff is the task's own diff restricted to the hunks that hold an increment line.
 - **`pre_existing`.** After a rework round's report is parsed, arc moves a blocking item to `suggestions` and marks it `"pre_existing": true` unless (a) its `file:line` is within 3 lines of an increment line in the same file, or (b) it is in the same file as, and within 10 lines of, a blocking item of the previous review, so an unfixed earlier item stays blocking. An item with no `file` or no `line` is moved. This is arc's check, not the model's: whether a line changed is not a matter of opinion. The stage passes when no blocking item is left.
+- **The review's follow-up task.** When a task reaches `done.merged`, arc reads the task's last `review` verdict and collects every `suggestions` item; the items arc moved as `pre_existing` are in `suggestions`. Nothing from `blocking` is collected: the review passed for the merge only because none was left. When at least one item is left and `[gate.review] propose_followups` is `true` (the default), arc adds one task to the same plan, and no more:
+  - id: the next id in the task sequence;
+  - slug: `<merged task slug>-followups`, cut to the 48-character slug limit;
+  - title: `Follow-ups from <task id>'s review`;
+  - `after`: the merged task;
+  - phase: `todo.proposed`, so it waits for the owner's `confirm`.
+
+  Its brief is fixed: one line saying the items are from the review of `<task id>`, which is now merged, and that each item is to be fixed or left with a one-line reason in the final answer; then the items, one per line, as `[level] path:line text`; then the path of the review verdict. A task merged without a review stage, or with no item left, gets no follow-up. With `propose_followups` `false` arc adds none; the lead's MCP `add_task` on a confirmed plan is not affected by the switch. `radian arc run` prints `<new task id> proposed (follow-ups from <task id>)`.
 - `integration` merges `head_sha` onto the current main in a temporary tree and runs the key commands of the profile on the result. It records `base_sha` and `candidate_sha`. When main is still the task's `base_sha`, `candidate_sha` is `head_sha`. Otherwise it is a merge commit of `head_sha` onto main. arc never rebases a task branch, because a rebase changes the sha that the gate verified.
 - Each stage runs in its own checkout under `<repository>/.radian/arc/gates/<stage>/`.
 - A profile has `before_attempt` (array of strings, default `["merge-main"]`): the steps the wrapper runs in the task's worktree before the worker starts (decision 7). The only allowed step is `merge-main`; any other value is a config error, and `[]` runs nothing. The wrapper uses the profile named by `[gate] profile`, and a change takes effect at the next attempt.
@@ -214,6 +226,7 @@ The change the delivery check counts is the attempt's own commits: the range fro
 ### 11. Approval
 
 - The MCP tools for the lead are `add_plan`, `add_task`, `update_plan`, `add_rework`, `list`, and `show`. There is no MCP tool to confirm, start, merge, reject, reverify, change the auto level, or approve.
+- `confirm <id>` takes a task id as well as a plan id. A `todo.proposed` task becomes `todo.ready`, and the plan keeps its `status` and `auto`; a task in any other state is refused (exit 3). An id that names both a plan and a task is refused as every command refuses it.
 - `reject <task> --note <text>` records the note in the task's run directory and moves the task to `review.rework_pending`. arc does not send it to the lead in v0: the lead reads it with the MCP `list` and `show` tools.
 - `reverify <task>` is an owner command; there is no MCP tool for it. It applies to a task in `review.rework_pending` or `review.awaiting_human` whose `rework_reason`, if any, comes from a verification stage: a reject note and a delivery failure are refused, and so is any other state (exit 3). It claims a new attempt without a worker (decision 10), moves the task to `review.verifying` and verifies it at once, as `start` does after a pushed attempt. A reverify attempt does not count toward `max_attempts`, costs nothing, and is not an automatic rework.
 - A merge binds to `verified_sha` and `verdict_set_digest`. A new review of the same sha changes the digest and makes an older approval invalid.
@@ -268,6 +281,7 @@ The `[gate.review]` table configures the `review` stage:
 - `exec_args` (array of strings): the `radian exec` arguments of the review session, after the stage's own arguments. Unset, it is `[worker] exec_args`. It may not repeat an argument the stage sets (`--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p`).
 - `prompt_file` (string): a path relative to the repository root. It is appended to the built-in prompt. Unset: only the built-in prompt.
 - `timeout_secs` (integer, default 900): the wall-time limit of one review session; `0` waits forever.
+- `propose_followups` (boolean, default `true`): whether arc proposes the review's follow-up task when a task merges (decision 10). `false` turns it off; a task merged while it is `false` gets no follow-up later.
 
 - **Tracking is the owner's choice.** With `--track`, git sees `config.toml`, `plans/`, and `tasks/`, and the owner commits them when the owner wants. arc never commits them. A checkout or pull that changes a plan or task file is an outside change (decision 5). The ledger, the runs, the attempt records, the locks, and the worktrees are always local.
 - The worktrees are inside the repository directory, so they get the repository's trust decision (ADR 0031) and need no extra flag.

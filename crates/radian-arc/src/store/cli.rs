@@ -61,8 +61,9 @@ pub enum Command {
     Show { id: String, json: bool },
     /// `radian arc adopt <id>`.
     Adopt { id: String },
-    /// `radian arc confirm <plan>`.
-    Confirm { plan: String },
+    /// `radian arc confirm <id>`: the owner confirms a draft plan, or a task arc or the
+    /// lead proposed (ADR 0048 decisions 3, 6 and 11).
+    Confirm { id: String },
     /// `radian arc auto <plan> <level>`.
     Auto { plan: String, level: String },
     /// `radian arc pause <plan>`.
@@ -104,7 +105,7 @@ pub fn run(command: Option<&Command>) -> u8 {
         Some(Command::List { plan, all, json }) => list(plan.as_deref(), *all, *json).map(emit),
         Some(Command::Show { id, json }) => show(id, *json).map(emit),
         Some(Command::Adopt { id }) => adopt(id).map(emit),
-        Some(Command::Confirm { plan }) => confirm(plan).map(emit),
+        Some(Command::Confirm { id }) => confirm(id).map(emit),
         Some(Command::Auto { plan, level }) => set_auto(plan, level).map(emit),
         Some(Command::Pause { plan }) => pause(plan).map(emit),
         Some(Command::Start { task }) => start(task),
@@ -647,11 +648,12 @@ fn adopt(id: &str) -> Result<String, Error> {
     })
 }
 
-/// `radian arc confirm <plan>`: the owner confirms a draft plan (decision 3).
-fn confirm(plan: &str) -> Result<String, Error> {
+/// `radian arc confirm <id>`: the owner confirms a draft plan, or a task arc or the lead
+/// proposed (ADR 0048 decisions 3, 6 and 11).
+fn confirm(id: &str) -> Result<String, Error> {
     let store = open()?;
-    super::plan_ops::confirm(&store, plan)?;
-    Ok(format!("{plan} confirmed\n"))
+    let confirmed = super::plan_ops::confirm(&store, id)?;
+    Ok(format!("{}\n", confirmed.line()))
 }
 
 /// `radian arc auto <plan> <level>`: the owner sets the plan's auto level (decision 12).
