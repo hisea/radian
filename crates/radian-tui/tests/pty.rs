@@ -6932,6 +6932,78 @@ async fn pty_new_refuses_while_a_background_job_runs() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
+/// A background job can be managed with `job` without an approval prompt: `job` is fixed
+/// `allow` in every tier because the command was approved when it started (ADR 0037
+/// decision 8). The call names an id the mock cannot know (real ids carry the app's pid),
+/// but the permission decision happens before the id is resolved, so this still catches
+/// the old fall-through to `ask`: the second turn stopped at the approval box.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_job_never_asks_for_approval() {
+    let dir = TempDir::new("job-no-prompt");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            r#"{"command":"sleep 60","background":true}"#,
+        ),
+        text_reply("JOB-STARTED"),
+        tool_reply(
+            "call_2",
+            "job",
+            r#"{"id":"job-unknown","op":"wait","timeout_ms":1}"#,
+        ),
+        text_reply("JOB-NO-PROMPT"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "job-no-prompt",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"start a background job\r");
+    assert!(
+        pty.wait_for_screen("JOB-STARTED", wait_positive()),
+        "the job did not start:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"manage the job\r");
+    assert!(
+        pty.wait_for_screen("JOB-NO-PROMPT", wait_positive()),
+        "a `job` call waited for approval instead of running:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("approve tool call?"),
+        "`job` must not ask for approval:\n{}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
 /// `/new` drops the old session's write lock while the process lives: a second process
 /// can `--resume` the old session while the first one runs the new session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
