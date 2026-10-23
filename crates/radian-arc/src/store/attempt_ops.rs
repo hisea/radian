@@ -634,10 +634,10 @@ fn random_token() -> Result<String, Error> {
 
 /// Applies one attempt's result (decision 9) in one transaction.
 ///
-/// `finish` is the wrapper's record. `signal` is set when arc signalled the wrapper: `cancel`
-/// ends the task at `failed.cancelled`, `stall` and `wall_time` are the attempt's class.
-/// `wrapper_exit` is the wrapper's own exit code, used when it wrote no record (a crash or a
-/// lock refusal).
+/// `finish` is the wrapper's record. `signal` is set when the attempt was signalled: `cancel`
+/// ends the task at `failed.cancelled`; `stall` and `wall_time` are written by the wrapper
+/// when it stopped its own worker, and are the attempt's class. `wrapper_exit` is the
+/// wrapper's own exit code, used when it wrote no record (a crash or a lock refusal).
 ///
 /// The token must be the task's current attempt's, and the attempt number must be the
 /// current one; otherwise nothing changes and the result is `ignored`.

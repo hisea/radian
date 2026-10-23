@@ -583,6 +583,7 @@ A pass that returns an error prints one `radian arc: <message>` line and the loo
 A one-shot `run` prints the same line and exits `1` instead.
 
 On SIGINT or SIGTERM the loop starts no new worker and no new gate.
+A Ctrl-C in the terminal reaches the loop only: each worker and each gate runs in its own process group, and both treat SIGINT exactly as SIGTERM.
 A running worker is left alone: it is a separate process with its own limits and record, and the next pass (or the next `run`) collects it.
 A running gate is signalled and gets `[limits] cancel_grace_secs` before SIGKILL; the gate forwards the signal to the stage it is running (the `commands` shell or the review session), waits for it, and exits without a record; a gate that did not finish is started again by the next loop as unverified, and the verdicts it already wrote are reused.
 The loop then prints the summary, releases `runner.lock`, and exits `0`.

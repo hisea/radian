@@ -22,16 +22,16 @@ static STOP: AtomicBool = AtomicBool::new(false);
 /// replaces the default once the gate has read `config.toml`.
 static GRACE_MILLIS: AtomicU64 = AtomicU64::new(10_000);
 
-/// Installs the gate's SIGTERM handler. The handler only stores to atomics and forwards to
-/// the tracked group, which is async-signal-safe.
+/// Installs the gate's stop handler for SIGTERM and SIGINT. The handler only stores to
+/// atomics and forwards to the tracked group, which is async-signal-safe. A Ctrl-C sent to the
+/// gate alone therefore stops its stage child exactly as SIGTERM does.
 pub(crate) fn install_handler() {
     // SAFETY: `stop` has the C ABI `signal` expects, and its body only stores to atomics and
     // calls `killpg(2)`; both are async-signal-safe. The previous handler is not needed.
     unsafe {
-        libc::signal(
-            libc::SIGTERM,
-            request_stop as *const () as libc::sighandler_t,
-        );
+        for signal in [libc::SIGTERM, libc::SIGINT] {
+            libc::signal(signal, request_stop as *const () as libc::sighandler_t);
+        }
     }
 }
 

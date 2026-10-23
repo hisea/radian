@@ -323,7 +323,8 @@ of one task, the brief on stdin. It is an **internal** subcommand: arc runs it, 
 not. It is hidden from `--help` and has no manual page. `--remote`, `--main-branch` and the
 three limit flags are internal too: `radian-tui` takes the names from the repository's
 `[repository] remote` and `main_branch` when they are absent, and from `origin`/`main` when
-there is no `config.toml`; a limit of `0` means no limit.
+there is no `config.toml`; `--stall-timeout-secs` and `--max-wall-time-secs` of `0` mean no
+limit, while `--cancel-grace-secs` of `0` sends the worker SIGKILL right after SIGTERM.
 
 One run:
 

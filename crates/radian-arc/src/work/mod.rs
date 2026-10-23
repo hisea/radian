@@ -119,26 +119,27 @@ const DENIED_ENTRIES: &[&str] = &[
 /// The worker's pid, while a child runs. The SIGTERM handler reads it to forward the signal.
 static CHILD_PID: AtomicI32 = AtomicI32::new(0);
 /// Whether a SIGTERM arrived before the child existed (or after it exited).
-static TERM_REQUESTED: AtomicBool = AtomicBool::new(false);
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// The SIGTERM handler: remember the request and forward it to the worker's whole process
-/// group. Both the atomic stores and `killpg(2)` are async-signal-safe.
-extern "C" fn forward_sigterm(_signal: libc::c_int) {
-    TERM_REQUESTED.store(true, Ordering::SeqCst);
+/// The stop handler (SIGTERM and SIGINT): remember the request and forward it to the worker's
+/// whole process group. Both the atomic stores and `killpg(2)` are async-signal-safe.
+extern "C" fn forward_stop(_signal: libc::c_int) {
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
     let pid = CHILD_PID.load(Ordering::SeqCst);
     if pid > 0 {
         process::signal_group(pid as u32, process::SIGTERM);
     }
 }
 
-fn install_sigterm_handler() {
+fn install_stop_handlers() {
     // SAFETY: the handler only touches atomics and calls `kill(2)`; both are
-    // async-signal-safe. `signal` with a positive handler installs it for the process.
+    // async-signal-safe. `signal` with a positive handler installs it for the process. SIGINT
+    // is treated exactly like SIGTERM: a Ctrl-C sent to the wrapper alone still forwards to
+    // the worker and ends the attempt with its record.
     unsafe {
-        libc::signal(
-            libc::SIGTERM,
-            forward_sigterm as *const () as libc::sighandler_t,
-        );
+        for signal in [libc::SIGTERM, libc::SIGINT] {
+            libc::signal(signal, forward_stop as *const () as libc::sighandler_t);
+        }
     }
 }
 
@@ -192,7 +193,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     // ADR 0048 decision 9: arc cancels an attempt with SIGTERM and expects the wrapper to
     // pass it on, wait for the worker, and still write `AttemptFinished`. Without a handler
     // the wrapper would die at once and leave no record for arc to apply.
-    install_sigterm_handler();
+    install_stop_handlers();
     // The wall clock starts here and covers everything this process does for the attempt: the
     // worktree and its fetch, the model, the delivery checks and the push (ADR 0048
     // decisions 7.8 and 9). Every wrapper git command gets the time that is left.
@@ -340,7 +341,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     CHILD_PID.store(pid as i32, Ordering::SeqCst);
     // A SIGTERM that arrived during the worktree setup is forwarded as soon as there is a
     // child to forward it to.
-    if TERM_REQUESTED.load(Ordering::SeqCst) {
+    if STOP_REQUESTED.load(Ordering::SeqCst) {
         process::signal_group(pid, process::SIGTERM);
     }
     let processor_started_at = process_start(pid).unwrap_or_else(|| started_at.clone());

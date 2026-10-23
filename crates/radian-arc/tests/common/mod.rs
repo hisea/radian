@@ -677,6 +677,18 @@ impl Repo {
         self.radian_command(args).spawn().expect("spawn radian")
     }
 
+    /// Like [`Repo::spawn`], in a process group of its own: a test can signal that group the
+    /// way a terminal's Ctrl-C signals the foreground job.
+    pub fn spawn_in_own_group(&self, args: &[&str]) -> std::process::Child {
+        let mut command = self.radian_command(args);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        command.spawn().expect("spawn radian")
+    }
+
     /// The `radian` binary in the clone, with the environment isolated from the machine: the
     /// home, the session directory and the model catalog are the test's own.
     fn radian_command(&self, args: &[&str]) -> Command {

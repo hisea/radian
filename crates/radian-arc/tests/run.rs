@@ -1451,6 +1451,148 @@ fn a_stage_child_does_not_keep_the_gate_lock() {
     });
 }
 
+/// A terminal Ctrl-C sends SIGINT to the foreground process group. The loop, each wrapper
+/// and each gate are in their own group, so only the loop gets it: the worker keeps running
+/// for the next loop, and the loop stops the gate, which stops its stage child. Mutation:
+/// leave the gate in the loop's group and the SIGINT reaches it directly (the group signal in
+/// the second test below no longer names a gate group).
+#[test]
+fn sigint_to_the_watch_group_leaves_the_worker_running() {
+    let repo = Repo::new("run-sigint-group");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "sigint");
+    let a = add_task(&store, &plan, "a", &[]);
+    let b = add_task(&store, &plan, "b", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    // The gate's `commands` sleeps only while this marker exists, so the later loop that
+    // collects the worker uses a fast gate.
+    let slow = repo.root.join("slow-stage");
+    fs::write(&slow, "slow\n").expect("the slow marker");
+    let stage_pid_file = repo.root.join("stage.pid");
+    commands(
+        &repo,
+        &format!(
+            "if [ -f '{}' ]; then echo $$ > '{}'; sleep 30; fi",
+            slow.display(),
+            stage_pid_file.display()
+        ),
+    );
+    publish_verifying(&repo, &store, &plan, &b);
+    // The worker runs until this marker is removed, so it is provably still alive when the
+    // loop gets the terminal signal.
+    let work_marker = repo.root.join("work-marker");
+    fs::write(&work_marker, "work\n").expect("the work marker");
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            &format!(
+                "while [ -f '{}' ]; do sleep 1; done; echo a > a.txt && git add a.txt && git commit -m a",
+                work_marker.display()
+            ),
+        ),
+        text_reply("done"),
+    ]);
+    worker_args(&repo, mock.base_url());
+
+    let watch = repo.spawn_in_own_group(&["arc", "run", "--watch", "--interval", "30"]);
+    let identity_path = repo.attempt_dir(&a, 1).join("identity.json");
+    wait_for(&identity_path);
+    wait_for(&stage_pid_file);
+    let identity: Value =
+        serde_json::from_str(&fs::read_to_string(&identity_path).expect("the wrapper's identity"))
+            .expect("identity.json parses");
+    let wrapper = identity["wrapper_pid"].as_u64().expect("wrapper_pid") as u32;
+    let stage: u32 = fs::read_to_string(&stage_pid_file)
+        .expect("stage.pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+
+    let sent = std::process::Command::new("kill")
+        .args(["-INT", &format!("-{}", watch.id())])
+        .status()
+        .expect("kill -INT -pgid");
+    assert!(sent.success(), "kill -INT -{}", watch.id());
+
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        process_alive(wrapper),
+        "the terminal-like SIGINT reached the worker's wrapper"
+    );
+    wait_until(Duration::from_secs(20), "the stage child to stop", || {
+        !process_alive(stage)
+    });
+
+    fs::remove_file(&slow).expect("the slow marker is removed");
+    fs::remove_file(&work_marker).expect("the work marker is removed");
+    wait_for(&repo.run_dir(&a, 1).join("attempt_finished.json"));
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &a).1 == "awaiting_human" && state(&store, &b).1 == "awaiting_human"
+    });
+}
+
+/// SIGINT aimed at the gate alone (its own process group) stops its stage child exactly as
+/// SIGTERM does. Mutation: without the gate's own process group, the group signal finds no
+/// such group.
+#[test]
+fn sigint_to_a_gate_stops_its_stage() {
+    let repo = Repo::new("run-sigint-gate");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "sigint-gate");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let stage_pid_file = repo.root.join("stage.pid");
+    commands(
+        &repo,
+        &format!("echo $$ > '{}' && sleep 30", stage_pid_file.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+
+    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    wait_for(&stage_pid_file);
+    let stage: u32 = fs::read_to_string(&stage_pid_file)
+        .expect("stage.pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let record = gate_record(&repo, &task).expect("the gate record");
+    let gate = record["pid"].as_u64().expect("the gate pid") as u32;
+
+    // The gate leads its own process group; the stage child is in another, so this reaches
+    // the gate alone.
+    let sent = std::process::Command::new("kill")
+        .args(["-INT", &format!("-{gate}")])
+        .status()
+        .expect("kill -INT -gate");
+    assert!(sent.success(), "kill -INT -{gate}");
+    wait_until(Duration::from_secs(20), "the stage child to stop", || {
+        !process_alive(stage)
+    });
+    wait_until(Duration::from_secs(20), "the gate to exit", || {
+        !process_alive(gate)
+    });
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill -TERM");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Runs one `radian` command with a deadline, so a hung `start` fails the test instead of
 /// hanging until nextest's own timeout.
 fn run_with_deadline(repo: &Repo, args: &[&str], limit: Duration) -> std::process::Output {

@@ -181,6 +181,15 @@ pub fn spawn_claim(
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // Its own process group: a terminal Ctrl-C reaches the scheduling loop only. The
+        // wrapper handles a signal sent to it alone and leaves the worker bounded; the loop's
+        // stop path leaves this worker running for the next pass to collect (ADR 0048
+        // decision 13).
+        command.process_group(0);
+    }
     let mut child = command
         .spawn()
         .map_err(|error| Error::Failed(format!("cannot start `radian arc work`: {error}")))?;

@@ -208,7 +208,8 @@ pub fn start(store: &Store, task: &str) -> Result<Option<u32>, Error> {
     inherit(&file, &path)?;
     let executable = std::env::current_exe()
         .map_err(|error| Error::Failed(format!("cannot find the current executable: {error}")))?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("arc")
         .arg("gate")
         .arg("--task")
@@ -218,7 +219,15 @@ pub fn start(store: &Store, task: &str) -> Result<Option<u32>, Error> {
         .current_dir(store.repo())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
+        .stderr(Stdio::from(log_err));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // Its own process group: a terminal Ctrl-C reaches the scheduling loop only, which
+        // then stops the gate through `stop` so the gate can stop its stage child first.
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| Error::Failed(format!("cannot start `radian arc gate`: {error}")))?;
     let pid = child.id();
