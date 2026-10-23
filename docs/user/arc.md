@@ -392,7 +392,7 @@ A verification stage (`commands`, `mutation`, `review`) or the integration stage
 With `merge-main` on, the next attempt starts mid-merge, so arc writes its brief and moves the task to `todo.ready`.
 The heading is `## Rework <n> (conflict with main)`, with the lead's `add_rework` numbering.
 The text names the main commit (short sha) and the stage, lists the conflicted paths, says the next attempt starts mid-merge, and asks the worker to resolve the conflict keeping both sides' intent, commit the merge, rebuild, run the touched tests, and change nothing else.
-Every other reason, and a conflict without `merge-main`, keeps `review.rework_pending`, as does a `reverify` conflict.
+Every other reason, and a conflict without `merge-main`, keeps `review.rework_pending`; a `reverify` conflict takes the automatic path above.
 It never raises `auto_rework` and never pauses the plan, and it counts as an attempt: a task that keeps conflicting reaches `failed.exhausted` when its last counted attempt conflicts.
 `auto` decides whether the next attempt starts by itself.
 
