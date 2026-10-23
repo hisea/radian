@@ -136,7 +136,7 @@ It never raises `auto_rework`, never pauses the plan, and never sends the task t
 A run of conflicts is bounded by [`limits.max_conflict_rework`](arc-files.md#configtoml) (default `3`).
 It counts the task's consecutive conflicts, including the one arc is handling: while the count is below the limit, arc writes the brief above; when the count reaches the limit, arc writes no brief and the task stays in `review.rework_pending`.
 `radian arc run` then prints `<task> conflict with main -> review.rework_pending: <reason>`, and `show` prints the same text as part of the `rework_reason`.
-A verification that does not end in a conflict sets the count back to `0`, so only a run of conflicts reaches the limit; `show` prints the task's `retry_count`, not this count.
+A verification that does not end in a conflict sets the count back to `0`, and so does an attempt that never reaches the gate, so only a run of conflicts reaches the limit; `show` prints the task's `retry_count`, not this count.
 `auto` decides whether the next attempt starts by itself.
 
 ### A command failure and a moved main

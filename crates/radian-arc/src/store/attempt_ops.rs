@@ -645,7 +645,7 @@ pub fn apply(
 ) -> Result<Applied, Error> {
     let cost = attempt_cost(store, task_id, attempt);
     let budget = BudgetCheck::new(store, task_id)?;
-    let (applied, pause_plan) = {
+    let (applied, pause_plan, reached_verification) = {
         let _lock = store.lock_state()?;
         let loaded = store.load_task(task_id)?;
         require_unchanged(task_id, loaded.changed_outside_arc)?;
@@ -712,6 +712,7 @@ pub fn apply(
         // budget that ran out while the attempt ran pauses the task even when it failed
         // otherwise retryable.
         task.cost_usd = Some(task.cost_usd.unwrap_or(0.0) + cost.cost_usd);
+        let reached_verification = matches!(next, Next::Verifying);
         let mut retry_at = None;
         let mut pause_plan = false;
         match next {
@@ -776,8 +777,13 @@ pub fn apply(
             cost_usd: cost.cost_usd,
             ignored: None,
         };
-        (applied, pause_plan)
+        (applied, pause_plan, reached_verification)
     };
+    // An attempt that ends without reaching the gate did not conflict with main, so the task's
+    // run of conflicts is over (ADR 0048 decision 9).
+    if !reached_verification {
+        crate::review::reset_conflict_rework(store, task_id)?;
+    }
     // The attempt's own record: the class, the cost, and the state arc wrote. Outside the
     // ledger, so a crash after the task write leaves the task's state authoritative.
     let record = json!({

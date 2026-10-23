@@ -320,6 +320,33 @@ fn a_reworked_task_keeps_starting_after_max_attempts_worth_of_attempts() {
     );
 }
 
+/// An attempt that ends without reaching the gate (a worker failure that retries, a delivery
+/// failure) did not conflict with main, so it sets the task's run of conflicts back to 0. The
+/// conflict count is `runs/<task>/conflict_rework.json`. Mutation: keep the count across such an
+/// attempt and a task that keeps retrying would still stop at its old streak.
+#[test]
+fn an_attempt_that_does_not_reach_the_gate_resets_the_conflict_count() {
+    let (_repo, store) = setup("conflict-reset");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    let path = store
+        .root()
+        .join("runs")
+        .join(task)
+        .join(radian_arc::review::CONFLICT_REWORK_FILE);
+    std::fs::create_dir_all(path.parent().unwrap()).expect("the run directory");
+    std::fs::write(&path, "{\n  \"conflicts\": 2\n}\n").expect("the conflict record");
+
+    attempt_ops::claim(&store, task).expect("claim");
+    let record = finish(&store, task, 1, "failed", false, None);
+    attempt_ops::apply(&store, task, 1, Some(&record), None, Some(1)).expect("apply");
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+
+    let text = std::fs::read_to_string(&path).expect("the conflict record reads");
+    let value: Value = serde_json::from_str(&text).expect("the conflict record parses");
+    assert_eq!(value["conflicts"], 0, "{text}");
+}
+
 /// `max_attempts` counts the retries since the last rework, not the attempt number: a task
 /// already five attempts in retries from 0 after a rework, gets `max_attempts` (3) retries, and
 /// the failure after them is `failed.exhausted`. Mutation: compare the attempt number and the

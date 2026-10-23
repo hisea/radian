@@ -1232,7 +1232,9 @@ fn write_conflict_rework(
 
 /// A verification that did not end in a conflict sets the task's run of conflicts back to 0
 /// (ADR 0048 decision 9): only a run of conflicts can reach `[limits] max_conflict_rework`.
-fn reset_conflict_rework(store: &Store, task: &str) -> Result<(), Error> {
+/// An attempt that ends without reaching the gate did not conflict either, so
+/// [`crate::store::attempt_ops::apply`] calls this too.
+pub(crate) fn reset_conflict_rework(store: &Store, task: &str) -> Result<(), Error> {
     if read_conflict_rework(store, task).conflicts == 0 {
         return Ok(());
     }
