@@ -2171,11 +2171,13 @@ mod tests {
 
     // ---- the arc manual --------------------------------------------------------------
     //
-    // Every check in this section locates its table by the heading it sits under. The
-    // heading is the anchor: `arc_tables(doc, "## `radian arc show")` is the only way a
-    // check reads rows, so an unrelated table elsewhere on the page can neither satisfy
-    // nor break it. A missing heading (or a heading with no table) fails with the page and
-    // the heading.
+    // The arc manual is three pages: `arc.md` (the commands), `arc-gate.md` (the gate and
+    // failures) and `arc-files.md` (the config, the plan and task files, the layout).
+    // Every check locates its table by the heading it sits under and the page that holds
+    // it. The heading is the anchor: `arc_tables(doc, "arc.md", "## `radian arc show")` is
+    // the only way a check reads rows, so an unrelated table elsewhere on any page can
+    // neither satisfy nor break it. A missing heading (or a heading with no table) fails
+    // with the page and the heading.
 
     /// Every data table under the heading that starts with `prefix`, from that heading to
     /// the next heading at the same or a higher level. The heading is the table's anchor:
@@ -2188,14 +2190,14 @@ mod tests {
         radian_coding::drift::tables_under(doc, page, prefix)
     }
 
-    /// Every data table under an `arc.md` heading.
-    fn arc_tables(doc: &str, prefix: &str) -> Vec<DocTable> {
-        doc_tables(doc, "arc.md", prefix)
+    /// Every data table under a heading of one arc page.
+    fn arc_tables(doc: &str, page: &str, prefix: &str) -> Vec<DocTable> {
+        doc_tables(doc, page, prefix)
     }
 
-    /// The first table under `prefix`.
-    fn arc_table(doc: &str, prefix: &str) -> DocTable {
-        arc_tables(doc, prefix).swap_remove(0)
+    /// The first table under `prefix` of one arc page.
+    fn arc_table(doc: &str, page: &str, prefix: &str) -> DocTable {
+        arc_tables(doc, page, prefix).swap_remove(0)
     }
 
     /// The `cli.md` tables the option checks read. Each heading is an anchor: a table
@@ -2254,10 +2256,28 @@ mod tests {
         }
     }
 
-    /// `docs/user/arc.md`, the page the `radian arc` grammar is checked against.
-    fn arc_md() -> String {
+    /// One arc manual page: its file name and text.
+    fn arc_page(name: &str) -> String {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        std::fs::read_to_string(manifest.join("../../docs/user/arc.md")).expect("arc.md exists")
+        let path = format!("../../docs/user/{name}");
+        std::fs::read_to_string(manifest.join(path)).unwrap_or_else(|error| {
+            panic!("docs/user/{name} exists: {error}");
+        })
+    }
+
+    /// `docs/user/arc.md`, the page the `radian arc` commands are checked against.
+    fn arc_md() -> String {
+        arc_page("arc.md")
+    }
+
+    /// `docs/user/arc-gate.md`, the page the gate and failure sections are checked against.
+    fn arc_gate_md() -> String {
+        arc_page("arc-gate.md")
+    }
+
+    /// `docs/user/arc-files.md`, the page the config and file sections are checked against.
+    fn arc_files_md() -> String {
+        arc_page("arc-files.md")
     }
 
     /// The `arc` subcommand of the parser, as a tree of its own.
@@ -2404,7 +2424,7 @@ mod tests {
         let commands = collect_arc_commands();
         assert!(!commands.is_empty(), "the arc subcommand has commands");
         for command in &commands {
-            let tables = arc_tables(&doc, &command.heading);
+            let tables = arc_tables(&doc, "arc.md", &command.heading);
             for option in &command.options {
                 let rows = rows_with_flag(&tables, &option.flag);
                 if rows.is_empty() {
@@ -2463,7 +2483,7 @@ mod tests {
     #[test]
     fn every_arc_exit_code_appears_in_arc_md() {
         let doc = arc_md();
-        let table = arc_table(&doc, "## Exit codes");
+        let table = arc_table(&doc, "arc.md", "## Exit codes");
         for (code, meaning) in radian_arc::store::EXIT_CODES {
             let cell = format!("`{code}`");
             let row = row_with_first_cell(&table, &cell).unwrap_or_else(|| {
@@ -2500,7 +2520,7 @@ mod tests {
     #[test]
     fn every_merge_exit_code_appears_in_arc_md() {
         let doc = arc_md();
-        let table = arc_table(&doc, "### Merge exit codes");
+        let table = arc_table(&doc, "arc.md", "### Merge exit codes");
         let mut documented = Vec::new();
         for row in &table {
             let code = first_cell(row)
@@ -2532,15 +2552,16 @@ mod tests {
         );
     }
 
-    /// Every `config.toml` key appears in the table under `## config.toml` with the default
-    /// the code has, and every key whose default is "not set" says so. The default is
+    /// Every `config.toml` key appears in the table under `## config.toml` on
+    /// `arc-files.md` with the default the code has, and every key whose default is "not
+    /// set" says so. The default is
     /// compared as a parsed TOML value, so the table may order an inline table's keys
     /// readably (`stage` before `required`) instead of following the serializer's order.
     /// The source is the serialized `Config::default()`, so a changed default fails here.
     #[test]
-    fn every_config_key_and_default_appears_in_arc_md() {
-        let doc = arc_md();
-        let table = arc_table(&doc, "## `config.toml`");
+    fn every_config_key_and_default_appears_in_arc_files_md() {
+        let doc = arc_files_md();
+        let table = arc_table(&doc, "arc-files.md", "## `config.toml`");
         let config = radian_arc::store::config::Config::default();
         let value = toml::Value::try_from(config).expect("the config serializes to TOML");
         let mut leaves = Vec::new();
@@ -2553,7 +2574,7 @@ mod tests {
         );
         for (key, rendered) in &leaves {
             let row = config_key_row(&table, key).unwrap_or_else(|| {
-                panic!("arc.md's `## config.toml` table has no row for `{key}`")
+                panic!("arc-files.md's `## config.toml` table has no row for `{key}`")
             });
             let cell = config_default_cell(row);
             let expected = parse_toml_value(rendered).unwrap_or_else(|| {
@@ -2568,7 +2589,7 @@ mod tests {
         }
         for key in radian_arc::store::config::OPTIONAL_KEYS {
             let row = config_key_row(&table, key).unwrap_or_else(|| {
-                panic!("arc.md's `## config.toml` table has no row for `{key}`")
+                panic!("arc-files.md's `## config.toml` table has no row for `{key}`")
             });
             assert!(
                 config_default_cell(row).contains("not set"),
@@ -2583,10 +2604,10 @@ mod tests {
     /// so does a row that names an argument the wrapper does not own.
     #[test]
     fn the_owned_worker_arguments_are_the_config_rows_list() {
-        let doc = arc_md();
-        let table = arc_table(&doc, "## `config.toml`");
+        let doc = arc_files_md();
+        let table = arc_table(&doc, "arc-files.md", "## `config.toml`");
         let row = config_key_row(&table, "worker.exec_args")
-            .expect("arc.md's config table has a `worker.exec_args` row");
+            .expect("arc-files.md's config table has a `worker.exec_args` row");
         let allowed = row.get(3).expect("the row has an Allowed values cell");
         let documented: Vec<&str> = allowed
             .split('`')
@@ -2597,7 +2618,7 @@ mod tests {
         assert_eq!(
             documented,
             radian_arc::worker_args::OWNED_EXEC_ARGS,
-            "arc.md's `worker.exec_args` row lists the code's owned arguments: {row:?}"
+            "arc-files.md's `worker.exec_args` row lists the code's owned arguments: {row:?}"
         );
     }
 
@@ -2607,10 +2628,10 @@ mod tests {
     /// here, and so does a row that names an argument the stage does not own.
     #[test]
     fn the_owned_review_arguments_are_the_config_rows_list() {
-        let doc = arc_md();
-        let table = arc_table(&doc, "## `config.toml`");
+        let doc = arc_files_md();
+        let table = arc_table(&doc, "arc-files.md", "## `config.toml`");
         let row = config_key_row(&table, "gate.review.exec_args")
-            .expect("arc.md's config table has a `gate.review.exec_args` row");
+            .expect("arc-files.md's config table has a `gate.review.exec_args` row");
         let allowed = row.get(3).expect("the row has an Allowed values cell");
         let documented: Vec<&str> = allowed
             .split('`')
@@ -2621,17 +2642,17 @@ mod tests {
         assert_eq!(
             documented,
             radian_arc::gate::OWNED_EXEC_ARGS,
-            "arc.md's `gate.review.exec_args` row lists the stage's owned arguments: {row:?}"
+            "arc-files.md's `gate.review.exec_args` row lists the stage's owned arguments: {row:?}"
         );
     }
 
     /// Every attempt failure class appears in the Class cell of the table under
-    /// `## Failures, retries and the budget`. The source is
+    /// `## Failures, retries and the budget` on `arc-gate.md`. The source is
     /// `radian_arc::attempt::FAILURE_CLASSES`.
     #[test]
-    fn every_attempt_failure_class_appears_in_arc_md() {
-        let doc = arc_md();
-        let table = arc_table(&doc, "## Failures, retries and the budget");
+    fn every_attempt_failure_class_appears_in_arc_gate_md() {
+        let doc = arc_gate_md();
+        let table = arc_table(&doc, "arc-gate.md", "## Failures, retries and the budget");
         for class in radian_arc::attempt::FAILURE_CLASSES {
             let found = table
                 .iter()
@@ -2646,9 +2667,9 @@ mod tests {
     /// A `reverify` attempt records its own class; the manual's failure table names it. The
     /// source is [`radian_arc::store::attempt_ops::REVERIFY_CLASS`].
     #[test]
-    fn the_reverify_class_appears_in_arc_md() {
-        let doc = arc_md();
-        let table = arc_table(&doc, "## Failures, retries and the budget");
+    fn the_reverify_class_appears_in_arc_gate_md() {
+        let doc = arc_gate_md();
+        let table = arc_table(&doc, "arc-gate.md", "## Failures, retries and the budget");
         let class = radian_arc::store::attempt_ops::REVERIFY_CLASS;
         assert!(
             table
@@ -2659,13 +2680,15 @@ mod tests {
     }
 
     /// Every plan status, auto level, stage, task state, and each state's phases appear in
-    /// the table that owns them: the plan fields table's `status` row, the level table, the
-    /// config table's `stages` row, and the states table. A mention elsewhere on the page
-    /// does not satisfy a check.
+    /// the table that owns them on the page that holds it: the plan fields table's `status`
+    /// row (`arc-files.md`), the level table (`arc.md`), the config table's `stages` row
+    /// (`arc-files.md`), and the states table (`arc-files.md`). A mention elsewhere on a
+    /// page does not satisfy a check.
     #[test]
-    fn every_arc_value_set_appears_in_arc_md() {
-        let doc = arc_md();
-        let plan_fields = arc_table(&doc, "### Plan fields");
+    fn every_arc_value_set_appears_in_the_arc_pages() {
+        let commands = arc_md();
+        let files = arc_files_md();
+        let plan_fields = arc_table(&files, "arc-files.md", "### Plan fields");
         let status_row = row_with_first_cell(&plan_fields, "`status`")
             .expect("the plan fields table has a `status` row");
         let allowed = status_row
@@ -2677,7 +2700,7 @@ mod tests {
                 "the `status` row misses `{status}`: {status_row:?}"
             );
         }
-        let levels = arc_table(&doc, "### The levels");
+        let levels = arc_table(&commands, "arc.md", "### The levels");
         for level in radian_arc::store::AUTO_LEVELS {
             assert!(
                 levels
@@ -2686,7 +2709,7 @@ mod tests {
                 "the level table has no `{level}` row"
             );
         }
-        let config = arc_table(&doc, "## `config.toml`");
+        let config = arc_table(&files, "arc-files.md", "## `config.toml`");
         let stages_row = row_with_first_cell(&config, "`gate.profiles.<name>.stages`")
             .expect("the config table has a `gate.profiles.<name>.stages` row");
         let allowed = stages_row
@@ -2698,7 +2721,7 @@ mod tests {
                 "the stages row misses `{stage}`: {stages_row:?}"
             );
         }
-        let states = arc_table(&doc, "### States and phases");
+        let states = arc_table(&files, "arc-files.md", "### States and phases");
         for state in radian_arc::store::TASK_STATES {
             let row = row_with_first_cell(&states, &format!("`{state}`"))
                 .unwrap_or_else(|| panic!("the states table has no `{state}` row"));
@@ -2717,13 +2740,14 @@ mod tests {
     }
 
     /// Every front-matter field the writer puts in a plan or a task file has a row in that
-    /// file's own table under `### Plan fields` / `### Task fields`. The source is the
+    /// file's own table under `### Plan fields` / `### Task fields` on `arc-files.md`. The
+    /// source is the
     /// writer: a renamed or added field fails here, and a task field cannot be satisfied by
     /// a plan row.
     #[test]
-    fn every_plan_and_task_field_appears_in_arc_md() {
+    fn every_plan_and_task_field_appears_in_arc_files_md() {
         use radian_arc::store::model::{PlanFile, TaskFile, TaskState};
-        let doc = arc_md();
+        let doc = arc_files_md();
         let plan = PlanFile {
             schema_version: 1,
             id: "0001-a".to_owned(),
@@ -2762,18 +2786,18 @@ mod tests {
             retry_at: Some("2026-01-01T00:00:00Z".to_owned()),
             body: String::new(),
         };
-        let plan_table = arc_table(&doc, "### Plan fields");
+        let plan_table = arc_table(&doc, "arc-files.md", "### Plan fields");
         for key in front_matter_keys(&plan.to_text()) {
             assert!(
                 row_with_first_cell(&plan_table, &format!("`{key}`")).is_some(),
-                "plan field `{key}` has no row in arc.md's plan fields table"
+                "plan field `{key}` has no row in arc-files.md's plan fields table"
             );
         }
-        let task_table = arc_table(&doc, "### Task fields");
+        let task_table = arc_table(&doc, "arc-files.md", "### Task fields");
         for key in front_matter_keys(&task.to_text()) {
             assert!(
                 row_with_first_cell(&task_table, &format!("`{key}`")).is_some(),
-                "task field `{key}` has no row in arc.md's task fields table"
+                "task field `{key}` has no row in arc-files.md's task fields table"
             );
         }
     }
@@ -2786,7 +2810,7 @@ mod tests {
     #[test]
     fn every_mcp_tool_appears_in_arc_md() {
         let doc = arc_md();
-        let table = arc_table(&doc, "### The tools");
+        let table = arc_table(&doc, "arc.md", "### The tools");
         assert!(!radian_arc::mcp::TOOLS.is_empty(), "the server has tools");
         for tool in radian_arc::mcp::TOOLS {
             let row = row_with_first_cell(&table, &format!("`{}`", tool.name))

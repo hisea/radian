@@ -359,9 +359,13 @@ fn read_only() -> Vec<Rule> {
 /// session whose own tier and approval decide everything it may do. A parent prompt would only
 /// add a second gate that a headless parent cannot answer. `goal` (ADR 0047) is here for the
 /// first reason: it only advances the session's own goal state and journals it — no workspace
-/// file, no command — so prompting for it would only stall the continuation it serves.
+/// file, no command — so prompting for it would only stall the continuation it serves. `job`
+/// (ADR 0037 decision 8) only reads, waits on or stops the session's own jobs: the command was
+/// approved when it started, and reading its output later adds no rights, so a second question
+/// would only stall a headless turn. Mounting is separate: a tier or a session that does not
+/// offer `job` never reaches this rule, and a `deny` rule still outranks it.
 fn always_allowed() -> Vec<Rule> {
-    ["ask_user", "skill", "subagent", "goal"]
+    ["ask_user", "skill", "subagent", "goal", "job"]
         .into_iter()
         .map(|name| {
             Rule::new(
@@ -529,6 +533,21 @@ mod tests {
         ] {
             let tier = profile.preset.as_str();
             assert_eq!(action(&profile, "subagent"), Action::Allow, "{tier}");
+        }
+    }
+
+    /// ADR 0037 decision 8: `job` only reads, waits on or stops the session's own jobs, so
+    /// every tier allows it and it never prompts. Removing the rule would make it fall through
+    /// to the default `ask` (and, under `approval = "never"`, to a deny).
+    #[test]
+    fn job_is_allowed_in_every_tier() {
+        let ws = TestDir::new("job");
+        for profile in [
+            Profile::workspace_write(&ws).unwrap(),
+            Profile::full_access(&ws).unwrap(),
+        ] {
+            let tier = profile.preset.as_str();
+            assert_eq!(action(&profile, "job"), Action::Allow, "{tier}");
         }
     }
 

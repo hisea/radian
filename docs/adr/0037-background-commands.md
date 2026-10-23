@@ -70,6 +70,8 @@ Removed names `job_output`, `job_list`, `job_kill`, `shell_output`, and similar 
 
 Jobs start under current-tier sandbox and approval rules (one approval covers the whole command lifetime). Background changes no tier, skips no deny rules, and routes around nothing through "read output later". Approval and sandbox already happened at start. Completion notices add no rights.
 
+The `job` tool itself never prompts: it only reads, waits on or stops the session's own jobs, and the command was approved when it started. Its rule is a fixed `allow` in every tier, so a headless session keeps it too. A user's `deny` or `ask` rule for `job` still wins, the host's tool-name gate still runs first, and a tier or a session that does not mount `job` is unaffected.
+
 ### 9. Concurrency cap
 
 Max **4** background jobs at once. A 5th start returns a tool error naming the cap and `job kill`. 3a foreground entries never count.
