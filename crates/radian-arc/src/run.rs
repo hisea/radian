@@ -18,6 +18,10 @@
 //! 6. for every plan at `auto` `merge`, approve a verified task and start its integration
 //!    gate, or finish the integration a gate left.
 //!
+//! Steps 4 to 6 walk the backlog in claim order: the plan's `priority` (`P0` first), then the
+//! plan id, then the task's order in the plan. Priority only decides who gets a free
+//! concurrency slot: a running attempt is never preempted.
+//!
 //! Waiting for a person, a future `retry_at`, a worker, or a gate does not keep it running:
 //! the loop ends at the first pass that changes nothing. A one-shot `run` therefore exits
 //! after starting work; `--watch` is how the loop keeps collecting it. A task of a plan at
@@ -33,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use crate::store::attempt_ops::{self, Claim};
 use crate::store::model::{self, TaskState};
-use crate::store::{Error, Store, plan_ops};
+use crate::store::{Error, PlanView, Store, plan_ops};
 
 /// A hard stop on the pass count. Every pass that continues changes at least one task; this
 /// only keeps a store that something else keeps rewriting from looping forever.
@@ -473,11 +477,41 @@ fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
 
-/// Every task in `review.rework_pending`, in id order. A file that changed outside arc is
+/// Every plan in claim order: the owner's `priority` (`P0` first), then the plan id. A plan
+/// file that changed outside arc keeps its place; the caller skips it where it must not act.
+fn plans_in_claim_order(store: &Store) -> Result<Vec<PlanView>, Error> {
+    let mut views = store.plans()?;
+    views.sort_by(|one, other| model::claim_order(&one.plan.item, &other.plan.item));
+    Ok(views)
+}
+
+/// Every task in claim order: its plan's priority, then the plan id, then the task's position
+/// in the plan. A task file no plan lists sorts last, by id.
+fn task_claim_order(store: &Store) -> Result<Vec<String>, Error> {
+    let mut keys: std::collections::HashMap<String, (usize, String, usize)> =
+        std::collections::HashMap::new();
+    for view in plans_in_claim_order(store)? {
+        let rank = model::priority_rank(view.plan.item.priority());
+        for (index, task) in view.tasks.iter().enumerate() {
+            keys.entry(task.item.id.clone())
+                .or_insert_with(|| (rank, view.plan.item.id.clone(), index));
+        }
+    }
+    let key = |id: &str| {
+        keys.get(id)
+            .cloned()
+            .unwrap_or((usize::MAX, String::new(), 0))
+    };
+    let mut ids = store.task_ids()?;
+    ids.sort_by(|one, other| key(one).cmp(&key(other)).then_with(|| one.cmp(other)));
+    Ok(ids)
+}
+
+/// Every task in `review.rework_pending`, in claim order. A file that changed outside arc is
 /// skipped.
 fn rework_pending_tasks(store: &Store) -> Result<Vec<String>, Error> {
     let mut ids = Vec::new();
-    for id in store.task_ids()? {
+    for id in task_claim_order(store)? {
         let loaded = store.load_task(&id)?;
         if loaded.changed_outside_arc {
             continue;
@@ -489,10 +523,11 @@ fn rework_pending_tasks(store: &Store) -> Result<Vec<String>, Error> {
     Ok(ids)
 }
 
-/// Every task in `review.verifying`, in id order. A file that changed outside arc is skipped.
+/// Every task in `review.verifying`, in claim order. A file that changed outside arc is
+/// skipped.
 fn verifying_tasks(store: &Store) -> Result<Vec<String>, Error> {
     let mut ids = Vec::new();
-    for id in store.task_ids()? {
+    for id in task_claim_order(store)? {
         let loaded = store.load_task(&id)?;
         if loaded.changed_outside_arc {
             continue;
@@ -504,8 +539,9 @@ fn verifying_tasks(store: &Store) -> Result<Vec<String>, Error> {
     Ok(ids)
 }
 
-/// Claims and runs ready tasks of plans at `auto` `run` or `merge`. `true` when it ran at
-/// least one attempt.
+/// Claims and runs ready tasks of plans at `auto` `run` or `merge`, in claim order: the plan's
+/// priority, then the plan id, then the task order. Priority picks who gets a free slot; it
+/// never preempts an attempt that is already running. `true` when it ran at least one attempt.
 fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
     let config = store.config()?;
     let concurrency = u64::from(config.limits.concurrency.max(1));
@@ -515,7 +551,7 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
     }
     let mut slots = concurrency - doing;
     let mut claims: Vec<(Claim, model::TaskFile)> = Vec::new();
-    for view in store.plans()? {
+    for view in plans_in_claim_order(store)? {
         if slots == 0 {
             break;
         }
@@ -567,14 +603,15 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
     Ok(true)
 }
 
-/// Merges every finished task of a plan at `auto` `merge`. `true` when a task changed state.
+/// Merges every finished task of a plan at `auto` `merge`, in claim order. `true` when a task
+/// changed state.
 fn merge_auto(
     store: &Store,
     transitions: &mut Transitions,
     stop: Option<&AtomicBool>,
 ) -> Result<bool, Error> {
     let mut changed = false;
-    for view in store.plans()? {
+    for view in plans_in_claim_order(store)? {
         if view.plan.changed_outside_arc
             || view.plan.item.status != "confirmed"
             || view.plan.item.auto != "merge"
@@ -658,10 +695,11 @@ fn count_doing(store: &Store) -> Result<u64, Error> {
     Ok(count)
 }
 
-/// The final summary: for each plan and task that is not merged, what it waits on.
+/// The final summary: for each plan and task that is not merged, what it waits on. Plans are
+/// listed in claim order.
 fn waiting(store: &Store) -> Result<Vec<String>, Error> {
     let mut lines = Vec::new();
-    for view in store.plans()? {
+    for view in plans_in_claim_order(store)? {
         let plan = &view.plan.item;
         let open: Vec<&crate::store::Loaded<model::TaskFile>> = view
             .tasks

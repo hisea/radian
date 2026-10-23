@@ -7,7 +7,7 @@ description: The arc commands: every subcommand, the lead's MCP server, and the 
 arc is a plan and task orchestrator built into the same `radian` binary.
 It keeps a plan and its tasks as files in the repository, runs each task as a separate headless `radian` worker, and merges only what passes a fixed gate.
 
-This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
+This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `priority`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and `run`.
 `radian arc run` is the scheduling loop; the arc terminal interface is **not built yet**, and a bare `radian arc` says so.
 
@@ -110,7 +110,8 @@ An `--after` id must name a task of the same plan or a task whose state is `done
 ## `radian arc list [--plan <ID>] [--all] [--json]`
 
 Lists plans, each with its tasks in the plan's order.
-Each plan's header line shows its id, its `status`, its `auto` level, its progress as `<merged>/<tasks> merged`, and its title.
+Plans print in claim order, the order `radian arc run` serves them in: the higher `priority` first (`P0` before `P1`), then the plan id from small to large.
+Each plan's header line shows its id, its `status`, its `auto` level, its `priority`, its progress as `<merged>/<tasks> merged`, and its title.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
 
 By default the finished work is left out, so the work in progress is what you see:
@@ -137,7 +138,7 @@ When everything is hidden, that line is the whole output. Nothing hidden means n
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
-The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `max_cost_usd`, `max_wall_time_secs`, `changed_outside_arc`, and `tasks`.
+The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `changed_outside_arc`, and `tasks`.
 Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `auto_rework`, `after`, `supersedes`, `allow_noop`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
 
 ## `radian arc show <ID> [--json]`
@@ -176,7 +177,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 It refuses with exit `3` when the id names both a plan and a task (see [Plan and task files](arc-files.md#plan-and-task-files)), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
 - a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `auto_rework`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
-- a plan: `status`, `auto`.
+- a plan: `status`, `auto`, `priority`.
 
 A file that already matches the ledger is a no-op and prints so.
 Without a recorded version to compare against, `adopt` refuses: it cannot tell which fields changed.
@@ -236,6 +237,39 @@ While the task's plan has an `auto` level other than `off`, arc counts that rewo
 When the count would go past `[limits] max_auto_rework`, arc pauses the whole plan: its `auto` becomes `off`, the task stays in `review.rework_pending`, and both `radian arc run` and `show` (as part of `rework_reason`) say why.
 arc never resets a task's count.
 A plan budget pausing the plan also sets `auto` to `off`; `run` starts and merges nothing for a plan at `off`.
+
+## `radian arc priority <PLAN> <PRIORITY>`
+
+`priority` sets a plan's priority: the plan the scheduling loop serves first.
+
+```text
+radian arc priority <PLAN> <PRIORITY>
+```
+
+| Argument | Value | What it does |
+|---|---|---|
+| `<PLAN>` | `ID` | The plan id. Required. Any plan, `draft` or `confirmed`. |
+| `<PRIORITY>` | `P0`, `P1`, `P2`, `P3`, `P4`, `P5` | The priority. Required. `P0` is the highest and `P3` the default. |
+
+| Priority | Meaning |
+|---|---|
+| `P0` | The highest: its ready tasks get the next free slot before any lower priority. |
+| `P1` | Above the default. |
+| `P2` | Above the default. |
+| `P3` | The default; a plan whose file has no `priority` field reads as `P3`. |
+| `P4` | Below the default. |
+| `P5` | The lowest. |
+
+A task has no priority of its own: it follows its plan, in its plan's task order and `after` list.
+`priority` only decides which plan gets the next free `[limits] concurrency` slot; it never preempts an attempt that is already running, so a change takes effect at the next pass that has a free slot (see [`run`](#radian-arc-run)).
+The plan's state does not matter: a `draft` plan can be set too.
+`list`, `show`, and the MCP `list` and `show` tools print the plan's priority.
+
+A value outside the set (`P6`, `p1`, `high`) is refused with exit `3`, and the message lists every value.
+A refusal writes nothing.
+
+The command prints `<plan> priority <PRIORITY>`, for example `PL0001-first priority P1`.
+It exits `0` on success, `3` for a value outside the set or a plan file that changed outside arc, and `4` when another process holds `state.lock`.
 
 ## `radian arc pause <PLAN>`
 
@@ -496,6 +530,10 @@ One pass repeats until a pass changes nothing, in this order:
 5. for each confirmed plan at `auto` `run` or `merge`, claim every `todo.ready` task whose `after` tasks are merged, up to `[limits] concurrency` attempts in flight, and start each wrapper without waiting for it;
 6. for each plan at `auto` `merge`, approve a verified task and start its integration in the background, or finish an integration a gate left.
    `run` writes the same `human` pass verdict `radian arc merge` writes, with `approver` `auto` in it.
+
+Steps 4, 5 and 6 walk the backlog in *claim order*: the plan's `priority` (`P0` first), then the plan id from small to large, then the task's order in the plan and its `after` list.
+So the higher priority's task is verified, claimed, merged, and queued for a stage's lock before a lower priority's.
+`priority` only decides which plan gets a free concurrency slot: a running attempt is never preempted, so a changed priority takes effect at the next free slot.
 
 The long work runs outside the pass: a worker is a separate `radian arc work` process with its own limits and record, and a gate is a separate process with its own record.
 A stage this build does not run, or a branch that moved, is reported in the summary; the gate's refusal is recorded, and `run` starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt).

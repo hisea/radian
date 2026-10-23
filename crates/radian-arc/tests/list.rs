@@ -190,10 +190,10 @@ fn the_default_hides_merged_tasks_and_finished_plans() {
 
     let expected = format!(
         concat!(
-            "{}  draft  auto: off  1/3 merged  Mixed plan\n",
+            "{}  draft  auto: off  priority: P3  1/3 merged  Mixed plan\n",
             "  {}  todo.ready  attempt 0  Ready two\n",
             "  {}  failed.exhausted  attempt 0  Failed three\n",
-            "{}  draft  auto: off  0/0 merged  Empty plan\n",
+            "{}  draft  auto: off  priority: P3  0/0 merged  Empty plan\n",
             "1 finished plan and 3 merged tasks hidden (--all to show)\n",
         ),
         fixture.mixed, fixture.mixed_ready, fixture.mixed_failed, fixture.empty
@@ -228,14 +228,14 @@ fn all_prints_every_plan_and_task() {
     }
     assert!(
         text.contains(&format!(
-            "{}  draft  auto: off  2/2 merged  Finished plan\n",
+            "{}  draft  auto: off  priority: P3  2/2 merged  Finished plan\n",
             fixture.finished
         )),
         "the finished plan keeps its header and its count: {text}"
     );
     assert!(
         text.contains(&format!(
-            "{}  draft  auto: off  1/3 merged  Mixed plan\n",
+            "{}  draft  auto: off  priority: P3  1/3 merged  Mixed plan\n",
             fixture.mixed
         )),
         "the mixed plan's header counts its merged task: {text}"
@@ -258,7 +258,7 @@ fn the_plan_of_a_finished_plan_keeps_its_header() {
         text,
         format!(
             concat!(
-                "{}  draft  auto: off  2/2 merged  Finished plan\n",
+                "{}  draft  auto: off  priority: P3  2/2 merged  Finished plan\n",
                 "2 merged tasks hidden (--all to show)\n",
             ),
             fixture.finished

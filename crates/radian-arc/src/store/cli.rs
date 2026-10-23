@@ -19,6 +19,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "adopt",
     "confirm",
     "auto",
+    "priority",
     "pause",
     "start",
     "reverify",
@@ -66,6 +67,8 @@ pub enum Command {
     Confirm { id: String },
     /// `radian arc auto <plan> <level>`.
     Auto { plan: String, level: String },
+    /// `radian arc priority <plan> <priority>`: the plan's `P0`..`P5`.
+    Priority { plan: String, priority: String },
     /// `radian arc pause <plan>`.
     Pause { plan: String },
     /// `radian arc start <task>`.
@@ -107,6 +110,7 @@ pub fn run(command: Option<&Command>) -> u8 {
         Some(Command::Adopt { id }) => adopt(id).map(emit),
         Some(Command::Confirm { id }) => confirm(id).map(emit),
         Some(Command::Auto { plan, level }) => set_auto(plan, level).map(emit),
+        Some(Command::Priority { plan, priority }) => set_priority(plan, priority).map(emit),
         Some(Command::Pause { plan }) => pause(plan).map(emit),
         Some(Command::Start { task }) => start(task),
         Some(Command::Reverify { task }) => reverify(task),
@@ -157,8 +161,9 @@ fn bare() -> Result<u8, Error> {
     out.push_str(&format!(
         "in this build: `radian arc init`, `radian arc add plan|task`, `radian arc list`, \
          `radian arc show`, `radian arc adopt`, `radian arc confirm`, `radian arc auto`, \
-         `radian arc pause`, `radian arc start`, `radian arc reverify`, `radian arc cancel`, \
-         `radian arc reset-budget`, `radian arc merge`, `radian arc reject`, `radian arc run`, `radian arc mcp`\n{}",
+         `radian arc priority`, `radian arc pause`, `radian arc start`, `radian arc reverify`, \
+         `radian arc cancel`, `radian arc reset-budget`, `radian arc merge`, `radian arc reject`, \
+         `radian arc run`, `radian arc mcp`\n{}",
         arc_dir_line(&store)
     ));
     let code = emit(out);
@@ -271,7 +276,12 @@ fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
     }
     match plan {
         Some(id) => Ok(list_plan_text(&store.plan_view(id)?, all)),
-        None => Ok(list_text(&store.plans()?, all)),
+        None => {
+            // Claim order, the order `run` serves tasks in: the plan's priority, then its id.
+            let mut views = store.plans()?;
+            views.sort_by(|one, other| super::model::claim_order(&one.plan.item, &other.plan.item));
+            Ok(list_text(&views, all))
+        }
     }
 }
 
@@ -304,10 +314,11 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
             continue;
         }
         out.push_str(&format!(
-            "{}  {}  auto: {}  {}/{} merged  {}{}\n",
+            "{}  {}  auto: {}  priority: {}  {}/{} merged  {}{}\n",
             view.plan.item.id,
             view.plan.item.status,
             view.plan.item.auto,
+            view.plan.item.priority(),
             merged,
             view.tasks.len(),
             view.plan.item.title,
@@ -402,6 +413,7 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
             field(&mut out, "title", &plan.item.title);
             field(&mut out, "status", &plan.item.status);
             field(&mut out, "auto", &plan.item.auto);
+            field(&mut out, "priority", plan.item.priority());
             field(
                 &mut out,
                 "max_cost_usd",
@@ -618,6 +630,7 @@ fn plan_json(view: &PlanView, with_body: bool) -> serde_json::Value {
         "title": plan.title,
         "status": plan.status,
         "auto": plan.auto,
+        "priority": plan.priority(),
         "max_cost_usd": plan.max_cost_usd,
         "max_wall_time_secs": plan.max_wall_time_secs,
         "tasks": view
@@ -661,6 +674,14 @@ fn set_auto(plan: &str, level: &str) -> Result<String, Error> {
     let store = open()?;
     super::plan_ops::set_auto(&store, plan, level)?;
     Ok(format!("{plan} auto {level}\n"))
+}
+
+/// `radian arc priority <plan> <P0..P5>`: the plan's priority (decision 3). A plan in any
+/// state can be changed, and the next scheduling pass reads it.
+fn set_priority(plan: &str, priority: &str) -> Result<String, Error> {
+    let store = open()?;
+    super::plan_ops::set_priority(&store, plan, priority)?;
+    Ok(format!("{plan} priority {priority}\n"))
 }
 
 /// `radian arc pause <plan>`: the auto level back to `off`.
@@ -803,7 +824,12 @@ fn mcp() -> Result<u8, Error> {
 pub fn list_json(store: &Store, plan: Option<&str>) -> Result<serde_json::Value, Error> {
     let views = match plan {
         Some(id) => vec![store.plan_view(id)?],
-        None => store.plans()?,
+        None => {
+            // The same order the text form prints and the loop claims in.
+            let mut views = store.plans()?;
+            views.sort_by(|one, other| super::model::claim_order(&one.plan.item, &other.plan.item));
+            views
+        }
     };
     Ok(serde_json::Value::Array(
         views.iter().map(|view| plan_json(view, false)).collect(),
@@ -862,7 +888,7 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::model::{AUTO_LEVELS, PLAN_STATUSES};
+    use crate::store::model::{AUTO_LEVELS, PLAN_PRIORITIES, PLAN_STATUSES};
 
     #[test]
     fn the_built_and_unbuilt_lists_do_not_share_a_name() {
@@ -877,5 +903,6 @@ mod tests {
     fn every_plan_value_set_has_the_expected_members() {
         assert_eq!(PLAN_STATUSES, &["draft", "confirmed"]);
         assert_eq!(AUTO_LEVELS, &["off", "run", "merge"]);
+        assert_eq!(PLAN_PRIORITIES, &["P0", "P1", "P2", "P3", "P4", "P5"]);
     }
 }

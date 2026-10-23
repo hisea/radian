@@ -2564,3 +2564,182 @@ fn a_failed_integration_is_reverified_automatically_once_main_moves() {
     assert!(run.contains("auto reverify"), "{run}");
     assert_eq!(attempt(&store, &task), 2, "{run}");
 }
+
+// ---- priority -------------------------------------------------------------------------
+
+/// Stops a test's long-running worker so it does not outlive the repository.
+fn cancel(repo: &Repo, task: &str) {
+    let canceled = repo.radian(&["arc", "cancel", task]);
+    assert_eq!(canceled.code, 0, "cancel: {}", canceled.stderr);
+}
+
+/// Two confirmed plans at auto `run` and one concurrency slot: the higher priority's task
+/// takes the slot, even though its plan id is the larger one. A plan without the `priority`
+/// field reads as `P3`.
+#[test]
+fn a_higher_priority_plan_gets_the_free_slot_first() {
+    let repo = Repo::new("run-priority");
+    let store = setup(&repo);
+    let first = add_plan(&store, "first");
+    let first_task = add_task(&store, &first, "work", &[]);
+    let second = add_plan(&store, "second");
+    let second_task = add_task(&store, &second, "work", &[]);
+    for plan in [&first, &second] {
+        plan_ops::confirm(&store, plan).expect("confirm");
+        plan_ops::set_auto(&store, plan, "run").expect("auto run");
+    }
+    assert_eq!(
+        store
+            .load_plan(&first)
+            .expect("the plan reads")
+            .item
+            .priority(),
+        "P3",
+        "a plan without the field reads as the default"
+    );
+    plan_ops::set_priority(&store, &second, "P1").expect("P1");
+    commands(&repo, "true");
+    let mock = Mock::start(vec![shell_reply(
+        "c1",
+        "sleep 30 && echo x > x.txt && git add x.txt && git commit -m x",
+    )]);
+    worker_args(&repo, mock.base_url());
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert!(
+        run.stdout
+            .contains(&format!("{second_task}-1 started -> doing.running")),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains(&format!(
+            "{first_task} todo.ready: waiting for a free concurrency slot"
+        )),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        state(&store, &first_task),
+        ("todo".to_owned(), "ready".to_owned())
+    );
+    cancel(&repo, &second_task);
+}
+
+/// Two plans at the same priority keep id order: the smaller plan id's task is claimed, and
+/// nothing of the other plan starts while the one slot is taken.
+#[test]
+fn two_plans_at_the_same_priority_keep_id_order() {
+    let repo = Repo::new("run-priority-id");
+    let store = setup(&repo);
+    let first = add_plan(&store, "first");
+    let first_task = add_task(&store, &first, "work", &[]);
+    let second = add_plan(&store, "second");
+    let second_task = add_task(&store, &second, "work", &[]);
+    for plan in [&first, &second] {
+        plan_ops::confirm(&store, plan).expect("confirm");
+        plan_ops::set_auto(&store, plan, "run").expect("auto run");
+    }
+    assert!(first < second, "{first} sorts before {second}");
+    commands(&repo, "true");
+    let mock = Mock::start(vec![shell_reply(
+        "c1",
+        "sleep 30 && echo x > x.txt && git add x.txt && git commit -m x",
+    )]);
+    worker_args(&repo, mock.base_url());
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert!(
+        run.stdout
+            .contains(&format!("{first_task}-1 started -> doing.running")),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains(&format!(
+            "{second_task} todo.ready: waiting for a free concurrency slot"
+        )),
+        "{}",
+        run.stdout
+    );
+    cancel(&repo, &first_task);
+}
+
+/// A priority change is read by the next pass, and it never preempts a running attempt: while
+/// the first plan's attempt runs, raising the other plan to `P0` claims nothing; when the slot
+/// frees, the raised plan's task goes next, not the lowered plan's second ready task.
+#[test]
+fn a_priority_change_takes_effect_on_the_next_pass_and_does_not_preempt() {
+    let repo = Repo::new("run-priority-change");
+    let store = setup(&repo);
+    let first = add_plan(&store, "first");
+    let one = add_task(&store, &first, "one", &[]);
+    let two = add_task(&store, &first, "two", &[]);
+    let later = add_plan(&store, "later");
+    let other = add_task(&store, &later, "work", &[]);
+    for plan in [&first, &later] {
+        plan_ops::confirm(&store, plan).expect("confirm");
+        plan_ops::set_auto(&store, plan, "run").expect("auto run");
+    }
+    commands(&repo, "true");
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "sleep 8 && echo one > one.txt && git add one.txt && git commit -m one",
+        ),
+        text_reply("done"),
+        shell_reply(
+            "c2",
+            "sleep 30 && echo other > other.txt && git add other.txt && git commit -m other",
+        ),
+    ]);
+    worker_args(&repo, mock.base_url());
+
+    // Both plans are `P3`: the smaller plan id's first task gets the one slot.
+    let first_pass = repo.radian(&["arc", "run"]);
+    assert_eq!(first_pass.code, 0, "run: {}", first_pass.stderr);
+    assert!(
+        first_pass
+            .stdout
+            .contains(&format!("{one}-1 started -> doing.running")),
+        "{}",
+        first_pass.stdout
+    );
+    assert_eq!(
+        state(&store, &other),
+        ("todo".to_owned(), "ready".to_owned())
+    );
+
+    // The owner changes both priorities; the next pass reads them.
+    for (plan, priority) in [(&first, "P5"), (&later, "P0")] {
+        let set = repo.radian(&["arc", "priority", plan, priority]);
+        assert_eq!(set.code, 0, "priority {priority}: {}", set.stderr);
+    }
+    let held = repo.radian(&["arc", "run"]);
+    assert_eq!(held.code, 0, "run: {}", held.stderr);
+    assert!(
+        !held.stdout.contains("started -> doing.running"),
+        "a higher priority preempted a running attempt: {}",
+        held.stdout
+    );
+    assert_eq!(state(&store, &one).0, "doing", "{}", held.stdout);
+    assert_eq!(
+        state(&store, &other),
+        ("todo".to_owned(), "ready".to_owned()),
+        "{}",
+        held.stdout
+    );
+
+    // A slot frees: the higher priority's task goes next, not the lowered plan's second one.
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &other).0 == "doing"
+    });
+    assert_eq!(
+        state(&store, &two),
+        ("todo".to_owned(), "ready".to_owned()),
+        "the lowered plan's second task must wait for a slot"
+    );
+    cancel(&repo, &other);
+}

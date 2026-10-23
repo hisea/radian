@@ -67,6 +67,7 @@ An id names one item: `show`, `adopt`, `reset-budget`, and the MCP `show` tool r
 | `title` | string | yes | any text |
 | `status` | string | yes | `draft`, `confirmed` |
 | `auto` | string | yes | `off`, `run`, `merge`; only a `confirmed` plan may use `run` or `merge` |
+| `priority` | string | no | `P0`, `P1`, `P2`, `P3`, `P4`, `P5`; `P0` is the highest; a file without the field reads as `P3` |
 | `max_cost_usd` | number | no | 0 or more, US dollars |
 | `max_wall_time_secs` | integer | no | seconds |
 | `tasks` | list of ids | yes | the plan's tasks, in display order (`[]` when there are none) |
@@ -74,6 +75,7 @@ An id names one item: `show`, `adopt`, `reset-budget`, and the MCP `show` tool r
 The body is the request text, then a `## Change records` section.
 Each change record is a `### <UTC time>` line (the shape `YYYY-MM-DDTHH:MM:SSZ`), a blank line, and the text of the change.
 A confirmed plan gains records only; a draft plan may have its request text replaced, which keeps the records below it.
+`priority` is written only once you set it with [`radian arc priority`](arc.md#radian-arc-priority-plan-priority); until then the field is absent and the plan reads as `P3`, so an older plan file is written back unchanged.
 
 ### Task fields
 

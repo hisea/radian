@@ -35,7 +35,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use config::STAGE_NAMES;
-pub use model::{AUTO_LEVELS, PLAN_STATUSES, TASK_PHASES, TASK_STATES};
+pub use model::{
+    AUTO_LEVELS, DEFAULT_PRIORITY, PLAN_PRIORITIES, PLAN_STATUSES, TASK_PHASES, TASK_STATES,
+};
 
 /// The directory arc keeps for one repository, relative to its root.
 pub const ARC_DIR: &str = ".radian/arc";
@@ -969,13 +971,16 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             let current = model::PlanFile::from_text(current).map_err(|message| {
                 Error::Failed(format!("the plan file does not parse: {message}"))
             })?;
-            // `status` and `auto` are a plan's state: the owner confirms and sets the auto
-            // level, so an outside edit of either is refused.
+            // `status`, `auto` and `priority` are a plan's state: the owner confirms, sets
+            // the auto level and sets the priority, so an outside edit of any is refused.
             if last.status != current.status {
                 touched.push("status");
             }
             if last.auto != current.auto {
                 touched.push("auto");
+            }
+            if last.priority() != current.priority() {
+                touched.push("priority");
             }
         }
         Kind::Task => {
