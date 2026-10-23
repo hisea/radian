@@ -146,7 +146,7 @@ sections in `compose_brief`'s argument list; only the conflicted-brief test comp
 order (the unit test passes the order it asserts). The `run::a_watch_pass_does_not_restart_a_gate_that_left_no_record`
 failure that M45's run also showed is a timeout under load: it passes in every clean run.
 
-M47 was run against `26d29780`, from `.radian/mut/work_mod_walkback.rs` restored with `cp` and
+M47 was run against `3ebead45`, from `.radian/mut/work_mod_walkback.rs` restored with `cp` and
 compared with `cmp`: `newest_report` reads `attempt - 1` instead of walking back, so the
 reverify attempt in the middle hides attempt 1's report and only the new work test fails.
 M41–M43 were run against `a95de60e` (the priority change), each through `git restore` of the
