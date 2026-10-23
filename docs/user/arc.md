@@ -1,5 +1,5 @@
 ---
-description: Plan and task orchestration: setup, plans, tasks, the files arc keeps, the lead's MCP server, and its exit codes.
+description: The arc commands: every subcommand, the lead's MCP server, and the exit codes.
 ---
 
 # arc
@@ -10,6 +10,8 @@ It keeps a plan and its tasks as files in the repository, runs each task as a se
 This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and `run`.
 `radian arc run` is the scheduling loop; the arc terminal interface is **not built yet**, and a bare `radian arc` says so.
+
+This page holds the `radian arc` commands; the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 ## `radian arc`
 
@@ -75,7 +77,7 @@ claude mcp add arc -- radian arc mcp
 
 `add` creates one plan or one task from standard input.
 The new id is printed on stdout, one line.
-Plans and tasks count in separate number sequences, so a plan and a task may carry the same number; the prefix tells them apart (see Plan and task files below).
+Plans and tasks count in separate number sequences, so a plan and a task may carry the same number; the prefix tells them apart (see [Plan and task files](arc-files.md#plan-and-task-files)).
 
 ### `radian arc add plan --slug <SLUG> --title <TITLE>`
 
@@ -124,7 +126,7 @@ Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `atte
 
 Prints one plan or task: every field, whether it changed outside arc, then its body.
 
-The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see Plan and task files below).
+The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see [Plan and task files](arc-files.md#plan-and-task-files)).
 `list --plan <id>` always reads the plan.
 
 | Argument | Value | What it does |
@@ -153,7 +155,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 |---|---|---|
 | `<ID>` | a plan or task id | Required. The item whose current file becomes arc's own. |
 
-It refuses with exit `3` when the id names both a plan and a task (see Plan and task files below), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
+It refuses with exit `3` when the id names both a plan and a task (see [Plan and task files](arc-files.md#plan-and-task-files)), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
 - a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `auto_rework`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
 - a plan: `status`, `auto`.
@@ -164,14 +166,14 @@ Without a recorded version to compare against, `adopt` refuses: it cannot tell w
 ## `radian arc confirm <PLAN>`
 
 `confirm` moves a plan from `draft` to `confirmed`.
-A confirmed plan gets no new tasks, and its request text can only gain change records (below).
+A confirmed plan gets no new tasks, and its request text can only gain change records (see [Plan and task files](arc-files.md#plan-and-task-files)).
 A plan's `auto` level may only be other than `off` once it is confirmed.
 
 | Argument | Value | What it does |
 |---|---|---|
 | `<PLAN>` | `ID` | The plan id. Required. |
 
-It refuses with exit `3` when the plan has no tasks, when it is already confirmed, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and `worker.exec_args`).
+It refuses with exit `3` when the plan has no tasks, when it is already confirmed, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and [`worker.exec_args`](arc-files.md#configtoml)).
 A refusal writes nothing.
 
 ## `radian arc auto <PLAN> <LEVEL>`
@@ -233,10 +235,10 @@ radian arc start <TASK>
 |---|---|---|
 | `<TASK>` | `ID` | The task id. Required. |
 
-Before it reconciles, claims or verifies anything, `start` parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args` (see the `worker.exec_args` row of `config.toml` below).
+Before it reconciles, claims or verifies anything, `start` parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args` (see the `worker.exec_args` row of [`config.toml`](arc-files.md#configtoml)).
 A line `radian exec` would reject, or one that repeats an argument the wrapper sets, refuses the command with exit `3` and the parser's own message, names `worker.exec_args`, claims nothing, and changes no file.
 
-Before it claims anything it reconciles every task in `doing` (see below) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
+Before it claims anything it reconciles every task in `doing` (see [Reconcile](arc-gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 
 A claim is refused with exit `3` and changes nothing when:
 
@@ -248,8 +250,8 @@ A claim is refused with exit `3` and changes nothing when:
 The claim is one transaction: the task's `attempt` goes up by one, `attempt_id` becomes `<task>-<attempt>`, a random `token` is written, and the task moves to `doing.starting`.
 arc then runs the hidden `radian arc work` wrapper as a child, with the brief on its stdin; the wrapper moves the task to `doing.running`.
 
-Before the worker starts, the wrapper runs the profile's `before_attempt` steps in the worktree (see the `before_attempt` row below); a first attempt's steps do nothing.
-`merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; a conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see A conflict with main).
+Before the worker starts, the wrapper runs the profile's `before_attempt` steps in the worktree (see the [`before_attempt` row](arc-files.md#configtoml)); a first attempt's steps do nothing.
+`merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; a conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see [A conflict with main](arc-gate.md#a-conflict-with-main)).
 A failed fetch or merge ends the attempt with git's message.
 
 The wrapper enforces the attempt's limits itself, so they hold even after the process that started the wrapper is gone:
@@ -262,7 +264,7 @@ A limit of `0` means no limit for that timer.
 The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json` (`stall` or `wall_time`), forwards SIGTERM, waits for the worker, and still writes its `AttemptFinished` record.
 `start` waits for the wrapper and applies the result; `radian arc run` does not wait (see `run`).
 
-When the attempt ends, arc applies the result in one transaction (the table below) and prints one line:
+When the attempt ends, arc applies the result in one transaction (the [result table](arc-gate.md#failures-retries-and-the-budget)) and prints one line:
 
 ```text
 <attempt id> <outcome> -> <state>.<phase>
@@ -313,7 +315,7 @@ It exits `0` when it stopped the task or left it `doing.reconciling`, `3` for a 
 ## `radian arc reset-budget <ID>`
 
 `reset-budget` returns budget-paused tasks to `todo.ready` and resets the counted cost to zero from now on.
-The id names one plan or task; an id that names both is refused with exit `3` (see Plan and task files below).
+The id names one plan or task; an id that names both is refused with exit `3` (see [Plan and task files](arc-files.md#plan-and-task-files)).
 
 | Argument | Value | What it does |
 |---|---|---|
@@ -324,108 +326,6 @@ The id names one plan or task; an id that names both is refused with exit `3` (s
 
 It prints `<id>: <n> task(s) ready` and exits `0`.
 An id that names no plan or task exits `1`.
-
-## The gate run
-
-A task in `review.verifying` is checked against `verified_sha`, which is the pushed `head_sha` of the task's current attempt.
-`start` runs the gate in the same process after a pushed attempt, and `radian arc run` starts it as a background process: a pass starts the gate and returns, and a later pass reads its verdicts and moves the task (`run` below).
-A gate writes its verdict files and one record, `runs/<task>/gate.json`; it never changes the task's state itself.
-
-- arc fetches `[repository] remote` first.
-  The remote's `work/<task>` must still be `head_sha`.
-  When it differs, arc records the reason in the attempt's `review.json` and the task stays in `review.verifying`; `show` prints the reason.
-- The stages are the configured profile's (`gate.profile`, then `gate.profiles.<name>.stages`), in order, plus the task's `extra_stages`.
-  `human` is your approval and does not run here.
-- Every stage runs against the verification candidate, in its own checkout under `.radian/arc/gates/<stage>/`.
-  The candidate is `verified_sha` when the remote main is an ancestor of it; otherwise it is a merge commit of `verified_sha` onto the remote main, built in that checkout and never pushed.
-  The merge uses arc's own commit identity, so the same inputs build the same tree.
-  `verified_sha` stays the task's commit: the approval, the digest and `merge` bind to it, and the candidate is evidence only.
-  A stage's commands run in order and stop at the first failure; each has its own log and the profile's timeout.
-- A verification stage's verdict records `sha` (the task's `verified_sha`), `main_sha` (the remote main the candidate was built on) and `candidate_sha` (the commit the stage ran on; absent when the merge conflicted).
-- A merge conflict is a failed stage: the verdict's reason is `conflict`, its `conflict_paths` lists the paths, the task goes to `review.rework_pending`, and `show` prints `conflict: <paths>`.
-  Nothing is pushed.
-- `review` is a read-only radian session, not the worker session.
-  It runs after `commands` passes and before `human`; a profile that lists both must list `commands` first.
-  For each run it starts one `radian exec` in its own checkout, `.radian/arc/gates/review/`, on the candidate, with the candidate as the workspace and only the `read`, `grep` and `glob` tools mounted: no shell tool, no write tool, and no MCP server.
-  Its model route is `[gate.review] exec_args`, and `[gate.review] timeout_secs` limits one session.
-  The prompt is built in: the task's brief, the commit list and the diff from the merge base of the remote main and `verified_sha` to `verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
-  `[gate.review] prompt_file` is appended to it.
-  The session must end with one fenced `json` block, and arc parses the last such block:
-
-  ```json
-  {"summary": "what the change does", "blocking": [], "suggestions": [], "verified": []}
-  ```
-
-  `summary` is 2 to 6 sentences. `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage.
-  Any blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items.
-  No parsable block, a missing field, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
-  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids` and `review_cost_micros` beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
-- `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), and `review_timeout` (the last run hit `[gate.review] timeout_secs`).
-- This build runs `commands` and `review`.
-  A profile or a task that lists `mutation` or `ci` is refused with `stage <name> is not built yet`; the task stays in `review.verifying` and `show` prints that reason.
-  `init`'s default profile lists only `commands` and `human`.
-- A verdict is `runs/<task>/attempts/<attempt id>/verdicts/<stage>.json`; a command's log is `runs/<task>/attempts/<attempt id>/logs/<stage>-<n>.log`.
-  A verdict is written once and never changed.
-  A verdict that already exists for this attempt and stage is reused instead of rerun, so a crash between stages resumes where it stopped.
-- One gate runs per task at a time.
-  The gate process holds `gates/<task>.gate.lock` from the moment a pass starts it, so the pass that follows starts no second gate for the same commit.
-  A gate that stops without a record releases the lock; the next pass starts it again, and the verdicts already written are reused.
-  Stages of different tasks still queue on their own locks: one `commands` stage at a time, one checkout per stage, and the review stage has its own.
-  The `review` stage is a read-only session, so it does not wait for another task's `commands`.
-- The gate's own output is `runs/<task>/gate.log`.
-- The gate records its outcome in `runs/<task>/gate.json` with the attempt it ran for: `done`, `refused` (a check before the stages refused: a moved branch, a stage this build does not run, no `head_sha`), or `error`.
-  A pass applies a `done` record; reports a `refused` one in the summary and starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt); and reports an `error` one as an error (exit `1` for a one-shot `run`).
-  `radian arc show` keeps printing the recorded reason.
-- Any stage failing moves the task to `review.rework_pending`.
-  The stage, its reason and the verdict path are in the task's `rework_reason` (`show` prints it).
-  Main moving after a verification does not send the task back to `review.verifying` by itself; `merge` integrates onto the then-current main and runs the key commands there.
-- Every required stage passing moves the task to `review.awaiting_human` and records `verified_sha` and `verdict_set_digest` in the task.
-  The digest covers the verification verdicts for `verified_sha`; it leaves out the `human` approval and the `integration` verdict, which are written later, at merge.
-  A new verdict for the same commit changes the digest and invalidates an approval.
-
-`list` and `show` do not use the network: they do not check the remote and cannot see a branch that moved after the gate.
-`merge` checks the remote before it acts.
-
-### A conflict with main
-
-A verification stage (`commands`, `mutation`, `review`) or the integration stage can fail with reason `conflict`: the task's commit or branch does not merge with main.
-With `merge-main` on, the next attempt starts mid-merge, so arc writes its brief and moves the task to `todo.ready`.
-The heading is `## Rework <n> (conflict with main)`, with the lead's `add_rework` numbering.
-The text names the main commit (short sha) and the stage, lists the conflicted paths, says the next attempt starts mid-merge, and asks the worker to resolve the conflict keeping both sides' intent, commit the merge, rebuild, run the touched tests, and change nothing else.
-Every other reason, and a conflict without `merge-main`, keeps `review.rework_pending`; a `reverify` conflict takes the automatic path above.
-It never raises `auto_rework` and never pauses the plan, and it counts as an attempt: a task that keeps conflicting reaches `failed.exhausted` when its last counted attempt conflicts.
-`auto` decides whether the next attempt starts by itself.
-
-## A gate for this repository
-
-Two bash scripts in this repository are the gate. A gate profile's `commands` call them:
-
-```toml
-[gate.profiles.default]
-commands = [
-  "/abs/path/to/repo/scripts/arc-gate.sh quick",
-  "/abs/path/to/repo/scripts/arc-gate.sh full",
-]
-```
-
-| Script | What it runs |
-|---|---|
-| `scripts/verify.sh [--log-dir <dir>]` | The full Verify of this repository: `cargo build -p radian-tui --bin radian --locked`, `cargo build -p agent-extensions --bin mcp-fixture --locked`, every command of the `Verify` block in `AGENTS.md`, then the three provider contract suites. It runs every step even after a failure, prints one `rc=<n> <seconds>s <command>` line per step, and keeps each step's output in `<dir>` (default `.radian/verify/`). It exits `0` only when every step passed, else `1`. |
-| `scripts/arc-gate.sh quick` | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the two binary builds, then `cargo nextest run --locked --no-fail-fast` for every crate under `crates/` that the checkout changed since its merge base with `origin/main`, plus `radian-tui` always. It stops at the first failing step. |
-| `scripts/arc-gate.sh full` | `scripts/verify.sh`, here or on `ARC_GATE_HOST` when that is set. It prints the step lines and the names of failing tests, and exits with the verify exit code. |
-
-With `ARC_GATE_HOST` set, `full` ships `HEAD` as a git bundle (`HEAD --not origin/main`; no bundle when `HEAD` is already in `origin/main`). On that host it takes a blocking lock on `~/.arc-gate.lock`, fetches the bundle, checks out exactly that commit detached inside `ARC_GATE_TREE`, and runs that checkout's `scripts/verify.sh`.
-
-| Environment variable | Type | Default | What it does |
-|---|---|---|---|
-| `ARC_GATE_HOST` | string | unset: `full` runs in this checkout | The ssh host that runs the full gate. |
-| `ARC_GATE_TREE` | string | unset | Required when `ARC_GATE_HOST` is set: the gate checkout on that host, as a path relative to the remote home directory. |
-
-Neither script sets `CARGO_TARGET_DIR`: a build cache is the caller's setting.
-
-**Trust.** arc runs a gate's `commands` inside a checkout of the task's own commit.
-A relative `scripts/...` path there would name the task's own script, so a task could change its own gate.
-Call both scripts by the main checkout's absolute path (`/abs/path/to/repo/scripts/arc-gate.sh`), never a relative path.
 
 ## `radian arc reverify <TASK>`
 
@@ -548,7 +448,7 @@ A pass only schedules: it starts a worker or a gate, collects what one left, and
 Waiting for you, a `retry_at` in the future, a running worker, or a running gate does not keep it running.
 A task of a plan at `auto` `off` is never started or merged by `run`; its verification still advances.
 
-Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see `worker.exec_args` below).
+Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](arc-files.md#configtoml)).
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|
@@ -557,7 +457,7 @@ Before its first pass, and before each pass claims a task, it checks the worker'
 
 One pass repeats until a pass changes nothing, in this order:
 
-1. reconcile every task in `doing` (see Reconcile): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one;
+1. reconcile every task in `doing` (see [Reconcile](arc-gate.md#reconcile)): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one;
 2. move every `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`;
 3. for every task in `review.verifying` (every plan, including a task that a moved branch or a changed digest sent back): apply the verdicts a background gate left, or start its gate in the background;
 4. for each confirmed plan at `auto` `run` or `merge`, claim every `todo.ready` task whose `after` tasks are merged, up to `[limits] concurrency` attempts in flight, and start each wrapper without waiting for it;
@@ -682,7 +582,7 @@ A tool that cannot do its work answers with `isError: true` and one text line: t
 That line is the same text the CLI prints for the same refusal, so a plan or task that changed outside arc says `changed outside arc` and names `radian arc adopt`.
 An argument of the wrong type, a missing required argument, and an argument the tool does not take are errors that name the argument.
 The arc exit codes below belong to the CLI; a tool error carries no code.
-An id that names both a plan and a task is a tool error that names both files (see Plan and task files below); the CLI exits `3` for it.
+An id that names both a plan and a task is a tool error that names both files (see [Plan and task files](arc-files.md#plan-and-task-files)); the CLI exits `3` for it.
 
 ## Exit codes
 
@@ -698,229 +598,6 @@ Every subcommand of this page uses these codes.
 
 Code `2` covers a bad flag or an argument value outside a closed set; a slug, an id, or a stage name that the rules refuse is also `2`.
 A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
-
-## `config.toml`
-
-`init` writes `config.toml` and every other subcommand reads it.
-Unknown keys are refused by name, and `schema_version` must be `1`.
-A key you leave out takes its default.
-
-| Key | Type | Default | Allowed values | When it takes effect |
-|---|---|---|---|---|
-| `schema_version` | integer | `1` | `1` | Every run; another value is refused. |
-| `repository.remote` | string | `"origin"` | A remote name that exists in the repository | When arc reads the main branch or pushes a task branch. |
-| `repository.main_branch` | string | `"main"` (`init` writes what it found) | A branch name | When a task starts from main, and when main is checked before a merge. |
-| `limits.concurrency` | integer | `1` | 1 or more | When `radian arc run` starts tasks: how many attempts may be in flight at once. A running gate takes no slot. |
-| `limits.max_attempts` | integer | `3` | 1 or more | When a task fails and arc decides whether to retry. |
-| `limits.stall_timeout_secs` | integer | `900` | seconds | When a worker prints no new line for that long. |
-| `limits.max_wall_time_secs` | integer | `7200` | seconds | As an absolute limit on one attempt, on top of the stall timeout. |
-| `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
-| `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
-| `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. A conflict rework that arc writes itself does not count. |
-| `worker.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | Before `start`, each `run` pass and `confirm` act, the line the worker would get is parsed with the `radian exec` parser; a rejected line exits `3`. Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
-| `ids.plan_prefix` | string | `"PL"` | 1 to 4 ASCII uppercase letters; must differ from `ids.task_prefix` | When a plan id is created. |
-| `ids.task_prefix` | string | `"TK"` | 1 to 4 ASCII uppercase letters; must differ from `ids.plan_prefix` | When a task id is created. |
-| `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
-| `gate.command_timeout_secs` | integer | `3600` | seconds | Per gate command line. |
-| `gate.review.exec_args` | array of strings | not set: `[worker] exec_args` | any `radian exec` argument except `--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p` | The review session's model route, after the stage's own arguments. Every review run. |
-| `gate.review.prompt_file` | string | not set: only the built-in prompt | a path relative to the repository root, without `..` | Appended to the built-in review prompt when the `review` stage runs. |
-| `gate.review.timeout_secs` | integer | `900` | seconds; `0` waits forever | The wall-time limit of one review session. |
-| `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
-| `gate.profiles.<name>.stages` | array of tables | `[{ stage = "commands", required = true }, { stage = "human", required = true }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs, in order. `integration` is not a profile stage: it always runs at merge. |
-| `gate.profiles.<name>.commands` | array of strings | `[]` | Shell command lines | The `commands` stage runs them in order on its own checkout. |
-| `gate.profiles.<name>.before_attempt` | array of strings | `["merge-main"]` | `merge-main`, or `[]` for no step | Before each attempt that reuses the worktree. `merge-main` merges the remote main into the branch. |
-| `gate.profiles.<name>.key_commands` | array of strings | `[]` | Shell command lines | The integration stage runs them on the merge candidate. |
-
-`gate.profiles.<name>` above is written out as `gate.profiles.default` in the file `init` writes.
-A stage may be listed once per profile: a profile that lists a stage twice, or that lists `integration`, is refused by name.
-A per-task field of the same name overrides a `[limits]` value for that task; a plan budget adds to the task budgets.
-
-## Plan and task files
-
-A plan file is `plans/<id>.md`; a task file is `tasks/<id>.md`.
-Both are front matter between two `---` lines, then a body.
-arc is the only writer; you change them with the subcommands above, and `adopt` after a hand edit.
-
-An id is a prefix of 1 to 4 uppercase ASCII letters, a four-digit number, a dash, and a slug (`PL0001-first`, `TK0001-work`).
-`[ids] plan_prefix` (default `PL`) and `[ids] task_prefix` (default `TK`) set the two prefixes; they must differ, and a prefix that is empty, not 1 to 4 uppercase letters, or equal to the other is refused by name when `config.toml` is read.
-Plans and tasks count in separate number sequences: a new id takes the next free number above the highest number any item of that kind (a file or a ledger entry) uses, whatever prefix that item carries, and the number is never reused while its ledger entry exists.
-An id without a prefix is not an id (exit `2`).
-Any prefix of 1 to 4 uppercase letters is a well-formed id, and the kind comes from the directory it is looked up in (`plans/` or `tasks/`), not from the prefix: an item created under an earlier prefix keeps working after the prefix changes.
-The id is the file name and never changes.
-An id names one item: `show`, `adopt`, `reset-budget`, and the MCP `show` tool refuse an id that names both a plan file and a task file with exit `3` (the MCP tool: a tool error), name both files, and change nothing.
-
-### Plan fields
-
-| Field | Type | Required | Allowed values |
-|---|---|---|---|
-| `schema_version` | integer | yes | `1` |
-| `id` | string | yes | `<PREFIX><NNNN>-<slug>`, prefix `PL` by default |
-| `title` | string | yes | any text |
-| `status` | string | yes | `draft`, `confirmed` |
-| `auto` | string | yes | `off`, `run`, `merge`; only a `confirmed` plan may use `run` or `merge` |
-| `max_cost_usd` | number | no | 0 or more, US dollars |
-| `max_wall_time_secs` | integer | no | seconds |
-| `tasks` | list of ids | yes | the plan's tasks, in display order (`[]` when there are none) |
-
-The body is the request text, then a `## Change records` section.
-Each change record is a `### <UTC time>` line (the shape `YYYY-MM-DDTHH:MM:SSZ`), a blank line, and the text of the change.
-A confirmed plan gains records only; a draft plan may have its request text replaced, which keeps the records below it.
-
-### Task fields
-
-| Field | Type | Required | Allowed values |
-|---|---|---|---|
-| `schema_version` | integer | yes | `1` |
-| `id` | string | yes | `<PREFIX><NNNN>-<slug>`, prefix `TK` by default |
-| `plan` | string | yes | the plan's id |
-| `title` | string | yes | any text |
-| `state` | string | yes | `todo`, `doing`, `review`, `done`, `failed` |
-| `phase` | string | yes | one of the phases of the task's state, in the table below |
-| `after` | list of ids | yes | tasks that must be merged first (`[]` when there are none) |
-| `supersedes` | string | no | the id of a task this one replaces |
-| `attempt` | integer | yes | 0 or more; `0` when the task is new |
-| `attempt_id` | string | no | the current attempt's `<task>-<n>`, written by the claim |
-| `token` | string | no | the current attempt's random token; a result is applied only when it matches |
-| `cost_usd` | number | no | the task's counted cost in US dollars, summed over its attempts; `reset-budget` makes it `0` |
-| `auto_rework` | integer | no | `0` or more; how many reworks arc counted while the plan's `auto` was not `off`; `0` when absent |
-| `allow_noop` | boolean | yes | `true`, `false`; `false` when the task is new |
-| `extra_stages` | list of strings | yes | gate stages added to the profile (`[]` when there are none) |
-| `max_attempts` | integer | no | 1 or more; overrides `limits.max_attempts` for this task |
-| `max_cost_usd` | number | no | 0 or more, US dollars; overrides the plan limit |
-| `max_wall_time_secs` | integer | no | seconds; overrides the plan limit |
-| `stall_timeout_secs` | integer | no | seconds; overrides `limits.stall_timeout_secs` |
-| `base_sha` | string | no | the commit the task branch started from; filled when the task is claimed |
-| `head_sha` | string | no | the task branch's tip that the attempt pushed; filled when a pushed attempt ends |
-| `verified_sha` | string | no | the commit the gate verified; filled by verification |
-| `verdict_set_digest` | string | no | the SHA-256 of the verification verdict set that made the task `review.awaiting_human`; a merge recomputes it |
-| `retry_at` | string | no | an absolute UTC time, `YYYY-MM-DDTHH:MM:SSZ` |
-
-The body is the brief.
-
-### States and phases
-
-| State | Phases |
-|---|---|
-| `todo` | `ready`, `blocked`, `retry_wait`, `paused_budget` |
-| `doing` | `starting`, `running`, `reconciling` |
-| `review` | `verifying`, `rework_pending`, `awaiting_human`, `integrating`, `ready_to_merge` |
-| `done` | `merged` |
-| `failed` | `exhausted`, `cancelled`, `irrecoverable` |
-
-A new task is `todo` / `ready`.
-A plan is done when all of its tasks are merged; `done` is not a stored plan status.
-
-### The review states
-
-A task leaves `doing` for `review.verifying` when a pushed attempt ends.
-
-| From | To | What moves it |
-|---|---|---|
-| `review.verifying` | `review.awaiting_human` | Every required non-`human` stage passed for `verified_sha`; `verified_sha` and `verdict_set_digest` are recorded. |
-| `review.verifying` | `review.rework_pending` | A stage failed: the stage, its reason and the verdict are recorded. |
-| `review.awaiting_human` | `review.integrating` | `radian arc merge`, or `radian arc run` on a plan at `auto` `merge`, with `verified_sha` still on the remote, the digest unchanged, and every required stage passed. |
-| `review.awaiting_human` | `review.rework_pending` | `radian arc reject --note <text>`: the note is recorded. |
-| `review.integrating` | `review.ready_to_merge` | The integration stage passed against the current main; its `base_sha` and `candidate_sha` are in the integration verdict. |
-| `review.integrating` | `review.rework_pending` | A conflict, or a failing key command. |
-| `review.ready_to_merge` | `done.merged` | Main is still the integration `base_sha`; the candidate was pushed to the remote main and contains `verified_sha`; the worktree is removed. |
-| `review.ready_to_merge` | `review.integrating` | Main moved after integration, or the push was rejected as non-fast-forward: integrate again. |
-| `review.awaiting_human` | `review.verifying` | The remote `work/<task>` is no longer `verified_sha`, or the verdict set no longer matches the recorded digest: every verdict and the approval of the old commit are invalid. |
-| `review.rework_pending`, `review.awaiting_human` | `review.verifying` | `radian arc reverify`: a new attempt is claimed without a worker; its verdicts are its own. |
-| `review.verifying` | `review.awaiting_human` (again) | `radian arc run` or `radian arc start` re-verifies a task a moved branch or a changed digest sent back. |
-| `review` (any phase) | `todo.ready` | The lead adds a rework brief (`add_rework`); the next claim starts the next attempt. |
-
-## Failures, retries and the budget
-
-One attempt's result maps to one class and one next state.
-The class is recorded in `runs/<task>/attempts/<attempt id>/attempt_result.json`.
-
-| Result | Class | Next state |
-|---|---|---|
-| `completed` and pushed | — | `review.verifying`, with `base_sha` and `head_sha` |
-| `completed`, but the wrapper's delivery check failed | `verification` | `review.rework_pending`; the reason is in the attempt result, arc writes no brief |
-| `poisoned` | `model` | `failed.irrecoverable` (never retries) |
-| `refused` | `model` | retry |
-| `failed` | `model` | retry |
-| `incomplete` | `model` | retry |
-| `budget_exceeded` | `model` | retry |
-| `cancelled` from inside the worker (not your `cancel`) | `model` | retry |
-| `terminated` (no `Result`, a crash or a kill) | `infrastructure` | retry |
-| an outcome this build does not know | `infrastructure` | retry |
-| a wrapper exit `4` (the worktree lock is held) | `infrastructure` | retry |
-| `stall` (the wrapper sent SIGTERM) | `stall` | retry |
-| `wall_time` (the wrapper sent SIGTERM) | `wall_time` | retry |
-| `cancelled` by `radian arc cancel` | `cancel` | `failed.cancelled` (never retries) |
-| `reverify` (no worker: `radian arc reverify`) | `reverify` | `review.verifying`, verified at once |
-
-A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 10 seconds for the first attempt, doubled for each later attempt, capped at 5 minutes.
-When `attempt` has reached the task's `max_attempts` (else `[limits] max_attempts`), the task goes to `failed.exhausted` instead.
-`todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; `start` does this before it claims.
-
-Every attempt of a task runs in one worker session, whose id is the task id.
-The first attempt that reaches the model creates the session; every later attempt, a retry or a rework, resumes it.
-An attempt that failed before the model started (a missing credential, a worktree that could not be prepared) leaves no session, so the next attempt creates it.
-A bad `worker.exec_args` entry no longer gets that far: `start`, `run` and `confirm` refuse it before the claim.
-
-Cost is counted per attempt.
-`Result.cost` is the session total, so the attempt's cost is this attempt's session total minus the previous attempt's.
-The delta is added to the task's `cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
-A `reverify` attempt runs no worker and costs nothing: it adds nothing to `cost_usd`.
-
-When a retry is due and the budget is used up, the task goes to `todo.paused_budget` instead of `todo.retry_wait`:
-
-- the task's `max_cost_usd`, else `[limits] max_cost_usd`;
-- the plan's `max_cost_usd`, counted over every task of the plan. A plan budget also sets the plan's `auto` to `off`.
-
-`reset-budget` is the only way back.
-
-## Reconcile
-
-arc keeps no attempt state in memory.
-Before `start` or `cancel` acts, and after a restart, it reconciles every task in `doing`:
-
-- the wrapper's `attempt_finished.json` is present and its token is current: the result is applied;
-- the wrapper's last heartbeat (`attempts/<task>/<attempt>/heartbeat.json`) is younger than the attempt's stall window (its `stall_timeout_secs`, else `[limits] stall_timeout_secs`): the attempt is alive and left alone.
-  The wrapper beats at most every 15 seconds and at least three times inside the attempt's stall window, from the moment the attempt directory exists until both end records are written; it keeps beating while the wrapper sets up the worktree, waits for the model, or checks and pushes the result.
-  When both stall values are `0` the window is three beats, 45 seconds.
-  A claim whose wrapper has not beaten yet is judged by its `start.json`;
-- the heartbeat is older than that window and there is no result: the attempt is an `infrastructure` (terminated) failure and the retry rules above apply.
-
-Reconcile never starts a task again.
-It reads no process list; `ps` is refused inside the `workspace` sandbox and is never needed here.
-`doing.reconciling` is left for you to resolve; `radian arc cancel` moves it to `failed.cancelled` after the same process check.
-
-## The `.radian/arc/` layout
-
-Everything arc stores for one repository is in `<repository>/.radian/arc/`:
-
-| Path | What it holds |
-|---|---|
-| `config.toml` | The settings above. |
-| `plans/<id>.md` | One plan: its fields and the request text. |
-| `tasks/<id>.md` | One task: its fields and the brief. |
-| `ledger/plans/<id>.json` | The `state_version` and SHA-256 arc last wrote for that plan. |
-| `ledger/plans/<id>.last.md` | The plan as arc last wrote it, for `adopt`. |
-| `ledger/tasks/<id>.json` | The same for a task. |
-| `ledger/tasks/<id>.last.md` | The task as arc last wrote it. |
-| `runs/<task>/attempts/<attempt id>/` | One attempt's output: the worker's `result.jsonl`, `stderr.log`, `execution.json`, the wrapper's `attempt_finished.json`, `signal.json` when the wrapper signalled the worker, arc's `attempt_result.json`, and `paused.json` when the automatic rework limit paused the plan. |
-| `runs/<task>/gate.json` | The background gate's outcome: `running`, then `done`, `refused` or `error`, with the attempt it ran for. |
-| `runs/<task>/gate.log` | The background gate process's own output. |
-| `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). |
-| `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |
-| `attempts/<task>/…` | The host-local attempt records: `base_sha`, `last_head`, and per attempt `start.json`, `identity.json`, `status.json`, `heartbeat.json`. |
-| `gates/<stage>/` | One checkout per gate stage. |
-| `gates/<task>.gate.lock` | The lock one task's running gate holds. |
-| `worktrees/<task>/` | The worker's checkout for that task (the worker wrapper creates it). |
-| `state.lock` | The short lock every change takes. |
-| `runner.lock` | The lock a scheduling loop holds. |
-
-Every change is one transaction under `state.lock`:
-take the lock (waiting up to 5 seconds, then exit `4`), compare the file with the ledger, write a temporary file, flush it to disk, rename it over the old one, flush the directory, record the new version and hash in the ledger, release.
-
-Search skips `worktrees/` and `gates/`: `grep`, `glob`, skill discovery, and `@` completion do not enter them.
-Both are full checkouts of the tree, so searching them would return every file once per task and once per gate stage.
-They skipped `.radian-worktrees/` for the same reason.
-A worker never reads the rest of `.radian/arc/` from inside its checkout: the worker wrapper denies every entry except `worktrees/`.
 
 ## Not built yet
 
