@@ -930,6 +930,7 @@ mod tests {
                     app.update(Input::MentionsExpanded(Ok(Expansion {
                         text: text.clone(),
                         attachments: Vec::new(),
+                        images: Vec::new(),
                         warnings: Vec::new(),
                     })))
                     .effects,

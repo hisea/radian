@@ -357,6 +357,17 @@ impl LoopContext<'_> {
                 self.send(AppInput::MentionsExpanded(result));
                 Ok(())
             }
+            // A dropped path is read by the host itself (outside the workspace is accepted,
+            // Q7); the result carries the loaded image or the reason it was refused.
+            Effect::LoadDropped { text, path, range } => {
+                let outcome = radian_tui::mention::load_dropped(&path);
+                self.send(AppInput::DroppedLoaded {
+                    text,
+                    range,
+                    outcome,
+                });
+                Ok(())
+            }
             Effect::CompleteMention { text, cursor } => {
                 let result = radian_tui::mention::complete(&text, cursor, self.workspace);
                 self.send(AppInput::CompletionReady(result));

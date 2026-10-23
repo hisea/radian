@@ -69,9 +69,13 @@ impl App {
             }
         });
         let loop_capture = self.loop_captures(false);
+        // Images dropped into the composer belong to this send. They are taken now and put
+        // back if the expansion fails, so a second send cannot claim them.
+        let images = std::mem::take(&mut self.composer_images);
         self.pending_expand.push_back(PendingExpand {
             kind,
             text: text.clone(),
+            images,
             loop_capture,
         });
         UpdateResult::effect(Effect::ExpandMentions { text })
@@ -192,6 +196,7 @@ impl App {
             Ok(expansion) => {
                 if let Some(refused) = self.refuse_if_session_ended() {
                     self.restore_input(pending.text);
+                    self.composer_images = pending.images;
                     return refused;
                 }
                 for warning in &expansion.warnings {
@@ -211,9 +216,12 @@ impl App {
                     ));
                 }
                 // ADR 0018: the message carries the text and each attachment as
-                // separate parts, so Core can keep the user's words verbatim.
+                // separate parts, so Core can keep the user's words verbatim. Composer images
+                // (dropped paths) come first, then the `@`/dropped images the expansion found.
+                let mut images = pending.images;
+                images.extend(expansion.images.iter().cloned());
                 let mut message =
-                    crate::mention::user_message(&expansion.text, &expansion.attachments);
+                    crate::mention::user_message(&expansion.text, &expansion.attachments, &images);
                 if pending.loop_capture && self.session.loop_state.active {
                     self.capture_loop_message(&mut message);
                 }
@@ -228,6 +236,7 @@ impl App {
                     .entries
                     .push(Entry::new(EntryKind::Notice, format!("not sent: {error}")));
                 self.restore_input(pending.text);
+                self.composer_images = pending.images;
                 UpdateResult::dirty()
             }
         }

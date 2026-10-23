@@ -77,10 +77,11 @@ impl App {
                 self.completion_clear();
                 if self.find_state().is_some() {
                     self.find_push(c);
+                    UpdateResult::dirty()
                 } else {
                     self.input.insert_char(c);
+                    self.after_input_edit()
                 }
-                UpdateResult::dirty()
             }
             Input::FindBackspace => {
                 self.completion_clear();
@@ -98,7 +99,7 @@ impl App {
                     return self.login_outcome(outcome.unwrap_or(LoginOutcome::Stay));
                 }
                 self.input.insert_str(&text);
-                UpdateResult::dirty()
+                self.after_input_edit()
             }
             Input::Resize { .. } => UpdateResult::dirty(),
             Input::ApprovalAnswer(outcome) => self.answer_approval(outcome),
@@ -132,6 +133,11 @@ impl App {
             Input::Pending(head, len) => self.sync_pending(head, len),
             Input::Form(key) => self.form_key(key),
             Input::MentionsExpanded(result) => self.mentions_expanded(result),
+            Input::DroppedLoaded {
+                text,
+                range,
+                outcome,
+            } => self.dropped_loaded(text, range, outcome),
             Input::CompletionReady(completion) => self.completion_ready(completion),
             Input::CompletionsReady { fetch, candidates } => {
                 self.completions_ready(fetch, candidates)
@@ -396,6 +402,49 @@ impl App {
             result.dirty = true;
         }
         result
+    }
+
+    /// After text enters the composer, look for an absolute path token ending at the cursor
+    /// (a terminal's dropped file). The shape check is pure; reading the bytes is the loop's
+    /// [`Effect::LoadDropped`]. Text without such a token stays an ordinary edit.
+    fn after_input_edit(&self) -> UpdateResult {
+        let text = self.input.text();
+        let Some(dropped) = crate::mention::dropped_path(&text, self.input.cursor()) else {
+            return UpdateResult::dirty();
+        };
+        UpdateResult::effect(Effect::LoadDropped {
+            text,
+            path: dropped.path,
+            range: dropped.range,
+        })
+    }
+
+    /// A dropped path's bytes came back. A loaded image replaces its path in the input and
+    /// joins the composer attachments; a limit refusal shows a notice and leaves the text (the
+    /// send path then refuses the message); a non-image leaves everything as written.
+    fn dropped_loaded(
+        &mut self,
+        text: String,
+        range: std::ops::Range<usize>,
+        outcome: crate::mention::DroppedImage,
+    ) -> UpdateResult {
+        if self.input.text() != text {
+            // The line changed while the read ran; the range no longer names this path.
+            return UpdateResult::none();
+        }
+        match outcome {
+            crate::mention::DroppedImage::Loaded(image) => {
+                self.input.remove_range(range);
+                self.session.note = Some(format!("attached {}", image.placeholder()));
+                self.composer_images.push(image);
+                UpdateResult::dirty()
+            }
+            crate::mention::DroppedImage::Unusable(reason) => {
+                self.push_notice(format!("cannot attach the dropped image: {reason}"));
+                UpdateResult::dirty()
+            }
+            crate::mention::DroppedImage::NotImage => UpdateResult::none(),
+        }
     }
 
     /// Resolves one key event to an [`Input`] through the keymap and the layer stack
@@ -741,6 +790,7 @@ impl App {
             self.session.history.push(text);
             self.session.history_cursor = None;
             self.session.history_stash.clear();
+            self.composer_images.clear();
             self.quit_pending = None;
             return UpdateResult::dirty();
         }
@@ -770,12 +820,17 @@ impl App {
                 let text = std::mem::take(&mut self.input).text();
                 self.session.history_cursor = None;
                 self.session.history_stash.clear();
-                if text.trim().is_empty() {
+                // An image attachment alone is a message too (`@` needs text, a dropped path
+                // does not).
+                if text.trim().is_empty() && self.composer_images.is_empty() {
                     return UpdateResult::dirty();
                 }
                 // Every submitted line (messages and `//` escapes and `/…` commands) joins the
-                // session history; browsing edits never change it.
-                self.session.history.push(text.clone());
+                // session history; browsing edits never change it. An images-only send has no
+                // line to remember.
+                if !text.trim().is_empty() {
+                    self.session.history.push(text.clone());
+                }
                 let trimmed = text.trim();
                 // `//x` is the escape: send it as the ordinary message `/x`.
                 if let Some(escaped) = trimmed.strip_prefix("//") {
@@ -834,7 +889,10 @@ impl App {
                 UpdateResult::dirty()
             }
             Action::DeleteBefore => {
-                self.input.backspace();
+                // Backspace on an empty input removes the newest composer image (Q7).
+                if !self.input.backspace() {
+                    self.composer_images.pop();
+                }
                 UpdateResult::dirty()
             }
             Action::DeleteUnder => {
@@ -948,6 +1006,7 @@ impl App {
                     self.session.history.push(text);
                     self.session.history_cursor = None;
                     self.session.history_stash.clear();
+                    self.composer_images.clear();
                     UpdateResult::dirty()
                 } else if self.session.bash_running.is_some() {
                     // Esc cancels the running `!` command (ADR 0033); the task reports back

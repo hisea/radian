@@ -33,6 +33,15 @@ pub enum Input {
     FindBackspace,
     /// A bracketed paste: inserted at the cursor.
     Paste(String),
+    /// A dropped path was read (the result of [`Effect::LoadDropped`]). `text` is the composer
+    /// text the range belonged to; a stale answer is dropped. A loaded image removes its path
+    /// from the input and becomes a composer attachment; `Unusable` shows a notice and keeps
+    /// the text (the send path then refuses the message); `NotImage` leaves everything alone.
+    DroppedLoaded {
+        text: String,
+        range: std::ops::Range<usize>,
+        outcome: crate::mention::DroppedImage,
+    },
     /// The terminal was resized. The renderer re-measures on the next frame.
     Resize { rows: u16, cols: u16 },
     /// The hardcoded answer to the approval prompt on screen (`y`/`a`/`n`/`Esc`).
@@ -292,6 +301,9 @@ pub enum PendingSend {
 pub(super) struct PendingExpand {
     pub(super) kind: PendingSend,
     pub(super) text: String,
+    /// Images already attached in the composer (dropped paths); they join the message after
+    /// the text, before the `@` attachments.
+    pub(super) images: Vec<radian_coding::LoadedImage>,
     /// This send carries the loop prompt: tag it and record it when the expansion lands.
     /// Set at submit time (a `/loop` inline prompt, or a message typed while the loop is
     /// armed or paused); re-checked against the live loop state on arrival.

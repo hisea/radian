@@ -2409,3 +2409,17 @@ from a `cp` in `/tmp/` and confirmed byte-identical with `cmp`; every run with
 | S5R1-3 | `classic.toml` is the `classic` preset section | the `preset`/`separator` values swapped in `classic.toml` (`preset = " · "`, `separator = "classic"`) | `--test footer_presets -- all_four_built_in_presets_parse` ✅ 1 failed (`classic: the file declares its own preset`) and `exported_presets_round_trip_through_the_user_config` ✅ 1 failed (`classic: the export resolves to the preset's rows`) |
 
 3/3 caught; no misses.
+
+## rework 3: a dropped path is not read whole before a check (2026-10-23, branch `work/TK0013-image-inputs`)
+
+`mention::load_dropped` now wraps the shared `radian_coding::image::load_path`, which opens the
+file, reads a bounded 64 KiB head for the magic number and `imagesize`, checks the metadata size
+against 5 MiB, and reads the body only for an accepted image. The mutation puts
+`std::fs::read(path)` back, so the whole file is allocated before `image::load` decides. The
+test-only read counter (`PATH_BYTES_READ`, also exposed under the `testing` feature for the
+`radian-exec` tests) makes the miss visible without writing a 2 GiB file: the sparse file is
+`set_len`-created. Restored from `.radian/mention.rs.bak` byte-identically.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RW3-1 | the path read reads the whole file (`std::fs::read`) before the magic/size checks | ✅ 1 failed | `radian-coding image::tests::a_large_non_image_is_refused_from_its_head` (0 bytes through the bounded reader on a 2 GiB sparse file) |

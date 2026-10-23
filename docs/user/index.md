@@ -24,6 +24,7 @@ Each line names one page and what it covers.
 - `arc-files`: the files arc keeps: `config.toml`, plan and task files, and the `.radian/arc/` layout.
 - `keybindings`: every key in the full-screen interface, by area, and how to rebind it.
 - `sessions`: resume, list, search, fork, export, and attach to sessions.
+- `tools`: the built-in file tools, `read`'s text, directory and image branches, its limits and error codes.
 - `subagent-and-jobs`: helper sessions and background shell jobs.
 - `permissions`: permission tiers, trust, approval, and sandbox behavior.
 - `troubleshooting`: fix setup, network, and session problems.

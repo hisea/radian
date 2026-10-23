@@ -68,6 +68,7 @@ mod foreground;
 mod glob;
 mod grep;
 pub mod host_git;
+pub mod image;
 mod jobs;
 mod list;
 mod output;
@@ -87,6 +88,11 @@ pub use ask::{
     QuestionOption, QuestionReply, QuestionRequest,
 };
 pub use deny::DenySet;
+pub use image::{
+    ImageError, ImageKind, ImageSupport, LoadedImage, MAX_IMAGE_BYTES, MAX_IMAGE_SIDE,
+    SCALE_NOTICE_SIDE, images_allowed, message as image_message, part_placeholder,
+    placeholder as image_placeholder, read_description as image_read_description,
+};
 pub use jobs::{
     JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,
     SweepSummary,

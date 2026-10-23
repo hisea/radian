@@ -307,6 +307,17 @@ pub async fn open_session(
     // sandbox slot as their tier source, so a tier switch changes their reads at the next
     // call (ADR 0038).
     let harden_git = !trust.resolved.decision.as_bool();
+    // ADR 0018: the `read` tool asks this closure at each call. The slot carries the live
+    // route, so a `/model` switch changes the answer; the catalog is read locally (cache, else
+    // the bundled snapshot), never over the network. An unknown model takes images.
+    let image_support: radian_coding::ImageSupport = {
+        let slot = Arc::clone(&config_slot);
+        let initial = model.current_route();
+        Arc::new(move || {
+            let route = ModelRoute::from_value(&slot.value()).unwrap_or_else(|| initial.clone());
+            crate::route_takes_images(&route.provider, &route.model)
+        })
+    };
     let skill_dirs: Vec<std::path::PathBuf> = shared_skills
         .iter()
         .filter(|skill| skill.body.is_none())
@@ -321,6 +332,7 @@ pub async fn open_session(
         harden_git,
         &skill_dirs,
         &file_deny_read,
+        image_support,
     )?;
     // ADR 0037 §6: a resumed session clears its jobs directory. The registry is built empty
     // above, so at this point no file in the directory can belong to it and nothing is

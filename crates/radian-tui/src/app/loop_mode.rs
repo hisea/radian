@@ -224,6 +224,7 @@ impl App {
         self.pending_expand.push_back(PendingExpand {
             kind: PendingSend::Followup,
             text: text.clone(),
+            images: std::mem::take(&mut self.composer_images),
             loop_capture: true,
         });
         UpdateResult::effect(Effect::ExpandMentions { text })
@@ -579,6 +580,7 @@ mod tests {
                     app.update(Input::MentionsExpanded(Ok(Expansion {
                         text: text.clone(),
                         attachments: Vec::new(),
+                        images: Vec::new(),
                         warnings: Vec::new(),
                     })))
                     .effects,

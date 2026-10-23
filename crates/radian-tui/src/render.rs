@@ -360,7 +360,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             // rows (the two rules, or the box's top rule and bottom tail), so the layout of
             // everything else is unchanged.
             let inner_width = input_inner_width(app, input_area.width as usize);
-            let visible = input_visible_rows(input_area.height);
+            let visible = input_visible_rows(app, input_area.height);
             let text = app.input.text();
             let rows = crate::composer::rows(&text, inner_width);
             let (cursor_row, cursor_col) = app.input.cursor_cell(inner_width);
@@ -368,6 +368,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let offset = cursor_row.saturating_sub(visible.saturating_sub(1));
             let offset = offset.min(rows.len().saturating_sub(1));
             let empty = app.input.is_empty();
+            // Composer image attachments (dropped paths) draw one placeholder row each above
+            // the text, the same `[image: …]` line the transcript shows (ADR 0028 R5).
+            let image_rows: Vec<Line> = app
+                .composer_images
+                .iter()
+                .map(|image| Line::from(Span::styled(image.placeholder(), app.theme.hint)))
+                .collect();
             let style = if empty {
                 app.theme.hint
             } else {
@@ -386,26 +393,26 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         INPUT_HINT_NO_MODEL
                     };
                     let body: Vec<Line> = if empty {
-                        vec![Line::from(vec![
+                        let mut body = image_rows.clone();
+                        body.push(Line::from(vec![
                             Span::styled(INPUT_PROMPT, app.theme.hint),
                             Span::styled(hint, style),
-                        ])]
+                        ]));
+                        body
                     } else {
-                        rows[offset..]
-                            .iter()
-                            .enumerate()
-                            .map(|(index, row)| {
-                                let lead = if index == 0 {
-                                    INPUT_PROMPT.to_string()
-                                } else {
-                                    " ".repeat(prompt_width(INPUT_PROMPT))
-                                };
-                                Line::from(vec![
-                                    Span::styled(lead, app.theme.hint),
-                                    Span::styled(row.clone(), style),
-                                ])
-                            })
-                            .collect()
+                        let mut body = image_rows.clone();
+                        body.extend(rows[offset..].iter().enumerate().map(|(index, row)| {
+                            let lead = if index == 0 {
+                                INPUT_PROMPT.to_string()
+                            } else {
+                                " ".repeat(prompt_width(INPUT_PROMPT))
+                            };
+                            Line::from(vec![
+                                Span::styled(lead, app.theme.hint),
+                                Span::styled(row.clone(), style),
+                            ])
+                        }));
+                        body
                     };
                     let mut block = Block::default()
                         .borders(Borders::TOP | Borders::BOTTOM)
@@ -467,6 +474,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         }
                     };
                     let mut body: Vec<Line> = vec![top];
+                    body.extend(image_rows.clone());
                     let text_rows: Vec<String> = if empty {
                         vec![if app.session.has_model {
                             INPUT_HINT.to_string()
@@ -504,8 +512,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;
                 // Both styles draw one chrome row above the text (the top rule, or the box's
-                // top rule with the running status in it).
-                let top_chrome: u16 = 1;
+                // top rule with the running status in it), plus one row per composer image.
+                let top_chrome: u16 = 1 + app.composer_images.len() as u16;
                 let x = input_area.x + lead + col;
                 let y = input_area.y + top_chrome + row;
                 frame.set_cursor_position((x, y));

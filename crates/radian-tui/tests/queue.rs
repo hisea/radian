@@ -32,6 +32,7 @@ fn submit(app: &mut App, line: &str) -> Vec<Effect> {
                 app.update(Input::MentionsExpanded(Ok(Expansion {
                     text: text.clone(),
                     attachments: Vec::new(),
+                    images: Vec::new(),
                     warnings: Vec::new(),
                 })))
                 .effects,
@@ -129,6 +130,7 @@ fn two_rapid_submits_both_send_in_order() {
         Input::MentionsExpanded(Ok(Expansion {
             text: text.to_owned(),
             attachments: Vec::new(),
+            images: Vec::new(),
             warnings: Vec::new(),
         }))
     };

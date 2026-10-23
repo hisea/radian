@@ -397,6 +397,9 @@ struct CatalogModel {
     /// The model entry's own `provider.npm` (ADR 0026), when it carries
     /// one; the provider-level `npm` in [`CatalogProvider`] is the fallback.
     npm: Option<String>,
+    /// The models.dev `modalities.input` list (ADR 0018), when the entry has one. `None` means
+    /// unknown, and an unknown model counts as taking images.
+    modalities_input: Option<Vec<String>>,
 }
 
 /// One catalog provider as parsed.
@@ -448,6 +451,7 @@ impl Catalog {
                             .and_then(|provider| provider.get("npm"))
                             .and_then(Value::as_str)
                             .map(str::to_owned),
+                        modalities_input: parse_modalities_input(model),
                         limit: ModelLimit {
                             context: limit.get("context").and_then(Value::as_u64),
                             output: limit.get("output").and_then(Value::as_u64),
@@ -523,6 +527,25 @@ impl Catalog {
         let provider_entry = self.providers.get(provider)?;
         let model_entry = provider_entry.models.get(model)?;
         model_entry.npm.as_deref().or(provider_entry.npm.as_deref())
+    }
+
+    /// The models.dev `modalities.input` list (ADR 0018), when the catalog entry has one.
+    /// `None` means unknown (the model takes images); `Some` may still lack `"image"`.
+    pub fn input_modalities(&self, provider: &str, model: &str) -> Option<&[String]> {
+        self.providers
+            .get(provider)?
+            .models
+            .get(model)?
+            .modalities_input
+            .as_deref()
+    }
+
+    /// Whether the model takes images (ADR 0018): `Some(false)` only when the catalog entry
+    /// names its input modalities and the list has no `image`. A model not in the catalog, or
+    /// one without `modalities`, is `None` (unknown, treated as taking images).
+    pub fn takes_images(&self, provider: &str, model: &str) -> Option<bool> {
+        self.input_modalities(provider, model)
+            .map(|list| list.iter().any(|modality| modality == "image"))
     }
 
     /// The provider's catalog metadata (display name, `env`), if present.
@@ -1042,6 +1065,30 @@ async fn fetch(url: &str) -> Option<String> {
     response.text().await.ok()
 }
 
+/// The models.dev `modalities.input` list, when the entry has one. An entry with no
+/// `modalities` object, no `input` array, or non-string members keeps no list (unknown).
+fn parse_modalities_input(model: &Value) -> Option<Vec<String>> {
+    let list = model.get("modalities")?.get("input")?.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// Whether the **current** route takes images, from the local catalog (cache, else the bundled
+/// snapshot), never the network. The protocol catalog is parsed once per process: the `read`
+/// tool asks this on every call, and a route switch does not change the catalog file.
+/// A model the catalog does not carry (including a custom provider) counts as taking images.
+pub fn route_takes_images(provider: &str, model: &str) -> bool {
+    static CATALOG: OnceLock<Catalog> = OnceLock::new();
+    CATALOG
+        .get_or_init(protocol_catalog)
+        .takes_images(provider, model)
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1091,6 +1138,18 @@ mod tests {
             "the entry's own npm wins"
         );
         assert_eq!(catalog.npm("opencode-go", "not-a-model"), None);
+        // ADR 0018: the snapshot keeps `modalities.input`, so the `read` tool can tell a
+        // vision model from a blind one without the network.
+        assert_eq!(
+            catalog.takes_images("anthropic", "claude-opus-4-5"),
+            Some(true),
+            "Anthropic models take images"
+        );
+        assert_eq!(
+            catalog.takes_images("opencode-go", "glm-5.2"),
+            Some(false),
+            "a text-only model is known blind"
+        );
         for provider in ["anthropic", "openai", "opencode", "deepseek", "openrouter"] {
             assert_eq!(
                 catalog.provider_info(provider).map(|info| info.id),
@@ -1148,6 +1207,28 @@ mod tests {
             Some("127.0.0.1")
         );
         assert_eq!(host_of("not a url"), None);
+    }
+
+    #[test]
+    fn the_catalog_input_modalities_decide_whether_a_model_takes_images() {
+        let text = r#"{
+            "anthropic": {"models": {
+                "vision": {"limit": {"context": 5}, "modalities": {"input": ["text", "image"]}},
+                "blind": {"limit": {"context": 5}, "modalities": {"input": ["text"]}},
+                "unknown": {"limit": {"context": 5}},
+                "empty": {"limit": {"context": 5}, "modalities": {}}
+            }}
+        }"#;
+        let catalog = Catalog::parse(text).unwrap();
+        assert_eq!(catalog.takes_images("anthropic", "vision"), Some(true));
+        assert_eq!(catalog.takes_images("anthropic", "blind"), Some(false));
+        assert_eq!(catalog.takes_images("anthropic", "unknown"), None);
+        assert_eq!(catalog.takes_images("anthropic", "empty"), None);
+        assert_eq!(catalog.takes_images("missing", "vision"), None);
+        assert_eq!(
+            catalog.input_modalities("anthropic", "blind"),
+            Some(&["text".to_string()][..])
+        );
     }
 
     #[test]

@@ -110,12 +110,16 @@ pub(super) fn input_height(app: &App, width: usize) -> u16 {
     let rows = crate::composer::rows(&app.input.text(), inner)
         .len()
         .clamp(1, MAX_INPUT_ROWS);
-    rows as u16 + 2
+    // One row per composer image attachment, above the text rows.
+    (rows + app.composer_images.len()) as u16 + 2
 }
 
-/// The input's visible text rows (`input_area.height` minus the two chrome rows), at least one.
-pub(super) fn input_visible_rows(height: u16) -> usize {
-    height.saturating_sub(2).max(1) as usize
+/// The input's visible text rows (`input_area.height` minus the two chrome rows and the image
+/// attachment rows), at least one.
+pub(super) fn input_visible_rows(app: &App, height: u16) -> usize {
+    height
+        .saturating_sub(2 + app.composer_images.len() as u16)
+        .max(1) as usize
 }
 
 /// The display width of a prompt constant: the columns it occupies, **not** its byte length

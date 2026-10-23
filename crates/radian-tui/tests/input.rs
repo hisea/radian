@@ -22,6 +22,7 @@ fn expanded(text: &str) -> Expansion {
     Expansion {
         text: text.to_owned(),
         attachments: Vec::new(),
+        images: Vec::new(),
         warnings: Vec::new(),
     }
 }

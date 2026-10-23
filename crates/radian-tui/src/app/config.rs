@@ -24,6 +24,7 @@ impl App {
             contributions: radian_host::ContributionStore::new(),
             footer_context: radian_host::FooterContext::new(),
             input: Composer::new(),
+            composer_images: Vec::new(),
             quit: false,
             new_session: false,
             pending: 0,

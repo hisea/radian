@@ -52,6 +52,38 @@ fn demo(dir: &TempDir) -> (std::path::PathBuf, Session) {
     (path, session)
 }
 
+/// A user message's image part is a `[<mime> image omitted]` text projection in the Markdown
+/// export; the base64 never becomes visible text (ADR 0028 R5, backlog `images.md` Q8).
+#[test]
+fn an_image_part_exports_as_the_omitted_text_projection() {
+    let dir = TempDir::new("export-image");
+    let path = dir.file("image.jsonl");
+    let sid = "sid-image";
+    let lines = [
+        json!({"schema_version":1,"session_id":sid,"seq":0,
+            "ts":"2026-10-12T08:00:00.000000Z","event":"SessionCreated","critical":true,
+            "data":{"workspace":"/work/image","config_snapshot":{}}}),
+        json!({"schema_version":1,"session_id":sid,"seq":1,
+        "ts":"2026-10-12T08:00:01.000000Z","event":"MessageAppended","critical":true,
+        "data":{"index":0,"message":{"user":{"content":[
+            {"text":{"text":"look"}},
+            {"image":{"mime_type":"image/png","data":"QUJD",
+                "annotations":{"kind":"image","name":"shot.png","width":1,"height":1,"bytes":3}}}
+        ]}}}}),
+    ];
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(&line.to_string());
+        out.push('\n');
+    }
+    std::fs::write(&path, out).unwrap();
+    let session = Session::open(&path).unwrap();
+    let markdown = export_markdown(&session, &ExportOptions::new()).unwrap();
+    assert!(markdown.contains("look"), "{markdown}");
+    assert!(markdown.contains("[image/png image omitted]"), "{markdown}");
+    assert!(!markdown.contains("QUJD"), "{markdown}");
+}
+
 #[test]
 fn json_export_omits_provider_payload_by_default_and_includes_it_when_opted_in() {
     let dir = TempDir::new("export-json");

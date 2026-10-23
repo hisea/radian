@@ -147,6 +147,11 @@ pub struct Cli {
     #[arg(short, long, conflicts_with = "list")]
     prompt: Option<String>,
 
+    /// Attach an image to the `-p` prompt's user message (repeatable). The path is read by
+    /// the host; PNG, JPEG, GIF or WebP only, at most 5 MiB and 8000 px per side.
+    #[arg(long = "image", value_name = "PATH", requires = "prompt")]
+    image: Vec<PathBuf>,
+
     /// Machine-readable output: `--output jsonl` prints every durable journal line, the
     /// live-only delta lines and a closing `Result` record to stdout, one JSON object per
     /// line. Omitted, stdout carries only the model text.
