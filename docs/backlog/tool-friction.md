@@ -9,7 +9,7 @@
 两处摩擦每天都在重复，各自只值一轮往返，但每次都让 worker 多想一步、多调一次，而且第二处还会误导看 transcript 的人。
 
 1. **`write` 要求父目录已存在。** 一天里撞了 12 次（新 crate 的 `Cargo.toml`、新模块目录 `src/review/mod.rs`、`.cargo/config.toml`）。错误文本是 `` `crates/radian-arc`: No such file or directory ``，只给出缺失的那一级，模型要自己推断是父目录没建，再用 `shell` 跑一条 `mkdir -p`，再重发 `write`。三轮换一个文件。工具描述里写着"The parent directory must exist"，模型照样撞。
-2. **`shell` 的 `[timeout clamped to the configured maximum of 600s]` 拼在 `--- stderr ---` 段之后。** 一天里出现 34 次，全部来自同一个模型给 `timeout_secs` 传 900（schema 已写明 Maximum: 600，它不改）。这行紧跟 stderr 内容、没有分隔，在 TUI 里和在模型眼里都像是命令的 stderr 报了超时。实际这 34 次没有一次超时（1738 次 `shell` 只有 3 次真超时，最长一次 550 s）。owner 看 transcript 时把连续两条读成了"连着两次 timeout"。真正的超时提示 `[timed out after …]` 在 `exit code:` 之前的标记区，位置不一致。
+2. **`shell` 的 `[timeout clamped to the configured maximum of 600s]` 拼在 `--- stderr ---` 段之后。** 一天里出现 34 次，全部来自同一个模型给 `timeout_secs` 传 900（schema 已写明 Maximum: 600，它不改）。这行紧跟 stderr 内容、没有分隔，在 TUI 里和在模型眼里都像是命令的 stderr 报了超时。实际这 34 次没有一次超时（1738 次 `shell` 只有 3 次真超时，最长一次 550 s）。看 transcript 的人会把连续两条读成"连着两次 timeout"。真正的超时提示 `[timed out after …]` 在 `exit code:` 之前的标记区，位置不一致。
 
 ## 决定（已定）
 
