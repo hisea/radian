@@ -794,9 +794,9 @@ fn list_hides_finished_work_unless_all_and_json_is_unfiltered() {
     );
     assert!(default.out.contains(&ready), "{}", default.out);
     assert!(
-        default
-            .out
-            .contains(&format!("{mixed}  draft  auto: off  1/2 merged  a plan")),
+        default.out.contains(&format!(
+            "{mixed}  draft  auto: off  priority: P3  1/2 merged  a plan"
+        )),
         "the shown plan counts what it hid: {}",
         default.out
     );
@@ -847,8 +847,9 @@ fn list_hides_finished_work_unless_all_and_json_is_unfiltered() {
     let one = run(&scratch, &["arc", "list", "--plan", &finished], "");
     assert_eq!(one.code, Some(0), "{one:?}");
     assert!(
-        one.out
-            .contains(&format!("{finished}  draft  auto: off  2/2 merged  a plan")),
+        one.out.contains(&format!(
+            "{finished}  draft  auto: off  priority: P3  2/2 merged  a plan"
+        )),
         "a finished plan named by --plan keeps its header: {}",
         one.out
     );
