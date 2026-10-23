@@ -1116,10 +1116,11 @@ fn failed_stage(
 /// `None` when the verdict is not a conflict or the profile does not run `merge-main`; the
 /// caller then keeps the path to `review.rework_pending`.
 ///
-/// `[limits] max_conflict_rework` bounds a run of conflicts: each conflict raises the task's
-/// count, and when the count reaches the limit no brief is written and the task stays in
-/// `review.rework_pending` with the reason in [`Conflict::stop`]. A verification that does not
-/// end in a conflict sets the count back to `0` ([`reset_conflict_rework`]).
+/// `[limits] max_conflict_rework` bounds the conflict reworks arc writes in a row: while the
+/// count is below the limit, arc writes the brief and raises the count; when it has reached
+/// the limit, no brief is written and the task stays in `review.rework_pending` with the
+/// reason in [`Conflict::stop`]. `0` writes none. The lead's own rework and an attempt that
+/// does not conflict set the count back to `0` ([`reset_conflict_rework`]).
 fn conflict_auto_rework(
     store: &Store,
     task: &model::TaskFile,
@@ -1146,20 +1147,18 @@ fn conflict_auto_rework(
         .to_owned();
     let limit = config.limits.max_conflict_rework;
     let mut record = read_conflict_rework(store, &task.id);
-    record.conflicts = record.conflicts.saturating_add(1);
-    write_conflict_rework(store, &task.id, &record)?;
     let conflict = Conflict {
         main_sha,
         stage: verdict.stage,
         paths: verdict.conflict_paths.clone(),
         stop: None,
     };
-    if record.conflicts >= limit {
+    if record.reworks >= limit {
         let conflict = Conflict {
             stop: Some(format!(
-                "the task conflicted with main {} times in a row and `[limits] \
+                "the task wrote {} conflict reworks in a row and `[limits] \
                  max_conflict_rework` is {limit}; it waits for a rework from the lead",
-                record.conflicts
+                record.reworks
             )),
             ..conflict
         };
@@ -1172,6 +1171,8 @@ fn conflict_auto_rework(
         })?;
         return Ok(Some(conflict));
     }
+    record.reworks = record.reworks.saturating_add(1);
+    write_conflict_rework(store, &task.id, &record)?;
     let brief = conflict_rework_brief(&conflict);
     crate::store::plan_ops::add_rework_with(
         store,
@@ -1182,17 +1183,17 @@ fn conflict_auto_rework(
     Ok(Some(conflict))
 }
 
-/// `runs/<task>/conflict_rework.json` (ADR 0048 decision 9): the task's run of conflicts with
-/// main. It is not part of the task file: it is bookkeeping for one limit, like
-/// [`AUTO_REVERIFY_FILE`].
+/// `runs/<task>/conflict_rework.json` (ADR 0048 decision 9): how many conflict reworks arc
+/// has written for the task in a row. It is not part of the task file: it is bookkeeping for
+/// one limit, like [`AUTO_REVERIFY_FILE`].
 pub const CONFLICT_REWORK_FILE: &str = "conflict_rework.json";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct ConflictReworkRecord {
-    /// How many conflicts with main the task has had in a row. A verification that does not
-    /// end in a conflict sets it back to 0.
-    conflicts: u32,
+    /// How many conflict reworks arc has written for the task in a row. The lead's rework and
+    /// an attempt that does not conflict set it back to 0.
+    reworks: u32,
 }
 
 fn conflict_rework_path(store: &Store, task: &str) -> PathBuf {
@@ -1230,12 +1231,13 @@ fn write_conflict_rework(
         .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
 }
 
-/// A verification that did not end in a conflict sets the task's run of conflicts back to 0
-/// (ADR 0048 decision 9): only a run of conflicts can reach `[limits] max_conflict_rework`.
-/// An attempt that ends without reaching the gate did not conflict either, so
-/// [`crate::store::attempt_ops::apply`] calls this too.
+/// A conflict rework arc wrote in a row is over: the lead's own rework, a verification that
+/// did not end in a conflict, and an attempt that never reached the gate all set the count back
+/// to 0 (ADR 0048 decision 9). Only a run of conflict reworks can reach
+/// `[limits] max_conflict_rework`; [`crate::store::attempt_ops::apply`] calls this for an
+/// attempt that ends without reaching the gate.
 pub(crate) fn reset_conflict_rework(store: &Store, task: &str) -> Result<(), Error> {
-    if read_conflict_rework(store, task).conflicts == 0 {
+    if read_conflict_rework(store, task).reworks == 0 {
         return Ok(());
     }
     write_conflict_rework(store, task, &ConflictReworkRecord::default())

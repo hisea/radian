@@ -58,11 +58,12 @@ copy.
 | M43 | include the review verdict's `blocking` items in the follow-up task | `review::a_blocking_item_is_never_carried_into_the_followup` | ✅ failed |
 | M44 | compare `max_attempts` with the attempt number again (`attempt < max_attempts`) | `attempt::a_reworked_task_keeps_starting_after_max_attempts_worth_of_attempts`, `attempt::retries_after_a_rework_start_from_zero_and_stop_at_max_attempts`, `attempt::a_failed_outcome_retries_with_the_backoff_then_is_exhausted` | ✅ 3 failed |
 | M45 | do not reset `retry_count` on a rework (`plan_ops::add_rework_with` drops the reset) | `attempt::a_reworked_task_keeps_starting_after_max_attempts_worth_of_attempts` (round 2 keeps the count at 1) | ✅ failed |
-| M46 | drop the conflict limit (`if false && record.conflicts >= limit`) | `review::max_conflict_rework_stops_a_run_of_conflicts_and_says_why` (the third conflict returns to `todo.ready`), `review::a_zero_conflict_limit_never_writes_the_rework` (the brief is written at `0`) | ✅ 2 failed |
+| M46 | drop the conflict limit (`if false && record.reworks >= limit`) | `review::max_conflict_rework_stops_a_run_of_conflicts_and_says_why` (the fourth conflict returns to `todo.ready`), `review::a_zero_conflict_limit_never_writes_the_rework` (the brief is written at `0`), `review::a_conflict_limit_of_one_writes_one_brief_and_then_waits` (a second brief is written at `1`) | ✅ 3 failed |
 | M47 | the conflict path consults `max_attempts` again (`task.attempt >= max_attempts \|\| …`) | `review::a_conflict_on_the_old_last_attempt_still_gets_the_conflict_rework` (the third attempt with `max_attempts` 1 stops instead of returning to `todo.ready`) | ✅ failed |
 | M48 | drop `retry_count` from the task JSON (`store::cli::task_json`) | `arc::the_retry_count_is_a_field_of_show_and_list_json` | ✅ failed |
-| M49 | drop the reset after a passing verification (`finish_verification`) | `review::a_non_conflicting_verification_resets_the_conflict_count` (the first conflict after the pass stops the task) | ✅ failed |
-| M50 | drop the reset in `attempt_ops::apply` for an attempt that never reached the gate | `attempt::an_attempt_that_does_not_reach_the_gate_resets_the_conflict_count` (the count stays at 2) | ✅ failed |
+| M49 | drop the reset after a passing verification (`finish_verification`) | `review::a_non_conflicting_verification_resets_the_conflict_count` (the second conflict after the pass stops the task) | ✅ failed |
+| M50 | drop the reset in `attempt_ops::apply` for an attempt that never reached the gate | `attempt::an_attempt_that_does_not_reach_the_gate_resets_the_conflict_count` (the run stays at 2) | ✅ failed |
+| M51 | do not reset the conflict run for the lead's `add_rework` (`plan_ops::add_rework_with` drops the empty-suffix reset) | `review::a_lead_rework_resets_the_conflict_run` (the record keeps `reworks: 3` after the lead's brief) | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -148,9 +149,9 @@ places; both are dropped in the one mutation, and the unit, store and CLI tests 
 M44–M46 were run against `9d3fdf67` (the retry count and the conflict limit), each from a copy
 under `.radian/mutations/` restored with `cp` and compared with `cmp`. M45 is caught by one
 test only: a task whose retry count is still 0 cannot show the missing reset, so the ten-round
-test is the one that sees the count cross the rework. M46 leaves the streak record itself in
-place (each conflict still counts); only the stop is gone, so both conflict-limit tests fail
-and every other conflict test still passes.
+test is the one that sees the count cross the rework. M46 leaves the run record itself in
+place (each conflict still raises the run); only the stop is gone, so all three conflict-limit
+tests fail and every other conflict test still passes.
 
 M47–M48 were run against `4b6a9619`, each from a copy under `.radian/mutations/` restored with
 `cp` and compared with `cmp`. M47 is what the old conflict path did; it leaves the conflict
@@ -161,3 +162,9 @@ the CLI test catches it.
 M49–M50 were run against `4b6a9619` the same way (`cp` back, `cmp`). Each drops one reset and
 one test sees it; no other test depends on the record, so the pair is what pins both reset
 paths.
+
+M46 was run again, and M51 was run, against the conflict budget's second rule (three briefs
+before the fourth conflict stops; the lead's rework resets the run), when M46's replacement
+was changed from "count the conflicts" to "count the conflict reworks arc wrote", each from a
+copy under `.radian/mutations/` restored with `cp` and compared with `cmp`. M51 is caught by
+`a_lead_rework_resets_the_conflict_run` alone; the run record it leaves shows `reworks: 3`.

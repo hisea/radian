@@ -268,6 +268,11 @@ pub fn add_rework_with(
         task.retry_count = 0;
         Ok(())
     })?;
+    // The lead's own rework is a person stepping in, so the task gets a fresh run of automatic
+    // conflict reworks too. arc's review and conflict reworks carry a suffix and keep the run.
+    if heading_suffix.is_empty() {
+        crate::review::reset_conflict_rework(store, task)?;
+    }
     Ok(())
 }
 

@@ -469,11 +469,13 @@ line or within 10 lines of a previous blocking item in the same file (`ReworkRou
 
 Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
 such a failure, with reason `conflict` and the paths. `review::conflict_auto_rework` writes
-the conflict brief while the task's run of conflicts (`runs/<task>/conflict_rework.json`,
-`CONFLICT_REWORK_FILE`) is below `[limits] max_conflict_rework`; at the limit no brief is
-written, the task stays in `review.rework_pending`, and the stop text is part of the recorded
-reason, so `show` prints it. A verification that does not end in a conflict, and an attempt
-that never reaches the gate, call `reset_conflict_rework`. A `review_blocking` failure on a plan
+the conflict brief while the task's run of conflict reworks (`runs/<task>/conflict_rework.json`,
+`CONFLICT_REWORK_FILE`) is below `[limits] max_conflict_rework`; once it has written the limit,
+no brief is written, the task stays in `review.rework_pending`, and the stop text is part of
+the recorded reason, so `show` prints it. A verification that does not end in a conflict, an
+attempt that never reaches the gate, and the lead's own rework (`plan_ops::add_rework`, the
+empty heading suffix) call `reset_conflict_rework`; arc's review and conflict reworks keep the
+run. A `review_blocking` failure on a plan
 whose `auto` is not `off` instead writes `## Rework <n> (review)` itself
 (`review::review_auto_rework`), counts an automatic rework, and returns the task to
 `todo.ready`; at `max_auto_rework` the plan pauses and the task stays in
