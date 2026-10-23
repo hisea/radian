@@ -21,7 +21,9 @@
 //!   normalised lexically against the link's parent, an absolute one with `realpath`
 //!   (which resolves names, not contents);
 //! - a component that exists but is not a directory is `not_a_directory`; a missing component
-//!   is `not_found`.
+//!   is `not_found` — except for the parent levels of a `write`, which the walk creates one at
+//!   a time with `mkdirat(dirfd, name, 0o755)` and opens by the same `O_NOFOLLOW | O_DIRECTORY`
+//!   rule, so nothing is ever created through a link.
 //!
 //! Directory listing goes through the same fd (`fdopendir` on a duplicate) and classifies each
 //! entry with `fstatat(..., AT_SYMLINK_NOFOLLOW)`, so a walk never follows a link either.
@@ -370,10 +372,29 @@ mod imp {
         }
     }
 
+    /// `mkdirat(dirfd, name, mode)` on an open directory fd.
+    fn mkdirat(dir: &File, name: &OsStr, mode: libc::mode_t) -> io::Result<()> {
+        let name = cstr(name)?;
+        // SAFETY: `dir` is an open directory fd and `name` a valid C string.
+        let rc = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Walks `parts` from `root_fd`, opening every component as a directory with
-    /// `O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC`. Returns the last directory's fd (a fresh
-    /// descriptor for the root itself when `parts` is empty).
-    pub fn walk_dirs(root_fd: &File, root: &Path, parts: &[OsString]) -> Result<File, SafeFsError> {
+    /// `O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC`. With `create`, a level that does not exist is
+    /// created first with `mkdirat(dirfd, name, 0o755)` on the level above's fd and then opened
+    /// by the same rule; a link level is still refused, so nothing is created through a link.
+    /// Returns the last directory's fd (a fresh descriptor for the root itself when `parts` is
+    /// empty).
+    pub fn walk_dirs(
+        root_fd: &File,
+        root: &Path,
+        parts: &[OsString],
+        create: bool,
+    ) -> Result<File, SafeFsError> {
         let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC;
         let mut dir =
             openat(root_fd, OsStr::new("."), flags, 0).map_err(|source| SafeFsError::Io {
@@ -383,6 +404,36 @@ mod imp {
         for (index, name) in parts.iter().enumerate() {
             dir = match openat(&dir, name, flags, 0) {
                 Ok(next) => next,
+                Err(error) if create && error.raw_os_error() == Some(libc::ENOENT) => {
+                    match mkdirat(&dir, name, 0o755) {
+                        Ok(()) => {}
+                        // Another process (or a concurrent tool call) created it first.
+                        Err(mkdir_error) if mkdir_error.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(mkdir_error) => {
+                            return Err(map_open_error(
+                                mkdir_error,
+                                &dir,
+                                &parts[..index],
+                                name,
+                                root,
+                                true,
+                            ));
+                        }
+                    }
+                    match openat(&dir, name, flags, 0) {
+                        Ok(next) => next,
+                        Err(error) => {
+                            return Err(map_open_error(
+                                error,
+                                &dir,
+                                &parts[..index],
+                                name,
+                                root,
+                                true,
+                            ));
+                        }
+                    }
+                }
                 Err(error) => {
                     return Err(map_open_error(
                         error,
@@ -399,19 +450,21 @@ mod imp {
     }
 
     /// Opens the file `parts` names (the last component with `O_NOFOLLOW` and the mode's
-    /// flags) after walking its parents as directories.
+    /// flags) after walking its parents as directories. `create_parents` creates missing parent
+    /// levels as [`walk_dirs`] describes (`write`); every other caller refuses a missing one.
     pub fn open_file(
         root_fd: &File,
         root: &Path,
         parts: &[OsString],
         mode: OpenMode,
+        create_parents: bool,
     ) -> Result<File, SafeFsError> {
         let Some((name, parents)) = parts.split_last() else {
             return Err(SafeFsError::IsADirectory {
                 component: PathBuf::from("."),
             });
         };
-        let dir = walk_dirs(root_fd, root, parents)?;
+        let dir = walk_dirs(root_fd, root, parents, create_parents)?;
         let base = libc::O_NOFOLLOW | libc::O_CLOEXEC;
         let flags = match mode {
             OpenMode::Read => libc::O_RDONLY | base,
@@ -427,7 +480,7 @@ mod imp {
     /// Opens the directory `parts` names (every component, including the last, as a
     /// directory with `O_NOFOLLOW`).
     pub fn open_dir(root_fd: &File, root: &Path, parts: &[OsString]) -> Result<File, SafeFsError> {
-        walk_dirs(root_fd, root, parts)
+        walk_dirs(root_fd, root, parts, false)
     }
 
     fn kind_of(mode: libc::mode_t) -> EntryKind {
@@ -584,8 +637,13 @@ mod imp {
         _root_fd: &File,
         root: &Path,
         parts: &[OsString],
+        create: bool,
     ) -> Result<File, SafeFsError> {
-        File::open(join(root, parts)).map_err(|e| io(parts, e))
+        let path = join(root, parts);
+        if create && !path.exists() {
+            std::fs::create_dir_all(&path).map_err(|e| io(parts, e))?;
+        }
+        File::open(path).map_err(|e| io(parts, e))
     }
 
     pub fn open_file(
@@ -593,8 +651,12 @@ mod imp {
         root: &Path,
         parts: &[OsString],
         mode: OpenMode,
+        create_parents: bool,
     ) -> Result<File, SafeFsError> {
         let path = join(root, parts);
+        if create_parents && let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| io(parts, e))?;
+        }
         let mut options = std::fs::OpenOptions::new();
         match mode {
             OpenMode::Read => options.read(true),
@@ -712,11 +774,20 @@ impl RootDir {
         &self.fd
     }
 
-    /// Opens `user` (workspace-relative) as a file.
+    /// Opens `user` (workspace-relative) as a file. Missing parent levels are refused.
     pub fn file(&self, user: &Path, mode: OpenMode) -> Result<File, SafeFsError> {
         let parts = components(user)?;
         run_resolve_hook();
-        open_file(&self.fd, &self.path, &parts, mode)
+        open_file(&self.fd, &self.path, &parts, mode, false)
+    }
+
+    /// Opens `user` (workspace-relative) as a file, creating missing parent levels one at a
+    /// time by fd (`mkdirat` then `openat(O_NOFOLLOW | O_DIRECTORY)`): the `write` tool's
+    /// rule (ADR 0039 decision 2). Nothing is created through a link.
+    pub fn file_creating_parents(&self, user: &Path, mode: OpenMode) -> Result<File, SafeFsError> {
+        let parts = components(user)?;
+        run_resolve_hook();
+        open_file(&self.fd, &self.path, &parts, mode, true)
     }
 
     /// Opens `user` (workspace-relative; `.` or empty is the root) as a directory.

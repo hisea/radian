@@ -420,6 +420,121 @@ async fn cancellation_kills_the_whole_process_group() {
 
 // ---------- 6. output cap ----------
 
+/// A clamp note is about the request, not command stderr: it sits in the marker block before
+/// `exit code:` (with `[timed out after …]` and `[cancelled …]`), names both numbers, and never
+/// appears after `--- stderr ---`.
+fn assert_clamp_before_exit(text: &str, marker: &str) {
+    let marker_at = text
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing {marker:?}: {text}"));
+    let exit_at = text.find("exit code:").expect("an exit code line");
+    assert!(
+        marker_at < exit_at,
+        "{marker:?} must precede `exit code:`:\n{text}"
+    );
+    let stderr_at = text.find("--- stderr ---").expect("a stderr section");
+    assert!(
+        !text[stderr_at..].contains(marker),
+        "{marker:?} must not follow the stderr section:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_clamped_timeout_is_a_marker_before_exit_code_with_both_numbers() {
+    let dir = TempDir::new("shell-timeout-clamp");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({"command": "echo CLAMP-CHECK", "timeout_secs": 900}),
+    )
+    .await
+    .unwrap();
+    let structured = structured(&output);
+    assert_eq!(structured["timeout_clamped"], json!(true), "{structured}");
+    assert_eq!(structured["timeout_secs"], json!(600), "{structured}");
+    let text = output_text(&output);
+    assert!(
+        text.contains(
+            "[timeout_secs 900 is above the maximum 600; the command ran with the 600 s limit]"
+        ),
+        "the note must name the request and the cap: {text}"
+    );
+    assert_clamp_before_exit(&text, "[timeout_secs 900 is above the maximum 600");
+
+    // No clamp, no note.
+    let plain = call(&tools, "shell", json!({"command": "echo CLAMP-CHECK"}))
+        .await
+        .unwrap();
+    let plain = output_text(&plain);
+    assert!(!plain.contains("is above the maximum"), "{plain}");
+}
+
+#[tokio::test]
+async fn a_clamped_output_budget_is_a_marker_before_exit_code_with_both_numbers() {
+    let dir = TempDir::new("shell-output-clamp");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let max = Limits::default().max_shell_output_bytes;
+    let requested = max + 1;
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({"command": "echo CLAMP-CHECK", "max_output_bytes": requested}),
+    )
+    .await
+    .unwrap();
+    let structured = structured(&output);
+    assert_eq!(structured["output_clamped"], json!(true), "{structured}");
+    assert_eq!(structured["output_bytes_per_stream"], json!(max));
+    let text = output_text(&output);
+    let marker = format!(
+        "[max_output_bytes {requested} is above the maximum {max}; each stream was capped at \
+         {max} bytes]"
+    );
+    assert!(text.contains(&marker), "{text}");
+    assert_clamp_before_exit(&text, &marker);
+    assert!(
+        !text.contains("[timeout_secs "),
+        "no timeout clamp without a timeout request: {text}"
+    );
+
+    let plain = call(&tools, "shell", json!({"command": "echo CLAMP-CHECK"}))
+        .await
+        .unwrap();
+    let plain = output_text(&plain);
+    assert!(!plain.contains("[max_output_bytes "), "{plain}");
+}
+
+/// `[timed out after …]` keeps its place in the same marker block, and no timeout-clamp note
+/// appears below the cap.
+#[tokio::test]
+async fn a_timed_out_result_keeps_its_marker_before_exit_code() {
+    let dir = TempDir::new("shell-timeout-marker");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({"command": "sleep 600", "timeout_secs": 1}),
+    )
+    .await
+    .unwrap();
+    let structured = structured(&output);
+    assert_eq!(structured["timed_out"], json!(true), "{structured}");
+    assert_eq!(structured["timeout_clamped"], json!(false), "{structured}");
+    let text = output_text(&output);
+    assert_clamp_before_exit(&text, "[timed out after");
+    assert!(!text.contains("is above the maximum"), "{text}");
+}
+
 #[tokio::test]
 async fn output_over_the_cap_is_truncated_and_reported() {
     let dir = TempDir::new("shell-cap");
