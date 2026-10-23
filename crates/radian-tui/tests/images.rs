@@ -202,6 +202,6 @@ fn an_image_only_message_is_sendable() {
     let radian_core::Message::User { content, .. } = &message else {
         panic!("a user message");
     };
-    assert_eq!(content.len(), 2);
-    assert!(matches!(content[1], ContentPart::Image { .. }));
+    assert_eq!(content.len(), 1, "no empty text part: {content:?}");
+    assert!(matches!(content[0], ContentPart::Image { .. }));
 }

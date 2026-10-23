@@ -26,6 +26,7 @@
 //! performs; nothing touches the terminal.
 
 use std::borrow::Cow;
+use std::io::Read;
 
 use radian_coding::image::{self, ImageError, LoadedImage};
 use radian_core::{ContentPart, Message, MessageMeta};
@@ -37,6 +38,11 @@ pub const MAX_FILE_BYTES: usize = 100 * 1024;
 
 /// The largest total of attached file contents (400 KiB).
 pub const MAX_TOTAL_BYTES: usize = 400 * 1024;
+
+/// The bounded head read for an absolute (dropped or typed) path: enough for every magic
+/// number and for `imagesize` to read an ordinary header. The rest is read only after the
+/// metadata size check passes, so a huge video or log is never allocated just to be refused.
+const DROPPED_HEAD_BYTES: usize = 64 * 1024;
 
 /// How many completions are offered at most.
 pub const MAX_CANDIDATES: usize = 50;
@@ -90,7 +96,12 @@ impl Expansion {
 /// provider sees the same text it always did (joined), but the parts are separate, so Core can
 /// replace an attachment with a placeholder when it keeps the user's words verbatim.
 pub fn user_message(text: &str, attachments: &[Attachment], images: &[LoadedImage]) -> Message {
-    let mut content = vec![ContentPart::text(text)];
+    // An image-only message (a dropped path is removed from the text) has no text part: an
+    // empty `Text` part would be sent to the adapters and draw a blank transcript line.
+    let mut content = Vec::new();
+    if !text.trim().is_empty() {
+        content.push(ContentPart::text(text));
+    }
     content.extend(images.iter().map(LoadedImage::part));
     for attachment in attachments {
         content.push(ContentPart::attachment(
@@ -554,19 +565,101 @@ pub fn dropped_paths(text: &str) -> Vec<DroppedPath> {
 
 /// Reads one dropped path with the host's own bytes: outside the workspace is accepted (Q7),
 /// the model gets the image and not the path, and the sandbox and read roots do not change.
+/// Only a bounded head is read first: a non-image ends there, and an over-limit image is
+/// refused from its metadata before its body is touched.
 pub fn load_dropped(path: &Path) -> DroppedImage {
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(mut file) = std::fs::File::open(path) else {
         return DroppedImage::NotImage;
     };
+    let Ok(meta) = file.metadata() else {
+        return DroppedImage::NotImage;
+    };
+    if !meta.is_file() {
+        return DroppedImage::NotImage;
+    }
+    let total = meta.len();
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
+    let mut head = Vec::with_capacity(DROPPED_HEAD_BYTES.min(total as usize));
+    let mut buf = [0u8; 8192];
+    while head.len() < DROPPED_HEAD_BYTES {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                note_read(n);
+                head.extend_from_slice(&buf[..n]);
+            }
+            Err(_) => return DroppedImage::NotImage,
+        }
+    }
+    if image::ImageKind::from_magic(&head).is_none() {
+        return DroppedImage::NotImage;
+    }
+    // A candidate image: the byte limit comes from metadata, before any body read.
+    if total > image::MAX_IMAGE_BYTES {
+        return DroppedImage::Unusable(ImageError::TooLarge { bytes: total }.to_string());
+    }
+    // When the head already holds the dimensions, a per-side over-limit is refused here too.
+    if let Some((width, height)) = image::header_dimensions(&head)
+        && (width > image::MAX_IMAGE_SIDE || height > image::MAX_IMAGE_SIDE)
+    {
+        return DroppedImage::Unusable(ImageError::TooManyPixels { width, height }.to_string());
+    }
+    // The accepted image (at most 5 MiB by the check above): read the rest. The cap also holds
+    // if the file grew after the metadata read.
+    let want = total.min(image::MAX_IMAGE_BYTES) as usize;
+    let mut bytes = head;
+    bytes.reserve(want.saturating_sub(bytes.len()));
+    while bytes.len() < want {
+        let room = (want - bytes.len()).min(buf.len());
+        match file.read(&mut buf[..room]) {
+            Ok(0) => break,
+            Ok(n) => {
+                note_read(n);
+                bytes.extend_from_slice(&buf[..n]);
+            }
+            Err(_) => return DroppedImage::NotImage,
+        }
+    }
+    if bytes.len() as u64 > image::MAX_IMAGE_BYTES {
+        return DroppedImage::Unusable(
+            ImageError::TooLarge {
+                bytes: bytes.len() as u64,
+            }
+            .to_string(),
+        );
+    }
     match image::load(&name, &bytes) {
         Ok(image) => DroppedImage::Loaded(image),
         Err(ImageError::NotImage) => DroppedImage::NotImage,
         Err(error) => DroppedImage::Unusable(error.to_string()),
     }
+}
+
+// Test-only count of the bytes `load_dropped` reads, so a test can prove a huge non-image is
+// not read whole. Production builds compile the hook out.
+#[cfg(test)]
+std::thread_local! {
+    static DROPPED_BYTES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_read_bytes() {
+    DROPPED_BYTES_READ.with(|bytes| bytes.set(0));
+}
+
+#[cfg(test)]
+fn read_bytes() -> usize {
+    DROPPED_BYTES_READ.with(std::cell::Cell::get)
+}
+
+fn note_read(n: usize) {
+    #[cfg(test)]
+    DROPPED_BYTES_READ.with(|bytes| bytes.set(bytes.get() + n));
+    #[cfg(not(test))]
+    let _ = n;
 }
 
 fn expand_tilde(value: &str) -> PathBuf {
@@ -971,6 +1064,20 @@ mod tests {
         );
     }
 
+    /// An image-only message (a dropped path removed, no other text) omits the empty text part:
+    /// the adapters get no empty `Text` and the transcript draws no blank line.
+    #[test]
+    fn an_image_only_message_has_no_empty_text_part() {
+        let image = radian_coding::image::load("shot.png", &png(1200, 800)).unwrap();
+        let message = user_message("   ", &[], std::slice::from_ref(&image));
+        let Message::User { content, .. } = &message else {
+            panic!("a user message");
+        };
+        assert_eq!(content.len(), 1, "{content:?}");
+        assert!(matches!(content[0], ContentPart::Image { .. }));
+        assert_eq!(display_parts(content), "[image: shot.png, 1200×800, 1 KB]");
+    }
+
     #[test]
     fn the_extension_does_not_decide_and_an_image_over_the_limit_is_unusable() {
         let dir = TempDir::new("mention-kind");
@@ -1022,6 +1129,64 @@ mod tests {
             assert_eq!(expansion.images[0].name, "shot one.png");
             assert!(!expansion.text.contains("shot one.png"), "{text:?}");
         }
+    }
+
+    /// A huge sparse non-image must not be read whole: the head is enough to say `NotImage`.
+    #[test]
+    fn a_large_non_image_is_refused_from_its_head() {
+        let dir = TempDir::new("drop-huge-non-image");
+        let path = dir.path().join("huge.bin");
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"not an image").unwrap();
+        file.set_len(2 * 1024 * 1024 * 1024).unwrap();
+        drop(file);
+        reset_read_bytes();
+        assert_eq!(load_dropped(&path), DroppedImage::NotImage);
+        let read = read_bytes();
+        assert!(
+            read > 0 && read <= DROPPED_HEAD_BYTES,
+            "read {read} bytes of a 2 GiB non-image"
+        );
+    }
+
+    /// An over-limit image is refused from the header/metadata, never by reading its body.
+    #[test]
+    fn an_over_limit_image_is_refused_before_its_body_is_read() {
+        let dir = TempDir::new("drop-huge-image");
+        let path = dir.path().join("huge.png");
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, &png(10, 10)).unwrap();
+        file.set_len(radian_coding::MAX_IMAGE_BYTES + 1).unwrap();
+        drop(file);
+        reset_read_bytes();
+        let outcome = load_dropped(&path);
+        assert!(
+            matches!(&outcome, DroppedImage::Unusable(reason) if reason.contains("5 MiB")),
+            "{outcome:?}"
+        );
+        let read = read_bytes();
+        assert!(read > 0, "the head must be read");
+        assert!(read <= DROPPED_HEAD_BYTES, "read {read} bytes");
+        assert!(
+            (read as u64) < radian_coding::MAX_IMAGE_BYTES,
+            "the body was read"
+        );
+    }
+
+    /// A header whose dimensions are already over 8000 px is refused from the head too.
+    #[test]
+    fn an_over_limit_side_is_refused_from_its_header() {
+        let dir = TempDir::new("drop-wide-image");
+        let path = dir.path().join("wide.png");
+        std::fs::write(&path, png(9000, 10)).unwrap();
+        reset_read_bytes();
+        let outcome = load_dropped(&path);
+        assert!(
+            matches!(&outcome, DroppedImage::Unusable(reason) if reason.contains("8000")),
+            "{outcome:?}"
+        );
+        assert!(read_bytes() > 0, "the head must be read");
+        assert!(read_bytes() <= DROPPED_HEAD_BYTES);
     }
 
     #[test]

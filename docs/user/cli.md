@@ -97,7 +97,7 @@ The print-and-exit modes (`--list`, `--export`, `--search`, `--fork`) need no mo
 | `--approval` | `POLICY` | `on-ask` | — | `on-ask`, `always`, `never`, or `auto`. The file is the fallback; `auto` in the file has no effect under `full`. |
 | `--yes` | — | ask | — | Shorthand for `--approval auto`. |
 | `-p`, `--prompt` | `PROMPT` | — | `--list` | One-shot mode: run this prompt, then exit. `-p -` reads stdin to EOF. |
-| `--image` | `PATH` | — | — | Attach an image to the `-p` prompt's user message. Repeatable; the images attach in the order given. Needs `-p`. The path is read by Radian, not the sandbox. PNG, JPEG, GIF or WebP only, at most 5 MiB and 8000 px per side. A missing file, another format, or an over-limit image is a usage error: exit `2`, naming the path and the reason. |
+| `--image` | `PATH` | — | — | Attach an image to the `-p` prompt's user message. Repeatable; the images attach in the order given. Needs `-p`. The path is read by Radian, not the sandbox. PNG, JPEG, GIF or WebP only, at most 5 MiB and 8000 px per side. A user-message image is sent by every provider route. A missing file, another format, or an over-limit image is a usage error: exit `2`, naming the path and the reason. |
 | `--output` | `jsonl` | model text | — | Print every journal line, live deltas, and a closing `Result` record as JSON lines. |
 | `--header` | `NAME=VALUE` | — | — | Extra request header. Repeatable. `Authorization` is refused. Only for `openai-compatible`; refused for other providers. `{session_id}` expands. A flag of the same name wins over the file. |
 | `--session-id` | `VALUE` | generated | `--resume`, `--list`, `--search` | The session file name for this process. |

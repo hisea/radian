@@ -146,7 +146,13 @@ impl LoadedImage {
 /// A user message carrying `text` and each image, in order (the `exec --image` shape; the TUI
 /// adds its `@` attachments around the same parts).
 pub fn message(text: impl Into<String>, images: &[LoadedImage]) -> radian_core::Message {
-    let mut content = vec![ContentPart::text(text)];
+    let text = text.into();
+    // An image-only message (`--image` with an empty prompt) has no text part: an empty `Text`
+    // part would reach the adapters and draw a blank transcript line.
+    let mut content = Vec::new();
+    if !text.trim().is_empty() {
+        content.push(ContentPart::text(text));
+    }
     content.extend(images.iter().map(LoadedImage::part));
     radian_core::Message::User {
         content,
@@ -183,6 +189,15 @@ pub fn part_placeholder(part: &ContentPart) -> Option<String> {
     Some(placeholder(name, width, height, bytes))
 }
 
+/// The dimensions from a header prefix, when the prefix holds the whole header. `None` when
+/// it does not (the caller may read more) or the parser cannot read it.
+pub fn header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let size = imagesize::blob_size(bytes).ok()?;
+    let width = u32::try_from(size.width).ok()?;
+    let height = u32::try_from(size.height).ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 /// The one pipeline: magic number → limits → part facts. `name` is the display source (a file
 /// name, `clipboard`); `bytes` are the raw file or clipboard bytes.
 pub fn load(name: &str, bytes: &[u8]) -> Result<LoadedImage, ImageError> {
@@ -192,12 +207,7 @@ pub fn load(name: &str, bytes: &[u8]) -> Result<LoadedImage, ImageError> {
             bytes: bytes.len() as u64,
         });
     }
-    let size = imagesize::blob_size(bytes).map_err(|_| ImageError::Unreadable)?;
-    let width = u32::try_from(size.width).unwrap_or(u32::MAX);
-    let height = u32::try_from(size.height).unwrap_or(u32::MAX);
-    if width == 0 || height == 0 {
-        return Err(ImageError::Unreadable);
-    }
+    let (width, height) = header_dimensions(bytes).ok_or(ImageError::Unreadable)?;
     if width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {
         return Err(ImageError::TooManyPixels { width, height });
     }
@@ -352,6 +362,17 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("scales"));
+    }
+
+    #[test]
+    fn an_image_only_message_has_no_empty_text_part() {
+        let image = load("shot.png", &png(10, 10)).unwrap();
+        let message = message("  ", std::slice::from_ref(&image));
+        let radian_core::Message::User { content, .. } = message else {
+            panic!("a user message");
+        };
+        assert_eq!(content.len(), 1, "{content:?}");
+        assert!(matches!(content[0], ContentPart::Image { .. }));
     }
 
     #[test]

@@ -30,7 +30,13 @@ A directory read lists `kind`, size and name rows, sorted by name.
 
 An image is PNG, JPEG, GIF or WebP, judged by the file's magic number and never by its extension.
 BMP and every other format are not images: `read` treats them as binary text and fails with `not_utf8`.
-An image read returns two parts: a text line `Read image file [image/png] 1200×800`, and the image itself.
+An image read returns two parts: a text line `Read image file [image/png] 1200×800`, and the image part.
+Whether the model receives that image depends on the provider route:
+
+- Anthropic sends the image block inside the tool result.
+- OpenAI-compatible and OpenAI Responses send a tool result's text only. On those routes the model receives `[image/png image omitted]`, not the image. The image part is still in the transcript and the session file.
+- An image in a **user message** (`@path`, a dropped path, or `exec --image`) is sent by every route: Anthropic as an image block, OpenAI-compatible as `image_url`, and OpenAI Responses as `input_image`.
+
 When the image's long side is over 1568 px, the text line adds that the provider scales it down.
 Radian never resizes or re-encodes the file itself.
 
@@ -47,7 +53,7 @@ A read that is not valid UTF-8 fails with `not_utf8`.
 
 When the current model's catalog entry says its input modalities have no `image`, `read` returns only the text line and adds
 `[Current model does not support images. The image will be omitted from this request.]`.
-The image part is not sent.
+No image part is sent, on any route.
 A model that is not in the catalog, or whose entry has no input modalities, is treated as taking images.
 
 ### Read roots

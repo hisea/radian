@@ -189,6 +189,9 @@ A path outside the workspace is accepted: Radian reads the bytes itself and the 
 Backspace on an empty input removes the newest image attachment.
 A path that does not exist stays as ordinary text, with no error.
 
+These images travel in your user message, and every provider route sends a user-message image.
+A `read` tool result's image is different: see `tools` for which routes deliver it.
+
 An image over either limit makes the message unsendable and names the limit.
 See `tools` for the `read` tool's image branch, its two error codes and its limits.
 

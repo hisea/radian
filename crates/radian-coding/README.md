@@ -91,8 +91,11 @@ then the base64 part with its display facts in `annotations` (`kind`, `name`, `w
 `read`, the TUI's `@path`/dropped path and `exec --image` all call it. `read` returns
 `Read image file [<mime>] W×H` plus the part, adds the provider-scaling sentence over
 `SCALE_NOTICE_SIDE` (1568 px), and, when the host-supplied `ImageSupport` says the current
-model takes no images, returns only the text with the omission sentence. The TUI's transcript
-line is `[image: <name>, W×H, N KB]`; `--export` keeps `[<mime> image omitted]`.
+model takes no images, returns only the text with the omission sentence. A `read` image travels
+to the model only on the Anthropic route (its tool result carries the block); the OpenAI
+adapters' tool-result channels are text, so they carry `[<mime> image omitted]` instead. The
+TUI's transcript line is `[image: <name>, W×H, N KB]`; `--export` keeps
+`[<mime> image omitted]`.
 
 ## Search (`glob`, `grep`)
 
