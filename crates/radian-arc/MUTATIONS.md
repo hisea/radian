@@ -41,6 +41,9 @@ copy.
 | M29 | leave the gate in the loop's process group (drop `process_group(0)` from its spawn) | `run::sigint_to_a_gate_stops_its_stage` (`kill(-<pid>, SIGINT)` fails: the gate has no group of its own) | ✅ failed |
 | M30 | drop the no-record guard (the pass's `started` record is left alone and a new gate starts on every pass) | `run::a_gate_that_exits_without_a_record_is_reported_once_and_not_restarted`, `run::a_watch_pass_does_not_restart_a_gate_that_left_no_record`, `run::a_changed_head_starts_a_gate_that_left_no_record_once_more` | ✅ 3 failed |
 | M31 | skip the early finish record (`run_inner` returns the failure without `record_failure`) | `run::a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass`, `run::a_wrapper_whose_worktree_lock_is_held_frees_the_slot_in_the_next_pass`, `work::a_second_wrapper_for_the_same_task_fails_on_the_flock` | ✅ 3 failed |
+| M32 | drop the recorded-pair guard in `review::auto_reverify` | `run::the_same_head_and_main_are_reverified_automatically_once` | ✅ failed |
+| M33 | drop the count (`len >= u32::MAX` instead of `len >= max_auto_reverify`) | `run::max_auto_reverify_stops_the_step_and_says_why` | ✅ failed |
+| M34 | also reverify a review failure (`stage == "review"` passes the fixable check) | `run::only_a_command_failure_of_an_auto_plan_is_reverified` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -94,3 +97,10 @@ push is a fast-forward. Its replacement, `a_main_that_keeps_moving_is_never_over
 proves main keeps every commit the other writer pushed, but a `--force` push is no longer
 distinguishable there (the only non-fast-forward now needs a race between `merge_ready` and
 the push). The code still never forces.
+
+M32–M34 were run against `fd0651da`, each from a copy under `.radian/mut-auto/` restored
+with `cp` and compared with `cmp`. The ordinary repeat of an automatic reverify is already
+stopped by its own condition (the new failing verdict records the main it ran against, so
+"main moved since the failing verdict" is false); M32 therefore drives the state a pass
+leaves when it dies between recording the `(head, main)` pair and claiming the attempt, which
+is the state the pair guard alone protects.

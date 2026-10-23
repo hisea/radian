@@ -2242,8 +2242,13 @@ fn a_command_failure_is_not_reverified_while_main_stands_still() {
     assert!(!repo.run_dir(&task, 2).exists());
 }
 
-/// One `(head, main)` pair is re-verified automatically once: the reverified attempt fails
-/// again with the same inputs, and no third attempt is claimed.
+/// A recorded `(head, main)` pair is re-verified automatically at most once. The state below
+/// is the one a pass leaves when it dies between recording its inputs and claiming the
+/// attempt: the failing reason still names the older main, so only the record stops the pair
+/// from running again. Mutation: drop the pair guard and the next pass claims an attempt.
+///
+/// The "main did not move" half of the guard is the same test: the reason's main equals the
+/// remote main after a crash, so nothing runs either way.
 #[test]
 fn the_same_head_and_main_are_reverified_automatically_once() {
     let repo = Repo::new("run-auto-reverify-pair");
@@ -2259,11 +2264,31 @@ fn the_same_head_and_main_are_reverified_automatically_once() {
     run_until(&repo, Duration::from_secs(90), || {
         state(&store, &task).1 == "rework_pending"
     });
+    let head = store
+        .load_task(&task)
+        .expect("the task reads")
+        .item
+        .head_sha
+        .expect("a head");
     advance_main(&repo, "main-move.txt", "moved\n");
-    let first = run_until(&repo, Duration::from_secs(90), || {
-        attempt(&store, &task) == 2 && state(&store, &task).1 == "rework_pending"
+    let moved = repo.remote_main_sha();
+
+    // The pass records the inputs it starts the automatic reverify with before it claims the
+    // attempt (ADR 0048 decision 9). The record is the guard: the same pair never runs twice.
+    let record = serde_json::json!({
+        "reverified": [{
+            "head_sha": head,
+            "main_sha": moved,
+            "at": "2026-01-01T00:00:00Z",
+        }],
     });
-    assert!(first.contains("auto reverify"), "{first}");
+    let path = repo
+        .arc()
+        .join("runs")
+        .join(&task)
+        .join("auto_reverify.json");
+    fs::create_dir_all(path.parent().expect("the runs directory")).expect("the runs directory");
+    fs::write(&path, format!("{record}\n")).expect("auto_reverify.json");
 
     for pass in 1..=2 {
         let run = repo.radian(&["arc", "run"]);
@@ -2274,22 +2299,14 @@ fn the_same_head_and_main_are_reverified_automatically_once() {
             run.stdout
         );
     }
-    assert_eq!(attempt(&store, &task), 2);
-    assert!(!repo.run_dir(&task, 3).exists());
-    let record: Value = serde_json::from_str(
-        &fs::read_to_string(
-            repo.arc()
-                .join("runs")
-                .join(&task)
-                .join("auto_reverify.json"),
-        )
-        .expect("auto_reverify.json"),
-    )
-    .expect("auto_reverify.json parses");
+    assert_eq!(attempt(&store, &task), 1);
+    assert!(!repo.run_dir(&task, 2).exists());
+    let stored: Value = serde_json::from_str(&fs::read_to_string(&path).expect("the record"))
+        .expect("auto_reverify.json parses");
     assert_eq!(
-        record["reverified"].as_array().map(Vec::len),
+        stored["reverified"].as_array().map(Vec::len),
         Some(1),
-        "{record}"
+        "the record changed: {stored}"
     );
 }
 
