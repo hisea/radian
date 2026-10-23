@@ -732,6 +732,14 @@ fn failed_stage(
     // decision 9). The pause is the same limit the other automatic reworks use.
     if let Some((review, paused)) = review_auto_rework(store, task, verdict, &path)? {
         let paused_here = paused.is_some();
+        // The rework path below records the sha it failed on and drops the digest; the task
+        // keeps that record whether it returns to `todo.ready` or pauses here.
+        store.change_task(&task.id, |task| {
+            task.verified_sha = Some(head.to_owned());
+            task.verdict_set_digest = None;
+            task.retry_at = None;
+            Ok(())
+        })?;
         return Ok(Verified {
             task: task.id.clone(),
             attempt_id: label.to_owned(),

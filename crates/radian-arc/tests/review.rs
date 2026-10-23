@@ -2499,6 +2499,11 @@ fn a_failed_review_with_auto_merge_writes_its_own_rework() {
         ("todo", "ready")
     );
     assert_eq!(stored.auto_rework, 1, "the rework counts");
+    assert_eq!(
+        stored.verified_sha.as_deref(),
+        Some(head.as_str()),
+        "the sha the review failed on is recorded, as the lead-rework path records it"
+    );
     assert!(stored.body.starts_with("the brief"), "{}", stored.body);
     assert!(
         stored.body.contains("## Rework 2 (review)"),
@@ -2628,6 +2633,7 @@ fn a_review_rework_at_the_auto_rework_limit_pauses_the_plan() {
     assert_eq!(paused.max_auto_rework, 2);
     let stored = fixture.store.load_task(&fixture.task).unwrap().item;
     assert_eq!(stored.auto_rework, 3);
+    assert_eq!(stored.verified_sha.as_deref(), Some(head.as_str()));
     assert!(
         !stored.body.contains("## Rework"),
         "a paused plan wrote a brief: {}",
