@@ -78,6 +78,7 @@ copy.
 | TK0034-M1 | the plan form forgets to set `auto` `off` (both writes in `cancel_plan` dropped) | `attempt::cancelling_a_plan_ends_every_open_task_and_the_plan` | ✅ failed |
 | TK0034-M2 | `list` shows a cancelled plan without `--all` (the cancelled-plan skip in `render` dropped) | `list::a_cancelled_plan_is_hidden_until_all_in_text_and_json` | ✅ failed |
 | TK0034-M3 | the claim path ignores the plan status (`start_ready` drops its `status != "confirmed"` check and `attempt_ops::claim` drops its plan-status refusal) | `run::a_run_pass_claims_and_gates_nothing_from_a_cancelled_plan` | ✅ failed |
+| TK0034-M4 | the pass drops the step that ends a cancelled plan's `doing.reconciling` task (the `end_reconciling_of_cancelled_plans` loop removed from `one_pass`) | `run::a_pass_ends_a_task_a_plan_cancel_left_reconciling` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -223,3 +224,8 @@ The claim transaction's check alone would mask the loop's filter, so the run tes
 task is claimed only when both are gone; the same mutation also fails the draft-plan claim
 test, which pins the transaction's side. The run test's second half (`verify started` is
 absent) pins the separate `verifying_tasks` cancelled-plan filter.
+
+TK0034-M4 was run against the code of `2bd7e155`, with the same backup, `cp` restore and
+`cmp` check. The whole step is removed from `one_pass`, so the pass prints `no transition`
+and the task stays at `doing.reconciling`; the test's line assertion fails. The binary was
+rebuilt before the run, because the sync tests refuse one older than its sources.
