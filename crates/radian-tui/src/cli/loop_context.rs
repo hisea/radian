@@ -388,6 +388,19 @@ impl LoopContext<'_> {
                             .session
                             .model_route()
                             .unwrap_or_else(|| self.startup_route.clone());
+                        // ADR 0026 D0/D10: a provider added with `/login` mid-session has no
+                        // cache yet; refresh every listed provider in the background so the
+                        // next `/model` shows its models without a restart. The TTL/retry rule
+                        // means an open `/model` fetches only a missing or stale list, and
+                        // always in the background.
+                        let targets = model_refresh_targets(
+                            Some(current_provider.as_str()),
+                            &self.config_providers,
+                        );
+                        self.runtime.spawn(refresh_provider_models(
+                            targets,
+                            self.config_providers.clone(),
+                        ));
                         mark_current_route(
                             model_route_candidates(
                                 Some(current_provider.as_str()),
