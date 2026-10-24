@@ -286,8 +286,14 @@ pub fn add_rework_with(
         append_rework(&mut task.body, number, brief, heading_suffix);
         task.state = TaskState::Todo;
         task.phase = "ready".to_owned();
-        // The rework's new instructions get their own retries (ADR 0048 decision 9).
-        task.retry_count = 0;
+        // The lead's and the review's new instructions get their own retries (ADR 0048
+        // decision 9). A conflict rework continues the same line of work, so it keeps the
+        // count: `max_attempts` then bounds a task whose conflicts keep returning it to
+        // `todo.ready` while its worker keeps failing. Without this, a conflict rework and a
+        // retry reset each other's limit forever.
+        if heading_suffix != CONFLICT_REWORK_SUFFIX {
+            task.retry_count = 0;
+        }
         Ok(())
     })?;
     // The lead's own rework is a person stepping in, so the task gets a fresh run of automatic
