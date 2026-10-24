@@ -3389,12 +3389,12 @@ fn a_main_change_merged_between_attempts_is_not_in_the_increment() {
     assert_eq!(verdict.review_pre_existing, Some(1));
 }
 
-/// A review of the commit the previous review already reviewed is a first review: a `reverify`
-/// of an unchanged head still blocks on the same item even when the session reports it more than
-/// 10 lines from where it reported it before. Mutation: treat a same-sha review as a rework
-/// round → the item is moved and the stage passes.
+/// A review of the commit the previous review already reviewed gets the first review's prompt:
+/// a `reverify` of an unchanged head still blocks on the same item even when the session
+/// reports it more than 10 lines from where it reported it before. Mutation: treat a same-sha
+/// review as a rework round → the item is moved and the stage passes.
 #[test]
-fn a_reverify_of_the_same_head_is_a_first_review_and_still_blocks() {
+fn a_reverify_of_the_same_head_gets_the_first_review_prompt_and_still_blocks() {
     let fixture = Fixture::new("review-same-sha");
     fixture.add_review_stage();
     let head = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));

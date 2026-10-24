@@ -99,7 +99,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 A review is a rework round when an earlier attempt of the same task has a review verdict for a `sha` other than the commit under review; the newest such verdict is the previous review.
 A review of the same commit as the previous review (a `reverify` of an unchanged head) gets the first review's prompt: the full diff, and no item is pre-existing.
 It reads the `[gate.review]` settings, not `[gate.review.first]`, because an earlier review verdict exists, so it is not a first review.
-The first review of a task is unchanged.
+A genuine first review, one with no earlier verdict at all, keeps the full-diff prompt and the `[gate.review.first]` settings.
 
 A rework round's prompt holds the brief, the previous review's blocking items, the commit list `<previous sha>..<sha>`, and the increment instead of the full diff.
 It asks the session to check that each previous blocking item is fixed, to review the increment, and to list every problem it finds; the session can read the files.
@@ -216,22 +216,22 @@ commands = [
 | `scripts/arc-gate.sh quick` | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the two binary builds, then `cargo nextest run --locked --no-fail-fast` for every crate under `crates/` that the checkout changed since its merge base with `origin/main`, plus `radian-tui` always. It stops at the first failing step. |
 | `scripts/arc-gate.sh full` | `scripts/verify.sh`, here or on `ARC_GATE_HOST` when that is set. It prints the step lines and the names of failing tests, and exits with the verify exit code. |
 
-Before their first step, `verify.sh` and `arc-gate.sh` (`quick` and `full` both) check the file system that holds `${TMPDIR:-/tmp}` with `df`: the free inodes and the free space. When fewer than 50,000 inodes or fewer than 2 GiB are free, they fail at once, before building anything, with exit code `1` and one line on stderr that names the path, the free and total inodes, the free space and the two limits, for example:
+Before their first step, `verify.sh` and `arc-gate.sh` check the file system that holds `${TMPDIR:-/tmp}` with `df`: `quick` always, `full` when it runs here. When fewer than 50,000 inodes or fewer than 2 GiB are free, they fail at once, before building anything, with exit code `1` and one line on stderr that names the path, the free and total inodes, the free space and the two limits, for example:
 
 ```
 verify: /tmp has 0 of 1048576 inodes free (limit 50000) and 45 GiB free (limit 2 GiB); remove leaked test directories first
 ```
 
-The check deletes nothing. A file system that reports no inode count (some macOS volumes report none) skips the inode check and keeps the space check; a `df` that cannot read the file system skips that check with a warning. The two limits are the two variables below. For arc the failure is an ordinary failed command (`command_failed`), not a new failure class.
+The check deletes nothing. A file system that reports no usable inode count (some macOS volumes report none, `-`, or a number too large for the shell to compare) skips the inode check and keeps the space check. A `df` that cannot read the file system skips that check with a warning. A negative free space (GNU `df` on ext4 when fewer bytes are free than the reserved-block count) is a real value and fails the space check; it is not read as unreadable. The two limits are the two variables below. For arc the failure is an ordinary failed command (`command_failed`), not a new failure class.
 
-With `ARC_GATE_HOST` set, `full` ships `HEAD` as a git bundle (`HEAD --not origin/main`; no bundle when `HEAD` is already in `origin/main`). On that host it takes a blocking lock on `~/.arc-gate.lock`, fetches the bundle, checks out exactly that commit detached inside `ARC_GATE_TREE`, and runs that checkout's `scripts/verify.sh`.
+With `ARC_GATE_HOST` set, `full` ships `HEAD` as a git bundle (`HEAD --not origin/main`; no bundle when `HEAD` is already in `origin/main`). On that host it takes a blocking lock on `~/.arc-gate.lock`, fetches the bundle, checks out exactly that commit detached inside `ARC_GATE_TREE`, and runs that checkout's `scripts/verify.sh`. It does not check the local temp file system: the remote `verify.sh` checks the host's own `${TMPDIR:-/tmp}`, and the remote environment supplies both limits (they are not forwarded over ssh).
 
 | Environment variable | Type | Default | What it does |
 |---|---|---|---|
 | `ARC_GATE_HOST` | string | unset: `full` runs in this checkout | The ssh host that runs the full gate. |
 | `ARC_GATE_TREE` | string | unset | Required when `ARC_GATE_HOST` is set: the gate checkout on that host, as a path relative to the remote home directory. |
-| `RADIAN_VERIFY_MIN_FREE_INODES` | integer | `50000` | A whole number, `0` or more; `0` turns the inode check off. The fewest free inodes on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script. Any other value (not all digits) fails the check with a message naming the variable. |
-| `RADIAN_VERIFY_MIN_FREE_GIB` | integer | `2` | A whole number, `0` or more; `0` turns the space check off. The fewest free GiB on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script. Any other value (not all digits) fails the check with a message naming the variable. |
+| `RADIAN_VERIFY_MIN_FREE_INODES` | integer | `50000` | A whole number, `0` or more and at most `999999999999999999` (18 digits after leading zeros); `0` turns the inode check off. The fewest free inodes on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script, in the environment that script runs in (with `ARC_GATE_HOST` that is the remote environment). Any other value (not all digits, or above that bound) fails the check with a message naming the variable. |
+| `RADIAN_VERIFY_MIN_FREE_GIB` | integer | `2` | A whole number, `0` or more and at most `999999999999999999` (18 digits after leading zeros); `0` turns the space check off. The fewest free GiB on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script, in the environment that script runs in (with `ARC_GATE_HOST` that is the remote environment). Any other value (not all digits, or above that bound) fails the check with a message naming the variable. |
 
 Neither script sets `CARGO_TARGET_DIR`: a build cache is the caller's setting.
 

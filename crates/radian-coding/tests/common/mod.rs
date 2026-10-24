@@ -27,8 +27,8 @@ impl TempDir {
         Self::named_with("radian-coding-tests", label)
     }
 
-    /// A named scratch directory whose own prefix identifies the test family (the caller keeps
-    /// the prefix it already had, as `docs/backlog/test-temp-leak.md` asks).
+    /// A named scratch directory whose own prefix identifies the test family (a leftover in the
+    /// system temp dir still names the test that made it).
     pub fn named(prefix: &str) -> Self {
         Self::named_with(prefix, "scratch")
     }
