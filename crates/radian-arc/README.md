@@ -484,7 +484,7 @@ before `human` (a profile that lists both must list `commands` first). Up to
 `--mcp-config` and `--no-config-mcp`. Its model route and wall-time limit come from
 `[gate.review] exec_args` (default `[worker] exec_args`) and `[gate.review] timeout_secs`; a
 task's first review reads `[gate.review.first] exec_args` and `timeout_secs` first, and a
-rework review never does (`ReviewConfig::choice`). The prompt is built from the brief, the
+later review never does (`ReviewConfig::choice`). The prompt is built from the brief, the
 commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The last
 fenced `json` block of the final message is parsed; an empty `blocking` list passes, any item
 fails with `review_blocking`. An item is `{level, file, line, text, pre_existing}`; a plain
@@ -498,7 +498,8 @@ round, `review_pre_existing`.
 
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)
-is a first review. A rework round's prompt holds the previous blocking items, the commits
+gets the first review's prompt, though it reads `[gate.review]` rather than
+`[gate.review.first]`. A rework round's prompt holds the previous blocking items, the commits
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
 `git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
 `suggestions` with `pre_existing` unless its `file:line` is within 3 lines of an increment
@@ -550,8 +551,8 @@ force. A main that moved after integration, or a rejected push, makes it integra
 (one round per pass in the loop; at most three runs per `radian arc merge` command). On
 success the task is `done.merged` and its worktree is removed; the branch stays.
 
-`finish_integration` then asks `review::propose_followup` for the task's review follow-up
-(ADR 0048 decision 10): it reads every `review` verdict of the task, oldest attempt first, and
+`finish_integration` then asks `review::propose_followup` for the task's review follow-up (ADR
+0048 decision 10): it reads every `review` verdict of the task, oldest attempt first, and
 collects every round's `suggestions` (the moved `pre_existing` items among them), never a
 `blocking` item, so a round that only had blocking items contributes nothing. Repeats are
 dropped: two items are the same when their `file`, `line` and `text` match after a leading tag
@@ -559,10 +560,9 @@ that repeats the item's own level is removed and whitespace is collapsed, and th
 is kept. The rest become one `todo.proposed` task of the same plan, `after` the merged task,
 when `[gate.review] propose_followups` is true and the plan does not already hold it; its brief
 groups the items by the round they came from (`From review <n> (attempt <n>):`) and names the
-path of every review verdict. A task
-that is itself a review follow-up gets none of its own; its review's unfixed items stay in its
-verdict and in the task's final report. A failure to add the follow-up is a warning after the
-merge, not a failed merge.
+path of every review verdict. A task that is itself a review follow-up gets none of its own;
+its review's unfixed items stay in its verdict and in the task's final report. A failure to add
+the follow-up is a warning after the merge, not a failed merge.
 
 `merge_step` reads `runs/<task>/gate.json` for a finished integration, and a
 `review.ready_to_merge` task finishes the newest passing integration verdict for its head.
