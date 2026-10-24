@@ -41,15 +41,30 @@ pub enum DiffSource {
     Worktree,
 }
 
+/// Why a task diff's range does not start at the merge base of the remote main and the head
+/// (ADR 0048 decision 13). The page prints the reason on its source line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffBase {
+    /// The range starts at the merge base of the remote main and the head, the range the review
+    /// stage reads: nothing to say.
+    #[default]
+    MergeBase,
+    /// There is no `refs/remotes/<remote>/<main branch>` ref, so the recorded base was used.
+    NoRemoteMain,
+    /// The remote main ref exists but shares no ancestor with the head, so the recorded base was
+    /// used.
+    Unrelated,
+}
+
 /// A task's change: every changed file with its counts and its unified diff.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskDiff {
     pub files: Vec<DiffFile>,
     /// The range the files came from.
     pub source: DiffSource,
-    /// The merge base of the remote main and the head could not be read (there is no remote
-    /// main ref), so the range fell back to the recorded base; the page says so.
-    pub fallback: bool,
+    /// Why the range does not start at the merge base of the remote main and the head, when it
+    /// does not: the recorded base was used instead, and the page says which reason.
+    pub base: DiffBase,
 }
 
 /// One stage's verdict in one attempt.
@@ -272,7 +287,8 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
 ///   the remote main and the worktree's HEAD, uncommitted and untracked files included, so the
 ///   change is visible while the attempt runs (ADR 0048 decision 13). The attempt's recorded
 ///   base (the one the wrapper wrote to `attempts/<task>/base_sha`, else the task's
-///   `base_sha`) is the fallback when there is no remote main ref; without a worktree or a base
+///   `base_sha`) is the fallback when the merge base cannot be taken (no remote main ref, or
+///   a ref that shares no ancestor with the head); without a worktree or a base
 ///   the committed range below is used.
 /// - A **merged** task: its passing integration verdict's candidate (ADR 0048 decision 10).
 ///   A merge candidate's first-parent diff (`<candidate>^1..<candidate>`) is the change the
@@ -282,13 +298,13 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
 /// - Any other task: the task's own change, from the merge base of the remote main and the
 ///   attempt's head to that head — the range the review stage reads, so a branch that merged a
 ///   newer main does not show main's merged changes. The head is the selected attempt's own
-///   `AttemptFinished` record when it has one, else the task's current fields. With no remote
-///   main ref the range is that attempt's recorded `base_sha..head_sha` and [`TaskDiff::fallback`]
-///   says so.
+///   `AttemptFinished` record when it has one, else the task's current fields. With no merge
+///   base to take, the range is that attempt's recorded `base_sha..head_sha` and
+///   [`TaskDiff::base`] says which reason kept it from it.
 ///
 /// The diff is empty when the task has no commit yet (no base or head, or both equal); its
-/// [`TaskDiff::fallback`] still reports a missing remote main ref, so the page says so under
-/// `no change yet`.
+/// [`TaskDiff::base`] still reports why the merge base could not be taken, so the page says so
+/// under `no change yet`.
 ///
 /// # Errors
 ///
@@ -301,58 +317,59 @@ pub fn task_diff(store: &Store, task: &str, attempt: Option<u32>) -> Result<Task
     {
         return Ok(diff);
     }
-    let (range, fallback) = match item.state {
+    let (range, base) = match item.state {
         // A merged task's merge commit is its change on main: the first-parent diff of the
         // candidate (or the branch itself when main was fast-forwarded to it).
         TaskState::Done => match merged_candidate(store, task)? {
             Some(verdict) => match merged_range(&verdict) {
-                Some(range) => (Some(range), false),
+                Some(range) => (Some(range), DiffBase::default()),
                 None => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
             },
             None => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
         },
         _ => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
     };
-    let Some((base, head)) = range else {
+    let Some((base_sha, head)) = range else {
         return Ok(TaskDiff::default());
     };
-    if base == head {
-        // No commit yet, but the range still fell back when there is no remote main ref: the
-        // page says so under `no change yet`.
+    if base_sha == head {
+        // No commit yet, but the range still fell back when the merge base could not be taken:
+        // the page says so under `no change yet`.
         return Ok(TaskDiff {
-            fallback,
+            base,
             ..TaskDiff::default()
         });
     }
-    diff_range(store.repo(), &base, &head).map(|mut diff| {
+    diff_range(store.repo(), &base_sha, &head).map(|mut diff| {
         diff.source = DiffSource::Range;
-        diff.fallback = fallback;
+        diff.base = base;
         diff
     })
 }
 
 /// The range of one attempt's own change: from the merge base of the remote main and the
 /// attempt's head to that head, the range the review stage reads (ADR 0048 decision 10). The
-/// second value is `true` when the merge base could not be found and the attempt's recorded base
-/// was used instead.
+/// second value says why the merge base could not be taken when it could not, and the attempt's
+/// recorded base was used instead.
 fn attempt_change(
     store: &Store,
     task: &str,
     attempt: Option<u32>,
     base: &Option<String>,
     head: &Option<String>,
-) -> (Option<(String, String)>, bool) {
+) -> (Option<(String, String)>, DiffBase) {
     let Some((recorded_base, head)) = attempt_range(store, task, attempt, base, head) else {
-        return (None, false);
+        return (None, DiffBase::default());
     };
     match remote_main_base(store, &head) {
-        Some(base) => (Some((base, head)), false),
-        None => (Some((recorded_base, head)), true),
+        MainBase::Base(base) => (Some((base, head)), DiffBase::MergeBase),
+        MainBase::Missing => (Some((recorded_base, head)), DiffBase::NoRemoteMain),
+        MainBase::Unrelated => (Some((recorded_base, head)), DiffBase::Unrelated),
     }
 }
 
 /// The running attempt's change: the worker's worktree against the merge base of the remote main
-/// and the worktree's HEAD (the attempt's recorded base when there is no remote main ref), with
+/// and the worktree's HEAD (the attempt's recorded base when the merge base cannot be taken), with
 /// modified and untracked files included. `None` when the attempt has no worktree yet or no base
 /// to compare with.
 fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>, Error> {
@@ -373,15 +390,18 @@ fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>
     let recorded = recorded.or_else(|| task.base_sha.clone().filter(|sha| !sha.is_empty()));
     // The worktree's HEAD is the attempt's own head: when the branch merged a newer main, a
     // diff from the recorded base would carry main's merged changes too. The range starts at
-    // the merge base, exactly as the committed range below does; without a remote main ref the
-    // recorded base is used and the source line says so.
+    // the merge base, exactly as the committed range below does; when there is none the
+    // recorded base is used and the source line says which reason.
     let head = git_raw(&worktree, &["rev-parse", "HEAD"])
         .map(|text| text.trim().to_owned())
         .filter(|sha| !sha.is_empty());
-    let merge_base = head
+    // Why the range starts where it does: the merge base, or the recorded base and the reason
+    // the source line prints.
+    let (merge_base, base_reason) = head
         .as_deref()
-        .and_then(|head| remote_main_base(store, head));
-    let fallback = merge_base.is_none();
+        .map_or((None, DiffBase::NoRemoteMain), |head| {
+            remote_main_base(store, head).into_parts()
+        });
     let Some(base) = merge_base.or(recorded) else {
         return Ok(None);
     };
@@ -445,7 +465,7 @@ fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>
     Ok(Some(TaskDiff {
         files,
         source: DiffSource::Worktree,
-        fallback,
+        base: base_reason,
     }))
 }
 
@@ -623,7 +643,7 @@ fn diff_range(repo: &Path, base: &str, head: &str) -> Result<TaskDiff, Error> {
     Ok(TaskDiff {
         files,
         source: DiffSource::Range,
-        fallback: false,
+        base: DiffBase::MergeBase,
     })
 }
 
@@ -962,7 +982,9 @@ fn task_commits(store: &Store, task: &TaskFile) -> Result<Vec<CommitView>, Strin
     let base = if task.state == TaskState::Done {
         task.base_sha.clone()
     } else {
-        remote_main_base(store, &head).or_else(|| task.base_sha.clone())
+        remote_main_base(store, &head)
+            .base()
+            .or_else(|| task.base_sha.clone())
     };
     let range = match base.filter(|sha| !sha.is_empty() && *sha != head) {
         Some(base) => format!("{base}..{head}"),
@@ -982,14 +1004,55 @@ fn task_commits(store: &Store, task: &TaskFile) -> Result<Vec<CommitView>, Strin
         .collect())
 }
 
-/// The merge base of the configured remote's main and `head`, when both exist.
-fn remote_main_base(store: &Store, head: &str) -> Option<String> {
-    let (remote, main_branch) = store.repository_names().ok()?;
+/// The merge base of the configured remote's main and `head`, or why there is none.
+fn remote_main_base(store: &Store, head: &str) -> MainBase {
+    let Ok((remote, main_branch)) = store.repository_names() else {
+        return MainBase::Missing;
+    };
     let reference = format!("refs/remotes/{remote}/{main_branch}");
-    crate::git::ok(store.repo(), &["merge-base", &reference, head])
-        .ok()
-        .map(|sha| sha.trim().to_owned())
-        .filter(|sha| !sha.is_empty())
+    // A ref that exists but is not an ancestor of the head is the other reason: the two are
+    // told apart, so the page's line stays literal.
+    let exists = crate::git::run(
+        store.repo(),
+        &["show-ref", "--verify", "--quiet", &reference],
+    )
+    .is_ok_and(|output| output.success());
+    if !exists {
+        return MainBase::Missing;
+    }
+    match crate::git::ok(store.repo(), &["merge-base", &reference, head]) {
+        Ok(sha) if !sha.is_empty() => MainBase::Base(sha),
+        _ => MainBase::Unrelated,
+    }
+}
+
+/// The merge base of the configured remote's main and a head, or why there is none.
+enum MainBase {
+    /// The merge base's commit id.
+    Base(String),
+    /// There is no `refs/remotes/<remote>/<main branch>` ref.
+    Missing,
+    /// The ref exists but shares no ancestor with the head.
+    Unrelated,
+}
+
+impl MainBase {
+    /// The commit id, when there is one.
+    fn base(self) -> Option<String> {
+        match self {
+            Self::Base(sha) => Some(sha),
+            Self::Missing | Self::Unrelated => None,
+        }
+    }
+
+    /// The commit id, and [`DiffBase`]'s reason when there is none.
+    fn into_parts(self) -> (Option<String>, DiffBase) {
+        match self {
+            Self::Base(sha) => (Some(sha), DiffBase::MergeBase),
+            Self::Missing => (None, DiffBase::NoRemoteMain),
+            Self::Unrelated => (None, DiffBase::Unrelated),
+        }
+    }
 }
 
 /// The 8-character sha the pages print.

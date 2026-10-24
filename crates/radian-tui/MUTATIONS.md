@@ -2676,3 +2676,17 @@ and the file was restored from a copy under `.radian/backup/` with `cp`, then co
 
 2/2 caught. TK0076-M2 (the diff range) mutates `radian-arc` and is recorded in
 `crates/radian-arc/MUTATIONS.md`.
+
+## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
+
+The diff tab's source line read one bool from `TaskDiff`, so both reasons the merge base is
+missing drew `no remote main`. It now maps `DiffBase` to its own line. The mutation was applied by
+hand to the working file, the named test was run alone with `cargo nextest run -p radian-tui
+--locked --profile sandbox -E 'test(a_diff_without_a_merge_base_names_that_reason)'`, and the file
+was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0084-M1 | the range's `DiffBase::Unrelated` draws `base..head · no remote main` | ✅ 1 failed | `arc_tui::a_diff_without_a_merge_base_names_that_reason` (the line says no remote main while the ref exists) |
+
+1/1 caught.
