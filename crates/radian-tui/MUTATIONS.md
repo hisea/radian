@@ -2853,3 +2853,18 @@ from that copy (never `git checkout`); the named test ran alone with
 | TK0089-M2 | `resolve_link` resolves a page link from the site root (`join_docs_user("", path)`) instead of the source page's directory | ✅ 1 failed | `site_docs::relative_page_links_resolve_from_the_source_directory` (a sibling `gate.md` becomes a `blob/main` repo link) |
 
 1/1 caught.
+
+## TK0097: the site links the moved arc manual pages (2026-10-24, branch `work/TK0097-site-arc-doc-links`)
+
+`site/arc.html` still linked the flat `/docs/arc.html` and `/docs/arc-*.html` paths that the
+manual's move into `docs/user/arc/` replaced. The new test renders the manual and checks every
+`/docs/…` link in the hand-written pages against the generator's output. The mutation was
+applied by hand to `site/arc.html`, backed up under `.radian/arc.html.bak` and restored from
+that copy (never `git checkout`); the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test site_docs -E 'test(the_hand_written_pages_only_link_generated_docs)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0097-M1 | a `/docs/arc/gate.html` link goes back to `/docs/arc-gate.html` | ✅ 1 failed | `site_docs::the_hand_written_pages_only_link_generated_docs` (`site/arc.html: link '/docs/arc-gate.html' names 'arc-gate.html', which the generator does not write`) |
+
+1/1 caught.
