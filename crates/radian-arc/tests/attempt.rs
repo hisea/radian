@@ -129,9 +129,9 @@ fn utc_seconds(text: &str) -> i64 {
 
 // ---- claim ----------------------------------------------------------------------------
 
-/// Decision 6: a task starts only from `todo.ready`, only under a confirmed plan, only when
-/// every `after` task is `done`, and only when a concurrency slot is free. Each refusal is
-/// exit 3 and writes nothing.
+/// Decision 6: a task starts only from `todo.ready` or the owner's `start` from
+/// `todo.retry_wait`, only under a confirmed plan, only when every `after` task is `done`, and
+/// only when a concurrency slot is free. Each refusal is exit 3 and writes nothing.
 #[test]
 fn claim_refusals_are_exit_three_and_write_nothing() {
     let (_repo, store) = setup("claim");
@@ -1030,6 +1030,34 @@ fn start_refuses_a_retry_wait_task_when_every_slot_is_taken() {
     );
     assert_eq!(stored.attempt, 0, "nothing was claimed");
     assert_eq!(stored.retry_at.as_deref(), Some("2099-01-01T00:00:00Z"));
+}
+
+/// A scheduling pass never claims a task that is backing off, even when its snapshot said the
+/// task was ready: `claim_by` re-reads the phase under the lock. The owner's `claim` still
+/// accepts the same task at once. Mutation: let `ClaimBy::SchedulingLoop` accept `retry_wait`
+/// and the scheduling claim succeeds.
+#[test]
+fn a_scheduling_claim_refuses_a_task_that_began_backing_off() {
+    let (_repo, store) = setup("scheduling-retry-wait");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    store
+        .change_task(task, |task| {
+            task.phase = "retry_wait".to_owned();
+            task.retry_at = Some("2099-01-01T00:00:00Z".to_owned());
+            Ok(())
+        })
+        .expect("the task waits for a retry");
+
+    let refusal = attempt_ops::claim_by(&store, task, attempt_ops::ClaimBy::SchedulingLoop)
+        .expect_err("the loop leaves a backing-off task alone");
+    assert_eq!(refusal.exit(), Exit::State, "{refusal:?}");
+    assert!(refusal.message().contains("scheduling loop"), "{refusal:?}");
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+    assert_eq!(store.load_task(task).unwrap().item.attempt, 0);
+
+    let claim = attempt_ops::claim(&store, task).expect("the owner claims it at once");
+    assert_eq!(claim.attempt, 1);
 }
 
 /// `start` still refuses `todo.paused_budget` and every `failed.*` phase: the retry-wait

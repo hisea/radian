@@ -115,9 +115,10 @@ parse or that repeats an argument the wrapper sets (`worker_args::OWNED_EXEC_ARG
 the manual's drift test reads). Nothing is claimed, started or written by the check.
 
 `start` reconciles `doing`, releases a due retry, and claims the
-task in one transaction (`todo.ready` → `doing.starting`, `attempt` + 1, `<task>-<n>`, a
-random token). A claim is refused (exit 3) when the task is not ready, its plan is not
-confirmed, an `after` task is not done, or `[limits] concurrency` tasks are already in
+task in one transaction (`todo.ready` or `todo.retry_wait` → `doing.starting`, `attempt` + 1,
+`<task>-<n>`, a random token); a `todo.retry_wait` task is claimed without waiting for
+`retry_at`. A claim is refused (exit 3) when the task is in any other state or phase, its plan
+is not confirmed, an `after` task is not done, or `[limits] concurrency` tasks are already in
 `doing`. A task already in `review.verifying` resumes verification instead of being claimed.
 
 It then runs the current executable as `arc work --task … --attempt … --token … --session …
