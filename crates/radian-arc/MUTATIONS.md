@@ -442,3 +442,18 @@ alone, and the file was restored from a copy under `.radian/mut-bak/`.
 | TK0066-M1 | `TaskFile::is_merged` always answers `false` | ✅ 1 failed | `list::the_default_hides_merged_tasks_and_finished_plans` (the finished plan and its merged tasks are printed) |
 
 1/1 caught.
+
+## TK0069: every worker brief ends with the standing worker instructions (2026-10-24, branch `work/TK0069-worker-brief-footer`)
+
+ADR 0048 decision 7: the wrapper composes `.radian/arc/worker-brief.md` as the last section of
+every brief, and `init` writes its default once. Each mutation was applied to the working file
+one at a time, run against the named test with
+`cargo nextest run -p radian-arc --locked --profile sandbox`, restored from a copy under
+`.radian/mut/` with `cp`, and compared byte for byte with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0069-M1 | the footer goes in front of the task body (`compose_brief` gets footer, body) | `work::the_worker_brief_is_the_last_section_of_a_first_attempt`, `work::a_fresh_rework_puts_the_worker_brief_after_the_hand_off_and_the_body` | ✅ 2 failed |
+| TK0069-M2 | a follow-up attempt skips the footer (drop it when the stdin brief starts with the follow-up's first line) | `review::a_followup_attempt_ends_its_brief_with_the_worker_brief` | ✅ failed |
+| TK0069-M3 | `init` overwrites an existing `worker-brief.md` (the `is_file` guard is dropped) | `store::init_writes_the_default_worker_brief_once_and_keeps_an_edit` (the edited file reads back as the default) | ✅ failed |
+| TK0069-M4 | the size limit is not checked (`len > u64::MAX` instead of `len > WORKER_BRIEF_LIMIT`) | `work::an_oversized_worker_brief_is_skipped_with_a_note` (the 33 KiB footer is appended and no note is recorded) | ✅ failed |
