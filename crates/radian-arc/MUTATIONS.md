@@ -371,6 +371,19 @@ lives with the page that draws it (`radian-tui/tests/arc_tui.rs`). TK0019-M7 and
 | TK0019-M7 | the rotation keeps appending to the 1 MiB file (`rotate_if_needed` does nothing) | `run::a_full_loop_log_is_rotated_to_loop_log_1` (`loop.log.1` is not the old content; the new file holds `old line`) | ✅ failed |
 | TK0019-M8 | `run` without `--watch` writes no `loop.log` (`run` calls `run_quiet` without the `LoopLog` sink) | `run::run_appends_every_printed_line_to_loop_log` (no `loop.log`) | ✅ failed |
 
+## TK0048: a running attempt's session id is known from its claim (2026-10-24, branch `work/TK0048-running-attempt-session`)
+
+The claim wrote `start.json` without the session it decided on, so `attempt_session_id` could
+only answer once the wrapper had ended and written `execution.json`; a running attempt had no
+session id, and `show` and the arc TUI missed its journal. The claim now writes `session_id`
+into `start.json`, and `attempt_session_id` takes the first record that names one:
+`execution.json`, then `identity.json`, then `start.json`. Each mutation was applied by hand to
+the working file, restored from a copy under `.radian/mut/` with `cp`, and compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0048-M1 | the claim omits `session_id` from `start.json` | ✅ 2 failed | `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (the running attempt answers `None`, and `show --json` prints `null`) |
+| TK0048-M2 | `attempt_session_id` reads `execution.json` only again | ✅ 3 failed | `attempt::a_session_id_is_read_from_the_identity_record_when_execution_is_missing`, `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (no `execution.json` exists before the wrapper ends) |
 ## TK0035 (a refused integration, the wrapper setup and the heartbeat)
 
 TK0035-M1–M3 were run against `29d77904`, each applied to the committed file, restored from a
