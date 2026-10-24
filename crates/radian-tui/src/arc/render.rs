@@ -1775,7 +1775,8 @@ fn draw_loop_log(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
     let height = area.height as usize;
     let inner = width.saturating_sub(4);
     // The frame's top and bottom lines leave the body this many rows; they are all drawn, so
-    // the frame fills the area whether the log has two lines or five hundred.
+    // the frame fills the area whether the log has two lines or five hundred. A body of one row
+    // has no room for both, and keeps the tail (see the clamp below).
     let rows = height.saturating_sub(2);
     app.log_rows = rows.max(1);
     let mut lines = Vec::with_capacity(height);
@@ -1803,6 +1804,16 @@ fn draw_loop_log(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
         }
     }
     lines.push(frame_bottom(&theme));
+    // The last row is always the frame's tail, the way the task and merge pages draw theirs: a
+    // body too short for a top line, its rows and the tail loses the log's rows first and then
+    // its top line, never the bottom. At the shortest body `draw` accepts (one row) the tail is
+    // the whole view.
+    if lines.len() > height {
+        lines.truncate(height);
+        if let Some(last) = lines.last_mut() {
+            *last = frame_bottom(&theme);
+        }
+    }
     draw_lines(frame, area, lines);
 }
 

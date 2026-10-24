@@ -2907,3 +2907,19 @@ the named file, backed up under `.radian/mut/` and restored from that copy (neve
 | TK0083-M4 | `draw_conversation` draws no rail on the transcript's rows (`arc/render.rs`) | ✅ 1 failed | `arc_tui::the_conversation_tab_rails_every_transcript_row` (row 6 has a space where the rail belongs) |
 
 4/4 caught.
+
+## TK0101: the log view keeps its frame tail in a one-row body (2026-10-24, branch `work/TK0101-tui-log-view-and-brief-wrap-followups`)
+
+`draw_loop_log` emitted its frame's top line and its tail for a body too short to hold both,
+and `draw_lines` clipped the tail away: the shortest body `draw` accepts (one row, a 5-row
+terminal with no ticker) showed the top line alone, so the view promised a bottom frame it
+never drew. The view now clamps its lines to the body and keeps the tail, as the task and merge
+pages already do. The mutation was applied by hand to the working file, backed up under
+`.radian/mut/` and restored from that copy (never `git checkout`); the named test ran alone
+with `cargo nextest run -p radian-tui --locked --profile sandbox -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0101-M1 | `draw_loop_log` pushes its frame's tail without clamping the lines to the body again (`arc/render.rs`) | ✅ 1 failed | `arc_loop::a_one_row_body_keeps_the_log_views_frame_tail` (`left: "  ╭─ log ───…"` for `right: "  ╰──"`) |
+
+1/1 caught.
