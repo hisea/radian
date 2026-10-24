@@ -2598,3 +2598,18 @@ hand to the committed file, the named test was run alone with `--profile sandbox
 | TK0057-M2 | the pending request is not tracked: `take_log_request` records nothing, `open_log` has no guard and `apply_log` checks only the task id | ✅ 1 failed | `arc_merge::one_log_is_in_flight_and_a_stale_reply_is_dropped` (the second Enter queues another read: `take_log_request` is `Some`) |
 
 2/2 caught.
+
+## TK0066: the plans page's view, refreshed and from either column (2026-10-24, branch `work/TK0066-tui-plan-filter-followups`)
+
+The TK0047 review found that the refresh test ran only in `active` and that the `f` test held
+the plan column's focus, so neither proved the view survives a re-read or that `f` works from
+the task column. The two new tests close those gaps. Each mutation was applied by hand to the
+working file, the named test was run alone, and the file was restored from a copy under
+`.radian/mut-bak/` (`git status --short` was otherwise empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0066-M1 | `refresh` resets the view (`self.filter = PlanFilter::Active;` at its start) | ✅ 1 failed | `arc_tui::a_refresh_keeps_the_plan_view` (`app.filter` is `Active`, not `Done`) |
+| TK0066-M2 | `f` only advances with the plan column focused (`KeyCode::Char('f') if self.focus == Focus::Plans`) | ✅ 1 failed | `arc_tui::f_advances_the_view_whichever_column_has_focus` (the press answers `Ignored`, not `Redraw`) |
+
+2/2 caught.

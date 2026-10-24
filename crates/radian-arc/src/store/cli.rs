@@ -339,7 +339,7 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
 
 /// Whether a task is `done.merged`: the one state the default `list` hides.
 fn is_merged(task: &Loaded<crate::store::model::TaskFile>) -> bool {
-    task.item.state == crate::store::model::TaskState::Done && task.item.phase == "merged"
+    task.item.is_merged()
 }
 
 /// The line that ends a filtered `list`: how many plans and tasks were left out. A zero part
@@ -822,9 +822,9 @@ fn queue_reason(store: &Store, id: &str) -> Result<Option<String>, Error> {
         return Ok(Some(crate::run::waiting_reason(store, &plan, &ready)?));
     }
     let blocked = task.after.iter().any(|dependency| {
-        !store.load_task(dependency).is_ok_and(|loaded| {
-            loaded.item.state == super::model::TaskState::Done && loaded.item.phase == "merged"
-        })
+        !store
+            .load_task(dependency)
+            .is_ok_and(|loaded| loaded.item.is_merged())
     });
     if blocked {
         Ok(Some(crate::run::waiting_reason(store, &plan, &ready)?))

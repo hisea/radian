@@ -114,7 +114,8 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
         };
         left.push(Span::styled(page.name(), style));
     }
-    // The plans page names its view, and counts the plans the view hides (never on `all`).
+    // The plans page names its view and counts the plans the view hides (never on `all`, and
+    // never a zero count, which `radian arc list` also omits).
     if app.page == Page::Plans {
         left.push(Span::styled("  ·  ", theme.hint));
         left.push(Span::styled(app.filter.name(), theme.text));
