@@ -13,6 +13,15 @@
   and nextest for the crates changed since `origin/main` plus `radian-tui`; `full`
   is `verify.sh`, here or on `$ARC_GATE_HOST` inside `$ARC_GATE_TREE`. Both are
   documented in `docs/user/arc-gate.md`, including the absolute-path trust rule.
+- `temp-check.sh`: the temp file system check, sourced by both scripts (it is not
+  a step). It reads the file system that holds `${TMPDIR:-/tmp}` with `df` and
+  fails, before any build, when fewer than 50,000 inodes or fewer than 2 GiB are
+  free: one line on stderr names the path, the free and total inodes, the free
+  space and the two limits. Nothing is deleted. A file system that reports no
+  inode count skips the inode check and keeps the space check. The two limits are
+  `RADIAN_VERIFY_MIN_FREE_INODES` and `RADIAN_VERIFY_MIN_FREE_GIB`; their type,
+  default, allowed values and when they take effect are in
+  [`docs/user/arc-gate.md`](../docs/user/arc-gate.md#a-gate-for-this-repository).
 
 ## Release
 
