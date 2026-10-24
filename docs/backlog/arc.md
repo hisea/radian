@@ -1,6 +1,6 @@
 # arc：替代 herdr 的派发与闸门（v0）
 
-- 状态：idea（设计定为 v0，记录在案，**不开工**）。落地时直接进 radian 二进制：`radian arc` 不带子命令打开 TUI，`radian arc <子命令>` 是 CLI（`add / list / show / start / merge / reject / auto / run`）；不做仓库外原型，不出独立二进制。
+- 状态：in-progress（切片 1–7 已落地；只剩本文件「待决」里的问题）。落地时直接进 radian 二进制：`radian arc` 不带子命令打开 TUI，`radian arc <子命令>` 是 CLI（`add / list / show / start / merge / reject / auto / run`）；不做仓库外原型，不出独立二进制。
   两轮外部审核的 P0 已全部采纳进设计稿；第一轮三处分歧保留原设计，第二轮保留一处：单机 v0 用 linked worktree 共享 clone，不做独立 clone。
 - 决定：ADR 0048（arc 本体）；0032 与 0043 已同步（`radian arc` 进命令表；跨进程编排归 arc）。ADR 0048 与这两处改动在分支 `adr/arc` 上，随 arc 的实现一起合入 main。
 - 涉及 ADR：0048、0032、0043（`subagent` 是子进程
@@ -50,7 +50,7 @@
 4. attempt 生命周期：起包装器、失败分类、退避重试、stall、预算、取消、reconcile。
 5. `start`、`merge`、`reject`、`cancel`、`reset-budget` 接到状态机。
 6. `run` 循环、`confirm`、`auto`、`pause`、plan 层、`radian arc mcp`。
-7. TUI（三个界面）。
+7. TUI（三个界面）。已落地：`plans`、`task`、`merge` 三页与 owner 动作；TUI 自己从不持有 `runner.lock`、不跑 pass：打开时（以及按 `R`）在没有调度循环时以独立会话启动 `radian arc run --watch`，退出 TUI 不停它；页脚 ticker 与 `L` 日志读 `loop.log`；`doing.running` 的任务显示 `live · worktree` 的未提交改动。
 
 1–3 可并行；4 在 1+2 之后；5 在 3+4 之后；6 在 5 之后。
 

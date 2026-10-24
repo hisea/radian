@@ -966,8 +966,7 @@ fn run_loop(watch: bool, interval: u64) -> Result<u8, Error> {
                 failed.set(true);
             }
         };
-        let report = crate::run::run(&store, &mut emit)?;
-        emit(&report.render_summary());
+        crate::run::run(&store, &mut emit)?;
     }
     Ok(if failed.get() {
         Exit::Error.code()

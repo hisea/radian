@@ -3858,3 +3858,111 @@ fn a_priority_change_takes_effect_on_the_next_pass_and_does_not_preempt() {
     // temp directory can survive.
     cancel(&repo, &one);
 }
+
+// ---- loop.log (ADR 0048 decision 13) -------------------------------------------------
+
+/// A plan with one `todo.retry_wait` task whose retry time has passed: a pass releases it, so
+/// the pass prints one transition and a summary without starting a worker or a gate.
+fn due_retry(store: &Store) -> String {
+    let plan = add_plan(store, "log");
+    let task = add_task(store, &plan, "work", &[]);
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Todo;
+            task.phase = "retry_wait".to_owned();
+            task.retry_at = Some("2000-01-01T00:00:00Z".to_owned());
+            Ok(())
+        })
+        .expect("the task is due");
+    task
+}
+
+/// `radian arc run` appends the lines it prints to `loop.log`, each behind an RFC 3339 UTC
+/// timestamp, and prints the same text on stdout.
+#[test]
+fn run_appends_every_printed_line_to_loop_log() {
+    let repo = Repo::new("loop-log");
+    let store = setup(&repo);
+    let task = due_retry(&store);
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    let transition = format!("{task} released: todo.retry_wait -> todo.ready");
+    assert!(run.stdout.contains(&transition), "stdout: {}", run.stdout);
+    assert!(
+        run.stdout.lines().any(|line| line == transition),
+        "stdout lost the line's own text: {}",
+        run.stdout
+    );
+    let log = fs::read_to_string(repo.arc().join("loop.log")).expect("loop.log");
+    assert!(
+        log.lines().any(|line| line.ends_with(&transition)),
+        "loop.log: {log}"
+    );
+    assert!(log.contains("summary"), "loop.log: {log}");
+    for line in log.lines() {
+        let (stamp, _) = line.split_once(' ').expect("a timestamp and a space");
+        assert!(
+            stamp.len() == 24 && stamp.contains('T') && stamp.ends_with('Z'),
+            "a line without an RFC 3339 UTC timestamp: {line}"
+        );
+    }
+}
+
+/// A `loop.log` at or above 1 MiB becomes `loop.log.1` (replacing an older one) before the next
+/// line, and the new file starts empty.
+#[test]
+fn a_full_loop_log_is_rotated_to_loop_log_1() {
+    let repo = Repo::new("loop-log-rotate");
+    let store = setup(&repo);
+    due_retry(&store);
+    let path = repo.arc().join("loop.log");
+    let old = "2026-10-24T00:00:00.000Z old line\n".repeat(40_000);
+    assert!(
+        old.len() as u64 >= radian_arc::run::LOOP_LOG_MAX_BYTES,
+        "the fixture log is not full: {} bytes",
+        old.len()
+    );
+    fs::write(&path, &old).expect("the full log");
+    fs::write(repo.arc().join("loop.log.1"), "older\n").expect("the older rotation");
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    let rotated = fs::read_to_string(repo.arc().join("loop.log.1")).expect("loop.log.1");
+    assert_eq!(rotated, old, "the old log is kept whole");
+    let new = fs::read_to_string(&path).expect("the new loop.log");
+    assert!(
+        !new.contains("old line"),
+        "the new log kept appending to the full file: {new}"
+    );
+    assert!(new.contains("released:"), "the new log: {new}");
+}
+
+/// A write error on `loop.log` prints one `radian arc:` line for the process and the pass still
+/// completes.
+#[test]
+fn a_read_only_loop_log_is_reported_once_and_the_pass_completes() {
+    let repo = Repo::new("loop-log-readonly");
+    let store = setup(&repo);
+    due_retry(&store);
+    let path = repo.arc().join("loop.log");
+    fs::write(&path, "existing\n").expect("the log");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).expect("read-only log");
+    }
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert!(run.stdout.contains("released:"), "stdout: {}", run.stdout);
+    assert!(run.stdout.contains("summary"), "stdout: {}", run.stdout);
+    let errors = run
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("radian arc: cannot write"))
+        .count();
+    assert_eq!(
+        errors, 1,
+        "one write-error line for the process, not one per line: {}",
+        run.stderr
+    );
+}

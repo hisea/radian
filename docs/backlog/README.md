@@ -52,7 +52,7 @@
 | `prompt-deliver-first.md` | idea | 0036 | 提示词：先交付能跑的版本再迭代、用参照物差分；cobol smoke 是现成复现 |
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
-| `arc.md` | idea | 0032、0043、0044、0038、0020、0024、0013、0037、0022 | 替代 herdr 的派发与闸门：文件 backlog 单写者、一次性 worker、固定 sha 的 gate；产品形态为三界面 app 加 plan 层与全自动 |
+| `arc.md` | in-progress（切片 1–7 已落地） | 0032、0043、0044、0038、0020、0024、0013、0037、0022 | 替代 herdr 的派发与闸门：文件 backlog 单写者、一次性 worker、固定 sha 的 gate；产品形态为三界面 app 加 plan 层与全自动 |
 | `arc-gate-batch.md` | decided（排在 `arc-landing.md` 之后） | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
 | `arc-reviewer-profiles.md` | decided | 0048 | reviewer profile（模型、prompt 写审查范围、时限、`fix_level`，第一轮可另设模型与时限）；只审 diff，返工轮只审增量和上轮问题，`pre_existing` 由 arc 按改动行机械判定、不打回；问题分 `critical`/`major`/`minor` 并附校准例子，用户选修到哪级，task 可覆盖；review 与 commands 并行，review 失败由 arc 自动写返工；没修的问题变成 `todo.proposed` 收尾 task，新增 task 级 `confirm` |
 | `arc-serve.md` | idea | 0048、0013、0032、0034、0006、0028、0045、0043 | 远程客户端（iOS / desktop）：runner 抽库，三个壳持 `runner.lock`；serve 只听 loopback，HTTP + SSE，会话投影成 block；状态迁移钩子推 APNs，payload 只带 id 与 phase；iOS 永远 client，desktop 可 host 可 client |

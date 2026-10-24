@@ -1,15 +1,18 @@
 //! `radian arc` with no subcommand: the arc TUI (ADR 0048 §1, §13).
 //!
-//! The view is read-only. This loop enters the terminal, draws one frame, reads one key at a
-//! time, re-reads the store every [`ARC_REFRESH`] seconds, and runs git (the remote main and a
-//! task's diff), the merge page's data, a command's log and the owner's actions on worker
-//! threads so a frame never waits on any of them. It holds no `runner.lock`:
-//! the header only reports whether another process does. `q` (or Ctrl-C) leaves through the
-//! same clean-exit path as `attach`.
+//! This loop enters the terminal, draws one frame, reads one key at a time, re-reads the store
+//! every [`ARC_REFRESH`] seconds, and runs git (the remote main and a task's diff), the merge
+//! page's data, a command's log and the owner's actions on worker threads so a frame never waits
+//! on any of them. The TUI holds no `runner.lock` and runs no pass: when it opens and when `R`
+//! is pressed, [`LoopStarter`] starts `radian arc run --watch` as a detached process if no loop
+//! holds the lock, and quitting never stops it. `q` (or Ctrl-C) leaves through the same
+//! clean-exit path as `attach`.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use radian_tui::arc::loop_log::LoopLogTail;
+use radian_tui::arc::looping::{self, LoopStarter};
 use radian_tui::arc::{ArcApp, ArcKey, actions, render};
 
 use super::*;
@@ -71,6 +74,19 @@ pub(super) fn run_arc() -> ExitCode {
         }
     };
     let mut app = ArcApp::open(store);
+    // The loop's log baseline is the file as it is when the TUI opens: a line the loop writes
+    // afterwards is news for the ticker, whether the TUI starts that loop or finds it running.
+    let mut tail = LoopLogTail::new(&app.store);
+    app.apply_loop_log(tail.read());
+    // The scheduling loop (ADR 0048 §13): the TUI never holds `runner.lock`. Opening it starts
+    // `radian arc run --watch` as a detached process when no loop runs, and quitting leaves
+    // that process alone.
+    let mut starter = LoopStarter::new(app.store.clone());
+    if let Err(text) = starter.start() {
+        app.set_result(text, false);
+    }
+    looping::install_stop_handler();
+    app.set_loop_status(starter.status());
     let (tx, rx) = mpsc::channel();
     let mut main_pending = false;
     let mut main_at = None;
@@ -80,6 +96,11 @@ pub(super) fn run_arc() -> ExitCode {
     let mut refresh_at = Instant::now() + ARC_REFRESH;
     let mut dirty = true;
     loop {
+        // SIGTERM closes the TUI, and nothing else: the loop it started keeps running in its
+        // own session.
+        if looping::signal_received() {
+            break;
+        }
         // Replies from the git workers: a stale diff (another task or attempt) is dropped by
         // the app.
         while let Ok(reply) = rx.try_recv() {
@@ -216,6 +237,13 @@ pub(super) fn run_arc() -> ExitCode {
             Input::Idle => {}
             Input::Event(Event::Key(key)) => match app.on_key(&key) {
                 ArcKey::Quit => break,
+                ArcKey::StartLoop => {
+                    if let Err(text) = starter.start() {
+                        app.set_result(text, false);
+                    }
+                    app.set_loop_status(starter.status());
+                    dirty = true;
+                }
                 ArcKey::Redraw => dirty = true,
                 ArcKey::Ignored => {}
             },
@@ -223,11 +251,21 @@ pub(super) fn run_arc() -> ExitCode {
             Input::Event(_) => {}
         }
         if Instant::now() >= refresh_at {
+            // A start in flight shows `starting` until a probe sees its lock; a start that
+            // failed is one footer line.
+            if let Some(line) = starter.poll() {
+                app.set_result(line, false);
+            }
+            app.set_loop_status(starter.status());
+            app.apply_loop_log(tail.read());
             app.refresh();
             refresh_at = Instant::now() + ARC_REFRESH;
             dirty = true;
         }
     }
+    // Quitting closes this window and nothing else: no signal to a loop, whether this TUI
+    // started it or not (ADR 0048 §13).
+    drop(starter);
     guard.restore();
     ExitCode::SUCCESS
 }

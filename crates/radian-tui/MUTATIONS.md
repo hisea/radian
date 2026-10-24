@@ -2474,6 +2474,28 @@ window). A cancelled plan also takes the failure mark and the `cancelled · ` pr
 | TK0040-M3 | the attempts list always starts at the first attempt (`first = 0`) | ✅ 1 failed | `the_attempts_list_scrolls_to_keep_the_selected_attempt_visible` (with attempt 10 selected it draws attempts 1 to 3) |
 | TK0040-M4 | a cancelled plan takes `Mark::Active` (`●`), as before | ✅ 1 failed | `a_cancelled_plan_is_marked_and_named_cancelled` (`mark_cell` panics: `×` is not before `PL0002-images`) |
 
+## TK0019 (the TUI starts the scheduling loop; the running task's live diff)
+
+The first attempt held the loop in the TUI (`TK0019-M1`–`M2`, on code this rework removes); the
+rework keeps the live diff (`M3`) and replaces the loop with a detached `radian arc run --watch`
+the TUI starts and never signals. `M4`–`M8` were run on the rework's code, each from a copy under
+`.radian/bak/`, restored with `cp` and compared with `cmp`; `git status --short` was empty
+afterwards. `M7`/`M8` mutate `radian-arc/src/run.rs` and are cross-referenced in that crate's
+`MUTATIONS.md`. `M9` was run after the merge of `origin/main` (`47e2397`) from a copy under
+`.radian/`, restored with `cp` and `cmp`; since it is a race, its ten runs are the record.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0019-M1 | (first attempt) run the pass on the UI thread | the removed `arc_loop` test; superseded | ✅ failed |
+| TK0019-M2 | (first attempt) do not release `runner.lock` on quit | the removed `arc_loop` test; superseded | ✅ failed |
+| TK0019-M3 | show the committed diff instead of the worktree for a running task (`read::task_diff` never takes the live branch) | `arc_tui::a_running_task_shows_the_worktree_including_uncommitted_files` (`diff.source` is `Range`, and the uncommitted file is missing) | ✅ failed |
+| TK0019-M4 | the spawned loop stays in the TUI's process group (drop the `setsid` `pre_exec`) | `arc_loop::the_started_loop_has_its_own_session_and_process_group` (`getsid` is the test's session, not the loop's pid) | ✅ failed |
+| TK0019-M5 | quitting signals the loop the TUI started (`Drop for LoopStarter` sends SIGTERM) | `arc_loop::quitting_while_a_start_is_in_flight_leaves_the_loop_running` (the loop never takes `runner.lock`; it was killed) | ✅ failed |
+| TK0019-M6 | the TUI starts a loop while another holds the lock (`start` skips its probe) | `arc_loop::a_held_lock_starts_nothing_and_the_header_names_the_holder` (the fake program's marker exists) | ✅ failed |
+| TK0019-M7 | the rotation keeps appending to the 1 MiB file (`rotate_if_needed` does nothing) | `radian-arc::run a_full_loop_log_is_rotated_to_loop_log_1` (`loop.log.1` is not the old content) | ✅ failed |
+| TK0019-M8 | `run` without `--watch` writes no `loop.log` (`run` calls `run_quiet` without the `LoopLog` sink) | `radian-arc::run run_appends_every_printed_line_to_loop_log` (`loop.log` does not exist) | ✅ failed |
+| TK0019-M9 | a start-in-flight `poll` probes `runner.lock` (take and release) instead of reading the started child's pid, so the probe can hold the lock while the child takes it, and the loop exits `4` | `arc_loop::the_tui_starts_one_loop_and_leaves_it_running` (the started loop never takes the lock; a race, caught in 1 run of 10; `the_started_loop_has_its_own_session_and_process_group` shares the helper) | ✅ failed |
+
 ## TK0048: the task page follows a running attempt's journal (2026-10-24, branch `work/TK0048-running-attempt-session`)
 
 A `doing.running` task has no `execution.json` yet, so the Conversation tab found nothing. The
