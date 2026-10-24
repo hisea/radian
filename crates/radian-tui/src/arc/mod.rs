@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use radian_arc::read::{AttemptView, CommandView, MergeView, TaskDiff};
-use radian_arc::store::model::{TaskFile, TaskState};
+use radian_arc::store::model::{PLAN_PRIORITIES, TaskFile, TaskState, priority_rank};
 use radian_arc::store::{Loaded, PlanView, Store};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
@@ -53,6 +53,64 @@ impl Page {
             Page::Plans => "plans",
             Page::Task => "task",
             Page::Merge => "merge",
+        }
+    }
+}
+
+/// Which plans the plans page lists. `f` cycles them in this order; the view is not saved,
+/// so every start opens on [`PlanFilter::Active`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlanFilter {
+    /// The plans `radian arc list` prints without `--all`: not cancelled and not finished.
+    #[default]
+    Active,
+    /// Every plan.
+    All,
+    /// The finished plans only: every task `done.merged`, and not cancelled.
+    Done,
+    /// The cancelled plans only.
+    Cancelled,
+}
+
+impl PlanFilter {
+    /// The word the header draws.
+    pub fn name(self) -> &'static str {
+        match self {
+            PlanFilter::Active => "active",
+            PlanFilter::All => "all",
+            PlanFilter::Done => "done",
+            PlanFilter::Cancelled => "cancelled",
+        }
+    }
+
+    /// The next view in the `f` cycle: `active → all → done → cancelled → active`.
+    pub fn next(self) -> Self {
+        match self {
+            PlanFilter::Active => PlanFilter::All,
+            PlanFilter::All => PlanFilter::Done,
+            PlanFilter::Done => PlanFilter::Cancelled,
+            PlanFilter::Cancelled => PlanFilter::Active,
+        }
+    }
+
+    /// Whether this view lists `view`. The "finished" test is the one `radian arc list` uses
+    /// ([`radian_arc::store::PlanView::is_finished`]); a plan with no tasks is active.
+    pub fn shows(self, view: &PlanView) -> bool {
+        match self {
+            PlanFilter::Active => !view.plan.item.is_cancelled() && !view.is_finished(),
+            PlanFilter::All => true,
+            PlanFilter::Done => view.is_finished(),
+            PlanFilter::Cancelled => view.plan.item.is_cancelled(),
+        }
+    }
+
+    /// The one weak line the plan column shows when this view holds no plan.
+    pub fn empty_text(self) -> &'static str {
+        match self {
+            PlanFilter::Active => "no active plans",
+            PlanFilter::All => "no plans",
+            PlanFilter::Done => "no done plans",
+            PlanFilter::Cancelled => "no cancelled plans",
         }
     }
 }
@@ -186,6 +244,7 @@ pub struct TaskRow {
 pub struct PlanRow {
     pub id: String,
     pub status: String,
+    pub priority: String,
     pub auto: String,
     pub cost: Option<f64>,
     pub merged: usize,
@@ -206,6 +265,9 @@ pub struct TaskPage {
     /// until the task gains a newer attempt).
     pub attempt: Option<u32>,
     pub latest: Option<u32>,
+    /// The first attempt row the attempts tab draws: the list scrolls only when the selection
+    /// leaves the visible rows.
+    pub attempt_top: usize,
     /// Whether the selection follows a new latest attempt.
     follow_latest: bool,
     pub attempts: Vec<AttemptView>,
@@ -242,6 +304,7 @@ impl TaskPage {
             tab: TaskTab::Conversation,
             attempt,
             latest,
+            attempt_top: 0,
             follow_latest: true,
             attempts,
             journal: None,
@@ -493,7 +556,15 @@ pub struct ResultLine {
 pub struct ArcApp {
     pub store: Store,
     session_dir: Option<PathBuf>,
+    /// The plans the current view lists, in the store's order. `all_plans` holds every plan,
+    /// for the hidden count and a task's `after` lookup.
     pub plans: Vec<PlanView>,
+    /// Every plan, whatever the view.
+    all_plans: Vec<PlanView>,
+    /// How many plans the current view hides.
+    pub hidden: usize,
+    /// The plans page's view; `f` cycles it, and it is not saved.
+    pub filter: PlanFilter,
     pub plan_sel: usize,
     pub focus: Focus,
     pub task_sel: usize,
@@ -538,6 +609,9 @@ impl ArcApp {
             store,
             session_dir,
             plans: Vec::new(),
+            all_plans: Vec::new(),
+            hidden: 0,
+            filter: PlanFilter::default(),
             plan_sel: 0,
             focus: Focus::Plans,
             task_sel: 0,
@@ -566,14 +640,11 @@ impl ArcApp {
     /// frame shows may have changed.
     pub fn refresh(&mut self) -> bool {
         self.loop_running = loop_running(&self.store);
-        let selected_plan = self
-            .plans
-            .get(self.plan_sel)
-            .map(|view| view.plan.item.id.clone());
+        let selected_plan = self.selected_plan().map(|view| view.plan.item.id.clone());
         let selected_task = self.selected_task_id();
         match self.store.plans() {
             Ok(plans) => {
-                self.plans = plans;
+                self.all_plans = plans;
                 self.notice = None;
             }
             Err(error) => {
@@ -581,14 +652,15 @@ impl ArcApp {
                 return true;
             }
         }
-        if self.plans.is_empty() {
-            self.plan_sel = 0;
+        self.rebuild_visible(selected_plan.as_deref());
+        // The view is kept, so a plan can leave it during a re-read: when the selected plan
+        // changed, the task selection resets; otherwise the selected task stays.
+        if self.selected_plan().map(|view| view.plan.item.id.clone()) != selected_plan {
+            self.task_sel = 0;
+            self.task_top = 0;
         } else {
-            self.plan_sel = selected_plan
-                .and_then(|id| self.plans.iter().position(|view| view.plan.item.id == id))
-                .unwrap_or_else(|| self.plan_sel.min(self.plans.len() - 1));
+            self.clamp_task_selection(selected_task.as_deref());
         }
-        self.clamp_task_selection(selected_task.as_deref());
         if self.page == Page::Task {
             self.refresh_task_page();
         }
@@ -708,6 +780,35 @@ impl ArcApp {
         self.plans.get(self.plan_sel)
     }
 
+    /// Rebuilds the view's plans and puts the selection back on `keep` when it is in the new
+    /// view; otherwise the selection moves to the first plan of the view (rule 4).
+    fn rebuild_visible(&mut self, keep: Option<&str>) {
+        self.plans = self
+            .all_plans
+            .iter()
+            .filter(|view| self.filter.shows(view))
+            .cloned()
+            .collect();
+        self.hidden = self.all_plans.len() - self.plans.len();
+        self.plan_sel = keep
+            .and_then(|id| self.plans.iter().position(|view| view.plan.item.id == id))
+            .unwrap_or(0);
+    }
+
+    /// `f` on the plans page: the next view. The selection stays on the same plan when the
+    /// new view has it; otherwise it moves to the first plan of the view. The task selection
+    /// resets only when the plan changes.
+    fn cycle_filter(&mut self) -> ArcKey {
+        let keep = self.selected_plan().map(|view| view.plan.item.id.clone());
+        self.filter = self.filter.next();
+        self.rebuild_visible(keep.as_deref());
+        if self.selected_plan().map(|view| view.plan.item.id.clone()) != keep {
+            self.task_sel = 0;
+            self.task_top = 0;
+        }
+        ArcKey::Redraw
+    }
+
     /// The selected task, in the selected plan's **display** order: the tree (`g` off) or the
     /// flat list (`g` on). The page draws that order, so the cursor, the moves and this
     /// selection are all one index into it.
@@ -734,7 +835,7 @@ impl ArcApp {
         };
     }
 
-    /// Every plan as the page draws it, in the store's order.
+    /// Every plan of the current view, as the page draws it, in the store's order.
     pub fn plan_rows(&self) -> Vec<PlanRow> {
         self.plans
             .iter()
@@ -964,7 +1065,7 @@ impl ArcApp {
         let mut waiting = Vec::new();
         for id in &item.after {
             let dependency = self
-                .plans
+                .all_plans
                 .iter()
                 .flat_map(|view| view.tasks.iter())
                 .find(|task| task.item.id == *id)
@@ -1183,24 +1284,72 @@ impl ArcApp {
                 self.clamp_task_selection(keep.as_deref());
                 ArcKey::Redraw
             }
+            KeyCode::Char('f') => self.cycle_filter(),
             KeyCode::Char('c') => {
-                let Some(view) = self.selected_plan() else {
-                    return ArcKey::Ignored;
+                // With the task column focused `c` confirms a proposed task; with the plan
+                // column focused it confirms a draft plan, as it always has (ADR 0048 §11).
+                let target = if self.focus == Focus::Tasks {
+                    self.selected_task()
+                        .filter(|task| {
+                            task.item.state == TaskState::Todo && task.item.phase == "proposed"
+                        })
+                        .map(|task| task.item.id.clone())
+                } else {
+                    self.selected_plan()
+                        .filter(|view| view.plan.item.status == "draft")
+                        .map(|view| view.plan.item.id.clone())
                 };
-                if view.plan.item.status != "draft" {
-                    self.result = Some(ResultLine {
-                        text: format!(
-                            "plan {} is {}; only a draft plan is confirmed",
-                            view.plan.item.id, view.plan.item.status
-                        ),
-                        failed: true,
-                    });
-                    return ArcKey::Redraw;
+                match target {
+                    Some(id) => {
+                        self.queue_action(actions::Action::Confirm(id));
+                    }
+                    None => {
+                        self.result = Some(ResultLine {
+                            text: "only a draft plan or a proposed task is confirmed".to_owned(),
+                            failed: true,
+                        });
+                    }
                 }
-                let id = view.plan.item.id.clone();
-                self.queue_action(actions::Action::Confirm(id));
                 ArcKey::Redraw
             }
+            KeyCode::Char('x') => {
+                // `x` always asks first, the way the merge page's `M` does (ADR 0048 §11);
+                // the CLI's own refusal is what a done task or a cancelled plan gets.
+                let (message, action) = match self.focus {
+                    Focus::Tasks => {
+                        let Some(task) = self.selected_task() else {
+                            return ArcKey::Ignored;
+                        };
+                        let id = task.item.id.clone();
+                        (format!("cancel {id} ?"), actions::Action::Cancel(id))
+                    }
+                    Focus::Plans => {
+                        let Some(view) = self.selected_plan() else {
+                            return ArcKey::Ignored;
+                        };
+                        let id = view.plan.item.id.clone();
+                        let open = view
+                            .tasks
+                            .iter()
+                            .filter(|task| {
+                                !task.changed_outside_arc
+                                    && matches!(
+                                        task.item.state,
+                                        TaskState::Todo | TaskState::Doing | TaskState::Review
+                                    )
+                            })
+                            .count();
+                        (
+                            format!("cancel plan {id} and its {open} open tasks?"),
+                            actions::Action::Cancel(id),
+                        )
+                    }
+                };
+                self.float = Some(Float::Confirm { message, action });
+                ArcKey::Redraw
+            }
+            KeyCode::Char('+') => self.step_priority(-1),
+            KeyCode::Char('-') => self.step_priority(1),
             KeyCode::Char('a') => {
                 let Some(view) = self.selected_plan() else {
                     return ArcKey::Ignored;
@@ -1263,6 +1412,29 @@ impl ArcApp {
             }
             _ => ArcKey::Ignored,
         }
+    }
+
+    /// `+`/`-` on the plans page: the selected plan's priority one step, `+` toward `P0` and
+    /// `-` toward `P5` (ADR 0048 decision 3). At an end the footer says so and nothing is
+    /// queued; the next refresh draws the new value.
+    fn step_priority(&mut self, delta: i32) -> ArcKey {
+        let Some(view) = self.selected_plan() else {
+            return ArcKey::Ignored;
+        };
+        let plan = view.plan.item.id.clone();
+        let current = view.plan.item.priority().to_owned();
+        let last = PLAN_PRIORITIES.len() as i32 - 1;
+        let rank = (priority_rank(&current) as i32).min(last);
+        let level = PLAN_PRIORITIES[(rank + delta).clamp(0, last) as usize].to_owned();
+        if level == current {
+            self.result = Some(ResultLine {
+                text: format!("plan {plan} is already {current}"),
+                failed: false,
+            });
+            return ArcKey::Redraw;
+        }
+        self.queue_action(actions::Action::Priority { plan, level });
+        ArcKey::Redraw
     }
 
     fn move_selection(&mut self, delta: i32) -> ArcKey {
@@ -1639,6 +1811,7 @@ fn plan_row(view: &PlanView, tasks: Vec<TaskRow>) -> PlanRow {
     PlanRow {
         id: view.plan.item.id.clone(),
         status: view.plan.item.status.clone(),
+        priority: view.plan.item.priority().to_owned(),
         auto: view.plan.item.auto.clone(),
         cost,
         merged,

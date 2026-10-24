@@ -82,6 +82,9 @@ copy.
 | TK0036-M1 | run the `commands`/`review` pair one after the other again (`run_pair` calls the two stages instead of the two threads) | `review::the_commands_and_review_stages_start_before_either_ends` (the commands wait times out and fails the round) | ✅ failed |
 | TK0036-M2 | let a review failure decide the round when `commands` also failed (`finish_verification` swaps the two in its scan order) | `review::a_commands_failure_decides_the_round_when_the_review_fails_too` (the task returns to `todo.ready` with a review brief) | ✅ failed |
 | TK0036-M3 | forward the gate's stop to only the first running stage (`request_stop` signals one slot) | `run::a_signal_to_the_gate_stops_both_stages_of_the_pair` (one stage outlives the 3 s deadline) | ✅ failed |
+| TK0052-M1 | do not reset the conflict-rework run on an attempt that never reached the gate (`attempt_ops::apply`'s `reset_conflict_rework` dropped) | `failure_sequences::every_automatic_failure_sequence_ends_within_the_limits` (an attempt that never reached the gate left the conflict run at 1) | ✅ failed |
+| TK0052-M2 | `max_auto_rework` never pauses the plan (`record_auto_rework` uses `u32::MAX`) | `failure_sequences::every_automatic_failure_sequence_ends_within_the_limits` (`auto_rework 3 tripped max_auto_rework but the plan did not pause`) | ✅ failed |
+| TK0052-M3 | never stop `--watch` on a repeated error (the `REPEATED_ERROR_LIMIT` branch dropped) | `run::three_identical_pass_errors_stop_watch_with_exit_one_and_release_the_lock` (it waits the 30 s deadline) | ✅ failed |
 | TK0035-M1 | clear a refused integration record again (the old `_` arm) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the record is gone after the first pass) | ✅ failed |
 | TK0035-M2 | drop the wall-time bound on the worktree-setup fetch (call `git::run` without the clock) | `run::a_hanging_fetch_ends_the_attempt_at_the_wall_time` (40 s deadline: `start` never returned) | ✅ failed |
 | TK0035-M3 | sleep a whole `POLL` slice inside each heartbeat interval again | `work::a_one_second_stall_window_keeps_three_beats_inside_it` (mean gap 414 ms) | ✅ failed |
@@ -90,6 +93,12 @@ copy.
 | TK0044-M3 | skip the owned-flag check for `gate.review.first.exec_args` | `review::a_first_exec_arg_the_review_stage_owns_is_refused` (the session runs and the stage passes) | ✅ failed |
 | TK0037-M1 | `start` refuses `todo.retry_wait` again (`attempt_ops::claim`'s guard goes back to `phase == "ready"`) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `attempt::start_refuses_a_retry_wait_task_when_every_slot_is_taken` (the second gets the wrong refusal, so its `limits.concurrency` assertion fails) | ✅ 2 failed |
 | TK0037-M2 | the scheduling loop ignores `retry_at` and claims a `todo.retry_wait` task (`run::start_ready` drops its phase check) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `run::a_future_retry_makes_run_exit_with_it_waiting` | ✅ 2 failed |
+| TK0060-M1 | the scheduling claim accepts `todo.retry_wait` (`ClaimBy::SchedulingLoop` uses the owner's phase set) | `attempt::a_scheduling_claim_refuses_a_task_that_began_backing_off` (the claim succeeds and takes attempt 1) | ✅ failed |
+
+TK0060-M1 was run on this branch from a copy under `.radian/tk0060/`, restored with `cp` and
+compared with `cmp`. `TK0037-M2`'s phase check has since moved into `attempt_ops::claim_by`, so
+dropping `run::start_ready`'s filter alone no longer changes behavior; `TK0060-M1` mutates the
+guard instead.
 
 TK0037-M1–M2 were run against `12da692f`, each applied to the committed file, with
 `cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` before the run
@@ -270,6 +279,30 @@ nothing. M3 leaves the stage that was not signalled alive past the test's 3 s de
 handler is the only SIGTERM source, because the wait loop now only escalates to SIGKILL after
 `cancel_grace_secs`.
 
+## TK0053 (bounded remote git calls and a re-run's review session)
+
+TK0053-M1–M3 were run against `a4a778f8`, each applied to the committed file, restored from a
+copy under `.radian/mut/` with `cp`, and compared byte for byte with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0053-M1 | the merge push calls the unbounded `git` helper again (`push_candidate` drops `run_remote`) | `review::a_merge_push_that_hangs_reports_the_line_and_kills_its_child` | ✅ timed out (180 s: the push never returned) |
+| TK0053-M2 | the timeout kills only the git pid (`kill(pid, SIGKILL)`, not `kill(-pid, SIGKILL)`) | `git_remote::a_gate_fetch_that_hangs_fails_with_the_line_and_kills_its_child` | ✅ timed out (180 s: `git remote-ext` and its child kept the pipes open) |
+| TK0053-M3 | the review stage reuses a journal's session id (`session_for` ignores the existing file) | `review::a_gate_rerun_gets_a_fresh_review_session_and_keeps_the_first_journal` | ✅ failed: the re-run asked for `...-review-1`, not `...-review-1-1` |
+
+M2's leftovers (`git remote-ext`, its script and `sleep`) were killed by hand after the run,
+because the mutation is exactly what leaves them behind; no other processes were left.
+TK0052-M1–M3 were run against the task's branch, each from a copy under `.radian/mut/`,
+restored with `cp` and compared with `cmp`, with `cargo build -p radian-tui --bin radian`
+before the `run` test (it refuses a binary older than its sources). M1 is caught by the model
+test's rule that an attempt which never reached the gate ends the conflict run, not by a
+non-ending sequence: with the retry count now kept across a conflict rework, removing the
+conflict reset makes the conflicts accumulate and the task stop sooner. The model test did
+find a non-ending sequence before the fix this task landed: `Success`, `Conflict`,
+`ModelFail` repeated. The conflict rework set `retry_count` back to `0`, the failed attempt set
+the conflict run back to `0`, and neither limit was ever reached; the run passed 100 steps at
+attempt 51. A conflict rework now keeps the retry count, so `max_attempts` bounds the failures
+between conflicts (ADR 0048 decision 9).
 ## TK0051 (a critical review item always blocks; an unplaced item is not demoted)
 
 TK0051-M1–M4 were run against `a7833564`, each applied to the committed file, restored from a
@@ -315,3 +348,21 @@ comparison, so the first pass drops it and the test's record assertion fails (th
 would then start the same gate again). M2 replaces the fetch's clock with an unbounded
 `git::run`, so `start` never returns and the test's 40-second deadline panics. M3 is the old
 heartbeat loop; the mean gap over three beats is 414 ms, where a 1 s window needs 333 ms.
+
+## TK0061 (`confirm --dry-run`, and the `after` chain both ways)
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0061-M1 | the dry run takes the write path (`confirm_dry_run` calls `confirm_with(store, id, true)`) | `chain::dry_run_on_a_proposed_task_prints_the_chain_and_writes_nothing` (the `.radian/arc/` snapshot differs and the task is `todo.ready`); the plan and refusal tests fail too | ✅ failed |
+| TK0061-M2 | `waits_on` stops after the direct `after` ids (the forward walk no longer enqueues a visited task's own `after`) | `chain::show_prints_the_full_wait_chain_and_every_task_that_blocks_it` (`c` waits on `b` only) | ✅ failed |
+| TK0061-M3 | the cycle check is removed (`Chain::cycle` is always `None`) | `chain::an_adopted_cycle_is_printed_once_and_the_walk_returns` (no `cycle:` line; the test's 5 s bound returns first) | ✅ failed |
+| TK0061-M4 | `never_runs` ignores `failed.*` (the `TaskState::Failed` early return is dropped) | `chain::a_failed_task_in_the_chain_is_reported_as_never_running` (the failed task is not named) | ✅ failed |
+
+TK0061-M1–M4 were applied to the working files, restored from copies under `.radian/mut/`
+with `cp`, and compared byte for byte with `cmp`. M1 drives a `radian` binary, so it was run
+after `cargo build -p radian-tui --bin radian`; the test's own staleness guard refuses a
+binary older than its sources. M2–M4 were run against the store-level tests only, through
+`cargo nextest run -p radian-arc --test chain ... --profile sandbox <test name>`, so the
+stale binary did not mask the mutation. M3 fails in 0.35 s (the bound is not hit); a walk
+that follows the cycle again would hit the 5 s bound instead of hanging the suite.
+

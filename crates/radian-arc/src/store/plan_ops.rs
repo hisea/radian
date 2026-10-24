@@ -54,6 +54,16 @@ impl Confirmed {
     }
 }
 
+/// What one `radian arc confirm` did, or what its `--dry-run` would do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirmation {
+    /// The line the confirmation prints.
+    pub confirmed: Confirmed,
+    /// The task ids whose `after` chain the confirmation reports: the confirmed task, or a
+    /// plan's `todo.ready` tasks in the plan's order.
+    pub tasks: Vec<String>,
+}
+
 /// `radian arc confirm <id>`: the owner's confirmation of a draft plan or of a proposed task
 /// (ADR 0048 decisions 3, 6 and 11).
 ///
@@ -63,6 +73,24 @@ impl Confirmed {
 /// outside arc is refused by the transaction, and an id that names both a plan and a task is
 /// refused the way every command refuses it.
 pub fn confirm(store: &Store, id: &str) -> Result<Confirmed, Error> {
+    confirm_report(store, id).map(|report| report.confirmed)
+}
+
+/// [`confirm`], with the task ids whose chain the caller reports as a warning.
+pub fn confirm_report(store: &Store, id: &str) -> Result<Confirmation, Error> {
+    confirm_with(store, id, true)
+}
+
+/// `radian arc confirm --dry-run <id>`: every check [`confirm`] makes, in the same order,
+/// with the same refusal and message, and no write at all.
+pub fn confirm_dry_run(store: &Store, id: &str) -> Result<Confirmation, Error> {
+    confirm_with(store, id, false)
+}
+
+/// The one confirm path: `write` decides whether the checked change is saved. The dry run
+/// takes `state.lock` (so a held lock refuses it exactly as it refuses a real confirm) and
+/// releases it without writing a plan or a task.
+fn confirm_with(store: &Store, id: &str, write: bool) -> Result<Confirmation, Error> {
     // A confirmed plan is the owner's promise that its tasks can run, and a confirmed task is
     // the same promise for one task, so the worker's command line is checked first: a wrong
     // `[worker] exec_args` entry leaves the plan a draft or the task proposed (ADR 0048
@@ -70,26 +98,23 @@ pub fn confirm(store: &Store, id: &str) -> Result<Confirmed, Error> {
     crate::worker_args::check(&store.config()?.worker.exec_args)?;
     match store.resolve_kind(id)? {
         super::Kind::Plan => {
-            store.change_plan(id, |plan| {
-                if plan.is_cancelled() {
-                    return Err(cancelled_plan(&plan.id));
-                }
-                if plan.status == "confirmed" {
-                    return Err(Error::Refused(format!(
-                        "plan `{}` is already `confirmed`",
-                        plan.id
-                    )));
-                }
-                if plan.tasks.is_empty() {
-                    return Err(Error::Refused(format!(
-                        "plan `{}` has no tasks; add the tasks that deliver it first",
-                        plan.id
-                    )));
-                }
-                plan.status = "confirmed".to_owned();
-                Ok(())
-            })?;
-            Ok(Confirmed::Plan(id.to_owned()))
+            if write {
+                store.change_plan(id, |plan| {
+                    check_plan(plan)?;
+                    plan.status = "confirmed".to_owned();
+                    Ok(())
+                })?;
+            } else {
+                store.check_state_lock()?;
+                let loaded = store.load_plan(id)?;
+                super::require_unchanged(id, loaded.changed_outside_arc)?;
+                check_plan(&loaded.item)?;
+            }
+            let plan = store.load_plan(id)?.item;
+            Ok(Confirmation {
+                confirmed: Confirmed::Plan(id.to_owned()),
+                tasks: ready_tasks(store, &plan),
+            })
         }
         super::Kind::Task => {
             // A cancelled plan is final, so a proposed task of one cannot be revived.
@@ -97,22 +122,73 @@ pub fn confirm(store: &Store, id: &str) -> Result<Confirmed, Error> {
             if plan.item.is_cancelled() {
                 return Err(cancelled_plan(&plan.item.id));
             }
-            store.change_task(id, |task| {
-                if task.state != TaskState::Todo || task.phase != model::PROPOSED_PHASE {
-                    return Err(Error::Refused(format!(
-                        "task `{}` is `{}.{}`; only a `todo.{}` task is confirmed",
-                        task.id,
-                        task.state.as_str(),
-                        task.phase,
-                        model::PROPOSED_PHASE
-                    )));
-                }
-                task.phase = "ready".to_owned();
-                Ok(())
-            })?;
-            Ok(Confirmed::Task(id.to_owned()))
+            if write {
+                store.change_task(id, |task| {
+                    check_task(task)?;
+                    task.phase = "ready".to_owned();
+                    Ok(())
+                })?;
+            } else {
+                store.check_state_lock()?;
+                let loaded = store.load_task(id)?;
+                super::require_unchanged(id, loaded.changed_outside_arc)?;
+                check_task(&loaded.item)?;
+            }
+            Ok(Confirmation {
+                confirmed: Confirmed::Task(id.to_owned()),
+                tasks: vec![id.to_owned()],
+            })
         }
     }
+}
+
+/// The plan checks of a confirm, in the order a refusal names them.
+fn check_plan(plan: &model::PlanFile) -> Result<(), Error> {
+    if plan.is_cancelled() {
+        return Err(cancelled_plan(&plan.id));
+    }
+    if plan.status == "confirmed" {
+        return Err(Error::Refused(format!(
+            "plan `{}` is already `confirmed`",
+            plan.id
+        )));
+    }
+    if plan.tasks.is_empty() {
+        return Err(Error::Refused(format!(
+            "plan `{}` has no tasks; add the tasks that deliver it first",
+            plan.id
+        )));
+    }
+    Ok(())
+}
+
+/// The task checks of a confirm: only a `todo.proposed` task is confirmed.
+fn check_task(task: &model::TaskFile) -> Result<(), Error> {
+    if task.state != TaskState::Todo || task.phase != model::PROPOSED_PHASE {
+        return Err(Error::Refused(format!(
+            "task `{}` is `{}.{}`; only a `todo.{}` task is confirmed",
+            task.id,
+            task.state.as_str(),
+            task.phase,
+            model::PROPOSED_PHASE
+        )));
+    }
+    Ok(())
+}
+
+/// The plan's `todo.ready` tasks in the plan's order: the tasks a plan confirm reports. A
+/// task file that does not read is left out, as `show` leaves it out.
+fn ready_tasks(store: &Store, plan: &model::PlanFile) -> Vec<String> {
+    let mut tasks = Vec::new();
+    for id in &plan.tasks {
+        if let Ok(task) = store.load_task(id)
+            && task.item.state == TaskState::Todo
+            && task.item.phase == "ready"
+        {
+            tasks.push(id.clone());
+        }
+    }
+    tasks
 }
 
 /// `radian arc auto <plan> <level>`: the plan's auto level (decision 12). `off` is allowed
@@ -286,8 +362,14 @@ pub fn add_rework_with(
         append_rework(&mut task.body, number, brief, heading_suffix);
         task.state = TaskState::Todo;
         task.phase = "ready".to_owned();
-        // The rework's new instructions get their own retries (ADR 0048 decision 9).
-        task.retry_count = 0;
+        // The lead's and the review's new instructions get their own retries (ADR 0048
+        // decision 9). A conflict rework continues the same line of work, so it keeps the
+        // count: `max_attempts` then bounds a task whose conflicts keep returning it to
+        // `todo.ready` while its worker keeps failing. Without this, a conflict rework and a
+        // retry reset each other's limit forever.
+        if heading_suffix != CONFLICT_REWORK_SUFFIX {
+            task.retry_count = 0;
+        }
         Ok(())
     })?;
     // The lead's own rework is a person stepping in, so the task gets a fresh run of automatic

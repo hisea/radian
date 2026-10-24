@@ -66,7 +66,7 @@ starts from one built-in palette, then sets roles.
 entries may reference each other with `$other`: chains resolve, and a loop
 only breaks the roles that use it. A missing variable warns once per name.
 
-A `[roles]` key is one of the 82 role names below. A value is one color for
+A `[roles]` key is one of the 89 role names below. A value is one color for
 the foreground, or a table with `fg`, `bg`, `bold`, `italic`, `dim` and
 `underline`. An absent field leaves the built-in value alone; `bold = false`
 turns off a bold the built-in sets. The same value shape overrides single
@@ -143,6 +143,21 @@ per level so levels read apart at a glance):
 | `reasoning_high` | The `high` level marker. |
 | `reasoning_xhigh` | The `xhigh` level marker. |
 | `reasoning_max` | The `max` level marker. |
+
+Plan priorities (the arc plans page draws `P0`..`P5` in these roles; `P0` is
+highest):
+
+| Role | What it paints | `dark` | `light` | `mono` |
+|---|---|---|---|---|
+| `priority_p0` | The `P0` text. | `okhsl(20 72% 67%)` (red) | `okhsl(20 91% 47%)` (red) | no color |
+| `priority_p1` | The `P1` text. | `okhsl(45 75% 67%)` (orange) | `okhsl(45 85% 47%)` (orange) | no color |
+| `priority_p2` | The `P2` text. | `okhsl(65 75% 67%)` (amber) | `okhsl(65 85% 47%)` (amber) | no color |
+| `priority_p3` | The `P3` text. | `okhsl(83 88% 67%)` (yellow) | `okhsl(83 99% 47%)` (yellow) | no color |
+| `priority_p4` | The `P4` text. | `okhsl(120 75% 67%)` (yellow-green) | `okhsl(120 85% 47%)` (yellow-green) | no color |
+| `priority_p5` | The `P5` text. | `okhsl(159 59% 67%)` (green) | `okhsl(159 75% 46%)` (green) | no color |
+
+A theme file sets them by these names; pi has no source role for them. Without
+truecolor each value becomes the nearest 256-color entry, like every role.
 
 Tool block backgrounds by state:
 

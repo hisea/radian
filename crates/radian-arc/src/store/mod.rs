@@ -17,6 +17,7 @@
 //! (`crate::work`).
 
 pub mod attempt_ops;
+pub mod chain;
 pub mod cli;
 pub mod config;
 mod frontmatter;
@@ -194,6 +195,19 @@ pub struct Loaded<T> {
 pub struct PlanView {
     pub plan: Loaded<model::PlanFile>,
     pub tasks: Vec<Loaded<model::TaskFile>>,
+}
+
+impl PlanView {
+    /// Whether the plan is finished: it is not cancelled and every task is `done.merged`. A
+    /// plan with no tasks is not finished. This is the test `radian arc list` leaves a plan
+    /// out by, and the arc TUI's `done` view shares it.
+    pub fn is_finished(&self) -> bool {
+        !self.plan.item.is_cancelled()
+            && !self.tasks.is_empty()
+            && self.tasks.iter().all(|task| {
+                task.item.state == model::TaskState::Done && task.item.phase == "merged"
+            })
+    }
 }
 
 /// What `show <id>` found. The task variant is the larger one (a task file has the attempt
@@ -376,24 +390,30 @@ impl Store {
     pub fn lock_state(&self) -> Result<StateLock, Error> {
         let path = self.root.join(STATE_LOCK);
         let file = open_lock_file(&path)?;
-        let start = Instant::now();
-        loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(StateLock { file }),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if start.elapsed() >= LOCK_WAIT {
-                        return Err(Error::Locked(STATE_LOCK));
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(error) => {
-                    return Err(Error::Failed(format!(
-                        "cannot lock {}: {error}",
-                        path.display()
-                    )));
-                }
+        wait_exclusive(&file, &path)?;
+        Ok(StateLock { file })
+    }
+
+    /// Checks whether another process holds `state.lock`, without creating the lock file.
+    ///
+    /// A command that only reads (a confirm's `--dry-run`) calls this: a missing lock file
+    /// means no process holds the lock, and the check leaves the store byte for byte as it
+    /// was instead of writing an empty `state.lock`.
+    pub fn check_state_lock(&self) -> Result<(), Error> {
+        let path = self.root.join(STATE_LOCK);
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::Failed(format!(
+                    "cannot open {}: {error}",
+                    path.display()
+                )));
             }
-        }
+        };
+        wait_exclusive(&file, &path)?;
+        let _ = FileExt::unlock(&file);
+        Ok(())
     }
 
     /// Tries `runner.lock` without waiting: `Some` when this process now holds it, `None`
@@ -864,6 +884,28 @@ pub struct RunnerLock {
 impl Drop for RunnerLock {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
+    }
+}
+
+/// Waits up to [`LOCK_WAIT`] for `file`'s exclusive flock, in the one loop every lock takes.
+fn wait_exclusive(file: &File, path: &Path) -> Result<(), Error> {
+    let start = Instant::now();
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if start.elapsed() >= LOCK_WAIT {
+                    return Err(Error::Locked(STATE_LOCK));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(Error::Failed(format!(
+                    "cannot lock {}: {error}",
+                    path.display()
+                )));
+            }
+        }
     }
 }
 

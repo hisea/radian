@@ -880,6 +880,113 @@ impl FakeReview {
     }
 }
 
+/// A remote that speaks the git protocol through an `ext::` script: the service named by
+/// `hang` (`upload` for the fetch, `receive` for the push, or `both`) records its own pid and
+/// its child's, then sleeps; the other service serves the bare `origin` normally. A test uses
+/// it to make one remote call wait past `[limits] git_remote_timeout_secs` while the others
+/// still work (ADR 0048 decision 7.8).
+pub struct HangRemote {
+    dir: PathBuf,
+}
+
+impl HangRemote {
+    /// Rewires `repo`'s `origin` to the hanging remote. `hang` is `upload`, `receive` or
+    /// `both`.
+    pub fn install(repo: &TestRepo, label: &str, hang: &str) -> Self {
+        let dir = repo.repo.with_file_name(format!("hang-{label}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("ext.sh");
+        let origin = path(&repo.origin);
+        let text = format!(
+            "#!/bin/sh\n\
+             ROOT=\"{root}\"\n\
+             hang() {{\n\
+               echo $$ > \"$ROOT/server.pid\"\n\
+               sleep 300 &\n\
+               echo $! > \"$ROOT/child.pid\"\n\
+               wait\n\
+             }}\n\
+             case \"$GIT_EXT_SERVICE\" in\n\
+               git-upload-pack)\n\
+                 if [ \"{hang}\" = both ] || [ \"{hang}\" = upload ]; then hang; \
+                 else exec git upload-pack \"{origin}\"; fi ;;\n\
+               git-receive-pack)\n\
+                 if [ \"{hang}\" = both ] || [ \"{hang}\" = receive ]; then hang; \
+                 else exec git receive-pack \"{origin}\"; fi ;;\n\
+               *) exit 1 ;;\n\
+             esac\n",
+            root = dir.display(),
+            origin = origin,
+            hang = hang,
+        );
+        std::fs::write(&script, text).expect("the hanging remote script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&script)
+                .expect("the script")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).expect("make it executable");
+        }
+        repo.git(&["config", "protocol.ext.allow", "always"]);
+        repo.git(&[
+            "remote",
+            "set-url",
+            "origin",
+            &format!("ext::{}", script.display()),
+        ]);
+        Self { dir }
+    }
+
+    /// The pid of the child the hanging service spawned, once it has written it.
+    pub fn child_pid(&self) -> u32 {
+        self.pid("child.pid")
+    }
+
+    /// The pid of the hanging service itself.
+    pub fn server_pid(&self) -> u32 {
+        self.pid("server.pid")
+    }
+
+    fn pid(&self, name: &str) -> u32 {
+        let path = self.dir.join(name);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(pid) = text.trim().parse()
+            {
+                return pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hanging remote never wrote {}: it did not run",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Asserts that `pid` is gone, so the timeout killed the whole process group and not only
+    /// the git process.
+    pub fn assert_gone(&self, pid: u32, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if !alive(pid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("{what} ({pid}) is still alive; the timeout did not kill its process group");
+    }
+}
+
+/// Whether `pid` exists: `kill(pid, 0)`, never the `kill` program.
+pub fn alive(pid: u32) -> bool {
+    // SAFETY: `kill(2)` with a positive pid and signal 0 reads no memory.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
 /// A session's final message with one fenced report.
 pub fn review_message(summary: &str, blocking: &[&str], suggestions: &[&str]) -> String {
     let value = serde_json::json!({

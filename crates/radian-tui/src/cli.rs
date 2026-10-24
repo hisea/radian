@@ -586,6 +586,10 @@ enum ArcCommand {
         /// The plan id, or the id of a `todo.proposed` task.
         #[arg(value_name = "ID")]
         id: String,
+        /// Run every check the confirm runs, print what it would do, and write nothing. It
+        /// refuses with the same message and exit code as a real confirm.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Set a plan's auto level. Only a confirmed plan can use a level other than `off`.
@@ -773,7 +777,7 @@ impl ArcCommand {
             ArcCommand::List { plan, all, json } => ArcRun::List { plan, all, json },
             ArcCommand::Show { id, json } => ArcRun::Show { id, json },
             ArcCommand::Adopt { id } => ArcRun::Adopt { id },
-            ArcCommand::Confirm { id } => ArcRun::Confirm { id },
+            ArcCommand::Confirm { id, dry_run } => ArcRun::Confirm { id, dry_run },
             ArcCommand::Auto { plan, level } => ArcRun::Auto { plan, level },
             ArcCommand::Priority { plan, priority } => ArcRun::Priority { plan, priority },
             ArcCommand::Pause { plan } => ArcRun::Pause { plan },
