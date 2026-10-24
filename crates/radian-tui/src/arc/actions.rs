@@ -150,7 +150,15 @@ pub fn run(action: &Action, store: &Store, ops: &dyn ArcOps) -> Outcome {
             Err(error) => Outcome::error(&error),
         },
         Action::Cancel(id) => match ops.cancel(store, id) {
-            Ok(cancelled) => Outcome::line(cancelled.lines().join(" · ")),
+            Ok(cancelled) => {
+                let mut lines = cancelled.lines();
+                // The CLI prints the changed tasks and then the plan; the footer fits one line
+                // and cuts its end, so the line that names the plan goes first.
+                if let Some(plan) = lines.pop() {
+                    lines.insert(0, plan);
+                }
+                Outcome::line(lines.join(" · "))
+            }
             Err(error) => Outcome::error(&error),
         },
         Action::Priority { plan, level } => match ops.set_priority(store, plan, level) {

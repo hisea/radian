@@ -372,7 +372,7 @@ fn the_plans_page_draws_the_list_and_the_selected_plan() {
         "loop ◻ stopped".to_owned(),
         "PLANS".to_owned(),
         "PL0001-first".to_owned(),
-        "auto off · 1/1 · $0.12".to_owned(),
+        "auto off · 1/1".to_owned(),
         "PL0002-images".to_owned(),
         "draft · auto off · 0/2 · —".to_owned(),
         format!(
@@ -388,6 +388,51 @@ fn the_plans_page_draws_the_list_and_the_selected_plan() {
         "q quit".to_owned(),
     ] {
         assert!(text.contains(&needle), "missing `{needle}`:\n{text}");
+    }
+}
+
+#[test]
+fn the_plan_summary_starts_under_the_id() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.on_key(&key(KeyCode::Char('f')));
+    let text = screen(&mut app, 120, 30);
+    let summary = text
+        .lines()
+        .find(|line| line.contains("auto merge · 3/8 · $0.61"))
+        .unwrap_or_else(|| panic!("no plan summary:\n{text}"));
+    assert!(
+        summary.starts_with("         auto merge · 3/8 · $0.61"),
+        "the summary starts under the id, past the mark and the priority: {summary:?}"
+    );
+}
+
+#[test]
+fn the_hints_keep_their_old_labels_and_drop_when_narrow() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    let wide = screen(&mut app, 160, 30);
+    for needle in [
+        "↑↓ select   enter open task",
+        "g graph/list",
+        "f filter",
+        "tab pages",
+        "q quit",
+    ] {
+        assert!(wide.contains(needle), "missing `{needle}`:\n{wide}");
+    }
+
+    // At 120 the row cannot hold every hint. The view keys the header already names go first,
+    // and no label is shortened to make room.
+    let narrow = screen(&mut app, 120, 30);
+    for needle in ["enter open task", "g graph/list", "+/- priority", "q quit"] {
+        assert!(narrow.contains(needle), "missing `{needle}`:\n{narrow}");
+    }
+    for dropped in ["f filter", "tab pages", "enter task", "g list", "f view"] {
+        assert!(
+            !narrow.contains(dropped),
+            "unexpected `{dropped}`:\n{narrow}"
+        );
     }
 }
 
@@ -741,7 +786,7 @@ fn a_cancelled_plan_is_marked_and_named_cancelled() {
     assert_eq!(fg(&terminal, row, column), theme.status_error.fg);
     let text = rows(&terminal).join("\n");
     assert!(
-        text.contains("cancelled · auto off · 0/2 · —"),
+        text.contains("cancelled · auto off · 0/2"),
         "the list names the status:\n{text}"
     );
 }

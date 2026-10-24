@@ -893,6 +893,12 @@ fn x_on_a_plan_counts_its_open_tasks_and_y_cancels_the_plan() {
     assert!(
         outcome
             .text
+            .starts_with(&format!("{} cancelled", fixture.plan)),
+        "the plan line comes first: {outcome:?}"
+    );
+    assert!(
+        outcome
+            .text
             .contains(&format!("{} cancelled", fixture.plan)),
         "{outcome:?}"
     );
@@ -1035,6 +1041,41 @@ fn a_cancelled_plan_refuses_plus_with_the_cli_message() {
         "P3",
         "the refusal wrote nothing"
     );
+    app.finish_action(outcome);
+
+    // At an end the cancelled plan still reaches the CLI: the footer shows its refusal, not
+    // "already P0" or "already P5".
+    for (priority, key_code) in [("P0", '+'), ("P5", '-')] {
+        fixture
+            .store
+            .change_plan(&fixture.plan, |plan| {
+                plan.priority = Some(priority.to_owned());
+                Ok(())
+            })
+            .unwrap();
+        app.refresh();
+        app.on_key(&key(KeyCode::Char(key_code)));
+        let action = app
+            .take_action()
+            .unwrap_or_else(|| panic!("{priority} at the end is not queued"));
+        assert_eq!(
+            action,
+            actions::Action::Priority {
+                plan: fixture.plan.clone(),
+                level: priority.to_owned(),
+            }
+        );
+        let outcome = actions::run(&action, &fixture.store, &actions::Library);
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.text.contains(&format!(
+                "plan `{}` is `cancelled`; a cancelled plan is final",
+                fixture.plan
+            )),
+            "{priority}: {outcome:?}"
+        );
+        app.finish_action(outcome);
+    }
 }
 
 #[test]

@@ -1472,17 +1472,19 @@ impl ArcApp {
 
     /// `+`/`-` on the plans page: the selected plan's priority one step, `+` toward `P0` and
     /// `-` toward `P5` (ADR 0048 decision 3). At an end the footer says so and nothing is
-    /// queued; the next refresh draws the new value.
+    /// queued; the next refresh draws the new value. A cancelled plan is queued even at an end,
+    /// so the CLI's refusal is what the footer shows.
     fn step_priority(&mut self, delta: i32) -> ArcKey {
         let Some(view) = self.selected_plan() else {
             return ArcKey::Ignored;
         };
         let plan = view.plan.item.id.clone();
         let current = view.plan.item.priority().to_owned();
+        let cancelled = view.plan.item.is_cancelled();
         let last = PLAN_PRIORITIES.len() as i32 - 1;
         let rank = (priority_rank(&current) as i32).min(last);
         let level = PLAN_PRIORITIES[(rank + delta).clamp(0, last) as usize].to_owned();
-        if level == current {
+        if level == current && !cancelled {
             self.result = Some(ResultLine {
                 text: format!("plan {plan} is already {current}"),
                 failed: false,
