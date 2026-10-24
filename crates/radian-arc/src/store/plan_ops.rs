@@ -177,7 +177,8 @@ fn check_task(task: &model::TaskFile) -> Result<(), Error> {
 }
 
 /// The plan's `todo.ready` tasks in the plan's order: the tasks a plan confirm reports. A
-/// task file that does not read is left out, as `show` leaves it out.
+/// task file that does not read is left out here; `show <plan>` fails on a malformed file and
+/// leaves out only a missing one.
 fn ready_tasks(store: &Store, plan: &model::PlanFile) -> Vec<String> {
     let mut tasks = Vec::new();
     for id in &plan.tasks {

@@ -339,6 +339,9 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 Hint::secondary("g", "graph/list", false),
                 Hint::secondary("f", "filter", false),
                 Hint::secondary("tab", "pages", false),
+                // The `PLANS · by <order>` heading already names the order, so this hint goes
+                // last and is the first view key the row drops when it is tight.
+                Hint::secondary("o", "order", false),
                 Hint::essential("q", "quit", false),
             ]
         }
@@ -525,12 +528,15 @@ pub(super) fn scroll_top(top: usize, selected: usize, visible: usize, len: usize
     top
 }
 
-/// The left column: `PLANS`, then each plan from `top` in two rows (the id and its summary).
-/// The summary row is three columns — the auto level, `merged/total` and the cost — each
-/// padded to the widest value the view lists (ADR 0048 decision 11).
+/// The left column: `PLANS · by <order>`, then each plan from `top` in two rows (the id and
+/// its summary). The summary row is three columns — the auto level, `merged/total` and the cost
+/// — each padded to the widest value the view lists (ADR 0048 decision 11).
 fn plan_list_lines(app: &ArcApp, rows: &[PlanRow], top: usize) -> Vec<Line<'static>> {
     let theme = &app.theme;
-    let mut out = vec![Line::from(Span::styled("PLANS", theme.hint))];
+    let mut out = vec![Line::from(Span::styled(
+        format!("PLANS · by {}", app.order.name()),
+        theme.hint,
+    ))];
     if rows.is_empty() {
         out.push(Line::default());
         out.push(Line::from(Span::styled(
@@ -1094,18 +1100,29 @@ fn draw_diff(
     remaining: usize,
     theme: &Theme,
 ) {
-    // The source line: a running attempt's worktree, and the fallback when the merge base of
-    // the remote main and the head could not be read (ADR 0048 decision 13).
+    // The source line: a running attempt's worktree, and why the range does not start at the
+    // merge base of the remote main and the head (ADR 0048 decision 13).
     let live = diff
         .diff
         .as_ref()
         .is_some_and(|diff| diff.source == radian_arc::read::DiffSource::Worktree);
-    let fallback = diff.diff.as_ref().is_some_and(|diff| diff.fallback);
-    let source = match (live, fallback) {
-        (true, true) => Some("live · worktree · no remote main"),
-        (true, false) => Some("live · worktree"),
-        (false, true) => Some("base..head · no remote main"),
-        (false, false) => None,
+    let base = diff
+        .diff
+        .as_ref()
+        .map_or(radian_arc::read::DiffBase::MergeBase, |diff| diff.base);
+    let source = match (live, base) {
+        (true, radian_arc::read::DiffBase::MergeBase) => Some("live · worktree"),
+        (true, radian_arc::read::DiffBase::NoRemoteMain) => {
+            Some("live · worktree · no remote main")
+        }
+        (true, radian_arc::read::DiffBase::Unrelated) => {
+            Some("live · worktree · no merge base with main")
+        }
+        (false, radian_arc::read::DiffBase::MergeBase) => None,
+        (false, radian_arc::read::DiffBase::NoRemoteMain) => Some("base..head · no remote main"),
+        (false, radian_arc::read::DiffBase::Unrelated) => {
+            Some("base..head · no merge base with main")
+        }
     };
     if let Some(text) = source {
         lines.push(rail(theme, Line::from(Span::styled(text, theme.hint))));

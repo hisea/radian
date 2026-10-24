@@ -233,18 +233,18 @@ fn load(store: &Store, id: &str) -> Option<TaskFile> {
 ///
 /// It is where the task would stand at this moment, not a promise.
 pub fn queue_position(store: &Store, task_id: &str) -> Result<(usize, usize), Error> {
-    let mut views = store.plans()?;
-    views.sort_by(|one, other| model::claim_order(&one.plan.item, &other.plan.item));
     let mut order = Vec::new();
-    for view in &views {
-        for task in &view.tasks {
-            let is_ready = task.item.state == TaskState::Todo && task.item.phase == "ready";
-            if is_ready || task.item.id == task_id {
-                order.push(task.item.id.clone());
-            }
+    for id in crate::run::task_claim_order(store)? {
+        let loaded = store.load_task(&id);
+        let ready = loaded.as_ref().is_ok_and(|loaded| {
+            loaded.item.state == TaskState::Todo && loaded.item.phase == "ready"
+        });
+        if ready || (id == task_id && loaded.is_ok()) {
+            order.push(id);
         }
     }
-    // A task its plan no longer lists (an adopted hand edit) still has a place: the end.
+    // A task its plan no longer lists (an adopted hand edit) still has a place: the end, where
+    // `task_claim_order` sorts it.
     match order.iter().position(|id| id == task_id) {
         Some(index) => Ok((index + 1, order.len())),
         None => Ok((order.len() + 1, order.len() + 1)),
