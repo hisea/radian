@@ -358,6 +358,20 @@ the `find`/replace from `followup_items`. M3 writes `self.text` again in `Review
 | TK0045-M2 | drop the deduplication (every round's item is carried) | `review::a_followup_holds_every_round_grouped_and_drops_a_repeat` (the repeat is under both rounds) | ✅ failed |
 | TK0045-M3 | keep the duplicated level tag in `Display` (write `self.text`) | `review::a_rework_brief_prints_a_duplicated_level_tag_once`, `review::a_followup_brief_prints_a_duplicated_level_tag_once` | ✅ 2 failed |
 | TK0045-M4 | propose a follow-up for a merged follow-up task (drop the `is_followup` guard) | `review::a_merge_of_a_followup_task_proposes_no_followup` (it gets `TK0003-…-followups-followups`) | ✅ failed |
+
+## TK0048: a running attempt's session id is known from its claim (2026-10-24, branch `work/TK0048-running-attempt-session`)
+
+The claim wrote `start.json` without the session it decided on, so `attempt_session_id` could
+only answer once the wrapper had ended and written `execution.json`; a running attempt had no
+session id, and `show` and the arc TUI missed its journal. The claim now writes `session_id`
+into `start.json`, and `attempt_session_id` takes the first record that names one:
+`execution.json`, then `identity.json`, then `start.json`. Each mutation was applied by hand to
+the working file, restored from a copy under `.radian/mut/` with `cp`, and compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0048-M1 | the claim omits `session_id` from `start.json` | ✅ 2 failed | `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (the running attempt answers `None`, and `show --json` prints `null`) |
+| TK0048-M2 | `attempt_session_id` reads `execution.json` only again | ✅ 3 failed | `attempt::a_session_id_is_read_from_the_identity_record_when_execution_is_missing`, `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (no `execution.json` exists before the wrapper ends) |
 ## TK0035 (a refused integration, the wrapper setup and the heartbeat)
 
 TK0035-M1–M3 were run against `29d77904`, each applied to the committed file, restored from a
