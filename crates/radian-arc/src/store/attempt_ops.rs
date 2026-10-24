@@ -981,9 +981,9 @@ fn session_id_in(path: &Path) -> Option<String> {
 }
 
 /// The notes the wrapper recorded for one attempt (ADR 0048 decision 7): a line such as
-/// `worker-brief.md skipped: <reason>`. The wrapper writes them to `execution.json`; an
-/// attempt that ended before that record was written leaves none, and so does a worker-less
-/// `reverify` attempt. `show` prints every one.
+/// `worker-brief.md skipped: <reason>` or `verdict copy skipped: <path>: <reason>`. The wrapper
+/// writes them to `execution.json`; an attempt that ended before that record was written leaves
+/// none, and so does a worker-less `reverify` attempt. `show` prints every one.
 pub fn attempt_notes(store: &Store, task: &str, attempt: u32) -> Vec<String> {
     [
         run_dir(store, task, attempt).join("execution.json"),

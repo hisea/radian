@@ -66,6 +66,15 @@ arc 是一个程序，不是模型：计划由一个 lead 会话来写，跑什�
 
 一个需求是这样走完的：
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/arc-flow-zh-dark.png">
+    <img src=".github/readme/arc-flow-zh-light.png" alt="arc：一个任务从需求到合并" width="820">
+  </picture>
+  <br><sub>一个任务从需求到合并，按这个仓库自己的跑法：图里的门禁（fmt、clippy、测试）是本仓库自己的。</sub>
+</p>
+
+
 1. lead（Claude Code 或 radian TUI）通过 arc 的 MCP 服务器 `radian arc mcp` 写计划和任务。lead 不能确认、启动或合并任何东西。
 2. 你确认计划。计划的 `auto` 级别是 `off` 时，每个任务由你自己启动；是 `run` 时，arc 会在任务所等的任务合并之后自己启动它。
 3. 每个任务是一个独立的无头 `radian exec` worker，有自己的 git worktree、自己的分支和自己的会话日志。

@@ -66,6 +66,15 @@ arc is a program, not a model: a lead session writes the plan, and you decide wh
 
 How a request moves:
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/arc-flow-en-dark.png">
+    <img src=".github/readme/arc-flow-en-light.png" alt="arc: one task from request to merge" width="820">
+  </picture>
+  <br><sub>One task from request to merge, as this repository runs it: the gate shown (fmt, clippy, tests) is this repository's own.</sub>
+</p>
+
+
 1. A lead (Claude Code or the radian TUI) writes a plan and its tasks through arc's MCP server, `radian arc mcp`. The lead cannot confirm, start or merge anything.
 2. You confirm the plan. With the plan's `auto` level at `off` you start each task yourself; at `run` arc starts a task once the tasks it waits for are merged.
 3. Each task runs as a separate headless `radian exec` worker, in its own git worktree, on its own branch, with its own session journal.
