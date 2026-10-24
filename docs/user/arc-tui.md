@@ -117,14 +117,14 @@ Then a `summary` frame: the `review` stage's `summary` (or a weak `no review sta
 `Esc` goes back exactly one level, from the innermost thing open:
 
 1. an open float (a confirmation, the reject note): closes it, changing nothing, as `n` does;
-2. an overlay view: the `L` loop log, a merge page command log, the board's finished list (`d`): closes it;
+2. an overlay view that is on screen: the `L` loop log, a merge page command log, the board's finished list (`d`): closes it;
 3. the merge page: back to the task page or the board it was opened from;
 4. the task page: back to the plans page or the board it was opened from, with that page's selection kept;
 5. the board: back to the plans page;
 6. the plans page with the task column focused: the focus returns to the plan column, the plan selection kept;
 7. the plans page with the plan column focused (the top level): nothing happens, and the footer shows one weak line, `q quits`, until the next key.
 
-`Esc` never quits the TUI. `q` quits from every page and every overlay (see [Quitting](#quitting)), with one exception: while the reject note takes input, `q` is a letter of the note. `Ctrl-C` quits always, the reject note included. The footer shows `esc back` wherever `Esc` has somewhere to go and `q quit` on every page; the top level shows no `esc back`.
+`Esc` never quits the TUI. A view a later page hides is not a level: `b` from the merge page shows the board with the merge page and its command log still below it, and a task opened from the finished list leaves that list below it, so `Esc` returns to the visible page and the hidden view is still there when you come back to it. `q` quits from every page and every overlay (see [Quitting](#quitting)), with one exception: while the reject note takes input, `q` is a letter of the note. `Ctrl-C` quits always, the reject note included. The footer shows `esc back` wherever `Esc` has somewhere to go and `q quit` on every page; the top level shows no `esc back`.
 
 ## The owner's actions
 
