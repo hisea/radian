@@ -769,10 +769,7 @@ fn merge_auto(
 fn after_merged(store: &Store, task: &model::TaskFile) -> Result<bool, Error> {
     for id in &task.after {
         let loaded = store.load_task(id)?;
-        if loaded.changed_outside_arc
-            || loaded.item.state != TaskState::Done
-            || loaded.item.phase != "merged"
-        {
+        if loaded.changed_outside_arc || !loaded.item.is_merged() {
             return Ok(false);
         }
     }
@@ -803,7 +800,7 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
         let open: Vec<&crate::store::Loaded<model::TaskFile>> = view
             .tasks
             .iter()
-            .filter(|task| !(task.item.state == TaskState::Done && task.item.phase == "merged"))
+            .filter(|task| !task.item.is_merged())
             .collect();
         if open.is_empty() && !view.plan.changed_outside_arc {
             continue;
@@ -850,9 +847,9 @@ pub fn waiting_reason(
                     .after
                     .iter()
                     .filter(|id| {
-                        store.load_task(id).is_ok_and(|loaded| {
-                            loaded.item.state != TaskState::Done || loaded.item.phase != "merged"
-                        })
+                        store
+                            .load_task(id)
+                            .is_ok_and(|loaded| !loaded.item.is_merged())
                     })
                     .map(String::as_str)
                     .collect();

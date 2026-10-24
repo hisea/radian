@@ -1261,7 +1261,7 @@ impl ArcApp {
             let Some(dependency) = dependency else {
                 return Some(format!("`after` names a task that does not exist: {id}"));
             };
-            if !(dependency.state == TaskState::Done && dependency.phase == "merged") {
+            if !dependency.is_merged() {
                 waiting.push(format!(
                     "{} ({}.{})",
                     dependency.id,
@@ -2011,7 +2011,7 @@ fn plan_row(view: &PlanView, tasks: Vec<TaskRow>) -> PlanRow {
     let merged = view
         .tasks
         .iter()
-        .filter(|task| task.item.state == TaskState::Done && task.item.phase == "merged")
+        .filter(|task| task.item.is_merged())
         .count();
     let mark = plan_mark(view);
     let costs: Vec<f64> = view
@@ -2141,10 +2141,7 @@ fn dependencies(view: &PlanView, task: &TaskFile) -> (Vec<String>, Vec<String>) 
             .iter()
             .find(|candidate| candidate.item.id == *parent && candidate.item.id != task.id);
         if let Some(found) = found {
-            parents.push((
-                found.item.id.clone(),
-                found.item.state == TaskState::Done && found.item.phase == "merged",
-            ));
+            parents.push((found.item.id.clone(), found.item.is_merged()));
         }
     }
     let also_after = parents

@@ -222,9 +222,7 @@ impl PlanView {
     pub fn is_finished(&self) -> bool {
         !self.plan.item.is_cancelled()
             && !self.tasks.is_empty()
-            && self.tasks.iter().all(|task| {
-                task.item.state == model::TaskState::Done && task.item.phase == "merged"
-            })
+            && self.tasks.iter().all(|task| task.item.is_merged())
     }
 }
 
