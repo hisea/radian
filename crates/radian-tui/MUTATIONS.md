@@ -2451,10 +2451,12 @@ file was restored from a copy under `.radian/mut-bak/` (`git status --short` emp
 | TK0018-M1 | `M` on the merge page queues the merge without the confirmation float (`queue_action` instead of `merge_float`) | ✅ 1 failed | `arc_merge::the_merge_key_asks_and_n_changes_nothing_while_y_merges` (no `Float::Confirm` to answer `n`/`y`) |
 | TK0018-M2 | the merge view keeps the marks after the branch moved (`let moved = false;`, so `head_sha != verified_sha` no longer invalidates a verdict) | ✅ 1 failed | `arc_merge::a_moved_branch_turns_every_mark_weak_and_says_the_task_is_back_in_verification` (the moved row is gone and `✓ commands` remains) |
 | TK0018-M3 | the merge action shells out to `radian arc merge` instead of calling `review::merge` | ✅ 1 failed | `arc_merge::the_merge_action_calls_the_library_not_a_subprocess` (the recording `ArcOps` sees no `merge` call, and the action's line is not the library result's) |
+| TK0018-M4 | the stage rows come only from the profile: `extra_stages` is collected but `in_profile` ignores it | ✅ 1 failed | `arc_merge::a_task_whose_extra_stages_list_review_shows_its_review_and_summary` (the row is `◻ review` instead of `✓ review`, so the summary says the profile has no review) |
+| TK0018-M5 | `q` quits before the float sees it (the `q` check moved above the open-float branch) | ✅ 1 failed | `arc_merge::a_q_in_the_reject_note_is_typed_and_does_not_quit` (`on_key` returns `Quit` on the `q` of `fix quickly`, not `Redraw`) |
+| TK0018-M6 | the log is read whole (`let cut = 0;` in `read_log_tail`) | ✅ 1 failed | `arc_merge::a_log_is_read_from_its_end_so_a_giant_one_is_bounded` (the "tail" is the whole 2 MiB file, over `LOG_BYTES`) |
 
-3/3 caught. M2 mutates `radian-arc`'s read function (`src/read.rs`), which this crate's tests
-exercise; the other two are in `radian-tui`.
-| TK0033-tui-pages-continued-M1 | the journal is looked up by the task id only, never by the attempt's `execution.json` session id | ✅ 1 failed | `the_conversation_tab_renders_the_selected_attempts_worker_journal` (the lookup finds attempt 1's `<task>.jsonl` instead of attempt 2's `<task>-2.jsonl`, so the screen shows `the first attempt` and the assertion on `the worker said hello` fails) |
+6/6 caught. M2 and M4 mutate `radian-arc`'s read function (`src/read.rs`), which this crate's
+tests exercise; the others are in `radian-tui`.
 
 ## TK0040: every TUI list keeps the selected row visible (2026-10-23, branch `work/TK0040-tui-pages-continued-followups`)
 
@@ -2516,3 +2518,22 @@ Base: the branch's first commit. The mutation was applied by hand to
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0049-M1 | drop `RADIAN_VERIFY_MIN_FREE_GIB` from the usage block | ✅ 1 failed | `arc_gate_without_arguments_exits_two_and_help_exits_zero` (the help did not name the two limits) |
+
+## TK0057: the merge page's command log (2026-10-24, branch `work/TK0057-tui-merge-actions-followups`)
+
+The review of TK0018 found two faults in the off-thread command log. `read_log_tail` dropped
+its first line whenever the cut was non-zero, even when the cut landed on a line start; it
+now reads the byte before the cut and keeps that line when it is a newline. `open_log` had no
+in-flight guard and `apply_log` matched only the task id, so two Enter presses in quick
+succession could open the earlier command's log; `ArcApp` now holds the pending request, one
+read runs at a time, and a reply for anything else is dropped. Each mutation was applied by
+hand to the committed file, the named test was run alone with `--profile sandbox
+--no-fail-fast`, and the file was restored from a copy under `.radian/mut-bak/`
+(`git status --short` empty afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0057-M1 | `read_log_tail` drops through the first newline whenever `cut > 0`, even when the cut lands on a line start (`if cut == 0`, no `at_line_start`) | ✅ 1 failed | `arc_merge::a_log_cut_exactly_on_a_line_start_keeps_that_whole_line` (the tail starts at `2:xxx…`, so the whole first line is lost) |
+| TK0057-M2 | the pending request is not tracked: `take_log_request` records nothing, `open_log` has no guard and `apply_log` checks only the task id | ✅ 1 failed | `arc_merge::one_log_is_in_flight_and_a_stale_reply_is_dropped` (the second Enter queues another read: `take_log_request` is `Some`) |
+
+2/2 caught.
