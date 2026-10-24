@@ -317,6 +317,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 Hint::new("+/-", "priority", !priority),
                 Hint::secondary("g", "graph/list", false),
                 Hint::secondary("f", "filter", false),
+                Hint::secondary("o", "order", false),
                 Hint::secondary("tab", "pages", false),
                 Hint::essential("q", "quit", false),
             ]
@@ -454,12 +455,15 @@ fn scroll_top(top: usize, selected: usize, visible: usize, len: usize) -> usize 
     top
 }
 
-/// The left column: `PLANS`, then each plan from `top` in two rows (the id and its summary).
-/// The summary row is three columns — the auto level, `merged/total` and the cost — each
-/// padded to the widest value the view lists (ADR 0048 decision 11).
+/// The left column: `PLANS · by <order>`, then each plan from `top` in two rows (the id and
+/// its summary). The summary row is three columns — the auto level, `merged/total` and the cost
+/// — each padded to the widest value the view lists (ADR 0048 decision 11).
 fn plan_list_lines(app: &ArcApp, rows: &[PlanRow], top: usize) -> Vec<Line<'static>> {
     let theme = &app.theme;
-    let mut out = vec![Line::from(Span::styled("PLANS", theme.hint))];
+    let mut out = vec![Line::from(Span::styled(
+        format!("PLANS · by {}", app.order.name()),
+        theme.hint,
+    ))];
     if rows.is_empty() {
         out.push(Line::default());
         out.push(Line::from(Span::styled(
