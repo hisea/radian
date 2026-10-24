@@ -70,7 +70,7 @@ fn tool_app() -> App {
     app
 }
 
-fn entry(app: &App) -> &radian_tui::Entry {
+fn image_entry(app: &App) -> &radian_tui::Entry {
     app.session
         .entries
         .iter()
@@ -86,7 +86,7 @@ fn a_user_image_gets_a_fixed_run_under_its_placeholder() {
         ContentPart::text("look at this"),
         image_part("shot.gif"),
     ]);
-    let entry = entry(&app);
+    let entry = image_entry(&app);
     assert_eq!(entry.kind, EntryKind::User);
     let all = modes(ToolFold::Expanded);
     let lines = blocks::layout(entry, &[], all, 80);
@@ -177,7 +177,7 @@ fn the_window_reports_a_run_only_when_the_whole_run_is_visible() {
 #[test]
 fn a_folded_tool_result_shows_the_placeholder_but_not_the_image() {
     let app = tool_app();
-    let entry = entry(&app);
+    let entry = image_entry(&app);
 
     let collapsed = blocks::layout(entry, &[], modes(ToolFold::Collapsed), 80);
     let texts: Vec<&str> = collapsed.iter().map(|line| line.text.as_str()).collect();
@@ -206,6 +206,31 @@ fn a_folded_tool_result_shows_the_placeholder_but_not_the_image() {
     // The default `errors` fold is folded for a successful result.
     let errors = blocks::layout(entry, &[], modes(ToolFold::Errors), 80);
     assert!(errors.iter().all(|line| line.image.is_none()), "{errors:?}");
+
+    // A failed result's body is never folded (ADR 0028 R4), so its image draws under every
+    // fold.
+    let mut failed = ToolResult::success(
+        "c2".to_owned(),
+        vec![
+            ContentPart::text("the image could not be read"),
+            image_part("broken.gif"),
+        ],
+    );
+    failed.is_error = true;
+    failed.error_code = Some("image_too_large".to_owned());
+    let mut app = App::new("m", "s");
+    app.push_message(&Message::Tool {
+        result: failed,
+        meta: MessageMeta::default(),
+    });
+    let failed_entry = image_entry(&app);
+    for fold in [ToolFold::Collapsed, ToolFold::Errors, ToolFold::Expanded] {
+        let lines = blocks::layout(failed_entry, &[], modes(fold), 80);
+        assert!(
+            lines.iter().any(|line| line.image.is_some()),
+            "a failed result keeps its image rows under {fold:?}: {lines:?}"
+        );
+    }
 }
 
 /// ADR 0028 R10: the image's own rows carry no characters. Selection copies the placeholder
@@ -259,7 +284,7 @@ fn a_broken_image_draws_only_its_placeholder() {
         *data = "not base64 at all".to_owned();
     }
     let app = user_app(vec![ContentPart::text("look"), part.clone()]);
-    let entry = entry(&app);
+    let entry = image_entry(&app);
     let all = modes(ToolFold::Expanded);
     let texts = blocks::body_text_lines(entry, all, 80);
     assert!(
@@ -287,7 +312,7 @@ fn a_broken_image_draws_only_its_placeholder() {
 #[test]
 fn a_tool_image_placeholder_is_a_body_row() {
     let app = tool_app();
-    let entry = entry(&app);
+    let entry = image_entry(&app);
     let lines = blocks::layout(entry, &[], modes(ToolFold::Collapsed), 80);
     let placeholder = lines
         .iter()

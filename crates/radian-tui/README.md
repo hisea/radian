@@ -1011,8 +1011,9 @@ throwaway terminal, not your working one.
    placeholders that scroll and fold with the text, iTerm2/WezTerm the iTerm2 protocol,
    Terminal.app half blocks; in tmux the picture still appears after the probe turned on
    `allow-passthrough` for the pane. The user message's image always draws; the `read`
-   result's image draws only when the body does (folded `errors`/`collapsed` shows the
-   placeholder line only, `Ctrl-O` expands it).
+   result's image draws only when the body does (a successful result under the default
+   `errors` fold shows the placeholder line only; `Ctrl-O` expands the body and the image; a
+   failed call, whose body is never folded, always draws it).
    *Look*: are the image rows aligned with the text column (not the marker column), is the
    placeholder line legible above it, does a partly scrolled image disappear cleanly rather
    than shear, and does `Ctrl-P`'s `images:` line name the protocol you expected?

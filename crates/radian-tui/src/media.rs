@@ -88,14 +88,14 @@ pub fn images_of(parts: &[ContentPart]) -> Vec<EntryImage> {
     parts.iter().filter_map(EntryImage::from_part).collect()
 }
 
-/// Whether a tool result's image rows draw (ADR 0028 R10): only when its body is drawn in
-/// full. A user message has no fold, so its images always draw.
+/// Whether a tool result's image rows draw (ADR 0028 R10): when its body is drawn in full —
+/// expanded, or a failed result, whose body is never folded (ADR 0028 R4). A user message has
+/// no fold, so its images always draw.
 pub fn rows_visible(entry: &Entry, modes: DisplayModes) -> bool {
     if entry.kind != EntryKind::ToolResult {
         return true;
     }
-    crate::blocks::expanded(entry, modes.tools.fold == ToolFold::Expanded)
-        || (modes.tools.fold == ToolFold::Errors && entry.is_error)
+    entry.is_error || crate::blocks::expanded(entry, modes.tools.fold == ToolFold::Expanded)
 }
 
 /// The image's width in columns: its aspect ratio at [`IMAGE_HEIGHT_ROWS`] rows, from the
