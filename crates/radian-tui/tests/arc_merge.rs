@@ -1605,6 +1605,49 @@ fn enter_on_a_command_row_opens_its_log_and_esc_closes_it() {
 }
 
 #[test]
+fn l_closes_the_command_log_and_opens_the_loop_log() {
+    let fixture = Fixture::new("log-key", &["commands", "human"]);
+    fs::write(fixture.repo.join("fmt.log"), "fmt output\n").unwrap();
+    fs::write(fixture.repo.join("clippy.log"), "clippy output\n").unwrap();
+    fs::write(fixture.repo.join("test.log"), "test output\n").unwrap();
+    fixture.write(&mut fixture.commands(true, None));
+    let mut app = fixture.app();
+    app.on_key(&key(KeyCode::Enter));
+    let request = app.take_log_request().expect("the log request");
+    let text = radian_tui::arc::read_log_tail(&request.path).expect("the log reads");
+    assert!(app.apply_log(&request, Ok(text)));
+    assert!(app.merge.as_ref().unwrap().log.is_some());
+
+    // `L` opens the loop's log above the page; the command log closes, because the command
+    // log frame draws above the loop log and would hide the view `L` opened.
+    assert_eq!(app.on_key(&key(KeyCode::Char('L'))), ArcKey::Redraw);
+    assert!(app.log_open);
+    assert!(app.merge.as_ref().unwrap().log.is_none());
+    let text = screen(&mut app, 120, 40);
+    assert!(text.contains("╭─ log"), "the loop log is drawn:\n{text}");
+    assert!(text.contains("no loop log yet"), "{text}");
+    assert!(
+        !text.contains("fmt output"),
+        "the command log still covers the loop log:\n{text}"
+    );
+    // A second `L` closes the loop log; the command log stays closed.
+    assert_eq!(app.on_key(&key(KeyCode::Char('L'))), ArcKey::Redraw);
+    assert!(!app.log_open);
+    assert!(app.merge.as_ref().unwrap().log.is_none());
+
+    // A command log still being read when `L` is pressed closes too: its late reply does not
+    // reopen it above the loop log.
+    app.on_key(&key(KeyCode::Enter));
+    let late = app.take_log_request().expect("the log request");
+    app.on_key(&key(KeyCode::Char('L')));
+    assert!(!app.apply_log(&late, Ok("late output\n".to_owned())));
+    assert!(app.merge.as_ref().unwrap().log.is_none());
+    let text = screen(&mut app, 120, 40);
+    assert!(text.contains("╭─ log"), "{text}");
+    assert!(!text.contains("late output"), "{text}");
+}
+
+#[test]
 fn enter_on_a_command_row_opens_its_log_in_a_scrollable_frame() {
     let fixture = Fixture::new("log-scroll", &["commands", "human"]);
     let long: String = (1..=40).map(|i| format!("log line {i}\n")).collect();

@@ -2726,3 +2726,22 @@ and the file was restored from a copy under `.radian/backup/` with `cp`, then co
 
 2/2 caught. TK0076-M2 (the diff range) mutates `radian-arc` and is recorded in
 `crates/radian-arc/MUTATIONS.md`.
+
+## TK0077: the loop follow-ups from the TK0019 review (2026-10-24, branch `work/TK0077-tui-loop-followups`)
+
+The review of TK0019 found that `L` on the merge page opened the loop log under an open command
+log, so nothing appeared, and that the plans footer advertised neither `R` nor `L`. The command
+log now closes when `L` opens the loop log, the plans footer carries both hints, and the loop
+sections of `docs/user/arc-tui.md` and `docs/user/arc.md` now say that a start is followed
+through its child's pid and that the pid appears only when the holder recorded one. Each mutation
+was applied by hand to the working file, the named test was run alone, and the file was restored
+afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0077-M1 | `L` toggles the loop log without closing the merge page's command log | ✅ 1 failed | `arc_merge::l_closes_the_command_log_and_opens_the_loop_log` (`app.merge...log` is still `Some`) |
+| TK0077-M2 | the plans footer omits the `R start loop` hint | ✅ 1 failed | `arc_tui::the_hints_keep_their_old_labels_and_drop_when_narrow` (`R start loop` is missing at 170 columns) |
+| TK0077-M3 | the plans footer omits the `L log` hint | ✅ 1 failed | `arc_tui::the_hints_keep_their_old_labels_and_drop_when_narrow` (`L log` is missing at 170 columns) |
+| TK0077-M4 | `L` closes the command log but leaves its in-flight read pending | ✅ 1 failed | `arc_merge::l_closes_the_command_log_and_opens_the_loop_log` (the late reply opens the command log again) |
+
+4/4 caught.

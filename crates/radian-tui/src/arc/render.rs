@@ -330,6 +330,12 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 Hint::new("p", "pause", !auto_on),
                 Hint::new("s", "start", app.start_blocker().is_some()),
                 Hint::new("+/-", "priority", !priority),
+                Hint::new(
+                    "R",
+                    "start loop",
+                    app.loop_status != super::looping::LoopStatus::Stopped,
+                ),
+                Hint::new("L", "log", false),
                 Hint::secondary("g", "graph/list", false),
                 Hint::secondary("f", "filter", false),
                 Hint::secondary("tab", "pages", false),
