@@ -15,7 +15,7 @@ Waiting for you, a `retry_at` in the future, a running worker, or a running gate
 A task of a plan at `auto` `off` is never started or merged by `run`; its verification still advances.
 A task of a `cancelled` plan is never claimed, gated or merged, and a cancelled plan is not listed in the summary.
 
-The arc TUI never runs this pass itself: when no loop holds the lock it starts `radian arc serve` as a detached process (see [the TUI](index.md#the-tui) and [`arc/tui`](tui.md#the-loop)). A TUI and a loop (`run` or `serve`) exclude each other through `runner.lock`: a second loop that cannot get it exits `4`.
+The arc TUI never runs this pass itself: when no loop holds the lock it starts `radian arc serve` as a detached process (see [`arc/tui`](tui.md#the-loop)). A TUI and a loop (`run` or `serve`) exclude each other through `runner.lock`: a second loop that cannot get it exits `4`.
 Quitting the TUI never stops a loop, whether the TUI started it or not.
 
 Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](files.md#configtoml)).
