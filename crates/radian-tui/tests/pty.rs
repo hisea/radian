@@ -13945,6 +13945,27 @@ async fn pty_attach_without_an_id_and_no_sessions_says_so_without_a_screen() {
 
 // ---------- ADR 0048: the arc TUI ----------
 
+/// One git command in `dir`, asserting success and returning its trimmed stdout.
+fn arc_git(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "arc test")
+        .env("GIT_AUTHOR_EMAIL", "arc@example.com")
+        .env("GIT_COMMITTER_NAME", "arc test")
+        .env("GIT_COMMITTER_EMAIL", "arc@example.com")
+        .args(["-c", "core.hooksPath="])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
 /// A git repository `radian arc` is set up in: a `main` branch and arc's own store.
 fn arc_test_repo(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
@@ -14006,6 +14027,67 @@ fn arc_test_repo(dir: &Path) {
         .expect("the task is created");
 }
 
+/// A repository with a bare `origin` and one task verified into `review.awaiting_human`:
+/// the merge page's precondition. Returns the task id.
+fn arc_merge_repo(dir: &Path) -> String {
+    std::fs::create_dir_all(dir).unwrap();
+    let origin = dir.with_file_name(format!(
+        "{}-origin.git",
+        dir.file_name().unwrap().to_string_lossy()
+    ));
+    arc_git(dir, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    arc_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    arc_git(dir, &["init", "-q"]);
+    arc_git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+    arc_git(dir, &["add", "README.md"]);
+    arc_git(dir, &["commit", "-q", "-m", "first"]);
+    arc_git(dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    arc_git(dir, &["push", "-q", "-u", "origin", "main"]);
+    arc_git(dir, &["remote", "set-head", "origin", "main"]);
+
+    radian_arc::store::Store::init(dir, false).expect("arc init");
+    let store = radian_arc::store::Store::open(dir).expect("the store opens");
+    let plan = store
+        .add_plan("tui", "the TUI plan", "a request\n")
+        .unwrap();
+    let task = store
+        .add_task(
+            &plan,
+            "one",
+            "the first task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .unwrap();
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+
+    let base = arc_git(dir, &["rev-parse", "refs/remotes/origin/main"]);
+    let branch = format!("work/{task}");
+    arc_git(dir, &["checkout", "-q", "-B", &branch, &base]);
+    std::fs::write(dir.join("feature.txt"), "feature\n").unwrap();
+    arc_git(dir, &["add", "feature.txt"]);
+    arc_git(dir, &["commit", "-q", "-m", "feature"]);
+    let head = arc_git(dir, &["rev-parse", "HEAD"]);
+    arc_git(dir, &["push", "-q", "origin", &branch]);
+    arc_git(dir, &["checkout", "-q", "main"]);
+    store
+        .change_task(&task, |task| {
+            task.state = radian_arc::store::model::TaskState::Review;
+            task.phase = "verifying".to_owned();
+            task.attempt = 1;
+            task.attempt_id = Some(format!("{}-1", task.id));
+            task.base_sha = Some(base.clone());
+            task.head_sha = Some(head.clone());
+            Ok(())
+        })
+        .unwrap();
+    radian_arc::review::verify(&store, &task).expect("verification runs");
+    task
+}
+
 /// `radian arc` opens on the plans page, `Enter` opens the selected task, `Tab` switches
 /// between the plans and task pages, and `q` leaves with the terminal restored.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -14061,6 +14143,70 @@ async fn pty_arc_opens_switches_pages_and_quits() {
         pty.wait_for_screen("conversation", wait_positive()),
         "Tab did not reopen the task page:\n{}",
         pty.screen()
+    );
+
+    pty.send(b"q");
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "q must quit the arc view:\n{}",
+        pty.screen()
+    );
+}
+
+/// The owner acts from the TUI: `m` opens the merge page of a `review.awaiting_human` task,
+/// `M` asks for confirmation, and `y` merges through the library — the footer then shows
+/// `done.merged` and the remote main holds the task's commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_arc_merges_a_verified_task_from_the_merge_page() {
+    let scratch = TempDir::new("arc-merge-tui");
+    let repo = scratch.path().join("repo");
+    let task = arc_merge_repo(&repo);
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 120);
+    assert!(
+        pty.wait_for_screen("PLANS", wait_positive()),
+        "the plans page is not on screen:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("review.awaiting_human", wait_positive()),
+        "the verified task is not listed:\n{}",
+        pty.screen()
+    );
+
+    // Enter opens the task page, `m` its merge page.
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("conversation", wait_positive()),
+        "the task page did not open:\n{}",
+        pty.screen()
+    );
+    pty.send(b"m");
+    assert!(
+        pty.wait_for_screen(&format!("{task} verified"), wait_positive()),
+        "`m` did not open the merge page:\n{}",
+        pty.screen()
+    );
+    // `M` asks first; `y` confirms.
+    pty.send(b"M");
+    assert!(
+        pty.wait_for_screen(&format!("merge {task} onto main?"), wait_positive()),
+        "the merge key did not ask:\n{}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("done.merged", wait_positive()),
+        "the footer does not show the merge's line:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        arc_git(&repo, &["ls-remote", "origin", "refs/heads/main"])
+            .split_whitespace()
+            .next()
+            .unwrap_or_default(),
+        arc_git(&repo, &["rev-parse", &format!("refs/heads/work/{task}")]),
+        "main holds the task's commit"
     );
 
     pty.send(b"q");

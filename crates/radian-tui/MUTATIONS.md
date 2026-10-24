@@ -2437,6 +2437,23 @@ afterwards.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
+| TK0033-tui-pages-continued-M1 | the journal is looked up by the task id only, never by the attempt's `execution.json` session id | ✅ 1 failed | `the_conversation_tab_renders_the_selected_attempts_worker_journal` (a `fresh` attempt's `<task>-2.jsonl` is not found, so the screen says `no session journal yet`) |
+
+## TK0018: the merge page and the owner's actions (2026-10-23, branch `work/TK0018-tui-merge-actions`)
+
+The merge page draws the stage rows from `radian_arc::read::merge_view` and the owner's keys
+run the CLI's library calls through `arc::actions`. Each mutation was applied by hand to the
+committed file, the named test was run alone with `--profile sandbox --no-fail-fast`, and the
+file was restored from a copy under `.radian/mut-bak/` (`git status --short` empty afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0018-M1 | `M` on the merge page queues the merge without the confirmation float (`queue_action` instead of `merge_float`) | ✅ 1 failed | `arc_merge::the_merge_key_asks_and_n_changes_nothing_while_y_merges` (no `Float::Confirm` to answer `n`/`y`) |
+| TK0018-M2 | the merge view keeps the marks after the branch moved (`let moved = false;`, so `head_sha != verified_sha` no longer invalidates a verdict) | ✅ 1 failed | `arc_merge::a_moved_branch_turns_every_mark_weak_and_says_the_task_is_back_in_verification` (the moved row is gone and `✓ commands` remains) |
+| TK0018-M3 | the merge action shells out to `radian arc merge` instead of calling `review::merge` | ✅ 1 failed | `arc_merge::the_merge_action_calls_the_library_not_a_subprocess` (the recording `ArcOps` sees no `merge` call, and the action's line is not the library result's) |
+
+3/3 caught. M2 mutates `radian-arc`'s read function (`src/read.rs`), which this crate's tests
+exercise; the other two are in `radian-tui`.
 | TK0033-tui-pages-continued-M1 | the journal is looked up by the task id only, never by the attempt's `execution.json` session id | ✅ 1 failed | `the_conversation_tab_renders_the_selected_attempts_worker_journal` (the lookup finds attempt 1's `<task>.jsonl` instead of attempt 2's `<task>-2.jsonl`, so the screen shows `the first attempt` and the assertion on `the worker said hello` fails) |
 
 ## TK0040: every TUI list keeps the selected row visible (2026-10-23, branch `work/TK0040-tui-pages-continued-followups`)
