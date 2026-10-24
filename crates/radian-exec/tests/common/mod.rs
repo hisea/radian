@@ -18,45 +18,6 @@ use std::sync::{Mutex, Once};
 
 static DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// A unique directory under the system temp dir, removed on drop.
-pub struct TempDir(PathBuf);
-
-impl TempDir {
-    pub fn new(label: &str) -> Self {
-        let n = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!(
-            "radian-exec-long-session-{}-{label}-{n}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl std::ops::Deref for TempDir {
-    type Target = Path;
-
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl AsRef<Path> for TempDir {
-    fn as_ref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 /// A unique directory under `$TMPDIR`, removed when the test process exits. Under nextest
 /// every test is its own process, so that is the end of the test; the spawned `radian` child
 /// writes its HOME, sessions and cache inside it, so they go with it.
