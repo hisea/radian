@@ -1553,9 +1553,55 @@ fn open_verdict(path: &Path, runs: &Path) -> Result<File, String> {
 }
 
 /// Writes a verdict copy under `worktree` without following a symbolic link at any component.
-/// The worker controls its worktree between attempts, so a link planted at `.radian/` or at a
-/// copy path must not let the wrapper write outside the worktree (ADR 0048 decision 7).
+/// The worker controls its worktree between attempts: it can plant a link at `.radian/` or at a
+/// copy path, and a process it left behind can rename a directory the wrapper already looked at
+/// and put a link in its place. On unix every directory is therefore opened once, without
+/// following a link, and descended by handle, so a name swapped after a directory is created or
+/// checked cannot redirect the write (ADR 0048 decision 7).
 fn write_verdict_copy(worktree: &Path, relative: &Path, bytes: &[u8]) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        write_verdict_copy_at(worktree, relative, bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        write_verdict_copy_by_path(worktree, relative, bytes)
+    }
+}
+
+/// The descriptor-relative form of [`write_verdict_copy`]: no copy path is resolved twice
+/// (ADR 0048 decision 7).
+#[cfg(unix)]
+fn write_verdict_copy_at(worktree: &Path, relative: &Path, bytes: &[u8]) -> Result<(), String> {
+    let components = relative
+        .components()
+        .map(|component| component.as_os_str())
+        .collect::<Vec<_>>();
+    let (file, parents) = components
+        .split_last()
+        .ok_or_else(|| "the copy names no file".to_owned())?;
+    let mut shown = worktree.to_path_buf();
+    let mut dir = open_dir(worktree)
+        .map_err(|error| format!("cannot open {}: {error}", worktree.display()))?;
+    for parent in parents {
+        shown.push(parent);
+        let name = c_name(parent, &shown)?;
+        dir = open_or_create_dir(&dir, &name, &shown)?;
+    }
+    shown.push(file);
+    let name = c_name(file, &shown)?;
+    write_file_at(&dir, &name, &shown, bytes)
+}
+
+/// The path-based form of [`write_verdict_copy`] for a platform without `openat`. It refuses a
+/// link at each component but, unlike the unix form, resolves a name a second time after the
+/// check (ADR 0048 decision 7).
+#[cfg(not(unix))]
+fn write_verdict_copy_by_path(
+    worktree: &Path,
+    relative: &Path,
+    bytes: &[u8],
+) -> Result<(), String> {
     let components = relative.components().collect::<Vec<_>>();
     let mut current = worktree.to_path_buf();
     for (index, component) in components.iter().enumerate() {
@@ -1569,8 +1615,148 @@ fn write_verdict_copy(worktree: &Path, relative: &Path, bytes: &[u8]) -> Result<
     Ok(())
 }
 
+/// A component's name as a C string for the `*at` calls.
+#[cfg(unix)]
+fn c_name(name: &std::ffi::OsStr, shown: &Path) -> Result<std::ffi::CString, String> {
+    use std::os::unix::ffi::OsStrExt as _;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| format!("{} has a null byte in a component", shown.display()))
+}
+
+/// Opens a directory without following a link at its final component.
+#[cfg(unix)]
+fn open_dir(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    options.open(path)
+}
+
+/// Opens the directory `name` in `dir`, creating it first when it is missing. Both calls resolve
+/// `name` against the held parent handle, so a directory renamed and replaced by a link after the
+/// create is not followed (ADR 0048 decision 7).
+#[cfg(unix)]
+fn open_or_create_dir(dir: &File, name: &std::ffi::CStr, shown: &Path) -> Result<File, String> {
+    use std::os::unix::io::AsRawFd as _;
+
+    let rc = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o777) };
+    if rc == 0 {
+        #[cfg(test)]
+        after_mkdir(shown);
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(format!("cannot create {}: {error}", shown.display()));
+        }
+    }
+    open_dir_at(dir, name, shown)
+}
+
+/// Opens `name` in `dir` as a directory, following no link.
+#[cfg(unix)]
+fn open_dir_at(dir: &File, name: &std::ffi::CStr, shown: &Path) -> Result<File, String> {
+    use std::os::unix::io::{AsRawFd as _, FromRawFd as _};
+
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+    if fd >= 0 {
+        // SAFETY: `openat` returned this descriptor, it is open, and this File owns it.
+        return Ok(unsafe { File::from_raw_fd(fd) });
+    }
+    let error = std::io::Error::last_os_error();
+    Err(format!(
+        "{} {}",
+        shown.display(),
+        component_reason(dir, name, libc::S_IFDIR, "not a directory", &error)
+    ))
+}
+
+/// Writes `bytes` to `name` in `dir`, creating or truncating the file without following a link.
+/// A later attempt overwrites the copy of an earlier one.
+#[cfg(unix)]
+fn write_file_at(
+    dir: &File,
+    name: &std::ffi::CStr,
+    shown: &Path,
+    bytes: &[u8],
+) -> Result<(), String> {
+    use std::os::unix::io::{AsRawFd as _, FromRawFd as _};
+
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, 0o644) };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(format!(
+            "{} {}",
+            shown.display(),
+            component_reason(dir, name, libc::S_IFREG, "not a regular file", &error)
+        ));
+    }
+    // SAFETY: `openat` returned this descriptor, it is open, and this File owns it.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(bytes)
+        .map_err(|error| format!("cannot write {}: {error}", shown.display()))
+}
+
+/// Why opening `name` in `dir` failed, for the note line. A link and a file of the wrong type are
+/// named as such; anything else keeps the OS error. `fstatat` resolves the name against the same
+/// held handle, so the answer describes what the wrapper just tried to open.
+#[cfg(unix)]
+fn component_reason(
+    dir: &File,
+    name: &std::ffi::CStr,
+    expected: libc::mode_t,
+    wrong: &str,
+    error: &std::io::Error,
+) -> String {
+    use std::os::unix::io::AsRawFd as _;
+
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc == 0 {
+        let kind = stat.st_mode & libc::S_IFMT;
+        if kind == libc::S_IFLNK {
+            return "is a symbolic link".to_owned();
+        }
+        if kind != expected {
+            return format!("is {wrong}");
+        }
+    }
+    format!("cannot be opened: {error}")
+}
+
+#[cfg(test)]
+type MkdirHook = Box<dyn Fn(&Path)>;
+
+// The test-only seam between creating a copy directory and opening it by handle. The unit test
+// `tests::a_verdict_copy_survives_a_directory_swapped_for_a_link` uses it to rename the new
+// directory and put a symbolic link in its place, the window a path-based traversal leaves open.
+// Nothing sets it outside a test, so it does nothing in a real run.
+#[cfg(test)]
+thread_local! {
+    static AFTER_MKDIR: std::cell::RefCell<Option<MkdirHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Calls the hook [`AFTER_MKDIR`] once, when a test set one.
+#[cfg(test)]
+fn after_mkdir(path: &Path) {
+    if let Some(hook) = AFTER_MKDIR.with(|hook| hook.borrow_mut().take()) {
+        hook(path);
+    }
+}
+
 /// Creates `path` as a directory unless it is one already, and refuses a symbolic link or a
 /// non-directory at it.
+#[cfg(not(unix))]
 fn create_dir_without_link(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1591,6 +1777,7 @@ fn create_dir_without_link(path: &Path) -> Result<(), String> {
 
 /// Replaces the file at `path` with `bytes`, and refuses a symbolic link or a non-regular file
 /// already at it. A later attempt overwrites the copy of an earlier one.
+#[cfg(not(unix))]
 fn write_file_without_link(path: &Path, bytes: &[u8]) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1605,11 +1792,6 @@ fn write_file_without_link(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
     let mut file = options
         .open(path)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
@@ -2496,6 +2678,50 @@ mod tests {
             fs::read(&target).expect("the target"),
             b"keep",
             "the link's target is untouched"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A directory the wrapper has just created can be renamed and replaced by a link before it
+    /// is opened; the copy descends by handle, so the link is refused and nothing outside the
+    /// worktree is written (ADR 0048 decision 7).
+    #[cfg(unix)]
+    #[test]
+    fn a_verdict_copy_survives_a_directory_swapped_for_a_link() {
+        use std::os::unix::fs::symlink;
+        let dir = crate::test_support::TempDir::named("radian-arc-verdict-dir-swap");
+        let arc = dir.join("arc");
+        let worktree = dir.join("worktree");
+        let outside = dir.join("outside");
+        fs::create_dir_all(&worktree).expect("the worktree");
+        fs::create_dir_all(&outside).expect("the outside directory");
+        let verdict = arc.join("runs/TK0005-e/attempts/TK0005-e-1/verdicts/review.json");
+        fs::create_dir_all(verdict.parent().expect("the verdict directory"))
+            .expect("the verdict directory");
+        fs::write(&verdict, b"the verdict").expect("the verdict");
+        let brief = format!("Read it: `{}`", verdict.display());
+
+        // At the moment the wrapper has created `.radian`, a process a worker left behind in
+        // an earlier attempt moves it away and links the name to a directory outside the
+        // worktree: the window a path-based traversal leaves open between check and use.
+        let created = worktree.join(".radian");
+        let moved = worktree.join(".radian-moved");
+        let target = outside.clone();
+        AFTER_MKDIR.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |path: &Path| {
+                assert_eq!(path, created.as_path());
+                fs::rename(path, &moved).expect("the rename");
+                symlink(&target, path).expect("the link");
+            }));
+        });
+        let (text, notes) = copy_verdicts(&brief, &arc, &worktree);
+        AFTER_MKDIR.with(|hook| hook.borrow_mut().take());
+        assert_eq!(text, brief, "the path stays in the text");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("symbolic link"), "{notes:?}");
+        assert!(
+            !outside.join("arc-verdicts").exists(),
+            "nothing was written through the link"
         );
         let _ = fs::remove_dir_all(&dir);
     }

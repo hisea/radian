@@ -618,3 +618,24 @@ from `.radian/work-fixed.rs` with `cp` and compared with `diff`.
 
 2/2 caught.
 
+## TK0091 rework 2: the verdict copy descends by handle (2026-10-24, branch `work/TK0091-worker-verdict-copies`)
+
+The review found that `write_verdict_copy` still checked each destination parent with
+`symlink_metadata` and then resolved the name again in `create_dir` and the file open, so a
+process left behind in the worktree could rename a checked directory and put a link in its place
+between the check and the use. `write_verdict_copy` now opens every destination directory once,
+with `O_DIRECTORY | O_NOFOLLOW`, and descends with `mkdirat`, `openat` and `fstatat` relative to
+the held parent handle; the copy file is opened on that handle with `O_CREAT | O_TRUNC |
+O_NOFOLLOW`. The source was already opened with `O_NOFOLLOW`. Each mutation was applied to
+`crates/radian-arc/src/work/mod.rs` by hand, the named tests ran with `cargo nextest run -p
+radian-arc --locked --profile sandbox --no-fail-fast`, and the file was restored from
+`.radian/work-fixed.rs` with `cp` and compared with `diff`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0091-M6 | the destination directory open follows a link (`O_NOFOLLOW` dropped from `open_dir_at`) | `work::tests::a_verdict_copy_never_follows_a_link_in_the_worktree` (the `.radian` link is followed and the copy lands outside), and `work::tests::a_verdict_copy_survives_a_directory_swapped_for_a_link` (the swapped link is followed) | ✅ 2 failed |
+| TK0091-M7 | the destination directory is opened by pathname (`fs::File::open(shown)` in `open_dir_at`) | the same two tests | ✅ 2 failed |
+| TK0091-M8 | the copy file is opened through a link (`O_NOFOLLOW` dropped from `write_file_at`) | `work::tests::a_verdict_copy_never_follows_a_link_in_the_worktree` (the link's target is truncated with the verdict bytes) | ✅ failed |
+
+3/3 caught.
+
