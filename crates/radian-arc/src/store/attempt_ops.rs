@@ -338,23 +338,50 @@ pub fn write_signal(store: &Store, task: &str, attempt: u32, class: Class) -> Re
 
 // ---- claim ---------------------------------------------------------------------------
 
-/// Claims one task (decision 6): `todo.ready` or `todo.retry_wait` to `doing.starting` in one
-/// transaction. The owner's `start` accepts either; a `todo.retry_wait` task is claimed without
-/// consulting `retry_at`, because the backoff exists for the scheduling loop, which itself
-/// claims only `todo.ready` (decision 9).
+/// Claims one task for the owner's `start` (decision 6): `todo.ready` or `todo.retry_wait` to
+/// `doing.starting` in one transaction. A `todo.retry_wait` task is claimed without consulting
+/// `retry_at`, because the backoff exists for the scheduling loop (decision 9).
 ///
 /// Refused (exit 3) when the task is in any other state or phase, its plan is not `confirmed`,
 /// an `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
 pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
+    claim_by(store, task_id, ClaimBy::Owner)
+}
+
+/// Who claims a worker attempt. The allowed phases differ (decision 9): the owner's `start`
+/// may claim a task that is backing off, a scheduling pass may not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimBy {
+    /// `radian arc start`: `todo.ready` and `todo.retry_wait` are both claimable, and
+    /// `retry_at` is not consulted.
+    Owner,
+    /// A scheduling pass: only `todo.ready` is claimable. The phase is re-read under the lock,
+    /// so a task that entered `todo.retry_wait` after the pass took its snapshot keeps its
+    /// backoff.
+    SchedulingLoop,
+}
+
+/// [`Claim`] with the caller's [`ClaimBy`] rules (decision 9).
+///
+/// Refused (exit 3) when the task is in any other state or phase, its plan is not `confirmed`,
+/// an `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
+pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Error> {
     let _lock = store.lock_state()?;
     let loaded = store.load_task(task_id)?;
     require_unchanged(task_id, loaded.changed_outside_arc)?;
     let mut task = loaded.item;
-    let claimable =
-        task.state == TaskState::Todo && matches!(task.phase.as_str(), "ready" | "retry_wait");
+    let claimable = task.state == TaskState::Todo
+        && match by {
+            ClaimBy::Owner => matches!(task.phase.as_str(), "ready" | "retry_wait"),
+            ClaimBy::SchedulingLoop => task.phase == "ready",
+        };
     if !claimable {
+        let allowed = match by {
+            ClaimBy::Owner => "only a `todo.ready` or `todo.retry_wait` task starts",
+            ClaimBy::SchedulingLoop => "only a `todo.ready` task starts from the scheduling loop",
+        };
         return Err(Error::Refused(format!(
-            "task `{task_id}` is `{}.{}`; only a `todo.ready` or `todo.retry_wait` task starts",
+            "task `{task_id}` is `{}.{}`; {allowed}",
             task.state.as_str(),
             task.phase
         )));
