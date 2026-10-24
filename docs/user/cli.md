@@ -296,12 +296,14 @@ radian footer export pi
 
 `radian docs` prints one line per manual topic with its description.
 `radian docs <topic>` prints that page verbatim, the same text the agent reads.
-The topic is a page stem (`commands`) or a file name (`commands.md`).
+The topic is a page stem (`commands`), a path under the manual (`arc/loop`), or a file name (`commands.md`, `arc/loop.md`).
+A topic that names a directory (`arc`) opens its `index.md`.
 An unknown topic exits `2` and lists the pages on stderr.
 
 ```sh
 radian docs
 radian docs cli
+radian docs arc/loop
 ```
 
 ## `radian attach`

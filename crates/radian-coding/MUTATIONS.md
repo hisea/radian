@@ -751,3 +751,17 @@ Base: the branch's first commit. Mutations were applied by hand to
 | TK0049-M1 | validate only the inode total, not `inode_free` (drop `|| ! radian_temp_is_count "$inode_free"`) | ✅ 1 failed | `macos_and_gnu_inode_output_both_parse` (the `-` ifree printed `[: -: integer expression expected` and the check passed) |
 | TK0049-M2 | take the leading `-` of the space column for an unreadable value (drop the `-*` case) | ✅ 1 failed | `a_negative_free_space_fails_the_space_check` (`Some(0)` with "cannot read the free space", not `Some(1)`) |
 | TK0049-M3 | do not bound a limit (remove the `-gt 18` check in `radian_temp_limit`) | ✅ 1 failed | `a_limit_past_the_bound_fails_the_check` (`[: 9999999999999999999: integer expression expected`, exit `0`) |
+
+## the user manual's `arc/` pages (2026-10-24, branch `work/TK0089-arc-docs-subdir`)
+
+Base: the branch's move commit. Each mutation was applied by hand to
+`crates/radian-coding/src/docs.rs`, backed up under `.radian/docs.rs.bak` and restored from
+that copy (never `git checkout`), and the named test ran alone with
+`cargo nextest run -p <crate> --locked --profile sandbox -E 'test(<name>)' --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0089-M1 | `lookup_topic` drops the directory fallback (`find_entry(&name)` only), so `radian docs arc` looks for `arc.md` | ✅ 1 failed | `radian-tui::docs_sync::radian_docs_reads_directory_topics_and_nested_pages` (`arc opens its index`) |
+| TK0089-M3 | `DOCS` drops the `arc/gate.md` row | ✅ 1 failed | `radian-coding::docs::the_table_matches_docs_user_on_disk` (disk 28 pages vs table 27) |
+
+2/2 caught.

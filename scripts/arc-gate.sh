@@ -16,7 +16,7 @@
 # a script read from that checkout would let a task change its own gate. The arc
 # configuration must therefore call this script by the *main checkout's absolute
 # path* (/abs/path/to/repo/scripts/arc-gate.sh), never a relative `scripts/...`
-# path. The same rule is in docs/user/arc-gate.md. full runs the verify.sh next to
+# path. The same rule is in docs/user/arc/gate.md. full runs the verify.sh next to
 # this script, so the command list comes from the trusted checkout too.
 #
 # CARGO_TARGET_DIR is the caller's business: this script never sets it.
@@ -49,7 +49,7 @@ system: fewer than RADIAN_VERIFY_MIN_FREE_INODES inodes (default 50000) or
 fewer than RADIAN_VERIFY_MIN_FREE_GIB GiB (default 2) free fails the gate; 0
 turns a check off. With ARC_GATE_HOST set, full checks nothing here: the
 remote verify.sh checks the host's temp file system in the host's environment.
-See docs/user/arc-gate.md.
+See docs/user/arc/gate.md.
 EOF
 }
 

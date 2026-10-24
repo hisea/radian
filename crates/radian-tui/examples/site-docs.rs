@@ -2,9 +2,10 @@
 //!
 //! Run: `cargo run -p radian-tui --example site-docs --locked -- <out-dir>`.
 //! Writes `<out-dir>/docs/index.html` (from `index.md`) and
-//! `<out-dir>/docs/<stem>.html` for every other page. A broken inter-page link fails the
-//! build with the source page and the link; a page holding raw HTML is reported on stderr
-//! (the HTML is escaped in the output).
+//! `<out-dir>/docs/<stem>.html` for every other page, in the page's own subdirectory
+//! (`docs/arc/loop.html`). A broken inter-page link fails the build with the source page
+//! and the link; a page holding raw HTML is reported on stderr (the HTML is escaped in the
+//! output).
 
 use std::path::PathBuf;
 
@@ -29,13 +30,16 @@ fn main() {
         std::process::exit(1);
     }
     for (index, page) in site.pages.iter().enumerate() {
-        let file = if page.stem == "index" {
-            "index.html".to_owned()
-        } else {
-            format!("{}.html", page.stem)
-        };
+        let file = radian_tui::site_docs::output_path(&page.stem);
+        let target = docs.join(&file);
+        if let Some(parent) = target.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("site-docs: cannot create {}: {error}", parent.display());
+            std::process::exit(1);
+        }
         let html = radian_tui::site_docs::page_html(&site, index);
-        if let Err(error) = std::fs::write(docs.join(&file), html) {
+        if let Err(error) = std::fs::write(&target, html) {
             eprintln!("site-docs: cannot write {file}: {error}");
             std::process::exit(1);
         }

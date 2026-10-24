@@ -326,9 +326,7 @@ impl WorkspaceRoot {
             return Ok(Resolved::Embedded { page: None });
         }
         if let Some(name) = docs::page_name(user) {
-            return Ok(Resolved::Embedded {
-                page: Some(name.to_owned()),
-            });
+            return Ok(Resolved::Embedded { page: Some(name) });
         }
         if docs::is_virtual(user) {
             return Err(fail(

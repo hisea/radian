@@ -20,7 +20,7 @@ arc 今天一个仓库只有一套流程，三个地方锁死：
 
 ### 第 1 步：`review` stage 落地（已落地）
 
-`review` 已在 `BUILT_STAGES` 里；`[gate.review]` 的 `exec_args`、`prompt_file`、`timeout_secs` 已实现（ADR 0048 §10、§15），`docs/user/arc.md` 有手册条目。`prompt_file` 是 repository 级的评审标准；按 flow 的评审标准见第 2 步（profile 自带的 review 设置）。
+`review` 已在 `BUILT_STAGES` 里；`[gate.review]` 的 `exec_args`、`prompt_file`、`timeout_secs` 已实现（ADR 0048 §10、§15），`docs/user/arc/index.md` 有手册条目。`prompt_file` 是 repository 级的评审标准；按 flow 的评审标准见第 2 步（profile 自带的 review 设置）。
 
 非代码 flow 的 gate 只有 `review` 和 `human` 有意义（`commands` 对美术和文案几乎无用）。这一步独立于 flow，所以先落。
 
@@ -74,4 +74,4 @@ arc 今天只有两种启动：owner `start`，或 `auto` 级别在 `after` 全�
 - 一个仓库配两个 flow（`default` 带 `commands` gate，另一个带 `review` + `human`），同一个 plan 里各一个 task，`after` 串起来，`auto = merge` 全程无人到 `done`；两个 worker 的 `execution.json` 记录的 exec 参数不同，verdict 目录里各自只有自己 profile 的 stage。
 - `flow` 指向不存在的节、`gate_profile` 指向不存在的 profile、`worker.exec_args` 与 `flows.default.exec_args` 同时有值，都在读 `config.toml` 时按名拒绝（exit 2），不起 worker。
 - 没写 `flow` 的旧 task 文件按 `default` 跑，行为与今天完全相同。
-- `docs/user/arc.md` 记录 `flows.<name>` 每个键与 task 的 `flow` 字段，drift test 读到允许值和缺省；0048 §14、§15 改成快照；删本文件。
+- `docs/user/arc/index.md` 记录 `flows.<name>` 每个键与 task 的 `flow` 字段，drift test 读到允许值和缺省；0048 §14、§15 改成快照；删本文件。

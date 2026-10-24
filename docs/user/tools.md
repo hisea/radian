@@ -25,6 +25,7 @@ A text read prefixes each line with its file line number and `": "`.
 That prefix is not file content; remove it before you reuse the text in `patch`.
 A directory read lists `kind`, size and name rows, sorted by name.
 `radian://docs/<page>.md` reads this manual from memory.
+A path that names a directory reads its `index.md` (`radian://docs/arc/`).
 
 ### Images
 

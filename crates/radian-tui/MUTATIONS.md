@@ -2767,7 +2767,7 @@ hand to `crates/radian-tui/src/arc/mod.rs`, the named test was run alone with
 The review of TK0019 found that `L` on the merge page opened the loop log under an open command
 log, so nothing appeared, and that the plans footer advertised neither `R` nor `L`. The command
 log now closes when `L` opens the loop log, the plans footer carries both hints, and the loop
-sections of `docs/user/arc-tui.md` and `docs/user/arc.md` now say that a start is followed
+sections of `docs/user/arc/tui.md` and `docs/user/arc/index.md` now say that a start is followed
 through its child's pid and that the pid appears only when the holder recorded one. Each mutation
 was applied by hand to the working file, the named test was run alone, and the file was restored
 afterwards.
@@ -2827,3 +2827,16 @@ restored from that copy (never `git checkout`), and the named test ran alone wit
 
 2/2 caught. TK0085-M1, -M2 and -M5 mutate `radian-arc` and are recorded in
 `crates/radian-arc/MUTATIONS.md`.
+
+## the docs site's `arc/` pages (2026-10-24, branch `work/TK0089-arc-docs-subdir`)
+
+Base: the branch's move commit. The mutation was applied by hand to
+`crates/radian-tui/src/site_docs.rs`, backed up under `.radian/site_docs.rs.bak` and restored
+from that copy (never `git checkout`); the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox -E 'test(relative_page_links_resolve_from_the_source_directory)' --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0089-M2 | `resolve_link` resolves a page link from the site root (`join_docs_user("", path)`) instead of the source page's directory | ✅ 1 failed | `site_docs::relative_page_links_resolve_from_the_source_directory` (a sibling `gate.md` becomes a `blob/main` repo link) |
+
+1/1 caught.
