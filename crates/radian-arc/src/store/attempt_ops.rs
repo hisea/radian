@@ -25,7 +25,8 @@ use crate::store::config::ReworkSession;
 pub const ATTEMPT_FINISHED_FILE: &str = "attempt_finished.json";
 /// The wrapper's last-written end record, in the host-local attempt directory.
 pub const STATUS_FILE: &str = "status.json";
-/// The claim's host-local record: the `start` process's identity.
+/// The claim's host-local start record: the attempt id, token and `started_at`, the time a
+/// reconcile uses to judge a wrapper that has not written its first heartbeat yet.
 pub const START_FILE: &str = "start.json";
 /// Why the wrapper was signalled (`cancel`, `stall`, `wall_time`).
 pub const SIGNAL_FILE: &str = "signal.json";
@@ -337,18 +338,23 @@ pub fn write_signal(store: &Store, task: &str, attempt: u32, class: Class) -> Re
 
 // ---- claim ---------------------------------------------------------------------------
 
-/// Claims one task (decision 6): `todo.ready` to `doing.starting` in one transaction.
+/// Claims one task (decision 6): `todo.ready` or `todo.retry_wait` to `doing.starting` in one
+/// transaction. The owner's `start` accepts either; a `todo.retry_wait` task is claimed without
+/// consulting `retry_at`, because the backoff exists for the scheduling loop, which itself
+/// claims only `todo.ready` (decision 9).
 ///
-/// Refused (exit 3) when the task is not `todo.ready`, its plan is not `confirmed`, an
-/// `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
+/// Refused (exit 3) when the task is in any other state or phase, its plan is not `confirmed`,
+/// an `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
 pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
     let _lock = store.lock_state()?;
     let loaded = store.load_task(task_id)?;
     require_unchanged(task_id, loaded.changed_outside_arc)?;
     let mut task = loaded.item;
-    if task.state != TaskState::Todo || task.phase != "ready" {
+    let claimable =
+        task.state == TaskState::Todo && matches!(task.phase.as_str(), "ready" | "retry_wait");
+    if !claimable {
         return Err(Error::Refused(format!(
-            "task `{task_id}` is `{}.{}`; only a `todo.ready` task starts",
+            "task `{task_id}` is `{}.{}`; only a `todo.ready` or `todo.retry_wait` task starts",
             task.state.as_str(),
             task.phase
         )));
@@ -407,17 +413,15 @@ pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
     task.retry_at = None;
     let version = store.next_version(Kind::Task, task_id);
     store.write_item(Kind::Task, task_id, &task.to_text(), version)?;
-    // The start process's identity, so a reconcile can tell a claim whose `start` is still
-    // coming up from an orphan. It is host-local and outside the ledger.
+    // The claim's start time, so a reconcile can judge a claim whose wrapper has not written
+    // its first heartbeat yet. It is host-local and outside the ledger. Nothing reads the
+    // claiming process's identity here: the wrapper records its own in `identity.json`.
     let dir = attempt_dir(store, task_id, number);
     fs::create_dir_all(&dir)
         .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
-    let pid = std::process::id();
     let record = json!({
         "attempt_id": attempt_id,
         "token": token,
-        "pid": pid,
-        "process_started_at": crate::process::start_time(pid),
         "started_at": super::plan_ops::utc_now(),
     });
     let text = serde_json::to_string_pretty(&record)

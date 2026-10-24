@@ -6,6 +6,8 @@
 //! builds it; a lone `cargo test -p radian-host` needs
 //! `cargo build -p agent-extensions --bin mcp-fixture` first. The message says so.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use agent_extensions::McpToolProvider;
@@ -14,18 +16,8 @@ use radian_core::{
 };
 use serde_json::json;
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "radian-host-mcp-cwd-{}-{}-{}",
-        std::process::id(),
-        tag,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn temp_dir(tag: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-host-mcp-cwd-{tag}"))
 }
 
 /// The fixture beside this test binary: `<target>/<profile>/deps/<test exe>` and

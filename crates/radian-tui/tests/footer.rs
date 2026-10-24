@@ -6,6 +6,8 @@ use radian_core::{BudgetReport, EventSink, UsageSource};
 use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig};
 use radian_session::RuntimeEvent;
 use radian_tui::App;
+mod common;
+
 use radian_tui::app::Input;
 use radian_tui::footer::{Footer, Preset};
 use ratatui::Terminal;
@@ -1987,10 +1989,7 @@ fn a_command_item_accepts_the_value_placeholder() {
 /// contributor and its first line appears in the footer where its id is placed.
 #[test]
 fn a_printf_fixture_appears_in_the_configured_footer_location() {
-    let dir =
-        std::env::temp_dir().join(format!("radian-tui-command-footer-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::TempDir::named("radian-tui-command-footer");
     let script = dir.join("hi.sh");
     std::fs::write(&script, "#!/bin/sh\nprintf hi\n").unwrap();
     #[cfg(unix)]

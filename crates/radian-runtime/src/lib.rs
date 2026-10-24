@@ -10,6 +10,8 @@
 mod config;
 mod driver;
 mod inbox;
+#[cfg(test)]
+mod test_support;
 
 pub use config::{ConfigQueue, ConfigSlot, ModelRoute};
 pub use driver::{BudgetFor, CompactionSettingsFor};

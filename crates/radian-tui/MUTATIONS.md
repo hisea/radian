@@ -2437,6 +2437,23 @@ afterwards.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
+| TK0033-tui-pages-continued-M1 | the journal is looked up by the task id only, never by the attempt's `execution.json` session id | ✅ 1 failed | `the_conversation_tab_renders_the_selected_attempts_worker_journal` (a `fresh` attempt's `<task>-2.jsonl` is not found, so the screen says `no session journal yet`) |
+
+## TK0018: the merge page and the owner's actions (2026-10-23, branch `work/TK0018-tui-merge-actions`)
+
+The merge page draws the stage rows from `radian_arc::read::merge_view` and the owner's keys
+run the CLI's library calls through `arc::actions`. Each mutation was applied by hand to the
+committed file, the named test was run alone with `--profile sandbox --no-fail-fast`, and the
+file was restored from a copy under `.radian/mut-bak/` (`git status --short` empty afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0018-M1 | `M` on the merge page queues the merge without the confirmation float (`queue_action` instead of `merge_float`) | ✅ 1 failed | `arc_merge::the_merge_key_asks_and_n_changes_nothing_while_y_merges` (no `Float::Confirm` to answer `n`/`y`) |
+| TK0018-M2 | the merge view keeps the marks after the branch moved (`let moved = false;`, so `head_sha != verified_sha` no longer invalidates a verdict) | ✅ 1 failed | `arc_merge::a_moved_branch_turns_every_mark_weak_and_says_the_task_is_back_in_verification` (the moved row is gone and `✓ commands` remains) |
+| TK0018-M3 | the merge action shells out to `radian arc merge` instead of calling `review::merge` | ✅ 1 failed | `arc_merge::the_merge_action_calls_the_library_not_a_subprocess` (the recording `ArcOps` sees no `merge` call, and the action's line is not the library result's) |
+
+3/3 caught. M2 mutates `radian-arc`'s read function (`src/read.rs`), which this crate's tests
+exercise; the other two are in `radian-tui`.
 | TK0033-tui-pages-continued-M1 | the journal is looked up by the task id only, never by the attempt's `execution.json` session id | ✅ 1 failed | `the_conversation_tab_renders_the_selected_attempts_worker_journal` (the lookup finds attempt 1's `<task>.jsonl` instead of attempt 2's `<task>-2.jsonl`, so the screen shows `the first attempt` and the assertion on `the worker said hello` fails) |
 
 ## TK0040: every TUI list keeps the selected row visible (2026-10-23, branch `work/TK0040-tui-pages-continued-followups`)
@@ -2454,3 +2471,19 @@ window). A cancelled plan also takes the failure mark and the `cancelled · ` pr
 | TK0040-M2 | the task list always starts at the first task (`task_top = 0`) | ✅ 1 failed | `the_task_list_scrolls_to_keep_the_selected_task_visible` (the selected `TK0011-h` is below the frame) |
 | TK0040-M3 | the attempts list always starts at the first attempt (`first = 0`) | ✅ 1 failed | `the_attempts_list_scrolls_to_keep_the_selected_attempt_visible` (with attempt 10 selected it draws attempts 1 to 3) |
 | TK0040-M4 | a cancelled plan takes `Mark::Active` (`●`), as before | ✅ 1 failed | `a_cancelled_plan_is_marked_and_named_cancelled` (`mark_cell` panics: `×` is not before `PL0002-images`) |
+
+## TK0047: the plans page's state view (2026-10-24, branch `work/TK0047-tui-plan-filter`)
+
+Base `76bcb8ba` (the branch point). The plans page lists one of four views and `f` cycles
+them; the header names the view and counts the plans it hides. Each mutation was applied by
+hand to the working file, the named test was run alone with `--profile sandbox
+--no-fail-fast`, and the file was restored from a copy under `.radian/mut-bak/`
+(`git status --short` empty afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0047-M1 | the default view is `all` again (`#[default]` moved from `Active` to `All`) | ✅ 1 failed | `the_default_plans_view_hides_finished_and_cancelled_plans` (`app.filter` is `All`, not `Active`) |
+| TK0047-M2 | `f` skips `cancelled` (`PlanFilter::Done.next()` returns `Active`) | ✅ 1 failed | `f_cycles_the_plan_views_in_order_and_back` (`left: Active`, `right: Cancelled` on the third press) |
+| TK0047-M3 | the selection always jumps to the first plan (`rebuild_visible` sets `plan_sel = 0`) | ✅ 1 failed | `the_selection_stays_on_a_plan_in_both_views_and_moves_to_the_first_otherwise` (`f` to `all` selects `PL0001-first`, not the held `PL0003-retro`) |
+
+3/3 caught.

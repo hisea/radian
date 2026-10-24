@@ -826,18 +826,8 @@ mod tests {
         path
     }
 
-    fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-host-mcp-{}-{}-{}",
-            std::process::id(),
-            tag,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(tag: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-host-mcp", tag)
     }
 
     #[test]

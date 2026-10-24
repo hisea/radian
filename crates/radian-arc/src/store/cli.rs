@@ -281,7 +281,7 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
     let mut hidden_tasks = 0usize;
     for view in views {
         let merged = view.tasks.iter().filter(|task| is_merged(task)).count();
-        let finished = !view.tasks.is_empty() && merged == view.tasks.len();
+        let finished = view.is_finished();
         if !all && !named && view.plan.item.is_cancelled() {
             hidden_cancelled += 1;
             hidden_tasks += merged;
@@ -534,6 +534,16 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
                     "review_cost_micros",
                     &optional_number(verdict.review_cost_micros),
                 );
+                if let Some(settings) = &verdict.review_settings {
+                    field(&mut out, "review_round", &settings.round);
+                    field(&mut out, "review_exec_args", &settings.exec_args);
+                    field(
+                        &mut out,
+                        "review_timeout_secs",
+                        &settings.timeout_secs.to_string(),
+                    );
+                    field(&mut out, "review_timeout", &settings.timeout);
+                }
             }
             field(
                 &mut out,
@@ -882,6 +892,14 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
                         verdict
                             .as_ref()
                             .and_then(|verdict| verdict.review_cost_micros)
+                    ),
+                );
+                object.insert(
+                    "review_settings".to_owned(),
+                    json!(
+                        verdict
+                            .as_ref()
+                            .and_then(|verdict| verdict.review_settings.clone())
                     ),
                 );
                 // The current attempt's worker session (ADR 0048 decision 4): `attach` and the

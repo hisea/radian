@@ -35,8 +35,9 @@ use serde_json::{Value, json};
 use sha2::Digest;
 
 use crate::gate::{
-    CommandRun, IntegrationRun, PreviousReview, ReviewItem, ReviewRun, Stage, StageSpec, Verdict,
-    attempt_dir, effective_stages, merge_ready, required_passed, verdict_path, verdict_set_digest,
+    CommandRun, IntegrationRun, PreviousReview, ReviewItem, ReviewRun, ReviewSettings, Stage,
+    StageSpec, Verdict, attempt_dir, effective_stages, merge_ready, required_passed, verdict_path,
+    verdict_set_digest,
 };
 use crate::store::attempt_ops::Paused;
 use crate::store::{Error, Store, model};
@@ -245,7 +246,7 @@ impl Reverified {
 }
 
 /// The follow-up task arc proposed for a merged task's review (ADR 0048 decision 10): the
-/// items the task's last review suggested, which the merge left unfixed.
+/// items every review of the task suggested, which the merge left unfixed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Followup {
     /// The new task's id.
@@ -689,28 +690,36 @@ fn run_stage(
         .map_err(gate_error),
         Stage::Review => {
             let review = &plan.config.gate.review;
-            let (exec_args, key) = match &review.exec_args {
-                Some(args) => (args.as_slice(), "gate.review.exec_args"),
-                None => (plan.config.worker.exec_args.as_slice(), "worker.exec_args"),
-            };
+            // A review that follows an earlier one of this task is a rework round: the stage
+            // reviews the increment and judges the items arc moved (ADR 0048 decision 10).
+            let earlier = previous_review(store, &task.id, &plan.label);
+            // A first review is a review stage run when no earlier attempt of the task has a
+            // review verdict; only it reads `[gate.review.first]` (ADR 0048 decision 10).
+            let first = earlier.is_none();
+            let choice = review.choice(first, &plan.config.worker.exec_args);
             // The stage owns the read-only mount and the session flags: an argument that
             // repeated one would overrule them (ADR 0048 decision 10).
-            if let Some(owned) = exec_args
+            if let Some(owned) = choice
+                .exec_args
                 .iter()
                 .find_map(|arg| crate::gate::owned_name(arg))
             {
                 return Err(Error::Refused(format!(
-                    "`{key}` must not repeat `{owned}`: the review stage sets it on the \
-                     review session's `radian exec` line"
+                    "`{}` must not repeat `{owned}`: the review stage sets it on the \
+                     review session's `radian exec` line",
+                    choice.exec_args_key
                 )));
             }
+            let settings = ReviewSettings {
+                round: if first { "first" } else { "rework" }.to_owned(),
+                exec_args: choice.exec_args_key.to_owned(),
+                timeout_secs: choice.timeout_secs,
+                timeout: choice.timeout_key.to_owned(),
+            };
             let prompt_file = review
                 .prompt_file
                 .as_ref()
                 .map(|file| store.repo().join(file));
-            // A review that follows an earlier one of this task is a rework round: the stage
-            // reviews the increment and judges the items arc moved (ADR 0048 decision 10).
-            let earlier = previous_review(store, &task.id, &plan.label);
             let earlier = earlier.as_ref().map(|(_, verdict)| PreviousReview {
                 sha: verdict.sha.clone(),
                 blocking: verdict
@@ -727,10 +736,12 @@ fn run_stage(
                 sha: &plan.head,
                 brief: &task.body,
                 main_ref: &plan.main_ref,
-                exec_args,
+                exec_args: choice.exec_args,
+                concurrency: review.concurrency,
+                settings,
                 prompt_file: prompt_file.as_deref(),
                 previous: earlier.as_ref(),
-                timeout: review.timeout(),
+                timeout: std::time::Duration::from_secs(choice.timeout_secs),
                 program: review_program,
             }
             .run()
@@ -1450,26 +1461,111 @@ fn review_rework_brief(rework: &ReviewRework) -> String {
 
 // ---- the review's follow-up task (ADR 0048 decision 10) -------------------------------
 
-/// The review's follow-up task of one merged task (ADR 0048 decision 10): the items the
-/// task's last review suggested become one `todo.proposed` task of the same plan, `after` the
-/// merged task. Nothing from `blocking` is carried: the review passed for the merge only
-/// because none was left.
+/// One review round of a merged task: the review verdict of one attempt and the items it
+/// suggested.
+struct FollowupRound {
+    /// 1-based, oldest first.
+    number: usize,
+    /// The attempt whose review wrote it.
+    attempt: u32,
+    /// The verdict file the brief names.
+    path: PathBuf,
+    /// The `suggestions` the round left; the `pre_existing` items arc moved are here.
+    items: Vec<ReviewItem>,
+}
+
+/// The task's `review` verdicts across every attempt, oldest first, with their paths. Attempt
+/// numbers order the rounds, because `task_verdict_files` sorts their directory names as
+/// strings and `attempt-10` sorts before `attempt-2`.
+fn review_verdicts(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict)>, Error> {
+    let mut reviews: Vec<(PathBuf, Verdict)> = task_verdict_files(store, task)?
+        .into_iter()
+        .filter(|(_, verdict)| verdict.stage == Stage::Review)
+        .collect();
+    reviews.sort_by_key(|(path, _)| verdict_attempt(path).unwrap_or(0));
+    Ok(reviews)
+}
+
+/// Every review round of a task, oldest first (ADR 0048 decision 10). A round that suggested
+/// nothing is kept as a round: the brief names its verdict too.
+fn followup_rounds(reviews: &[(PathBuf, Verdict)]) -> Vec<FollowupRound> {
+    reviews
+        .iter()
+        .enumerate()
+        .map(|(index, (path, verdict))| FollowupRound {
+            number: index + 1,
+            attempt: verdict_attempt(path).unwrap_or(index as u32 + 1),
+            path: path.clone(),
+            items: verdict
+                .review
+                .as_ref()
+                .map(|review| review.suggestions.clone())
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// The attempt number a verdict path names:
+/// `<...>/attempts/<task id>-<n>/verdicts/<stage>.json`.
+fn verdict_attempt(path: &Path) -> Option<u32> {
+    let attempt = path.parent()?.parent()?.file_name()?.to_str()?;
+    attempt.rsplit_once('-')?.1.parse().ok()
+}
+
+/// What two follow-up items are the same by: `file`, `line`, and the `text` without a tag
+/// that repeats the item's own level and with its whitespace collapsed (ADR 0048 decision
+/// 10). An item with the same place and other text is a different item.
+fn followup_item_key(item: &ReviewItem) -> (Option<&str>, Option<u32>, String) {
+    (
+        item.file.as_deref(),
+        item.line,
+        item.text_without_level_tag()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// The items the follow-up carries, in round order, with the round each kept copy came from.
+/// A repeat replaces the earlier copy, so the newest one is kept and grouped under its own
+/// round.
+fn followup_items(rounds: &[FollowupRound]) -> Vec<(usize, ReviewItem)> {
+    let mut kept: Vec<(usize, ReviewItem)> = Vec::new();
+    for (index, round) in rounds.iter().enumerate() {
+        for item in &round.items {
+            let key = followup_item_key(item);
+            match kept
+                .iter_mut()
+                .find(|(_, earlier)| followup_item_key(earlier) == key)
+            {
+                Some(slot) => *slot = (index, item.clone()),
+                None => kept.push((index, item.clone())),
+            }
+        }
+    }
+    kept
+}
+
+/// The review's follow-up task of one merged task (ADR 0048 decision 10): the items every
+/// review of the task suggested — every attempt's `review` verdict, oldest first — become one
+/// `todo.proposed` task of the same plan, `after` the merged task. The `pre_existing` items
+/// are among them. Nothing from `blocking` is carried: a merged task's blocking items were
+/// fixed or the review would not have passed.
 ///
-/// `None` when `[gate.review] propose_followups` is `false`, when the task has no review
-/// verdict, when the review suggested nothing, or when the plan already holds this task's
-/// follow-up: a task gets at most one.
+/// `None` when `[gate.review] propose_followups` is `false`, when the merged task is itself a
+/// review follow-up (a follow-up gets none of its own), when the task has no review verdict,
+/// when no round suggested anything, or when the plan already holds this task's follow-up: a
+/// task gets at most one.
 fn propose_followup(store: &Store, task: &model::TaskFile) -> Result<Option<Followup>, Error> {
     if !store.config()?.gate.review.propose_followups {
         return Ok(None);
     }
-    let Some((verdict_path, verdict)) = latest_review_verdict(store, &task.id) else {
+    if is_followup(task) {
         return Ok(None);
-    };
-    let items = verdict
-        .review
-        .as_ref()
-        .map(|review| review.suggestions.clone())
-        .unwrap_or_default();
+    }
+    let reviews = review_verdicts(store, &task.id)?;
+    let rounds = followup_rounds(&reviews);
+    let items = followup_items(&rounds);
     if items.is_empty() {
         return Ok(None);
     }
@@ -1487,12 +1583,22 @@ fn propose_followup(store: &Store, task: &model::TaskFile) -> Result<Option<Foll
         vec![task.id.clone()],
         false,
         Vec::new(),
-        &followup_brief(&task.id, &items, &verdict_path),
+        &followup_brief(&task.id, &rounds, &items),
     )?;
     Ok(Some(Followup {
         task: id,
         from: task.id.clone(),
     }))
+}
+
+/// Whether `task` is itself a review follow-up: its title and its one `after` entry are the
+/// ones arc gives a follow-up. It is the same test [`has_followup`] uses, so a follow-up task
+/// never gets a follow-up of its own (ADR 0048 decision 10).
+fn is_followup(task: &model::TaskFile) -> bool {
+    match task.after.as_slice() {
+        [parent] => task.title == followup_title(parent),
+        _ => false,
+    }
 }
 
 /// Whether the plan already holds `task`'s follow-up: a task whose title and `after` are the
@@ -1532,20 +1638,42 @@ fn followup_title(task: &str) -> String {
 }
 
 /// The fixed brief of `task`'s follow-up (ADR 0048 decision 10): the line that says where the
-/// items come from and what to do with each, the items as `[level] path:line text`, and the
-/// review verdict to read for detail.
-fn followup_brief(task: &str, items: &[ReviewItem], verdict: &Path) -> String {
-    let items = items
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
+/// items come from and what to do with each, the items grouped by the round they came from as
+/// `[level] path:line text`, and the path of every review verdict.
+fn followup_brief(task: &str, rounds: &[FollowupRound], items: &[(usize, ReviewItem)]) -> String {
+    let mut brief = format!(
         "The items below are from the review of `{task}`, which is now merged; fix each one, \
-         or leave it with a one-line reason in the final answer.\n\n{items}\n\n\
-         Read the verdict for detail: `{}`",
-        verdict.display()
-    )
+         or leave it with a one-line reason in the final answer."
+    );
+    for (index, round) in rounds.iter().enumerate() {
+        let group: Vec<&ReviewItem> = items
+            .iter()
+            .filter(|(from, _)| *from == index)
+            .map(|(_, item)| item)
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        brief.push_str(&format!(
+            "\n\nFrom review {} (attempt {}):",
+            round.number, round.attempt
+        ));
+        for item in group {
+            brief.push_str(&format!("\n- {item}"));
+        }
+    }
+    let paths = rounds
+        .iter()
+        .map(|round| format!("`{}`", round.path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let verdict = if rounds.len() == 1 {
+        "verdict"
+    } else {
+        "verdicts"
+    };
+    brief.push_str(&format!("\n\nRead the {verdict} for detail: {paths}"));
+    brief
 }
 
 /// The task's `extra_stages` as stage specs. Every name was checked when the task file was
@@ -1628,8 +1756,6 @@ pub struct MergeContext {
     pub main_branch: String,
     pub main_ref: String,
     pub profile: crate::gate::Profile,
-    /// The phase after this call: `integrating`, or `ready_to_merge` on a resume.
-    pub phase: String,
 }
 
 /// Checks the approval's preconditions, writes the approval when the task is
@@ -1762,11 +1888,6 @@ fn prepare_merge(
         main_branch,
         main_ref,
         profile,
-        phase: if task.phase == "awaiting_human" {
-            "integrating".to_owned()
-        } else {
-            task.phase
-        },
     })
 }
 
@@ -2087,6 +2208,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
             .filter(|record| record.kind == "integration");
         // How many deaths this attempt and these inputs already have (ADR 0048 decision 10).
         let mut deaths = 0;
+        let label = attempt_label(&task)?;
         if let Some(record) = &record {
             match record.status.as_str() {
                 // A gate that wrote `running` and is gone died; arc's own stop (`interrupted`)
@@ -2098,7 +2220,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                             store,
                             task_id,
                             "integration",
-                            &attempt_label(&task)?,
+                            &label,
                             record,
                             inputs.as_deref(),
                         )? {
@@ -2117,7 +2239,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                 // wrote nothing: a new start with the same inputs would only repeat it.
                 crate::gate::background::STARTED => {
                     if !crate::gate::background::running(store, task_id)
-                        && record.attempt == attempt_label(&task)?
+                        && record.attempt == label
                         && let Some(inputs) = record.inputs.clone()
                     {
                         crate::gate::background::write_no_record(
@@ -2133,18 +2255,30 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                         )));
                     }
                 }
-                crate::gate::background::NO_RECORD | crate::gate::background::DIED => {
+                // A refused gate is reported once, and no new gate starts for this attempt
+                // while the inputs it saw are unchanged: a repeat would rerun the same
+                // refusal every interval. A new attempt, a changed config, a new head or a
+                // new main changes the inputs (ADR 0048 decision 10), as it does for a
+                // verification.
+                crate::gate::background::NO_RECORD
+                | crate::gate::background::DIED
+                | crate::gate::background::REFUSED => {
                     let current = integration_inputs(store, task_id);
-                    let reported = format!(
-                        "{task_id} integration cannot run: {}",
-                        record.text.clone().unwrap_or_else(|| {
-                            crate::gate::background::NO_RECORD_TEXT.to_owned()
-                        })
-                    );
-                    if record.attempt == attempt_label(&task)?
-                        && current.as_deref() == record.inputs.as_deref()
-                    {
-                        return Ok(MergeStep::note(reported));
+                    let same_attempt = record.attempt == label
+                        || record
+                            .attempt
+                            .strip_prefix(&label)
+                            .is_some_and(|rest| rest.starts_with(".i"));
+                    let same_inputs =
+                        record.inputs.is_some() && current.as_deref() == record.inputs.as_deref();
+                    if same_attempt && same_inputs {
+                        let text = record
+                            .text
+                            .clone()
+                            .unwrap_or_else(|| crate::gate::background::NO_RECORD_TEXT.to_owned());
+                        return Ok(MergeStep::note(format!(
+                            "{task_id} integration cannot run: {text}"
+                        )));
                     }
                     // The inputs changed (a new head, a new main, a changed profile), or the
                     // record belongs to an earlier attempt: start one new gate below.
@@ -2160,12 +2294,6 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                                 .clone()
                                 .unwrap_or_else(|| "the integration gate failed".to_owned()),
                         ));
-                    }
-                    if record.status == "refused" {
-                        return Ok(MergeStep::note(format!(
-                            "{task_id} integration cannot run: {}",
-                            record.text.clone().unwrap_or_default()
-                        )));
                     }
                     let path =
                         verdict_path(store.repo(), task_id, &record.attempt, Stage::Integration)
@@ -2198,7 +2326,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
             task_id,
             &crate::gate::background::Start {
                 kind: "integration",
-                attempt: attempt_label(&task)?,
+                attempt: label,
                 inputs: integration_inputs(store, task_id),
                 deaths,
             },
@@ -2733,18 +2861,25 @@ mod tests {
         );
     }
 
-    /// The brief has the fixed form: the one line, one item per line as `[level] path:line
-    /// text`, and the verdict path.
+    /// The brief has the fixed form: the one line, the items grouped by their round as
+    /// `[level] path:line text`, and the verdict path.
     #[test]
     fn the_followup_brief_names_the_task_the_items_and_the_verdict() {
-        let items = vec![ReviewItem {
+        let item = ReviewItem {
             level: Some("minor".to_owned()),
             file: Some("a.rs".to_owned()),
             line: Some(7),
             text: "a nicer name".to_owned(),
             pre_existing: true,
+        };
+        let rounds = vec![FollowupRound {
+            number: 1,
+            attempt: 2,
+            path: PathBuf::from("/r/verdicts/review.json"),
+            items: vec![item.clone()],
         }];
-        let brief = followup_brief("TK0001-work", &items, Path::new("/r/verdicts/review.json"));
+        let items = vec![(0, item)];
+        let brief = followup_brief("TK0001-work", &rounds, &items);
         assert!(
             brief.contains(
                 "The items below are from the review of `TK0001-work`, which is now merged"
@@ -2752,12 +2887,37 @@ mod tests {
             "{brief}"
         );
         assert!(brief.contains("one-line reason"), "{brief}");
+        assert!(brief.contains("From review 1 (attempt 2):"), "{brief}");
         assert!(
             brief
                 .lines()
-                .any(|line| line == "[minor] a.rs:7 a nicer name"),
+                .any(|line| line == "- [minor] a.rs:7 a nicer name"),
             "{brief}"
         );
         assert!(brief.contains("/r/verdicts/review.json"), "{brief}");
+    }
+
+    /// The item key drops a leading tag that repeats the item's own level and collapses
+    /// whitespace, so a repeat from a later round matches its earlier copy. A different tag
+    /// stays part of the text.
+    #[test]
+    fn the_followup_item_key_ignores_a_duplicated_level_tag_and_whitespace() {
+        let first = ReviewItem {
+            level: Some("minor".to_owned()),
+            file: Some("a.rs".to_owned()),
+            line: Some(7),
+            text: "a   nicer\n name".to_owned(),
+            pre_existing: false,
+        };
+        let repeat = ReviewItem {
+            text: "[Minor] a nicer name".to_owned(),
+            ..first.clone()
+        };
+        assert_eq!(followup_item_key(&first), followup_item_key(&repeat));
+        let other_tag = ReviewItem {
+            text: "[major] a nicer name".to_owned(),
+            ..first.clone()
+        };
+        assert_ne!(followup_item_key(&first), followup_item_key(&other_tag));
     }
 }

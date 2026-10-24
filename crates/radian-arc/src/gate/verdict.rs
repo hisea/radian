@@ -127,10 +127,34 @@ impl ReviewItem {
             pre_existing,
         })
     }
+
+    /// The item's `text` without a leading tag that repeats the item's own level: `[major]`,
+    /// `[MAJOR]` and `[ major ]` all count, and the spaces after the tag go too. A text that
+    /// starts with another tag, or an item with no level, keeps its text unchanged.
+    #[must_use]
+    pub fn text_without_level_tag(&self) -> &str {
+        let Some(level) = self.level.as_deref() else {
+            return &self.text;
+        };
+        let trimmed = self.text.trim_start();
+        let Some(rest) = trimmed.strip_prefix('[') else {
+            return &self.text;
+        };
+        let Some((tag, after)) = rest.split_once(']') else {
+            return &self.text;
+        };
+        if tag.trim().eq_ignore_ascii_case(level) {
+            after.trim_start()
+        } else {
+            &self.text
+        }
+    }
 }
 
 /// `[level] path:line text`, leaving out the parts the item does not have. A line without a
-/// file names no place, so only a file carries a location.
+/// file names no place, so only a file carries a location. A `text` that starts with a tag
+/// that repeats the item's own level loses that tag, so the level prints once; a text that
+/// starts with another tag keeps it. The verdict on disk is never rewritten.
 impl std::fmt::Display for ReviewItem {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(level) = &self.level {
@@ -143,7 +167,7 @@ impl std::fmt::Display for ReviewItem {
             }
             formatter.write_str(" ")?;
         }
-        formatter.write_str(&self.text)
+        formatter.write_str(self.text_without_level_tag())
     }
 }
 
@@ -199,6 +223,23 @@ pub struct ReviewReport {
     pub suggestions: Vec<ReviewItem>,
     /// What the session checked and found correct.
     pub verified: Vec<String>,
+}
+
+/// The settings one review session ran with, and where each came from (ADR 0048
+/// decision 10), so `show` can tell a first review from a rework review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewSettings {
+    /// `first` for a task's first review, `rework` for a later one.
+    pub round: String,
+    /// The config key the session's `exec_args` came from: `gate.review.first.exec_args`,
+    /// `gate.review.exec_args` or `worker.exec_args`.
+    pub exec_args: String,
+    /// The wall-time limit of one session, in seconds.
+    pub timeout_secs: u64,
+    /// The config key `timeout_secs` came from: `gate.review.first.timeout_secs` or
+    /// `gate.review.timeout_secs`.
+    pub timeout: String,
 }
 
 /// The verdict of one stage for one commit.
@@ -263,6 +304,10 @@ pub struct Verdict {
     /// first review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_pre_existing: Option<u32>,
+    /// A `review` verdict only: the settings the session ran with and the keys they came from
+    /// (ADR 0048 decision 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_settings: Option<ReviewSettings>,
 }
 
 impl Verdict {
@@ -295,6 +340,7 @@ impl Verdict {
             review_session_ids: Vec::new(),
             review_cost_micros: None,
             review_pre_existing: None,
+            review_settings: None,
         }
     }
 

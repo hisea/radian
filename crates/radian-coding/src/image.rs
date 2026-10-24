@@ -437,34 +437,14 @@ mod tests {
         assert_eq!(image.placeholder(), "[image: shot.png, 1200×800, 1 KB]");
     }
 
-    /// A unique scratch directory removed on drop (no tempdir dependency).
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(label: &str) -> Self {
-            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let dir = std::env::temp_dir()
-                .join(format!("radian-image-{}-{label}-{n}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    /// A unique scratch directory removed on drop.
+    fn scratch(label: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-image", label)
     }
 
     #[test]
     fn a_valid_path_loads_the_image() {
-        let dir = Scratch::new("valid");
+        let dir = scratch("valid");
         let path = dir.path().join("shot.png");
         std::fs::write(&path, png(10, 10)).unwrap();
         let PathImage::Loaded(image) = load_path(&path) else {
@@ -476,7 +456,7 @@ mod tests {
 
     #[test]
     fn a_text_file_is_not_an_image() {
-        let dir = Scratch::new("text");
+        let dir = scratch("text");
         let path = dir.path().join("notes.png");
         std::fs::write(&path, "plain text").unwrap();
         assert_eq!(load_path(&path), PathImage::NotImage);
@@ -484,7 +464,7 @@ mod tests {
 
     #[test]
     fn a_missing_path_is_unreadable() {
-        let dir = Scratch::new("missing");
+        let dir = scratch("missing");
         assert!(matches!(
             load_path(&dir.path().join("nope.png")),
             PathImage::Unreadable(_)
@@ -494,7 +474,7 @@ mod tests {
     /// A huge sparse non-image must not be read whole: the head is enough to say `NotImage`.
     #[test]
     fn a_large_non_image_is_refused_from_its_head() {
-        let dir = Scratch::new("huge-non-image");
+        let dir = scratch("huge-non-image");
         let path = dir.path().join("huge.bin");
         let mut file = std::fs::File::create(&path).unwrap();
         std::io::Write::write_all(&mut file, b"not an image").unwrap();
@@ -512,7 +492,7 @@ mod tests {
     /// An over-limit image is refused from metadata, never by reading its body.
     #[test]
     fn an_over_limit_image_is_refused_before_its_body_is_read() {
-        let dir = Scratch::new("huge-image");
+        let dir = scratch("huge-image");
         let path = dir.path().join("huge.png");
         let mut file = std::fs::File::create(&path).unwrap();
         std::io::Write::write_all(&mut file, &png(10, 10)).unwrap();
@@ -533,7 +513,7 @@ mod tests {
     /// A header whose dimensions are already over 8000 px is refused from the head too.
     #[test]
     fn an_over_limit_side_is_refused_from_its_header() {
-        let dir = Scratch::new("wide-image");
+        let dir = scratch("wide-image");
         let path = dir.path().join("wide.png");
         std::fs::write(&path, png(9000, 10)).unwrap();
         reset_path_read_bytes();

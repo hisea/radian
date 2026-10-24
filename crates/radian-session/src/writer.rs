@@ -1307,11 +1307,8 @@ mod tests {
     use super::{SessionCreatedData, SessionJournal, must_sync, session_is_live};
     use crate::runtime::{RuntimeEvent, TurnOutcome};
 
-    fn tee_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("radian-tee-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn tee_dir(name: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-tee", name)
     }
 
     fn config_changed(revision: u64) -> RuntimeEvent {
@@ -1460,9 +1457,7 @@ mod tests {
     /// blocks the writer and repeated probes agree.
     #[test]
     fn the_liveness_probe_follows_the_writer_lock() {
-        let dir = std::env::temp_dir().join(format!("radian-live-probe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-live-probe");
         let path = dir.join("live.jsonl");
 
         assert!(!session_is_live(&path), "a missing file is not live");
