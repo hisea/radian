@@ -86,14 +86,16 @@ copy.
 | TK0052-M2 | `max_auto_rework` never pauses the plan (`record_auto_rework` uses `u32::MAX`) | `failure_sequences::every_automatic_failure_sequence_ends_within_the_limits` (`auto_rework 3 tripped max_auto_rework but the plan did not pause`) | ✅ failed |
 | TK0052-M3 | never stop `--watch` on a repeated error (the `REPEATED_ERROR_LIMIT` branch dropped) | `run::three_identical_pass_errors_stop_watch_with_exit_one_and_release_the_lock` (it waits the 30 s deadline) | ✅ failed |
 | TK0035-M1 | clear a refused integration record again (the old `_` arm) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the record is gone after the first pass) | ✅ failed |
-| TK0035-M2 | drop the wall-time bound on the worktree-setup fetch (call `git::run` without the clock) | `run::a_hanging_fetch_ends_the_attempt_at_the_wall_time` (40 s deadline: `start` never returned) | ✅ failed |
-| TK0035-M3 | sleep a whole `POLL` slice inside each heartbeat interval again | `work::a_one_second_stall_window_keeps_three_beats_inside_it` (mean gap 414 ms) | ✅ failed |
+| TK0035-M2 | drop the wall-time bound on the worktree-setup fetch (the setup fetch calls the unbounded `crate::git::run` instead of `git_remote(repo, &["fetch", …], clock)`) | `run::a_hanging_fetch_ends_the_attempt_at_the_wall_time` (40 s deadline: `start` never returned) | ✅ failed |
+| TK0035-M3 | sleep a whole `POLL` slice inside each heartbeat interval again | `work::a_one_second_stall_window_keeps_three_beats_inside_it` (every gap is 400 ms) | ✅ failed |
 | TK0044-M1 | take a single review lock again (`SlotLock::acquire` with 1 slot) | `review::two_tasks_reviews_overlap_with_concurrency_two` (the two reviews' intervals do not overlap) | ✅ failed |
 | TK0044-M2 | apply the `[gate.review.first]` settings to every review (force `first = true`) | `review::a_first_review_uses_the_first_settings_and_a_rework_uses_the_normal_ones` (the rework session times out and the fake records no third run) | ✅ failed |
 | TK0044-M3 | skip the owned-flag check for `gate.review.first.exec_args` | `review::a_first_exec_arg_the_review_stage_owns_is_refused` (the session runs and the stage passes) | ✅ failed |
 | TK0037-M1 | `start` refuses `todo.retry_wait` again (`attempt_ops::claim`'s guard goes back to `phase == "ready"`) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `attempt::start_refuses_a_retry_wait_task_when_every_slot_is_taken` (the second gets the wrong refusal, so its `limits.concurrency` assertion fails) | ✅ 2 failed |
 | TK0037-M2 | the scheduling loop ignores `retry_at` and claims a `todo.retry_wait` task (`run::start_ready` drops its phase check) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `run::a_future_retry_makes_run_exit_with_it_waiting` | ✅ 2 failed |
 | TK0060-M1 | the scheduling claim accepts `todo.retry_wait` (`ClaimBy::SchedulingLoop` uses the owner's phase set) | `attempt::a_scheduling_claim_refuses_a_task_that_began_backing_off` (the claim succeeds and takes attempt 1) | ✅ failed |
+| TK0065-M1 | drop the pass's digest from an integration refusal (`run_inner` copies the written inputs only for `verify`) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the refused record says `"inputs": ""`) | ✅ failed |
+| TK0065-M2 | drop the `.iN` attempt prefix acceptance (`same_attempt` compares the attempt only) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the first later pass starts a gate again) | ✅ failed |
 
 TK0060-M1 was run on this branch from a copy under `.radian/tk0060/`, restored with `cp` and
 compared with `cmp`. `TK0037-M2`'s phase check has since moved into `attempt_ops::claim_by`, so
@@ -104,6 +106,11 @@ TK0037-M1–M2 were run against `12da692f`, each applied to the committed file, 
 `cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` before the run
 (the sync tests refuse a binary older than its sources), restored from a copy under
 `.radian/tk0037/` with `cp`, and compared byte for byte with `cmp`.
+
+TK0065-M1–M2 were run against this branch's working files, with the strengthened
+`run::a_refused_integration_is_not_restarted_until_its_inputs_change` in place, the same
+two-binary build before each run, and `git checkout --` to restore the file. M1 fails the
+digest assertion; M2 starts a gate on the first later pass.
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -326,8 +333,8 @@ test passes the round and reaches `awaiting_human`. M2 returns `false` for an it
 test moves, and all three items of the unplaced test move. M3 writes `level: None` on a moved
 item, so the demoted `major` item loses its grade in the verdict and in the follow-up brief.
 M4 keeps only the newest `review` verdict in `review_verdicts` (the follow-up's input), so every
-earlier round goes unread and the merge proposes no follow-up. It was re-run on the merged
-follow-up code, after TK0045 replaced the single-verdict read.
+earlier round goes unread and, in this test, the merge proposes no follow-up. It was re-run on
+the merged follow-up code, after TK0045 replaced the single-verdict read.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
@@ -335,6 +342,7 @@ follow-up code, after TK0045 replaced the single-verdict read.
 | TK0051-M2 | demote an item without a `file` or a `line` again (the `let … else` returns `false`) | ✅ 2 failed | `gate::review::tests::an_item_without_a_place_stays_blocking_at_its_level`; `gate::review::tests::a_pre_existing_item_is_moved_and_marked` |
 | TK0051-M3 | drop the `level` of a moved item (`level: None` in `mark_pre_existing`) | ✅ 2 failed | `gate::review::tests::a_major_item_outside_the_windows_is_moved_and_keeps_its_level`; `review::a_demoted_major_item_reaches_the_followup_at_its_level` |
 | TK0051-M4 | read only the newest review verdict again (`review_verdicts` keeps just its last entry) | ✅ 3 failed | `review::a_major_item_a_failing_round_demoted_reaches_the_followup`; `review::a_pre_existing_item_from_an_earlier_round_is_carried`; `review::a_followup_holds_every_round_grouped_and_drops_a_repeat` |
+
 ## TK0045 (the follow-up holds every review round)
 
 TK0045-M1–M4 were run on the branch's working code before the code commit, each from a copy
@@ -357,9 +365,10 @@ copy under `.radian/mut/` with `cp`, and compared byte for byte with `cmp`, with
 `cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` before every
 run (the run tests drive the `radian` binary). M1 clears the refused record before the input
 comparison, so the first pass drops it and the test's record assertion fails (the second pass
-would then start the same gate again). M2 replaces the fetch's clock with an unbounded
-`git::run`, so `start` never returns and the test's 40-second deadline panics. M3 is the old
-heartbeat loop; the mean gap over three beats is 414 ms, where a 1 s window needs 333 ms.
+would then start the same gate again). M2 replaces the setup fetch's `git_remote` call with the
+unbounded `crate::git::run`, so `start` never returns and the test's 40-second deadline panics.
+M3 is the old heartbeat loop; every gap over three beats is 400 ms, where a 1 s window needs
+333 ms.
 
 ## TK0061 (`confirm --dry-run`, and the `after` chain both ways)
 
@@ -377,4 +386,21 @@ binary older than its sources. M2–M4 were run against the store-level tests on
 `cargo nextest run -p radian-arc --test chain ... --profile sandbox <test name>`, so the
 stale binary did not mask the mutation. M3 fails in 0.35 s (the bound is not hit); a walk
 that follows the cycle again would hit the 5 s bound instead of hanging the suite.
+
+## TK0039 (the cancel-plan review's follow-ups)
+
+The three races and edges the TK0034 review left: the `todo` branch of `cancel_task` writes
+under the transaction's lock and only while the task is still `todo`; the plan form walks the
+plan's tasks once more after its status becomes `cancelled`; and the pass that ends a
+cancelled plan's `doing.reconciling` task passes `Duration::ZERO` as the grace.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0039-M1 | the `todo` branch writes `failed.cancelled` without the transaction's re-check (the pre-TK0039 unconditional write) | `attempt::tests::a_todo_cancel_that_finds_a_claim_cancels_the_attempt_instead` (the claimed attempt is overwritten: `failed.cancelled`, where the doing path leaves `doing.reconciling`) | ✅ failed |
+| TK0039-M2 | the plan form's second walk is dropped (the `added` set and its `cancel_plan_tasks` call removed) | `attempt::a_task_added_while_the_plan_is_cancelled_is_cancelled_too` (the task is left `todo.proposed` under a `cancelled` plan) | ✅ failed |
+| TK0039-M3 | `end_reconciling_of_cancelled_plans` passes `[limits] cancel_grace_secs` again instead of `Duration::ZERO` | `attempt::a_pass_ends_a_reconciling_task_without_a_second_grace` (the pass takes the 5 s grace; the test's 2 s bound fails at 5.09 s) | ✅ failed |
+
+TK0039-M1–M3 were applied to the working file one at a time, run with `cargo test -p
+radian-arc` (`--lib attempt::tests` for M1, `--test attempt` for M2 and M3), restored from a
+copy under `.radian/tk0039/` with `cp`, and compared byte for byte with `cmp`.
 

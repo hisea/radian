@@ -835,6 +835,42 @@ fn fake_wrapper(repo: &Repo, store: &Store, task: &str, attempt: u32) -> std::pr
     child
 }
 
+/// A stand-in wrapper that outlives its SIGTERM: only the SIGKILL after the grace ends it. With
+/// `marker`, the file is written when the SIGTERM arrives, which is how a test knows the task's
+/// cancel is running (and waiting the grace). `pid_start_or_empty` records the start time when
+/// `ps` works; without it the pid alone is the identity, the way arc falls back.
+fn stubborn_wrapper(
+    repo: &Repo,
+    task: &str,
+    attempt: u32,
+    marker: Option<&Path>,
+) -> std::process::Child {
+    let script = match marker {
+        Some(marker) => format!(
+            "trap 'printf signalled > \"{}\"' TERM; while :; do sleep 0.05; done",
+            marker.display()
+        ),
+        None => "trap '' TERM; while :; do sleep 0.05; done".to_owned(),
+    };
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .spawn()
+        .expect("a stand-in wrapper that ignores SIGTERM");
+    let dir = repo.attempt_dir(task, attempt);
+    std::fs::create_dir_all(&dir).expect("the attempt directory");
+    let identity = json!({
+        "attempt_id": format!("{task}-{attempt}"),
+        "token": "t",
+        "pid": child.id(),
+        "process_started_at": pid_start_or_empty(child.id()),
+        "wrapper_pid": child.id(),
+        "wrapper_process_started_at": pid_start_or_empty(child.id()),
+    });
+    std::fs::write(dir.join("identity.json"), identity.to_string()).expect("the identity record");
+    child
+}
+
 fn plan_is(store: &Store, plan: &str, status: &str) -> bool {
     store.load_plan(plan).expect("the plan reads").item.status == status
 }
@@ -1418,6 +1454,129 @@ fn cancelling_a_plan_ends_every_open_task_and_the_plan() {
         again.stderr
     );
     let _ = wrapper.kill();
+    let _ = wrapper.wait();
+}
+
+/// The plan's status write is a transaction of its own, so the lead's `add_task` can land
+/// between the task walk and that write. The plan is `cancelled` by then and takes no task, so
+/// one more walk ends the one that made it in: nothing is left `todo.proposed` under a final
+/// plan.
+#[test]
+fn a_task_added_while_the_plan_is_cancelled_is_cancelled_too() {
+    let repo = Repo::new("cancel-plan-add");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    tune(
+        &repo,
+        &[("cancel_grace_secs = 10", "cancel_grace_secs = 2")],
+    );
+    let (plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = tasks[0].clone();
+    attempt_ops::claim(&store, &task).expect("claim");
+    store
+        .change_task(&task, |task| {
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("running");
+    let marker = repo.root.join("signalled");
+    let mut wrapper = stubborn_wrapper(&repo, &task, 1, Some(&marker));
+
+    let clone = repo.clone.clone();
+    let plan_id = plan.clone();
+    let cancel = std::thread::spawn(move || {
+        let store = Store::open(&clone).expect("the store opens");
+        attempt::cancel_plan(&store, &plan_id)
+    });
+    // The walk is inside this task's cancel and waits the grace, which leaves the window the
+    // status write and the task walk are separate in.
+    wait_for_file(&marker);
+    let added = store
+        .add_task_proposed(
+            &plan,
+            "extra",
+            "An extra task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .expect("the lead adds a task while the walk runs");
+
+    let canceled = cancel
+        .join()
+        .expect("the cancel thread did not panic")
+        .expect("the plan cancels");
+    assert_eq!(
+        store.load_plan(&plan).expect("the plan reads").item.status,
+        "cancelled"
+    );
+    assert_eq!(
+        state(&store, &task),
+        ("doing".to_owned(), "reconciling".to_owned()),
+        "the wrapper was killed and left no result"
+    );
+    assert_eq!(
+        state(&store, &added),
+        ("failed".to_owned(), "cancelled".to_owned()),
+        "the task added during the walk is cancelled too"
+    );
+    assert!(
+        canceled
+            .tasks
+            .iter()
+            .any(|task| task.task == added && task.phase == "cancelled"),
+        "{canceled:?}"
+    );
+    assert_eq!(canceled.lines().last(), Some(&format!("{plan} cancelled")));
+    let _ = wrapper.wait();
+}
+
+/// The pass that ends a cancelled plan's `doing.reconciling` task does not wait a second cancel
+/// grace: the plan form already sent that wrapper its SIGTERM and killed it. The pass checks
+/// the pid and its start time, and kills the process at once when it is still there.
+#[test]
+fn a_pass_ends_a_reconciling_task_without_a_second_grace() {
+    let repo = Repo::new("pass-reconciling-grace");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    tune(
+        &repo,
+        &[("cancel_grace_secs = 10", "cancel_grace_secs = 5")],
+    );
+    let (plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = tasks[0].clone();
+    attempt_ops::claim(&store, &task).expect("claim");
+    store
+        .change_task(&task, |task| {
+            task.phase = "reconciling".to_owned();
+            Ok(())
+        })
+        .expect("reconciling");
+    // The wrapper the plan form could not end: it ignores SIGTERM and is still the process the
+    // record names.
+    let mut wrapper = stubborn_wrapper(&repo, &task, 1, None);
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "cancelled".to_owned();
+            plan.auto = "off".to_owned();
+            Ok(())
+        })
+        .expect("the plan form cancelled the plan");
+
+    let started = Instant::now();
+    let ended = attempt::end_reconciling_of_cancelled_plans(&store).expect("the pass runs");
+    let elapsed = started.elapsed();
+
+    assert_eq!(ended, vec![task.clone()]);
+    assert_eq!(
+        state(&store, &task),
+        ("failed".to_owned(), "cancelled".to_owned())
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the pass waited a second cancel grace: {elapsed:?}"
+    );
     let _ = wrapper.wait();
 }
 
