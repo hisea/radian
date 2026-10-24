@@ -1244,6 +1244,26 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
 
 // ---- automatic rework ------------------------------------------------------------------
 
+/// Whether the task's current attempt is a worker-less reverify attempt (ADR 0048 decisions 9,
+/// 10 and 11). The reverify claim writes the attempt's `attempt_result.json` with class
+/// [`REVERIFY_CLASS`] before the gate runs, so a failed reverify is told apart from a failed
+/// worker attempt by what the store already records, never by timing or log text.
+///
+/// # Errors
+///
+/// The task file could not be read.
+pub fn is_reverify_attempt(store: &Store, task_id: &str) -> Result<bool, Error> {
+    let task = store.load_task(task_id)?.item;
+    let path = run_dir(store, task_id, task.attempt).join(ATTEMPT_RESULT_FILE);
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Ok(false);
+    };
+    Ok(value.get("class").and_then(Value::as_str) == Some(REVERIFY_CLASS))
+}
+
 /// What one automatic rework did to the plan: the pause, when the task went past its limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paused {

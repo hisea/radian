@@ -2767,7 +2767,7 @@ hand to `crates/radian-tui/src/arc/mod.rs`, the named test was run alone with
 The review of TK0019 found that `L` on the merge page opened the loop log under an open command
 log, so nothing appeared, and that the plans footer advertised neither `R` nor `L`. The command
 log now closes when `L` opens the loop log, the plans footer carries both hints, and the loop
-sections of `docs/user/arc-tui.md` and `docs/user/arc.md` now say that a start is followed
+sections of `docs/user/arc/tui.md` and `docs/user/arc/index.md` now say that a start is followed
 through its child's pid and that the pid appears only when the holder recorded one. Each mutation
 was applied by hand to the working file, the named test was run alone, and the file was restored
 afterwards.
@@ -2853,3 +2853,30 @@ Each mutation was applied by hand, backed up under `.radian/` and restored from 
 | TK0014-M3 | the image rows carry their payload as text, so search matches inside them | ✅ 3 failed | `selection_and_search_never_see_the_image_rows` (`search must not match inside the image rows`, 12 matches) |
 
 3/3 caught.
+## the docs site's `arc/` pages (2026-10-24, branch `work/TK0089-arc-docs-subdir`)
+
+Base: the branch's move commit. The mutation was applied by hand to
+`crates/radian-tui/src/site_docs.rs`, backed up under `.radian/site_docs.rs.bak` and restored
+from that copy (never `git checkout`); the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox -E 'test(relative_page_links_resolve_from_the_source_directory)' --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0089-M2 | `resolve_link` resolves a page link from the site root (`join_docs_user("", path)`) instead of the source page's directory | ✅ 1 failed | `site_docs::relative_page_links_resolve_from_the_source_directory` (a sibling `gate.md` becomes a `blob/main` repo link) |
+
+1/1 caught.
+
+## TK0097: the site links the moved arc manual pages (2026-10-24, branch `work/TK0097-site-arc-doc-links`)
+
+`site/arc.html` still linked the flat `/docs/arc.html` and `/docs/arc-*.html` paths that the
+manual's move into `docs/user/arc/` replaced. The new test renders the manual and checks every
+`/docs/…` link in the hand-written pages against the generator's output. The mutation was
+applied by hand to `site/arc.html`, backed up under `.radian/arc.html.bak` and restored from
+that copy (never `git checkout`); the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test site_docs -E 'test(the_hand_written_pages_only_link_generated_docs)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0097-M1 | a `/docs/arc/gate.html` link goes back to `/docs/arc-gate.html` | ✅ 1 failed | `site_docs::the_hand_written_pages_only_link_generated_docs` (`site/arc.html: link '/docs/arc-gate.html' names 'arc-gate.html', which the generator does not write`) |
+
+1/1 caught.

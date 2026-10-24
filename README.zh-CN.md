@@ -93,7 +93,7 @@ radian arc                             # 打开 arc TUI
 arc 需要一个 git 工作区，并且有一个你能往 main 分支推送的 `origin` 远端。
 `radian arc init` 会检查凭据、远端、一次试推送和沙箱，哪一项失败就给一行警告。
 门禁要跑的命令写在 `.radian/arc/config.toml` 里。
-命令、门禁和 arc 保存的文件见 [`docs/user/arc.md`](docs/user/arc.md)、[`arc-gate.md`](docs/user/arc-gate.md)、[`arc-files.md`](docs/user/arc-files.md)、[`arc-mcp.md`](docs/user/arc-mcp.md) 和 [`arc-tui.md`](docs/user/arc-tui.md)（用户手册是英文）。
+命令、门禁和 arc 保存的文件见 [`docs/user/arc/index.md`](docs/user/arc/index.md)、[`arc/gate.md`](docs/user/arc/gate.md)、[`arc/files.md`](docs/user/arc/files.md)、[`arc/mcp.md`](docs/user/arc/mcp.md) 和 [`arc/tui.md`](docs/user/arc/tui.md)（用户手册是英文）。
 
 ## 安装
 
