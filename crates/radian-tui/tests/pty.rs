@@ -14517,7 +14517,7 @@ fn pty_arc_is_a_viewer_while_arc_serve_holds_the_lock() {
 }
 
 /// The open-time theme warning is not lost when a loop already runs: `radian arc` opened with
-/// a config whose theme warns, while `radian arc run --watch` holds `runner.lock`, shows the
+/// a config whose theme warns, while `radian arc serve` holds `runner.lock`, shows the
 /// warning in the footer with the start's line after it — not only "a loop is already running"
 /// (brief TK0087).
 #[test]
@@ -14526,8 +14526,8 @@ fn pty_arc_keeps_the_theme_warning_when_a_loop_already_runs() {
     let repo = scratch.path().join("repo");
     arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
     let home = TempDir::new("arc-theme-warning-home");
-    let mut watch = std::process::Command::new(BIN)
-        .args(["arc", "run", "--watch", "--interval", "5"])
+    let mut serve = std::process::Command::new(BIN)
+        .args(["arc", "serve", "--interval", "5"])
         .current_dir(&repo)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -14538,11 +14538,11 @@ fn pty_arc_keeps_the_theme_warning_when_a_loop_already_runs() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("arc run --watch starts");
-    wait_until(Duration::from_secs(10), "the watch loop's lock", || {
+        .expect("arc serve starts");
+    wait_until(Duration::from_secs(10), "the serve loop's lock", || {
         !arc_lock_free(&repo)
     });
-    let pid = watch.id();
+    let pid = serve.id();
 
     // `system` is pi's reserved name: `theme::load` warns once and falls back to dark. The line
     // is short enough to share the footer's one result line with the start's.
@@ -14579,11 +14579,11 @@ fn pty_arc_keeps_the_theme_warning_when_a_loop_already_runs() {
 
     pty.send(b"q");
     assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
-    assert!(arc_process_alive(pid), "quitting stopped the watch loop");
+    assert!(arc_process_alive(pid), "quitting stopped the serve loop");
     let _ = std::process::Command::new("kill")
         .args(["-TERM", &pid.to_string()])
         .status();
-    let _ = watch.wait();
+    let _ = serve.wait();
 }
 
 /// SIGTERM closes the TUI and nothing else: the loop it started keeps running with the lock
