@@ -14299,6 +14299,27 @@ fn arc_task_state(repo: &Path, task: &str) -> (String, String) {
     (item.state.as_str().to_owned(), item.phase)
 }
 
+/// Waits for the task's `(state, phase)`, naming the state it saw last when it does not get
+/// there.
+fn wait_for_state(repo: &Path, task: &str, want: (&str, &str), limit: Duration) {
+    let deadline = Instant::now() + limit;
+    loop {
+        let state = arc_task_state(repo, task);
+        if state == (want.0.to_owned(), want.1.to_owned()) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{task} is {}.{}, not {}.{} in {limit:?}",
+            state.0,
+            state.1,
+            want.0,
+            want.1
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Whether `runner.lock` can be taken: true when no loop holds it.
 fn arc_lock_free(repo: &Path) -> bool {
     use fs2::FileExt;
@@ -14367,10 +14388,11 @@ async fn pty_arc_runs_a_task_at_auto_run_and_stops_at_awaiting_human() {
         "the ticker does not show the start:\n{}",
         pty.screen()
     );
-    wait_until(
+    wait_for_state(
+        &repo,
+        &task,
+        ("review", "awaiting_human"),
         Duration::from_secs(90),
-        "the task at review.awaiting_human",
-        || arc_task_state(&repo, &task) == ("review".to_owned(), "awaiting_human".to_owned()),
     );
 
     pty.send(b"q");
@@ -14405,9 +14427,7 @@ async fn pty_arc_merges_at_auto_merge() {
     .await;
     let task = arc_loop_repo(&repo, "merge", &server.base_url);
     let mut pty = Pty::spawn_in(&["arc"], &ARC_LOOP_ENV, &repo, 30, 140);
-    wait_until(Duration::from_secs(120), "the task merged", || {
-        arc_task_state(&repo, &task) == ("done".to_owned(), "merged".to_owned())
-    });
+    wait_for_state(&repo, &task, ("done", "merged"), Duration::from_secs(120));
     assert_eq!(
         arc_git(&repo, &["ls-remote", "origin", "refs/heads/main"])
             .split_whitespace()
@@ -14531,9 +14551,7 @@ async fn pty_arc_quit_asks_with_a_running_attempt_and_a_later_run_reconciles_it(
     let server = MockServer::start(vec![slow_text_reply("done", Duration::from_secs(8))]).await;
     let task = arc_loop_repo(&repo, "run", &server.base_url);
     let mut pty = Pty::spawn_in(&["arc"], &ARC_LOOP_ENV, &repo, 30, 140);
-    wait_until(Duration::from_secs(60), "the attempt running", || {
-        arc_task_state(&repo, &task) == ("doing".to_owned(), "running".to_owned())
-    });
+    wait_for_state(&repo, &task, ("doing", "running"), Duration::from_secs(60));
     assert!(
         pty.wait_for_screen(
             &format!("{task}-1 started -> doing.running"),
