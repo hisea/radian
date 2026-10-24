@@ -587,28 +587,45 @@ fn merged_candidate(store: &Store, task: &str) -> Result<Option<Verdict>, Error>
     Ok(best.map(|(_, verdict)| verdict))
 }
 
-/// When `task` reached the state it is in now, as an RFC 3339 UTC time from its records. The
-/// arc TUI's board orders its finished list by it: a merged task takes the newest passing
-/// `integration` verdict's end time, every other task the current attempt's `execution.json`
-/// end time (the wrapper's own record), and, when neither exists (a cancelled `todo` task), the
-/// task file's modification time, which is when arc wrote the final state.
+/// When `task` reached the state it is in now, as an RFC 3339 UTC time from its records,
+/// normalized to six fractional digits so `at` strings sort by instant. The arc TUI's board
+/// orders its finished list by it: a merged task takes the newest passing `integration`
+/// verdict's end time, every other task the current attempt's `execution.json` end time (the
+/// wrapper's own record), and, when neither exists (a cancelled `todo` task), the task file's
+/// modification time, which is when arc wrote the final state.
 ///
 /// `None` when no record and no task file can be read.
 #[must_use]
 pub fn finished_at(store: &Store, task: &str) -> Option<String> {
     let item = store.load_task(task).ok()?.item;
-    if item.state == TaskState::Done
+    let raw = if item.state == TaskState::Done
         && let Ok(Some(verdict)) = merged_candidate(store, task)
     {
-        return Some(verdict.ended_at);
-    }
-    if let Some(at) = attempt_end(store, task, item.attempt) {
-        return Some(at);
-    }
-    let path = store.root().join("tasks").join(format!("{task}.md"));
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let at: chrono::DateTime<chrono::Utc> = modified.into();
-    Some(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        verdict.ended_at
+    } else if let Some(at) = attempt_end(store, task, item.attempt) {
+        at
+    } else {
+        let path = store.root().join("tasks").join(format!("{task}.md"));
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        let at: chrono::DateTime<chrono::Utc> = modified.into();
+        at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    Some(normal_time(&raw))
+}
+
+/// `at` in the verdict format (RFC 3339 UTC with six fractional digits), so two records of the
+/// same second compare by instant instead of by how many digits their writer used: a verdict
+/// writes microseconds, `execution.json` and the file mtime write milliseconds. Text that does
+/// not parse is returned unchanged.
+fn normal_time(at: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(at).map_or_else(
+        |_| at.to_owned(),
+        |time| {
+            time.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%S%.6fZ")
+                .to_string()
+        },
+    )
 }
 
 /// The `ended_at` the wrapper wrote to one attempt's `execution.json`.

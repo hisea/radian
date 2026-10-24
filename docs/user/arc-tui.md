@@ -1,5 +1,5 @@
 ---
-description: The arc TUI: the plans, task and merge pages, every mark and key, and the owner's actions.
+description: The arc TUI: the plans, board, task and merge pages, every mark and key, and the owner's actions.
 ---
 
 # arc: the TUI
@@ -8,7 +8,7 @@ This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the 
 
 `radian arc` opens a view of plans, tasks, verdicts, journals and merges; the pages themselves read the store, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (take and release at once, never creating it) and never holds it. Header: `arc`, tabs `plans · board · task · merge` (`merge` for a task in `review.*` or `done`), then on the plans page the view and the plans it hides (`active · 14 hidden`; a zero count is omitted), on the board page its scope (`all plans` or the plan id, and `finished` while the list is open), `main <sha>` and the loop state.
 
-`b` opens the board from any page; on the board it goes back to the plans page. Outside the task page `Tab` keeps its page meaning: on the plans page it opens the selected task's page, on the board the selected card's, and on the merge page it closes it. On the task page `Tab`/`Shift-Tab` cycle that page's own four tabs instead; `Esc` returns to the page the task page was opened from, and `b` opens the board from any page, the task page included.
+`b` opens the board from any page, the task page included; on the board it goes back to the plans page. Outside the task page `Tab` keeps its page meaning: on the plans page it opens the selected task's page, on the board the selected card's, and on the merge page it closes it, unless a command's log is open (`Esc` closes that first). On the task page `Tab`/`Shift-Tab` cycle that page's own four tabs instead; there `Esc` returns to the page the task page was opened from, and `m` opens the merge page.
 
 ## The loop
 
@@ -75,8 +75,8 @@ The board groups the open tasks of the plans it shows by who acts next. From lef
 |---|---|
 | `todo` | `todo.ready`, `todo.blocked` and `todo.retry_wait`: waiting for its turn. |
 | `doing` | `doing.starting`, `doing.running`, `doing.reconciling`: a worker runs. |
-| `verifying` | `review.verifying`, `review.integrating`, `review.ready_to_merge`: a gate or a merge runs. Also `review.awaiting_human` of a plan whose `auto` is `merge` (the loop merges it), and `review.rework_pending` that a scheduling pass will still reverify by itself (a `commands` or integration command failure or timeout, with automatic reverifies left). |
-| `needs you` | `review.awaiting_human` of a plan whose `auto` is not `merge`; `review.rework_pending` that nothing automatic will leave (the review or conflict limit was reached, a command failure no automatic reverify takes, or a reject note); `todo.proposed`; `todo.paused_budget`; and every task of a plan `arc` paused through one of its tasks (the automatic rework limit wrote `paused.json` and set the plan's `auto` to `off`). |
+| `verifying` | `review.verifying`, `review.integrating`, `review.ready_to_merge`: a gate or a merge runs. Also `review.awaiting_human` of a plan whose `auto` is `merge` (the loop merges it), and `review.rework_pending` that a scheduling pass will still reverify by itself (a `commands` or integration command failure or timeout, with automatic reverifies left and the `(head, main)` pair not re-verified yet). |
+| `needs you` | `review.awaiting_human` of a plan whose `auto` is not `merge`; `review.rework_pending` that nothing automatic will leave (the review or conflict limit was reached, a command failure whose `(head, main)` pair was re-verified already or whose count is used up, or a reject note); `todo.proposed`; `todo.paused_budget`; and every task of a plan `arc` paused through one of its tasks: the automatic rework limit wrote `paused.json`, or a plan budget set the plan's `auto` to `off` and left a task in `todo.paused_budget`. A task budget alone does not pause the plan. |
 
 Within a column, cards keep the order `radian arc list` prints: the plan's priority (`P0` first), the plan id, then the task's order in the plan. Each column is an open frame: its top line carries the column name and its count (`╭─ TODO 10 ───…`), every row starts with the `│` rail, and the column ends with `╰──`. Two cards inside a frame are separated by one weak `┄` divider, and no divider follows the last card. A card is three lines: the state mark, the task id (cut with `…`) and `#<attempt>` right-aligned; the title, indented under the id; and, weak, `<plan id short> · <phase>` on the left — `PL0012` is the plan id's prefix and number — with the cost (`$0.13`, or `—` when none) on the right, or for a `doing` card the age of the worker's last heartbeat (`5s`, `2m`). A card in `needs you` carries `!` instead of its state mark. The selection cursor `❯` sits in the marker column left of the rail, on the selected card's first line; the selected card is not otherwise marked.
 
