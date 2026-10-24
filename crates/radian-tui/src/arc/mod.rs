@@ -124,9 +124,11 @@ pub enum Focus {
     Tasks,
 }
 
-/// The task page's tabs.
+/// The task page's tabs, in cycle order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskTab {
+    /// The task file's body (the brief), Markdown as the store loads it.
+    Brief,
     Conversation,
     Diff,
     Attempts,
@@ -135,6 +137,7 @@ pub enum TaskTab {
 impl TaskTab {
     pub fn name(self) -> &'static str {
         match self {
+            TaskTab::Brief => "brief",
             TaskTab::Conversation => "conversation",
             TaskTab::Diff => "diff",
             TaskTab::Attempts => "attempts",
@@ -143,15 +146,17 @@ impl TaskTab {
 
     fn next(self) -> Self {
         match self {
+            TaskTab::Brief => TaskTab::Conversation,
             TaskTab::Conversation => TaskTab::Diff,
             TaskTab::Diff => TaskTab::Attempts,
-            TaskTab::Attempts => TaskTab::Conversation,
+            TaskTab::Attempts => TaskTab::Brief,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            TaskTab::Conversation => TaskTab::Attempts,
+            TaskTab::Brief => TaskTab::Attempts,
+            TaskTab::Conversation => TaskTab::Brief,
             TaskTab::Diff => TaskTab::Conversation,
             TaskTab::Attempts => TaskTab::Diff,
         }
@@ -382,6 +387,14 @@ pub struct TaskPage {
     pub cost: Option<f64>,
     pub plan: String,
     pub tab: TaskTab,
+    /// The task file's body: the brief, rework sections included, without the hand-off a
+    /// fresh attempt's stdin adds.
+    pub brief: String,
+    /// The first line of the brief the tab draws. The window is clamped in the frame, where
+    /// the wrapped line count is known.
+    pub brief_scroll: usize,
+    /// The runner pins the brief to its end (`f`) at the next frame.
+    pub brief_follow: bool,
     /// The selected attempt (the latest until the user switches, then the choice sticks
     /// until the task gains a newer attempt).
     pub attempt: Option<u32>,
@@ -422,7 +435,17 @@ impl TaskPage {
             phase: format!("{}.{}", task.state.as_str(), task.phase),
             cost: task.cost_usd,
             plan: task.plan.clone(),
-            tab: TaskTab::Conversation,
+            // A task that has not run opens on its brief; the owner reads why it exists
+            // before its (empty) conversation. A task with an attempt opens on the
+            // conversation, as it always has.
+            tab: if task.attempt == 0 {
+                TaskTab::Brief
+            } else {
+                TaskTab::Conversation
+            },
+            brief: task.body.clone(),
+            brief_scroll: 0,
+            brief_follow: false,
             attempt,
             latest,
             attempt_top: 0,
@@ -835,6 +858,7 @@ impl ArcApp {
             page.phase = format!("{}.{}", task.state.as_str(), task.phase);
             page.cost = task.cost_usd;
             page.plan = task.plan.clone();
+            page.brief = task.body.clone();
             page.head = task.head_sha.clone();
             page.latest = attempts.last().map(|attempt| attempt.attempt);
             page.attempts = attempts;
@@ -1631,8 +1655,21 @@ impl ArcApp {
             return ArcKey::Ignored;
         };
         match key.code {
-            KeyCode::Esc | KeyCode::Tab => {
+            KeyCode::Esc => {
                 self.close_task();
+                ArcKey::Redraw
+            }
+            // The tabs cycle both ways; `Tab` no longer leaves the page (`Esc` does).
+            KeyCode::BackTab => {
+                page.tab = page.tab.previous();
+                ArcKey::Redraw
+            }
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                page.tab = page.tab.previous();
+                ArcKey::Redraw
+            }
+            KeyCode::Tab => {
+                page.tab = page.tab.next();
                 ArcKey::Redraw
             }
             KeyCode::Char('m') => {
@@ -1658,6 +1695,11 @@ impl ArcApp {
                 ArcKey::Redraw
             }
             KeyCode::Char('j') | KeyCode::Down => match page.tab {
+                TaskTab::Brief => {
+                    page.brief_follow = false;
+                    page.brief_scroll = page.brief_scroll.saturating_add(1);
+                    ArcKey::Redraw
+                }
                 TaskTab::Diff => {
                     let end = page.diff_body_len().saturating_sub(1);
                     page.diff_scroll = page.diff_scroll.saturating_add(1).min(end);
@@ -1670,6 +1712,11 @@ impl ArcApp {
                 TaskTab::Attempts => ArcKey::Ignored,
             },
             KeyCode::Char('k') | KeyCode::Up => match page.tab {
+                TaskTab::Brief => {
+                    page.brief_follow = false;
+                    page.brief_scroll = page.brief_scroll.saturating_sub(1);
+                    ArcKey::Redraw
+                }
                 TaskTab::Diff => {
                     page.diff_scroll = page.diff_scroll.saturating_sub(1);
                     ArcKey::Redraw
@@ -1682,6 +1729,9 @@ impl ArcApp {
             },
             KeyCode::Char('f') => {
                 match page.tab {
+                    // The frame clamps the brief to its last page and clears the follow, so a
+                    // later `k` moves up from the real end.
+                    TaskTab::Brief => page.brief_follow = true,
                     // Follow the end means the last body row is the first visible one; it is
                     // stored, so `k` moves up from there instead of from a sentinel.
                     TaskTab::Diff => page.diff_scroll = page.diff_body_len().saturating_sub(1),

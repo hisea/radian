@@ -2548,6 +2548,22 @@ file was restored from that copy (never `git checkout`).
 
 5/5 caught. The M5 edit landed on both palettes' identical literals; the dark palette is the one
 the test checks first.
+## TK0059: the task page's brief tab (2026-10-24, branch `work/TK0059-tui-task-brief-tab`)
+
+Base `b335c1de` (the branch point). The task page gains `brief` as its first tab: the task
+file's body through the transcript's Markdown renderer, with no frontmatter and no worker
+hand-off. Each mutation was applied by hand to `crates/radian-tui/src/arc/mod.rs`, the named
+test was run alone with `cargo nextest run -p radian-tui --locked --profile sandbox --test
+arc_tui <test> --no-fail-fast`, and the file was restored from a copy under `.radian/`
+(`cmp` agreed afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0059-M1 | the brief keeps its frontmatter (`TaskPage::new` sets `brief: task.to_text()` instead of `task.body.clone()`) | ✅ 1 failed | `the_brief_tab_shows_the_task_body_and_no_frontmatter` (`the frontmatter key `schema_version` is drawn`) |
+| TK0059-M2 | the page always opens on `conversation` (`TaskPage::new` sets `tab: TaskTab::Conversation`) | ✅ 1 failed | `a_task_page_opens_on_the_brief_until_the_task_has_an_attempt` (`left: Conversation`, `right: Brief`) |
+| TK0059-M3 | `Shift-Tab` from `brief` goes to `conversation` (`TaskTab::previous`'s `Brief` arm returns `Conversation`) | ✅ 1 failed | `the_task_tabs_cycle_in_order_in_both_directions` (`left: Conversation`, `right: Attempts`) |
+
+3/3 caught.
 ## TK0057: the merge page's command log (2026-10-24, branch `work/TK0057-tui-merge-actions-followups`)
 
 The review of TK0018 found two faults in the off-thread command log. `read_log_tail` dropped
