@@ -615,7 +615,8 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   its `--dry-run` and the MCP `show` tool use it. It returns `waits_on` and `blocks` (breadth
   first, nearest first, each task once), the first entry that can never reach `done.merged`
   (a `failed.*` task, a task of a `cancelled` plan, or an id that names no file), and one
-  `after` cycle. `queue_position` is the task's place among the `todo.ready` tasks. The dry
+  `after` cycle. `queue_position` is the task's place among the `todo.ready` tasks, in
+  `run::task_claim_order`'s order, so a task no plan lists still counts at the end. The dry
   run calls `plan_ops::confirm_dry_run`, which shares `confirm_with`'s checks and writes
   nothing; it checks the lock with `Store::check_state_lock`, which never creates the file.
 - The remote is always a parameter, never the literal `origin`: the caller passes

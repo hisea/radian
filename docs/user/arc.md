@@ -162,7 +162,7 @@ The id names one plan or task. An id that names both a plan and a task is refuse
 |---|---|---|
 | `--json` | — | Print one JSON object instead of fields. |
 
-The object holds the same keys as in `list --json`, plus `body`, `session_id`, `rework_reason`, and the newest review verdict's `review`, `review_verdict`, `review_session_ids`, `review_cost_micros` and `review_settings`.
+The object holds the same keys as in `list --json`, plus `body`, `session_id`, `rework_reason`, the `after` chain's `waits_on`, `blocks`, `never_runs` and `cycle` (see [the `after` chain](#the-after-chain)), and the newest review verdict's `review`, `review_verdict`, `review_session_ids`, `review_cost_micros` and `review_settings`.
 An unset field is `null`; `session_id` is the current attempt's worker session id, from its `execution.json`, else its `identity.json`, else the claim's `start.json`, and `null` only when none of them names one; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a gate that died after it started, a reject note, the automatic rework limit that paused the plan, a conflict that reached `limits.max_conflict_rework`, or an automatic reverify count that is used up).
 `review` is `{"summary", "blocking", "suggestions", "verified"}` from the newest `review` verdict, or `null`; each item of `blocking` and `suggestions` is an object with `text` and, when it has them, `level`, `file`, `line` and `pre_existing` (see [the review stage](arc-gate.md#the-gate-run)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none); `review_settings` is `{"round", "exec_args", "timeout_secs", "timeout"}` (the round `first` or `rework`, the config key the session's arguments came from, its wall-time limit in seconds and the key that limit came from), or `null`.
 For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_blocking`, `review_suggestions`, `review_verified`, `review_session_ids`, `review_cost_micros`, and `review_round`, `review_exec_args`, `review_timeout_secs` and `review_timeout`.
@@ -248,9 +248,9 @@ On success it prints these lines and exits `0`:
 - first, the line the real confirm would print, prefixed `would: `: `would: TK0002-two todo.ready` or `would: PL0001-first confirmed`;
 - one `<id> waits on: <chain>` line per task the confirm would make `todo.ready` — the task itself, or a plan's `todo.ready` tasks in the plan's order — with the same entries as `show`'s [`waits_on`](#the-after-chain), or `<id> waits on: nothing`;
 - a `never runs: <id> <state>.<phase>` line for each such task whose chain cannot finish (the same test as `show`'s `never_runs`), and a `cycle: <id> -> … -> <id>` line for a cycle;
-- one `<id> queue: <n> of <m> todo.ready` line per such task: its place among every `todo.ready` task plus itself, in claim order (the plan's `priority`, the plan id, the task's order in the plan).
+- one `<id> queue: <n> of <m> todo.ready` line per such task: its place among every `todo.ready` task plus itself, in claim order (the plan's `priority`, the plan id, the task's order in the plan). A `todo.ready` task no plan lists, possible only through an adopted plan edit, sorts last.
 
-When the next pass would not claim the task, the queue line ends with the reason in parentheses, in the words `radian arc run`'s summary uses: `(waiting for <id> to merge)`, or ``(waiting for you to start it (`auto` is `off`))``.
+When the next pass would not claim the task, the queue line ends with the reason in parentheses, in the words `radian arc run`'s summary uses: `(waiting for <id> to merge)`, `(waiting for a free concurrency slot)`, or ``(waiting for you to start it (`auto` is `off`))``.
 The place is where the task would stand at that moment, not a promise: another task may be claimed or merged before it.
 
 ```text
