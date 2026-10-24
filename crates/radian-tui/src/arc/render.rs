@@ -2,9 +2,10 @@
 //! plans page, the task page and the key hints.
 //!
 //! The plans page is two columns: the plan list (fixed width) and the selected plan in an open
-//! frame. The task page is one open frame; the conversation tab puts the attach renderer
-//! inside it, the diff tab adds a second open frame for the selected file, and the attempts
-//! tab lists each attempt's verdicts.
+//! frame. The task page is one open frame; the brief tab draws the task file's body through the
+//! transcript's Markdown renderer, the conversation tab puts the attach renderer inside it, the
+//! diff tab adds a second open frame for the selected file, and the attempts tab lists each
+//! attempt's verdicts.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
