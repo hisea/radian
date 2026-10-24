@@ -51,10 +51,16 @@ pub const WORKER_BRIEF_FILE: &str = "worker-brief.md";
 /// The default `worker-brief.md` `init` writes. It lives here, in one place, and the manual
 /// quotes it verbatim (a drift test in `crates/radian-arc/tests/` compares them).
 pub const WORKER_BRIEF_DEFAULT: &str = "\
-Work only on the current branch.\nCommit everything that belongs to the change, and end with \
-`git status --short` printing nothing.\nPut scratch files only under `.radian/`.\nNever change \
-`.radian/arc/`.\nEnd with a short report: the commits, the tests you ran, the decisions you made, \
-and any open questions.";
+Work only on the current branch.\n\
+Commit everything that belongs to the change, and end with `git status --short` printing nothing.\n\
+Put scratch files only under `.radian/`.\n\
+Never change `.radian/arc/`.\n\
+While iterating, run only the tests being changed, and run each named crate in full once at the \
+end; never the whole workspace.\n\
+In a `MUTATIONS.md`, add a new section at the end of the file, with one blank line before its \
+`##` heading.\n\
+End with a short report: the commits, the tests you ran, the decisions you made, and any open \
+questions.";
 /// The short lock every state change takes.
 pub const STATE_LOCK: &str = "state.lock";
 /// The lock a scheduling loop holds for its lifetime.

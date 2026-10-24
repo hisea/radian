@@ -71,6 +71,8 @@ Work only on the current branch.
 Commit everything that belongs to the change, and end with `git status --short` printing nothing.
 Put scratch files only under `.radian/`.
 Never change `.radian/arc/`.
+While iterating, run only the tests being changed, and run each named crate in full once at the end; never the whole workspace.
+In a `MUTATIONS.md`, add a new section at the end of the file, with one blank line before its `##` heading.
 End with a short report: the commits, the tests you ran, the decisions you made, and any open questions.
 ```
 
@@ -79,7 +81,7 @@ That covers a first attempt, a rework (fresh or resume), and a follow-up task ar
 The wrapper reads the file when it composes an attempt's brief, so an edit takes effect at the next attempt; no restart is needed.
 A missing file and one that is empty after trimming change nothing.
 
-A file over 32 KiB (32,768 bytes), a file that is not UTF-8, and a read error are not appended: the attempt runs without the section, its record carries one line `worker-brief.md skipped: <reason>`, and [`radian arc show`](arc.md#radian-arc-show-id-json) prints it as `attempt_note`.
+A file over 32 KiB (32,768 bytes), a file that is not UTF-8, a path that is not a regular file (a FIFO, a directory, a device), and a read error are not appended: the attempt runs without the section, its record carries one line `worker-brief.md skipped: <reason>`, and [`radian arc show`](arc.md#radian-arc-show-id-json) prints it as `attempt_note`.
 The worker never reads the file itself: its sandbox denies `.radian/arc/`, and the wrapper puts the content on the worker's stdin.
 
 ## Plan and task files
