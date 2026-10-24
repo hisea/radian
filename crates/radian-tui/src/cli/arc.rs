@@ -96,7 +96,9 @@ pub(super) fn run_arc(config: Option<&Path>) -> ExitCode {
     // that process alone.
     let mut starter = LoopStarter::new(app.store.clone());
     if let Err(text) = starter.start() {
-        app.set_result(text, false);
+        // A loop that already holds the lock makes this fail before the first frame: the
+        // open-time theme warning stays, with the start's line after it (brief TK0087).
+        app.add_result(text, false);
     }
     looping::install_stop_handler();
     app.set_loop_status(starter.status());

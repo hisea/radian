@@ -254,11 +254,13 @@ fn an_unknown_theme_opens_with_the_fallback_and_warns_in_the_footer() {
     assert!(text.contains("using built-in dark"), "{text}");
 }
 
-/// A config that cannot be read falls back to the built-in dark theme and names the reason in
-/// the footer; it never stops the TUI. The radian TUI's own handling of the error is unchanged:
-/// `load` still refuses it, the arc TUI is the one that carries on.
+/// A config that cannot be read falls back to the theme `theme::load` resolves for an empty
+/// configuration, with the reader's reason in the footer; it never stops the TUI. The radian
+/// TUI's own handling of the error is unchanged: `load` still refuses it, the arc TUI is the
+/// one that carries on. `NO_COLOR` and truecolor detection still decide the fallback (ADR
+/// 0029 decision 7: `NO_COLOR` wins), as they do for a readable file.
 #[test]
-fn an_unreadable_config_opens_with_dark_and_names_the_reason_in_the_footer() {
+fn an_unreadable_config_opens_with_the_loader_theme_and_names_the_reason_in_the_footer() {
     let scratch = Scratch::new("unreadable");
     // A directory where the file should be is a read error on every platform the TUI runs on.
     let path = scratch.path("config-is-a-directory");
@@ -280,6 +282,46 @@ fn an_unreadable_config_opens_with_dark_and_names_the_reason_in_the_footer() {
         text.contains("config-is-a-directory"),
         "the footer names the file it could not read:\n{text}"
     );
+
+    // An unreadable config never bypasses the loader: `NO_COLOR` still wins (ADR 0029), and a
+    // terminal without truecolor still gets the loader's 256-color palette rather than
+    // hard-coded RGB.
+    let mono = open_theme(Some(&path), true, true, None);
+    assert_eq!(mono.theme, Theme::mono());
+    assert!(
+        mono.warnings
+            .iter()
+            .any(|warning| warning.contains("cannot read")),
+        "{:?}",
+        mono.warnings
+    );
+    let no_truecolor = open_theme(Some(&path), false, false, None);
+    assert_eq!(no_truecolor.theme, Theme::builtin(ThemeName::Dark, false));
+    assert_ne!(
+        no_truecolor.theme,
+        Theme::dark(),
+        "a terminal without truecolor must not open on hard-coded RGB"
+    );
+}
+
+/// The open-time warning stays when a loop start fails before the first frame: the start's
+/// line is added after it, not put in its place (brief TK0087; the footer has one line).
+#[test]
+fn a_failed_start_before_the_first_frame_keeps_the_open_warning() {
+    let scratch = Scratch::new("warning-then-start");
+    // pi's reserved name warns without a path, so the two lines fit the footer side by side.
+    let path = write_config(&scratch.dir, "[tui]\ntheme = \"system\"\n");
+
+    let open = open_theme(Some(&path), false, true, None);
+    let mut app = ArcApp::open_with_theme(store(&scratch.dir), open);
+    app.add_result("a loop is already running".to_owned(), false);
+    let text = screen(&mut app, 240, 30);
+    assert!(
+        text.contains("theme `system` is not a usable theme name"),
+        "{text}"
+    );
+    assert!(text.contains("using built-in dark"), "{text}");
+    assert!(text.contains("a loop is already running"), "{text}");
 }
 
 /// A missing config file is the empty configuration, exactly as it is for the radian TUI, so

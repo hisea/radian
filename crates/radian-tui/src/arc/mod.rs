@@ -805,10 +805,11 @@ pub struct ResultLine {
 /// radian TUI would draw with, and the lines to show once in the footer.
 #[derive(Debug, Clone)]
 pub struct OpenTheme {
-    /// The theme to draw with. The built-in dark theme when the config cannot be read.
+    /// The theme to draw with. The loader's theme for an empty configuration when the config
+    /// cannot be read (mono under `NO_COLOR`, else built-in dark for the terminal's depth).
     pub theme: Theme,
-    /// One line per problem: an unknown theme file, a bad `[tui.colors]` color, or why the
-    /// config could not be read. Shown as the footer's one result line when the TUI opens.
+    /// One line per problem: why the config could not be read, an unknown theme file, or a bad
+    /// `[tui.colors]` color. Shown as the footer's one result line when the TUI opens.
     pub warnings: Vec<String>,
 }
 
@@ -820,30 +821,35 @@ pub struct OpenTheme {
 /// the arc TUI passes [`radian_host::config::resolved_path`] (`RADIAN_CONFIG`, then
 /// `~/.radian/config/config.toml`), while a test injects a file instead of the environment. A
 /// missing file is the empty configuration, exactly as it is for the radian TUI; a file that
-/// cannot be read or parsed falls back to the built-in dark theme with the reader's reason as
-/// the one warning, and never stops the TUI.
+/// cannot be read or parsed is read as the empty configuration with the reader's reason as the
+/// first warning, so the TUI never stops and `NO_COLOR` and truecolor detection still apply
+/// exactly as they do for a readable file (ADR 0029 decision 7: `NO_COLOR` wins).
 pub fn open_theme(
     config_path: Option<&Path>,
     no_color: bool,
     truecolor: bool,
     themes_dir: Option<&Path>,
 ) -> OpenTheme {
-    let config = match radian_host::config::load_path(config_path) {
-        Ok(config) => config,
-        Err(error) => {
-            return OpenTheme {
-                theme: Theme::default(),
-                warnings: vec![error.to_string()],
-            };
-        }
+    let (config, error) = match radian_host::config::load_path(config_path) {
+        Ok(config) => (config, None),
+        // A file that cannot be read is no configuration at all, never a bypass of the theme
+        // loader: an unreadable config under `NO_COLOR` still opens in mono, and a terminal
+        // without truecolor still gets the 256-color palette.
+        Err(error) => (
+            radian_host::config::Config::default(),
+            Some(error.to_string()),
+        ),
     };
-    let (theme, warnings) = crate::theme::load(
+    let (theme, mut warnings) = crate::theme::load(
         config.tui.theme.as_deref(),
         no_color,
         truecolor,
         themes_dir,
         &config.tui.colors,
     );
+    if let Some(error) = error {
+        warnings.insert(0, error);
+    }
     OpenTheme { theme, warnings }
 }
 
@@ -1734,6 +1740,22 @@ impl ArcApp {
     /// Sets the footer's result line (a start that failed, a key that cannot act now).
     pub fn set_result(&mut self, text: String, failed: bool) {
         self.result = Some(ResultLine { text, failed });
+    }
+
+    /// Adds `text` to the footer's result line instead of replacing it: the open-time theme
+    /// warning is shown when the TUI opens, and a loop start that fails before the first frame
+    /// must not hide it (brief TK0087). The footer has one line, so the two are joined with
+    /// `; `, the separator [`ArcApp::open_with_theme`] uses for several warnings; a line that
+    /// already failed stays failed.
+    pub fn add_result(&mut self, text: String, failed: bool) {
+        match &mut self.result {
+            Some(line) => {
+                line.text.push_str("; ");
+                line.text.push_str(&text);
+                line.failed |= failed;
+            }
+            None => self.set_result(text, failed),
+        }
     }
 
     /// Scrolls the log view by `delta` lines, clamped to its end.

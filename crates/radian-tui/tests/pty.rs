@@ -14516,6 +14516,76 @@ fn pty_arc_is_a_viewer_while_arc_run_watch_holds_the_lock() {
     );
 }
 
+/// The open-time theme warning is not lost when a loop already runs: `radian arc` opened with
+/// a config whose theme warns, while `radian arc run --watch` holds `runner.lock`, shows the
+/// warning in the footer with the start's line after it — not only "a loop is already running"
+/// (brief TK0087).
+#[test]
+fn pty_arc_keeps_the_theme_warning_when_a_loop_already_runs() {
+    let scratch = TempDir::new("arc-theme-warning");
+    let repo = scratch.path().join("repo");
+    arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
+    let home = TempDir::new("arc-theme-warning-home");
+    let mut watch = std::process::Command::new(BIN)
+        .args(["arc", "run", "--watch", "--interval", "5"])
+        .current_dir(&repo)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("TMPDIR", std::env::var("TMPDIR").unwrap_or_default())
+        .env("RADIAN_CATALOG_URL", fast_catalog_url())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("arc run --watch starts");
+    wait_until(Duration::from_secs(10), "the watch loop's lock", || {
+        !arc_lock_free(&repo)
+    });
+    let pid = watch.id();
+
+    // `system` is pi's reserved name: `theme::load` warns once and falls back to dark. The line
+    // is short enough to share the footer's one result line with the start's.
+    let config = "schema_version = 1\n[tui]\ntheme = \"system\"\n";
+    let argv = vec![BIN.to_owned(), "arc".to_owned()];
+    let mut pty = Pty::spawn_argv_in(
+        &argv,
+        &[],
+        TestConfig::Explicit(config),
+        Some(&repo),
+        30,
+        140,
+    );
+    assert!(
+        pty.wait_for_screen("theme `system` is not a usable theme name", wait_positive()),
+        "the open-time theme warning is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("using built-in dark", wait_positive()),
+        "the fallback theme is not named:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("a loop is already running", wait_positive()),
+        "the start's line is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen(&format!("loop ● running (pid {pid})"), wait_positive()),
+        "the header does not name the holder's pid:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"q");
+    assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
+    assert!(arc_process_alive(pid), "quitting stopped the watch loop");
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+    let _ = watch.wait();
+}
+
 /// SIGTERM closes the TUI and nothing else: the loop it started keeps running with the lock
 /// held. The test stops the loop at the end.
 #[test]
