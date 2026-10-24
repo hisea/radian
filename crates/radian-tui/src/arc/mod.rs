@@ -2473,7 +2473,8 @@ impl ArcApp {
         self.float = Some(Float::Confirm { message, action });
     }
 
-    /// The keys a float takes: `y`/`n` for a confirmation, typing/Enter/Esc for the reject note.
+    /// The keys a float takes: `y`/`n` for a confirmation, typing/Enter for the reject note.
+    /// `Esc` never reaches here: [`Self::go_back`] closes the float first.
     fn on_float_key(&mut self, key: &KeyEvent) -> ArcKey {
         let Some(float) = self.float.clone() else {
             return ArcKey::Ignored;
