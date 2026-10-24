@@ -24,7 +24,7 @@ use super::checkout::GateCheckout;
 use super::commands::{SeriesOutcome, run_series};
 use super::config::Stage;
 use super::error::GateError;
-use super::exclusive::DirLock;
+use super::exclusive::{DirLock, PREPARE_LOCK};
 use super::git;
 use super::verdict::{
     VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, attempt_dir, now_utc, verdict_path,
@@ -222,6 +222,10 @@ pub(crate) fn candidate_for(
     task: &str,
     checkout: &GateCheckout,
 ) -> Result<Candidate, GateError> {
+    // The `commands` and `review` pair prepares two checkouts at the same time: the fetches
+    // and `git worktree add`/`prune` update the shared repository, so the preparations take
+    // turns (the stage work after this call still runs at the same time).
+    let _prepare = DirLock::acquire(repository, PREPARE_LOCK)?;
     let main_branch = git::main_branch_of(remote, main_ref)?;
     git::fetch_remote(repository, remote)?;
     git::fetch_main(repository, remote, main_branch)?;
