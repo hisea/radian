@@ -800,7 +800,7 @@ impl ArcCommand {
 }
 
 /// Runs `radian arc`: the arguments are parsed here, the work is in `radian-arc`.
-fn run_arc(command: Option<ArcCommand>) -> ExitCode {
+fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
     match command {
         // The wrapper is internal and has no store operation. `remote` and `main_branch`
         // default to the repository's `config.toml`, which `radian arc init` wrote; the git
@@ -852,7 +852,7 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
         }
         // A bare `radian arc` opens the TUI (ADR 0048 §1). Without setup the one-line refusal
         // names `radian arc init` before the terminal is entered.
-        None => run_arc_tui(),
+        None => run_arc_tui(config),
     }
 }
 
@@ -890,8 +890,9 @@ enum ThemeCommand {
 
 /// Runs a non-TUI subcommand and returns its exit code (ADR 0032 A3: 0 ok, 1 the run failed,
 /// 2 usage/setup, 101 panic, 128+signal - the same codes the `agent` binary returns, because
-/// it is the same dispatch).
-fn run_subcommand(command: RadianCommand) -> ExitCode {
+/// it is the same dispatch). `config` is the top-level `--config`, for the one subcommand that
+/// reads it (`radian arc`'s theme).
+fn run_subcommand(command: RadianCommand, config: Option<&Path>) -> ExitCode {
     match command {
         RadianCommand::Exec { args } => {
             // The agent parser owns `--help`/`--version`/usage errors: `parse_from` exits
@@ -929,7 +930,7 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
             radian_exec::Command::Config { command },
         )),
         RadianCommand::Theme { command } => run_theme(command),
-        RadianCommand::Arc { command } => run_arc(command),
+        RadianCommand::Arc { command } => run_arc(command, config),
         RadianCommand::Footer { command } => run_footer(command),
         RadianCommand::Docs { topic } => run_docs(topic.as_deref()),
         RadianCommand::Attach {
@@ -1127,10 +1128,12 @@ pub fn run_cli() -> ExitCode {
     radian_session::trace::start();
     radian_tui::terminal::install_panic_hook();
     let mut cli = Cli::parse();
-    // A subcommand is a mode of its own: it never enters the TUI, never reads the TUI's
-    // flags, and returns its own exit code (ADR 0032).
+    // A subcommand is a mode of its own: it never enters the TUI and returns its own exit
+    // code (ADR 0032). The top-level `--config` is passed along because `radian arc` reads the
+    // same file the radian TUI does for its theme.
     if let Some(command) = cli.command.take() {
-        return run_subcommand(command);
+        let config = cli.config.clone();
+        return run_subcommand(command, config.as_deref());
     }
     if let Some(path) = &cli.exit_trace {
         let _ = EXIT_TRACE.set(path.clone());

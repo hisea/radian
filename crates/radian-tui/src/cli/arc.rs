@@ -51,7 +51,7 @@ enum GitReply {
 
 /// `radian arc`: open the arc TUI. Without setup the refusal is one line on the normal screen
 /// (exit `3`); with it, the alternate screen is entered and restored on every exit path.
-pub(super) fn run_arc() -> ExitCode {
+pub(super) fn run_arc(config: Option<&Path>) -> ExitCode {
     let dir = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -73,7 +73,20 @@ pub(super) fn run_arc() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut app = ArcApp::open(store);
+    // The theme is the radian TUI's theme: the same `config.toml` (the same precedence, through
+    // `radian_host::config::resolved_path` with the top-level `--config`), the same `theme::load`
+    // call and the same `NO_COLOR` and truecolor checks, read once when the TUI opens (brief
+    // TK0087). A theme changed while the TUI runs shows the next time it opens. The load's
+    // warnings, and a config that cannot be read, are one footer line; the TUI still opens with
+    // the theme the load fell back to.
+    let config_path = radian_host::config::resolved_path(config);
+    let open_theme = radian_tui::arc::open_theme(
+        config_path.as_deref(),
+        radian_tui::theme::Theme::no_color_env(),
+        radian_tui::theme::truecolor_env(),
+        radian_host::themes_dir().as_deref(),
+    );
+    let mut app = ArcApp::open_with_theme(store, open_theme);
     // The loop's log baseline is the file as it is when the TUI opens: a line the loop writes
     // afterwards is news for the ticker, whether the TUI starts that loop or finds it running.
     let mut tail = LoopLogTail::new(&app.store);

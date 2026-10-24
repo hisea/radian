@@ -2793,3 +2793,22 @@ was restored from a copy under `.radian/` with `cp`.
 | TK0084-M1 | the range's `DiffBase::Unrelated` draws `base..head · no remote main` | ✅ 1 failed | `arc_tui::a_diff_without_a_merge_base_names_that_reason` (the line says no remote main while the ref exists) |
 
 1/1 caught.
+
+## TK0087: the arc TUI shares radian's theme (2026-10-24, branch `work/TK0087-tui-arc-shared-theme`)
+
+The arc TUI drew with `Theme::default()` and ignored `config.toml`. It now resolves its theme
+with the radian TUI's own `theme::load` call from the same config file
+(`radian_host::config::resolved_path` → the new `config::load_path`), applies `NO_COLOR` and
+truecolor detection, and shows the load's warnings, or the config reader's reason, as one footer
+result line when it opens. Each mutation was applied by hand to `src/arc/mod.rs`, the
+`arc_theme` test binary was run with `cargo nextest run -p radian-tui --locked --profile sandbox
+-E 'binary(arc_theme)'`, and the file was restored from a copy under `.radian/backup/` with
+`cp`, then compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0087-M1 | `with_theme` ignores its theme and builds the app with `Theme::default()` | ✅ 4 failed | `arc_theme::the_configured_theme_is_the_radian_tuis` (the app's theme is dark, not `Theme::builtin(Light, …)`); also `no_color_forces_mono`, `a_theme_file_name_resolves_through_the_themes_dir` and `tui_colors_reaches_the_plans_pages_running_mark` |
+| TK0087-M2 | `open_theme` passes `&[]` instead of `&config.tui.colors` | ✅ 1 failed | `arc_theme::tui_colors_reaches_the_plans_pages_running_mark` (`app.theme.plan_running.fg` stays the dark default) |
+| TK0087-M3 | `open_theme` drops `theme::load`'s warnings | ✅ 1 failed | `arc_theme::an_unknown_theme_opens_with_the_fallback_and_warns_in_the_footer` (no footer line names `future`) |
+
+3/3 caught.

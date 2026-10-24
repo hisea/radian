@@ -798,6 +798,52 @@ pub struct ResultLine {
     pub failed: bool,
 }
 
+/// What the arc TUI reads from `config.toml` when it opens (brief TK0087): the theme the
+/// radian TUI would draw with, and the lines to show once in the footer.
+#[derive(Debug, Clone)]
+pub struct OpenTheme {
+    /// The theme to draw with. The built-in dark theme when the config cannot be read.
+    pub theme: Theme,
+    /// One line per problem: an unknown theme file, a bad `[tui.colors]` color, or why the
+    /// config could not be read. Shown as the footer's one result line when the TUI opens.
+    pub warnings: Vec<String>,
+}
+
+/// Resolves the arc TUI's theme from the same `config.toml` and with the same
+/// [`crate::theme::load`] call the radian TUI uses (brief TK0087): `tui.theme`, a theme file
+/// under `themes_dir`, `[tui.colors]`, `NO_COLOR` and truecolor detection all behave the same.
+///
+/// `config_path` is the already-resolved path, so the radian TUI's precedence holds:
+/// the arc TUI passes [`radian_host::config::resolved_path`] (`RADIAN_CONFIG`, then
+/// `~/.radian/config/config.toml`), while a test injects a file instead of the environment. A
+/// missing file is the empty configuration, exactly as it is for the radian TUI; a file that
+/// cannot be read or parsed falls back to the built-in dark theme with the reader's reason as
+/// the one warning, and never stops the TUI.
+pub fn open_theme(
+    config_path: Option<&Path>,
+    no_color: bool,
+    truecolor: bool,
+    themes_dir: Option<&Path>,
+) -> OpenTheme {
+    let config = match radian_host::config::load_path(config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            return OpenTheme {
+                theme: Theme::default(),
+                warnings: vec![error.to_string()],
+            };
+        }
+    };
+    let (theme, warnings) = crate::theme::load(
+        config.tui.theme.as_deref(),
+        no_color,
+        truecolor,
+        themes_dir,
+        &config.tui.colors,
+    );
+    OpenTheme { theme, warnings }
+}
+
 /// The arc TUI's state.
 pub struct ArcApp {
     pub store: Store,
@@ -872,8 +918,34 @@ impl ArcApp {
     }
 
     /// [`ArcApp::open`] with an explicit session directory (tests, and a caller that already
-    /// resolved it).
+    /// resolved it). The theme stays [`Theme::default`]; use [`ArcApp::with_theme`] for the one
+    /// the config resolved.
     pub fn with_session_dir(store: Store, session_dir: Option<PathBuf>) -> Self {
+        Self::with_session_dir_and_theme(store, session_dir, Theme::default())
+    }
+
+    /// [`ArcApp::open`] with `theme`, the theme the config resolved at open (brief TK0087).
+    pub fn with_theme(store: Store, theme: Theme) -> Self {
+        let session_dir = radian_host::session_dir(None).ok();
+        Self::with_session_dir_and_theme(store, session_dir, theme)
+    }
+
+    /// [`ArcApp::with_theme`] plus [`open_theme`]'s warnings as the footer's one result line,
+    /// the way an owner action's message is shown. The lines are joined with `; ` because the
+    /// footer has one result line; an empty list leaves the footer as it was.
+    pub fn open_with_theme(store: Store, open: OpenTheme) -> Self {
+        let mut app = Self::with_theme(store, open.theme);
+        if !open.warnings.is_empty() {
+            app.set_result(open.warnings.join("; "), true);
+        }
+        app
+    }
+
+    fn with_session_dir_and_theme(
+        store: Store,
+        session_dir: Option<PathBuf>,
+        theme: Theme,
+    ) -> Self {
         let mut app = Self {
             store,
             session_dir,
@@ -907,7 +979,7 @@ impl ArcApp {
             log_missing: true,
             log_open: false,
             log_scroll: 0,
-            theme: Theme::default(),
+            theme,
             notice: None,
         };
         app.refresh();
