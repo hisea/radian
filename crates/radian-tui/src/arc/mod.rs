@@ -211,8 +211,6 @@ pub struct TaskPage {
     pub attempts: Vec<AttemptView>,
     pub journal: Option<AttachView>,
     pub journal_error: Option<String>,
-    /// The journal file was looked for (a missing one draws one weak line).
-    pub journal_checked: bool,
     pub diff: Option<TaskDiff>,
     /// The `(task, attempt)` a diff is loaded for, or is being loaded for.
     pub diff_key: Option<(String, u32)>,
@@ -248,7 +246,6 @@ impl TaskPage {
             attempts,
             journal: None,
             journal_error: None,
-            journal_checked: false,
             diff: None,
             diff_key: None,
             diff_loading: None,
@@ -457,6 +454,11 @@ pub struct ArcApp {
     pub plan_sel: usize,
     pub focus: Focus,
     pub task_sel: usize,
+    /// The first plan drawn in the list: the list scrolls only when the selection leaves the
+    /// visible rows.
+    pub plan_top: usize,
+    /// The first task drawn in the selected plan's frame, with the same rule.
+    pub task_top: usize,
     pub flat: bool,
     pub page: Page,
     pub task: Option<TaskPage>,
@@ -494,6 +496,8 @@ impl ArcApp {
             plan_sel: 0,
             focus: Focus::Plans,
             task_sel: 0,
+            plan_top: 0,
+            task_top: 0,
             flat: false,
             page: Page::Plans,
             task: None,
@@ -636,13 +640,11 @@ impl ArcApp {
         page.journal = None;
         page.journal_error = None;
         let Some(dir) = self.session_dir.clone() else {
-            page.journal_checked = true;
             page.journal_error = Some("no session directory is known".to_owned());
             return;
         };
         let path = dir.join(format!("{session}.jsonl"));
         if !path.is_file() {
-            page.journal_checked = true;
             return;
         }
         match AttachView::open(&path, &session) {
@@ -653,7 +655,6 @@ impl ArcApp {
             }
             Err(error) => page.journal_error = Some(error),
         }
-        page.journal_checked = true;
     }
 
     /// The selected plan's view.
@@ -1550,12 +1551,13 @@ fn plan_row(view: &PlanView, tasks: Vec<TaskRow>) -> PlanRow {
         .iter()
         .filter(|task| task.item.state == TaskState::Done && task.item.phase == "merged")
         .count();
-    let mark = if total > 0 && merged == total {
-        Mark::Done
-    } else if view.plan.item.status == "draft" {
-        Mark::Todo
-    } else {
-        Mark::Active
+    let mark = match view.plan.item.status.as_str() {
+        // A cancelled plan is final, whatever its tasks reached: it is never a confirmed
+        // plan with work left, and it is not the same thing as a finished one.
+        "cancelled" => Mark::Failed,
+        _ if total > 0 && merged == total => Mark::Done,
+        "draft" => Mark::Todo,
+        _ => Mark::Active,
     };
     let costs: Vec<f64> = view
         .tasks

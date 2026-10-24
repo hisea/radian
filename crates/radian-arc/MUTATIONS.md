@@ -79,6 +79,9 @@ copy.
 | TK0034-M2 | `list` shows a cancelled plan without `--all` (the cancelled-plan skip in `render` dropped) | `list::a_cancelled_plan_is_hidden_until_all_in_text_and_json` | ✅ failed |
 | TK0034-M3 | the claim path ignores the plan status (`start_ready` drops its `status != "confirmed"` check and `attempt_ops::claim` drops its plan-status refusal) | `run::a_run_pass_claims_and_gates_nothing_from_a_cancelled_plan` | ✅ failed |
 | TK0034-M4 | the pass drops the step that ends a cancelled plan's `doing.reconciling` task (the `end_reconciling_of_cancelled_plans` loop removed from `one_pass`) | `run::a_pass_ends_a_task_a_plan_cancel_left_reconciling` | ✅ failed |
+| TK0036-M1 | run the `commands`/`review` pair one after the other again (`run_pair` calls the two stages instead of the two threads) | `review::the_commands_and_review_stages_start_before_either_ends` (the commands wait times out and fails the round) | ✅ failed |
+| TK0036-M2 | let a review failure decide the round when `commands` also failed (`finish_verification` swaps the two in its scan order) | `review::a_commands_failure_decides_the_round_when_the_review_fails_too` (the task returns to `todo.ready` with a review brief) | ✅ failed |
+| TK0036-M3 | forward the gate's stop to only the first running stage (`request_stop` signals one slot) | `run::a_signal_to_the_gate_stops_both_stages_of_the_pair` (one stage outlives the 3 s deadline) | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -224,6 +227,7 @@ afterwards. The test lives in `radian-tui`, where the diff tab is drawn.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0033-tui-pages-continued-M2 | a merged task always diffs `<candidate>^1..<candidate>`, even when the candidate is the head | ✅ 1 failed | `radian-tui::arc_tui a_fast_forward_merged_task_shows_every_commit_of_its_branch` (`first.txt`, the branch's first commit, is missing from the file list) |
+
 ## TK0034 (cancel a plan)
 
 TK0034-M1–M3 were run against `de2a816f`, each applied to the committed file, restored
@@ -241,3 +245,12 @@ TK0034-M4 was run against the code of `2bd7e155`, with the same backup, `cp` res
 `cmp` check. The whole step is removed from `one_pass`, so the pass prints `no transition`
 and the task stays at `doing.reconciling`; the test's line assertion fails. The binary was
 rebuilt before the run, because the sync tests refuse one older than its sources.
+TK0036-M1–M3 were run against the parallel pair, each from a copy under `.radian/mut/`
+restored with `cp` and compared with `cmp`, with `cargo build -p radian-tui --bin radian`
+before each run (the `run` tests refuse a binary older than its sources). M1's sequential pair
+makes the `commands` script wait out its 5 s barrier and fail before the review starts, so the
+round is `review.rework_pending` instead of `awaiting_human`. M2 is caught only when both
+stages fail: with `commands` failing alone the review passes, and scanning it first changes
+nothing. M3 leaves the stage that was not signalled alive past the test's 3 s deadline; the
+handler is the only SIGTERM source, because the wait loop now only escalates to SIGKILL after
+`cancel_grace_secs`.

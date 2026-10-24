@@ -604,4 +604,5 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 The arc TUI lives in `radian-tui` (`src/arc/`, with its terminal loop in `src/cli/arc.rs`);
 this crate owns the read-only views it draws ([`read`](src/read.rs): the remote main, a
 task's attempts and verdicts, a task's diff, and the merge page's stage rows, review and
-commits). The owner's keys there are the same library calls as the CLI's subcommands.
+commits). The owner's keys there are the same library calls as the CLI's subcommands. The
+gate stages `mutation` and `ci` are refused until they are built.

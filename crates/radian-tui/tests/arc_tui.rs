@@ -389,6 +389,152 @@ fn the_plans_page_draws_the_list_and_the_selected_plan() {
 }
 
 #[test]
+fn the_plan_list_scrolls_to_keep_the_selected_plan_visible() {
+    let scratch = Scratch::new("plan-scroll");
+    let store = store(&scratch.path("repo"));
+    let ids: Vec<String> = (1..=12)
+        .map(|n| add_plan(&store, &format!("plan-{n:02}"), &format!("plan {n}")))
+        .collect();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    // Four plans fit under the heading at this height; the rest are below the window.
+    let text = screen(&mut app, 120, 20);
+    assert!(text.contains(&ids[0]), "{text}");
+    assert!(!text.contains(&ids[11]), "{text}");
+
+    for _ in 0..11 {
+        assert_eq!(app.on_key(&key(KeyCode::Down)), ArcKey::Redraw);
+    }
+    let terminal = render(&mut app, 120, 20);
+    let text = rows(&terminal).join("\n");
+    assert!(
+        text.contains(&ids[11]),
+        "the selected plan's row is drawn:\n{text}"
+    );
+    assert!(
+        !text.contains(&ids[0]),
+        "the list scrolled past the first plan:\n{text}"
+    );
+    assert!(
+        rows(&terminal)[4].contains(&ids[8]),
+        "the list starts at the plan that keeps the selection visible:\n{text}"
+    );
+
+    for _ in 0..11 {
+        assert_eq!(app.on_key(&key(KeyCode::Up)), ArcKey::Redraw);
+    }
+    let terminal = render(&mut app, 120, 20);
+    let text = rows(&terminal).join("\n");
+    assert!(text.contains(&ids[0]), "{text}");
+    assert!(
+        rows(&terminal)[4].contains(&ids[0]),
+        "selecting the first plan draws the top of the list:\n{text}"
+    );
+    assert!(!text.contains(&ids[11]), "{text}");
+}
+
+#[test]
+fn the_task_list_scrolls_to_keep_the_selected_task_visible() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    // Five task rows fit in the frame at this height; the last task is below the window.
+    app.on_key(&key(KeyCode::Right));
+    for _ in 0..7 {
+        assert_eq!(app.on_key(&key(KeyCode::Down)), ArcKey::Redraw);
+    }
+    let view = app.selected_plan().unwrap();
+    let shown = app.task_rows(view);
+    let first = shown[0].id.clone();
+    let last = shown[7].id.clone();
+    let text = screen(&mut app, 120, 14);
+    assert!(text.contains(&last), "the selected task is drawn:\n{text}");
+    assert!(!text.contains(&first), "the list scrolled:\n{text}");
+
+    for _ in 0..7 {
+        assert_eq!(app.on_key(&key(KeyCode::Up)), ArcKey::Redraw);
+    }
+    let text = screen(&mut app, 120, 14);
+    assert!(text.contains(&first), "{text}");
+    assert!(
+        !text.contains(&last),
+        "the list returns to the top:\n{text}"
+    );
+}
+
+#[test]
+fn the_attempts_list_scrolls_to_keep_the_selected_attempt_visible() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    for attempt in 1..=10 {
+        write_verdicts(&fixture, &task, attempt, &[("commands", true, None)]);
+    }
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    app.on_key(&key(KeyCode::Char('l')));
+    // Three attempt rows fit; the latest attempt is selected and drawn at the bottom.
+    let text = screen(&mut app, 120, 12);
+    let attempt_rows: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("✓ commands"))
+        .collect();
+    assert_eq!(attempt_rows.len(), 3, "{text}");
+    assert!(
+        attempt_rows.iter().any(|line| line.contains("attempt 10")),
+        "{text}"
+    );
+    assert!(
+        !attempt_rows
+            .iter()
+            .any(|line| line.contains("attempt 1   ")),
+        "{text}"
+    );
+
+    for _ in 0..9 {
+        app.on_key(&key(KeyCode::Char('[')));
+    }
+    let text = screen(&mut app, 120, 12);
+    let attempt_rows: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("✓ commands"))
+        .collect();
+    assert!(
+        attempt_rows
+            .iter()
+            .any(|line| line.contains("attempt 1   ")),
+        "{text}"
+    );
+    assert!(
+        !attempt_rows.iter().any(|line| line.contains("attempt 10")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_cancelled_plan_is_marked_and_named_cancelled() {
+    let fixture = Fixture::new();
+    fixture
+        .store
+        .change_plan("PL0002-images", |plan| {
+            plan.status = "cancelled".to_owned();
+            plan.auto = "off".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = fixture.app();
+    let theme = app.theme.clone();
+    let terminal = render(&mut app, 120, 30);
+    // A cancelled plan is not a confirmed one: it takes the failure mark, not `●`.
+    let (row, column) = mark_cell(&terminal, "PL0002-images", '×');
+    assert_eq!(fg(&terminal, row, column), theme.status_error.fg);
+    let text = rows(&terminal).join("\n");
+    assert!(
+        text.contains("cancelled · auto off · 0/2 · —"),
+        "the list names the status:\n{text}"
+    );
+}
+
+#[test]
 fn the_tree_places_a_branch_and_names_the_other_parent() {
     let fixture = Fixture::new();
     let app = fixture.app();
@@ -1057,7 +1203,17 @@ impl GitFixture {
         git(&repo, &["add", "second.txt"]);
         git(&repo, &["commit", "-q", "-m", "the second commit"]);
         let fast_head = git(&repo, &["rev-parse", "HEAD"]);
+        // Main had not moved since the branch's base, so the merge fast-forwards it to the
+        // branch's head; the remote main moves with it.
         git(&repo, &["checkout", "-q", "main"]);
+        git(
+            &repo,
+            &["merge", "-q", "--ff-only", &format!("work/{fast}")],
+        );
+        git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/main", &fast_head],
+        );
 
         store
             .change_task(&merged, |task| {
