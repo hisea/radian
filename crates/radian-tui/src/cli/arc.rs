@@ -1,15 +1,17 @@
 //! `radian arc` with no subcommand: the arc TUI (ADR 0048 §1, §13).
 //!
-//! The view is read-only. This loop enters the terminal, draws one frame, reads one key at a
-//! time, re-reads the store every [`ARC_REFRESH`] seconds, and runs git (the remote main and a
-//! task's diff), the merge page's data, a command's log and the owner's actions on worker
-//! threads so a frame never waits on any of them. It holds no `runner.lock`:
-//! the header only reports whether another process does. `q` (or Ctrl-C) leaves through the
-//! same clean-exit path as `attach`.
+//! This loop enters the terminal, draws one frame, reads one key at a time, re-reads the store
+//! every [`ARC_REFRESH`] seconds, and runs git (the remote main and a task's diff), the merge
+//! page's data, a command's log and the owner's actions on worker threads so a frame never waits
+//! on any of them. It is also the scheduling loop when it can be: [`ArcLoop`] takes
+//! `runner.lock` without waiting and runs the `arc run --watch` pass on a background thread; a
+//! TUI that cannot take the lock is a viewer and retries on its next refresh. `q` (or Ctrl-C)
+//! leaves through the same clean-exit path as `attach`, after the loop has stopped.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use radian_tui::arc::looping::{self, ArcLoop};
 use radian_tui::arc::{ArcApp, ArcKey, actions, render};
 
 use super::*;
@@ -71,6 +73,11 @@ pub(super) fn run_arc() -> ExitCode {
         }
     };
     let mut app = ArcApp::open(store);
+    // The scheduling loop (ADR 0048 §13): with `runner.lock` it runs the pass on a background
+    // thread; without it the TUI is a viewer and takes the lock on a later refresh.
+    let mut arc_loop = ArcLoop::new(app.store.clone());
+    looping::install_stop_handler();
+    app.set_loop_status(arc_loop.status());
     let (tx, rx) = mpsc::channel();
     let mut main_pending = false;
     let mut main_at = None;
@@ -80,6 +87,23 @@ pub(super) fn run_arc() -> ExitCode {
     let mut refresh_at = Instant::now() + ARC_REFRESH;
     let mut dirty = true;
     loop {
+        // The pass's transition lines: the footer's ticker and the log, and the pages re-read
+        // the store, so a task that moved shows it at once.
+        let events = arc_loop.drain();
+        if !events.is_empty() {
+            for event in events {
+                app.push_loop_event(event);
+            }
+            app.refresh();
+            dirty = true;
+        }
+        if app.set_loop_status(arc_loop.status()) {
+            dirty = true;
+        }
+        // SIGTERM stops the loop the way `--watch` does and leaves through the clean path.
+        if looping::signal_received() {
+            break;
+        }
         // Replies from the git workers: a stale diff (another task or attempt) is dropped by
         // the app.
         while let Ok(reply) = rx.try_recv() {
@@ -111,7 +135,12 @@ pub(super) fn run_arc() -> ExitCode {
                     }
                 }
                 GitReply::Action(outcome) => {
+                    let ok = outcome.ok;
                     app.finish_action(outcome);
+                    // An owner action that changed state runs the next pass at once.
+                    if ok {
+                        arc_loop.nudge();
+                    }
                     dirty = true;
                 }
                 GitReply::Log { request, result } => {
@@ -223,11 +252,16 @@ pub(super) fn run_arc() -> ExitCode {
             Input::Event(_) => {}
         }
         if Instant::now() >= refresh_at {
+            arc_loop.refresh();
+            app.set_loop_status(arc_loop.status());
             app.refresh();
             refresh_at = Instant::now() + ARC_REFRESH;
             dirty = true;
         }
     }
+    // The quit path of ADR 0048 §13: no new work, a short grace for the pass's current step,
+    // `runner.lock` released. A pass still running is left to the next loop's reconcile.
+    arc_loop.stop();
     guard.restore();
     ExitCode::SUCCESS
 }

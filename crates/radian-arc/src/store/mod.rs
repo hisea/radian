@@ -397,18 +397,34 @@ impl Store {
     }
 
     /// Tries `runner.lock` without waiting: `Some` when this process now holds it, `None`
-    /// when a scheduling loop already does. Dropping the guard releases it.
+    /// when a scheduling loop already does. Dropping the guard releases it. The holder writes
+    /// its pid into the file, which a viewer's header reads; the flock is the lock itself.
     pub fn try_runner_lock(&self) -> Result<Option<RunnerLock>, Error> {
         let path = self.root.join(RUNNER_LOCK);
-        let file = open_lock_file(&path)?;
+        let mut file = open_lock_file(&path)?;
         match file.try_lock_exclusive() {
-            Ok(()) => Ok(Some(RunnerLock { file })),
+            Ok(()) => {
+                record_runner_pid(&mut file);
+                Ok(Some(RunnerLock { file }))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(Error::Failed(format!(
                 "cannot lock {}: {error}",
                 path.display()
             ))),
         }
+    }
+
+    /// The pid the holder of `runner.lock` recorded, when it did. It is only meaningful while
+    /// the lock is held: the probe that reads it failed first. A lock file from an older arc,
+    /// or one whose pid could not be written, reads as `None`.
+    #[must_use]
+    pub fn runner_lock_pid(&self) -> Option<u32> {
+        fs::read_to_string(self.root.join(RUNNER_LOCK))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
     }
 
     // ---- reading ----------------------------------------------------------------------
@@ -867,7 +883,8 @@ impl Drop for RunnerLock {
     }
 }
 
-/// Opens (creating) a lock file. Lock files carry no state: the lock is the flock only.
+/// Opens (creating) a lock file. The flock is the lock; `runner.lock` also carries the holder's
+/// pid for a viewer's header, and no other lock file carries state.
 fn open_lock_file(path: &Path) -> Result<File, Error> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -881,6 +898,17 @@ fn open_lock_file(path: &Path) -> Result<File, Error> {
         .truncate(false)
         .open(path)
         .map_err(|error| Error::Failed(format!("cannot open {}: {error}", path.display())))
+}
+
+/// Writes this process's pid into `runner.lock`, for a viewer that cannot take the lock. A
+/// failure is ignored: the lock is the flock, and the pid only feeds a header line.
+fn record_runner_pid(file: &mut File) {
+    use std::io::{Seek, SeekFrom, Write};
+    if file.set_len(0).is_err() || file.seek(SeekFrom::Start(0)).is_err() {
+        return;
+    }
+    let _ = file.write_all(std::process::id().to_string().as_bytes());
+    let _ = file.sync_data();
 }
 
 /// Writes `bytes` to `path` the way every arc write happens: a temporary file in the same

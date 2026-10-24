@@ -185,7 +185,7 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `gates/<task>.gate.lock` | The lock one task's running gate holds. |
 | `worktrees/<task>/` | The worker's checkout for that task (the worker wrapper creates it). |
 | `state.lock` | The short lock every change takes. |
-| `runner.lock` | The lock a scheduling loop holds. |
+| `runner.lock` | The lock a scheduling loop holds; its holder writes its pid there, which a viewer's header reads. |
 
 Every change is one transaction under `state.lock`:
 take the lock (waiting up to 5 seconds, then exit `4`), compare the file with the ledger, write a temporary file, flush it to disk, rename it over the old one, flush the directory, record the new version and hash in the ledger, release.

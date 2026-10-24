@@ -2471,3 +2471,16 @@ window). A cancelled plan also takes the failure mark and the `cancelled · ` pr
 | TK0040-M2 | the task list always starts at the first task (`task_top = 0`) | ✅ 1 failed | `the_task_list_scrolls_to_keep_the_selected_task_visible` (the selected `TK0011-h` is below the frame) |
 | TK0040-M3 | the attempts list always starts at the first attempt (`first = 0`) | ✅ 1 failed | `the_attempts_list_scrolls_to_keep_the_selected_attempt_visible` (with attempt 10 selected it draws attempts 1 to 3) |
 | TK0040-M4 | a cancelled plan takes `Mark::Active` (`●`), as before | ✅ 1 failed | `a_cancelled_plan_is_marked_and_named_cancelled` (`mark_cell` panics: `×` is not before `PL0002-images`) |
+
+## TK0019 (the arc TUI is the scheduling loop)
+
+TK0019-M1–M3 were run on the branch's working code before the code commit, each from a copy
+under `.radian/bak/`, restored with `cp` and compared with `cmp`; the restored files match the
+commit. `radian-tui`'s pass seam lets a test script the pass, so the thread, the lock and the
+quit path are checked without a worker; the pty suite runs the real pass and worker.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0019-M1 | run the pass on the UI thread (`take` calls `pass.run` inline instead of spawning `run_loop`; the full loop would hang the harness, so the inline form runs one pass) | `arc_loop::the_tui_takes_the_lock_and_runs_the_pass_on_a_background_thread` (same thread id) | ✅ failed |
+| TK0019-M2 | do not release `runner.lock` on quit (drop `self.lock = None` from `ArcLoop::stop`) | `arc_loop::the_tui_takes_the_lock_and_runs_the_pass_on_a_background_thread` (the lock is still held after `stop`); the pty test `pty_arc_runs_a_task_at_auto_run_and_stops_at_awaiting_human` checks the same end to end | ✅ failed |
+| TK0019-M3 | show the committed diff instead of the worktree for a running task (`read::task_diff` never takes the live branch) | `arc_tui::a_running_task_shows_the_worktree_including_uncommitted_files` (`diff.source` is `Range`, and the uncommitted file is missing) | ✅ failed |

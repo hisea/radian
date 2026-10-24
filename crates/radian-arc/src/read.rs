@@ -24,12 +24,28 @@ pub struct DiffFile {
     /// The file's unified diff (`git diff --unified=3 <range> -- <path>`), without the
     /// `diff --git` preamble.
     pub text: String,
+    /// The file has content the running attempt has not committed yet (a modified or
+    /// untracked file in the worker's worktree). Always `false` for a committed range.
+    pub uncommitted: bool,
+}
+
+/// Where a task's diff comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffSource {
+    /// A committed range (`base_sha..head_sha`, or a merged task's candidate).
+    #[default]
+    Range,
+    /// The running attempt's worktree against its `base_sha`, uncommitted files included
+    /// (ADR 0048 decision 13).
+    Worktree,
 }
 
 /// A task's change: every changed file with its counts and its unified diff.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskDiff {
     pub files: Vec<DiffFile>,
+    /// The range the files came from.
+    pub source: DiffSource,
 }
 
 /// One stage's verdict in one attempt.
@@ -248,6 +264,11 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
 
 /// The change a task is responsible for.
 ///
+/// - A **running** task (`doing.running`): the worker's worktree against the attempt's
+///   `base_sha`, uncommitted and untracked files included, so the change is visible while the
+///   attempt runs (ADR 0048 decision 13). The attempt's base is the one the wrapper recorded in
+///   `attempts/<task>/base_sha`, else the task's `base_sha`; without a worktree or a base the
+///   committed range below is used.
 /// - A **merged** task: its passing integration verdict's candidate (ADR 0048 decision 10).
 ///   A merge candidate's first-parent diff (`<candidate>^1..<candidate>`) is the change the
 ///   merge put on main, not what main has gained since. When the candidate is the task head
@@ -264,6 +285,12 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
 /// The task cannot be read, or git cannot produce the diff.
 pub fn task_diff(store: &Store, task: &str, attempt: Option<u32>) -> Result<TaskDiff, Error> {
     let item = store.load_task(task)?.item;
+    if item.state == TaskState::Doing
+        && item.phase == "running"
+        && let Some(diff) = live_worktree_diff(store, &item)?
+    {
+        return Ok(diff);
+    }
     let range = match item.state {
         TaskState::Done => match merged_candidate(store, task)? {
             Some(verdict) => merged_range(&verdict).or_else(|| {
@@ -279,7 +306,151 @@ pub fn task_diff(store: &Store, task: &str, attempt: Option<u32>) -> Result<Task
     if base == head {
         return Ok(TaskDiff::default());
     }
-    diff_range(store.repo(), &base, &head)
+    diff_range(store.repo(), &base, &head).map(|mut diff| {
+        diff.source = DiffSource::Range;
+        diff
+    })
+}
+
+/// The running attempt's change: the worker's worktree against the attempt's `base_sha`, with
+/// modified and untracked files included. `None` when the attempt has no worktree yet or no
+/// base to compare with.
+fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>, Error> {
+    let worktree = store.root().join("worktrees").join(&task.id);
+    if !worktree.join(".git").exists() {
+        return Ok(None);
+    }
+    let recorded = std::fs::read_to_string(
+        store
+            .root()
+            .join("attempts")
+            .join(&task.id)
+            .join("base_sha"),
+    )
+    .ok()
+    .map(|text| text.trim().to_owned())
+    .filter(|sha| !sha.is_empty());
+    let Some(base) = recorded.or_else(|| task.base_sha.clone().filter(|sha| !sha.is_empty()))
+    else {
+        return Ok(None);
+    };
+    let Some(numstat) = git_raw(&worktree, &["diff", "--numstat", "-z", &base]) else {
+        // A base that is not a commit (a worktree made outside the wrapper): no diff rather
+        // than a screen full of an error.
+        return Ok(None);
+    };
+    // The paths with worktree changes (modified, staged or untracked), so a file that only
+    // exists in the working tree is marked. `--porcelain` keeps a leading space for an
+    // unstaged change, so its output is read raw.
+    let dirty = git_raw(
+        &worktree,
+        &["status", "--porcelain", "-z", "--untracked-files=all"],
+    )
+    .map(|text| porcelain_paths(&text))
+    .unwrap_or_default();
+    let mut files = numstat_entries(&numstat)
+        .into_iter()
+        .map(|(path, added, removed)| DiffFile {
+            uncommitted: dirty.iter().any(|dirty| dirty == &path),
+            text: git_raw(
+                &worktree,
+                &[
+                    "diff",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "-M",
+                    "--unified=3",
+                    &base,
+                    "--",
+                    &path,
+                ],
+            )
+            .unwrap_or_default(),
+            path,
+            added,
+            removed,
+        })
+        .collect::<Vec<_>>();
+    // Untracked files are not in `git diff <base>`: they are new content of the attempt.
+    let untracked = git_raw(
+        &worktree,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )
+    .unwrap_or_default();
+    for path in untracked.split('\0').filter(|path| !path.is_empty()) {
+        if files.iter().any(|file| file.path == path) {
+            continue;
+        }
+        let text = no_index_diff(&worktree, path);
+        let (added, removed) = count_diff_lines(&text);
+        files.push(DiffFile {
+            path: path.to_owned(),
+            added,
+            removed,
+            text,
+            uncommitted: true,
+        });
+    }
+    Ok(Some(TaskDiff {
+        files,
+        source: DiffSource::Worktree,
+    }))
+}
+
+/// The paths `git status --porcelain -z` names, in either field of a rename or copy.
+fn porcelain_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut records = text.split('\0').filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        if record.len() < 4 {
+            continue;
+        }
+        let status = &record[..2];
+        paths.push(record[3..].to_owned());
+        if (status.starts_with('R') || status.starts_with('C'))
+            && let Some(original) = records.next()
+        {
+            paths.push(original.to_owned());
+        }
+    }
+    paths
+}
+
+/// A `git diff --no-index` of a new file against `/dev/null`: git exits `1` for a difference,
+/// so the text is taken whatever the status is.
+fn no_index_diff(worktree: &Path, path: &str) -> String {
+    crate::git::run(
+        worktree,
+        &[
+            "diff",
+            "--no-index",
+            "--no-color",
+            "--no-ext-diff",
+            "--unified=3",
+            "--",
+            "/dev/null",
+            path,
+        ],
+    )
+    .map(|output| output.stdout)
+    .unwrap_or_default()
+}
+
+/// The added and removed lines of a unified diff, `+++`/`---` headers left out.
+fn count_diff_lines(text: &str) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in text.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    (added, removed)
 }
 
 /// The base and head a diff range uses for one attempt: the attempt's own record when it
@@ -374,32 +545,8 @@ fn diff_range(repo: &Path, base: &str, head: &str) -> Result<TaskDiff, Error> {
         Err(_) => return Ok(TaskDiff::default()),
     };
     let mut files = Vec::new();
-    let mut rename_from: Option<usize> = None;
-    for record in numstat.split('\0').filter(|record| !record.is_empty()) {
-        match record.split_once('\t') {
-            Some((added, rest)) => {
-                let Some((removed, path)) = rest.split_once('\t') else {
-                    continue;
-                };
-                let count = |text: &str| text.parse::<usize>().unwrap_or(0);
-                files.push(DiffFile {
-                    path: path.to_owned(),
-                    added: count(added),
-                    removed: count(removed),
-                    text: String::new(),
-                });
-                rename_from = Some(files.len() - 1);
-            }
-            // A rename's new path follows its old one as a bare field.
-            None => {
-                if let Some(index) = rename_from {
-                    files[index].path = record.to_owned();
-                }
-            }
-        }
-    }
-    for file in &mut files {
-        file.text = git(
+    for (path, added, removed) in numstat_entries(&numstat) {
+        let text = git(
             repo,
             &[
                 "diff",
@@ -409,16 +556,59 @@ fn diff_range(repo: &Path, base: &str, head: &str) -> Result<TaskDiff, Error> {
                 "--unified=3",
                 &range,
                 "--",
-                &file.path,
+                &path,
             ],
         )
         .unwrap_or_default();
+        files.push(DiffFile {
+            path,
+            added,
+            removed,
+            text,
+            uncommitted: false,
+        });
     }
-    Ok(TaskDiff { files })
+    Ok(TaskDiff {
+        files,
+        source: DiffSource::Range,
+    })
+}
+
+/// The `--numstat -z` records as `(path, added, removed)`. A rename's new path follows its old
+/// one as a bare field. A binary file's `-` counts read as `0`.
+fn numstat_entries(text: &str) -> Vec<(String, usize, usize)> {
+    let mut files: Vec<(String, usize, usize)> = Vec::new();
+    let mut rename_from: Option<usize> = None;
+    for record in text.split('\0').filter(|record| !record.is_empty()) {
+        match record.split_once('\t') {
+            Some((added, rest)) => {
+                let Some((removed, path)) = rest.split_once('\t') else {
+                    continue;
+                };
+                let count = |text: &str| text.parse::<usize>().unwrap_or(0);
+                files.push((path.to_owned(), count(added), count(removed)));
+                rename_from = Some(files.len() - 1);
+            }
+            // A rename's new path follows its old one as a bare field.
+            None => {
+                if let Some(index) = rename_from {
+                    files[index].0 = record.to_owned();
+                }
+            }
+        }
+    }
+    files
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, Error> {
     crate::git::ok(repo, args).map_err(Error::Failed)
+}
+
+/// A git command whose output is read as it is: a `-z` listing or `--porcelain` line starts
+/// with a space that trimming would eat. `None` when the command fails.
+fn git_raw(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = crate::git::run(dir, args).ok()?;
+    output.success().then_some(output.stdout)
 }
 
 /// The attempt number in an attempt directory name, `<task>-<n>`; `None` for an integration

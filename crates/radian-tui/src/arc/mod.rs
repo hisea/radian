@@ -15,10 +15,11 @@
 //! color is a theme role.
 
 pub mod actions;
+pub mod looping;
 pub mod render;
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use radian_arc::read::{AttemptView, CommandView, MergeView, TaskDiff};
 use radian_arc::store::model::{TaskFile, TaskState};
@@ -28,6 +29,7 @@ use ratatui::style::Style;
 
 use crate::attach::AttachView;
 use crate::theme::Theme;
+use looping::{LoopEvent, LoopStatus};
 
 /// The left plan column's width in cells, from column 3 to the divider.
 pub const LEFT_WIDTH: u16 = 35;
@@ -226,6 +228,9 @@ pub struct TaskPage {
     pub pending_follow: bool,
     /// The task's `head_sha` when the data was last loaded; a change invalidates the diff.
     head: Option<String>,
+    /// When the live worktree diff was last applied, so a running task re-reads it every
+    /// [`LIVE_DIFF_REFRESH`] instead of once per attempt.
+    pub live_at: Option<Instant>,
 }
 
 impl TaskPage {
@@ -255,6 +260,7 @@ impl TaskPage {
             pending_scroll: 0,
             pending_follow: false,
             head: task.head_sha.clone(),
+            live_at: None,
         }
     }
 
@@ -359,6 +365,9 @@ pub struct LogView {
 /// grows the view without limit.
 pub const LOG_LINES: usize = 5_000;
 
+/// How often a running task's live worktree diff is re-read (ADR 0048 decision 13).
+pub const LIVE_DIFF_REFRESH: Duration = Duration::from_secs(5);
+
 impl LogView {
     /// Opens `text` as the log of `title`, keeping its last [`LOG_LINES`] lines.
     pub fn new(title: impl Into<String>, text: &str) -> Self {
@@ -393,6 +402,8 @@ pub enum Float {
     },
     /// The reject note, one line.
     Reject { note: String },
+    /// `q` while this TUI's loop runs and attempts are in flight (ADR 0048 decision 13).
+    Quit { running: usize },
 }
 
 /// The merge page's state: the task's stage rows, the review's findings, the commits, the
@@ -517,7 +528,17 @@ pub struct ArcApp {
     /// The confirmation or reject float, which takes the keys until it closes.
     pub float: Option<Float>,
     pub main_sha: Option<String>,
-    pub loop_running: bool,
+    /// What the scheduling loop is doing: this window runs it, another process does, or no
+    /// one does (ADR 0048 decision 13). The runner sets it from its [`looping::ArcLoop`].
+    pub loop_status: LoopStatus,
+    /// The last transition line the pass produced, one line in the footer.
+    pub ticker: Option<String>,
+    /// The pass's transitions and summaries, the log view's lines (the last
+    /// [`LOG_LINES`]).
+    pub log: Vec<String>,
+    /// `L`: the log view is open over the page.
+    pub log_open: bool,
+    pub log_scroll: usize,
     pub theme: Theme,
     /// A store read error, drawn as one weak line instead of a blank page.
     pub notice: Option<String>,
@@ -553,7 +574,11 @@ impl ArcApp {
             log_request: None,
             float: None,
             main_sha: None,
-            loop_running: false,
+            loop_status: LoopStatus::Stopped,
+            ticker: None,
+            log: Vec::new(),
+            log_open: false,
+            log_scroll: 0,
             theme: Theme::default(),
             notice: None,
         };
@@ -565,7 +590,6 @@ impl ArcApp {
     /// also re-reads the task, its verdicts and its journal. Returns whether anything the
     /// frame shows may have changed.
     pub fn refresh(&mut self) -> bool {
-        self.loop_running = loop_running(&self.store);
         let selected_plan = self
             .plans
             .get(self.plan_sel)
@@ -994,7 +1018,8 @@ impl ArcApp {
     }
 
     /// The diff the runner should fetch now, if any: the page's selected attempt has no diff,
-    /// and no request for that same attempt is in flight.
+    /// and no request for that same attempt is in flight. A task in `doing.running` asks again
+    /// every [`LIVE_DIFF_REFRESH`], so the worktree's change is shown while it happens.
     pub fn diff_request(&self) -> Option<(String, u32)> {
         match self.page {
             Page::Task => {
@@ -1003,9 +1028,17 @@ impl ArcApp {
                     return None;
                 }
                 let key = (page.id.clone(), page.attempt.unwrap_or(0));
-                if page.diff_key.as_ref() == Some(&key) || page.diff_loading.as_ref() == Some(&key)
-                {
+                if page.diff_loading.as_ref() == Some(&key) {
                     return None;
+                }
+                if page.diff_key.as_ref() == Some(&key) {
+                    let live = page.phase == "doing.running";
+                    let due = page
+                        .live_at
+                        .is_none_or(|at| at.elapsed() >= LIVE_DIFF_REFRESH);
+                    if !live || !due {
+                        return None;
+                    }
                 }
                 Some(key)
             }
@@ -1038,6 +1071,7 @@ impl ArcApp {
                     page.diff_loading = None;
                 }
                 page.diff_key = Some(key);
+                page.live_at = Some(Instant::now());
                 match result {
                     Ok(diff) => {
                         let count = diff.files.len();
@@ -1119,6 +1153,72 @@ impl ArcApp {
         self.main_sha = sha;
     }
 
+    /// Records what the scheduling loop is doing. Returns whether the header changed.
+    pub fn set_loop_status(&mut self, status: LoopStatus) -> bool {
+        if self.loop_status == status {
+            return false;
+        }
+        self.loop_status = status;
+        true
+    }
+
+    /// How many tasks are in `doing`: the attempts a quit would leave running.
+    pub fn running_attempts(&self) -> usize {
+        self.plans
+            .iter()
+            .flat_map(|view| view.tasks.iter())
+            .filter(|task| task.item.state == TaskState::Doing)
+            .count()
+    }
+
+    /// Adds one event the pass produced: a transition goes to the ticker and the log, a detail
+    /// (the summary, an error) to the log only. Returns whether the frame changed.
+    pub fn push_loop_event(&mut self, event: LoopEvent) -> bool {
+        match event {
+            LoopEvent::Transition(line) => {
+                self.ticker = Some(line.clone());
+                self.push_log(line);
+            }
+            LoopEvent::Detail(text) => {
+                for line in text.lines() {
+                    self.push_log(line.to_owned());
+                }
+            }
+        }
+        true
+    }
+
+    /// Appends one log line, keeping the last [`LOG_LINES`].
+    fn push_log(&mut self, line: String) {
+        self.log.push(line);
+        if self.log.len() > LOG_LINES {
+            self.log.drain(..self.log.len() - LOG_LINES);
+        }
+    }
+
+    /// Scrolls the log view by `delta` lines, clamped to its end.
+    pub fn scroll_log(&mut self, delta: i32) {
+        let end = self.log.len().saturating_sub(1) as i32;
+        self.log_scroll = (self.log_scroll as i32).saturating_add(delta).clamp(0, end) as usize;
+    }
+
+    /// Pins the log view to its end.
+    pub fn log_end(&mut self) {
+        self.log_scroll = self.log.len().saturating_sub(1);
+    }
+
+    /// `q`: when this window is the scheduling loop and attempts are in flight, ask first
+    /// (ADR 0048 decision 13).
+    fn quit_key(&mut self) -> ArcKey {
+        let running = self.running_attempts();
+        if self.loop_status == LoopStatus::ThisWindow && running > 0 {
+            self.float = Some(Float::Quit { running });
+            ArcKey::Redraw
+        } else {
+            ArcKey::Quit
+        }
+    }
+
     /// One key press.
     pub fn on_key(&mut self, key: &KeyEvent) -> ArcKey {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1132,8 +1232,37 @@ impl ArcApp {
             self.result = None;
             return self.on_float_key(key);
         }
+        // `L` opens and closes the loop's log from any page (ADR 0048 decision 13).
+        if key.code == KeyCode::Char('L') && !ctrl {
+            self.log_open = !self.log_open;
+            self.result = None;
+            return ArcKey::Redraw;
+        }
+        if self.log_open {
+            self.result = None;
+            return match key.code {
+                KeyCode::Esc => {
+                    self.log_open = false;
+                    ArcKey::Redraw
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.scroll_log(1);
+                    ArcKey::Redraw
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.scroll_log(-1);
+                    ArcKey::Redraw
+                }
+                KeyCode::Char('f') => {
+                    self.log_end();
+                    ArcKey::Redraw
+                }
+                KeyCode::Char('q') if !ctrl => self.quit_key(),
+                _ => ArcKey::Ignored,
+            };
+        }
         if key.code == KeyCode::Char('q') && !ctrl {
-            return ArcKey::Quit;
+            return self.quit_key();
         }
         // An action in flight takes no page key: its result lands on the footer when it ends.
         if self.pending.is_some() {
@@ -1403,6 +1532,17 @@ impl ArcApp {
                 }
                 _ => ArcKey::Ignored,
             },
+            Float::Quit { .. } => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.float = None;
+                    ArcKey::Quit
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.float = None;
+                    ArcKey::Redraw
+                }
+                _ => ArcKey::Ignored,
+            },
             Float::Reject { note } => match key.code {
                 KeyCode::Esc => {
                     self.float = None;
@@ -1594,24 +1734,6 @@ fn attempts_with_current(attempts: Vec<AttemptView>, attempt: u32) -> Vec<Attemp
             verdicts: Vec::new(),
         })
         .collect()
-}
-
-/// Whether another process holds `runner.lock` (ADR 0048 §13). The lock is taken and released
-/// at once: the view never holds it. A repository with no `runner.lock` has no loop, and the
-/// probe never creates the file.
-pub fn loop_running(store: &Store) -> bool {
-    let path = store.root().join(radian_arc::store::RUNNER_LOCK);
-    if !path.is_file() {
-        return false;
-    }
-    match store.try_runner_lock() {
-        Ok(Some(guard)) => {
-            drop(guard);
-            false
-        }
-        Ok(None) => true,
-        Err(_) => false,
-    }
 }
 
 /// A plan as the page draws it: the summary line and its tasks.

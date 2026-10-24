@@ -32,7 +32,8 @@
 //! Every transition line is written through the caller's sink and flushed when the loop makes
 //! it; the summary of what waits on whom prints when the pass ends. `watch` repeats a pass
 //! after `--interval` seconds until SIGINT or SIGTERM, holds `runner.lock` the whole time, and
-//! prints the summary only when it changed.
+//! prints the summary only when it changed. [`pass`] is that same pass for a caller that holds
+//! `runner.lock` itself: the arc TUI (ADR 0048 decision 13) runs it on a background thread.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -152,9 +153,28 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
     Ok(())
 }
 
-/// Stops the gates a watch loop leaves running: a short grace, then SIGKILL. Each gate arc
-/// stopped records `interrupted`, so the next loop starts it again and counts no death.
-fn stop_gates(store: &Store) -> Result<(), Error> {
+/// Runs the passes of one scheduling loop until one changes nothing, for a caller that holds
+/// `runner.lock` itself (the arc TUI, ADR 0048 decision 13). It is the same function `run` and
+/// `--watch` use; waiting, claiming, gating and merging are theirs too.
+///
+/// `stop` is checked between passes and between the steps of a pass: once it is set, no further
+/// pass starts, an automatic reverify is not claimed, and no attempt and no gate is started.
+/// Work already running (a worker or a gate is a separate process) still ends normally. `emit`
+/// receives each transition line with its newline, as the loop makes it.
+///
+/// # Errors
+///
+/// A file arc needs cannot be read or written, or the store did not settle within
+/// [`MAX_PASSES`] passes. A caller that holds the lock reports `Error::Locked` itself.
+pub fn pass(store: &Store, emit: &mut dyn FnMut(&str), stop: &AtomicBool) -> Result<Report, Error> {
+    run_quiet(store, emit, Some(stop))
+}
+
+/// Stops the gates a loop leaves running when it stops: a short grace, then SIGKILL. Each
+/// gate arc stopped records `interrupted`, so the next loop starts it again and counts no
+/// death. Public because the arc TUI's loop ends the same way `--watch` does on SIGTERM
+/// (ADR 0048 decision 13).
+pub fn stop_gates(store: &Store) -> Result<(), Error> {
     let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
     for id in store.task_ids()? {
         crate::gate::background::stop(store, &id, grace);

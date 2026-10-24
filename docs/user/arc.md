@@ -559,6 +559,9 @@ Waiting for you, a `retry_at` in the future, a running worker, or a running gate
 A task of a plan at `auto` `off` is never started or merged by `run`; its verification still advances.
 A task of a `cancelled` plan is never claimed, gated or merged, and a cancelled plan is not listed in the summary.
 
+The arc TUI runs this same pass while it is open (see [the TUI](#the-tui) and [`arc-tui`](arc-tui.md#the-loop)): a TUI and a `run` (or `run --watch`) exclude each other through `runner.lock`, and whichever holds it is the loop.
+When either closes, nothing advances.
+
 Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](arc-files.md#configtoml)).
 
 | Flag | Value | Default | What it does |
@@ -610,8 +613,8 @@ A plan whose budget or automatic-rework limit paused it is named with its reason
 
 ### `--watch`
 
-`radian arc run --watch` repeats the pass. After every pass (which always ends quiet) it waits `--interval` seconds, then runs another pass; it holds `runner.lock` for the whole loop, so a second `run` exits `4` as usual.
-It is a foreground loop that you start and stop, not a daemon: while it is not running, nothing advances.
+`radian arc run --watch` repeats the pass. After every pass (which always ends quiet) it waits `--interval` seconds, then runs another pass; it holds `runner.lock` for the whole loop, so a second `run` exits `4` as usual, and a TUI opened meanwhile is a viewer until this loop exits.
+It is a foreground loop that you start and stop, not a daemon: while it is not running, nothing advances (unless the arc TUI, which holds `runner.lock` in the same way, is open).
 
 With `--watch`, the summary is printed only when it differs from the summary the loop printed last, so a quiet loop does not repeat the same lines every interval. Every transition line is still printed when it happens.
 
@@ -726,6 +729,11 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 ## The TUI
 
 A bare `radian arc` opens the TUI; the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
+While it is open it is the scheduling loop when it can be: it takes `runner.lock` without waiting and runs the same pass `radian arc run --watch` runs, every 30 seconds after a pass that ends quiet and at once after one of your actions changed state.
+Each transition line goes to a one-line ticker in the footer and to a scrollable log (`L`).
+When another loop holds the lock, the TUI is a viewer, its header names that loop's pid, and it takes the lock on its next refresh after that loop exits.
+`q` while this window holds the loop and an attempt runs asks first; quitting (or SIGTERM) stops the loop the way `--watch` stops, releases `runner.lock`, and exits `0`, and an attempt that is still running is reconciled by the next loop.
+A running task's diff tab shows the worker's worktree against the attempt's `base_sha`, uncommitted files included (`live · worktree`), refreshed every 5 seconds.
 
 ## Not built yet
 

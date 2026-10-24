@@ -633,36 +633,30 @@ fn g_switches_between_the_tree_and_the_flat_list() {
 }
 
 #[test]
-fn the_header_reports_the_remote_main_and_the_loop_lock() {
+fn the_header_reports_the_remote_main_and_the_loop_state() {
+    use radian_tui::arc::looping::LoopStatus;
     let fixture = Fixture::new();
     let mut app = fixture.app();
     let lock_path = fixture.store.root().join(radian_arc::store::RUNNER_LOCK);
-    // No lock file: stopped, and the probe creates nothing.
-    assert!(!radian_tui::arc::loop_running(&fixture.store));
-    assert!(!lock_path.exists(), "the probe never creates the lock file");
-
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .unwrap();
-    {
-        use fs2::FileExt;
-        lock.lock_exclusive().unwrap();
-    }
-    assert!(radian_tui::arc::loop_running(&fixture.store));
-    app.refresh();
+    // The loop owns the probe: with no lock file and no loop, the header says stopped, and the
+    // app never creates the file itself.
+    assert!(!lock_path.exists());
+    app.set_loop_status(LoopStatus::Stopped);
     app.apply_main(Some("8a3ec2ba".to_owned()));
     let text = screen(&mut app, 120, 30);
     assert!(text.contains("main 8a3ec2ba"), "{text}");
-    assert!(text.contains("loop ● running"), "{text}");
-    {
-        fs2::FileExt::unlock(&lock).unwrap();
-    }
-    app.refresh();
-    assert!(screen(&mut app, 120, 30).contains("loop ◻ stopped"));
+    assert!(text.contains("loop ◻ stopped"), "{text}");
+
+    // Another process holds the lock: the header names it by the pid the holder recorded.
+    fs::write(&lock_path, "4242").unwrap();
+    app.set_loop_status(LoopStatus::Elsewhere(Some(4242)));
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("loop ● running (pid 4242)"), "{text}");
+
+    // This window holds it.
+    app.set_loop_status(LoopStatus::ThisWindow);
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("loop ● running (this window)"), "{text}");
 }
 
 #[test]
@@ -778,8 +772,16 @@ fn follow_then_k_scrolls_the_diff_up_from_the_end() {
         added: 40,
         removed: 0,
         text,
+        uncommitted: false,
     };
-    app.apply_diff(&id, attempt, Ok(TaskDiff { files: vec![file] }));
+    app.apply_diff(
+        &id,
+        attempt,
+        Ok(TaskDiff {
+            files: vec![file],
+            source: radian_arc::read::DiffSource::Range,
+        }),
+    );
 
     app.on_key(&key(KeyCode::Char('f')));
     assert_eq!(
@@ -836,9 +838,17 @@ fn a_long_file_list_still_leaves_the_diff_a_body_row() {
             added: 1,
             removed: 0,
             text: format!("+the change of file-{i:02}.txt\n"),
+            uncommitted: false,
         })
         .collect();
-    app.apply_diff(&id, attempt, Ok(TaskDiff { files }));
+    app.apply_diff(
+        &id,
+        attempt,
+        Ok(TaskDiff {
+            files,
+            source: radian_arc::read::DiffSource::Range,
+        }),
+    );
 
     let text = screen(&mut app, 80, 24);
     assert!(
@@ -1008,6 +1018,80 @@ fn the_conversation_tab_renders_the_selected_attempts_worker_journal() {
     assert!(
         !text.contains("the worker said hello"),
         "attempt 2's journal is not drawn for attempt 1:\n{text}"
+    );
+}
+
+#[test]
+fn f_follows_a_growing_journal() {
+    // ADR 0048 §13: a running attempt's conversation is a growing journal; `f` keeps the view
+    // at its end, so the newest line is visible without pressing `f` again.
+    use radian_core::{JournalRecord, Message, TranscriptJournal};
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    let sessions = fixture.scratch.path("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = format!("{task}-2");
+    write_execution(&fixture, &task, 2, &session);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let path = sessions.join(format!("{session}.jsonl"));
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        &session,
+        radian_session::SessionCreatedData::new(
+            sessions.to_string_lossy().into_owned(),
+            serde_json::json!({}),
+        ),
+    )
+    .expect("the journal is created for appending");
+    runtime.block_on(async {
+        for index in 0..30 {
+            journal
+                .append(JournalRecord::Message {
+                    index,
+                    message: Message::assistant(format!("filler-{index}")),
+                })
+                .await
+                .unwrap();
+        }
+    });
+
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), Some(sessions.clone()));
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('f')));
+    app.apply_pending_scroll();
+    let text = screen(&mut app, 120, 14);
+    assert!(text.contains("filler-29"), "the end is shown:\n{text}");
+    assert!(!text.contains("filler-0"), "follow is at the end:\n{text}");
+
+    // The worker appends while the page follows: the new line is at the end, on screen.
+    runtime.block_on(async {
+        journal
+            .append(JournalRecord::Message {
+                index: 30,
+                message: Message::assistant("the growing line"),
+            })
+            .await
+            .unwrap();
+    });
+    app.refresh();
+    app.apply_pending_scroll();
+    let text = screen(&mut app, 120, 14);
+    assert!(
+        text.contains("the growing line"),
+        "follow did not tail the growing journal:\n{text}"
+    );
+    assert!(
+        !text.contains("filler-0"),
+        "follow moved to the new end:\n{text}"
     );
 }
 
@@ -1354,6 +1438,100 @@ fn a_fast_forward_merged_task_shows_every_commit_of_its_branch() {
     );
     // Mutation: use `<candidate>^1..<candidate>` when the candidate is the head — the first
     // commit's file drops out of the list.
+}
+
+#[test]
+fn a_running_task_shows_the_worktree_including_uncommitted_files() {
+    // ADR 0048 decision 13: a `doing.running` task's diff is the worker's worktree against the
+    // attempt's base, not only its commits. Mutation: use `base_sha..head_sha` for a running
+    // task, and the uncommitted and untracked files below drop out.
+    let fixture = GitFixture::new();
+    let task = fixture.unmerged.clone();
+    let base = fixture
+        .store
+        .load_task(&task)
+        .unwrap()
+        .item
+        .base_sha
+        .clone()
+        .expect("the fixture recorded the base");
+    let worktree = fixture.store.root().join("worktrees").join(&task);
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            worktree.to_str().unwrap(),
+            &format!("work/{task}"),
+        ],
+    );
+    // A commit the attempt made...
+    write(&worktree, "committed.txt", "the committed change\n");
+    git(&worktree, &["add", "committed.txt"]);
+    git(&worktree, &["commit", "-q", "-m", "the committed change"]);
+    // ... a tracked file changed but not committed, and a new file never added.
+    write(&worktree, "base.txt", "changed but not committed\n");
+    write(&worktree, "untracked.txt", "never added\n");
+    // The wrapper records the attempt's base where the live diff reads it.
+    let attempt_dir = fixture.store.root().join("attempts").join(&task);
+    fs::create_dir_all(&attempt_dir).unwrap();
+    fs::write(attempt_dir.join("base_sha"), &base).unwrap();
+
+    let diff = read::task_diff(&fixture.store, &task, Some(1)).unwrap();
+    assert_eq!(
+        diff.source,
+        read::DiffSource::Worktree,
+        "a running attempt's diff is its worktree"
+    );
+    let file = |path: &str| {
+        diff.files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("{path} is missing: {:?}", diff.files))
+    };
+    assert!(!file("committed.txt").uncommitted, "a commit is committed");
+    assert!(file("committed.txt").text.contains("the committed change"));
+    assert!(
+        file("base.txt").uncommitted,
+        "a worktree modification is uncommitted"
+    );
+    assert!(
+        file("untracked.txt").uncommitted,
+        "an untracked file is uncommitted"
+    );
+
+    // The page says where the diff comes from and marks the uncommitted files, and the live
+    // diff is re-read every five seconds (the page re-requests it).
+    let mut app = fixture.app();
+    let view = fixture
+        .store
+        .plan_view(&app.plans[app.plan_sel].plan.item.id)
+        .unwrap();
+    app.task_sel = view
+        .tasks
+        .iter()
+        .position(|candidate| candidate.item.id == task)
+        .unwrap();
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    app.apply_diff(&task, 1, Ok(diff));
+    let text = screen(&mut app, 120, 30);
+    for needle in ["live · worktree", "untracked.txt", "uncommitted"] {
+        assert!(text.contains(needle), "missing `{needle}`:\n{text}");
+    }
+    assert_eq!(
+        app.diff_request(),
+        None,
+        "a fresh live diff is not re-read at once"
+    );
+    app.task.as_mut().unwrap().live_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(6));
+    assert_eq!(
+        app.diff_request(),
+        Some((task.clone(), 1)),
+        "a running task asks for the worktree diff again after five seconds"
+    );
 }
 
 #[test]

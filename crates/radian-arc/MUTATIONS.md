@@ -275,3 +275,9 @@ the `find`/replace from `followup_items`. M3 writes `self.text` again in `Review
 | TK0045-M2 | drop the deduplication (every round's item is carried) | `review::a_followup_holds_every_round_grouped_and_drops_a_repeat` (the repeat is under both rounds) | ✅ failed |
 | TK0045-M3 | keep the duplicated level tag in `Display` (write `self.text`) | `review::a_rework_brief_prints_a_duplicated_level_tag_once`, `review::a_followup_brief_prints_a_duplicated_level_tag_once` | ✅ 2 failed |
 | TK0045-M4 | propose a follow-up for a merged follow-up task (drop the `is_followup` guard) | `review::a_merge_of_a_followup_task_proposes_no_followup` (it gets `TK0003-…-followups-followups`) | ✅ failed |
+
+## TK0019 (the running task's live diff)
+
+TK0019-M3 mutates `read::task_diff`'s live-worktree branch (`radian-arc/src/read.rs`). The test
+lives with the page that draws it (`radian-tui/tests/arc_tui.rs`), so the row is recorded in
+`crates/radian-tui/MUTATIONS.md` with M1 and M2.
