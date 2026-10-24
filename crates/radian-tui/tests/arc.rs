@@ -1345,7 +1345,7 @@ fn a_valid_worker_argument_line_passes_the_check() {
 }
 
 /// A child killed and reaped when a test ends before it waited, so a failed assertion does not
-/// leave a `run --watch` loop behind.
+/// leave an `arc serve` loop behind.
 struct ChildGuard(std::process::Child);
 
 impl Drop for ChildGuard {
@@ -1569,19 +1569,19 @@ fn run_writes_a_transition_line_before_it_exits() {
     }
 }
 
-/// `--watch` runs another pass on its own: a retry that becomes due between passes is released
+/// `serve` runs another pass on its own: a retry that becomes due between passes is released
 /// with no second command, and SIGTERM stops the loop with exit `0` and the lock released.
 ///
 /// Mutations: buffer the lines again and the released line misses its deadline; keep the lock
 /// (and the process) on SIGTERM and the child does not exit within five seconds.
 #[test]
-fn watch_runs_another_pass_and_exits_zero_on_sigterm() {
+fn serve_runs_another_pass_and_exits_zero_on_sigterm() {
     let scratch = fixture("watch");
     init(&scratch);
     let plan = add_plan(&scratch, "watch");
     let task = add_task(&scratch, &plan, "work", "the brief\n");
 
-    let mut child = spawn_arc(&scratch, &["arc", "run", "--watch", "--interval", "5"]);
+    let mut child = spawn_arc(&scratch, &["arc", "serve", "--interval", "5"]);
     let mut lines = Lines::new(child.0.stdout.take().expect("stdout is piped"));
     let stderr = drain_stderr(&mut child);
 
@@ -1591,9 +1591,12 @@ fn watch_runs_another_pass_and_exits_zero_on_sigterm() {
         lines.seen
     );
 
-    // The loop holds the lock between passes: a second one-shot run exits `4`.
+    // The loop holds the lock between passes: a second one-shot run, and a second serve, exit
+    // `4`.
     let blocked = run(&scratch, &["arc", "run"], "");
     assert_eq!(blocked.code, Some(4), "{blocked:?}");
+    let second_serve = run(&scratch, &["arc", "serve"], "");
+    assert_eq!(second_serve.code, Some(4), "{second_serve:?}");
 
     // No second command runs: the loop's own next pass releases the retry.
     wait_for_a_retry(&scratch, &task);
@@ -1617,14 +1620,14 @@ fn watch_runs_another_pass_and_exits_zero_on_sigterm() {
     assert_eq!(
         unsafe { libc::kill(pid, libc::SIGTERM) },
         0,
-        "SIGTERM reaches run --watch"
+        "SIGTERM reaches arc serve"
     );
     let status = wait_within(&mut child.0, Duration::from_secs(5));
     let Some(status) = status else {
         let _ = child.0.kill();
         let _ = child.0.wait();
         let err = stderr.join().unwrap_or_default();
-        panic!("run --watch did not exit on SIGTERM: {err}");
+        panic!("arc serve did not exit on SIGTERM: {err}");
     };
     let err = stderr.join().expect("the stderr reader");
     assert_eq!(status.code(), Some(0), "SIGTERM is not an error: {err}");
@@ -1636,22 +1639,46 @@ fn watch_runs_another_pass_and_exits_zero_on_sigterm() {
         .expect("runner.lock exists");
     assert!(
         lock.try_lock_exclusive().is_ok(),
-        "run --watch releases runner.lock"
+        "arc serve releases runner.lock"
     );
 }
 
-/// The interval is a closed range, and it only means something with `--watch`.
+/// The interval is a closed range.
 #[test]
-fn a_watch_interval_outside_five_to_3600_is_a_usage_error() {
+fn a_serve_interval_outside_five_to_3600_is_a_usage_error() {
     let scratch = fixture("interval");
     init(&scratch);
     for args in [
-        vec!["arc", "run", "--watch", "--interval", "4"],
-        vec!["arc", "run", "--watch", "--interval", "3601"],
+        vec!["arc", "serve", "--interval", "4"],
+        vec!["arc", "serve", "--interval", "3601"],
+        // `--interval` is not `run`'s own input; it belongs to the old `--watch` form and is
+        // refused there with the line below.
         vec!["arc", "run", "--interval", "5"],
     ] {
         let run = run(&scratch, &args, "");
         assert_eq!(run.code, Some(2), "{args:?}: {run:?}");
+    }
+}
+
+/// `--watch` is gone: `radian arc run --watch` is refused with exit `2` and one line naming
+/// `radian arc serve`, with or without `--interval`.
+#[test]
+fn run_watch_is_refused_and_names_arc_serve() {
+    let scratch = fixture("run-watch-refused");
+    init(&scratch);
+    for args in [
+        vec!["arc", "run", "--watch"],
+        vec!["arc", "run", "--watch", "--interval", "4"],
+        vec!["arc", "run", "--watch", "--interval", "30"],
+    ] {
+        let run = run(&scratch, &args, "");
+        assert_eq!(run.code, Some(2), "{args:?}: {run:?}");
+        assert_eq!(
+            run.err.trim_end(),
+            "radian arc: `run --watch` is now `radian arc serve`",
+            "{args:?}: {run:?}"
+        );
+        assert!(run.out.is_empty(), "{args:?}: {run:?}");
     }
 }
 

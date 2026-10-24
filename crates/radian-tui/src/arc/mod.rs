@@ -9,7 +9,7 @@
 //! `loop.log` ([`loop_log`], read by the runner); the page state writes no file and starts no
 //! process. An owner's action is queued here and executed by the runner through [`actions`],
 //! in this process, with the library calls the CLI makes. [`looping`] starts the detached
-//! `radian arc run --watch` when no loop holds `runner.lock`; this window never holds it.
+//! `radian arc serve` when no loop holds `runner.lock`; this window never holds it.
 //!
 //! The layout follows ADR 0035: columns 1-2 are the marker column, text starts at column 3,
 //! open frames (`╭─ label ───`, `│ `, `╰──`) carry the structure, the cursor is `❯`, and every

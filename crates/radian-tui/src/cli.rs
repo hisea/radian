@@ -678,18 +678,27 @@ enum ArcCommand {
     /// Make every transition the auto levels allow now, then exit: reconcile, release due
     /// retries, start a task's gate or a worker, and drive a merge at auto level `merge`. A
     /// pass only schedules: the worker and the gate run outside it and a later pass collects
-    /// them. With `--watch`, repeat after `--interval` seconds until SIGINT or SIGTERM.
+    /// them. Use `radian arc serve` to repeat the pass.
     Run {
-        /// Keep running: after a pass that ends quiet, wait `--interval` seconds and run
-        /// another pass, until SIGINT or SIGTERM. Holds `runner.lock` the whole time.
-        #[arg(long)]
+        /// Refused: `run --watch` is now `radian arc serve`. The flag exists only so the
+        /// refusal names the new command in one exact line; the manual documents it as a
+        /// refused input.
+        #[arg(long, hide = true)]
         watch: bool,
-        /// Seconds between passes of `--watch`: 5 to 3600. Only with `--watch`; without it
-        /// this is a usage error. The default is 30.
+        /// Accepted with `--watch` only so the refusal is the exact line above instead of
+        /// clap's unknown-argument error. Hidden: it is part of the refused input, not an
+        /// input of `run`.
+        #[arg(long, value_name = "SECONDS", requires = "watch", hide = true)]
+        interval: Option<u64>,
+    },
+
+    /// Run the scheduling loop: repeat the pass (which only schedules) every `--interval`
+    /// seconds until SIGINT or SIGTERM, holding `runner.lock` the whole time.
+    Serve {
+        /// Seconds between passes: 5 to 3600. The default is 30.
         #[arg(
             long,
             value_name = "SECONDS",
-            requires = "watch",
             value_parser = clap::value_parser!(u64).range(
                 radian_arc::run::MIN_INTERVAL_SECS..=radian_arc::run::MAX_INTERVAL_SECS
             )
@@ -787,8 +796,8 @@ impl ArcCommand {
             ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
             ArcCommand::Merge { task } => ArcRun::Merge { task },
             ArcCommand::Reject { task, note } => ArcRun::Reject { task, note },
-            ArcCommand::Run { watch, interval } => ArcRun::Run {
-                watch,
+            ArcCommand::Run { .. } => ArcRun::Run,
+            ArcCommand::Serve { interval } => ArcRun::Serve {
                 interval: interval.unwrap_or(radian_arc::run::DEFAULT_INTERVAL_SECS),
             },
             ArcCommand::Mcp => ArcRun::Mcp,
@@ -842,6 +851,13 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             ExitCode::from(radian_arc::gate::background::run(
                 radian_arc::gate::background::Options { task, lock_fd },
             ) as u8)
+        }
+        // `run --watch` is `radian arc serve` (ADR 0048 §13), with or without `--interval`.
+        // The old form is refused with one exact line and the usage exit code; the hidden
+        // flags above exist only so that line is this command's own, not clap's.
+        Some(ArcCommand::Run { watch: true, .. }) => {
+            eprintln!("radian arc: `run --watch` is now `radian arc serve`");
+            ExitCode::from(2)
         }
         Some(command) => {
             // `work` returned `None` above: every remaining subcommand has a store operation.

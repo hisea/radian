@@ -1,7 +1,7 @@
 //! The arc TUI starts the scheduling loop and never holds it (ADR 0048 decision 13).
 //!
 //! The TUI holds no `runner.lock` and runs no pass. When it opens, and when `R` is pressed, it
-//! starts `radian arc run --watch` as a detached process if the probe says no loop runs, and it
+//! starts `radian arc serve` as a detached process if the probe says no loop runs, and it
 //! never signals that process. These tests use the real `radian` binary as that process, in a
 //! scratch repository, so the lock and the process are real; the fake executable covers the
 //! failure a start can report.
@@ -124,7 +124,7 @@ fn wait_until(limit: Duration, what: &str, mut predicate: impl FnMut() -> bool) 
     }
 }
 
-/// Starts the real `radian arc run --watch` in `store`'s repository and waits for its lock.
+/// Starts the real `radian arc serve` in `store`'s repository and waits for its lock.
 /// Returns the starter and the holder's pid.
 fn start_real_loop(store: &Store) -> (LoopStarter, u32) {
     let radian = PathBuf::from(env!("CARGO_BIN_EXE_radian"));
@@ -148,6 +148,38 @@ fn start_real_loop(store: &Store) -> (LoopStarter, u32) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn the_detached_start_runs_arc_serve() {
+    let scratch = Scratch::new("args");
+    let store = store_at(&scratch.path("repo"));
+    let args_file = scratch.path("args");
+    let script = scratch.path("fake-loop");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 0\n",
+            args_file.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut starter = LoopStarter::with_program_and_timeout(store, script, Duration::from_secs(5));
+    starter.start().expect("the process is spawned");
+    wait_until(Duration::from_secs(5), "the fake loop's arguments", || {
+        args_file.exists()
+    });
+    let args = fs::read_to_string(&args_file).expect("the fake loop wrote its arguments");
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        ["arc", "serve"],
+        "the TUI starts `radian arc serve`"
+    );
 }
 
 #[test]

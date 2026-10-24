@@ -14378,7 +14378,7 @@ fn arc_process_alive(pid: u32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Opening the TUI on a free `runner.lock` starts `radian arc run --watch`; the loop takes the
+/// Opening the TUI on a free `runner.lock` starts `radian arc serve`; the loop takes the
 /// lock, advances a `todo.ready` task at auto `run` (its start line reaches the ticker from
 /// `loop.log`), and quitting the TUI leaves the loop running with the lock still held. The test
 /// stops the loop at the end.
@@ -14458,17 +14458,17 @@ fn pty_arc_starts_one_loop_so_a_second_arc_run_exits_four() {
     stop_arc_loop(&repo);
 }
 
-/// A TUI opened while `radian arc run --watch` holds the lock starts no loop: its header names
-/// the holder's pid, and quitting leaves that loop alone. When the watch loop exits, the header
+/// A TUI opened while `radian arc serve` holds the lock starts no loop: its header names
+/// the holder's pid, and quitting leaves that loop alone. When the serve loop exits, the header
 /// goes back to `stopped` and the TUI starts nothing by itself (`R` is the only way).
 #[test]
-fn pty_arc_is_a_viewer_while_arc_run_watch_holds_the_lock() {
+fn pty_arc_is_a_viewer_while_arc_serve_holds_the_lock() {
     let scratch = TempDir::new("arc-start-viewer");
     let repo = scratch.path().join("repo");
     arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
     let home = TempDir::new("arc-start-viewer-home");
     let mut watch = std::process::Command::new(BIN)
-        .args(["arc", "run", "--watch", "--interval", "5"])
+        .args(["arc", "serve", "--interval", "5"])
         .current_dir(&repo)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -14479,7 +14479,7 @@ fn pty_arc_is_a_viewer_while_arc_run_watch_holds_the_lock() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("arc run --watch starts");
+        .expect("arc serve starts");
     wait_until(Duration::from_secs(10), "the watch loop's lock", || {
         !arc_lock_free(&repo)
     });

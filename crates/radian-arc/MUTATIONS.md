@@ -443,3 +443,15 @@ alone, and the file was restored from a copy under `.radian/mut-bak/`.
 | TK0066-M1 | `TaskFile::is_merged` always answers `false` | ✅ 1 failed | `list::the_default_hides_merged_tasks_and_finished_plans` (the finished plan and its merged tasks are printed) |
 
 1/1 caught.
+
+## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
+
+`run --watch` became `radian arc serve`; `run` is one pass. The mutation was applied by hand to
+the working file, the named test was run alone, and the file was restored from a copy under
+`.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0079-M3 | `serve` drops the interval lower bound (`MIN_INTERVAL_SECS` becomes `0`) | ✅ 1 timed out | `radian-tui::arc a_serve_interval_outside_five_to_3600_is_a_usage_error` (`serve --interval 4` is accepted and runs the loop until nextest's timeout, instead of exiting 2) |
+
+1/1 caught.

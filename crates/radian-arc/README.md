@@ -189,9 +189,9 @@ a pass changes nothing, in this order:
    `review.ready_to_merge` (finish the last passing integration).
 
 The long work runs outside the pass: a worker is a separate `arc work` process and a gate is a
-separate `arc gate` process. A one-shot `run` therefore exits after starting work; `--watch`
-is what collects it. `[limits] concurrency` counts tasks in `doing`; a running gate takes no
-slot.
+separate `arc gate` process. A one-shot `run` therefore exits after starting work; `radian arc
+serve` is what collects it. `[limits] concurrency` counts tasks in `doing`; a running gate
+takes no slot.
 
 A stage failure or a failed integration counts one automatic rework
 (`attempt_ops::record_auto_rework`); past the limit the plan's `auto` becomes `off` and the
@@ -204,13 +204,13 @@ At quiet, the report lists each open plan and task with what it waits on (a pers
 line it prints (each transition, then the summary) to its sink, and every line also goes to
 `.radian/arc/loop.log` through `run::LoopLog`.
 
-`run::watch` repeats the pass every `--interval` seconds (default 30, 5 to 3600) until SIGINT
+`run::serve` repeats the pass every `--interval` seconds (default 30, 5 to 3600) until SIGINT
 or SIGTERM; it holds `runner.lock` for the whole loop, prints the summary only when it changed,
 prints a pass error as one `radian arc: <message>` line and runs the next pass, starts no new
 worker or gate once the signal arrived, leaves a running worker alone, and signals a running
 gate (`gate::background::stop`) before it returns.
 
-`run::LoopLog` is the one writer of `loop.log`, used by `run` and `watch`: each line gets an
+`run::LoopLog` is the one writer of `loop.log`, used by `run` and `serve`: each line gets an
 RFC 3339 UTC timestamp and a space, is appended and flushed at once, and a log at or above
 1 MiB is renamed to `loop.log.1` before the next line (one old file is kept). A write error
 prints one `radian arc:` line for the whole process and the loop goes on. The arc TUI reads
@@ -449,7 +449,7 @@ task, start)` opens `gates/<task>.gate.lock`, locks it, clears the descriptor's 
 and writes the digest of what the gate will read, and how many times a gate already died for
 it, to `runs/<task>/gate.json` (`started`), then spawns `radian arc gate --task <task>
 --lock-fd <fd>`: the child inherits the lock, so no second gate can start for that task until
-it exits. The pass keeps no child handle it waits on; a thread reaps the child so a `--watch`
+it exits. The pass keeps no child handle it waits on; a thread reaps the child so a `serve`
 loop collects no zombies, and the child's pid goes into the `started` record so a stop that
 finds only that record has a process to signal.
 

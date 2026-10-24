@@ -1,8 +1,8 @@
 //! Starting the arc scheduling loop from the TUI (ADR 0048 decision 13).
 //!
 //! The TUI never takes `runner.lock` and never runs a pass. It probes the lock (take and
-//! release at once, never creating it); when no loop holds it, it starts `radian arc run
-//! --watch` as a detached process in the repository root: its own session (`setsid`, so the
+//! release at once, never creating it); when no loop holds it, it starts `radian arc serve`
+//! as a detached process in the repository root: its own session (`setsid`, so the
 //! terminal's SIGHUP and the TUI's process group never reach it), stdin, stdout and stderr on
 //! `/dev/null`, and no handle the TUI reaps or signals when it quits. `R` starts one the same
 //! way when the probe says no loop runs.
@@ -24,8 +24,8 @@ use super::loop_log;
 /// How long a start has to show its lock before it counts as failed.
 pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The arguments the TUI starts: the loop with the default interval.
-pub const LOOP_ARGS: [&str; 3] = ["arc", "run", "--watch"];
+/// The arguments the TUI starts: the scheduling loop with the default interval.
+pub const LOOP_ARGS: [&str; 2] = ["arc", "serve"];
 
 /// What the header shows about the scheduling loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +38,7 @@ pub enum LoopStatus {
     Elsewhere(Option<u32>),
 }
 
-/// Starts and watches the detached `radian arc run --watch` of one repository. It holds no
+/// Starts and watches the detached `radian arc serve` of one repository. It holds no
 /// lock itself and never signals the child.
 pub struct LoopStarter {
     store: Store,
@@ -93,7 +93,7 @@ impl LoopStarter {
         self.status
     }
 
-    /// Starts `radian arc run --watch` when the probe says no loop runs. `Err` is the footer
+    /// Starts `radian arc serve` when the probe says no loop runs. `Err` is the footer
     /// line: why nothing started (a loop already holds the lock, or the spawn failed).
     ///
     /// # Errors

@@ -2659,3 +2659,16 @@ the named test was run alone, and the file was restored to the same bytes.
 | TK0073-M2 | `f` on the conversation tab pins nothing (`TaskTab::Conversation => {}`) | ✅ 1 failed | `arc_tui::the_conversation_tab_follows_a_running_attempts_journal` (`follow shows the end` misses `filler-39`) |
 
 2/2 caught.
+
+## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
+
+`run --watch` became `radian arc serve`: the TUI's detached start runs `arc serve`, and the
+old form is refused with one exact line. Each mutation was applied by hand to the working file,
+the named test was run alone, and the file was restored from a copy under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0079-M1 | the TUI starts `arc run` instead of `arc serve` (`LOOP_ARGS` in `src/arc/looping.rs`) | ✅ 1 failed | `arc_loop::the_detached_start_runs_arc_serve` (`left: ["arc", "run"]`, `right: ["arc", "serve"]`) |
+| TK0079-M2 | `run --watch` is accepted again (the refusal arm matches `watch: false`) | ✅ 1 failed | `arc::run_watch_is_refused_and_names_arc_serve` (`run --watch` exits 0 with a one-pass summary instead of 2) |
+
+2/2 caught.
