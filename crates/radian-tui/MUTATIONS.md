@@ -2840,3 +2840,21 @@ restored from that copy (never `git checkout`), and the named test ran alone wit
 
 2/2 caught. TK0085-M1, -M2 and -M5 mutate `radian-arc` and are recorded in
 `crates/radian-arc/MUTATIONS.md`.
+
+## TK0082: `Esc` goes back one level, `q` quits everywhere (2026-10-24, branch `work/TK0082-tui-esc-back-q-quit`)
+
+`Esc` used to quit on the plans page, and every page and overlay kept its own `Esc` arm; `q` did
+nothing in a confirmation float. `Esc` now walks one level down from whatever is innermost open
+(`go_back` in `arc/mod.rs`) and never quits, and `q` quits from every page and overlay but the
+reject note, where it is a letter. Each mutation was applied by hand to
+`crates/radian-tui/src/arc/mod.rs`, the named test was run with `cargo nextest run -p radian-tui
+--locked --profile sandbox`, and the file was restored from a copy under `.radian/mut/` with
+`cp`, then compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0082-M1 | `go_back` returns `Quit` at the plans page's top level, as `Esc` used to | ✅ 1 failed | `arc_back::esc_at_the_top_level_does_not_quit_and_says_q_quits` (`Esc` returned `Quit`) |
+| TK0082-M2 | `Esc` in the task column leaves the focus there (the `self.focus = Focus::Plans` line is deleted) | ✅ 1 failed | `arc_back::esc_moves_the_focus_from_the_task_column_to_the_plan_column` (`focus` stays `Tasks`) |
+| TK0082-M3 | a `q` in the reject note quits (`KeyCode::Char('q') => self.quit_key()` in the reject arm) | ✅ 2 failed | `arc_back::q_in_the_reject_note_is_typed`, `arc_merge::a_q_in_the_reject_note_is_typed_and_does_not_quit` |
+
+3/3 caught.
