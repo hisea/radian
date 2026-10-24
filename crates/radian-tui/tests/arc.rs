@@ -857,7 +857,7 @@ fn list_hides_finished_work_unless_all_and_json_holds_it_here() {
     assert!(default.out.contains(&ready), "{}", default.out);
     assert!(
         default.out.contains(&format!(
-            "{mixed}  draft  auto: off  priority: P3  1/2 merged  a plan"
+            "{mixed}  draft  auto: off  priority: P3  1/2 merged  total_cost_usd: 0  a plan"
         )),
         "the shown plan counts what it hid: {}",
         default.out
@@ -910,7 +910,7 @@ fn list_hides_finished_work_unless_all_and_json_holds_it_here() {
     assert_eq!(one.code, Some(0), "{one:?}");
     assert!(
         one.out.contains(&format!(
-            "{finished}  draft  auto: off  priority: P3  2/2 merged  a plan"
+            "{finished}  draft  auto: off  priority: P3  2/2 merged  total_cost_usd: 0  a plan"
         )),
         "a finished plan named by --plan keeps its header: {}",
         one.out

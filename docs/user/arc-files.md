@@ -22,7 +22,7 @@ A key you leave out takes its default.
 | `limits.stall_timeout_secs` | integer | `900` | seconds | When a worker prints no new line for that long. |
 | `limits.max_wall_time_secs` | integer | `7200` | seconds | As an absolute limit on one attempt, on top of the stall timeout. |
 | `limits.git_remote_timeout_secs` | integer | `300` | seconds, `1` or more | A git call that talks to a remote (`fetch`, `push`, `ls-remote`): the call, and everything it started, is killed when it runs this long. It takes effect at the next git call. A local git call (`diff`, `log`, `merge-base`, `status`, a local `merge`) is not bounded. In the worker wrapper the shorter of this and the attempt's remaining wall time applies. |
-| `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
+| `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and when a `review` verdict is applied: every worker attempt and every `review` stage adds its cost, and the task or plan budget that is reached pauses the task. A `review` run that reports no cost adds `0`. |
 | `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
 | `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. A review rework counts; a conflict rework that arc writes itself does not. |
 | `limits.max_conflict_rework` | integer | `3` | 0 or more | When a verification or integration stage fails with a conflict with main: how many conflict reworks arc writes in a row for one task. While it has written fewer, the conflict gets the brief; once it has written the limit, arc writes no brief, the task stays in `review.rework_pending` and waits for you. The lead's rework and an attempt that does not end in a conflict set the run back to `0`. `0` writes none, so the first conflict waits for you; `1` writes exactly one. |
@@ -108,7 +108,8 @@ A cancelled plan takes no change record: it is final.
 | `attempt` | integer | yes | 0 or more; `0` when the task is new |
 | `attempt_id` | string | no | the current attempt's `<task>-<n>`, written by the claim |
 | `token` | string | no | the current attempt's random token; a result is applied only when it matches |
-| `cost_usd` | number | no | the task's counted cost in US dollars, summed over its attempts; `reset-budget` makes it `0` |
+| `cost_usd` | number | no | the task's counted cost in US dollars: every worker attempt and every `review` stage, summed; the budget compares this number, and `reset-budget` makes it `0` |
+| `total_cost_usd` | number | no | the task's cost in US dollars: every worker attempt and every `review` stage, summed; `reset-budget` does not change it. A file without the field reads its `cost_usd` as the total until its next write. |
 | `auto_rework` | integer | no | `0` or more; how many reworks arc counted while the plan's `auto` was not `off`; `0` when absent |
 | `retry_count` | integer | no | `0` or more; how many retries arc started since the task's last lead or review rework; `0` when absent. The lead's brief and the review rework set it back to `0`; a conflict rework keeps it, and `max_attempts` counts it. |
 | `allow_noop` | boolean | yes | `true`, `false`; `false` when the task is new |

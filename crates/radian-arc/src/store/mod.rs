@@ -198,6 +198,24 @@ pub struct PlanView {
 }
 
 impl PlanView {
+    /// The plan's counted cost: every task's `cost_usd`, the number the plan budget compares.
+    /// Read when the plan is read; it is never stored in the plan file.
+    pub fn cost_usd(&self) -> f64 {
+        self.tasks
+            .iter()
+            .map(|task| task.item.cost_usd.unwrap_or(0.0))
+            .sum()
+    }
+
+    /// The plan's total cost: every task's running total (its `cost_usd` when its file has no
+    /// `total_cost_usd`). Read when the plan is read; it is never stored in the plan file.
+    pub fn total_cost_usd(&self) -> f64 {
+        self.tasks
+            .iter()
+            .map(|task| task.item.running_total())
+            .sum()
+    }
+
     /// Whether the plan is finished: it is not cancelled and every task is `done.merged`. A
     /// plan with no tasks is not finished. This is the test `radian arc list` leaves a plan
     /// out by, and the arc TUI's `done` view shares it.
@@ -1061,6 +1079,9 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             }
             if last.cost_usd != current.cost_usd {
                 touched.push("cost_usd");
+            }
+            if last.total_cost_usd != current.total_cost_usd {
+                touched.push("total_cost_usd");
             }
             if last.auto_rework != current.auto_rework {
                 touched.push("auto_rework");

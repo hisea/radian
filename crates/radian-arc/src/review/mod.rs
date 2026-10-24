@@ -800,6 +800,7 @@ fn run_stage(
 /// arc.
 pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verified, Error> {
     let task = &plan.task;
+    let mut failed = None;
     for spec in &plan.stages {
         if spec.stage == Stage::Human {
             continue;
@@ -824,8 +825,44 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
             return Err(Error::Refused(reason.text()));
         }
         if !verdict.is_pass() {
-            return failed_stage(store, task, &plan.label, &plan.head, &verdict, path);
+            failed = Some((verdict, path));
+            break;
         }
+    }
+
+    // The review stage's cost counts toward the task and plan budgets whenever it ran,
+    // whatever this round's outcome (ADR 0048 decision 12). A commands-only profile has no
+    // review verdict, so nothing extra is charged then.
+    let budget_paused = match review_cost(store, &task.id, &plan.label)? {
+        Some(cost) => crate::store::attempt_ops::charge_review_cost(store, &task.id, cost)?,
+        None => false,
+    };
+    if let Some((verdict, path)) = failed {
+        return failed_stage(
+            store,
+            task,
+            &plan.label,
+            &plan.head,
+            &verdict,
+            path,
+            budget_paused,
+        );
+    }
+    if budget_paused {
+        // The charge moved the task to `todo.paused_budget`; no approval is recorded for it.
+        clear_reason(store, &task.id, &plan.label);
+        return Ok(Verified {
+            task: task.id.clone(),
+            attempt_id: plan.label.clone(),
+            state: "todo",
+            phase: "paused_budget".to_owned(),
+            reason: None,
+            digest: None,
+            reused: Vec::new(),
+            conflict: None,
+            review: None,
+            paused: None,
+        });
     }
 
     let verdicts = task_verdicts(store, &task.id)?;
@@ -1183,6 +1220,19 @@ fn write_auto_reverify(
         .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
 }
 
+/// The summed cost of one attempt's `review` stage, in US dollars, when it wrote a verdict.
+/// `Some(0.0)` for a review that reported no cost; `None` when the attempt ran no review.
+fn review_cost(store: &Store, task: &str, label: &str) -> Result<Option<f64>, Error> {
+    let path = verdict_path(store.repo(), task, label, Stage::Review).map_err(gate_error)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let verdict = Verdict::read(&path).map_err(gate_error)?;
+    Ok(Some(
+        verdict.review_cost_micros.unwrap_or(0) as f64 / 1_000_000.0,
+    ))
+}
+
 fn failed_stage(
     store: &Store,
     task: &model::TaskFile,
@@ -1190,11 +1240,30 @@ fn failed_stage(
     head: &str,
     verdict: &Verdict,
     path: PathBuf,
+    budget_paused: bool,
 ) -> Result<Verified, Error> {
+    let mut text = failure_text(verdict);
+    // A review cost that used up the budget stops the task before any rework is considered:
+    // `charge_review_cost` already moved it to `todo.paused_budget` (ADR 0048 decision 12).
+    if budget_paused {
+        let reason = Reason::with_verdict("verify", verdict.stage, text, path.clone());
+        reason.record(store, &task.id, label);
+        return Ok(Verified {
+            task: task.id.clone(),
+            attempt_id: label.to_owned(),
+            state: "todo",
+            phase: "paused_budget".to_owned(),
+            reason: Some(reason),
+            digest: None,
+            reused: Vec::new(),
+            conflict: None,
+            review: None,
+            paused: None,
+        });
+    }
     // A conflict with main starts the next attempt mid-merge, so arc writes its brief itself
     // when the profile runs `merge-main` before an attempt (ADR 0048 decision 9).
     let conflict = conflict_auto_rework(store, task, verdict)?;
-    let mut text = failure_text(verdict);
     if let Some(stop) = conflict
         .as_ref()
         .and_then(|conflict| conflict.stop.as_ref())

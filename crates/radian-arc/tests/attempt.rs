@@ -580,6 +580,35 @@ fn a_fresh_attempt_counts_its_whole_session_cost() {
     assert_eq!(store.load_task(task).unwrap().item.cost_usd, Some(1.5));
 }
 
+/// A task file written before `total_cost_usd` existed starts its total from its `cost_usd`
+/// on the first write, and the next attempt's cost is added to both counters (ADR 0048
+/// decision 12). Mutation: start the total from 0 and it misses the old counted cost.
+#[test]
+fn an_old_task_without_a_total_starts_from_its_cost() {
+    let (_repo, store) = setup("old-total");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    store
+        .change_task(task, |task| {
+            task.cost_usd = Some(2.0);
+            task.total_cost_usd = None;
+            Ok(())
+        })
+        .expect("an older task file");
+
+    attempt_ops::claim(&store, task).expect("claim");
+    write_stream(&store, task, 1, Some(500_000));
+    let finish = finish(&store, task, 1, "failed", false, None);
+    attempt_ops::apply(&store, task, 1, Some(&finish), None, Some(1)).expect("apply");
+    let stored = store.load_task(task).unwrap().item;
+    assert_eq!(stored.cost_usd, Some(2.5));
+    assert_eq!(
+        stored.total_cost_usd,
+        Some(2.5),
+        "the total starts from 2.0"
+    );
+}
+
 /// A task budget pauses the task instead of retrying; `reset-budget` makes it ready and
 /// resets its counted cost.
 #[test]
