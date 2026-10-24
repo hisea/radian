@@ -1,18 +1,18 @@
 ---
-description: The arc TUI: the plans, task and merge pages, every mark and key, and the owner's actions.
+description: The arc TUI: the plans, board, task and merge pages, every mark and key, and the owner's actions.
 ---
 
 # arc: the TUI
 
-This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
+This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the scheduling loop is in [`arc-loop`](arc-loop.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 `radian arc` opens a view of plans, tasks, verdicts, journals and merges; the pages themselves read the store, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (take and release at once, never creating it) and never holds it. Header: `arc`, tabs `plans · board · task · merge` (`merge` for a task in `review.*` or `done`), then on the plans page the view and the plans it hides (`active · 14 hidden`; a zero count is omitted), on the board page its scope (`all plans` or the plan id, and `finished` while the list is open), `main <sha>` and the loop state.
 
-`b` opens the board from any page; on the board it goes back to the plans page. Outside the task page `Tab` keeps its page meaning: on the plans page it opens the selected task's page, on the board the selected card's, and on the merge page it closes it. On the task page `Tab`/`Shift-Tab` cycle that page's own four tabs instead; `Esc` returns to the page the task page was opened from, and `b` opens the board from any page, the task page included.
+`b` opens the board from any page, the task page included; on the board it goes back to the plans page. Outside the task page `Tab` keeps its page meaning: on the plans page it opens the selected task's page, on the board the selected card's, and on the merge page it closes it, unless a command's log is open (`Esc` closes that first). On the task page `Tab`/`Shift-Tab` cycle that page's own four tabs instead; there `Esc` returns to the page the task page was opened from, and `m` opens the merge page.
 
 ## The loop
 
-The TUI is never the scheduling loop: it holds no `runner.lock` and runs no pass. When it opens, it starts `radian arc run --watch` with the default interval when no loop holds the lock; `R` starts one the same way while none runs. The loop is a detached process in the repository root: it has its own session, its input and output go to `/dev/null`, and its lines go to [`loop.log`](arc-files.md). Starting a loop asks nothing: it is the default way arc runs.
+The TUI is never the scheduling loop: it holds no `runner.lock` and runs no pass. When it opens, it starts `radian arc serve` with the default interval when no loop holds the lock; `R` starts one the same way while none runs. The loop is a detached process in the repository root: it has its own session, its input and output go to `/dev/null`, and its lines go to [`loop.log`](arc-files.md). Starting a loop asks nothing: it is the default way arc runs.
 
 The header reads the probe: `loop ● running (pid <n>)` while any loop holds the lock, whoever started it; the pid appears when the holder recorded a readable one, so a lock with none shows plain `loop ● running`. `loop ◌ starting` lasts from a start until the process the TUI started writes its own pid into `runner.lock`: a start in flight is followed through its child, not by a probe, so it does not see another process's lock until the child exits or the 10 seconds run out. `loop ○ stopped` is shown when none holds the lock. A start that fails (the process cannot start, it exits, or it records no pid within 10 seconds) shows `loop ○ stopped` and one footer line with the reason, the exit code when the process exited (`3` a rejected worker line, `4` another holder), and the last `radian arc: <message>` line of `loop.log` when there is one. `R` while a loop runs starts nothing and says so in the footer. Quitting the TUI never stops a loop: the loop keeps running, and the next time you open the TUI it shows that loop's pid.
 
@@ -75,10 +75,10 @@ The board groups the open tasks of the plans it shows by who acts next. From lef
 |---|---|
 | `todo` | `todo.ready`, `todo.blocked` and `todo.retry_wait`: waiting for its turn. |
 | `doing` | `doing.starting`, `doing.running`, `doing.reconciling`: a worker runs. |
-| `verifying` | `review.verifying`, `review.integrating`, `review.ready_to_merge`: a gate or a merge runs. Also `review.awaiting_human` of a plan whose `auto` is `merge` (the loop merges it), and `review.rework_pending` that a scheduling pass will still reverify by itself (a `commands` or integration command failure or timeout, with automatic reverifies left). |
-| `needs you` | `review.awaiting_human` of a plan whose `auto` is not `merge`; `review.rework_pending` that nothing automatic will leave (the review or conflict limit was reached, a command failure no automatic reverify takes, or a reject note); `todo.proposed`; `todo.paused_budget`; and every task of a plan `arc` paused through one of its tasks (the automatic rework limit wrote `paused.json` and set the plan's `auto` to `off`). |
+| `verifying` | `review.verifying`, `review.integrating`, `review.ready_to_merge`: a gate or a merge runs. Also `review.awaiting_human` of a plan whose `auto` is `merge` (the loop merges it), and `review.rework_pending` that a scheduling pass will still reverify by itself (a `commands` or integration command failure or timeout, with automatic reverifies left and the `(head, main)` pair not re-verified yet). |
+| `needs you` | `review.awaiting_human` of a plan whose `auto` is not `merge`; `review.rework_pending` that nothing automatic will leave (the review or conflict limit was reached, a command failure whose `(head, main)` pair was re-verified already or whose count is used up, or a reject note); `todo.proposed`; `todo.paused_budget`; and every task of a plan `arc` paused through one of its tasks: the automatic rework limit wrote `paused.json`, or a plan budget set the plan's `auto` to `off` and left a task in `todo.paused_budget`. A task budget alone does not pause the plan. |
 
-Within a column, cards keep the order `radian arc list` prints: the plan's priority (`P0` first), the plan id, then the task's order in the plan. A card is three lines: the mark, the task id, `#<attempt>` and the cost (a `doing` card also the age of the worker's last heartbeat, `5s`); the title; and, weak, the plan id and the phase (`PL0012 · rework_pending`). A card in `needs you` carries `!` instead of its state mark.
+Within a column, cards keep the order `radian arc list` prints: the plan's priority (`P0` first), the plan id, then the task's order in the plan. Each column is an open frame: its top line carries the column name and its count (`╭─ TODO 10 ───…`), every row starts with the `│` rail, and the column ends with `╰──`. Two cards inside a frame are separated by one weak `┄` divider, and no divider follows the last card. A card is three lines: the state mark, the task id (cut with `…`) and `#<attempt>` right-aligned; the title, indented under the id; and, weak, `<plan id short> · <phase>` on the left — `PL0012` is the plan id's prefix and number — with the cost (`$0.13`, or `—` when none) on the right, or for a `doing` card the age of the worker's last heartbeat (`5s`, `2m`). A card in `needs you` carries `!` instead of its state mark. The selection cursor `❯` sits in the marker column left of the rail, on the selected card's first line; the selected card is not otherwise marked.
 
 The board shows the tasks of the plans the plans page's current view shows (the [`f` view](#the-plan-view), `active` by default). `p` limits it to the plan of the selected card and the header names it (`board · PL0012`); `p` again shows every plan of the view again (`board · all plans`).
 
@@ -86,15 +86,15 @@ The board shows the tasks of the plans the plans page's current view shows (the 
 
 A column reads at 28 cells. `h`/`l` (or `←`/`→`) change column, `j`/`k` (or `↑`/`↓`) move within a column, and each column scrolls to keep the selected card visible. `Enter` (or `Tab`) opens the selected card's task page; `Esc` returns to the plans page, and the task page returns to the board.
 
-- **Wide** (at least 118 cells: four 28-cell columns and their two-cell gaps): the four columns side by side.
-- **Medium** (at least 58 cells): two columns. The left stacks `todo` over `doing`, the right `verifying` over `needs you`, each group under its heading and count. `h`/`l` move between the left and the right column (`todo` ↔ `verifying`, `doing` ↔ `needs you`); `j`/`k` walk the cards of both groups of that column.
-- **Narrow** (fewer than 58 cells): one column with the four groups stacked in the order `todo`, `doing`, `verifying`, `needs you`, each under its heading and count. `j`/`k` walk every card in that order; `h`/`l` jump to the previous or next group.
+- **Wide** (at least 118 cells: four 28-cell columns and their two-cell gaps): the four columns side by side, each one open frame.
+- **Medium** (at least 58 cells): two columns. The left stacks `todo` over `doing`, the right `verifying` over `needs you`; each group is its own frame with its name and count. `h`/`l` move between the left and the right column (`todo` ↔ `verifying`, `doing` ↔ `needs you`); `j`/`k` walk the cards of both groups of that column.
+- **Narrow** (fewer than 58 cells): one column with the four groups' frames stacked in the order `todo`, `doing`, `verifying`, `needs you`, each with its name and count. `j`/`k` walk every card in that order; `h`/`l` jump to the previous or next group.
 
-A group with no card shows its heading, `0` and one weak line: `nothing waiting`, `nothing running`, `nothing verifying`, or `nothing needs you`. The board re-reads the store every 2 seconds. The selection stays on the same task while it is on the board (also while the width changes), and moves to the nearest card of its column when the task leaves.
+A group with no card shows its name, `0` and one weak line inside its frame: `nothing waiting`, `nothing running`, `nothing verifying`, or `nothing needs you`. The board re-reads the store every 2 seconds. The selection stays on the same task while it is on the board (also while the width changes), and moves to the nearest card of its column when the task leaves.
 
 ### The finished list
 
-`d` replaces the columns with every `done.merged` and `failed.*` task of the plans the board shows, the most recently finished first (the time is from the task's records: the passing integration verdict of a merged task, else the attempt's end record). One row each: `✓` (green) for a merged task or `×` (red) for a failed one, the task id, the title, the plan, and when (`12m ago`, `3h ago`, `2d ago`). `j`/`k` scroll it; `Enter` opens the task page; `d` or `Esc` returns to the columns. An empty list shows one weak `nothing finished`.
+`d` replaces the columns with one open frame titled `FINISHED <n>`, where `n` is the number of tasks, holding every `done.merged` and `failed.*` task of the plans the board shows, the most recently finished first (the time is from the task's records: the passing integration verdict of a merged task, else the attempt's end record). One row each, starting with the frame's rail: `✓` (green) for a merged task or `×` (red) for a failed one, the task id, the title, the plan, and when (`12m ago`, `3h ago`, `2d ago`). The selection cursor `❯` sits left of the rail, and no dividers separate the rows. `j`/`k` scroll it; `Enter` opens the task page; `d` or `Esc` returns to the columns. An empty list shows one weak `nothing finished` inside the frame.
 
 ### The owner's actions on the board
 
@@ -128,10 +128,10 @@ The TUI's owner actions are the CLI's own library calls, run in the TUI process;
 | merge | `r` | `reject` with a note | a one-line note float: `Enter` rejects, `Esc` cancels; an empty note is refused like the CLI |
 | merge | `v` | `reverify` | none |
 
-`y` confirms and `n` (or `Esc`) closes a confirmation float without changing anything. `start` in the TUI does what `radian arc start` does; the scheduling loop (the `radian arc run --watch` the TUI starts, or one started by hand) is what schedules the rest.
+`y` confirms and `n` (or `Esc`) closes a confirmation float without changing anything. `start` in the TUI does what `radian arc start` does; the scheduling loop (the `radian arc serve` the TUI starts, or one started by hand) is what schedules the rest.
 
 ## Quitting
 
-`q` (or `Ctrl-C`) quits, and so does SIGTERM: the terminal is restored and the TUI exits `0`. Nothing else happens: no float about the loop, no signal to a loop, whether the TUI started it or not. A loop the TUI started keeps running with its lock, and an attempt it left running is reconciled by the next loop, exactly as when `radian arc run --watch` is killed.
+`q` (or `Ctrl-C`) quits, and so does SIGTERM: the terminal is restored and the TUI exits `0`. Nothing else happens: no float about the loop, no signal to a loop, whether the TUI started it or not. A loop the TUI started keeps running with its lock, and an attempt it left running is reconciled by the next loop, exactly as when `radian arc serve` is killed.
 
 Re-reads the store every 2 s; git, the merge page's data, a command's log and the actions run in worker threads, a frame never waits (`loading…`).

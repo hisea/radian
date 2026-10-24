@@ -86,6 +86,8 @@ libc = "0.2"
 [dev-dependencies]
 # The shared heading-anchored table reader for the manual drift tests.
 radian-coding = { path = "../radian-coding", features = ["testing"] }
+# The board test writes a heartbeat a known age before now, so its card prints that age.
+chrono = "0.4"
 radian-core = { path = "../radian-core" }
 radian-memory = { path = "../radian-memory" }
 # The `radian arc mcp` tests drive the real server through a real MCP client over the

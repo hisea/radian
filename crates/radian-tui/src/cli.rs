@@ -678,18 +678,27 @@ enum ArcCommand {
     /// Make every transition the auto levels allow now, then exit: reconcile, release due
     /// retries, start a task's gate or a worker, and drive a merge at auto level `merge`. A
     /// pass only schedules: the worker and the gate run outside it and a later pass collects
-    /// them. With `--watch`, repeat after `--interval` seconds until SIGINT or SIGTERM.
+    /// them. Use `radian arc serve` to repeat the pass.
     Run {
-        /// Keep running: after a pass that ends quiet, wait `--interval` seconds and run
-        /// another pass, until SIGINT or SIGTERM. Holds `runner.lock` the whole time.
-        #[arg(long)]
+        /// Refused: `run --watch` is now `radian arc serve`. The flag exists only so the
+        /// refusal names the new command in one exact line; the manual documents it as a
+        /// refused input.
+        #[arg(long, hide = true)]
         watch: bool,
-        /// Seconds between passes of `--watch`: 5 to 3600. Only with `--watch`; without it
-        /// this is a usage error. The default is 30.
+        /// Accepted with `--watch` only so the refusal is the exact line above instead of
+        /// clap's unknown-argument error. Hidden: it is part of the refused input, not an
+        /// input of `run`.
+        #[arg(long, value_name = "SECONDS", requires = "watch", hide = true)]
+        interval: Option<u64>,
+    },
+
+    /// Run the scheduling loop: repeat the pass (which only schedules) every `--interval`
+    /// seconds until SIGINT or SIGTERM, holding `runner.lock` the whole time.
+    Serve {
+        /// Seconds between passes: 5 to 3600. The default is 30.
         #[arg(
             long,
             value_name = "SECONDS",
-            requires = "watch",
             value_parser = clap::value_parser!(u64).range(
                 radian_arc::run::MIN_INTERVAL_SECS..=radian_arc::run::MAX_INTERVAL_SECS
             )
@@ -787,8 +796,8 @@ impl ArcCommand {
             ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
             ArcCommand::Merge { task } => ArcRun::Merge { task },
             ArcCommand::Reject { task, note } => ArcRun::Reject { task, note },
-            ArcCommand::Run { watch, interval } => ArcRun::Run {
-                watch,
+            ArcCommand::Run { .. } => ArcRun::Run,
+            ArcCommand::Serve { interval } => ArcRun::Serve {
                 interval: interval.unwrap_or(radian_arc::run::DEFAULT_INTERVAL_SECS),
             },
             ArcCommand::Mcp => ArcRun::Mcp,
@@ -842,6 +851,13 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             ExitCode::from(radian_arc::gate::background::run(
                 radian_arc::gate::background::Options { task, lock_fd },
             ) as u8)
+        }
+        // `run --watch` is `radian arc serve` (ADR 0048 §13), with or without `--interval`.
+        // The old form is refused with one exact line and the usage exit code; the hidden
+        // flags above exist only so that line is this command's own, not clap's.
+        Some(ArcCommand::Run { watch: true, .. }) => {
+            eprintln!("radian arc: `run --watch` is now `radian arc serve`");
+            ExitCode::from(2)
         }
         Some(command) => {
             // `work` returned `None` above: every remaining subcommand has a store operation.
@@ -2158,7 +2174,7 @@ mod tests {
             }
             for sub in command.get_subcommands() {
                 // `radian arc` has its own page: its values and defaults are checked
-                // against `arc.md` (see `every_arc_option_and_value_appears_in_arc_md`).
+                // against the arc pages (see `every_arc_option_and_value_appears_in_the_arc_manual`).
                 if sub.get_name() == "arc" {
                     continue;
                 }
@@ -2243,9 +2259,10 @@ mod tests {
 
     // ---- the arc manual --------------------------------------------------------------
     //
-    // The arc manual is four pages: `arc.md` (the commands), `arc-gate.md` (the gate and
-    // failures), `arc-mcp.md` (the lead's MCP server) and `arc-files.md` (the config, the plan
-    // and task files, the layout).
+    // The arc manual is five pages: `arc.md` (the commands), `arc-loop.md` (the scheduling
+    // loop, its pass and `loop.log`), `arc-gate.md` (the gate and failures), `arc-mcp.md`
+    // (the lead's MCP server) and `arc-files.md` (the config, the plan and task files, the
+    // layout).
     // Every check locates its table by the heading it sits under and the page that holds
     // it. The heading is the anchor: `arc_tables(doc, "arc.md", "## `radian arc show")` is
     // the only way a check reads rows, so an unrelated table elsewhere on any page can
@@ -2341,6 +2358,11 @@ mod tests {
     /// `docs/user/arc.md`, the page the `radian arc` commands are checked against.
     fn arc_md() -> String {
         arc_page("arc.md")
+    }
+
+    /// `docs/user/arc-loop.md`, the page the scheduling loop and its log are checked against.
+    fn arc_loop_md() -> String {
+        arc_page("arc-loop.md")
     }
 
     /// `docs/user/arc-gate.md`, the page the gate and failure sections are checked against.
@@ -2515,16 +2537,25 @@ mod tests {
     }
 
     /// Every option of `radian arc`, with every allowed value and default the parser
-    /// declares, appears in the tables under that command's own heading. Every positional
+    /// declares, appears in the tables under that command's own heading, on the arc page
+    /// that holds it (`arc.md`, or `arc-loop.md` for `run` and `serve`). Every positional
     /// the parser takes is a `<NAME>` row there, and every `<NAME>` row names a positional
     /// the parser takes (the reverse). A table elsewhere on the page is never read.
     #[test]
-    fn every_arc_option_and_value_appears_in_arc_md() {
-        let doc = arc_md();
+    fn every_arc_option_and_value_appears_in_the_arc_manual() {
+        // `arc-loop.md` first: the overview page may name a command and link to its full
+        // section, and the table lives with the section.
+        let pages = [("arc-loop.md", arc_loop_md()), ("arc.md", arc_md())];
         let commands = collect_arc_commands();
         assert!(!commands.is_empty(), "the arc subcommand has commands");
         for command in &commands {
-            let tables = arc_tables(&doc, "arc.md", &command.heading);
+            let (page, doc) = pages
+                .iter()
+                .find(|(_, doc)| doc.contains(&command.heading))
+                .unwrap_or_else(|| {
+                    panic!("{} is missing from arc.md and arc-loop.md", command.heading)
+                });
+            let tables = arc_tables(doc, page, &command.heading);
             for option in &command.options {
                 let rows = rows_with_flag(&tables, &option.flag);
                 if rows.is_empty() {
@@ -2533,7 +2564,7 @@ mod tests {
                     // documentation.
                     assert!(
                         doc.contains(&option.flag),
-                        "{} is missing from arc.md",
+                        "{} is missing from {page}",
                         option.flag
                     );
                     continue;

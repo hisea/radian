@@ -215,7 +215,7 @@ fn run_one(
     })?;
     #[cfg(unix)]
     let pid = child.id();
-    // A stop from `--watch` reaches this child's group, so the next loop never finds a
+    // A stop from `serve` reaches this child's group, so the next loop never finds a
     // build writing in the checkout the gate left (ADR 0048 decision 10).
     #[cfg(unix)]
     let mut running = super::stage::Running::track(pid);
