@@ -85,6 +85,13 @@ copy.
 | TK0044-M1 | take a single review lock again (`SlotLock::acquire` with 1 slot) | `review::two_tasks_reviews_overlap_with_concurrency_two` (the two reviews' intervals do not overlap) | ✅ failed |
 | TK0044-M2 | apply the `[gate.review.first]` settings to every review (force `first = true`) | `review::a_first_review_uses_the_first_settings_and_a_rework_uses_the_normal_ones` (the rework session times out and the fake records no third run) | ✅ failed |
 | TK0044-M3 | skip the owned-flag check for `gate.review.first.exec_args` | `review::a_first_exec_arg_the_review_stage_owns_is_refused` (the session runs and the stage passes) | ✅ failed |
+| TK0037-M1 | `start` refuses `todo.retry_wait` again (`attempt_ops::claim`'s guard goes back to `phase == "ready"`) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `attempt::start_refuses_a_retry_wait_task_when_every_slot_is_taken` (the second gets the wrong refusal, so its `limits.concurrency` assertion fails) | ✅ 2 failed |
+| TK0037-M2 | the scheduling loop ignores `retry_at` and claims a `todo.retry_wait` task (`run::start_ready` drops its phase check) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `run::a_future_retry_makes_run_exit_with_it_waiting` | ✅ 2 failed |
+
+TK0037-M1–M2 were run against `12da692f`, each applied to the committed file, with
+`cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` before the run
+(the sync tests refuse a binary older than its sources), restored from a copy under
+`.radian/tk0037/` with `cp`, and compared byte for byte with `cmp`.
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 

@@ -337,18 +337,23 @@ pub fn write_signal(store: &Store, task: &str, attempt: u32, class: Class) -> Re
 
 // ---- claim ---------------------------------------------------------------------------
 
-/// Claims one task (decision 6): `todo.ready` to `doing.starting` in one transaction.
+/// Claims one task (decision 6): `todo.ready` or `todo.retry_wait` to `doing.starting` in one
+/// transaction. The owner's `start` accepts either; a `todo.retry_wait` task is claimed without
+/// consulting `retry_at`, because the backoff exists for the scheduling loop, which itself
+/// claims only `todo.ready` (decision 9).
 ///
-/// Refused (exit 3) when the task is not `todo.ready`, its plan is not `confirmed`, an
-/// `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
+/// Refused (exit 3) when the task is in any other state or phase, its plan is not `confirmed`,
+/// an `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
 pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
     let _lock = store.lock_state()?;
     let loaded = store.load_task(task_id)?;
     require_unchanged(task_id, loaded.changed_outside_arc)?;
     let mut task = loaded.item;
-    if task.state != TaskState::Todo || task.phase != "ready" {
+    let claimable =
+        task.state == TaskState::Todo && matches!(task.phase.as_str(), "ready" | "retry_wait");
+    if !claimable {
         return Err(Error::Refused(format!(
-            "task `{task_id}` is `{}.{}`; only a `todo.ready` task starts",
+            "task `{task_id}` is `{}.{}`; only a `todo.ready` or `todo.retry_wait` task starts",
             task.state.as_str(),
             task.phase
         )));

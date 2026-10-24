@@ -303,9 +303,11 @@ A line `radian exec` would reject, or one that repeats an argument the wrapper s
 
 Before it claims anything it reconciles every task in `doing` (see [Reconcile](arc-gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 
+`start` also claims the task you name when it is `todo.retry_wait`, even while its `retry_at` is still in the future: your `start` is a run-now, and the backoff exists for the scheduling loop. The claim is the same transaction as a `todo.ready` one, with the same concurrency check and the same printed line, and it clears `retry_at`.
+
 A claim is refused with exit `3` and changes nothing when:
 
-- the task is not `todo.ready`; a `todo.proposed` task names its phase and waits for `radian arc confirm`;
+- the task is not `todo.ready` or `todo.retry_wait`; a `todo.proposed` task names its phase and waits for `radian arc confirm`, and `todo.paused_budget` and every `failed.*` phase are refused;
 - its plan is not `confirmed`; a `cancelled` plan is refused, naming its status;
 - an `after` task is not `done`;
 - `[limits] concurrency` tasks are already in `doing`.
@@ -346,7 +348,7 @@ For example `TK0001-work-1 completed -> review.verifying`.
 A result whose token is not the task's current attempt prints `<attempt id> ignored: <why>` and changes nothing.
 Before its own line, `start` prints `reconciled: <line>` for each task the reconcile step changed.
 
-A pushed `completed` attempt continues into the gate in the same process, so one `start` takes a task from `todo.ready` to `review.awaiting_human` or `review.rework_pending`.
+A pushed `completed` attempt continues into the gate in the same process, so one `start` takes a task from `todo.ready` (or `todo.retry_wait`) to `review.awaiting_human` or `review.rework_pending`.
 The verification prints its own line:
 
 ```text

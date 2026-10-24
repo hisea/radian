@@ -22,6 +22,7 @@ radian arc <subcommand>       run one CLI operation and exit
 - `radian arc` with no subcommand opens the TUI. A subcommand runs the CLI. This follows `radian` (TUI) and `radian exec` (headless). The TUI's pages are `plans`, `task` and `merge`; they read the plans, the tasks, the attempt verdicts, a worker's journal and a task's diff, and the owner's keys act through the same library calls as the CLI (decision 11). The `merge` page is enabled for a task in `review.*` or `done`.
 - The CLI subcommands are `init`, `add`, `list`, `show`, `adopt`, `start`, `merge`, `reject`, `auto`, `priority`, `confirm`, `pause`, `reset-budget`, `cancel`, `reverify`, `run`, `mcp`, and the two internal ones a person does not run, `work` and `gate`.
 - Exit codes: 0 success; 1 error; 2 usage error; 3 the state does not allow the operation (this includes a file changed outside arc); 4 a lock is held by another process. `list` takes `--all` and `--json`; `show` takes `--json`.
+- `start` is the owner's run-now command: it claims a `todo.ready` task or a `todo.retry_wait` one, without consulting `retry_at` (decision 9).
 - `rad arc` is the same command through the `rad` alias.
 
 ### 2. Roles
@@ -107,6 +108,7 @@ Everything arc stores for a repository is in `<repository>/.radian/arc/`.
 | From | To | Condition |
 |---|---|---|
 | `todo.ready` | `doing.starting` | Every task in `after` is merged, a slot is free, and the owner started the task or the plan's auto level starts it. arc claims the task and creates an attempt in one transaction. |
+| `todo.retry_wait` | `doing.starting` | The owner runs `radian arc start`: the task is claimed exactly as a `todo.ready` one, and `retry_at` is not consulted. The scheduling loop still waits for `retry_at` (decision 9). |
 | `doing.running` | `review.verifying` | arc receives a valid attempt end record (token matches, result present) and the delivery check passes (decision 8). |
 | `doing.running` | `todo.retry_wait` | The worker ended, and the failure is an infrastructure or model failure that can retry. |
 | `doing.running` | `doing.reconciling` | arc cannot prove the state of the worker. arc does not start the task again. A person decides. |
@@ -166,7 +168,7 @@ The change the delivery check counts is the attempt's own commits: the range fro
 
 ### 9. Failures, retries, stalls, and cancel
 
-- Failure classes are infrastructure, model, verification, and cancel. Only infrastructure and model failures retry, with exponential backoff from 10 seconds to 5 minutes. A cancel does not retry. A verification failure goes to the lead for rework, except for a conflict with main when the profile runs `merge-main` before an attempt; arc writes no other brief.
+- Failure classes are infrastructure, model, verification, and cancel. Only infrastructure and model failures retry, with exponential backoff from 10 seconds to 5 minutes. The backoff exists for the scheduling loop: the owner's `start` claims a `todo.retry_wait` task at once as it claims a `todo.ready` one, while the loop releases the task only once `retry_at` has passed. A cancel does not retry. A verification failure goes to the lead for rework, except for a conflict with main when the profile runs `merge-main` before an attempt; arc writes no other brief.
 - **`max_attempts` counts retries, not attempts.** A task keeps `retry_count`, the number of retries arc has started since the task's last rework. A failed attempt retries while `retry_count` is below the task's `max_attempts` (else `[limits] max_attempts`) and raises it by one; when the count has reached the limit, the task goes to `failed.exhausted`. The attempt number is never compared with the limit. Every rework sets `retry_count` back to `0`: the lead's `add_rework`, the review rework and the conflict rework. `attempt` still goes up by one for every attempt, and a `reverify` attempt is not a retry, so it changes neither `retry_count` nor the decision. The backoff follows the count: 10 seconds for the first retry, doubled for each later one.
 - A `commands`, `mutation` or `review` stage, or the integration stage, that fails with reason `conflict` returns the task to `todo.ready` by itself when the selected profile's `before_attempt` contains `merge-main` (decision 10): the next attempt starts mid-merge, so arc writes that attempt's brief.
   - arc appends the brief to the task body and moves the task to `todo.ready` the way the lead's rework does (decision 6), with the heading `## Rework <n> (conflict with main)`. No new task state is added.

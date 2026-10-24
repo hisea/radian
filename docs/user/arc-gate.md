@@ -257,7 +257,8 @@ A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 1
 Every rework sets `retry_count` back to `0` (the lead's brief, arc's review rework, and the conflict rework), so the new instructions get their own retries.
 The attempt number is never compared with the limit; `show` prints `retry_count`.
 A `reverify` attempt is not a retry: it changes neither `retry_count` nor the limit.
-`todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; `start` does this before it claims.
+`todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; the scheduling loop and `start` do this before they claim.
+`start` also claims a `todo.retry_wait` task whose time has not come, without waiting for it (see [`start`](arc.md#radian-arc-start-task)).
 
 Every attempt of a task runs in a worker session.
 With [`worker.rework_session`](arc-files.md#configtoml) at `fresh` (the default) each attempt has a session of its own, `<task>-<attempt>`, and none is ever resumed; an attempt after the first gets the hand-off section (see [`start`](arc.md#radian-arc-start-task)).

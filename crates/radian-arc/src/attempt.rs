@@ -119,7 +119,9 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
     }
     let reconciled = reconcile(store)?;
     // The loop releases a due retry on every pass; `start` is the owner's one task, so it
-    // does the same before it claims.
+    // does the same before it claims. A target whose `retry_at` is still in the future is
+    // claimed anyway: the claim accepts `todo.retry_wait`, and the backoff exists for the
+    // scheduling loop (ADR 0048 decision 9).
     attempt_ops::release_retries(store, &crate::store::plan_ops::utc_now())?;
     let config = store.config()?;
     let claim = attempt_ops::claim(store, task_id)?;
