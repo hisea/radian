@@ -39,8 +39,9 @@ static FIXTURE: OnceLock<Fixture> = OnceLock::new();
 
 fn fixture() -> &'static Fixture {
     FIXTURE.get_or_init(|| {
-        let base = std::env::temp_dir().join(format!("radian-read-roots-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        // The fixture is `'static` (a `OnceLock`), so it uses the process-exit cleanup: under
+        // nextest the test process ends with the test.
+        let base = common::process_dir("radian-read-roots");
 
         let cargo_home = base.join(".cargo");
         let registry = cargo_home.join("registry/src");
