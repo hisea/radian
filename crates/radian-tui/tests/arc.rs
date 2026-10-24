@@ -1171,6 +1171,10 @@ fn arc_gate_without_arguments_exits_two_and_help_exits_zero() {
     let out = String::from_utf8_lossy(&help.stdout);
     assert!(out.contains("usage: arc-gate.sh"), "{out}");
     assert!(out.contains("quick") && out.contains("full"), "{out}");
+    assert!(
+        out.contains("RADIAN_VERIFY_MIN_FREE_INODES") && out.contains("RADIAN_VERIFY_MIN_FREE_GIB"),
+        "the help names the two temp file system limits: {out}"
+    );
 }
 
 /// `quick` runs nextest for the crates the checkout changed since its merge base
@@ -1219,6 +1223,11 @@ fn quick_tests_the_changed_crates_and_radian_tui() {
         .current_dir(&repo)
         .env("PATH", path)
         .env("CARGO_CALLS", &calls)
+        // This test is about which crates the gate selects, not about the temp
+        // file system: turn both limits off so the real `df` on the inherited
+        // TMPDIR (or a limit set in the developer's environment) cannot fail it.
+        .env("RADIAN_VERIFY_MIN_FREE_INODES", "0")
+        .env("RADIAN_VERIFY_MIN_FREE_GIB", "0")
         .output()
         .expect("the gate runs");
     assert!(

@@ -738,3 +738,15 @@ helper did not exist).
 | TK0042-M1 | compare with `-gt` where the inode check means `-lt` (`inode_free -gt inode_limit`) | ✅ 5 failed | `low_inodes_fail_with_the_line` (10 free passed the check), also `plenty_free_passes`, `macos_and_gnu_inode_output_both_parse`, and both override tests |
 | TK0042-M2 | ignore `RADIAN_VERIFY_MIN_FREE_INODES` (`local inode_limit="50000"`) | ✅ 2 failed | `the_inode_limit_can_be_overridden_and_zero_turns_it_off` (the `0` and lowered-limit runs failed) and `a_non_numeric_limit_fails_the_check` |
 
+## the temp file system check's follow-ups (2026-10-24, branch `work/TK0049-verify-inode-check-followups`)
+
+Base: the branch's first commit. Mutations were applied by hand to
+`scripts/temp-check.sh`, backed up under `.radian/` and restored from that copy (never
+`git checkout`); each named test ran alone with
+`cargo nextest run -p radian-coding --locked --no-fail-fast --test temp_check <test>`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0049-M1 | validate only the inode total, not `inode_free` (drop `|| ! radian_temp_is_count "$inode_free"`) | ✅ 1 failed | `macos_and_gnu_inode_output_both_parse` (the `-` ifree printed `[: -: integer expression expected` and the check passed) |
+| TK0049-M2 | take the leading `-` of the space column for an unreadable value (drop the `-*` case) | ✅ 1 failed | `a_negative_free_space_fails_the_space_check` (`Some(0)` with "cannot read the free space", not `Some(1)`) |
+| TK0049-M3 | do not bound a limit (remove the `-gt 18` check in `radian_temp_limit`) | ✅ 1 failed | `a_limit_past_the_bound_fails_the_check` (`[: 9999999999999999999: integer expression expected`, exit `0`) |

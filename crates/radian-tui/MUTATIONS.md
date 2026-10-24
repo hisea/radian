@@ -2505,3 +2505,14 @@ applied by hand to the working file, the named test was run alone with `--profil
 | TK0050-M4 | the dark palette swaps `priority_p0` and `priority_p5` (`P0` gets `GREEN`, `P5` gets `RED`) | ✅ 1 failed | `theme::tests::the_priority_roles_are_six_distinct_colors_and_mono_has_none` (`P0` is green, not `status_error`'s red) |
 
 4/4 caught.
+
+## TK0049: the gate usage names the temp file system limits (2026-10-24, branch `work/TK0049-verify-inode-check-followups`)
+
+Base: the branch's first commit. The mutation was applied by hand to
+`scripts/arc-gate.sh`, backed up under `.radian/` and restored from that copy (never
+`git checkout`), and the named test ran alone with
+`cargo nextest run -p radian-tui --locked --no-fail-fast --test arc <test>`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0049-M1 | drop `RADIAN_VERIFY_MIN_FREE_GIB` from the usage block | ✅ 1 failed | `arc_gate_without_arguments_exits_two_and_help_exits_zero` (the help did not name the two limits) |
