@@ -235,11 +235,11 @@ impl EventSink for Ui {
                 // turn's output starts on its own line.
                 self.end_of_turn();
                 // ADR 0026 D2: a key switch's one notice line goes to stderr, after the turn.
-                // The JSONL stream stays machine-readable (no notice lines mixed in).
-                if self.jsonl.is_none() {
-                    for notice in radian_host::key_pool::take_notices() {
-                        eprintln!("{notice}");
-                    }
+                // It goes to stderr in `--output jsonl` mode too: stdout is the machine stream
+                // and stderr is status. Draining on every turn also keeps the process-global
+                // queue from growing across turns.
+                for notice in radian_host::key_pool::take_notices() {
+                    eprintln!("{notice}");
                 }
                 *self.last_status.lock().unwrap() = Some(status.clone());
                 match &status {
