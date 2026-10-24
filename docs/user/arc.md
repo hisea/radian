@@ -727,7 +727,7 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
-A bare `radian arc` opens the TUI; the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
+A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
 
 ## Not built yet
 
