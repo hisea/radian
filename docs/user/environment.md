@@ -44,6 +44,13 @@ See `providers` for login and routing.
 | `NO_COLOR` | any non-empty value turns it on; empty counts as unset | unset | A non-empty value forces the `mono` theme. Wins over the file and over `/theme`. |
 | `COLORTERM` | `truecolor` or `24bit` turns on truecolor; any other value stays in 256 colors | unset | Truecolor rendering switch. |
 | `RADIAN_KEYBOARD_ENHANCEMENT` | `0` or `false` never probes the terminal, for the keyboard flags **or** the image protocol (images then draw as half blocks); `1` or `true` pushes the enhancement flags without asking, and still probes for images | unset: ask the terminal | Terminal capability probing. Unset: radian asks the terminal once, for both answers at the same time (up to a 2 second wait on a terminal that never answers). Any other value counts as unset. |
+| `TERM` | any value; a value starting with `tmux` means inside tmux | unset: not tmux | tmux detection for the terminal probes, beside `TERM_PROGRAM`. Inside tmux the graphics query is wrapped in the tmux passthrough, and radian runs `tmux set -p allow-passthrough on` on the current pane. Also passes through to sandboxed children. |
+| `TERM_PROGRAM` | `tmux` means inside tmux; any other value counts as not tmux | unset: not tmux | The second tmux signal: `tmux` turns on the tmux passthrough query and its `allow-passthrough` side effect, exactly like a `TERM` starting with `tmux`. |
+| `WEZTERM_EXECUTABLE` | any non-empty value turns it on; empty counts as unset | unset | WezTerm sets it. On: radian ignores the graphics answer and keeps the protocol the environment implies, so WezTerm draws with the iTerm2 protocol and a terminal without that hint stays at half blocks. Off: the probed answer decides. |
+| `KONSOLE_VERSION` | any non-empty value turns it on; empty counts as unset | unset | Konsole sets it. On: radian ignores the graphics answer and falls back to half blocks, because Konsole's sixel support is unreliable. Off: the probed answer decides. |
+
+See `commands` for which protocol each terminal draws, and `troubleshooting` when an image
+shows only its `[image: …]` line.
 
 ## Sandboxed children
 
