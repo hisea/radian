@@ -21,6 +21,7 @@ pub mod loop_log;
 pub mod looping;
 pub mod render;
 
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -122,6 +123,72 @@ impl PlanFilter {
             PlanFilter::Done => "no done plans",
             PlanFilter::Cancelled => "no cancelled plans",
         }
+    }
+}
+
+/// The order of the plans page's left list. `o` cycles them in this order; the order is not
+/// saved, so every start opens on [`PlanOrder::Priority`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlanOrder {
+    /// The most urgent first: `P0`, then `P1` … `P5`, then the id.
+    #[default]
+    Priority,
+    /// The plan mark first — needs you, running, queued, paused, draft, done, cancelled — then
+    /// the priority and the id.
+    State,
+    /// The id alone.
+    Id,
+}
+
+impl PlanOrder {
+    /// The word the `PLANS` heading draws: `by priority`, `by state` or `by id`.
+    pub fn name(self) -> &'static str {
+        match self {
+            PlanOrder::Priority => "priority",
+            PlanOrder::State => "state",
+            PlanOrder::Id => "id",
+        }
+    }
+
+    /// The next order in the `o` cycle: `priority → state → id → priority`.
+    pub fn next(self) -> Self {
+        match self {
+            PlanOrder::Priority => PlanOrder::State,
+            PlanOrder::State => PlanOrder::Id,
+            PlanOrder::Id => PlanOrder::Priority,
+        }
+    }
+}
+
+/// The plans page's order: `priority` ranks `P0` first, `state` follows the marks from needs
+/// you to cancelled, and `id` is ascending. Every order breaks a tie by id, and `state` also
+/// by priority first.
+fn compare_plans(order: PlanOrder, one: &PlanView, other: &PlanView) -> Ordering {
+    let by_priority = || {
+        priority_rank(one.plan.item.priority())
+            .cmp(&priority_rank(other.plan.item.priority()))
+            .then_with(|| one.plan.item.id.cmp(&other.plan.item.id))
+    };
+    match order {
+        PlanOrder::Priority => by_priority(),
+        PlanOrder::State => plan_mark_rank(plan_mark(one))
+            .cmp(&plan_mark_rank(plan_mark(other)))
+            .then_with(by_priority),
+        PlanOrder::Id => one.plan.item.id.cmp(&other.plan.item.id),
+    }
+}
+
+/// Where a plan mark sits in the `state` order: needs you, running, queued, paused, draft,
+/// done, cancelled. It ranks [`plan_mark`]'s own set instead of repeating its rules.
+fn plan_mark_rank(mark: PlanMark) -> usize {
+    match mark {
+        PlanMark::NeedsYou => 0,
+        PlanMark::Running => 1,
+        PlanMark::Queued => 2,
+        PlanMark::Paused => 3,
+        PlanMark::Draft => 4,
+        PlanMark::Done => 5,
+        PlanMark::Cancelled => 6,
     }
 }
 
@@ -735,7 +802,7 @@ pub struct ResultLine {
 pub struct ArcApp {
     pub store: Store,
     session_dir: Option<PathBuf>,
-    /// The plans the current view lists, in the store's order. `all_plans` holds every plan,
+    /// The plans the current view lists, in the page's order. `all_plans` holds every plan,
     /// for the hidden count and a task's `after` lookup.
     pub plans: Vec<PlanView>,
     /// Every plan, whatever the view.
@@ -744,6 +811,8 @@ pub struct ArcApp {
     pub hidden: usize,
     /// The plans page's view; `f` cycles it, and it is not saved.
     pub filter: PlanFilter,
+    /// The plans list's order; `o` cycles it, and it is not saved.
+    pub order: PlanOrder,
     pub plan_sel: usize,
     pub focus: Focus,
     pub task_sel: usize,
@@ -812,6 +881,7 @@ impl ArcApp {
             all_plans: Vec::new(),
             hidden: 0,
             filter: PlanFilter::default(),
+            order: PlanOrder::default(),
             plan_sel: 0,
             focus: Focus::Plans,
             task_sel: 0,
@@ -1004,12 +1074,15 @@ impl ArcApp {
     /// Rebuilds the view's plans and puts the selection back on `keep` when it is in the new
     /// view; otherwise the selection moves to the first plan of the view (rule 4).
     fn rebuild_visible(&mut self, keep: Option<&str>) {
-        self.plans = self
+        let order = self.order;
+        let mut plans: Vec<PlanView> = self
             .all_plans
             .iter()
             .filter(|view| self.filter.shows(view))
             .cloned()
             .collect();
+        plans.sort_by(|one, other| compare_plans(order, one, other));
+        self.plans = plans;
         self.hidden = self.all_plans.len() - self.plans.len();
         self.plan_sel = keep
             .and_then(|id| self.plans.iter().position(|view| view.plan.item.id == id))
@@ -1027,6 +1100,15 @@ impl ArcApp {
             self.task_sel = 0;
             self.task_top = 0;
         }
+        ArcKey::Redraw
+    }
+
+    /// `o` on the plans page: the next order. The selection stays on the same plan, and the
+    /// task column follows it as an ordinary refresh does.
+    fn cycle_order(&mut self) -> ArcKey {
+        let keep = self.selected_plan().map(|view| view.plan.item.id.clone());
+        self.order = self.order.next();
+        self.rebuild_visible(keep.as_deref());
         ArcKey::Redraw
     }
 
@@ -1056,7 +1138,7 @@ impl ArcApp {
         };
     }
 
-    /// Every plan of the current view, as the page draws it, in the store's order.
+    /// Every plan of the current view, as the page draws it, in the page's order.
     pub fn plan_rows(&self) -> Vec<PlanRow> {
         self.plans
             .iter()
@@ -1727,6 +1809,7 @@ impl ArcApp {
                 ArcKey::Redraw
             }
             KeyCode::Char('f') => self.cycle_filter(),
+            KeyCode::Char('o') => self.cycle_order(),
             KeyCode::Char('c') => {
                 // With the task column focused `c` confirms a proposed task; with the plan
                 // column focused it confirms a draft plan, as it always has (ADR 0048 §11).

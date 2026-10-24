@@ -96,6 +96,8 @@ copy.
 | TK0060-M1 | the scheduling claim accepts `todo.retry_wait` (`ClaimBy::SchedulingLoop` uses the owner's phase set) | `attempt::a_scheduling_claim_refuses_a_task_that_began_backing_off` (the claim succeeds and takes attempt 1) | ✅ failed |
 | TK0065-M1 | drop the pass's digest from an integration refusal (`run_inner` copies the written inputs only for `verify`) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the refused record says `"inputs": ""`) | ✅ failed |
 | TK0065-M2 | drop the `.iN` attempt prefix acceptance (`same_attempt` compares the attempt only) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the first later pass starts a gate again) | ✅ failed |
+| TK0068-M1 | `free_concurrency_slot` always answers true (a taken slot is no reason) | `chain::a_dry_run_queue_line_names_a_taken_concurrency_slot` (the queue line carries no `(waiting for a free concurrency slot)`) | ✅ failed |
+| TK0068-M2 | `task_claim_order` walks only the ids a plan lists (`store.task_ids` replaced by the key map's ids) | `chain::an_unlisted_ready_task_counts_at_the_end_of_the_queue` (`(1, 1)` instead of `(1, 2)`) | ✅ failed |
 
 TK0060-M1 was run on this branch from a copy under `.radian/tk0060/`, restored with `cp` and
 compared with `cmp`. `TK0037-M2`'s phase check has since moved into `attempt_ops::claim_by`, so
@@ -111,6 +113,11 @@ TK0065-M1–M2 were run against this branch's working files, with the strengthen
 `run::a_refused_integration_is_not_restarted_until_its_inputs_change` in place, the same
 two-binary build before each run, and `git checkout --` to restore the file. M1 fails the
 digest assertion; M2 starts a gate on the first later pass.
+
+TK0068-M1–M2 were run against this branch's working files, each restored with the edit tool
+and checked with `git diff`, with `cargo build -p radian-tui --bin radian -p agent-extensions
+--bin mcp-fixture` before each run. M1 makes the dry run omit the concurrency reason; M2 makes
+the queue total count only plan-listed tasks.
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -507,3 +514,17 @@ TK0067-M2 is the check the TK0052 review asked for: it is the mutation that make
 count and the conflict run reset each other, so the model test's bound, not a per-attempt
 assertion, catches it. TK0052-M1 (dropping only the conflict reset on an attempt that never
 reached the gate) stays a valid mutation caught by the per-attempt assertion.
+## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
+
+`TaskDiff::fallback` was a bool, so a remote main ref that exists but shares no ancestor with the
+head read as `no remote main` — a line that was false about the repository. `remote_main_base`
+now tells a missing ref (`git show-ref --verify`) from a ref git finds no merge base for, and
+`TaskDiff::base` is the closed set `DiffBase`. The mutation was applied by hand to the working
+file, the named test was run alone with `cargo nextest run -p radian-arc --locked --profile
+sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0084-M1 | `remote_main_base` reports a ref with no common ancestor as `MainBase::Missing` | ✅ 1 failed | `read::a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref` (`left: NoRemoteMain`, right `Unrelated`) |
+
+1/1 caught.

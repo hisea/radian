@@ -821,8 +821,8 @@ fn warning_lines(store: &Store, tasks: &[String]) -> Result<Vec<String>, Error> 
 }
 
 /// Why the next scheduling pass would not claim a task that is `todo.ready` now, in the words
-/// `radian arc run`'s summary uses: its plan's `auto` is `off`, or an `after` task has not
-/// merged. `None` when nothing stands in the way.
+/// `radian arc run`'s summary uses: its plan's `auto` is `off`, an `after` task has not
+/// merged, or every concurrency slot is taken. `None` when nothing stands in the way.
 fn queue_reason(store: &Store, id: &str) -> Result<Option<String>, Error> {
     let task = store.load_task(id)?.item;
     let plan = store.load_plan(&task.plan)?.item;
@@ -830,15 +830,12 @@ fn queue_reason(store: &Store, id: &str) -> Result<Option<String>, Error> {
     // task gets, not the one it has as `todo.proposed` now.
     let mut ready = task.clone();
     ready.phase = "ready".to_owned();
-    if plan.auto == "off" {
-        return Ok(Some(crate::run::waiting_reason(store, &plan, &ready)?));
-    }
     let blocked = task.after.iter().any(|dependency| {
         !store
             .load_task(dependency)
             .is_ok_and(|loaded| loaded.item.is_merged())
     });
-    if blocked {
+    if plan.auto == "off" || blocked || !crate::run::free_concurrency_slot(store)? {
         Ok(Some(crate::run::waiting_reason(store, &plan, &ready)?))
     } else {
         Ok(None)

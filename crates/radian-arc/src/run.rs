@@ -713,7 +713,7 @@ fn plans_in_claim_order(store: &Store) -> Result<Vec<PlanView>, Error> {
 
 /// Every task in claim order: its plan's priority, then the plan id, then the task's position
 /// in the plan. A task file no plan lists sorts last, by id.
-fn task_claim_order(store: &Store) -> Result<Vec<String>, Error> {
+pub(crate) fn task_claim_order(store: &Store) -> Result<Vec<String>, Error> {
     let mut keys: std::collections::HashMap<String, (usize, String, usize)> =
         std::collections::HashMap::new();
     for view in plans_in_claim_order(store)? {
@@ -912,6 +912,25 @@ fn after_merged(store: &Store, task: &model::TaskFile) -> Result<bool, Error> {
         }
     }
     Ok(true)
+}
+
+/// Whether a scheduling pass would find a free concurrency slot right now: `confirm
+/// --dry-run` says a ready task waits when it would have none.
+///
+/// A task file that does not read is not a running task here: a dry run must refuse exactly
+/// as the real confirm does, and the real confirm never reads an unrelated task file.
+pub(crate) fn free_concurrency_slot(store: &Store) -> Result<bool, Error> {
+    let concurrency = u64::from(store.config()?.limits.concurrency.max(1));
+    let mut doing = 0;
+    for id in store.task_ids()? {
+        if store
+            .load_task(&id)
+            .is_ok_and(|loaded| loaded.item.state == TaskState::Doing)
+        {
+            doing += 1;
+        }
+    }
+    Ok(doing < concurrency)
 }
 
 /// How many tasks are in `doing`.

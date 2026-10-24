@@ -2727,6 +2727,23 @@ and the file was restored from a copy under `.radian/backup/` with `cp`, then co
 2/2 caught. TK0076-M2 (the diff range) mutates `radian-arc` and is recorded in
 `crates/radian-arc/MUTATIONS.md`.
 
+## TK0078: the plans list's order (`o`) (2026-10-24, branch `work/TK0078-tui-plans-sort-toggle`)
+
+The plans page now draws one of three orders — `priority` (the default: `P0` first, then the
+id), `state` (the plan marks from needs you to cancelled, then priority and id) and `id` —
+cycled by `o`, and the `PLANS` heading names the order. The selection is kept by plan id
+across the cycle, a refresh that reorders after `+`/`-`, and `f`. Each mutation was applied by
+hand to `crates/radian-tui/src/arc/mod.rs`, the named test was run alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --no-fail-fast --test arc_tui -E
+'test(<name>)'`, and the file was restored from a copy under `.radian/mut/` with `cp` and
+`cmp` (byte-identical afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0078-M1 | priority order puts `P5` first (`PlanOrder::Priority` compares the ranks the other way round) | ✅ 2 failed | `the_plans_page_puts_the_most_urgent_first_and_says_so` (left `PL0001-p3`, `PL0003-p1`, …), `o_cycles_priority_state_id_and_back` |
+| TK0078-M2 | `o` keeps the selection index instead of the plan (`plan_sel` restored after `rebuild_visible(None)`) | ✅ 1 failed | `the_order_keeps_the_selected_plan_across_o_a_refresh_and_f` (after `o` to id the cursor is `1`, not `0`) |
+| TK0078-M3 | the default order is `id` (`#[default]` moved from `Priority` to `Id`) | ✅ 3 failed | `the_plans_page_puts_the_most_urgent_first_and_says_so`, `o_cycles_priority_state_id_and_back`, `the_order_keeps_the_selected_plan_across_o_a_refresh_and_f` (all `left: Id`, `right: Priority`) |
+| TK0078-M4 | state order puts done before running (`Done => 1`, `Running => 5` in `plan_mark_rank`) | ✅ 1 failed | `o_cycles_priority_state_id_and_back` (left `needs`, `done`, `queued`, …) |
 ## TK0077: the loop follow-ups from the TK0019 review (2026-10-24, branch `work/TK0077-tui-loop-followups`)
 
 The review of TK0019 found that `L` on the merge page opened the loop log under an open command
@@ -2745,3 +2762,16 @@ afterwards.
 | TK0077-M4 | `L` closes the command log but leaves its in-flight read pending | ✅ 1 failed | `arc_merge::l_closes_the_command_log_and_opens_the_loop_log` (the late reply opens the command log again) |
 
 4/4 caught.
+## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
+
+The diff tab's source line read one bool from `TaskDiff`, so both reasons the merge base is
+missing drew `no remote main`. It now maps `DiffBase` to its own line. The mutation was applied by
+hand to the working file, the named test was run alone with `cargo nextest run -p radian-tui
+--locked --profile sandbox -E 'test(a_diff_without_a_merge_base_names_that_reason)'`, and the file
+was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0084-M1 | the range's `DiffBase::Unrelated` draws `base..head · no remote main` | ✅ 1 failed | `arc_tui::a_diff_without_a_merge_base_names_that_reason` (the line says no remote main while the ref exists) |
+
+1/1 caught.
