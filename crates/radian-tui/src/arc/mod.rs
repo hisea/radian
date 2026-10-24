@@ -16,6 +16,7 @@
 //! color is a theme role.
 
 pub mod actions;
+pub mod board;
 pub mod loop_log;
 pub mod looping;
 pub mod render;
@@ -25,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use radian_arc::read::{AttemptView, CommandView, MergeView, TaskDiff};
 use radian_arc::store::model::{
-    PLAN_PRIORITIES, PROPOSED_PHASE, TaskFile, TaskState, priority_rank,
+    PLAN_PRIORITIES, PROPOSED_PHASE, TaskFile, TaskState, claim_order, priority_rank,
 };
 use radian_arc::store::{Loaded, PlanView, Store};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -44,10 +45,12 @@ pub const DIVIDER_X: u16 = LEFT_X + LEFT_WIDTH;
 /// The right column's left edge: the divider plus `│  `.
 pub const RIGHT_X: u16 = DIVIDER_X + 3;
 
-/// The pages the header names. `Merge` is enabled for a task in `review.*` or `done`.
+/// The pages the header names. `Board` groups the open tasks by who acts next; `Merge` is
+/// enabled for a task in `review.*` or `done`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Plans,
+    Board,
     Task,
     Merge,
 }
@@ -57,6 +60,7 @@ impl Page {
     pub fn name(self) -> &'static str {
         match self {
             Page::Plans => "plans",
+            Page::Board => "board",
             Page::Task => "task",
             Page::Merge => "merge",
         }
@@ -349,6 +353,10 @@ pub enum Freshness {
     Beating { age: u64 },
     /// The last beat is older than the attempt's stall window.
     Stalled { age: u64 },
+    /// The heartbeat file exists, but its time cannot be used: it does not parse, or it is in
+    /// the future. This is not the same as no beat yet: a reconcile may judge the attempt dead
+    /// from `start.json` while `starting` would suggest it has not begun.
+    Unreadable,
 }
 
 /// One row of a plan's task list, whether drawn as the tree or as the flat list.
@@ -746,8 +754,14 @@ pub struct ArcApp {
     pub task_top: usize,
     pub flat: bool,
     pub page: Page,
+    /// The board page's columns, selection, scope and finished list.
+    pub board: board::BoardPage,
     pub task: Option<TaskPage>,
     pub merge: Option<MergePage>,
+    /// The page `Esc`/`Tab` return to from the task page, and the one the merge page opened
+    /// over.
+    task_return: Page,
+    merge_return: Page,
     /// The action the runner should execute.
     action: Option<actions::Action>,
     /// The action the runner is executing.
@@ -805,8 +819,11 @@ impl ArcApp {
             task_top: 0,
             flat: false,
             page: Page::Plans,
+            board: board::BoardPage::default(),
             task: None,
             merge: None,
+            task_return: Page::Plans,
+            merge_return: Page::Plans,
             action: None,
             pending: None,
             result: None,
@@ -860,6 +877,9 @@ impl ArcApp {
         }
         if self.page == Page::Task {
             self.refresh_task_page();
+        }
+        if self.page == Page::Board {
+            self.rebuild_board();
         }
         if self.page == Page::Merge
             && let Some(page) = &mut self.merge
@@ -1067,6 +1087,37 @@ impl ArcApp {
         rows
     }
 
+    /// The plans the board shows: the plan `p` pinned, else the plans page's current view, in
+    /// claim order (the plan's priority, then its id) — the order `radian arc list` prints.
+    fn board_plans(&self) -> Vec<PlanView> {
+        let mut plans: Vec<PlanView> = match &self.board.plan {
+            Some(id) => self
+                .all_plans
+                .iter()
+                .filter(|view| view.plan.item.id == *id)
+                .cloned()
+                .collect(),
+            None => self.plans.clone(),
+        };
+        plans.sort_by(|one, other| claim_order(&one.plan.item, &other.plan.item));
+        plans
+    }
+
+    /// Rebuilds the board from the store, keeping its selection on the same task. A pinned plan
+    /// that disappeared unpins it.
+    pub fn rebuild_board(&mut self) {
+        if self
+            .board
+            .plan
+            .as_ref()
+            .is_some_and(|id| !self.all_plans.iter().any(|view| view.plan.item.id == *id))
+        {
+            self.board.plan = None;
+        }
+        let plans = self.board_plans();
+        self.board.rebuild(&plans, &self.store);
+    }
+
     /// Opens the selected task's page.
     pub fn open_task(&mut self) {
         let Some(view) = self.selected_plan() else {
@@ -1081,17 +1132,37 @@ impl ArcApp {
             return;
         };
         let id = task.item.id.clone();
-        let attempts = radian_arc::read::task_attempts(&self.store, &id).unwrap_or_default();
-        self.task = Some(TaskPage::new(&task.item, attempts));
-        self.page = Page::Task;
-        self.refresh_journal();
+        self.open_task_id(&id, Page::Plans);
     }
 
-    /// Leaves the task page.
+    /// Opens one task's page and remembers where `Esc`/`Tab` return to.
+    pub fn open_task_id(&mut self, id: &str, from: Page) -> bool {
+        let loaded = match self.store.load_task(id) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.result = Some(ResultLine {
+                    text: error.message(),
+                    failed: true,
+                });
+                return false;
+            }
+        };
+        let attempts = radian_arc::read::task_attempts(&self.store, id).unwrap_or_default();
+        self.task = Some(TaskPage::new(&loaded.item, attempts));
+        self.task_return = from;
+        self.page = Page::Task;
+        self.refresh_journal();
+        true
+    }
+
+    /// Leaves the task page, back to the page it was opened from.
     pub fn close_task(&mut self) {
-        self.page = Page::Plans;
+        self.page = self.task_return;
         self.task = None;
         self.merge = None;
+        if self.page == Page::Board {
+            self.rebuild_board();
+        }
     }
 
     /// Whether the merge page applies to `task`: `review.*` or `done` (ADR 0048 §6 and §10).
@@ -1104,7 +1175,12 @@ impl ArcApp {
         let Some(id) = self.task.as_ref().map(|page| page.id.clone()) else {
             return false;
         };
-        let task = match self.store.load_task(&id) {
+        self.open_merge_for(&id, Page::Task)
+    }
+
+    /// Opens the merge page for `id` and remembers where `Esc` returns to.
+    pub fn open_merge_for(&mut self, id: &str, from: Page) -> bool {
+        let task = match self.store.load_task(id) {
             Ok(loaded) => loaded.item,
             Err(error) => {
                 self.result = Some(ResultLine {
@@ -1127,18 +1203,18 @@ impl ArcApp {
             return false;
         }
         self.merge = Some(MergePage::new(task.id.clone(), task.attempt));
+        self.merge_return = from;
         self.page = Page::Merge;
         true
     }
 
-    /// Leaves the merge page: back to the task page it was opened from.
+    /// Leaves the merge page: back to the task page or the board it was opened from.
     pub fn close_merge(&mut self) {
         self.merge = None;
-        self.page = if self.task.is_some() {
-            Page::Task
-        } else {
-            Page::Plans
-        };
+        self.page = self.merge_return;
+        if self.page == Page::Board {
+            self.rebuild_board();
+        }
     }
 
     /// The merge view the runner should read now, if any.
@@ -1268,7 +1344,12 @@ impl ArcApp {
         let Some(task) = self.selected_task() else {
             return Some("no task selected".to_owned());
         };
-        let item = &task.item;
+        self.start_blocker_for(view, &task.item)
+    }
+
+    /// [`ArcApp::start_blocker`] for one task of one plan: the board asks it about the card it
+    /// shows.
+    fn start_blocker_for(&self, view: &PlanView, item: &TaskFile) -> Option<String> {
         if view.plan.item.is_cancelled() {
             return Some(format!("plan {} is cancelled", view.plan.item.id));
         }
@@ -1352,7 +1433,7 @@ impl ArcApp {
                 }
                 Some(key)
             }
-            Page::Plans => None,
+            Page::Plans | Page::Board => None,
         }
     }
 
@@ -1407,7 +1488,7 @@ impl ArcApp {
                 }
                 true
             }
-            Page::Plans => false,
+            Page::Plans | Page::Board => false,
         }
     }
 
@@ -1424,7 +1505,7 @@ impl ArcApp {
                     page.diff_loading = Some(key);
                 }
             }
-            Page::Plans => {}
+            Page::Plans | Page::Board => {}
         }
     }
 
@@ -1585,8 +1666,19 @@ impl ArcApp {
         }
         // The next key clears the last action's line (ADR 0048 §11).
         self.result = None;
+        // `b` opens the board from any page; on the board it goes back to the plans page.
+        if key.code == KeyCode::Char('b') && !ctrl {
+            if self.page == Page::Board {
+                self.page = Page::Plans;
+            } else {
+                self.page = Page::Board;
+                self.rebuild_board();
+            }
+            return ArcKey::Redraw;
+        }
         match self.page {
             Page::Plans => self.on_plans_key(key),
+            Page::Board => self.on_board_key(key),
             Page::Task => self.on_task_key(key),
             Page::Merge => self.on_merge_key(key),
         }
@@ -1697,27 +1789,10 @@ impl ArcApp {
                 let Some(view) = self.selected_plan() else {
                     return ArcKey::Ignored;
                 };
-                if view.plan.item.status != "confirmed" {
-                    self.result = Some(ResultLine {
-                        text: format!(
-                            "plan {} is {}; only a confirmed plan has an auto level",
-                            view.plan.item.id, view.plan.item.status
-                        ),
-                        failed: true,
-                    });
-                    return ArcKey::Redraw;
-                }
                 let plan = view.plan.item.id.clone();
-                let level = Self::next_auto(&view.plan.item.auto).to_owned();
-                let action = actions::Action::Auto { plan, level };
-                let asks =
-                    matches!(&action, actions::Action::Auto { level, .. } if level == "merge");
-                if asks {
-                    self.merge_float(action);
-                } else {
-                    self.queue_action(action);
-                }
-                ArcKey::Redraw
+                let status = view.plan.item.status.clone();
+                let auto = view.plan.item.auto.clone();
+                self.cycle_auto(&plan, &status, &auto)
             }
             KeyCode::Char('p') => {
                 let Some(view) = self.selected_plan() else {
@@ -1768,8 +1843,21 @@ impl ArcApp {
         let plan = view.plan.item.id.clone();
         let current = view.plan.item.priority().to_owned();
         let cancelled = view.plan.item.is_cancelled();
+        self.step_plan_priority(&plan, &current, cancelled, delta)
+    }
+
+    /// [`ArcApp::step_priority`] for one plan: the board steps the selected card's plan.
+    /// `cancelled` is [`radian_arc::store::model::PlanFile::is_cancelled`] of that plan: a
+    /// cancelled plan queues the step even at an end, so the CLI's refusal is what shows.
+    fn step_plan_priority(
+        &mut self,
+        plan: &str,
+        current: &str,
+        cancelled: bool,
+        delta: i32,
+    ) -> ArcKey {
         let last = PLAN_PRIORITIES.len() as i32 - 1;
-        let rank = (priority_rank(&current) as i32).min(last);
+        let rank = (priority_rank(current) as i32).min(last);
         let level = PLAN_PRIORITIES[(rank + delta).clamp(0, last) as usize].to_owned();
         if level == current && !cancelled {
             self.result = Some(ResultLine {
@@ -1778,8 +1866,206 @@ impl ArcApp {
             });
             return ArcKey::Redraw;
         }
-        self.queue_action(actions::Action::Priority { plan, level });
+        self.queue_action(actions::Action::Priority {
+            plan: plan.to_owned(),
+            level,
+        });
         ArcKey::Redraw
+    }
+
+    /// `a` on the plans page and the board: the next auto level of `plan`. Only a confirmed
+    /// plan has one; setting `merge` asks first (ADR 0048 §11).
+    fn cycle_auto(&mut self, plan: &str, status: &str, auto: &str) -> ArcKey {
+        if status != "confirmed" {
+            self.result = Some(ResultLine {
+                text: format!("plan {plan} is {status}; only a confirmed plan has an auto level"),
+                failed: true,
+            });
+            return ArcKey::Redraw;
+        }
+        let level = Self::next_auto(auto).to_owned();
+        let action = actions::Action::Auto {
+            plan: plan.to_owned(),
+            level,
+        };
+        let asks = matches!(&action, actions::Action::Auto { level, .. } if level == "merge");
+        if asks {
+            self.merge_float(action);
+        } else {
+            self.queue_action(action);
+        }
+        ArcKey::Redraw
+    }
+
+    /// The plan view and task of a card, looked up by the task id in every plan.
+    fn card_plan_task(&self, id: &str) -> Option<(&PlanView, &TaskFile)> {
+        self.all_plans.iter().find_map(|view| {
+            view.tasks
+                .iter()
+                .find(|task| task.item.id == id)
+                .map(|task| (view, &task.item))
+        })
+    }
+
+    /// The selected card's plan and task.
+    fn board_card(&self) -> Option<(&PlanView, &TaskFile)> {
+        let id = self.board.selected()?.id.clone();
+        self.card_plan_task(&id)
+    }
+
+    /// The board's keys. The owner's keys act on the selected card with the plans page's rules,
+    /// floats and footer lines (ADR 0048 §11).
+    fn on_board_key(&mut self, key: &KeyEvent) -> ArcKey {
+        if self.board.finished {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('d') => {
+                    self.board.show_columns();
+                    ArcKey::Redraw
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.board.move_done(1);
+                    ArcKey::Redraw
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.board.move_done(-1);
+                    ArcKey::Redraw
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    let Some(id) = self.board.selected_done().map(|row| row.id.clone()) else {
+                        return ArcKey::Ignored;
+                    };
+                    if self.open_task_id(&id, Page::Board) {
+                        ArcKey::Redraw
+                    } else {
+                        ArcKey::Ignored
+                    }
+                }
+                _ => ArcKey::Ignored,
+            };
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.page = Page::Plans;
+                ArcKey::Redraw
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.board.move_horizontal(-1);
+                ArcKey::Redraw
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.board.move_horizontal(1);
+                ArcKey::Redraw
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.board.move_vertical(-1);
+                ArcKey::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.board.move_vertical(1);
+                ArcKey::Redraw
+            }
+            KeyCode::Enter | KeyCode::Tab => {
+                let Some(id) = self.board.selected().map(|card| card.id.clone()) else {
+                    return ArcKey::Ignored;
+                };
+                if self.open_task_id(&id, Page::Board) {
+                    ArcKey::Redraw
+                } else {
+                    ArcKey::Ignored
+                }
+            }
+            KeyCode::Char('d') => {
+                self.board.show_finished();
+                ArcKey::Redraw
+            }
+            KeyCode::Char('p') => {
+                if self.board.toggle_pin() {
+                    self.rebuild_board();
+                    ArcKey::Redraw
+                } else {
+                    ArcKey::Ignored
+                }
+            }
+            KeyCode::Char('s') => {
+                let Some((view, task)) = self.board_card() else {
+                    return ArcKey::Ignored;
+                };
+                if let Some(blocker) = self.start_blocker_for(view, task) {
+                    self.result = Some(ResultLine {
+                        text: blocker,
+                        failed: false,
+                    });
+                    return ArcKey::Redraw;
+                }
+                let id = task.id.clone();
+                self.queue_action(actions::Action::Start(id));
+                ArcKey::Redraw
+            }
+            KeyCode::Char('c') => {
+                let Some((_, task)) = self.board_card() else {
+                    return ArcKey::Ignored;
+                };
+                if task.state != TaskState::Todo || task.phase != "proposed" {
+                    self.result = Some(ResultLine {
+                        text: "only a draft plan or a proposed task is confirmed".to_owned(),
+                        failed: true,
+                    });
+                    return ArcKey::Redraw;
+                }
+                let id = task.id.clone();
+                self.queue_action(actions::Action::Confirm(id));
+                ArcKey::Redraw
+            }
+            KeyCode::Char('x') => {
+                let Some((_, task)) = self.board_card() else {
+                    return ArcKey::Ignored;
+                };
+                let id = task.id.clone();
+                self.float = Some(Float::Confirm {
+                    message: format!("cancel {id} ?"),
+                    action: actions::Action::Cancel(id),
+                });
+                ArcKey::Redraw
+            }
+            KeyCode::Char('a') => {
+                let Some((view, _)) = self.board_card() else {
+                    return ArcKey::Ignored;
+                };
+                let plan = view.plan.item.id.clone();
+                let status = view.plan.item.status.clone();
+                let auto = view.plan.item.auto.clone();
+                self.cycle_auto(&plan, &status, &auto)
+            }
+            KeyCode::Char('+') => {
+                let Some((view, _)) = self.board_card() else {
+                    return ArcKey::Ignored;
+                };
+                let plan = view.plan.item.id.clone();
+                let current = view.plan.item.priority().to_owned();
+                let cancelled = view.plan.item.is_cancelled();
+                self.step_plan_priority(&plan, &current, cancelled, -1)
+            }
+            KeyCode::Char('-') => {
+                let Some((view, _)) = self.board_card() else {
+                    return ArcKey::Ignored;
+                };
+                let plan = view.plan.item.id.clone();
+                let current = view.plan.item.priority().to_owned();
+                let cancelled = view.plan.item.is_cancelled();
+                self.step_plan_priority(&plan, &current, cancelled, 1)
+            }
+            // The merge page's own keys land there: a card in `review.*` opens it, and its `M`,
+            // `r` and `v` then act on the task (ADR 0048 §11). `m` is the task page's key.
+            KeyCode::Char('M') | KeyCode::Char('m') | KeyCode::Char('r') | KeyCode::Char('v') => {
+                let Some((_, task)) = self.board_card() else {
+                    return ArcKey::Ignored;
+                };
+                let id = task.id.clone();
+                self.open_merge_for(&id, Page::Board);
+                ArcKey::Redraw
+            }
+            _ => ArcKey::Ignored,
+        }
     }
 
     fn move_selection(&mut self, delta: i32) -> ArcKey {
@@ -2322,16 +2608,24 @@ fn freshness(store: &Store, task: &TaskFile, default_stall: u64) -> Option<Fresh
     if task.state != TaskState::Doing {
         return None;
     }
-    let Some(beat) = radian_arc::store::attempt_ops::read_heartbeat(store, &task.id, task.attempt)
-    else {
-        return Some(Freshness::Starting);
-    };
     let stall = task.stall_timeout_secs.unwrap_or(default_stall);
     let window = radian_arc::store::attempt_ops::liveness_window_secs(stall);
+    let Some(beat) = radian_arc::store::attempt_ops::read_heartbeat(store, &task.id, task.attempt)
+    else {
+        // A file that exists but holds no readable time is not the same as no beat yet: a
+        // reconcile may judge the attempt dead from `start.json`, so do not say `starting`.
+        let path = radian_arc::store::attempt_ops::attempt_dir(store, &task.id, task.attempt)
+            .join(radian_arc::store::attempt_ops::HEARTBEAT_FILE);
+        return Some(if path.exists() {
+            Freshness::Unreadable
+        } else {
+            Freshness::Starting
+        });
+    };
     match radian_arc::store::attempt_ops::utc_age_secs(&beat) {
         Some(age) if age > window => Some(Freshness::Stalled { age }),
         Some(age) => Some(Freshness::Beating { age }),
-        None => Some(Freshness::Starting),
+        None => Some(Freshness::Unreadable),
     }
 }
 

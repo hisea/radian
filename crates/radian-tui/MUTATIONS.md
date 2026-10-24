@@ -2507,6 +2507,7 @@ compared with `cmp`.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0048-M3 | the TUI falls back to the task id even when a session id is known (`let session = id.clone();`) | ✅ 1 failed | `arc_tui::the_conversation_tab_follows_a_running_attempts_journal` (the screen says `no session journal yet` instead of the running worker's lines) |
+
 ## TK0047: the plans page's state view (2026-10-24, branch `work/TK0047-tui-plan-filter`)
 
 Base `76bcb8ba` (the branch point). The plans page lists one of four views and `f` cycles
@@ -2552,6 +2553,22 @@ Base: the branch's first commit. The mutation was applied by hand to
 |---|---|---|---|
 | TK0049-M1 | drop `RADIAN_VERIFY_MIN_FREE_GIB` from the usage block | ✅ 1 failed | `arc_gate_without_arguments_exits_two_and_help_exits_zero` (the help did not name the two limits) |
 
+## TK0054: the board page (2026-10-24, branch `work/TK0054-tui-board`)
+
+Base: the branch's first commit. The board groups the open tasks by who acts next, `d` opens
+the finished list, and the three widths stack the groups. Each mutation was applied by hand
+to `crates/radian-tui/src/arc/board.rs`, backed up under `.radian/mut-bak/` and restored
+from that copy (never `git checkout`), and the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_board <test> --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0054-M1 | every `review.awaiting_human` task goes to `needs you`, whatever the plan's `auto` (`column_of` returns `NEEDS_YOU`) | ✅ 1 failed | `an_awaiting_human_task_is_the_owners_only_at_auto_off` (the `auto merge` task is no longer in `verifying`) |
+| TK0054-M2 | the finished list is oldest first (`done.sort_by` compares `one.at.cmp(&other.at)`) | ✅ 1 failed | `d_lists_merged_and_failed_tasks_newest_first` ("the most recently finished comes first") |
+| TK0054-M3 | `BoardLayout::of` always answers `Wide` (four columns at every width) | ✅ 1 failed | `a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` (`left: Wide`, `right: Medium`) |
+| TK0054-M4 | the medium layout stacks `todo` over `verifying` on the left and `doing` over `needs you` on the right | ✅ 1 failed | `a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` ("todo over doing on the left: 0, 41") |
+
+4/4 caught.
 ## TK0063: the plans page's columns and plan marks (2026-10-24, branch `work/TK0063-tui-plans-align-and-marks`)
 
 Base `93e078fe` (the branch point; `origin/main` has since moved). The plan summary row is three
@@ -2605,6 +2622,42 @@ hand to the committed file, the named test was run alone with `--profile sandbox
 
 2/2 caught.
 
+## TK0059: the task page's brief tab (2026-10-24, branch `work/TK0059-tui-task-brief-tab`)
+
+Base `b335c1de` (the branch point). The task page gains `brief` as its first tab: the task
+file's body through the transcript's Markdown renderer, with no frontmatter and no worker
+hand-off. Each mutation was applied by hand to `crates/radian-tui/src/arc/mod.rs`, the named
+test was run alone with `cargo nextest run -p radian-tui --locked --profile sandbox --test
+arc_tui <test> --no-fail-fast`, and the file was restored from a copy under `.radian/`
+(`cmp` agreed afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0059-M1 | the brief keeps its frontmatter (`TaskPage::new` sets `brief: task.to_text()` instead of `task.body.clone()`) | ✅ 1 failed | `the_brief_tab_shows_the_task_body_and_no_frontmatter` (the frontmatter key `schema_version` is drawn) |
+| TK0059-M2 | the page always opens on `conversation` (`TaskPage::new` sets `tab: TaskTab::Conversation`) | ✅ 1 failed | `a_task_page_opens_on_the_brief_until_the_task_has_an_attempt` (`left: Conversation`, `right: Brief`) |
+| TK0059-M3 | `Shift-Tab` from `brief` goes to `conversation` (`TaskTab::previous`'s `Brief` arm returns `Conversation`) | ✅ 1 failed | `the_task_tabs_cycle_in_order_in_both_directions` (`left: Conversation`, `right: Attempts`) |
+
+3/3 caught.
+
+## TK0063: the plans page's columns and plan marks (2026-10-24, branch `work/TK0063-tui-plans-align-and-marks`)
+
+Base `93e078fe` (the branch point; `origin/main` has since moved). The plan summary row is three
+aligned columns, both task lists share fixed columns, and the seven circle marks take seven theme
+roles. Each mutation was applied by hand to the working file, backed up under `.radian/mut-bak/`,
+the named test ran alone with `cargo nextest run -p radian-tui --locked --profile sandbox`, and the
+file was restored from that copy (never `git checkout`).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0063-M1 | the task cost is left-aligned (`{:>width$}` → `{:<width$}`) | ✅ 1 failed | `the_flat_task_list_aligns_the_after_text_across_cost_widths` ("the costs end at one column") |
+| TK0063-M2 | the graph id block ignores the connector again (`let lead = 2`, so each level shifts the phase right) | ✅ 1 failed | `the_graph_task_list_aligns_columns_at_every_depth` ("the phase column holds at every depth") |
+| TK0063-M3 | running is checked before needs you in `plan_mark` | ✅ 1 failed | `each_plan_mark_rule_draws_its_mark_and_role` (the running-plus-proposed plan draws `●`, not `◉`) |
+| TK0063-M4 | `failed.cancelled` counts as needs you (the failed predicate drops the phase test) | ✅ 1 failed | `each_plan_mark_rule_draws_its_mark_and_role` (the done plan draws `◉`, not `✓`) |
+| TK0063-M5 | `plan_running` takes the `VIOLET` constant in the dark palette, like `plan_queued` | ✅ 1 failed | `theme::tests::the_plan_roles_are_seven_distinct_colors_and_mono_has_none` (running and queued are the same color) |
+
+5/5 caught. The M5 edit landed on both palettes' identical literals; the dark palette is the one
+the test checks first.
+
 ## TK0066: the plans page's view, refreshed and from either column (2026-10-24, branch `work/TK0066-tui-plan-filter-followups`)
 
 The TK0047 review found that the refresh test ran only in `active` and that the `f` test held
@@ -2639,3 +2692,37 @@ afterwards).
 | TK0070-M5 | `fit_hints` is bypassed, so the row clips instead of dropping a hint | ✅ 1 failed | `arc_tui::the_hints_keep_their_old_labels_and_drop_when_narrow` (at 120 columns the clipped row loses `q quit`) |
 
 5/5 caught.
+
+## TK0073: an unreadable heartbeat and a followed journal (2026-10-24, branch `work/TK0073-running-attempt-session-followups`)
+
+The TK0048 review found two gaps. A `heartbeat.json` that exists but holds no usable time
+(`last_beat` unparseable or in the future) drew the same weak `starting` as no beat yet, while a
+reconcile can judge the attempt dead from `start.json`; it now draws `heartbeat unreadable` in the
+warning role. The conversation tab's follow test had a journal shorter than its frame, so it
+passed whether or not `f` pinned the view; it now scrolls past the frame height, pauses with `k`
+and resumes with `f` before the append. Each mutation was applied by hand to the working file,
+the named test was run alone, and the file was restored to the same bytes.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0073-M1 | an unreadable beat falls back to `starting` (`None => Some(Freshness::Starting)` in `freshness`) | ✅ 1 failed | `arc_tui::a_doing_tasks_row_reports_its_worker_heartbeat_and_a_stopped_loop` (`heartbeat unreadable` is missing) |
+| TK0073-M2 | `f` on the conversation tab pins nothing (`TaskTab::Conversation => {}`) | ✅ 1 failed | `arc_tui::the_conversation_tab_follows_a_running_attempts_journal` (`follow shows the end` misses `filler-39`) |
+
+2/2 caught.
+## TK0076: the diff tab's file list keeps room for the diff (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
+
+The file list took every row but five, so a task with many changed files left the selected
+file's frame one body row. The list now takes at most half of the diff area and ends with
+`files a–b of n` when it shows only part of the files; the task page and the merge page both
+call the one list function. Each mutation was applied by hand to the working file, the named
+tests were run with `cargo nextest run -p radian-tui --locked --profile sandbox --no-fail-fast`,
+and the file was restored from a copy under `.radian/backup/` with `cp`, then compared with
+`diff -q`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0076-M1 | the list takes `available - reserve` rows again (no half cap) | ✅ 2 failed | `arc_tui::the_file_list_takes_at_most_half_of_the_diff_area` (`left: 37`, `right: 21`), `arc_merge::the_merge_pages_file_list_takes_at_most_half_of_the_diff_area` (`left: 15`, `right: 9`) |
+| TK0076-M3 | the merge page keeps the old uncapped list (passes the old `remaining - 4` row count, doubled so the shared cap cannot bite) | ✅ 1 failed | `arc_merge::the_merge_pages_file_list_takes_at_most_half_of_the_diff_area` (`left: 15`, `right: 9`); the task page test still passed |
+
+2/2 caught. TK0076-M2 (the diff range) mutates `radian-arc` and is recorded in
+`crates/radian-arc/MUTATIONS.md`.

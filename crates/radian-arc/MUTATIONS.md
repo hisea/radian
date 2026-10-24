@@ -384,6 +384,7 @@ the working file, restored from a copy under `.radian/mut/` with `cp`, and compa
 |---|---|---|---|
 | TK0048-M1 | the claim omits `session_id` from `start.json` | ✅ 2 failed | `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (the running attempt answers `None`, and `show --json` prints `null`) |
 | TK0048-M2 | `attempt_session_id` reads `execution.json` only again | ✅ 3 failed | `attempt::a_session_id_is_read_from_the_identity_record_when_execution_is_missing`, `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (no `execution.json` exists before the wrapper ends) |
+
 ## TK0035 (a refused integration, the wrapper setup and the heartbeat)
 
 TK0035-M1–M3 were run against `29d77904`, each applied to the committed file, restored from a
@@ -442,3 +443,42 @@ alone, and the file was restored from a copy under `.radian/mut-bak/`.
 | TK0066-M1 | `TaskFile::is_merged` always answers `false` | ✅ 1 failed | `list::the_default_hides_merged_tasks_and_finished_plans` (the finished plan and its merged tasks are printed) |
 
 1/1 caught.
+
+## TK0076: the diff is the task's own change from the merge base with main (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
+
+`read::task_diff` diffed the attempt's `base_sha..head_sha`, so a task branch that merged a
+newer main during reworks (every conflict rework does) listed main's merged changes as the
+task's — the review stage already used the merge base. `task_diff` now takes the merge base of
+the remote main and the attempt's head for an unmerged task, and the attempt's own head for an
+older attempt the owner selects; a running attempt's live worktree diff uses the merge base of
+the remote main and the worktree's HEAD. Without a remote main ref the range falls back to the
+recorded base and `TaskDiff::fallback` says so. The mutation was applied by hand to the working
+file, the named test was run alone with `cargo nextest run -p radian-arc --locked --profile
+sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian/backup/` with
+`cp`, then compared with `diff -q`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0076-M2 | `attempt_change` uses the attempt's recorded base again (`base_sha..head_sha`) | ✅ 1 failed | `read::the_diff_is_the_task_own_change_from_the_merge_base_with_main` (`left: ["x.rs", "y.rs"]`, `right: ["y.rs"]`) |
+| TK0076-M4 | an empty diff (`base_sha == head_sha`) returns `TaskDiff::default()`, dropping the fallback | ✅ 1 failed | `read::a_no_change_diff_without_a_remote_main_ref_keeps_the_fallback` (`diff.fallback` is false, so the page loses `base..head · no remote main`) |
+
+TK0076-M4 is the rework's check: the review found that a task with no commit of its own and no
+remote main ref lost the fallback flag, so the diff tab drew only `no change yet`. The mutation
+was applied to the working file, the test was run alone with the command above, and the file was
+restored from `.radian/backup2/read.rs` with `cp` and compared with `diff -q`.
+
+2/2 caught.
+## TK0069: every worker brief ends with the standing worker instructions (2026-10-24, branch `work/TK0069-worker-brief-footer`)
+
+ADR 0048 decision 7: the wrapper composes `.radian/arc/worker-brief.md` as the last section of
+every brief, and `init` writes its default once. Each mutation was applied to the working file
+one at a time, run against the named test with
+`cargo nextest run -p radian-arc --locked --profile sandbox`, restored from a copy under
+`.radian/mut/` with `cp`, and compared byte for byte with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0069-M1 | the footer goes in front of the task body (`compose_brief` gets footer, body) | `work::the_worker_brief_is_the_last_section_of_a_first_attempt`, `work::a_fresh_rework_puts_the_worker_brief_after_the_hand_off_and_the_body` | ✅ 2 failed |
+| TK0069-M2 | a follow-up attempt skips the footer (drop it when the stdin brief starts with the follow-up's first line) | `review::a_followup_attempt_ends_its_brief_with_the_worker_brief` | ✅ failed |
+| TK0069-M3 | `init` overwrites an existing `worker-brief.md` (the `is_file` guard is dropped) | `store::init_writes_the_default_worker_brief_once_and_keeps_an_edit` (the edited file reads back as the default) | ✅ failed |
+| TK0069-M4 | the size limit is not checked (`len > u64::MAX` instead of `len > WORKER_BRIEF_LIMIT`) | `work::an_oversized_worker_brief_is_skipped_with_a_note` (the 33 KiB footer is appended and no note is recorded) | ✅ failed |

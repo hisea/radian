@@ -292,6 +292,7 @@ fn record_failure(o: &Options, s: &Setup, failure: Failure) -> Failure {
             outcome: "terminated",
             exit_code: failure.code,
             failure: Some(failure.message.clone()),
+            notes: &[],
         },
     );
     failure
@@ -391,7 +392,17 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     // A fresh rework gets the previous attempt's end in front of the brief: its new session
     // cannot see that conversation (ADR 0048 decision 7).
     let handoff = handoff_section(o, s, &start_sha, &base_sha)?;
-    let brief = compose_brief(&[conflict.as_deref(), handoff.as_deref(), Some(&brief)]);
+    // The repository's standing worker instructions end every brief (ADR 0048 decision 7).
+    // They are read here, when the brief is composed, so an edit takes effect at the next
+    // attempt; a file that is too large, not UTF-8, or unreadable is skipped with a note.
+    let (footer, skipped) = worker_brief(&s.arc);
+    let notes: Vec<String> = skipped.into_iter().collect();
+    let brief = compose_brief(&[
+        conflict.as_deref(),
+        handoff.as_deref(),
+        Some(&brief),
+        footer.as_deref(),
+    ]);
     let started_at = now();
     let deny = deny_paths(&s.arc);
     let mut child = spawn_child(o, &s.worktree, &deny, &result_path, &stderr_path, &brief)?;
@@ -469,6 +480,9 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             "head_sha": head_sha,
             "started_at": started_at,
             "ended_at": ended_at,
+            // A line such as `worker-brief.md skipped: not UTF-8`; `show` prints it
+            // (ADR 0048 decision 7). Nothing to report leaves an empty list.
+            "notes": notes,
         }),
     )?;
 
@@ -540,6 +554,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             outcome: &outcome,
             exit_code,
             failure,
+            notes: &notes,
         },
     )
 }
@@ -554,6 +569,8 @@ struct Finish<'a> {
     outcome: &'a str,
     exit_code: i32,
     failure: Option<String>,
+    /// The notes of the attempt, such as the worker brief being skipped (ADR 0048 decision 7).
+    notes: &'a [String],
 }
 
 fn write_finish(o: &Options, s: &Setup, finish: Finish<'_>) -> Result<i32, Failure> {
@@ -570,6 +587,7 @@ fn write_finish(o: &Options, s: &Setup, finish: Finish<'_>) -> Result<i32, Failu
         "pushed": finish.pushed,
         "remote_sha": finish.remote_sha,
         "failure": finish.failure,
+        "notes": finish.notes,
     });
     let line = serde_json::to_string(&record)
         .map_err(|error| Failure::error(format!("cannot serialize AttemptFinished: {error}")))?;
@@ -606,6 +624,7 @@ fn finish_wall(o: &Options, s: &Setup) -> Result<i32, Failure> {
             outcome: "terminated",
             exit_code: EXIT_ERROR,
             failure: Some("max_wall_time_secs reached".to_owned()),
+            notes: &[],
         },
     )
 }
@@ -1280,8 +1299,112 @@ fn conflict_section(conflict: &MergeConflict) -> String {
 /// carries.
 const HANDOFF_REPORT_CHARS: usize = 8_000;
 
+/// The largest `.radian/arc/worker-brief.md` the wrapper appends: 32 KiB. A larger file is
+/// skipped with a note; the attempt goes on (ADR 0048 decision 7).
+const WORKER_BRIEF_LIMIT: u64 = 32 * 1024;
+
+/// The repository's standing worker instructions (ADR 0048 decision 7): the section every
+/// brief ends with, and the note the attempt record carries when the file is not appended.
+/// The file is read when the attempt's brief is composed, so an edit takes effect at the next
+/// attempt. A missing file and one that trims to nothing are no section and no note. A path
+/// that is not a regular file, a file over [`WORKER_BRIEF_LIMIT`], one that is not UTF-8, and a
+/// read error are skipped with a note; the attempt still runs. The worker never reads the file
+/// itself: its sandbox denies `.radian/arc/`, and the content reaches it on stdin.
+fn worker_brief(arc: &Path) -> (Option<String>, Option<String>) {
+    let path = arc.join(crate::store::WORKER_BRIEF_FILE);
+    // One handle for the checks and the read: `metadata()` on the handle describes the file
+    // the bytes come from, so a path swapped after the open cannot change what is read. The
+    // open is non-blocking on Unix, so a FIFO or a device at the path cannot make the wrapper
+    // wait for a writer before it has even started a worker.
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (None, None),
+        Err(error) => {
+            return (
+                None,
+                Some(skipped_brief(&format!(
+                    "cannot read {}: {error}",
+                    path.display()
+                ))),
+            );
+        }
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return (
+                None,
+                Some(skipped_brief(&format!(
+                    "cannot read {}: {error}",
+                    path.display()
+                ))),
+            );
+        }
+    };
+    // Only a regular file is read: a FIFO, a directory or a device is skipped with a note.
+    if !metadata.is_file() {
+        return (
+            None,
+            Some(skipped_brief(&format!(
+                "{} is not a regular file",
+                path.display()
+            ))),
+        );
+    }
+    let len = metadata.len();
+    if len > WORKER_BRIEF_LIMIT {
+        return (
+            None,
+            Some(skipped_brief(&format!(
+                "{len} bytes, the limit is {WORKER_BRIEF_LIMIT} bytes"
+            ))),
+        );
+    }
+    // The handle, not the path, is read, and at most one byte past the limit: a file that grew
+    // after the check above cannot make the wrapper read more than the limit.
+    let mut bytes = Vec::new();
+    if let Err(error) = (&file).take(WORKER_BRIEF_LIMIT + 1).read_to_end(&mut bytes) {
+        return (
+            None,
+            Some(skipped_brief(&format!(
+                "cannot read {}: {error}",
+                path.display()
+            ))),
+        );
+    }
+    if bytes.len() as u64 > WORKER_BRIEF_LIMIT {
+        return (
+            None,
+            Some(skipped_brief(&format!(
+                "{} bytes, the limit is {WORKER_BRIEF_LIMIT} bytes",
+                bytes.len()
+            ))),
+        );
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return (None, Some(skipped_brief("not UTF-8")));
+    };
+    if text.trim().is_empty() {
+        return (None, None);
+    }
+    (Some(text), None)
+}
+
+/// The one line the attempt record and `show` carry for a skipped worker brief.
+fn skipped_brief(reason: &str) -> String {
+    format!("{} skipped: {reason}", crate::store::WORKER_BRIEF_FILE)
+}
+
 /// The brief the worker receives, in order: the `merge-main` conflict section, a fresh
-/// rework's hand-off, then the brief arc handed over. An empty section takes no room.
+/// rework's hand-off, then the brief arc handed over, then the repository's standing worker
+/// instructions. An empty section takes no room.
 fn compose_brief(sections: &[Option<&str>]) -> String {
     sections
         .iter()
@@ -1418,6 +1541,7 @@ fn refuse(o: &Options, s: &Setup, base_sha: &str, reason: &str) -> Result<i32, F
             outcome: "terminated",
             exit_code: EXIT_ERROR,
             failure: Some(reason.to_owned()),
+            notes: &[],
         },
     )
 }
@@ -2023,16 +2147,75 @@ mod tests {
         assert_eq!(session_start(true, true), SessionStart::Continue);
     }
 
-    /// The brief's sections keep their order, and a missing one takes no blank line.
+    /// The brief's sections keep their order, the footer last, and a missing one takes no
+    /// blank line.
     #[test]
-    fn the_brief_keeps_the_conflict_hand_off_and_body_order() {
-        assert_eq!(compose_brief(&[None, None, Some("body")]), "body");
-        assert_eq!(compose_brief(&[Some("a"), None, Some("b")]), "a\n\nb");
+    fn the_brief_keeps_the_conflict_hand_off_body_and_footer_order() {
+        assert_eq!(compose_brief(&[None, None, Some("body"), None]), "body");
+        assert_eq!(compose_brief(&[Some("a"), None, Some("b"), None]), "a\n\nb");
         assert_eq!(
-            compose_brief(&[Some("conflict"), Some("hand-off"), Some("body")]),
-            "conflict\n\nhand-off\n\nbody"
+            compose_brief(&[
+                Some("conflict"),
+                Some("hand-off"),
+                Some("body"),
+                Some("footer")
+            ]),
+            "conflict\n\nhand-off\n\nbody\n\nfooter"
         );
-        assert_eq!(compose_brief(&[None, None, Some("  ")]), "");
+        assert_eq!(compose_brief(&[None, None, Some("  "), None]), "");
+    }
+
+    /// A file over the limit, a file that is not UTF-8, and a missing file: the first two get
+    /// the one note line and no section; the third is silence (ADR 0048 decision 7).
+    #[test]
+    fn a_worker_brief_over_the_limit_or_not_utf8_is_skipped_with_a_note() {
+        let dir = crate::test_support::TempDir::named("radian-arc-brief");
+        let path = dir.join(crate::store::WORKER_BRIEF_FILE);
+        assert_eq!(worker_brief(&dir), (None, None), "a missing file is silent");
+        fs::write(&path, "  \n\t\n").expect("whitespace");
+        assert_eq!(worker_brief(&dir), (None, None), "an empty one too");
+        fs::write(&path, "stand here\n").expect("a footer");
+        assert_eq!(worker_brief(&dir), (Some("stand here\n".to_owned()), None));
+        fs::write(&path, "x".repeat(33 * 1024)).expect("too large");
+        let (section, note) = worker_brief(&dir);
+        assert!(section.is_none(), "a file over the limit is not appended");
+        assert!(
+            note.expect("a note")
+                .starts_with("worker-brief.md skipped: "),
+            "the note names the file"
+        );
+        fs::write(&path, [0xff, 0xfe, 0xfd]).expect("not UTF-8");
+        let (section, note) = worker_brief(&dir);
+        assert!(
+            section.is_none(),
+            "a file that is not UTF-8 is not appended"
+        );
+        assert_eq!(note.as_deref(), Some("worker-brief.md skipped: not UTF-8"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A FIFO at the path would block a plain open until a writer appears, and the wrapper
+    /// composes the brief before any child of its own exists, so no attempt limit can end the
+    /// wait: the handle is opened non-blocking, its type is checked, and the file is skipped
+    /// with a note (ADR 0048 decision 7).
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_brief_that_is_not_a_regular_file_is_skipped_with_a_note() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = crate::test_support::TempDir::named("radian-arc-brief-fifo");
+        let path = dir.join(crate::store::WORKER_BRIEF_FILE);
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL in a path");
+        // SAFETY: `name` is a NUL-terminated path this test owns and `mkfifo` only creates it.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo");
+        let (section, note) = worker_brief(&dir);
+        assert!(section.is_none(), "a FIFO is not appended");
+        let note = note.expect("a note");
+        assert!(
+            note.starts_with("worker-brief.md skipped: ")
+                && note.ends_with("is not a regular file"),
+            "{note}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The cap is 8,000 characters, and a cut report says so. A report at the cap is unchanged.
