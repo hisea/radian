@@ -31,9 +31,9 @@ The arc TUI (`radian arc`) draws with the same theme, from the same config
 file: `tui.theme`, a theme file, `[tui.colors]`, `NO_COLOR` and truecolor
 detection all apply there too. It reads them when it opens, so a change made
 while it is open (with `/theme`, for example) shows the next time you open it.
-A theme problem, or a config file that cannot be read, is one line in its
-footer when it opens; the TUI still opens with the theme the load fell back
-to.
+A theme problem, or a config file that cannot be read or parsed, is one line in
+its footer when it opens; the TUI still opens with the theme the load fell back
+to (`NO_COLOR` and truecolor detection still decide that fallback).
 
 Set the startup theme in the config file:
 
