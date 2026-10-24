@@ -64,7 +64,8 @@ pub const CHANNEL_PHASES: &[&str] = &[
 /// The paragraph the flagged server adds to its `instructions`: what the lead receives and
 /// how to read the details.
 const CHANNEL_INSTRUCTIONS: &str = "Task transitions from arc arrive as `<channel>` blocks, one \
-     per transition. They are one-way: there is no reply tool. Read the details with `show`.";
+     per transition, with the meta attributes `task`, `plan`, `state`, `phase` and `previous`. \
+     They are one-way: there is no reply tool. Read the details with `show`.";
 
 /// The MCP server for one repository's arc store.
 #[derive(Debug, Clone)]
