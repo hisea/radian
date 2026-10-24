@@ -1384,3 +1384,26 @@ mutation edits `src/mcp.rs` in place, restores from `.radian/mcp.rs.bak` with `c
 6/6 caught; the file was byte-identical after the restore. Commands: `cargo test -p
 radian-host --lib mcp::tests::<name>` for MC-1..MC-4 and MC-6, `cargo test -p radian-host
 --test mcp_cwd` for MC-5.
+
+## TK0090: `env_docs` stops reporting ordinary constants (2026-10-24)
+
+Worktree `.radian/arc/worktrees/TK0090-env-docs-const-uses`, branch
+`work/TK0090-env-docs-const-uses` (base `982f0801`, `origin/main`). Each mutation edits
+`crates/radian-host/tests/env_docs.rs` (M3: `docs/user/environment.md`) in place, restores from
+a `cp` under `.radian/` (never `git checkout`), and runs
+`cargo nextest run -p radian-host --locked --profile sandbox --no-fail-fast -E 'binary(env_docs)'`
+with `--no-fail-fast`.
+
+Before the change the scanner found 27 names (`.radian/env-names-before.txt`); the new scanner
+finds the same 27 — no name was dropped, and none was added.
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| TK0090-M1 | count every `pub const` again (the old rule: `is_env_read` also accepts `pub const`, so every all-caps literal on a constant line is a variable) | ✅ 2 failed | `a_heading_constant_is_not_environment_variables` (`TODO`, `DOING`, `VERIFYING` come back) and `a_constant_used_outside_an_environment_call_yields_nothing` (`HELLO_WORLD` comes back) |
+| TK0090-M2 | drop `.env(` from the accepted environment calls (`ENV_CALLS`) | ✅ 1 failed | `a_constant_set_on_a_child_yields_its_literal` (no name found) |
+| TK0090-M3 | delete the `RADIAN_HOME` row from `docs/user/environment.md` | ✅ 1 failed | `every_env_var_appears_in_environment_md`: `these variables are missing from docs/user/environment.md: ["RADIAN_HOME"]` |
+
+3/3 caught. M1 also leaves the real scan green on this tree only because
+`COLUMN_HEADINGS` is `pub(crate) const`, which the old substring `pub const` never matched —
+the sample test is what pins the rule.
+
