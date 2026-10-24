@@ -18,7 +18,7 @@ use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
 use radian_tui::arc::render;
-use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter};
+use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter, actions};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -376,7 +376,7 @@ fn the_plans_page_draws_the_list_and_the_selected_plan() {
         "PL0002-images".to_owned(),
         "draft · auto off · 0/2 · —".to_owned(),
         format!(
-            "{} confirmed · auto merge · 3/8 merged · $0.61",
+            "{} confirmed · P3 · auto merge · 3/8 merged · $0.61",
             fixture.plan
         ),
         "arc improvements from the first plan".to_owned(),
@@ -819,6 +819,101 @@ fn every_state_mark_takes_its_role() {
     check("PL0001-first", '✓', theme.status_ok, "a finished plan");
     check(&fixture.plan, '●', theme.model, "a confirmed plan");
     check("PL0002-images", '◻', theme.hint, "a draft plan");
+}
+
+#[test]
+fn the_plans_page_shows_each_priority_in_its_role() {
+    use radian_arc::store::model::PLAN_PRIORITIES;
+
+    let scratch = Scratch::new("priority");
+    let store = store(&scratch.path("repo"));
+    let mut plans = Vec::new();
+    for (index, priority) in PLAN_PRIORITIES.iter().enumerate() {
+        let id = add_plan(
+            &store,
+            &format!("p{index}"),
+            &format!("the {priority} plan"),
+        );
+        add_task(
+            &store,
+            &id,
+            &format!("t{index}"),
+            &[],
+            TaskState::Todo,
+            "ready",
+            0,
+            None,
+        );
+        radian_arc::store::plan_ops::set_priority(&store, &id, priority).unwrap();
+        plans.push(((*priority).to_owned(), id));
+    }
+    let mut app = ArcApp::with_session_dir(store.clone(), Some(scratch.path("sessions")));
+    let theme = app.theme.clone();
+    let role = |priority: &str| match priority {
+        "P0" => theme.priority_p0.fg,
+        "P1" => theme.priority_p1.fg,
+        "P2" => theme.priority_p2.fg,
+        "P3" => theme.priority_p3.fg,
+        "P4" => theme.priority_p4.fg,
+        _ => theme.priority_p5.fg,
+    };
+
+    // The left list puts the priority before the id, in that priority's role.
+    let terminal = render(&mut app, 140, 40);
+    for (priority, id) in &plans {
+        let needle = format!("{priority} {id}");
+        let (row, column) = fg_of(&terminal, &needle);
+        assert_eq!(
+            fg(&terminal, row, column),
+            role(priority),
+            "the list row: {needle}"
+        );
+    }
+    // The frame label puts it after the status, in the same role, for every selected plan.
+    for (index, (priority, id)) in plans.iter().enumerate() {
+        app.plan_sel = index;
+        let terminal = render(&mut app, 140, 40);
+        let text = rows(&terminal).join("\n");
+        assert!(
+            text.contains(&format!("{id} draft · {priority} · auto off")),
+            "the frame label: {priority}\n{text}"
+        );
+        let (row, column) = fg_of(&terminal, &format!("{priority} ·"));
+        assert_eq!(
+            fg(&terminal, row, column),
+            role(priority),
+            "{priority} label"
+        );
+    }
+
+    // `+` on the P2 plan moves it to P1; the next refresh shows P1 in both places.
+    app.plan_sel = 2;
+    app.on_key(&key(KeyCode::Char('+')));
+    let action = app.take_action().expect("the step is queued");
+    assert_eq!(
+        action,
+        actions::Action::Priority {
+            plan: plans[2].1.clone(),
+            level: "P1".to_owned(),
+        }
+    );
+    let outcome = actions::run(&action, &store, &actions::Library);
+    assert!(outcome.ok, "{outcome:?}");
+    app.finish_action(outcome);
+    let terminal = render(&mut app, 140, 40);
+    let id = &plans[2].1;
+    let (row, column) = fg_of(&terminal, &format!("P1 {id}"));
+    assert_eq!(
+        fg(&terminal, row, column),
+        theme.priority_p1.fg,
+        "the list row shows the new priority"
+    );
+    let (row, column) = fg_of(&terminal, "P1 ·");
+    assert_eq!(
+        fg(&terminal, row, column),
+        theme.priority_p1.fg,
+        "the frame label shows the new priority"
+    );
 }
 
 #[test]

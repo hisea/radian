@@ -17,6 +17,7 @@
 //! (`crate::work`).
 
 pub mod attempt_ops;
+pub mod chain;
 pub mod cli;
 pub mod config;
 mod frontmatter;
@@ -197,6 +198,24 @@ pub struct PlanView {
 }
 
 impl PlanView {
+    /// The plan's counted cost: every task's `cost_usd`, the number the plan budget compares.
+    /// Read when the plan is read; it is never stored in the plan file.
+    pub fn cost_usd(&self) -> f64 {
+        self.tasks
+            .iter()
+            .map(|task| task.item.cost_usd.unwrap_or(0.0))
+            .sum()
+    }
+
+    /// The plan's total cost: every task's running total (its `cost_usd` when its file has no
+    /// `total_cost_usd`). Read when the plan is read; it is never stored in the plan file.
+    pub fn total_cost_usd(&self) -> f64 {
+        self.tasks
+            .iter()
+            .map(|task| task.item.running_total())
+            .sum()
+    }
+
     /// Whether the plan is finished: it is not cancelled and every task is `done.merged`. A
     /// plan with no tasks is not finished. This is the test `radian arc list` leaves a plan
     /// out by, and the arc TUI's `done` view shares it.
@@ -389,24 +408,30 @@ impl Store {
     pub fn lock_state(&self) -> Result<StateLock, Error> {
         let path = self.root.join(STATE_LOCK);
         let file = open_lock_file(&path)?;
-        let start = Instant::now();
-        loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(StateLock { file }),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if start.elapsed() >= LOCK_WAIT {
-                        return Err(Error::Locked(STATE_LOCK));
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(error) => {
-                    return Err(Error::Failed(format!(
-                        "cannot lock {}: {error}",
-                        path.display()
-                    )));
-                }
+        wait_exclusive(&file, &path)?;
+        Ok(StateLock { file })
+    }
+
+    /// Checks whether another process holds `state.lock`, without creating the lock file.
+    ///
+    /// A command that only reads (a confirm's `--dry-run`) calls this: a missing lock file
+    /// means no process holds the lock, and the check leaves the store byte for byte as it
+    /// was instead of writing an empty `state.lock`.
+    pub fn check_state_lock(&self) -> Result<(), Error> {
+        let path = self.root.join(STATE_LOCK);
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::Failed(format!(
+                    "cannot open {}: {error}",
+                    path.display()
+                )));
             }
-        }
+        };
+        wait_exclusive(&file, &path)?;
+        let _ = FileExt::unlock(&file);
+        Ok(())
     }
 
     /// Tries `runner.lock` without waiting: `Some` when this process now holds it, `None`
@@ -880,6 +905,28 @@ impl Drop for RunnerLock {
     }
 }
 
+/// Waits up to [`LOCK_WAIT`] for `file`'s exclusive flock, in the one loop every lock takes.
+fn wait_exclusive(file: &File, path: &Path) -> Result<(), Error> {
+    let start = Instant::now();
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if start.elapsed() >= LOCK_WAIT {
+                    return Err(Error::Locked(STATE_LOCK));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(Error::Failed(format!(
+                    "cannot lock {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+}
+
 /// Opens (creating) a lock file. Lock files carry no state: the lock is the flock only.
 fn open_lock_file(path: &Path) -> Result<File, Error> {
     if let Some(parent) = path.parent() {
@@ -1032,6 +1079,9 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             }
             if last.cost_usd != current.cost_usd {
                 touched.push("cost_usd");
+            }
+            if last.total_cost_usd != current.total_cost_usd {
+                touched.push("total_cost_usd");
             }
             if last.auto_rework != current.auto_rework {
                 touched.push("auto_rework");

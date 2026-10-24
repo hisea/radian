@@ -26,6 +26,34 @@ pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<GitOutput, GateError> {
     })
 }
 
+/// Runs a git command in `dir` that talks to a remote, bounded by
+/// `[limits] git_remote_timeout_secs`. A limit that runs out kills the command's process group
+/// and fails with `git <subcommand> timed out after <n> s`.
+pub(crate) fn run_remote(dir: &Path, args: &[&str]) -> Result<GitOutput, GateError> {
+    match crate::git::run_remote(dir, args, None).map_err(|error| match error {
+        RunError::Spawn(source) => GateError::Spawn {
+            program: "git".to_string(),
+            source,
+        },
+        RunError::Build(message) => GateError::Git {
+            dir: dir.to_path_buf(),
+            command: command_line(args),
+            stderr: message,
+        },
+    })? {
+        crate::git::RemoteRun::Done(output) => Ok(output),
+        crate::git::RemoteRun::TimedOut { limit } => Err(GateError::RemoteTimeout(
+            crate::git::timeout_text(args, limit),
+        )),
+    }
+}
+
+/// Runs a git command in `dir` that talks to a remote and requires success.
+fn remote_ok(dir: &Path, args: &[&str]) -> Result<String, GateError> {
+    let output = run_remote(dir, args)?;
+    finish(dir, args, output)
+}
+
 /// Runs a git command in `dir` and requires success, returning trimmed standard output.
 pub(crate) fn ok(dir: &Path, args: &[&str]) -> Result<String, GateError> {
     let output = run(dir, args)?;
@@ -53,7 +81,7 @@ pub(crate) fn command_line(args: &[&str]) -> String {
 
 /// Fetches `remote`. The gate never trusts a local ref alone; the remote is the truth.
 pub(crate) fn fetch_remote(repository: &Path, remote: &str) -> Result<(), GateError> {
-    ok(repository, &["fetch", remote])?;
+    remote_ok(repository, &["fetch", remote])?;
     Ok(())
 }
 
@@ -67,7 +95,7 @@ pub(crate) fn fetch_main(
     main_branch: &str,
 ) -> Result<(), GateError> {
     let refspec = format!("+refs/heads/{main_branch}:refs/remotes/{remote}/{main_branch}");
-    ok(repository, &["fetch", remote, &refspec])?;
+    remote_ok(repository, &["fetch", remote, &refspec])?;
     Ok(())
 }
 

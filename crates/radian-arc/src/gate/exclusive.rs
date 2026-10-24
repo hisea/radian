@@ -19,11 +19,11 @@ use super::error::GateError;
 /// The lock file `commands` and `mutation` take.
 pub(crate) const EXCLUSIVE_LOCK: &str = "exclusive.lock";
 
-/// The lock a candidate preparation holds while it fetches and creates or updates its stage
+/// The lock every stage preparation holds while it fetches and creates or updates its stage
 /// checkout. The `commands` and `review` stages of one verification run at the same time
-/// (ADR 0048 decision 10), and `git fetch`, `git worktree add` and `git worktree prune` update
-/// the shared repository, so their preparations take turns and the stage work then runs at the
-/// same time.
+/// (ADR 0048 decision 10), and `integration` runs beside both; `git fetch`, `git worktree add`
+/// and `git worktree prune` update the shared repository, so the preparations take turns and
+/// the stage work then runs at the same time.
 pub(crate) const PREPARE_LOCK: &str = "prepare.lock";
 
 /// A held `flock` on one file in `gates/`. Dropping it releases the lock.

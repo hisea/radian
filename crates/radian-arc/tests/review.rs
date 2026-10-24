@@ -18,7 +18,7 @@ use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Exit, Store, plan_ops};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 // ---- store-level fixture -------------------------------------------------------------
 
@@ -255,6 +255,14 @@ impl Fixture {
         path
     }
 
+    /// Sets `[limits] git_remote_timeout_secs`.
+    fn git_remote_timeout(&self, seconds: u64) {
+        self.tune(
+            "git_remote_timeout_secs = 300",
+            &format!("git_remote_timeout_secs = {seconds}"),
+        );
+    }
+
     /// Sets the plan's auto level.
     fn set_auto(&self, level: &str) {
         let plan = self
@@ -264,6 +272,68 @@ impl Fixture {
             .item
             .plan;
         plan_ops::set_auto(&self.store, &plan, level).expect("the auto level");
+    }
+
+    /// Writes the worker's own result stream with `micros` of reported cost, as a completed
+    /// attempt does, and the execution record that names its session.
+    fn write_cost_stream(&self, attempt: u32, session: &str, micros: u64) {
+        let dir = attempt_ops::run_dir(&self.store, &self.task, attempt);
+        fs::create_dir_all(&dir).expect("the attempt run dir");
+        fs::write(
+            dir.join("result.jsonl"),
+            format!(
+                "{}\n",
+                json!({
+                    "type": "Result",
+                    "outcome": "completed",
+                    "cost": {"micros": micros},
+                })
+            ),
+        )
+        .expect("the result stream");
+        fs::write(
+            dir.join("execution.json"),
+            json!({
+                "attempt_id": format!("{}-{attempt}", self.task),
+                "session_id": session,
+            })
+            .to_string(),
+        )
+        .expect("the execution record");
+    }
+
+    /// One worker attempt that reports `micros` of cost: claim, publish a commit, apply the
+    /// pushed result. The task ends in `review.verifying` for the returned head.
+    fn attempt_costing(&self, at: &str, file: &str, content: &str, micros: u64) -> String {
+        let claim = attempt_ops::claim(&self.store, &self.task).expect("the attempt claim");
+        let head = self.publish(at, file, content);
+        self.write_cost_stream(claim.attempt, &claim.session_id, micros);
+        let finish = Finish {
+            attempt_id: claim.attempt_id.clone(),
+            token: claim.token.clone(),
+            exit_code: 0,
+            outcome: "completed".to_owned(),
+            base_sha: Some(self.base.clone()),
+            head_sha: Some(head.clone()),
+            pushed: true,
+            failure: None,
+        };
+        attempt_ops::apply(
+            &self.store,
+            &self.task,
+            claim.attempt,
+            Some(&finish),
+            None,
+            Some(0),
+        )
+        .expect("the attempt result applies");
+        head
+    }
+
+    /// A lead's rework, then a worker attempt that reports `micros` of cost.
+    fn rework_costing(&self, at: &str, file: &str, content: &str, micros: u64) -> String {
+        plan_ops::add_rework(&self.store, &self.task, "fix the review").expect("a rework brief");
+        self.attempt_costing(at, file, content, micros)
     }
 
     /// Runs one rework attempt: the lead's brief, the claim, a commit on `work/<task>` at `at`,
@@ -1030,6 +1100,27 @@ fn merge_integrates_again_when_main_moves_during_the_integration() {
         fixture.repo.is_ancestor(&moved, &candidate),
         "the candidate contains the moved main"
     );
+}
+
+/// The push to the remote main is a remote call: a remote that accepts the connection and
+/// then hangs makes the push run out after the limit. The task stays where a rejected push
+/// leaves it (`review.integrating`, the next round can try again), the reason carries the
+/// line, and the child the remote spawned is gone.
+#[test]
+fn a_merge_push_that_hangs_reports_the_line_and_kills_its_child() {
+    let fixture = Fixture::new("merge-push-hang");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    fixture.git_remote_timeout(1);
+    let hang = HangRemote::install(&fixture.repo, "merge-push", "receive");
+
+    let error = review::merge(&fixture.store, &fixture.task).expect_err("the push runs out");
+    assert!(
+        error.message().contains("git push timed out after 1 s"),
+        "{error:?}"
+    );
+    assert_state(&fixture, ("review", "integrating"));
+    hang.assert_gone(hang.child_pid(), "the remote's child");
 }
 
 /// A conflict in the integration stage, with `merge-main` off, sends the task to rework with
@@ -2755,6 +2846,104 @@ fn show_exposes_the_review_findings() {
     assert_eq!(value["review_cost_micros"], 2000);
 }
 
+// ---- a gate re-run's review sessions ------------------------------------------------
+
+/// A gate that died mid-review is started again for the same attempt. The re-run must not
+/// reuse a session id whose journal exists: it takes `<attempt>-review-<run>-<k>` and writes
+/// its logs under the matching name, and the first journal is untouched.
+#[test]
+fn a_gate_rerun_gets_a_fresh_review_session_and_keeps_the_first_journal() {
+    let fixture = Fixture::new("review-rerun-sessions");
+    fixture.add_review_stage();
+    let session_dir = common::scratch("review-sessions");
+    fixture.review_exec_args(&["--model", "m", "--session-dir", common::path(&session_dir)]);
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let attempt = fixture.attempt_label();
+
+    let first = FakeReview::new(
+        "review-rerun-first",
+        &[review_message("first pass", &[], &[])],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, first.program()).phase,
+        "awaiting_human"
+    );
+    // The first run's journal, left in the session directory.
+    let journal = session_dir.join(format!("{attempt}-review-1.jsonl"));
+    fs::write(&journal, "the first journal\n").expect("the first journal");
+    let before = fs::read(&journal).expect("the first journal reads");
+    let first_log = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(&attempt)
+        .join("logs/review-1.jsonl");
+    assert!(
+        first_log.is_file(),
+        "the first run's log: {}",
+        first_log.display()
+    );
+
+    // The gate died before it wrote the verdict: remove it, as a death mid-review leaves it.
+    let verdict_path = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(&attempt)
+        .join("verdicts/review.json");
+    fs::remove_file(&verdict_path).expect("the review verdict is removed");
+    fixture.set_verifying(&head);
+
+    let second = FakeReview::new(
+        "review-rerun-second",
+        &[review_message("second pass", &[], &[])],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, second.program()).phase,
+        "awaiting_human"
+    );
+    assert_eq!(second.count(), 1);
+    let argv = second.argv(1);
+    let requested = argv
+        .iter()
+        .position(|arg| arg == "--session-id")
+        .map(|at| argv[at + 1].clone())
+        .expect("the stage passes a session id");
+    assert_eq!(
+        requested,
+        format!("{attempt}-review-1-1"),
+        "the re-run took the next free session id"
+    );
+    assert_eq!(
+        fs::read(&journal).expect("the first journal reads"),
+        before,
+        "the first journal is unchanged byte for byte"
+    );
+    let second_log = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(&attempt)
+        .join("logs/review-1-1.jsonl");
+    assert!(
+        second_log.is_file(),
+        "the re-run's log has the matching name: {}",
+        second_log.display()
+    );
+    let verdict = fixture.verdict(&attempt, Stage::Review);
+    assert_eq!(verdict.result, VerdictResult::Pass);
+    assert!(!verdict.review_session_ids.is_empty());
+    let _ = fs::remove_dir_all(session_dir.path());
+}
+
 // ---- the rework round (ADR 0048 decision 10) ------------------------------------------
 
 /// The first review of a task is unchanged: its prompt holds the whole diff of the task's own
@@ -3200,12 +3389,12 @@ fn a_main_change_merged_between_attempts_is_not_in_the_increment() {
     assert_eq!(verdict.review_pre_existing, Some(1));
 }
 
-/// A review of the commit the previous review already reviewed is a first review: a `reverify`
-/// of an unchanged head still blocks on the same item even when the session reports it more than
-/// 10 lines from where it reported it before. Mutation: treat a same-sha review as a rework
-/// round → the item is moved and the stage passes.
+/// A review of the commit the previous review already reviewed gets the first review's prompt:
+/// a `reverify` of an unchanged head still blocks on the same item even when the session
+/// reports it more than 10 lines from where it reported it before. Mutation: treat a same-sha
+/// review as a rework round → the item is moved and the stage passes.
 #[test]
-fn a_reverify_of_the_same_head_is_a_first_review_and_still_blocks() {
+fn a_reverify_of_the_same_head_gets_the_first_review_prompt_and_still_blocks() {
     let fixture = Fixture::new("review-same-sha");
     fixture.add_review_stage();
     let head = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
@@ -4571,4 +4760,253 @@ fn a_followup_brief_prints_a_duplicated_level_tag_once() {
         body.contains("- [minor] feature.txt:3 spaced tag"),
         "an own tag in any case and with spaces is dropped:\n{body}"
     );
+}
+
+// ---- cost (ADR 0048 decision 12) ------------------------------------------------------
+
+/// Two worker attempts and three reviews (the first attempt's, the rework's and a
+/// `reverify`'s) make the task's total: every reported cost is added, and `reset-budget`
+/// zeroes the budget counter but leaves the total alone. Mutation: count a review nowhere and
+/// the total is short by its three costs; zero the total in `reset-budget` and the last
+/// assertion fails.
+#[test]
+fn two_attempts_and_three_reviews_make_the_total_and_reset_budget_keeps_it() {
+    let fixture = Fixture::new("cost-total-sum");
+    fixture.add_review_stage();
+
+    // The first worker attempt: $1.00.
+    let first = fixture.attempt_costing(&fixture.base.clone(), "one.txt", "one\n", 1_000_000);
+    // The first review blocks and costs $0.003; the plan is at `off`, so the task waits.
+    let first_review = FakeReview::new(
+        "cost-total-sum-review-1",
+        &[review_message(
+            "the change adds one.txt",
+            &["fix one.txt"],
+            &[],
+        )],
+        0,
+    );
+    first_review.set_cost(3_000);
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_review.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // The second worker attempt: $1.00. Its review passes and costs $0.004.
+    let _second = fixture.rework_costing(&first, "two.txt", "two\n", 1_000_000);
+    let second_review = FakeReview::new(
+        "cost-total-sum-review-2",
+        &[review_message("the rework fixes it", &[], &[])],
+        0,
+    );
+    second_review.set_cost(4_000);
+    let verified =
+        review::verify_with(&fixture.store, &fixture.task, Some(second_review.program()))
+            .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    // A reverify runs no worker; its review still costs $0.005 and counts.
+    let third_review = FakeReview::new(
+        "cost-total-sum-review-3",
+        &[review_message("still fine", &[], &[])],
+        0,
+    );
+    third_review.set_cost(5_000);
+    let reverified =
+        review::reverify_with(&fixture.store, &fixture.task, Some(third_review.program()))
+            .expect("the reverify runs");
+    assert_eq!(
+        reverified.verification.expect("the verification ran").phase,
+        "awaiting_human"
+    );
+
+    let expected = 1.0 + 1.0 + 0.003 + 0.004 + 0.005;
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        (stored.cost_usd.expect("a counted cost") - expected).abs() < 1e-9,
+        "the budget counter is every attempt and every review: {stored:?}"
+    );
+    assert!(
+        (stored.total_cost_usd.expect("a total") - expected).abs() < 1e-9,
+        "the total is the same five costs: {stored:?}"
+    );
+
+    let plan = stored.plan.clone();
+    let reset = attempt_ops::reset_budget(&fixture.store, &plan).expect("reset the plan");
+    assert_eq!(reset.kind, "plan");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        stored.cost_usd,
+        Some(0.0),
+        "reset-budget zeroes the counter"
+    );
+    assert!(
+        (stored.total_cost_usd.expect("the total stays") - expected).abs() < 1e-9,
+        "reset-budget does not change the total: {stored:?}"
+    );
+}
+
+/// The budget check happens when the review's verdict is applied: a `max_cost_usd` the
+/// review alone reaches stops the task in `todo.paused_budget` after the gate, and no review
+/// rework is written even though the plan's `auto` would write one. Mutation: skip the check
+/// and the task returns to `todo.ready` with the rework.
+#[test]
+fn a_review_cost_that_reaches_the_budget_pauses_the_task_without_a_rework() {
+    let fixture = Fixture::new("cost-review-budget");
+    fixture.add_review_stage();
+    fixture.set_auto("run");
+    fixture
+        .store
+        .change_task(&fixture.task, |task| {
+            task.max_cost_usd = Some(0.5);
+            Ok(())
+        })
+        .expect("the task limit");
+
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "cost-review-budget-fake",
+        &[review_message(
+            "the change adds one.txt",
+            &["fix one.txt"],
+            &[],
+        )],
+        0,
+    );
+    fake.set_cost(1_000_000);
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "paused_budget", "{verified:?}");
+    assert!(verified.review.is_none(), "no review rework: {verified:?}");
+    assert!(verified.conflict.is_none(), "{verified:?}");
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "paused_budget")
+    );
+    assert_eq!(
+        stored.auto_rework, 0,
+        "a budget stop is not an automatic rework"
+    );
+    assert!(
+        !stored.body.contains("## Rework"),
+        "no rework brief is written: {}",
+        stored.body
+    );
+    let plan = fixture.store.load_plan(&stored.plan).unwrap().item;
+    assert_eq!(
+        plan.auto, "run",
+        "the task's own budget paused the task, not the plan"
+    );
+}
+
+/// A review run that reports no cost adds nothing: the worker attempt's cost stays as it was.
+#[test]
+fn a_review_that_reports_no_cost_adds_nothing() {
+    let fixture = Fixture::new("review-no-cost");
+    fixture.add_review_stage();
+    let head = fixture.attempt_costing(&fixture.base.clone(), "one.txt", "one\n", 1_000_000);
+    let fake = FakeReview::new(
+        "review-no-cost-fake",
+        &[review_message("the change is fine", &[], &[])],
+        0,
+    );
+    fake.set_no_cost();
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    assert_eq!(
+        fixture
+            .verdict(&fixture.attempt_label(), Stage::Review)
+            .review_cost_micros,
+        None
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.cost_usd, Some(1.0), "the review adds 0");
+    assert_eq!(stored.total_cost_usd, Some(1.0));
+}
+
+/// A plan's `cost_usd` and `total_cost_usd` are the sums of its tasks' fields, read when the
+/// plan is read: `list`, `list --json`, `show` and `show --json` all print them.
+#[test]
+fn a_plans_cost_and_total_are_its_tasks_sums_in_list_and_show() {
+    let repo = Repo::new("plan-cost-totals");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let one = store
+        .add_task(&plan, "one", "One", vec![], false, vec![], "brief\n")
+        .expect("add a task");
+    let two = store
+        .add_task(&plan, "two", "Two", vec![], false, vec![], "brief\n")
+        .expect("add a task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    store
+        .change_task(&one, |task| {
+            task.cost_usd = Some(1.25);
+            task.total_cost_usd = Some(1.5);
+            Ok(())
+        })
+        .expect("one's costs");
+    store
+        .change_task(&two, |task| {
+            task.cost_usd = Some(0.5);
+            task.total_cost_usd = Some(0.75);
+            Ok(())
+        })
+        .expect("two's costs");
+
+    let listed = repo.radian(&["arc", "list", "--json"]);
+    assert_eq!(listed.code, 0, "{}", listed.stderr);
+    let value: Value = serde_json::from_str(&listed.stdout).expect("the list JSON");
+    let plan_json = value
+        .as_array()
+        .and_then(|plans| {
+            plans
+                .iter()
+                .find(|candidate| candidate["id"].as_str() == Some(plan.as_str()))
+        })
+        .unwrap_or_else(|| panic!("the plan is in the list: {value}"));
+    assert_eq!(plan_json["cost_usd"], 1.75, "{plan_json}");
+    assert_eq!(plan_json["total_cost_usd"], 2.25, "{plan_json}");
+    assert_eq!(plan_json["tasks"][0]["cost_usd"], 1.25, "{plan_json}");
+    assert_eq!(plan_json["tasks"][0]["total_cost_usd"], 1.5, "{plan_json}");
+
+    let text = repo.radian(&["arc", "list"]);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(
+        text.stdout.contains("total_cost_usd: 2.25"),
+        "the plan line carries the total: {}",
+        text.stdout
+    );
+
+    let shown = repo.radian(&["arc", "show", plan.as_str()]);
+    assert_eq!(shown.code, 0, "{}", shown.stderr);
+    assert!(shown.stdout.contains("cost_usd: 1.75"), "{}", shown.stdout);
+    assert!(
+        shown.stdout.contains("total_cost_usd: 2.25"),
+        "{}",
+        shown.stdout
+    );
+    let shown_task = repo.radian(&["arc", "show", one.as_str()]);
+    assert_eq!(shown_task.code, 0, "{}", shown_task.stderr);
+    assert!(
+        shown_task.stdout.contains("cost_usd: 1.25"),
+        "{}",
+        shown_task.stdout
+    );
+    assert!(
+        shown_task.stdout.contains("total_cost_usd: 1.5"),
+        "{}",
+        shown_task.stdout
+    );
+
+    let shown_json = repo.radian(&["arc", "show", plan.as_str(), "--json"]);
+    let value: Value = serde_json::from_str(&shown_json.stdout).expect("the show JSON");
+    assert_eq!(value["cost_usd"], 1.75, "{value}");
+    assert_eq!(value["total_cost_usd"], 2.25, "{value}");
+    assert_eq!(value["tasks"][0]["total_cost_usd"], 1.5, "{value}");
 }

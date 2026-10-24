@@ -57,6 +57,7 @@ impl GitOutput {
 }
 
 /// Why a git command did not run at all.
+#[derive(Debug)]
 pub(crate) enum RunError {
     /// The shared builder could not read the effective configuration.
     Build(String),
@@ -108,8 +109,9 @@ pub(crate) enum TimedRun {
 
 /// Runs a git command in `dir` with an optional wall-clock limit. A limit that runs out kills
 /// the command's process group (the command leads its own group), so a fetch or a push that
-/// waits on a remote cannot outlive the attempt. `None` waits forever, which is what every
-/// non-wrapper caller wants.
+/// waits on a remote cannot outlive the attempt. `None` waits forever: a local call (a
+/// `diff`, a `log`, a `merge-base`, a `status`, a local `merge`) uses [`run`] instead, and
+/// every call that talks to a remote uses [`run_remote`], which always has a limit.
 pub(crate) fn run_with_timeout(
     dir: &Path,
     args: &[&str],
@@ -202,6 +204,60 @@ fn kill_group(pid: u32) {
     }
 }
 
+/// The default limit of one git call that talks to a remote: `[limits]
+/// git_remote_timeout_secs` (ADR 0048 decision 7.8).
+pub(crate) const DEFAULT_REMOTE_TIMEOUT_SECS: u64 = 300;
+
+/// What a git call that talks to a remote produced.
+pub(crate) enum RemoteRun {
+    /// The command finished.
+    Done(GitOutput),
+    /// The limit ran out; the command's whole process group was killed.
+    TimedOut { limit: Duration },
+}
+
+/// The limit of one git call that talks to a remote in `dir`: `[limits]
+/// git_remote_timeout_secs` from the repository's `config.toml`, else the default. The file is
+/// read on every call, so a change takes effect at the next git call; a file that does not
+/// parse (a command that reads it again would report that) or a value below `1` falls back to
+/// the default.
+pub(crate) fn remote_timeout(dir: &Path) -> Duration {
+    let secs = std::fs::read_to_string(dir.join(".radian").join("arc").join("config.toml"))
+        .ok()
+        .and_then(|text| crate::store::config::parse(&text).ok())
+        .map(|config| config.limits.git_remote_timeout_secs)
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_REMOTE_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Runs a git command in `dir` that talks to a remote (`fetch`, `push`, `ls-remote`), bounded
+/// by [`remote_timeout`] and, when given, `also` (the worker wrapper's remaining wall time);
+/// the shorter limit wins. A limit that runs out kills the command's process group (the
+/// command leads its own group).
+pub(crate) fn run_remote(
+    dir: &Path,
+    args: &[&str],
+    also: Option<Duration>,
+) -> Result<RemoteRun, RunError> {
+    let limit = match also {
+        Some(also) => remote_timeout(dir).min(also),
+        None => remote_timeout(dir),
+    };
+    match run_with_timeout(dir, args, Some(limit))? {
+        TimedRun::Done(output) => Ok(RemoteRun::Done(output)),
+        TimedRun::TimedOut => Ok(RemoteRun::TimedOut { limit }),
+    }
+}
+
+/// The text a remote call that ran out of time fails with: `git <subcommand> timed out after
+/// <n> s`. The first argument is the subcommand of a remote call (`fetch`, `push`,
+/// `ls-remote`).
+pub(crate) fn timeout_text(args: &[&str], limit: Duration) -> String {
+    let subcommand = args.first().copied().unwrap_or("git");
+    format!("git {subcommand} timed out after {} s", limit.as_secs())
+}
+
 /// Runs a git command in `dir` and requires success, returning trimmed standard output.
 /// A failure names the command and git's own last stderr line.
 pub(crate) fn ok(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -212,4 +268,77 @@ pub(crate) fn ok(dir: &Path, args: &[&str]) -> Result<String, String> {
         return Err(format!("git {} failed: {detail}", args.join(" ")));
     }
     Ok(output.stdout.trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A directory with an arc `config.toml` that sets the key, or none when `key` is `None`.
+    fn dir_with_key(label: &str, key: Option<u64>) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("radian-arc-git-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".radian").join("arc")).unwrap();
+        if let Some(key) = key {
+            std::fs::write(
+                dir.join(".radian").join("arc").join("config.toml"),
+                format!("schema_version = 1\n[limits]\ngit_remote_timeout_secs = {key}\n"),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    /// The key bounds a remote call; a missing file, a file without the key and a `0` take
+    /// the code's default.
+    #[test]
+    fn the_remote_timeout_is_the_key_or_the_default() {
+        let default = Duration::from_secs(DEFAULT_REMOTE_TIMEOUT_SECS);
+        let missing = dir_with_key("missing", None);
+        assert_eq!(remote_timeout(&missing), default);
+        let set = dir_with_key("set", Some(7));
+        assert_eq!(remote_timeout(&set), Duration::from_secs(7));
+        let zero = dir_with_key("zero", Some(0));
+        assert_eq!(remote_timeout(&zero), default);
+        for dir in [missing, set, zero] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// The failure line names the subcommand and the limit the call ran out on.
+    #[test]
+    fn a_remote_timeout_names_its_subcommand_and_limit() {
+        assert_eq!(
+            timeout_text(&["fetch", "origin"], Duration::from_secs(1)),
+            "git fetch timed out after 1 s"
+        );
+        assert_eq!(
+            timeout_text(&["ls-remote", "origin"], Duration::from_secs(300)),
+            "git ls-remote timed out after 300 s"
+        );
+        assert_eq!(
+            timeout_text(&["push", "origin"], Duration::from_secs(7)),
+            "git push timed out after 7 s"
+        );
+    }
+
+    /// A local call is not bounded by the remote key: a git alias that sleeps longer than the
+    /// key still finishes, while the key is short enough that a remote call would be killed.
+    #[test]
+    fn a_local_call_is_not_bounded_by_the_remote_key() {
+        let dir = dir_with_key("local", Some(1));
+        assert_eq!(remote_timeout(&dir), Duration::from_secs(1));
+        let started = Instant::now();
+        let output =
+            run(&dir, &["-c", "alias.slow=!sleep 2", "slow"]).expect("the local command runs");
+        assert!(output.success(), "{}", output.stderr);
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "the local call must outlive the remote key: {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

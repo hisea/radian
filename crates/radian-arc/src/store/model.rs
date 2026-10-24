@@ -349,8 +349,13 @@ pub struct TaskFile {
     pub attempt_id: Option<String>,
     /// The current attempt's random token: a result is applied only when it matches.
     pub token: Option<String>,
-    /// What the task has cost so far, in US dollars, summed over its attempts.
+    /// What the task has cost so far, in US dollars, summed over its attempts and its
+    /// `review` stages. This is the budget counter: `reset-budget` sets it back to `0`.
     pub cost_usd: Option<f64>,
+    /// What the task has cost in total, in US dollars, summed over its attempts and its
+    /// `review` stages. `reset-budget` does not change it. A file written before the field
+    /// existed reads as its `cost_usd` until the next write (ADR 0048 decision 12).
+    pub total_cost_usd: Option<f64>,
     /// How many reworks arc counted while the plan's `auto` level was not `off`
     /// (`[limits] max_auto_rework`).
     pub auto_rework: u32,
@@ -378,6 +383,25 @@ pub struct TaskFile {
 }
 
 impl TaskFile {
+    /// The task's running total: its stored `total_cost_usd`, or its `cost_usd` for a file
+    /// written before the field existed (ADR 0048 decision 12).
+    pub fn running_total(&self) -> f64 {
+        self.total_cost_usd.or(self.cost_usd).unwrap_or(0.0)
+    }
+
+    /// The task's total as a field: `None` when the file records neither cost.
+    pub fn total_cost(&self) -> Option<f64> {
+        self.total_cost_usd.or(self.cost_usd)
+    }
+
+    /// Adds one attempt's or one review stage's cost to both counters. The first write of a
+    /// file that has no `total_cost_usd` starts the total from its `cost_usd`.
+    pub fn add_cost(&mut self, cost: f64) {
+        let total = self.running_total();
+        self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + cost);
+        self.total_cost_usd = Some(total + cost);
+    }
+
     /// A new `todo`/`ready` task with no attempt yet.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -402,6 +426,7 @@ impl TaskFile {
             attempt_id: None,
             token: None,
             cost_usd: None,
+            total_cost_usd: None,
             auto_rework: 0,
             retry_count: 0,
             allow_noop,
@@ -441,6 +466,9 @@ impl TaskFile {
         }
         if let Some(cost) = self.cost_usd {
             out.push_str(&format!("cost_usd: {cost}\n"));
+        }
+        if let Some(cost) = self.total_cost_usd {
+            out.push_str(&format!("total_cost_usd: {cost}\n"));
         }
         if self.auto_rework > 0 {
             out.push_str(&format!("auto_rework: {}\n", self.auto_rework));
@@ -531,6 +559,7 @@ impl TaskFile {
         let attempt_id = fields.optional_string("attempt_id")?;
         let token = fields.optional_string("token")?;
         let cost_usd = fields.optional_f64("cost_usd")?;
+        let total_cost_usd = fields.optional_f64("total_cost_usd")?;
         let auto_rework = fields.optional_u32("auto_rework")?.unwrap_or(0);
         let retry_count = fields.optional_u32("retry_count")?.unwrap_or(0);
         let allow_noop = fields.optional_bool("allow_noop")?.unwrap_or(false);
@@ -573,6 +602,7 @@ impl TaskFile {
             attempt_id,
             token,
             cost_usd,
+            total_cost_usd,
             auto_rework,
             retry_count,
             allow_noop,
@@ -761,6 +791,7 @@ mod tests {
             attempt_id: Some("TK0002-two-2".to_owned()),
             token: Some("a-token".to_owned()),
             cost_usd: Some(1.25),
+            total_cost_usd: Some(1.5),
             auto_rework: 2,
             retry_count: 1,
             allow_noop: true,
@@ -836,6 +867,24 @@ mod tests {
         let task = sample_task();
         let text = task.to_text();
         assert_eq!(TaskFile::from_text(&text).unwrap(), task);
+    }
+
+    /// A file written before `total_cost_usd` existed has no field and reads its `cost_usd`
+    /// as the total; the first cost added starts the total there and writes the field.
+    #[test]
+    fn a_task_without_a_total_reads_its_cost_and_starts_from_it() {
+        let mut task = sample_task();
+        task.cost_usd = Some(1.25);
+        task.total_cost_usd = None;
+        let text = task.to_text();
+        assert!(!text.contains("total_cost_usd:"), "{text}");
+        let mut read = TaskFile::from_text(&text).expect("an older file reads");
+        assert_eq!(read.running_total(), 1.25);
+        assert_eq!(read.total_cost(), Some(1.25));
+        read.add_cost(0.5);
+        assert_eq!(read.cost_usd, Some(1.75));
+        assert_eq!(read.total_cost_usd, Some(1.75));
+        assert!(read.to_text().contains("total_cost_usd: 1.75"));
     }
 
     #[test]

@@ -666,7 +666,8 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
             {
                 continue;
             }
-            match attempt_ops::claim(store, &task.item.id) {
+            match attempt_ops::claim_by(store, &task.item.id, attempt_ops::ClaimBy::SchedulingLoop)
+            {
                 Ok(claim) => {
                     slots -= 1;
                     claims.push((claim, task.item.clone()));
@@ -817,7 +818,7 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
         };
         lines.push(header);
         for task in open {
-            let reason = task_reason(store, plan, task)?;
+            let reason = waiting_reason(store, plan, &task.item)?;
             lines.push(format!(
                 "  {} {}.{}: {reason}",
                 task.item.id,
@@ -832,12 +833,14 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
     Ok(lines)
 }
 
-fn task_reason(
+/// Why `radian arc run` would not act on `task` now, in one line. `confirm --dry-run` uses
+/// the same words for a task it would make ready.
+pub fn waiting_reason(
     store: &Store,
     plan: &model::PlanFile,
-    task: &crate::store::Loaded<model::TaskFile>,
+    task: &model::TaskFile,
 ) -> Result<String, Error> {
-    let item = &task.item;
+    let item = task;
     let reason = match (item.state, item.phase.as_str()) {
         (TaskState::Todo, "ready") => {
             if plan.auto == "off" {

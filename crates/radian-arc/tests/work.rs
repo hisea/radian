@@ -1838,11 +1838,12 @@ fn a_one_second_stall_window_keeps_three_beats_inside_it() {
         .windows(2)
         .map(|pair| (pair[1] - pair[0]).num_milliseconds())
         .collect();
-    // The old loop slept four 100 ms slices for a 333 ms interval: 400 ms per gap. The mean
-    // tolerates one late beat, where a single widest gap would not.
-    let mean = gaps.iter().sum::<i64>() / gaps.len() as i64;
+    // The old loop slept four 100 ms slices for a 333 ms interval: every gap was 400 ms. One
+    // late beat under load stretches a single gap, so at most one may be late; the rest stay
+    // at the interval itself.
+    let on_time = gaps.iter().filter(|gap| **gap <= 375).count();
     assert!(
-        mean <= 375,
-        "the mean heartbeat gap in a 1 s window is {mean} ms: {gaps:?}"
+        on_time + 1 >= gaps.len(),
+        "more than one heartbeat gap is late for the 333 ms interval: {gaps:?}"
     );
 }
