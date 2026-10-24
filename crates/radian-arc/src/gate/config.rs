@@ -17,6 +17,10 @@ pub const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 3600;
 /// The default wall-time limit of one `review` session, in seconds (ADR 0048 decision 15).
 pub const DEFAULT_REVIEW_TIMEOUT_SECS: u64 = 900;
 
+/// The default number of review sessions that may run at once in a repository (ADR 0048
+/// decision 10).
+pub const DEFAULT_REVIEW_CONCURRENCY: u32 = 2;
+
 /// One gate stage.
 ///
 /// `commands`, `mutation`, `review`, `ci` and `human` are the stages a profile can list.
@@ -223,6 +227,11 @@ pub struct ReviewConfig {
     /// Whether arc proposes the review's follow-up task when a task merges (ADR 0048
     /// decision 10). `true` by default; `false` turns the follow-up off.
     pub propose_followups: bool,
+    /// How many review sessions may run at once in the repository. `1` or more.
+    pub concurrency: u32,
+    /// The values a task's first review uses in place of the keys above (ADR 0048
+    /// decision 10).
+    pub first: FirstReviewConfig,
 }
 
 impl Default for ReviewConfig {
@@ -232,8 +241,39 @@ impl Default for ReviewConfig {
             prompt_file: None,
             timeout_secs: DEFAULT_REVIEW_TIMEOUT_SECS,
             propose_followups: true,
+            concurrency: DEFAULT_REVIEW_CONCURRENCY,
+            first: FirstReviewConfig::default(),
         }
     }
+}
+
+/// `[gate.review.first]`: the two keys a task's first review may replace (ADR 0048
+/// decision 10). An unset key falls back to the `[gate.review]` key.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FirstReviewConfig {
+    /// Extra `radian exec` arguments of a first review, in place of `[gate.review] exec_args`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_args: Option<Vec<String>>,
+    /// Wall-time limit of a first review's session, in seconds. `1` or more.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// The settings one review session runs with, and where each came from (ADR 0048
+/// decision 10). [`ReviewConfig::choice`] fills it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewChoice<'a> {
+    /// Whether this is a task's first review.
+    pub first: bool,
+    /// The arguments the session gets, after the stage's own.
+    pub exec_args: &'a [String],
+    /// The config key `exec_args` came from.
+    pub exec_args_key: &'static str,
+    /// The wall-time limit of one session, in seconds.
+    pub timeout_secs: u64,
+    /// The config key `timeout_secs` came from.
+    pub timeout_key: &'static str,
 }
 
 impl ReviewConfig {
@@ -248,6 +288,43 @@ impl ReviewConfig {
     #[must_use]
     pub fn timeout(&self) -> Duration {
         Duration::from_secs(self.timeout_secs)
+    }
+
+    /// The settings a review session runs with (ADR 0048 decision 10): a first review reads
+    /// `[gate.review.first]` first, and an unset key falls back to `[gate.review]` and then,
+    /// for `exec_args`, to `[worker] exec_args`. A rework review never reads `first`.
+    #[must_use]
+    pub fn choice<'a>(&'a self, first: bool, worker: &'a [String]) -> ReviewChoice<'a> {
+        let (exec_args, exec_args_key) = if first {
+            match &self.first.exec_args {
+                Some(args) => (args.as_slice(), "gate.review.first.exec_args"),
+                None => self.fallback_exec_args(worker),
+            }
+        } else {
+            self.fallback_exec_args(worker)
+        };
+        let (timeout_secs, timeout_key) = if first {
+            match self.first.timeout_secs {
+                Some(secs) => (secs, "gate.review.first.timeout_secs"),
+                None => (self.timeout_secs, "gate.review.timeout_secs"),
+            }
+        } else {
+            (self.timeout_secs, "gate.review.timeout_secs")
+        };
+        ReviewChoice {
+            first,
+            exec_args,
+            exec_args_key,
+            timeout_secs,
+            timeout_key,
+        }
+    }
+
+    fn fallback_exec_args<'a>(&'a self, worker: &'a [String]) -> (&'a [String], &'static str) {
+        match &self.exec_args {
+            Some(args) => (args.as_slice(), "gate.review.exec_args"),
+            None => (worker, "worker.exec_args"),
+        }
     }
 }
 

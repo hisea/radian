@@ -176,6 +176,83 @@ fn a_non_array_review_exec_args_is_refused_by_name() {
     }
 }
 
+/// `gate.review.first.exec_args` must be an array of strings, and an unknown key under
+/// `[gate.review.first]` is refused like every other unknown config key.
+#[test]
+fn the_first_review_table_is_a_closed_table() {
+    for addition in [
+        "[gate.review.first]\nexec_args = \"--model m\"\n",
+        "[gate.review.first]\nexec_args = [1]\n",
+    ] {
+        let error = radian_arc::store::config::parse(&format!("{BASE}{addition}"))
+            .expect_err("a non-array exec_args must fail");
+        assert!(error.contains("gate.review.first.exec_args"), "{error}");
+    }
+    let error =
+        radian_arc::store::config::parse(&format!("{BASE}[gate.review.first]\nmodel = \"m\"\n"))
+            .expect_err("an unknown key must fail");
+    assert!(error.contains("model"), "{error}");
+}
+
+/// `gate.review.concurrency` is `1` or more and `gate.review.first.timeout_secs` is `1` or
+/// more; `0` is refused by name.
+#[test]
+fn review_concurrency_and_first_timeout_are_positive() {
+    for (addition, key) in [
+        (
+            "[gate.review]\nconcurrency = 0\n",
+            "gate.review.concurrency",
+        ),
+        (
+            "[gate.review.first]\ntimeout_secs = 0\n",
+            "gate.review.first.timeout_secs",
+        ),
+    ] {
+        let error = radian_arc::store::config::parse(&format!("{BASE}{addition}"))
+            .expect_err("a zero must fail");
+        assert!(error.contains(key), "the error names `{key}`: {error}");
+    }
+}
+
+/// The first review's keys replace the same `[gate.review]` key when set, and each unset key
+/// falls back: `exec_args` to `[gate.review] exec_args` and then `[worker] exec_args`;
+/// `timeout_secs` to `[gate.review] timeout_secs`. A rework review never reads `first`.
+#[test]
+fn the_first_review_choice_replaces_each_key_and_falls_back() {
+    let worker = vec!["--model".to_owned(), "worker".to_owned()];
+    let mut review = radian_arc::gate::ReviewConfig::default();
+    let choice = review.choice(true, &worker);
+    assert!(choice.first);
+    assert_eq!(choice.exec_args, worker.as_slice());
+    assert_eq!(choice.exec_args_key, "worker.exec_args");
+    assert_eq!(choice.timeout_secs, 900);
+    assert_eq!(choice.timeout_key, "gate.review.timeout_secs");
+
+    let review_args = vec!["--model".to_owned(), "review".to_owned()];
+    review.exec_args = Some(review_args.clone());
+    let choice = review.choice(true, &worker);
+    assert_eq!(choice.exec_args, review_args.as_slice());
+    assert_eq!(choice.exec_args_key, "gate.review.exec_args");
+    review.exec_args = None;
+
+    let first_args = vec!["--model".to_owned(), "first".to_owned()];
+    review.first.exec_args = Some(first_args.clone());
+    review.first.timeout_secs = Some(12);
+    let choice = review.choice(true, &worker);
+    assert_eq!(choice.exec_args, first_args.as_slice());
+    assert_eq!(choice.exec_args_key, "gate.review.first.exec_args");
+    assert_eq!(choice.timeout_secs, 12);
+    assert_eq!(choice.timeout_key, "gate.review.first.timeout_secs");
+
+    // A rework review ignores the whole `first` table.
+    let choice = review.choice(false, &worker);
+    assert!(!choice.first);
+    assert_eq!(choice.exec_args, worker.as_slice());
+    assert_eq!(choice.exec_args_key, "worker.exec_args");
+    assert_eq!(choice.timeout_secs, 900);
+    assert_eq!(choice.timeout_key, "gate.review.timeout_secs");
+}
+
 /// `review` reads the change `commands` accepted: a profile that lists both must list
 /// `commands` first.
 #[test]

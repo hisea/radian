@@ -21,6 +21,7 @@ pub fn gates_dir(repository: &Path) -> PathBuf {
 pub struct GateCheckout {
     repository: PathBuf,
     stage: Stage,
+    name: String,
     remote: String,
 }
 
@@ -34,14 +35,32 @@ impl GateCheckout {
         Self {
             repository: repository.into(),
             stage,
+            name: stage.as_str().to_owned(),
             remote: remote.into(),
         }
     }
 
-    /// The checkout path, `<repository>/.radian/arc/gates/<stage>/`.
+    /// The checkout of the `review` stage's slot `slot` in `repository`, fetching from
+    /// `remote` (ADR 0048 decision 10). Each concurrent review session has its own checkout,
+    /// so two reviews never read one tree.
+    #[must_use]
+    pub fn review_slot(
+        repository: impl Into<PathBuf>,
+        slot: u32,
+        remote: impl Into<String>,
+    ) -> Self {
+        Self {
+            repository: repository.into(),
+            stage: Stage::Review,
+            name: format!("review-{slot}"),
+            remote: remote.into(),
+        }
+    }
+
+    /// The checkout path, `<repository>/.radian/arc/gates/<name>/`.
     #[must_use]
     pub fn path(&self) -> PathBuf {
-        gates_dir(&self.repository).join(self.stage.as_str())
+        gates_dir(&self.repository).join(&self.name)
     }
 
     /// The stage this checkout belongs to.

@@ -201,6 +201,23 @@ pub struct ReviewReport {
     pub verified: Vec<String>,
 }
 
+/// The settings one review session ran with, and where each came from (ADR 0048
+/// decision 10), so `show` can tell a first review from a rework review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewSettings {
+    /// `first` for a task's first review, `rework` for a later one.
+    pub round: String,
+    /// The config key the session's `exec_args` came from: `gate.review.first.exec_args`,
+    /// `gate.review.exec_args` or `worker.exec_args`.
+    pub exec_args: String,
+    /// The wall-time limit of one session, in seconds.
+    pub timeout_secs: u64,
+    /// The config key `timeout_secs` came from: `gate.review.first.timeout_secs` or
+    /// `gate.review.timeout_secs`.
+    pub timeout: String,
+}
+
 /// The verdict of one stage for one commit.
 ///
 /// Field order is the serialized order and is part of the canonical form the digest hashes.
@@ -263,6 +280,10 @@ pub struct Verdict {
     /// first review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_pre_existing: Option<u32>,
+    /// A `review` verdict only: the settings the session ran with and the keys they came from
+    /// (ADR 0048 decision 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_settings: Option<ReviewSettings>,
 }
 
 impl Verdict {
@@ -295,6 +316,7 @@ impl Verdict {
             review_session_ids: Vec::new(),
             review_cost_micros: None,
             review_pre_existing: None,
+            review_settings: None,
         }
     }
 

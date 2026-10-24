@@ -195,6 +195,35 @@ impl Fixture {
         );
     }
 
+    /// Sets `gate.review.concurrency`.
+    fn review_concurrency(&self, value: u32) {
+        self.tune("concurrency = 2", &format!("concurrency = {value}"));
+    }
+
+    /// Sets `gate.review.first.exec_args`.
+    fn review_first_exec_args(&self, args: &[&str]) {
+        let list = args
+            .iter()
+            .map(|arg| format!("\"{arg}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.tune(
+            "# exec_args = [\"--model\", \"m\"]   # not set: the same as [gate.review] exec_args",
+            &format!("exec_args = [{list}]"),
+        );
+    }
+
+    /// Sets `gate.review.first.timeout_secs`.
+    fn review_first_timeout(&self, seconds: u64) {
+        self.tune(
+            "# timeout_secs = 1800            # not set: the same as [gate.review] timeout_secs",
+            &format!(
+                "timeout_secs = {seconds}             # not set: the same as [gate.review] \
+                 timeout_secs"
+            ),
+        );
+    }
+
     /// Sets `gate.review.prompt_file`.
     fn review_prompt_file(&self, file: &str) {
         self.tune(
@@ -261,6 +290,28 @@ fn assert_state(fixture: &Fixture, expected: (&str, &str)) {
         fixture.state(),
         (expected.0.to_owned(), expected.1.to_owned())
     );
+}
+
+/// Reads one task's verdict for one attempt.
+fn verdict_for(store: &Store, task: &str, attempt: &str, stage: Stage) -> Verdict {
+    Verdict::read(&verdict_path(store.repo(), task, attempt, stage).expect("the verdict path"))
+        .expect("the verdict reads")
+}
+
+/// Puts `task` in `review.verifying` for `head`, the way a pushed attempt leaves it.
+fn set_task_verifying(store: &Store, task: &str, base: &str, head: &str, attempt: u32) {
+    store
+        .change_task(task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "verifying".to_owned();
+            task.attempt = attempt;
+            task.attempt_id = Some(format!("{}-{attempt}", task.id));
+            task.token = Some(format!("token-{attempt}"));
+            task.base_sha = Some(base.to_owned());
+            task.head_sha = Some(head.to_owned());
+            Ok(())
+        })
+        .expect("the task is in review.verifying");
 }
 
 // ---- end to end: start ---------------------------------------------------------------
@@ -2318,6 +2369,316 @@ fn a_review_that_times_out_twice_fails_with_review_timeout() {
     assert_eq!(fake.count(), 2);
 }
 
+/// A task's first review reads `[gate.review.first]`: its `exec_args` reach the child and
+/// its short `timeout_secs` times out where the `[gate.review]` limit would not. The same
+/// task's rework review reads `[gate.review]` again. Mutation: apply the first settings to a
+/// rework review and the rework session times out too.
+#[test]
+fn a_first_review_uses_the_first_settings_and_a_rework_uses_the_normal_ones() {
+    let fixture = Fixture::new("review-first-settings");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    fixture.review_exec_args(&[
+        "--model",
+        "review-model",
+        "--base-url",
+        "http://127.0.0.1:9",
+    ]);
+    fixture.review_first_exec_args(&["--model", "first-model", "--base-url", "http://127.0.0.1:9"]);
+    fixture.review_first_timeout(1);
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "review-first-settings-fake",
+        &[review_message("the change is fine", &[], &[])],
+        3,
+    );
+
+    let first = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(first.phase, "rework_pending", "{first:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(
+        verdict.reason.as_deref(),
+        Some("review_timeout"),
+        "the first review's 1 s limit did not stop the 3 s session"
+    );
+    let settings = verdict.review_settings.clone().expect("the settings");
+    assert_eq!(settings.round, "first");
+    assert_eq!(settings.exec_args, "gate.review.first.exec_args");
+    assert_eq!(settings.timeout_secs, 1);
+    assert_eq!(settings.timeout, "gate.review.first.timeout_secs");
+    let argv = fake.argv(1);
+    assert_eq!(arg_value(&argv, "--model"), Some("first-model"));
+    assert_eq!(
+        arg_value(&argv, "--session-id"),
+        Some(format!("{}-review-1", fixture.attempt_label()).as_str())
+    );
+
+    // The rework round reads `[gate.review]`: its 900 s limit lets the 3 s session pass.
+    let second_head = fixture.rework(&head, "two.txt", "two\n");
+    assert_ne!(second_head, head);
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework verification runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let label = format!("{}-2", fixture.task);
+    let verdict = fixture.verdict(&label, Stage::Review);
+    assert!(verdict.is_pass(), "{:?}", verdict.reason);
+    let settings = verdict.review_settings.clone().expect("the settings");
+    assert_eq!(settings.round, "rework");
+    assert_eq!(settings.exec_args, "gate.review.exec_args");
+    assert_eq!(settings.timeout_secs, 900);
+    assert_eq!(settings.timeout, "gate.review.timeout_secs");
+    let argv = fake.argv(3);
+    assert_eq!(arg_value(&argv, "--model"), Some("review-model"));
+}
+
+/// An unset `[gate.review.first]` key falls back to the same `[gate.review]` key: the first
+/// session takes its arguments from `first` and its limit from `[gate.review]`.
+#[test]
+fn an_unset_first_review_key_falls_back_to_the_review_table() {
+    let fixture = Fixture::new("review-first-fallback");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    fixture.review_exec_args(&[
+        "--model",
+        "review-model",
+        "--base-url",
+        "http://127.0.0.1:9",
+    ]);
+    fixture.review_first_exec_args(&["--model", "first-model", "--base-url", "http://127.0.0.1:9"]);
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "review-first-fallback-fake",
+        &[review_message("the change is fine", &[], &[])],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    let settings = verdict.review_settings.clone().expect("the settings");
+    assert_eq!(settings.round, "first");
+    assert_eq!(settings.exec_args, "gate.review.first.exec_args");
+    assert_eq!(settings.timeout_secs, 900);
+    assert_eq!(settings.timeout, "gate.review.timeout_secs");
+    assert_eq!(arg_value(&fake.argv(1), "--model"), Some("first-model"));
+}
+
+/// A `[gate.review.first] exec_args` entry that repeats an argument the stage owns is
+/// refused by that key's name, and the session does not run.
+#[test]
+fn a_first_exec_arg_the_review_stage_owns_is_refused() {
+    let fixture = Fixture::new("review-first-owned-args");
+    fixture.add_review_stage();
+    fixture.review_first_exec_args(&["--tools", "shell"]);
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "review-first-owned-args-fake",
+        &[review_message("must not run", &[], &[])],
+        0,
+    );
+    fixture.set_verifying(&head);
+
+    let error = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect_err("the stage owns --tools");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(
+        error.message().contains("gate.review.first.exec_args"),
+        "{error:?}"
+    );
+    assert!(error.message().contains("--tools"), "{error:?}");
+    assert_eq!(fake.count(), 0, "the session ran");
+    assert_state(&fixture, ("review", "verifying"));
+}
+
+/// Two tasks in one repository with `[gate.review] concurrency` 2 review at the same time,
+/// each in its own slot checkout. Mutation: take a single lock again and the second review
+/// waits for the first to end, so the intervals do not overlap.
+#[test]
+fn two_tasks_reviews_overlap_with_concurrency_two() {
+    let fixture = Fixture::new("review-concurrency-two");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    let plan = fixture
+        .store
+        .load_task(&fixture.task)
+        .expect("the task")
+        .item
+        .plan;
+    let second = fixture
+        .store
+        .add_task_proposed(
+            &plan,
+            "second",
+            "A second task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the second brief\n",
+        )
+        .expect("the second task");
+    let first_head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let second_branch = format!("work/{second}");
+    let second_head =
+        fixture
+            .repo
+            .commit_on(&second_branch, &fixture.base.clone(), "two.txt", "two\n");
+    fixture.repo.git(&["push", "origin", &second_branch]);
+    set_task_verifying(&fixture.store, &fixture.task, &fixture.base, &first_head, 1);
+    set_task_verifying(&fixture.store, &second, &fixture.base, &second_head, 1);
+
+    let first_fake = FakeReview::new(
+        "review-concurrency-two-1",
+        &[review_message("the first change is fine", &[], &[])],
+        2,
+    );
+    let second_fake = FakeReview::new(
+        "review-concurrency-two-2",
+        &[review_message("the second change is fine", &[], &[])],
+        2,
+    );
+    let repo = fixture.repo.repo.clone();
+    let task = fixture.task.clone();
+    let other = second.clone();
+    let (one, two) = std::thread::scope(|scope| {
+        let one = scope.spawn(|| {
+            let store = Store::open(&repo).expect("the store opens");
+            review::verify_with(&store, &task, Some(first_fake.program()))
+                .expect("the first verification runs")
+        });
+        let two = scope.spawn(|| {
+            let store = Store::open(&repo).expect("the store opens");
+            review::verify_with(&store, &other, Some(second_fake.program()))
+                .expect("the second verification runs")
+        });
+        (
+            one.join().expect("the first thread"),
+            two.join().expect("the second thread"),
+        )
+    });
+    assert_eq!(one.phase, "awaiting_human", "{one:?}");
+    assert_eq!(two.phase, "awaiting_human", "{two:?}");
+
+    let first = verdict_for(
+        &fixture.store,
+        &fixture.task,
+        &format!("{}-1", fixture.task),
+        Stage::Review,
+    );
+    let second = verdict_for(
+        &fixture.store,
+        &second,
+        &format!("{second}-1"),
+        Stage::Review,
+    );
+    assert!(
+        first.started_at < second.ended_at && second.started_at < first.ended_at,
+        "the two reviews did not overlap: {}..{} and {}..{}",
+        first.started_at,
+        first.ended_at,
+        second.started_at,
+        second.ended_at
+    );
+    let workspace = |fake: &FakeReview| arg_value(&fake.argv(1), "--workspace").map(str::to_owned);
+    let first_workspace = workspace(&first_fake);
+    let second_workspace = workspace(&second_fake);
+    assert!(first_workspace.is_some(), "the fake recorded no workspace");
+    assert!(second_workspace.is_some(), "the fake recorded no workspace");
+    assert_ne!(
+        first_workspace, second_workspace,
+        "the two reviews shared one checkout"
+    );
+}
+
+/// With `[gate.review] concurrency` 1, the second review waits for the first: today's
+/// behaviour as the default's lower bound.
+#[test]
+fn reviews_do_not_overlap_with_concurrency_one() {
+    let fixture = Fixture::new("review-concurrency-one");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    fixture.review_concurrency(1);
+    let plan = fixture
+        .store
+        .load_task(&fixture.task)
+        .expect("the task")
+        .item
+        .plan;
+    let second = fixture
+        .store
+        .add_task_proposed(
+            &plan,
+            "second",
+            "A second task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the second brief\n",
+        )
+        .expect("the second task");
+    let first_head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let second_branch = format!("work/{second}");
+    let second_head =
+        fixture
+            .repo
+            .commit_on(&second_branch, &fixture.base.clone(), "two.txt", "two\n");
+    fixture.repo.git(&["push", "origin", &second_branch]);
+    set_task_verifying(&fixture.store, &fixture.task, &fixture.base, &first_head, 1);
+    set_task_verifying(&fixture.store, &second, &fixture.base, &second_head, 1);
+
+    let first_fake = FakeReview::new(
+        "review-concurrency-one-1",
+        &[review_message("the first change is fine", &[], &[])],
+        2,
+    );
+    let second_fake = FakeReview::new(
+        "review-concurrency-one-2",
+        &[review_message("the second change is fine", &[], &[])],
+        2,
+    );
+    let repo = fixture.repo.repo.clone();
+    let task = fixture.task.clone();
+    let other = second.clone();
+    let (one, two) = std::thread::scope(|scope| {
+        let one = scope.spawn(|| {
+            let store = Store::open(&repo).expect("the store opens");
+            review::verify_with(&store, &task, Some(first_fake.program()))
+                .expect("the first verification runs")
+        });
+        let two = scope.spawn(|| {
+            let store = Store::open(&repo).expect("the store opens");
+            review::verify_with(&store, &other, Some(second_fake.program()))
+                .expect("the second verification runs")
+        });
+        (
+            one.join().expect("the first thread"),
+            two.join().expect("the second thread"),
+        )
+    });
+    assert_eq!(one.phase, "awaiting_human", "{one:?}");
+    assert_eq!(two.phase, "awaiting_human", "{two:?}");
+
+    let first = verdict_for(
+        &fixture.store,
+        &fixture.task,
+        &format!("{}-1", fixture.task),
+        Stage::Review,
+    );
+    let second = verdict_for(
+        &fixture.store,
+        &second,
+        &format!("{second}-1"),
+        Stage::Review,
+    );
+    assert!(
+        first.ended_at <= second.started_at || second.ended_at <= first.started_at,
+        "the two reviews overlapped with concurrency 1: {}..{} and {}..{}",
+        first.started_at,
+        first.ended_at,
+        second.started_at,
+        second.ended_at
+    );
+}
+
 /// `[gate.review] prompt_file` is appended to the built-in prompt.
 #[test]
 fn the_review_prompt_file_is_appended() {
@@ -3053,6 +3414,7 @@ fn write_passing_review(fixture: &Fixture, head: &str, report: ReviewReport) {
         review_session_ids: vec!["hand-written".to_owned()],
         review_cost_micros: None,
         review_pre_existing: None,
+        review_settings: None,
     }
     .write_new(&path)
     .expect("the review verdict is written once");

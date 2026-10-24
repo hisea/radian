@@ -98,6 +98,7 @@ impl CommandRun<'_> {
             review_session_ids: Vec::new(),
             review_cost_micros: None,
             review_pre_existing: None,
+            review_settings: None,
         };
         verdict.write_new(&verdict_path(
             self.repository,
