@@ -57,6 +57,11 @@ pub const AUTO_REVERIFY_FILE: &str = "auto_reverify.json";
 /// The failure reasons a moved main can fix: a `commands` or integration command that failed,
 /// or ran past its timeout (ADR 0048 decision 9).
 pub const AUTO_REVERIFY_REASONS: &[&str] = &["command_failed", "timeout"];
+/// Test-only (an input that exists only for tests is not in the manual, AGENTS.md): the program
+/// a background gate runs instead of `radian exec` for the `review` stage, the same seam
+/// [`ReviewRun::program`] gives the synchronous path. A test sets it on the `radian arc run`
+/// process, which its gate child inherits. Never set by arc.
+pub const REVIEW_PROGRAM_ENV: &str = "RADIAN_ARC_GATE_TEST_REVIEW_PROGRAM";
 
 /// Why a verify or merge did not advance the task: a stage that failed, a branch that
 /// moved, or a stage this build does not run yet.
@@ -510,119 +515,232 @@ pub fn integration_inputs(store: &Store, task_id: &str) -> Option<String> {
 }
 
 /// Runs the stages the plan lists that have no verdict yet, in order, and stops at the first
-/// failure. A verdict already written for this attempt and stage is reused, so a gate that
-/// died between stages resumes instead of rerunning (ADR 0048 decision 10). This writes
-/// verdicts only: it never moves the task's state. It returns the stages whose verdict was
-/// reused.
+/// failure. `commands` and `review` are the exception: when the profile lists both and neither
+/// has a verdict, the two run at the same time, and the round is decided in the profile order
+/// afterwards (ADR 0048 decision 10). A verdict already written for this attempt and stage is
+/// reused, so a gate that died between stages resumes instead of rerunning, and a pair a gate
+/// died under resumes only the stage without a verdict. This writes verdicts only: it never
+/// moves the task's state. It returns the stages whose verdict was reused.
 ///
 /// # Errors
 ///
 /// A verdict exists for another sha, a stage this build does not run was reached, or the gate
-/// could not run (a git or file error, a failing checkout).
+/// could not run (a git or file error, a failing checkout, a stop).
 pub fn run_stages(
     store: &Store,
     plan: &Verification,
     review_program: Option<&Path>,
 ) -> Result<Vec<Stage>, Error> {
-    let task = &plan.task;
     let mut reused = Vec::new();
-    for spec in &plan.stages {
+    let pair = pair_positions(plan);
+    let mut index = 0;
+    while index < plan.stages.len() {
+        let spec = plan.stages[index];
         if spec.stage == Stage::Human {
+            index += 1;
             continue;
         }
-        let path =
-            verdict_path(store.repo(), &task.id, &plan.label, spec.stage).map_err(gate_error)?;
-        if path.is_file() {
-            let verdict = Verdict::read(&path).map_err(gate_error)?;
-            if verdict.sha != plan.head {
-                let reason = Reason::with_verdict(
-                    "verify",
-                    spec.stage,
-                    format!("the verdict is for {}, not {}", verdict.sha, plan.head),
-                    path,
-                );
-                reason.record(store, &task.id, &plan.label);
-                return Err(Error::Refused(reason.text()));
-            }
-            reused.push(spec.stage);
-            if !verdict.is_pass() {
+        if let Some((commands_at, review_at)) = pair
+            && index == commands_at
+        {
+            if !run_pair(store, plan, review_program, &mut reused)? {
                 return Ok(reused);
             }
+            index = review_at + 1;
             continue;
         }
-        let verdict = match spec.stage {
-            Stage::Commands => CommandRun {
+        let verdict = match recorded_verdict(store, plan, &spec)? {
+            Some(verdict) => {
+                reused.push(spec.stage);
+                verdict
+            }
+            None => run_stage(store, plan, &spec, review_program)?,
+        };
+        if !verdict.is_pass() {
+            return Ok(reused);
+        }
+        index += 1;
+    }
+    Ok(reused)
+}
+
+/// The `(commands, review)` positions when the plan lists both. `Profile::validate` refuses
+/// `review` before `commands`, so the two are in that order; an extra stage is only appended,
+/// so a pair with `review` first cannot arise from a valid task either.
+fn pair_positions(plan: &Verification) -> Option<(usize, usize)> {
+    let commands = plan
+        .stages
+        .iter()
+        .position(|spec| spec.stage == Stage::Commands)?;
+    let review = plan
+        .stages
+        .iter()
+        .position(|spec| spec.stage == Stage::Review)?;
+    (commands < review).then_some((commands, review))
+}
+
+/// The verdict already written for `spec` in this attempt, when there is one. A verdict for
+/// another sha refuses the verification and records the reason (ADR 0048 decision 10).
+fn recorded_verdict(
+    store: &Store,
+    plan: &Verification,
+    spec: &StageSpec,
+) -> Result<Option<Verdict>, Error> {
+    let path =
+        verdict_path(store.repo(), &plan.task.id, &plan.label, spec.stage).map_err(gate_error)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let verdict = Verdict::read(&path).map_err(gate_error)?;
+    if verdict.sha != plan.head {
+        let reason = Reason::with_verdict(
+            "verify",
+            spec.stage,
+            format!("the verdict is for {}, not {}", verdict.sha, plan.head),
+            path,
+        );
+        reason.record(store, &plan.task.id, &plan.label);
+        return Err(Error::Refused(reason.text()));
+    }
+    Ok(Some(verdict))
+}
+
+/// Runs the `commands`/`review` pair (ADR 0048 decision 10). A stage that already has a verdict
+/// is reused; when both are pending they start at the same time and the gate waits for both,
+/// so a failure of one never kills the other. Returns whether the round goes on, decided in
+/// the profile order (`commands` first): the other verdict is always written before this
+/// returns.
+fn run_pair(
+    store: &Store,
+    plan: &Verification,
+    review_program: Option<&Path>,
+    reused: &mut Vec<Stage>,
+) -> Result<bool, Error> {
+    let commands_spec = plan
+        .stages
+        .iter()
+        .find(|spec| spec.stage == Stage::Commands)
+        .ok_or_else(|| Error::Failed("the plan lists no commands stage".to_owned()))?;
+    let review_spec = plan
+        .stages
+        .iter()
+        .find(|spec| spec.stage == Stage::Review)
+        .ok_or_else(|| Error::Failed("the plan lists no review stage".to_owned()))?;
+    let recorded_commands = recorded_verdict(store, plan, commands_spec)?;
+    let recorded_review = recorded_verdict(store, plan, review_spec)?;
+    if recorded_commands.is_some() {
+        reused.push(Stage::Commands);
+    }
+    if recorded_review.is_some() {
+        reused.push(Stage::Review);
+    }
+    let (commands, review) = match (recorded_commands, recorded_review) {
+        (Some(commands), Some(review)) => (commands, review),
+        (Some(commands), None) => (
+            commands,
+            run_stage(store, plan, review_spec, review_program)?,
+        ),
+        (None, Some(review)) => (
+            run_stage(store, plan, commands_spec, review_program)?,
+            review,
+        ),
+        (None, None) => {
+            let (commands, review) = std::thread::scope(|scope| {
+                let commands =
+                    scope.spawn(|| run_stage(store, plan, commands_spec, review_program));
+                let review = scope.spawn(|| run_stage(store, plan, review_spec, review_program));
+                (commands.join(), review.join())
+            });
+            (joined(commands)?, joined(review)?)
+        }
+    };
+    Ok(commands.is_pass() && review.is_pass())
+}
+
+/// A stage thread's result. A panic in a stage is the gate's panic, not a stage result, so it
+/// keeps its behaviour.
+fn joined(result: std::thread::Result<Result<Verdict, Error>>) -> Result<Verdict, Error> {
+    match result {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// Runs one stage and returns the verdict it wrote.
+fn run_stage(
+    store: &Store,
+    plan: &Verification,
+    spec: &StageSpec,
+    review_program: Option<&Path>,
+) -> Result<Verdict, Error> {
+    let task = &plan.task;
+    match spec.stage {
+        Stage::Commands => CommandRun {
+            repository: store.repo(),
+            remote: &plan.remote,
+            task: &task.id,
+            attempt: &plan.label,
+            sha: &plan.head,
+            main_ref: &plan.main_ref,
+            commands: &plan.profile.commands,
+            timeout: plan.config.gate.command_timeout(),
+        }
+        .run()
+        .map_err(gate_error),
+        Stage::Review => {
+            let review = &plan.config.gate.review;
+            let (exec_args, key) = match &review.exec_args {
+                Some(args) => (args.as_slice(), "gate.review.exec_args"),
+                None => (plan.config.worker.exec_args.as_slice(), "worker.exec_args"),
+            };
+            // The stage owns the read-only mount and the session flags: an argument that
+            // repeated one would overrule them (ADR 0048 decision 10).
+            if let Some(owned) = exec_args
+                .iter()
+                .find_map(|arg| crate::gate::owned_name(arg))
+            {
+                return Err(Error::Refused(format!(
+                    "`{key}` must not repeat `{owned}`: the review stage sets it on the \
+                     review session's `radian exec` line"
+                )));
+            }
+            let prompt_file = review
+                .prompt_file
+                .as_ref()
+                .map(|file| store.repo().join(file));
+            // A review that follows an earlier one of this task is a rework round: the stage
+            // reviews the increment and judges the items arc moved (ADR 0048 decision 10).
+            let earlier = previous_review(store, &task.id, &plan.label);
+            let earlier = earlier.as_ref().map(|(_, verdict)| PreviousReview {
+                sha: verdict.sha.clone(),
+                blocking: verdict
+                    .review
+                    .as_ref()
+                    .map(|review| review.blocking.clone())
+                    .unwrap_or_default(),
+            });
+            ReviewRun {
                 repository: store.repo(),
                 remote: &plan.remote,
                 task: &task.id,
                 attempt: &plan.label,
                 sha: &plan.head,
+                brief: &task.body,
                 main_ref: &plan.main_ref,
-                commands: &plan.profile.commands,
-                timeout: plan.config.gate.command_timeout(),
+                exec_args,
+                prompt_file: prompt_file.as_deref(),
+                previous: earlier.as_ref(),
+                timeout: review.timeout(),
+                program: review_program,
             }
             .run()
-            .map_err(gate_error)?,
-            Stage::Review => {
-                let review = &plan.config.gate.review;
-                let (exec_args, key) = match &review.exec_args {
-                    Some(args) => (args.as_slice(), "gate.review.exec_args"),
-                    None => (plan.config.worker.exec_args.as_slice(), "worker.exec_args"),
-                };
-                // The stage owns the read-only mount and the session flags: an argument that
-                // repeated one would overrule them (ADR 0048 decision 10).
-                if let Some(owned) = exec_args
-                    .iter()
-                    .find_map(|arg| crate::gate::owned_name(arg))
-                {
-                    return Err(Error::Refused(format!(
-                        "`{key}` must not repeat `{owned}`: the review stage sets it on the \
-                         review session's `radian exec` line"
-                    )));
-                }
-                let prompt_file = review
-                    .prompt_file
-                    .as_ref()
-                    .map(|file| store.repo().join(file));
-                // A review that follows an earlier one of this task is a rework round: the
-                // stage reviews the increment and judges the items arc moved (ADR 0048
-                // decision 10).
-                let earlier = previous_review(store, &task.id, &plan.label);
-                let earlier = earlier.as_ref().map(|(_, verdict)| PreviousReview {
-                    sha: verdict.sha.clone(),
-                    blocking: verdict
-                        .review
-                        .as_ref()
-                        .map(|review| review.blocking.clone())
-                        .unwrap_or_default(),
-                });
-                ReviewRun {
-                    repository: store.repo(),
-                    remote: &plan.remote,
-                    task: &task.id,
-                    attempt: &plan.label,
-                    sha: &plan.head,
-                    brief: &task.body,
-                    main_ref: &plan.main_ref,
-                    exec_args,
-                    prompt_file: prompt_file.as_deref(),
-                    previous: earlier.as_ref(),
-                    timeout: review.timeout(),
-                    program: review_program,
-                }
-                .run()
-                .map_err(gate_error)?
-            }
-            other => {
-                // `plan_verification` refused an unbuilt stage before this point.
-                return Err(Error::Failed(format!("stage {other} is not built yet")));
-            }
-        };
-        if !verdict.is_pass() {
-            return Ok(reused);
+            .map_err(gate_error)
+        }
+        other => {
+            // `plan_verification` refused an unbuilt stage before this point.
+            Err(Error::Failed(format!("stage {other} is not built yet")))
         }
     }
-    Ok(reused)
 }
 
 /// Applies the verdicts a gate left for `plan` (ADR 0048 decisions 6 and 10): a failed stage

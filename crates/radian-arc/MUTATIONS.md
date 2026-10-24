@@ -75,6 +75,9 @@ copy.
 | M58 | `radian arc reverify` refuses a stuck `review.verifying` task again (`attempt_ops` sets `gate_stuck = false`) | `run::reverify_reruns_a_task_whose_gate_left_no_record`, `run::reverify_reruns_a_task_whose_gate_died` (exit 3, no attempt) | ✅ 2 failed |
 | M59 | `background::stop` ignores a gate whose record is still `started` (`STARTED => false`, no lock check) | `run::sigterm_to_watch_stops_a_gate_that_has_not_written_running` (the gate outlives the loop and later writes `done`) | ✅ failed |
 | M60 | `background::stop` assumes a gate with no start time is alive (`started.is_empty() \|\| …`); the extra mutation of the brief's item (d) | `run::stop_without_a_start_time_returns_as_soon_as_the_gate_is_gone` (waits its whole grace and then the kill window) | ✅ failed |
+| TK0036-M1 | run the `commands`/`review` pair one after the other again (`run_pair` calls the two stages instead of the two threads) | `review::the_commands_and_review_stages_start_before_either_ends` (the commands wait times out and fails the round) | ✅ failed |
+| TK0036-M2 | let a review failure decide the round when `commands` also failed (`finish_verification` swaps the two in its scan order) | `review::a_commands_failure_decides_the_round_when_the_review_fails_too` (the task returns to `todo.ready` with a review brief) | ✅ failed |
+| TK0036-M3 | forward the gate's stop to only the first running stage (`request_stop` signals one slot) | `run::a_signal_to_the_gate_stops_both_stages_of_the_pair` (one stage outlives the 3 s deadline) | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -207,3 +210,13 @@ tests only, and its reverse (`gate_stuck` true for every `review.verifying` task
 just-started task alone: it survives the loop, finishes its 15 s test-only delay, and writes
 `done`. M60 is the item (d) mutation: with no start time it waits the full grace and then the
 kill window, so the test's 2 s bound fails at 15 s.
+
+TK0036-M1–M3 were run against the parallel pair, each from a copy under `.radian/mut/`
+restored with `cp` and compared with `cmp`, with `cargo build -p radian-tui --bin radian`
+before each run (the `run` tests refuse a binary older than its sources). M1's sequential pair
+makes the `commands` script wait out its 5 s barrier and fail before the review starts, so the
+round is `review.rework_pending` instead of `awaiting_human`. M2 is caught only when both
+stages fail: with `commands` failing alone the review passes, and scanning it first changes
+nothing. M3 leaves the stage that was not signalled alive past the test's 3 s deadline; the
+handler is the only SIGTERM source, because the wait loop now only escalates to SIGKILL after
+`cancel_grace_secs`.

@@ -97,6 +97,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "RADIAN_ARC_GATE_TEST_SLOW_START_MS",
         "read in radian-arc/src/gate/background.rs: milliseconds the background gate waits before its `running` record, so a test can stop it while only the pass's `started` record exists",
     ),
+    (
+        "RADIAN_ARC_GATE_TEST_REVIEW_PROGRAM",
+        "read in radian-arc/src/gate/background.rs: runs this program instead of `radian exec` for the review stage, so a test drives the background gate's `commands`/`review` pair without a model",
+    ),
 ];
 
 /// The headings whose tables list environment variables. Each heading is an anchor: a row

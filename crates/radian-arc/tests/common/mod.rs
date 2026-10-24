@@ -6,6 +6,7 @@
 //! in `agent-provider-openai-compatible`'s `testing` feature.
 #![allow(dead_code)]
 
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -720,6 +721,152 @@ impl Repo {
             .stderr(Stdio::piped());
         command
     }
+}
+
+/// A fake `radian exec` for the review stage. It records its argv, prompt and pid per run and
+/// prints one `Result` line whose `text` is the run's chosen message. Every run touches
+/// `<dir>/started-<n>` when it starts, so a test can see a session running.
+pub struct FakeReview {
+    dir: TempDir,
+    program: PathBuf,
+}
+
+impl FakeReview {
+    /// `messages[n]` is run `n`'s final text; a missing entry repeats the last message.
+    pub fn new(label: &str, messages: &[String], sleep_secs: u32) -> Self {
+        Self::with_barrier(label, messages, sleep_secs, None)
+    }
+
+    /// [`FakeReview::new`] with `barrier` = `(wait_for, seconds)`: the run waits up to `seconds`
+    /// for that file to appear before it answers. The `commands` stage runs its own script, so
+    /// two programs can wait for each other and prove they started together.
+    pub fn with_barrier(
+        label: &str,
+        messages: &[String],
+        sleep_secs: u32,
+        barrier: Option<(&Path, u32)>,
+    ) -> Self {
+        let dir = TempDir::new(label);
+        for (index, message) in messages.iter().enumerate() {
+            fs::write(
+                dir.path().join(format!("text-{}", index + 1)),
+                serde_json::to_string(message).expect("a JSON string"),
+            )
+            .expect("the fake message");
+        }
+        let last = messages.len().max(1);
+        for run in 1..=last {
+            fs::write(
+                dir.path().join(format!("sleep-{run}")),
+                sleep_secs.to_string(),
+            )
+            .expect("the fake sleep");
+        }
+        let wait = match barrier {
+            Some((path, seconds)) => format!(
+                "i=0\n\
+                 while [ ! -f '{path}' ] && [ $i -lt {loops} ]; do i=$((i+1)); sleep 0.05; done\n",
+                path = path.display(),
+                loops = seconds.saturating_mul(20),
+            ),
+            None => String::new(),
+        };
+        let program = dir.path().join("fake-radian-exec");
+        let script = format!(
+            "#!/bin/sh\n\
+             d=\"{dir}\"\n\
+             n=$(cat \"$d/count\" 2>/dev/null || printf '0')\n\
+             n=$((n+1))\n\
+             printf '%s\\n' \"$n\" > \"$d/count\"\n\
+             printf '%s\\n' \"$@\" > \"$d/argv-$n\"\n\
+             printf '%s\\n' \"$$\" > \"$d/pid-$n\"\n\
+             touch \"$d/started-$n\"\n\
+             cat > \"$d/prompt-$n\"\n\
+             {wait}\
+             s=$(cat \"$d/sleep-$n\" 2>/dev/null || printf '{sleep_secs}')\n\
+             sleep \"$s\"\n\
+             if [ ! -f \"$d/text-$n\" ]; then n={last}; fi\n\
+             printf '{{\"type\":\"Result\",\"session_id\":\"fake-review-%s\",\"outcome\":\"completed\",\"cost\":{{\"micros\":2000}},\"text\":' \"$n\"\n\
+             cat \"$d/text-$n\"\n\
+             printf '}}\\n'\n",
+            dir = dir.path().display(),
+            wait = wait,
+            sleep_secs = sleep_secs,
+            last = last,
+        );
+        fs::write(&program, script).expect("the fake program");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&program)
+                .expect("the fake program")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&program, permissions).expect("make it executable");
+        }
+        Self { dir, program }
+    }
+
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub fn count(&self) -> u32 {
+        fs::read_to_string(self.dir.path().join("count"))
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    pub fn argv(&self, run: u32) -> Vec<String> {
+        fs::read_to_string(self.dir.path().join(format!("argv-{run}")))
+            .expect("the fake recorded its argv")
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    pub fn prompt(&self, run: u32) -> String {
+        fs::read_to_string(self.dir.path().join(format!("prompt-{run}")))
+            .expect("the fake recorded its prompt")
+    }
+
+    /// The marker a run touches when it starts.
+    pub fn started(&self, run: u32) -> PathBuf {
+        self.dir.path().join(format!("started-{run}"))
+    }
+
+    /// The pid of a run's shell, which leads its own process group.
+    pub fn pid(&self, run: u32) -> u32 {
+        fs::read_to_string(self.dir.path().join(format!("pid-{run}")))
+            .expect("the fake recorded its pid")
+            .trim()
+            .parse()
+            .expect("a pid")
+    }
+
+    /// Changes how long a later run sleeps before it answers.
+    pub fn set_sleep(&self, run: u32, seconds: u32) {
+        fs::write(
+            self.dir.path().join(format!("sleep-{run}")),
+            seconds.to_string(),
+        )
+        .expect("the fake sleep");
+    }
+}
+
+/// A session's final message with one fenced report.
+pub fn review_message(summary: &str, blocking: &[&str], suggestions: &[&str]) -> String {
+    let value = serde_json::json!({
+        "summary": summary,
+        "blocking": blocking,
+        "suggestions": suggestions,
+        "verified": ["the diff reads correctly"],
+    });
+    format!(
+        "Here is my review.\n\n```json\n{}\n```\n",
+        serde_json::to_string_pretty(&value).expect("the report serializes")
+    )
 }
 
 fn write_hook(path: &Path, marker: &Path) {

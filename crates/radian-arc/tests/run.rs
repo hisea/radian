@@ -15,6 +15,7 @@ use common::*;
 use radian_arc::attempt;
 use radian_arc::gate::background;
 use radian_arc::gate::{Stage, Verdict};
+use radian_arc::review::REVIEW_PROGRAM_ENV;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, plan_ops};
 use serde_json::Value;
@@ -52,6 +53,28 @@ fn commands(repo: &Repo, line: &str) {
     fs::write(
         &path,
         text.replacen("\ncommands = []", &format!("\ncommands = [\"{line}\"]"), 1),
+    )
+    .expect("write config.toml");
+}
+
+/// Adds `review`, required, between `commands` and `human` in the default profile.
+fn review_stage(repo: &Repo) {
+    let path = repo.arc().join("config.toml");
+    let text = fs::read_to_string(&path).expect("config.toml");
+    let from = "stages = [{ stage = \"commands\", required = true }, { stage = \"human\", \
+                required = true }]";
+    assert!(
+        text.contains(from),
+        "the default stages are in config.toml:\n{text}"
+    );
+    fs::write(
+        &path,
+        text.replacen(
+            from,
+            "stages = [{ stage = \"commands\", required = true }, { stage = \"review\", required \
+             = true }, { stage = \"human\", required = true }]",
+            1,
+        ),
     )
     .expect("write config.toml");
 }
@@ -174,6 +197,30 @@ fn run_until(repo: &Repo, limit: Duration, done: impl Fn() -> bool) -> String {
     let mut output = String::new();
     loop {
         let run = repo.radian(&["arc", "run"]);
+        assert_eq!(run.code, 0, "run failed: {}", run.stderr);
+        output.push_str(&run.stdout);
+        if done() {
+            return output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the loop did not settle within {limit:?}:\n{output}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// [`run_until`] with extra environment variables on every pass (the gate child inherits them).
+fn run_until_env(
+    repo: &Repo,
+    limit: Duration,
+    env: &[(&str, String)],
+    done: impl Fn() -> bool,
+) -> String {
+    let deadline = Instant::now() + limit;
+    let mut output = String::new();
+    loop {
+        let run = repo.radian_with_env(&["arc", "run"], env);
         assert_eq!(run.code, 0, "run failed: {}", run.stderr);
         output.push_str(&run.stdout);
         if done() {
@@ -1890,6 +1937,169 @@ fn stop_without_a_start_time_returns_as_soon_as_the_gate_is_gone() {
         gate_record(&repo, &task).expect("the record")["status"],
         "running",
         "a gate that was already gone is not one arc stopped"
+    );
+}
+
+// ---- the commands and review pair (ADR 0048 decision 10) ------------------------------
+
+/// A gate killed while only the review ran resumes with the commands verdict reused: the next
+/// pass starts a new gate, which runs the review and not the commands. Mutation: run the pair
+/// sequentially, or ignore the recorded commands verdict, and the command's counter has two
+/// lines.
+#[test]
+fn a_gate_killed_during_the_review_resumes_with_the_commands_verdict_reused() {
+    let repo = Repo::new("run-pair-resume");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "pair-resume");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    review_stage(&repo);
+    let counter = repo.root.join("commands-run.txt");
+    commands(&repo, &format!("echo run >> '{}'", counter.display()));
+    publish_verifying(&repo, &store, &plan, &task);
+    let fake = FakeReview::new(
+        "run-pair-resume-fake",
+        &[
+            review_message("first", &[], &[]),
+            review_message("second", &[], &[]),
+        ],
+        30,
+    );
+    let env = [(
+        REVIEW_PROGRAM_ENV,
+        fake.program().to_string_lossy().into_owned(),
+    )];
+
+    // One pass starts the gate; the commands stage ends at once and the review sleeps.
+    let first = repo.radian_with_env(&["arc", "run"], &env);
+    assert_eq!(first.code, 0, "run: {}", first.stderr);
+    let verdicts = repo.run_dir(&task, 1).join("verdicts");
+    wait_until(Duration::from_secs(60), "the review session", || {
+        fake.started(1).is_file()
+    });
+    wait_until(Duration::from_secs(60), "the commands verdict", || {
+        verdicts.join("commands.json").is_file()
+    });
+    let commands_verdict = fs::read(verdicts.join("commands.json")).expect("the verdict");
+    let gate = gate_record(&repo, &task).expect("the gate record")["pid"]
+        .as_u64()
+        .expect("the gate pid") as u32;
+    assert!(process_alive(gate), "the gate did not start");
+
+    // Kill the gate: the next pass has to finish the attempt with the pair's other verdict.
+    let sent = std::process::Command::new("kill")
+        .args(["-9", &gate.to_string()])
+        .status()
+        .expect("kill -9");
+    assert!(sent.success(), "kill -9 the gate");
+    wait_until(Duration::from_secs(20), "the killed gate", || {
+        !process_alive(gate) && !background::running(&store, &task)
+    });
+    // Its review session is an orphan: kill it so it cannot race the resumed one, and answer
+    // the second run at once.
+    let orphan = fake.pid(1);
+    signal_group(orphan, libc::SIGKILL);
+    wait_until(Duration::from_secs(20), "the orphan review", || {
+        !process_alive(orphan)
+    });
+    fake.set_sleep(2, 0);
+
+    run_until_env(&repo, Duration::from_secs(90), &env, || {
+        state(&store, &task).1 == "awaiting_human"
+    });
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "awaiting_human".to_owned())
+    );
+    assert_eq!(
+        fs::read_to_string(&counter).unwrap().lines().count(),
+        1,
+        "the commands stage ran again"
+    );
+    assert_eq!(
+        fs::read(verdicts.join("commands.json")).expect("the verdict"),
+        commands_verdict,
+        "the commands verdict was rewritten"
+    );
+    assert_eq!(fake.count(), 2, "the review did not resume");
+    let review = Verdict::read(&verdicts.join("review.json")).expect("the review verdict");
+    assert!(review.is_pass(), "{:?}", review.reason);
+}
+
+/// SIGTERM to the gate reaches both stages of the pair. Both children die at once; one the
+/// gate misses lives until the 10 s `cancel_grace_secs` runs out, past this test's deadline.
+/// Mutation: forward the stop to one stage's group only.
+#[test]
+fn a_signal_to_the_gate_stops_both_stages_of_the_pair() {
+    let repo = Repo::new("run-pair-stop");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "pair-stop");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    review_stage(&repo);
+    let commands_pid_file = repo.root.join("commands.pid");
+    commands(
+        &repo,
+        &format!("echo $$ > '{}' && sleep 30", commands_pid_file.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+    let fake = FakeReview::new(
+        "run-pair-stop-fake",
+        &[review_message("too slow", &[], &[])],
+        30,
+    );
+    let env = [(
+        REVIEW_PROGRAM_ENV,
+        fake.program().to_string_lossy().into_owned(),
+    )];
+
+    let watch =
+        repo.spawn_in_own_group_with_env(&["arc", "run", "--watch", "--interval", "30"], &env);
+    wait_for(&commands_pid_file);
+    wait_until(Duration::from_secs(60), "the review session", || {
+        fake.started(1).is_file()
+    });
+    let commands_pid: u32 = fs::read_to_string(&commands_pid_file)
+        .expect("commands.pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let review_pid = fake.pid(1);
+    assert!(
+        process_alive(commands_pid),
+        "the commands stage did not start"
+    );
+    assert!(process_alive(review_pid), "the review stage did not start");
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill -TERM");
+    assert!(sent.success(), "kill -TERM");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let (commands_dead, review_dead) = loop {
+        let commands_dead = !process_alive(commands_pid);
+        let review_dead = !process_alive(review_pid);
+        if commands_dead && review_dead {
+            break (commands_dead, review_dead);
+        }
+        if Instant::now() >= deadline {
+            // Leave nothing behind; the assertions below name the survivor.
+            signal_group(commands_pid, libc::SIGKILL);
+            signal_group(review_pid, libc::SIGKILL);
+            break (commands_dead, review_dead);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(commands_dead, "the commands stage outlived the stop");
+    assert!(review_dead, "the review stage outlived the stop");
+
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
