@@ -4,7 +4,7 @@ description: The files arc keeps: config.toml, plan and task files, and the .rad
 
 # arc: the files
 
-This page covers the files arc keeps; the commands are in [`arc`](arc.md), the scheduling loop is in [`arc-loop`](arc-loop.md), and the gate and its failures are in [`arc-gate`](arc-gate.md).
+This page covers the files arc keeps; the commands are in [`arc`](index.md), the scheduling loop is in [`arc/loop`](loop.md), and the gate and its failures are in [`arc/gate`](gate.md).
 
 ## `config.toml`
 
@@ -27,9 +27,9 @@ A key you leave out takes its default.
 | `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. A review rework counts; a conflict rework that arc writes itself does not. |
 | `limits.max_conflict_rework` | integer | `3` | 0 or more | When a verification or integration stage fails with a conflict with main: how many conflict reworks arc writes in a row for one task. While it has written fewer, the conflict gets the brief; once it has written the limit, arc writes no brief, the task stays in `review.rework_pending` and waits for you. The lead's rework and an attempt that does not end in a conflict set the run back to `0`. `0` writes none, so the first conflict waits for you; `1` writes exactly one. |
 | `limits.max_auto_reverify` | integer | `2` | 0 or more; `0` turns the feature off | When a `commands` or integration command failure waits for a moved main: how many automatic reverifies one task gets. A hand `radian arc reverify` neither checks the count nor uses it up. |
-| `limits.max_gate_deaths` | integer | `2` | 0 or more; `0` stops at the first death | When a background gate wrote `running` and then died for the same attempt and inputs: how many deaths it gets before the record becomes `died` and no gate starts for those inputs. The gate is started `1 + max_gate_deaths` times at most. A gate the scheduling loop stopped itself is `interrupted`, not a death (see [the gate run](arc-gate.md#the-gate-run)). |
+| `limits.max_gate_deaths` | integer | `2` | 0 or more; `0` stops at the first death | When a background gate wrote `running` and then died for the same attempt and inputs: how many deaths it gets before the record becomes `died` and no gate starts for those inputs. The gate is started `1 + max_gate_deaths` times at most. A gate the scheduling loop stopped itself is `interrupted`, not a death (see [the gate run](gate.md#the-gate-run)). |
 | `worker.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | Before `start`, each `run` pass and `confirm` act, the line the worker would get is parsed with the `radian exec` parser; a rejected line exits `3`. Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. |
-| `worker.rework_session` | string | `"fresh"` | `fresh`, `resume` | The session each worker attempt runs in. `fresh`: every attempt, a retry or a rework, starts a session of its own, `<task>-<attempt>`, and an attempt after the first gets a hand-off section in front of the brief ([what a rework receives](arc.md#radian-arc-start-task)). `resume`: one session per task, whose id is the task id, created by the first attempt that reaches the model and continued by every later one. A change takes effect at the next attempt. |
+| `worker.rework_session` | string | `"fresh"` | `fresh`, `resume` | The session each worker attempt runs in. `fresh`: every attempt, a retry or a rework, starts a session of its own, `<task>-<attempt>`, and an attempt after the first gets a hand-off section in front of the brief ([what a rework receives](index.md#radian-arc-start-task)). `resume`: one session per task, whose id is the task id, created by the first attempt that reaches the model and continued by every later one. A change takes effect at the next attempt. |
 | `ids.plan_prefix` | string | `"PL"` | 1 to 4 ASCII uppercase letters; must differ from `ids.task_prefix` | When a plan id is created. |
 | `ids.task_prefix` | string | `"TK"` | 1 to 4 ASCII uppercase letters; must differ from `ids.plan_prefix` | When a task id is created. |
 | `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
@@ -41,9 +41,9 @@ A key you leave out takes its default.
 | `gate.review.first.timeout_secs` | integer | not set: `gate.review.timeout_secs` | seconds; `1` or more | The wall-time limit of one first-review session. Unset, the first review uses `gate.review.timeout_secs`. |
 | `gate.review.prompt_file` | string | not set: only the built-in prompt | a path relative to the repository root, without `..` | Appended to the built-in review prompt when the `review` stage runs. |
 | `gate.review.timeout_secs` | integer | `900` | seconds; `0` waits forever | The wall-time limit of one review session. |
-| `gate.review.propose_followups` | boolean | `true` | `true`, `false` | When a task merges: `true` lets arc add one `todo.proposed` task with the items every review round of the task suggested but the merge left unfixed (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)); `false` turns it off. The lead's MCP `add_task` on a confirmed plan is not affected. |
+| `gate.review.propose_followups` | boolean | `true` | `true`, `false` | When a task merges: `true` lets arc add one `todo.proposed` task with the items every review round of the task suggested but the merge left unfixed (see [The review's follow-up](gate.md#the-reviews-follow-up)); `false` turns it off. The lead's MCP `add_task` on a confirmed plan is not affected. |
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
-| `gate.profiles.<name>.stages` | array of tables | `[{ stage = "commands", required = true }, { stage = "human", required = true }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs. The list's order is the round's order; when it lists both `commands` and `review`, those two start at the same time and the round is decided in the list's order ([the gate run](arc-gate.md#the-gate-run)). `integration` is not a profile stage: it always runs at merge. |
+| `gate.profiles.<name>.stages` | array of tables | `[{ stage = "commands", required = true }, { stage = "human", required = true }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs. The list's order is the round's order; when it lists both `commands` and `review`, those two start at the same time and the round is decided in the list's order ([the gate run](gate.md#the-gate-run)). `integration` is not a profile stage: it always runs at merge. |
 | `gate.profiles.<name>.commands` | array of strings | `[]` | Shell command lines | The `commands` stage runs them in order on its own checkout. |
 | `gate.profiles.<name>.before_attempt` | array of strings | `["merge-main"]` | `merge-main`, or `[]` for no step | Before each attempt that reuses the worktree. `merge-main` merges the remote main into the branch. |
 | `gate.profiles.<name>.key_commands` | array of strings | `[]` | Shell command lines | The integration stage runs them on the merge candidate. |
@@ -64,7 +64,7 @@ When a journal of that name already exists (a gate was started again for the sam
 
 `<repository>/.radian/arc/worker-brief.md` is the repository's standing worker instructions.
 It is optional.
-[`radian arc init`](arc.md#radian-arc-init-track) writes it with this default when the file does not exist, and never overwrites a file you edited:
+[`radian arc init`](index.md#radian-arc-init-track) writes it with this default when the file does not exist, and never overwrites a file you edited:
 
 ```text
 Work only on the current branch.
@@ -81,14 +81,14 @@ That covers a first attempt, a rework (fresh or resume), and a follow-up task ar
 The wrapper reads the file when it composes an attempt's brief, so an edit takes effect at the next attempt; no restart is needed.
 A missing file and one that is empty after trimming change nothing.
 
-A file over 32 KiB (32,768 bytes), a file that is not UTF-8, a path that is not a regular file (a FIFO, a directory, a device), and a read error are not appended: the attempt runs without the section, its record carries one line `worker-brief.md skipped: <reason>`, and [`radian arc show`](arc.md#radian-arc-show-id-json) prints it as `attempt_note`.
+A file over 32 KiB (32,768 bytes), a file that is not UTF-8, a path that is not a regular file (a FIFO, a directory, a device), and a read error are not appended: the attempt runs without the section, its record carries one line `worker-brief.md skipped: <reason>`, and [`radian arc show`](index.md#radian-arc-show-id-json) prints it as `attempt_note`.
 The worker never reads the file itself: its sandbox denies `.radian/arc/`, and the wrapper puts the content on the worker's stdin.
 
 ## Plan and task files
 
 A plan file is `plans/<id>.md`; a task file is `tasks/<id>.md`.
 Both are front matter between two `---` lines, then a body.
-arc is the only writer; you change them with [the `radian arc` subcommands](arc.md), and `adopt` after a hand edit.
+arc is the only writer; you change them with [the `radian arc` subcommands](index.md), and `adopt` after a hand edit.
 
 An id is a prefix of 1 to 4 uppercase ASCII letters, a four-digit number, a dash, and a slug (`PL0001-first`, `TK0001-work`).
 `[ids] plan_prefix` (default `PL`) and `[ids] task_prefix` (default `TK`) set the two prefixes; they must differ, and a prefix that is empty, not 1 to 4 uppercase letters, or equal to the other is refused by name when `config.toml` is read.
@@ -116,7 +116,7 @@ The body is the request text, then a `## Change records` section.
 Each change record is a `### <UTC time>` line (the shape `YYYY-MM-DDTHH:MM:SSZ`), a blank line, and the text of the change.
 A confirmed plan gains records only; a draft plan may have its request text replaced, which keeps the records below it.
 A cancelled plan takes no change record: it is final.
-`priority` is written only once you set it with [`radian arc priority`](arc.md#radian-arc-priority-plan-priority); until then the field is absent and the plan reads as `P3`, so an older plan file is written back unchanged.
+`priority` is written only once you set it with [`radian arc priority`](index.md#radian-arc-priority-plan-priority); until then the field is absent and the plan reads as `P3`, so an older plan file is written back unchanged.
 
 ### Task fields
 
@@ -164,10 +164,10 @@ The MCP `update_task` tool replaces the original brief and keeps every rework se
 | `failed` | `exhausted`, `cancelled`, `irrecoverable` |
 
 A new task is `todo` / `ready`.
-A `todo` / `retry_wait` task is claimed at once by `radian arc start`, without waiting for its `retry_at`; the scheduling loop waits for `retry_at` (see [`radian arc start`](arc.md#radian-arc-start-task)).
+A `todo` / `retry_wait` task is claimed at once by `radian arc start`, without waiting for its `retry_at`; the scheduling loop waits for `retry_at` (see [`radian arc start`](index.md#radian-arc-start-task)).
 A task the lead adds to a confirmed plan (MCP `add_task`) or arc proposes from a merged task's review is `todo` / `proposed`: the scheduling loop never claims it and `start` refuses it until you run `radian arc confirm <task>`.
 A plan is done when all of its tasks are merged; `done` is not a stored plan status.
-A `cancelled` plan is final: `radian arc cancel <plan>` sets it after ending every open task of the plan (see [`radian arc cancel`](arc.md#radian-arc-cancel-id)).
+A `cancelled` plan is final: `radian arc cancel <plan>` sets it after ending every open task of the plan (see [`radian arc cancel`](index.md#radian-arc-cancel-id)).
 No command confirms it, adds a task to it, changes its `auto` or `priority`, resets its budget, or starts, reverifies or gates its tasks, and `list` hides it unless `--all`.
 
 ### The review states
@@ -207,7 +207,7 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `ledger/tasks/<id>.json` | The same for a task. |
 | `ledger/tasks/<id>.last.md` | The task as arc last wrote it. |
 | `runs/<task>/attempts/<attempt id>/` | One attempt's output: the worker's `result.jsonl`, `stderr.log`, `execution.json`, the wrapper's `attempt_finished.json`, `signal.json` when the wrapper signalled the worker, arc's `attempt_result.json`, and `paused.json` when the automatic rework limit paused the plan. |
-| `runs/<task>/gate.json` | The background gate's record. Its `status` is one of `started`, `running`, `done`, `refused`, `error`, `no_record`, `died` and `interrupted`: `started` while a pass has started the gate but the process has not written its own record yet, `running` while it runs, then `done`, `refused` or `error`; `no_record` when the process exited without writing any record; `died` when it wrote `running` and died more often than [`limits.max_gate_deaths`](arc-files.md#configtoml) allows for one attempt and one set of inputs; `interrupted` when the scheduling loop stopped it itself. It keeps the attempt it runs for, the inputs the gate was started with (`started`, `refused`, `no_record` and `died`), and, across restarts of a dying gate, its `deaths`. |
+| `runs/<task>/gate.json` | The background gate's record. Its `status` is one of `started`, `running`, `done`, `refused`, `error`, `no_record`, `died` and `interrupted`: `started` while a pass has started the gate but the process has not written its own record yet, `running` while it runs, then `done`, `refused` or `error`; `no_record` when the process exited without writing any record; `died` when it wrote `running` and died more often than [`limits.max_gate_deaths`](files.md#configtoml) allows for one attempt and one set of inputs; `interrupted` when the scheduling loop stopped it itself. It keeps the attempt it runs for, the inputs the gate was started with (`started`, `refused`, `no_record` and `died`), and, across restarts of a dying gate, its `deaths`. |
 | `runs/<task>/gate.log` | The background gate process's own output. |
 | `runs/<task>/auto_reverify.json` | The `(head_sha, remote main)` pairs a scheduling pass already re-verified for the task, and the text of the last `limits.max_auto_reverify` stop. |
 | `runs/<task>/conflict_rework.json` | How many conflict reworks arc has written for the task in a row. The lead's rework and an attempt that does not end in a conflict set it back to `0`. |
