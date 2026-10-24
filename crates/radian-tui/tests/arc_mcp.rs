@@ -1,4 +1,4 @@
-//! `radian arc mcp` through the real binary and a real MCP client on stdio: the six tools,
+//! `radian arc mcp` through the real binary and a real MCP client on stdio: the seven tools,
 //! the plan and task rules they keep, and the reasons they refuse (ADR 0048 decisions 3, 6
 //! and 11).
 
@@ -224,7 +224,7 @@ fn set_state(scratch: &Scratch, task: &str, state: TaskState, phase: &str) {
 }
 
 #[tokio::test]
-async fn tools_list_returns_exactly_the_six_lead_tools() {
+async fn tools_list_returns_exactly_the_seven_lead_tools() {
     let scratch = fixture("mcp-tools");
     let session = Session::open(&scratch).await;
 
@@ -244,6 +244,7 @@ async fn tools_list_returns_exactly_the_six_lead_tools() {
             "list".to_owned(),
             "show".to_owned(),
             "update_plan".to_owned(),
+            "update_task".to_owned(),
         ],
         "the full set: no owner action is a tool"
     );

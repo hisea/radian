@@ -2769,6 +2769,23 @@ afterwards.
 
 4/4 caught.
 
+## TK0086: the board's columns get open frames (2026-10-24, branch `work/TK0086-tui-board-column-frames`)
+
+The board drew its columns as bare text. Each column is now one open frame (the plans page's
+`frame_top`/`rail`/`frame_bottom`), cards are separated by one `┄` divider inside it, the
+selected card's `❯` sits in the marker column left of the rail, and the medium and narrow
+layouts frame every group, one blank container-owned row apart. Each mutation was applied by hand to `board.rs`, the named test was
+run alone with `cargo nextest run -p radian-tui --locked --profile sandbox`, and the file was
+restored from a copy under `.radian/backup/` with `cp`, then compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0086-M1 | a divider follows the last card as well (`group_lines` pushes one before `frame_bottom`) | ✅ 1 failed | `arc_board::a_divider_sits_between_two_cards_and_never_after_the_last` (the divider rows are `[first+3, second+3, third+3]`) |
+| TK0086-M2 | the cursor is drawn inside the rail (`  │ ❯ ` instead of `❯ │ `) | ✅ 1 failed | `arc_board::the_cursor_sits_left_of_the_rail_on_the_selected_cards_first_line` (`left: ' '`, `right: '❯'` at column 1) |
+| TK0086-M3 | a pane's second group loses its own top and bottom, so two groups sit in one frame | ✅ 1 failed | `arc_board::a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` (`no row contains DOING`: the pane's second frame heading is gone) |
+| TK0086-M4 | the blank row between two group frames is dropped (`draw_groups` appends a group's lines without the container separator) | ✅ 1 failed | `arc_board::a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` (the next frame starts at `bottom + 1`, not `bottom + 2`) |
+
+4/4 caught.
 ## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
 
 The diff tab's source line read one bool from `TaskDiff`, so both reasons the merge base is
