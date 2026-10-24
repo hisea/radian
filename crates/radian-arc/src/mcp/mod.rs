@@ -8,34 +8,88 @@
 //!
 //! The seven tools are in [`tools`]; there is no tool to confirm, start, merge, reject,
 //! change the auto level, or approve (decision 11).
+//!
+//! With `--claude-experimental` (decision 11) the server also declares the `claude/channel`
+//! capability and pushes task transitions to the lead over the same stdio connection: it
+//! reads the store every [`CHANNEL_INTERVAL_SECS`] seconds and sends one
+//! [`CHANNEL_METHOD`] notification for each task whose `state.phase` entered
+//! [`CHANNEL_PHASES`]. The channel is one-way; the read tools are how the lead learns the
+//! details.
 
 pub mod tools;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub use tools::{TOOLS, ToolDef, names};
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, CustomNotification,
+    DiscoverResult, Implementation, InitializeResult, ListToolsResult, PaginatedRequestParams,
+    ProtocolVersion, ServerCapabilities, ServerNotification, Tool,
 };
 use rmcp::service::RequestContext;
-use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
+use rmcp::{ErrorData, Peer, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{Map, Value, json};
 
+use crate::store::model::TaskFile;
 use crate::store::{self, Error, Store};
+
+/// The experiment capability Claude Code reads a channel declaration from.
+pub const CHANNEL_CAPABILITY: &str = "claude/channel";
+/// The capability the server does **not** declare: it never relays permission prompts.
+pub const CHANNEL_PERMISSION_CAPABILITY: &str = "claude/channel/permission";
+/// The notification method a channel event is sent with.
+pub const CHANNEL_METHOD: &str = "notifications/claude/channel";
+/// How often the poller reads every plan and its tasks.
+pub const CHANNEL_INTERVAL_SECS: u64 = 5;
+/// The newest protocol version the flagged server supports. A revision after this one (such
+/// as `2026-07-28`) cannot carry channel messages, so Claude Code does not register a server
+/// that negotiates it as a channel.
+pub const CHANNEL_MAX_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_25;
+/// The phases that cost the lead a turn when a task enters them. Every other change goes
+/// unsent on purpose: each event starts one of the lead's model turns. This is the closed
+/// list the manual's drift test reads.
+pub const CHANNEL_PHASES: &[&str] = &[
+    "todo.proposed",
+    "review.awaiting_human",
+    "review.rework_pending",
+    "done.merged",
+    "failed.exhausted",
+    "failed.cancelled",
+    "failed.irrecoverable",
+];
+
+/// The paragraph the flagged server adds to its `instructions`: what the lead receives and
+/// how to read the details.
+const CHANNEL_INSTRUCTIONS: &str = "Task transitions from arc arrive as `<channel>` blocks, one \
+     per transition, with the meta attributes `task`, `plan`, `state`, `phase` and `previous`. \
+     They are one-way: there is no reply tool. Read the details with `show`.";
 
 /// The MCP server for one repository's arc store.
 #[derive(Debug, Clone)]
 pub struct ArcServer {
     store: Store,
+    claude_experimental: bool,
 }
 
 impl ArcServer {
-    /// A server over `store`.
+    /// A server over `store`, without the channel: today's tool server.
     pub fn new(store: Store) -> Self {
-        Self { store }
+        Self {
+            store,
+            claude_experimental: false,
+        }
+    }
+
+    /// A server over `store` that also pushes task transitions to the lead
+    /// (`--claude-experimental`).
+    pub fn with_channel(store: Store) -> Self {
+        Self {
+            store,
+            claude_experimental: true,
+        }
     }
 
     /// Answers one `tools/call`: the tool's JSON result, or the reason it failed. The reason
@@ -151,13 +205,57 @@ fn reason(error: Error) -> String {
 
 impl ServerHandler for ArcServer {
     fn get_info(&self) -> InitializeResult {
-        InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+        let mut capabilities = ServerCapabilities::builder().enable_tools().build();
+        let mut instructions =
+            "arc is the plan and task backlog of this repository. Write it with these \
+             tools. Confirming a plan, starting a task, merging, and the auto level are \
+             the owner's; you have no tool for them."
+                .to_owned();
+        if self.claude_experimental {
+            capabilities.experimental = Some(BTreeMap::from([(
+                CHANNEL_CAPABILITY.to_owned(),
+                Map::new(),
+            )]));
+            instructions.push_str("\n\n");
+            instructions.push_str(CHANNEL_INSTRUCTIONS);
+        }
+        InitializeResult::new(capabilities)
             .with_server_info(Implementation::new("radian-arc", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-                "arc is the plan and task backlog of this repository. Write it with these \
-                 tools. Confirming a plan, starting a task, merging, and the auto level are \
-                 the owner's; you have no tool for them.",
-            )
+            .with_instructions(instructions)
+    }
+
+    /// Without the flag the server advertises every version this SDK knows, as it always
+    /// has. With it the ceiling is the newest revision that carries channel messages: a
+    /// later revision makes Claude Code decline to register the server as a channel.
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        if self.claude_experimental {
+            Cow::Borrowed(ProtocolVersion::known_up_to(&CHANNEL_MAX_VERSION))
+        } else {
+            Cow::Borrowed(ProtocolVersion::KNOWN_VERSIONS)
+        }
+    }
+
+    /// `server/discover` is the probe that advertises the protocol versions. A flagged
+    /// server has no version at or after `2026-07-28`, so the bootstrap probe is refused
+    /// with the unsupported-protocol-version error instead of answered.
+    fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<DiscoverResult, ErrorData>> + '_ {
+        if !self.claude_experimental {
+            return std::future::ready(Ok(DiscoverResult::from_server_info(
+                self.supported_protocol_versions().into_owned(),
+                self.get_info(),
+            )));
+        }
+        let requested = context
+            .meta
+            .protocol_version()
+            .unwrap_or(ProtocolVersion::V_2026_07_28);
+        std::future::ready(Err(ErrorData::unsupported_protocol_version(
+            requested,
+            &self.supported_protocol_versions(),
+        )))
     }
 
     fn list_tools(
@@ -195,27 +293,155 @@ impl ServerHandler for ArcServer {
     }
 }
 
+/// One task as the previous poll read it. `full` is `state.phase`, the value the channel
+/// compares and reports; `state` and `phase` are its two parts for the meta.
+#[derive(Debug, Clone)]
+struct TaskSnapshot {
+    plan: String,
+    state: String,
+    phase: String,
+    full: String,
+}
+
+/// Every task the store currently holds, by task id. The read is the same read-only call
+/// the CLI's `list` uses: it takes no lock.
+fn snapshot(store: &Store) -> Result<BTreeMap<String, TaskSnapshot>, Error> {
+    let mut tasks = BTreeMap::new();
+    for view in store.plans()? {
+        // A file someone changed outside arc makes the round fail: arc refuses to act on it,
+        // and the channel sends nothing from a read it cannot trust. The next round tries
+        // again (the owner may adopt it).
+        if view.plan.changed_outside_arc {
+            return Err(Error::ChangedOutsideArc(view.plan.item.id.clone()));
+        }
+        for task in &view.tasks {
+            if task.changed_outside_arc {
+                return Err(Error::ChangedOutsideArc(task.item.id.clone()));
+            }
+            let state = task.item.state.as_str().to_owned();
+            let phase = task.item.phase.clone();
+            tasks.insert(
+                task.item.id.clone(),
+                TaskSnapshot {
+                    plan: view.plan.item.id.clone(),
+                    full: format!("{state}.{phase}"),
+                    state,
+                    phase,
+                },
+            );
+        }
+    }
+    Ok(tasks)
+}
+
+/// The events to send, with the phase each task had before (`new` for a task the previous
+/// read did not have). `previous` is a task map, not a phase map, so a task that moved to a
+/// different plan is still one task.
+fn transitions(
+    previous: &BTreeMap<String, TaskSnapshot>,
+    current: &BTreeMap<String, TaskSnapshot>,
+) -> Vec<(String, TaskSnapshot, String)> {
+    let mut events = Vec::new();
+    for (task_id, task) in current {
+        let before = previous
+            .get(task_id)
+            .map(|task| task.full.clone())
+            .unwrap_or_else(|| "new".to_owned());
+        if before == task.full || !CHANNEL_PHASES.contains(&task.full.as_str()) {
+            continue;
+        }
+        events.push((task_id.clone(), task.clone(), before));
+    }
+    events
+}
+
+/// The event's second line: the same `rework_reason` `show --json` gives, when the task has
+/// one. A read that fails leaves it off; the transition is still sent.
+fn rework_reason(store: &Store, task_id: &str) -> Option<String> {
+    let task: TaskFile = store.load_task(task_id).ok()?.item;
+    crate::review::rework_reason(store, &task)
+}
+
+/// Sends one `notifications/claude/channel` event. A send that fails means the client closed
+/// the connection; the poller keeps going until `serve` aborts it.
+async fn send_event(
+    store: &Store,
+    peer: &Peer<RoleServer>,
+    task_id: &str,
+    task: &TaskSnapshot,
+    previous: &str,
+) {
+    let mut content = format!("{task_id} {previous} -> {}", task.full);
+    if let Some(reason) = rework_reason(store, task_id) {
+        content.push('\n');
+        content.push_str(&reason);
+    }
+    let params = json!({
+        "content": content,
+        "meta": {
+            "task": task_id,
+            "plan": task.plan,
+            "state": task.state,
+            "phase": task.phase,
+            "previous": previous,
+        },
+    });
+    let notification = CustomNotification::new(CHANNEL_METHOD, Some(params));
+    let _ = peer
+        .send_notification(ServerNotification::CustomNotification(notification))
+        .await;
+}
+
+/// The channel's poller: read once as the baseline (nothing is sent for it), then every
+/// [`CHANNEL_INTERVAL_SECS`] seconds. A failed read sends nothing that round and is retried
+/// next round; it never ends the server and prints nothing.
+async fn poll(store: Store, peer: Peer<RoleServer>) {
+    let mut previous: Option<BTreeMap<String, TaskSnapshot>> = None;
+    loop {
+        if let Ok(current) = snapshot(&store) {
+            if let Some(before) = &previous {
+                for (task_id, task, phase) in transitions(before, &current) {
+                    send_event(&store, &peer, &task_id, &task, &phase).await;
+                }
+            }
+            previous = Some(current);
+        }
+        tokio::time::sleep(Duration::from_secs(CHANNEL_INTERVAL_SECS)).await;
+    }
+}
+
 /// Serves `store` over standard input and output until the client closes the connection. A
-/// tool error never stops the server: it is answered as that call's error result.
-pub async fn serve(store: Store) -> Result<(), String> {
-    let service = ArcServer::new(store)
+/// tool error never stops the server: it is answered as that call's error result. With
+/// `claude_experimental` the channel's poller runs beside the service and stops with it.
+pub async fn serve(store: Store, claude_experimental: bool) -> Result<(), String> {
+    let server = if claude_experimental {
+        ArcServer::with_channel(store.clone())
+    } else {
+        ArcServer::new(store.clone())
+    };
+    let service = server
         .serve(rmcp::transport::stdio())
         .await
         .map_err(|error| format!("the MCP handshake failed: {error}"))?;
-    service
-        .waiting()
-        .await
-        .map_err(|error| format!("the MCP server stopped unexpectedly: {error}"))?;
+    let poller = claude_experimental.then(|| {
+        let peer = service.peer().clone();
+        tokio::spawn(poll(store.clone(), peer))
+    });
+    let result = service.waiting().await;
+    if let Some(poller) = poller {
+        poller.abort();
+    }
+    result.map_err(|error| format!("the MCP server stopped unexpectedly: {error}"))?;
     Ok(())
 }
 
 /// [`serve`] on a runtime of its own, for the synchronous CLI entry.
-pub fn run(store: Store) -> Result<(), String> {
+pub fn run(store: Store, claude_experimental: bool) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("cannot start the MCP runtime: {error}"))?;
-    runtime.block_on(serve(store))
+    runtime.block_on(serve(store, claude_experimental))
 }
 
 /// One call's arguments, typed. Every error names the argument and what is wrong with it,

@@ -711,7 +711,14 @@ enum ArcCommand {
 
     /// Serve the lead's MCP tools over standard input and output. A lead registers this
     /// command; a person does not run it.
-    Mcp,
+    Mcp {
+        /// Push task transitions to the lead over Claude Code's channel extension: the
+        /// server declares `claude/channel`, narrows its supported protocol versions to
+        /// `2025-11-25` and below, and sends `notifications/claude/channel` for the tracked
+        /// transitions. Off: the server is the plain tool server and sends nothing.
+        #[arg(long)]
+        claude_experimental: bool,
+    },
 }
 
 /// The `radian arc add` subcommands.
@@ -803,7 +810,11 @@ impl ArcCommand {
             ArcCommand::Serve { interval } => ArcRun::Serve {
                 interval: interval.unwrap_or(radian_arc::run::DEFAULT_INTERVAL_SECS),
             },
-            ArcCommand::Mcp => ArcRun::Mcp,
+            ArcCommand::Mcp {
+                claude_experimental,
+            } => ArcRun::Mcp {
+                claude_experimental,
+            },
             // `work` is the trusted wrapper and `gate` is the background gate: not store
             // operations. `run_arc` dispatches both before this conversion.
             ArcCommand::Work { .. } | ArcCommand::Gate { .. } => return None,
@@ -3098,6 +3109,49 @@ mod tests {
                     tool.name
                 );
             }
+        }
+    }
+
+    /// Every phase the channel reports, the notification method, the capability and the
+    /// version ceiling appear on `arc/mcp.md`, with the polling interval. The source is
+    /// `radian_arc::mcp`, so a phase added to or dropped from the sent set fails here.
+    /// Mutation: drop a phase from the page → this fails naming it.
+    #[test]
+    fn every_channel_phase_appears_in_arc_mcp_md() {
+        let doc = arc_mcp_md();
+        for (what, needle) in [
+            ("the notification method", radian_arc::mcp::CHANNEL_METHOD),
+            (
+                "the channel capability",
+                radian_arc::mcp::CHANNEL_CAPABILITY,
+            ),
+            (
+                "the permission capability it does not declare",
+                radian_arc::mcp::CHANNEL_PERMISSION_CAPABILITY,
+            ),
+            (
+                "the version ceiling",
+                radian_arc::mcp::CHANNEL_MAX_VERSION.as_str(),
+            ),
+        ] {
+            assert!(doc.contains(needle), "arc/mcp.md does not name {what}");
+        }
+        assert!(
+            doc.contains(&format!(
+                "every {} seconds",
+                radian_arc::mcp::CHANNEL_INTERVAL_SECS
+            )),
+            "arc/mcp.md does not name the polling interval"
+        );
+        assert!(
+            !radian_arc::mcp::CHANNEL_PHASES.is_empty(),
+            "the set is sent"
+        );
+        for phase in radian_arc::mcp::CHANNEL_PHASES {
+            assert!(
+                doc.contains(&format!("`{phase}`")),
+                "arc/mcp.md is missing the channel phase `{phase}`"
+            );
         }
     }
 

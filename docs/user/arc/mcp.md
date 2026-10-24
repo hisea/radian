@@ -47,6 +47,58 @@ A tool from a project `.mcp.json` asks before running under the `workspace` tier
 The server takes only `state.lock`, never `runner.lock`, so the lead can add tasks while a scheduling loop runs.
 Every tool is one of the store's transactions: a plan or task file that changed outside arc is refused with that reason, and the tool call fails without writing anything.
 
+### The claude-experimental flag
+
+`radian arc mcp --claude-experimental` turns the server into a channel: a client that understands Claude Code's channel extension starts a turn with each task transition it receives.
+The flag is a boolean, and it is off by default; without it the server is exactly the server on this page: the same tools, the same capabilities, the same instructions, and no notification is ever sent.
+
+With the flag the `initialize` answer carries `capabilities.experimental["claude/channel"] = {}`.
+It does not declare `claude/channel/permission`: the server never relays permission prompts.
+
+The supported protocol versions are the known versions up to and including `2025-11-25`.
+A `server/discover` request is answered with the unsupported-protocol-version error, and an `initialize` that asks for `2026-07-28` is answered with `2025-11-25`.
+That is what makes Claude Code register the server as a channel: a revision at or after `2026-07-28` cannot carry channel messages.
+
+The server reads every plan and its tasks once after the handshake.
+That read is the baseline and sends nothing, so a task that already is `review.awaiting_human` when the session opens is not reported.
+It then reads every plan and its tasks again every 5 seconds, with the read-only store call `list` uses, and takes no lock.
+A read that fails (a file changed outside arc, a parse error, a lock it cannot get) sends nothing that round and tries again next round; it never ends the server and prints nothing.
+
+One event is sent per task whose `state.phase` differs from the previous read and whose new value is one of these:
+
+`todo.proposed`, `review.awaiting_human`, `review.rework_pending`, `done.merged`, `failed.exhausted`, `failed.cancelled`, `failed.irrecoverable`.
+
+A task that is new since the previous read counts as a transition from nothing.
+Every other change (`doing.*`, `review.verifying`, `review.integrating`, `todo.ready`, a title edit) sends nothing: each event costs the lead a model turn.
+
+The notification's method is `notifications/claude/channel`.
+`content` is one line `<task id> <previous state.phase or "new"> -> <state.phase>`, then, when the task has a `rework_reason` (the same text `show --json` gives, a reject note included), a second line with it.
+`meta` has exactly these keys, and every value is a string:
+
+| Key | Value |
+|---|---|
+| `task` | the task id |
+| `plan` | the plan id |
+| `state` | the new `state` |
+| `phase` | the new `phase` |
+| `previous` | the previous `state.phase`, or `new` |
+
+A meta key stays letters and underscores; Claude Code drops a key with any other character.
+The channel is one-way: there is no tool to reply to an event, and there is still no tool to confirm, start, merge, reject, approve, or change the auto level.
+The poller stops when the client closes the connection.
+
+The channel is the stdio connection to the lead's own process: no network and no new telemetry.
+
+Load it in an interactive Claude Code session with
+
+```sh
+claude --dangerously-load-development-channels server:arc
+```
+
+The name after `server:` is the name the server is registered under (here `arc`, from the registration above).
+A plain `--channels` accepts only Claude Code's own list of channel plugins, so the server's own name does not load through it.
+Claude Code ignores the flag in a non-interactive `-p` session, so the events reach only an interactive session.
+
 ### The tools
 
 | Tool | Parameters | Result |

@@ -92,8 +92,10 @@ pub enum Command {
     /// `radian arc serve [--interval <seconds>]`: the scheduling loop, a pass repeated until
     /// SIGINT or SIGTERM.
     Serve { interval: u64 },
-    /// `radian arc mcp`: the lead's MCP server on standard input and output.
-    Mcp,
+    /// `radian arc mcp [--claude-experimental]`: the lead's MCP server on standard input and
+    /// output. The flag pushes task transitions to the lead over Claude Code's channel
+    /// extension (ADR 0048 decision 11).
+    Mcp { claude_experimental: bool },
 }
 
 /// Runs one invocation and returns the process exit code.
@@ -124,7 +126,9 @@ pub fn run(command: &Command) -> u8 {
         Command::Reject { task, note } => reject(task, note),
         Command::Run => run_loop(),
         Command::Serve { interval } => serve_loop(*interval),
-        Command::Mcp => mcp(),
+        Command::Mcp {
+            claude_experimental,
+        } => mcp(*claude_experimental),
     };
     match result {
         Ok(code) => code,
@@ -1002,9 +1006,9 @@ fn serve_loop(interval: u64) -> Result<u8, Error> {
 
 /// `radian arc mcp`: the lead's MCP server, until its client closes the connection. Without
 /// setup `open` refuses with the same line and exit code as every other subcommand.
-fn mcp() -> Result<u8, Error> {
+fn mcp(claude_experimental: bool) -> Result<u8, Error> {
     let store = open()?;
-    crate::mcp::run(store).map_err(Error::Failed)?;
+    crate::mcp::run(store, claude_experimental).map_err(Error::Failed)?;
     Ok(Exit::Ok.code())
 }
 

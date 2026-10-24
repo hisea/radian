@@ -3,16 +3,19 @@
 //! and 11).
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use radian_arc::store::Store;
 use radian_arc::store::model::TaskState;
-use rmcp::model::{CallToolRequestParams, CallToolResult};
-use rmcp::service::RunningService;
+use rmcp::model::{CallToolRequestParams, CallToolResult, CustomNotification};
+use rmcp::service::{NotificationContext, RunningService};
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::{Value, json};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// A temp directory that removes itself.
 struct Scratch {
@@ -92,36 +95,95 @@ fn fixture(label: &str) -> Scratch {
     scratch
 }
 
-/// The MCP client: no capabilities, so the server can never wait on it.
+/// The MCP client: no capabilities, so the server can never wait on it. It records every
+/// custom notification, which is how the channel is observed.
 #[derive(Clone)]
-struct TestClient;
+struct TestClient {
+    events: UnboundedSender<CustomNotification>,
+}
 
-impl ClientHandler for TestClient {}
+impl ClientHandler for TestClient {
+    fn on_custom_notification(
+        &self,
+        notification: CustomNotification,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        let _ = self.events.send(notification);
+        std::future::ready(())
+    }
+}
 
 /// One `radian arc mcp` process and the client connected to it.
 struct Session {
     service: RunningService<RoleClient, TestClient>,
     child: tokio::process::Child,
+    events: UnboundedReceiver<CustomNotification>,
 }
 
 impl Session {
+    /// The plain server: no `--claude-experimental`.
     async fn open(scratch: &Scratch) -> Self {
+        Self::open_flagged(scratch, false).await
+    }
+
+    /// The server, with the channel when `channel` is set.
+    async fn open_flagged(scratch: &Scratch, channel: bool) -> Self {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_radian"));
         command
             .current_dir(scratch.repo())
             .env("RADIAN_HOME", scratch.path("home"))
-            .args(["arc", "mcp"])
+            .args(["arc", "mcp"]);
+        if channel {
+            command.arg("--claude-experimental");
+        }
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         let mut child = command.spawn().expect("`radian arc mcp` starts");
         let stdin = child.stdin.take().expect("the server's stdin is piped");
         let stdout = child.stdout.take().expect("the server's stdout is piped");
-        let service = TestClient
+        let (events, receiver) = unbounded_channel();
+        let service = TestClient { events }
             .serve((stdout, stdin))
             .await
             .expect("the MCP handshake succeeds");
-        Self { service, child }
+        Self {
+            service,
+            child,
+            events: receiver,
+        }
+    }
+
+    /// The server capabilities the handshake agreed on.
+    fn capabilities(&self) -> rmcp::model::ServerCapabilities {
+        self.service
+            .peer()
+            .peer_info()
+            .expect("the handshake records the server's capabilities")
+            .capabilities
+            .clone()
+    }
+
+    /// The wait for one channel event: up to 15 seconds, never a fixed sleep.
+    async fn next_event(&mut self) -> CustomNotification {
+        tokio::time::timeout(Duration::from_secs(15), self.events.recv())
+            .await
+            .expect("a channel event arrives within 15 seconds")
+            .expect("the event channel stays open")
+    }
+
+    /// Waits the given time and asserts that no event arrived. A negative check has to cover
+    /// at least one poll round; two rounds keep it stable on a loaded machine.
+    async fn no_event_for(&mut self, wait: Duration) {
+        match tokio::time::timeout(wait, self.events.recv()).await {
+            Err(_) => {}
+            Ok(Some(notification)) => panic!(
+                "expected no channel event, got {} {:?}",
+                notification.method, notification.params
+            ),
+            Ok(None) => panic!("the event channel closed"),
+        }
     }
 
     /// The tool names the server lists, sorted.
@@ -221,6 +283,110 @@ fn set_state(scratch: &Scratch, task: &str, state: TaskState, phase: &str) {
             Ok(())
         })
         .expect("the test moves the task");
+}
+
+/// Asserts one channel event for `task` and returns its content.
+fn expect_event(
+    notification: &CustomNotification,
+    task: &str,
+    plan: &str,
+    state: &str,
+    phase: &str,
+    previous: &str,
+) -> String {
+    assert_eq!(
+        notification.method,
+        radian_arc::mcp::CHANNEL_METHOD,
+        "the event method is the channel's"
+    );
+    let params = notification.params.as_ref().expect("the event has params");
+    let content = params["content"]
+        .as_str()
+        .expect("the event content is a string")
+        .to_owned();
+    let meta = params["meta"].as_object().expect("the meta is an object");
+    let mut keys: Vec<&str> = meta.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["phase", "plan", "previous", "state", "task"],
+        "the meta has exactly the five channel keys: {meta:?}"
+    );
+    for (key, value) in meta {
+        assert!(value.is_string(), "meta `{key}` is a string: {value}");
+    }
+    assert_eq!(meta["task"].as_str(), Some(task), "{meta:?}");
+    assert_eq!(meta["plan"].as_str(), Some(plan), "{meta:?}");
+    assert_eq!(meta["state"].as_str(), Some(state), "{meta:?}");
+    assert_eq!(meta["phase"].as_str(), Some(phase), "{meta:?}");
+    assert_eq!(meta["previous"].as_str(), Some(previous), "{meta:?}");
+    let first = content.lines().next().unwrap_or_default();
+    assert_eq!(
+        first,
+        format!("{task} {previous} -> {state}.{phase}"),
+        "the content's first line: {content:?}"
+    );
+    content
+}
+
+/// One raw JSON-RPC line to a fresh `radian arc mcp` process, and the one line it answers.
+/// A raw probe is how the bootstrap `server/discover` path is tested: the typed client does
+/// not send it.
+fn raw_request(scratch: &Scratch, channel: bool, request: Value) -> Value {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_radian"));
+    command
+        .current_dir(scratch.repo())
+        .env("RADIAN_HOME", scratch.path("home"))
+        .args(["arc", "mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    if channel {
+        command.arg("--claude-experimental");
+    }
+    let mut child = command.spawn().expect("`radian arc mcp` starts");
+    let mut stdin = child.stdin.take().expect("the server's stdin is piped");
+    writeln!(stdin, "{request}").expect("the request is written");
+    stdin.flush().expect("the request reaches the server");
+    let stdout = child.stdout.take().expect("the server's stdout is piped");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .expect("the server answers one line");
+    drop(stdin);
+    let _ = child.wait();
+    serde_json::from_str(&line)
+        .unwrap_or_else(|error| panic!("the answer is not JSON ({error}): {line}"))
+}
+
+/// A `server/discover` request with the 2026-07-28 request metadata the draft schema needs.
+fn discover_request() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        }
+    })
+}
+
+/// An `initialize` request that asks for the revision a channel cannot use.
+fn initialize_request() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2026-07-28",
+            "capabilities": {},
+            "clientInfo": {"name": "arc-test", "version": "0.0.0"}
+        }
+    })
 }
 
 #[tokio::test]
@@ -527,5 +693,254 @@ async fn a_hand_edited_task_makes_add_rework_fail_with_changed_outside_arc() {
     let text = fs::read_to_string(&path).expect("the task file is readable");
     assert!(text.contains("an edited brief"), "{text}");
     assert!(!text.contains("## Rework"), "{text}");
+    session.close().await;
+}
+
+#[tokio::test]
+async fn without_the_flag_the_server_is_todays_server() {
+    let scratch = fixture("mcp-plain-server");
+    let mut session = Session::open(&scratch).await;
+
+    // Today's capabilities and today's version list.
+    assert!(
+        session.capabilities().experimental.is_none(),
+        "without the flag no experimental capability is declared"
+    );
+    let discover = raw_request(&scratch, false, discover_request());
+    assert!(
+        discover.get("error").is_none_or(Value::is_null),
+        "server/discover still succeeds: {discover}"
+    );
+    let versions = discover["result"]["supportedVersions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a supportedVersions list: {discover}"));
+    assert!(
+        versions.iter().any(|version| version == "2026-07-28"),
+        "today's supported versions still include 2026-07-28: {discover}"
+    );
+
+    // A tracked transition sends nothing.
+    let (_plan, task) = plan_with_task(&session, "plain").await;
+    set_state(&scratch, &task, TaskState::Review, "awaiting_human");
+    session.no_event_for(Duration::from_secs(11)).await;
+    session.close().await;
+}
+
+#[tokio::test]
+async fn the_flag_declares_the_channel_and_refuses_discover() {
+    let scratch = fixture("mcp-channel-capability");
+    let session = Session::open_flagged(&scratch, true).await;
+
+    let capabilities = session.capabilities();
+    let experimental = capabilities
+        .experimental
+        .expect("the flagged server declares an experimental capability map");
+    let channel = experimental
+        .get(radian_arc::mcp::CHANNEL_CAPABILITY)
+        .expect("claude/channel is declared");
+    assert!(
+        channel.is_empty(),
+        "the capability's value is an empty object"
+    );
+    assert!(
+        !experimental.contains_key(radian_arc::mcp::CHANNEL_PERMISSION_CAPABILITY),
+        "the permission relay is not declared: {experimental:?}"
+    );
+
+    // The discover probe is refused: the server supports no revision that carries channels.
+    let discover = raw_request(&scratch, true, discover_request());
+    let error = discover
+        .get("error")
+        .filter(|error| !error.is_null())
+        .unwrap_or_else(|| panic!("server/discover is refused: {discover}"));
+    assert_eq!(error["code"], -32022, "{discover}");
+    assert_eq!(
+        error["message"], "Unsupported protocol version",
+        "{discover}"
+    );
+    let supported = error["data"]["supported"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the error names the supported versions: {discover}"));
+    assert!(
+        !supported.iter().any(|version| version == "2026-07-28"),
+        "2026-07-28 is not supported: {discover}"
+    );
+    assert!(
+        supported.iter().any(|version| version == "2025-11-25"),
+        "2025-11-25 is the ceiling: {discover}"
+    );
+
+    // An initialize that asks for 2026-07-28 is answered with 2025-11-25.
+    let initialize = raw_request(&scratch, true, initialize_request());
+    assert_eq!(
+        initialize["result"]["protocolVersion"], "2025-11-25",
+        "{initialize}"
+    );
+    assert_eq!(
+        initialize["result"]["capabilities"]["experimental"]["claude/channel"],
+        json!({}),
+        "{initialize}"
+    );
+
+    session.close().await;
+}
+
+#[tokio::test]
+async fn the_channel_reports_the_tracked_transitions_and_stays_silent_for_the_rest() {
+    let scratch = fixture("mcp-channel-events");
+
+    // The plan and its two tasks come from the tools, so the baseline is a real backlog.
+    let setup = Session::open(&scratch).await;
+    let (plan, first) = plan_with_task(&setup, "channel").await;
+    let second = setup
+        .ok(
+            "add_task",
+            json!({
+                "plan": plan,
+                "slug": "second",
+                "title": "the second task",
+                "brief": "the second brief",
+            }),
+        )
+        .await["id"]
+        .as_str()
+        .expect("a task id")
+        .to_owned();
+    setup.close().await;
+
+    // The first task is already `review.awaiting_human` when the channel opens: the baseline
+    // must stay silent for it. Its attempt number is what a reject note hangs off.
+    let store = Store::at(scratch.repo());
+    store
+        .change_task(&first, |task| {
+            task.state = TaskState::Review;
+            task.phase = "awaiting_human".to_owned();
+            task.attempt = 1;
+            Ok(())
+        })
+        .expect("the task is put in review");
+
+    let mut session = Session::open_flagged(&scratch, true).await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // `review.awaiting_human` -> `review.rework_pending` with a recorded note: the note is
+    // the event's second content line.
+    radian_arc::review::reject(&store, &first, "needs a faster loop")
+        .expect("the task is rejected");
+    let event = session.next_event().await;
+    let content = expect_event(
+        &event,
+        &first,
+        &plan,
+        "review",
+        "rework_pending",
+        "review.awaiting_human",
+    );
+    assert_eq!(
+        content,
+        format!("{first} review.awaiting_human -> review.rework_pending\nneeds a faster loop")
+    );
+
+    // `review.rework_pending` -> `done.merged`: no `rework_reason` any more.
+    set_state(&scratch, &first, TaskState::Done, "merged");
+    let event = session.next_event().await;
+    let content = expect_event(
+        &event,
+        &first,
+        &plan,
+        "done",
+        "merged",
+        "review.rework_pending",
+    );
+    assert!(!content.contains('\n'), "one line, no reason: {content:?}");
+
+    // `doing.running` is not a sent phase: the move costs the lead nothing.
+    set_state(&scratch, &second, TaskState::Doing, "running");
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // The phases on either side of that quiet move are sent, with the actual previous phase.
+    set_state(&scratch, &second, TaskState::Review, "awaiting_human");
+    let event = session.next_event().await;
+    expect_event(
+        &event,
+        &second,
+        &plan,
+        "review",
+        "awaiting_human",
+        "doing.running",
+    );
+
+    set_state(&scratch, &second, TaskState::Failed, "cancelled");
+    let event = session.next_event().await;
+    expect_event(
+        &event,
+        &second,
+        &plan,
+        "failed",
+        "cancelled",
+        "review.awaiting_human",
+    );
+
+    // A task added to a confirmed plan is a transition from nothing.
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+    let added = session
+        .ok(
+            "add_task",
+            json!({
+                "plan": plan,
+                "slug": "follow",
+                "title": "the follow-up",
+                "brief": "the follow-up brief",
+            }),
+        )
+        .await;
+    let added = added["id"].as_str().expect("a task id").to_owned();
+    let event = session.next_event().await;
+    expect_event(&event, &added, &plan, "todo", "proposed", "new");
+
+    session.close().await;
+}
+
+#[tokio::test]
+async fn a_task_file_the_poller_cannot_parse_sends_nothing_and_the_next_transition_arrives() {
+    let scratch = fixture("mcp-channel-bad-read");
+
+    let setup = Session::open(&scratch).await;
+    let (plan, task) = plan_with_task(&setup, "bad-read").await;
+    setup.close().await;
+
+    let mut session = Session::open_flagged(&scratch, true).await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    set_state(&scratch, &task, TaskState::Review, "awaiting_human");
+    let event = session.next_event().await;
+    expect_event(
+        &event,
+        &task,
+        &plan,
+        "review",
+        "awaiting_human",
+        "todo.ready",
+    );
+
+    // A task file that does not parse fails the whole read: nothing is sent that round.
+    let path = task_path(&scratch, &task);
+    let original = fs::read_to_string(&path).expect("the task file is readable");
+    fs::write(&path, "this is not a task file\n").expect("the task file is writable");
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // The next round reads again, and a valid transition after it still arrives.
+    fs::write(&path, &original).expect("the task file is restored");
+    set_state(&scratch, &task, TaskState::Done, "merged");
+    let event = session.next_event().await;
+    expect_event(
+        &event,
+        &task,
+        &plan,
+        "done",
+        "merged",
+        "review.awaiting_human",
+    );
+
     session.close().await;
 }

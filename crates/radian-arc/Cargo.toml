@@ -45,8 +45,9 @@ toml = "0.8"
 # speaks over. The feature set is deliberately narrower than `agent-extensions`' (client
 # side only): this crate never acts as an MCP client.
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io"] }
-# The async runtime the MCP server runs on; the binary is synchronous and builds one.
-tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util"] }
+# The async runtime the MCP server runs on; the binary is synchronous and builds one. `time`
+# is the channel's 5-second poll (`tokio::time::sleep`), not a test feature.
+tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util", "time"] }
 
 [dev-dependencies]
 # The mock model `radian arc work` runs against in `tests/work.rs`.
