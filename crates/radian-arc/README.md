@@ -548,11 +548,18 @@ force. A main that moved after integration, or a rejected push, makes it integra
 success the task is `done.merged` and its worktree is removed; the branch stays.
 
 `finish_integration` then asks `review::propose_followup` for the task's review follow-up
-(ADR 0048 decision 10): the items of the task's newest `review` verdict's `suggestions` (the
-moved `pre_existing` items among them), never a `blocking` item, become one `todo.proposed`
-task of the same plan, `after` the merged task, when `[gate.review] propose_followups` is
-true and the plan does not already hold it. A failure to add it is a warning after the merge,
-not a failed merge.
+(ADR 0048 decision 10): it reads every `review` verdict of the task, oldest attempt first, and
+collects every round's `suggestions` (the moved `pre_existing` items among them), never a
+`blocking` item, so a round that only had blocking items contributes nothing. Repeats are
+dropped: two items are the same when their `file`, `line` and `text` match after a leading tag
+that repeats the item's own level is removed and whitespace is collapsed, and the newest copy
+is kept. The rest become one `todo.proposed` task of the same plan, `after` the merged task,
+when `[gate.review] propose_followups` is true and the plan does not already hold it; its brief
+groups the items by the round they came from (`From review <n> (attempt <n>):`) and names the
+path of every review verdict. A task
+that is itself a review follow-up gets none of its own; its review's unfixed items stay in its
+verdict and in the task's final report. A failure to add the follow-up is a warning after the
+merge, not a failed merge.
 
 `merge_step` reads `runs/<task>/gate.json` for a finished integration, and a
 `review.ready_to_merge` task finishes the newest passing integration verdict for its head.
@@ -581,7 +588,9 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   uncommitted files is left in place and reported as a warning, never forced away.
 - The follow-up's slug is `<merged task slug>-followups` cut from the end to
   `SLUG_MAX_CHARS`, then a trailing `-` from the cut is removed so it stays a valid slug. A
-  plan that already holds the follow-up (the same title and `after`) gets no second one.
+  plan that already holds the follow-up (the same title and `after`) gets no second one. A
+  follow-up task gets none of its own: its title and single `after` entry are the ones arc
+  gives a follow-up, the same test `has_followup` uses, so the chain stops after one level.
 - `confirm` of a task checks `worker_args` first, as `confirm` of a plan does, so a broken
   worker line leaves the task `todo.proposed` instead of making it runnable.
 - The remote is always a parameter, never the literal `origin`: the caller passes
