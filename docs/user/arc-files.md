@@ -33,7 +33,11 @@ A key you leave out takes its default.
 | `ids.task_prefix` | string | `"TK"` | 1 to 4 ASCII uppercase letters; must differ from `ids.plan_prefix` | When a task id is created. |
 | `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
 | `gate.command_timeout_secs` | integer | `3600` | seconds | Per gate command line. |
-| `gate.review.exec_args` | array of strings | not set: `[worker] exec_args` | any `radian exec` argument except `--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p` | The review session's model route, after the stage's own arguments. Every review run. |
+| `gate.review.exec_args` | array of strings | not set: `[worker] exec_args` | any `radian exec` argument except `--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p` | The review session's model route, after the stage's own arguments. Every review run except a first review's when `gate.review.first.exec_args` is set. |
+| `gate.review.concurrency` | integer | `2` | `1` or more | When the review stage starts: how many review sessions may run at once in the repository. Each session holds one of the locks `gates/review-0.lock` … `gates/review-<n-1>.lock` and its own checkout, `gates/review-<n>/`; `1` runs one review at a time. A change takes effect at the next review. |
+| `gate.review.first` | table | empty | `exec_args` and `timeout_secs`, each optional | A task's first review, a review stage run when no earlier attempt of the task has a `review` verdict. Each key set here replaces the same `[gate.review]` key for that review; a rework review never reads it. A change takes effect at the next first review. |
+| `gate.review.first.exec_args` | array of strings | not set: `gate.review.exec_args` (and then `worker.exec_args`) | any `radian exec` argument except `--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p` | The first review session's model route, after the stage's own arguments. Unset, the first review uses `gate.review.exec_args`. |
+| `gate.review.first.timeout_secs` | integer | not set: `gate.review.timeout_secs` | seconds; `1` or more | The wall-time limit of one first-review session. Unset, the first review uses `gate.review.timeout_secs`. |
 | `gate.review.prompt_file` | string | not set: only the built-in prompt | a path relative to the repository root, without `..` | Appended to the built-in review prompt when the `review` stage runs. |
 | `gate.review.timeout_secs` | integer | `900` | seconds; `0` waits forever | The wall-time limit of one review session. |
 | `gate.review.propose_followups` | boolean | `true` | `true`, `false` | When a task merges: `true` lets arc add one `todo.proposed` task with the items the task's last review suggested but the merge left unfixed (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)); `false` turns it off. The lead's MCP `add_task` on a confirmed plan is not affected. |
@@ -176,7 +180,8 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). |
 | `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |
 | `attempts/<task>/…` | The host-local attempt records: `base_sha`, `last_head`, and per attempt `start.json`, `identity.json`, `status.json`, `heartbeat.json`. |
-| `gates/<stage>/` | One checkout per gate stage. |
+| `gates/<stage>/` | One checkout per gate stage; the review stage uses one per concurrency slot, `gates/review-<n>/`. |
+| `gates/review-<n>.lock` | One review slot's lock. |
 | `gates/<task>.gate.lock` | The lock one task's running gate holds. |
 | `worktrees/<task>/` | The worker's checkout for that task (the worker wrapper creates it). |
 | `state.lock` | The short lock every change takes. |
