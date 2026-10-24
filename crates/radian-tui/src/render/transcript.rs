@@ -172,6 +172,26 @@ pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
     }
 }
 
+/// The text a selection maps offsets into and copies. It is [`display_text`] plus, for a tool
+/// result, the `[image: …]` placeholder lines the layout synthesizes above each run (ADR 0028
+/// R10). They are not in the entry's own text, so without this a selection could neither
+/// anchor on the placeholder row nor copy it. The spans are the layout's own
+/// ([`crate::media::placeholder_spans`]), so the two cannot disagree.
+pub(crate) fn selection_text(entry: &Entry) -> Cow<'_, str> {
+    let base = display_text(entry);
+    if entry.kind != EntryKind::ToolResult || entry.images.is_empty() {
+        return base;
+    }
+    let mut out = base.into_owned();
+    for image in &entry.images {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&image.placeholder);
+    }
+    Cow::Owned(out)
+}
+
 /// The display text lines of `entry`'s body (the prefix and the interrupted marker are not
 /// included), at `width` — the block model's layout, flattened to strings. The renderer
 /// renders exactly these, and [`crate::find`] matches against exactly these, so a folded `@`

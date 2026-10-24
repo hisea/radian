@@ -263,24 +263,37 @@ fn read_probe_reply(_timeout: Duration) -> io::Result<Vec<u8>> {
 /// The picker one reply describes (ADR 0028 R10): the terminal's reported protocol, its cell
 /// size, and `ratatui-image`'s own env/tmux fallbacks through its picker. A terminal that
 /// reported no cell size uses the window's pixel size when the ioctl reports one; with none,
-/// half blocks (the only protocol that does not need a cell size).
+/// half blocks (the only protocol that does not need a cell size). A terminal that answered
+/// nothing falls back to half blocks even when the environment names a protocol: silence is
+/// not an answer.
 fn picker_from_reply(reply: ProbeReply) -> Picker {
     let Some(font_size) = reply.cell.map(FontSize::from).or_else(window_cell_size) else {
         return Picker::halfblocks();
     };
     // `from_fontsize` is the only constructor that takes a measured cell size; it also runs
     // the tmux detection (the `allow-passthrough` side effect) and the env-based protocol
-    // guesses, which the probed answer then overrides.
+    // guesses, which the probed answer overrides below.
     #[allow(deprecated)]
-    let mut picker = Picker::from_fontsize(font_size);
-    if let Some(protocol) = reply.protocol {
-        // The two terminals whose kitty/sixel implementations ratatui-image refuses (its own
-        // query blacklists them; the picker falls back to the env-derived iTerm2).
-        let blacklisted = std::env::var("WEZTERM_EXECUTABLE").is_ok_and(|value| !value.is_empty())
-            || std::env::var("KONSOLE_VERSION").is_ok_and(|value| !value.is_empty());
-        if !blacklisted {
-            picker.set_protocol_type(protocol);
-        }
+    let picker = Picker::from_fontsize(font_size);
+    let blacklisted = std::env::var("WEZTERM_EXECUTABLE").is_ok_and(|value| !value.is_empty())
+        || std::env::var("KONSOLE_VERSION").is_ok_and(|value| !value.is_empty());
+    apply_probe_protocol(picker, reply.protocol, blacklisted)
+}
+
+/// Applies one probe answer to the picker `ratatui-image` built from the cell size and the
+/// environment (ADR 0028 R10). A reported protocol wins; the two terminals whose kitty/sixel
+/// implementations `ratatui-image` refuses (its own query blacklists them) keep the
+/// environment's derived protocol; a **silent** probe is half blocks, never an environment
+/// guess.
+fn apply_probe_protocol(
+    mut picker: Picker,
+    protocol: Option<ProtocolType>,
+    blacklisted: bool,
+) -> Picker {
+    match (protocol, blacklisted) {
+        (Some(protocol), false) => picker.set_protocol_type(protocol),
+        (Some(_), true) => {}
+        (None, _) => picker.set_protocol_type(ProtocolType::Halfblocks),
     }
     picker
 }
@@ -732,13 +745,38 @@ mod tests {
     }
 
     /// A terminal that answers nothing: the keyboard result stays unsupported (the old
-    /// behaviour) and no graphics protocol is picked, which is the half-block fallback.
+    /// behaviour) and no graphics protocol is picked, which is the half-block fallback even
+    /// when the environment (iTerm2, WezTerm) names one.
     #[test]
     fn a_silent_terminal_keeps_unsupported_keyboard_and_no_protocol() {
         assert_eq!(parse_probe_reply(b""), ProbeReply::default());
         assert!(!parse_probe_reply(b"").keyboard);
         assert_eq!(parse_probe_reply(b"").protocol, None);
         assert_eq!(parse_probe_reply(b"garbage without escapes").protocol, None);
+
+        // The picker cannot inherit the environment's guess for a terminal that stayed quiet
+        // (ADR 0028 R10).
+        #[allow(deprecated)]
+        let mut guessed = Picker::from_fontsize(FontSize::new(10, 20));
+        guessed.set_protocol_type(ProtocolType::Iterm2);
+        let silent = apply_probe_protocol(guessed, None, false);
+        assert_eq!(silent.protocol_type(), ProtocolType::Halfblocks);
+        assert_eq!(
+            (silent.font_size().width, silent.font_size().height),
+            (10, 20)
+        );
+        // A reported protocol still wins, and so does a cell size without one.
+        #[allow(deprecated)]
+        let mut guessed = Picker::from_fontsize(FontSize::new(10, 20));
+        guessed.set_protocol_type(ProtocolType::Iterm2);
+        let answered = apply_probe_protocol(guessed, Some(ProtocolType::Sixel), false);
+        assert_eq!(answered.protocol_type(), ProtocolType::Sixel);
+        let via_reply = picker_from_reply(ProbeReply {
+            keyboard: false,
+            protocol: None,
+            cell: Some((10, 20)),
+        });
+        assert_eq!(via_reply.protocol_type(), ProtocolType::Halfblocks);
     }
 
     /// tmux wraps the query for passthrough; the keyboard query goes inside the same wrapper.

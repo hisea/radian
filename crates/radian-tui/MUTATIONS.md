@@ -2880,3 +2880,17 @@ that copy (never `git checkout`); the named test ran alone with
 | TK0097-M1 | a `/docs/arc/gate.html` link goes back to `/docs/arc-gate.html` | ✅ 1 failed | `site_docs::the_hand_written_pages_only_link_generated_docs` (`site/arc.html: link '/docs/arc-gate.html' names 'arc-gate.html', which the generator does not write`) |
 
 1/1 caught.
+
+## TK0014 rework 2: the decode-failure fallback, tool-result selection and the silent probe (2026-10-24, branch `work/TK0014-image-render`)
+
+The review found three ways the ADR 0028 R10 rules could still be broken. Each mutation was
+applied by hand, backed up under `.radian/bak/` and restored from that copy (never
+`git checkout`), and the named test ran alone.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0014-M4 | an image that did not decode at ingest still reserves its `IMAGE_HEIGHT_ROWS` run (drop the `decodable` guard in `insert_user_images`) | ✅ 1 failed | `a_broken_image_draws_only_its_placeholder` (`a failed decode reserves no run`: 12 blank rows after the placeholder) |
+| TK0014-M5 | `selection_text` projects `display_text` only, so a tool result's synthesized placeholder is not copied (drop the placeholder lines) | ✅ 1 failed | `a_tool_result_placeholder_is_copied_and_the_run_is_not` |
+| TK0014-M6 | a silent probe keeps `ratatui-image`'s env-derived protocol instead of half blocks (drop the `(None, _)` arm of `apply_probe_protocol`) | ✅ 1 failed | `a_silent_terminal_keeps_unsupported_keyboard_and_no_protocol` (`left: Iterm2, right: Halfblocks`) |
+
+3/3 caught.

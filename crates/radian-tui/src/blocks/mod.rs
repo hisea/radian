@@ -519,10 +519,19 @@ impl BodyLine {
 
     /// The `[image: …]` placeholder row a tool result draws (ADR 0028 R10): it is always
     /// visible, even when the tool body is folded, and it is the text selection and search may
-    /// match. The user-message placeholder comes from the entry's own text instead.
-    fn image_placeholder(text: String, end: usize) -> Self {
+    /// match. The user-message placeholder comes from the entry's own text instead. `start`
+    /// and `end` are the row's byte range in the entry's selection text (its own text plus the
+    /// synthesized placeholder lines), so a click on the row anchors inside that text and a
+    /// copy includes the placeholder.
+    fn image_placeholder(text: String, start: usize, end: usize) -> Self {
+        let mut offset = start;
+        let mut chars = Vec::with_capacity(text.len());
+        for ch in text.chars() {
+            chars.push(Some(offset));
+            offset += ch.len_utf8();
+        }
         Self {
-            chars: Vec::new(),
+            chars,
             end,
             text,
             code: false,

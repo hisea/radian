@@ -350,7 +350,7 @@ fn layout_unstripped(
             // drawn, not part of the body.
             let mut lines = prose_lines(&text, body_width);
             // ADR 0028 R10: each image's fixed run sits directly under its placeholder line.
-            insert_user_images(&mut lines, entry);
+            insert_user_images(&mut lines, entry, &text);
             lines
         }
         (EntryKind::Assistant, _) => {
@@ -528,11 +528,15 @@ fn image_run(index: usize, end: usize) -> Vec<BodyLine> {
 /// A user message's image runs, each directly under the line carrying its `[image: …]`
 /// placeholder (ADR 0028 R10). The placeholder is part of the message's own text, so the run
 /// goes after the display line that holds the placeholder's last source character; a
-/// placeholder that cannot be located (a foreign text shape) gets its run at the end.
-fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry) {
+/// placeholder that cannot be located (a foreign text shape) gets its run at the end. A
+/// payload that did not decode gets no run (the placeholder line is all there is).
+fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry, text: &str) {
     let mut search = 0usize;
     for (index, image) in entry.images.iter().enumerate() {
-        let Some(found) = entry.text[search..].find(&image.placeholder) else {
+        if !image.decodable {
+            continue;
+        }
+        let Some(found) = text[search..].find(&image.placeholder) else {
             continue;
         };
         let start = search + found;
@@ -548,14 +552,19 @@ fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry) {
 }
 
 /// A tool result's image rows (ADR 0028 R10): each image's placeholder row, then its run when
-/// the body is drawn in full. The placeholder row is always drawn — that is what the folded
-/// block shows instead of the image.
+/// the body is drawn in full and the payload decoded. The placeholder row is always drawn —
+/// that is what the folded block shows instead of the image, and what a broken payload shows
+/// instead of a blank hole.
 fn append_tool_images(lines: &mut Vec<BodyLine>, entry: &Entry, modes: DisplayModes) {
-    let end = entry.text.len();
     let visible = crate::media::rows_visible(entry, modes);
-    for (index, image) in entry.images.iter().enumerate() {
-        lines.push(BodyLine::image_placeholder(image.placeholder.clone(), end));
-        if visible {
+    let spans = crate::media::placeholder_spans(entry.text.len(), &entry.images);
+    for ((index, image), (start, end)) in entry.images.iter().enumerate().zip(spans) {
+        lines.push(BodyLine::image_placeholder(
+            image.placeholder.clone(),
+            start,
+            end,
+        ));
+        if visible && image.decodable {
             lines.extend(image_run(index, end));
         }
     }

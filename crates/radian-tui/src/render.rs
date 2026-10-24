@@ -43,7 +43,7 @@ pub use transcript::{
     ImageRun, display_lines, highlight, split_label, transcript_lines, transcript_lines_with,
     visible_lines, visible_lines_images, visible_lines_with,
 };
-pub(crate) use transcript::{display_text, marker_prefix, spinner_style};
+pub(crate) use transcript::{display_text, marker_prefix, selection_text, spinner_style};
 pub(crate) use wrap::clip_display;
 pub use wrap::{WrappedLine, wrap, wrap_char_offsets, wrap_line_count};
 

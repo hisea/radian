@@ -18,14 +18,15 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::Entry;
 use crate::blocks::{self};
-use crate::render::{display_text, marker_prefix};
+use crate::render::{marker_prefix, selection_text};
 use crate::tools::DisplayModes;
 
 /// One end of a selection: entry `entry`'s display text at byte offset `offset` (always on a
 /// char boundary: it comes from `char_indices` or `text.len()`).
 ///
-/// Offsets are into the **display text** ([`display_text`]): a user entry's `@` attachments
-/// are folded, and the folded line is both what is shown and what is copied.
+/// Offsets are into the **selection text** ([`selection_text`]): a user entry's `@`
+/// attachments are folded, and a tool result carries its synthesized `[image: …]` placeholder
+/// lines after its own text. That text is both what is shown and what is copied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Anchor {
     pub entry: usize,
@@ -98,7 +99,7 @@ pub fn locate_hit(
         let gap = crate::blocks::gap_at(entries, index);
         if remaining < gap {
             let previous = crate::blocks::previous_shown(entries, index)?;
-            let text_len = display_text(&entries[previous]).len();
+            let text_len = selection_text(&entries[previous]).len();
             return Some(Hit {
                 anchor: Anchor {
                     entry: previous,
@@ -117,7 +118,7 @@ pub fn locate_hit(
     }
     // Past the last entry: the end of the last one (or `None` with no transcript) — a gap.
     let last = entries.len().checked_sub(1)?;
-    let text_len = display_text(&entries[last]).len();
+    let text_len = selection_text(&entries[last]).len();
     Some(Hit {
         anchor: Anchor {
             entry: last,
@@ -223,10 +224,10 @@ fn slice(text: &str, start: usize, end: usize) -> &str {
     if a < b { &text[a..b] } else { "" }
 }
 
-/// The byte length of the char at `anchor`'s offset in its entry's display text; `None` at
+/// The byte length of the char at `anchor`'s offset in its entry's selection text; `None` at
 /// or past the text's end.
 pub fn char_len_at(entries: &[Entry], anchor: Anchor) -> Option<usize> {
-    let text = display_text(entries.get(anchor.entry)?);
+    let text = selection_text(entries.get(anchor.entry)?);
     char_at(&text, anchor.offset).map(char::len_utf8)
 }
 
@@ -234,7 +235,7 @@ pub fn char_len_at(entries: &[Entry], anchor: Anchor) -> Option<usize> {
 pub fn entry_display_len(entries: &[Entry], index: usize) -> usize {
     entries
         .get(index)
-        .map(|entry| display_text(entry).len())
+        .map(|entry| selection_text(entry).len())
         .unwrap_or(0)
 }
 
@@ -251,7 +252,7 @@ pub fn run_at(
 ) -> Option<(Anchor, Anchor)> {
     let hit = locate_hit(entries, modes, width, line, col)?;
     let anchor = hit.anchor;
-    let text = display_text(entries.get(anchor.entry)?);
+    let text = selection_text(entries.get(anchor.entry)?);
     if anchor.offset >= text.len() {
         return None;
     }
@@ -301,7 +302,7 @@ pub fn logical_text(entries: &[Entry], selection: &Selection) -> String {
         let Some(entry) = entries.get(start.entry) else {
             return String::new();
         };
-        let text = display_text(entry);
+        let text = selection_text(entry);
         return slice(&text, start.offset, end.offset).to_owned();
     }
     let mut out = String::new();
@@ -315,7 +316,7 @@ pub fn logical_text(entries: &[Entry], selection: &Selection) -> String {
         if !out.is_empty() {
             out.push('\n');
         }
-        let text = display_text(entry);
+        let text = selection_text(entry);
         if index == start.entry {
             out.push_str(slice(&text, start.offset, text.len()));
         } else if index == end.entry {

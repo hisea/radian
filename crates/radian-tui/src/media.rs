@@ -2,10 +2,13 @@
 //! image occupies, and the decoded protocol state cached across frames.
 //!
 //! An image part's display facts (name, dimensions, size) live in its `annotations`, so the
-//! placeholder line needs no decode; this module only decodes when a frame actually draws the
-//! image, and caches the result per image. The layout counts `IMAGE_HEIGHT_ROWS` empty rows per
-//! image whether or not the decode succeeds, so a decode failure never moves the rows below it
-//! — it just leaves the run blank (the placeholder line still says what the image was).
+//! placeholder line needs no decode. A part whose payload does not decode carries no run at
+//! all: its entry reserves no rows, so the placeholder line is the whole of what it shows
+//! (ADR 0028 R10). The check happens once when the entry is built; a frame then decodes the
+//! image once into its protocol state and caches it.
+//!
+//! The layout and the drawing both read [`EntryImage::decodable`], so the counting, the
+//! drawing and the selection geometry cannot disagree about whether a run exists.
 //!
 //! Nothing here reads a file: the bytes are the part's own base64 payload.
 
@@ -40,6 +43,10 @@ pub struct EntryImage {
     pub height: u32,
     /// `[image: <source>, W×H, N KB]`, the line drawn directly above the image.
     pub placeholder: String,
+    /// Whether the payload decoded when the entry was built (ADR 0028 R10). `false` means the
+    /// placeholder line is all there is: the layout reserves no run for it, so no blank hole
+    /// is left where the image would have been.
+    pub decodable: bool,
 }
 
 impl EntryImage {
@@ -62,13 +69,18 @@ impl EntryImage {
         };
         let width = u32::try_from(annotations.get("width")?.as_u64()?).ok()?;
         let height = u32::try_from(annotations.get("height")?.as_u64()?).ok()?;
-        Some(Self {
+        let mut image = Self {
             data: Arc::from(data.as_str()),
             mime_type: mime_type.clone(),
             width,
             height,
             placeholder,
-        })
+            // Checked once, here: the layout needs the answer before any frame draws, and a
+            // broken payload must not reserve rows (ADR 0028 R10).
+            decodable: false,
+        };
+        image.decodable = decode(&image).is_some();
+        Some(image)
     }
 
     /// A stable key for the decode cache: the payload plus its display dimensions. Two entries
@@ -86,6 +98,25 @@ impl EntryImage {
 /// The images of a message's parts, in order.
 pub fn images_of(parts: &[ContentPart]) -> Vec<EntryImage> {
     parts.iter().filter_map(EntryImage::from_part).collect()
+}
+
+/// The byte ranges the placeholder rows occupy in a tool result's **selection text**: its own
+/// text, then one `[image: …]` line per image, each introduced by a newline when something
+/// precedes it. The layout maps its synthesized placeholder rows to these offsets, and the
+/// selection copies the same text, so copy sees the placeholder line and never the run
+/// (ADR 0028 R10). Every image has a row, drawn or not: a broken payload still names itself.
+pub fn placeholder_spans(text_len: usize, images: &[EntryImage]) -> Vec<(usize, usize)> {
+    let mut cursor = text_len;
+    let mut spans = Vec::with_capacity(images.len());
+    for image in images {
+        if cursor > 0 {
+            cursor += 1;
+        }
+        let start = cursor;
+        cursor += image.placeholder.len();
+        spans.push((start, cursor));
+    }
+    spans
 }
 
 /// Whether a tool result's image rows draw (ADR 0028 R10): when its body is drawn in full —
@@ -145,7 +176,9 @@ impl ImageCache {
     ) -> Option<&mut StatefulProtocol> {
         let key = image.key();
         if let std::collections::hash_map::Entry::Vacant(slot) = self.entries.entry(key) {
-            let cached = match decode(image) {
+            // A payload that already failed its check at ingest is not decoded again; the
+            // placeholder line is all that shows (ADR 0028 R10).
+            let cached = match image.decodable.then(|| decode(image)).flatten() {
                 Some(decoded) => Cached::Ready(Box::new(picker.new_resize_protocol(decoded))),
                 None => Cached::Failed,
             };
@@ -237,6 +270,7 @@ mod tests {
         let entry_image = EntryImage::from_part(&image_part()).expect("an image part");
         assert_eq!(entry_image.placeholder, "[image: shot.gif, 1×1, 1 KB]");
         assert_eq!((entry_image.width, entry_image.height), (1, 1));
+        assert!(entry_image.decodable, "the payload decodes");
         // A foreign image part has no placeholder line, so it is not drawn.
         let foreign = ContentPart::Image {
             mime_type: "image/png".to_owned(),
@@ -245,10 +279,19 @@ mod tests {
             meta: None,
         };
         assert!(EntryImage::from_part(&foreign).is_none());
+        // A part with the annotations but a payload that does not decode still names itself:
+        // the placeholder stays and no run is reserved (ADR 0028 R10).
+        let mut broken = image_part();
+        if let ContentPart::Image { data, .. } = &mut broken {
+            *data = "not base64 at all".to_owned();
+        }
+        let broken = EntryImage::from_part(&broken).expect("the annotations are intact");
+        assert_eq!(broken.placeholder, "[image: shot.gif, 1×1, 1 KB]");
+        assert!(!broken.decodable, "the check happens once at ingest");
     }
 
     /// ADR 0028 R10: one decode per image, however many frames draw it, and a failure is
-    /// cached too (the placeholder row is all that shows).
+    /// remembered too (the placeholder row is all that shows).
     #[test]
     fn an_image_decodes_once_and_a_failure_is_cached() {
         let picker = Picker::halfblocks();
@@ -264,15 +307,30 @@ mod tests {
         );
         assert!(cache.is_ready(&image));
 
+        // The hand-built payload claims to be decodable, so the cache tries and remembers the
+        // failure rather than retrying it every frame.
         let broken = EntryImage {
             data: Arc::from("not base64 at all"),
+            decodable: true,
             ..image
         };
         drop(cache);
         let mut cache = ImageCache::default();
         assert!(cache.protocol(&broken, &picker).is_none());
+        let after_failure = decodes();
         assert!(cache.protocol(&broken, &picker).is_none());
+        assert_eq!(decodes(), after_failure, "the failure is cached");
         assert!(!cache.is_ready(&broken));
+
+        // A payload already known to fail at ingest is never decoded by the cache.
+        let mut part = image_part();
+        if let ContentPart::Image { data, .. } = &mut part {
+            *data = "not base64 at all".to_owned();
+        }
+        let known_bad = EntryImage::from_part(&part).expect("the annotations are intact");
+        let before = decodes();
+        assert!(cache.protocol(&known_bad, &picker).is_none());
+        assert_eq!(decodes(), before, "an undecodable part is not retried");
     }
 
     /// The width keeps the aspect ratio at the fixed row height and never exceeds the body

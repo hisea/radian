@@ -273,8 +273,9 @@ fn selection_and_search_never_see_the_image_rows() {
 }
 
 /// ADR 0028 R10's fallback: a payload that does not decode draws only the placeholder row and
-/// produces no error block. The rows stay reserved so nothing below moves, and the cache
-/// remembers the failure instead of retrying every frame.
+/// produces no error block, and it reserves no rows — the placeholder is the whole story, with
+/// no blank hole where the image would have been. The cache remembers the failure instead of
+/// retrying every frame.
 #[test]
 fn a_broken_image_draws_only_its_placeholder() {
     use radian_tui::media::{EntryImage, ImageCache};
@@ -286,7 +287,8 @@ fn a_broken_image_draws_only_its_placeholder() {
     let app = user_app(vec![ContentPart::text("look"), part.clone()]);
     let entry = image_entry(&app);
     let all = modes(ToolFold::Expanded);
-    let texts = blocks::body_text_lines(entry, all, 80);
+    let lines = blocks::layout(entry, &[], all, 80);
+    let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
     assert!(
         texts
             .iter()
@@ -294,17 +296,95 @@ fn a_broken_image_draws_only_its_placeholder() {
         "{texts:?}"
     );
     assert!(
+        lines.iter().all(|line| line.image.is_none()),
+        "a failed decode reserves no run: {texts:?}"
+    );
+    assert!(
         texts
             .iter()
             .all(|text| text.is_empty() || !text.contains("error")),
         "no error block: {texts:?}"
     );
+    // The counting, the drawing and the text-only view agree on the shorter shape.
+    assert_eq!(blocks::line_count(entry, all, 80), lines.len());
+    assert_eq!(
+        blocks::body_text_lines(entry, all, 80)
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        texts
+    );
 
     let image = EntryImage::from_part(&part).expect("the placeholder still exists");
+    assert!(!image.decodable);
     let mut cache = ImageCache::default();
     let picker = ratatui_image::picker::Picker::halfblocks();
     assert!(cache.protocol(&image, &picker).is_none());
     assert!(!cache.is_ready(&image));
+}
+
+/// ADR 0028 R10: a tool result's placeholder line is synthesized by the layout, but selection
+/// and copy still see it. A click on the row anchors inside the selection text, and dragging
+/// across the run copies the placeholder only — never the image's rows.
+#[test]
+fn a_tool_result_placeholder_is_copied_and_the_run_is_not() {
+    let app = tool_app();
+    let entries = &app.session.entries;
+    let index = entries
+        .iter()
+        .position(|entry| !entry.images.is_empty())
+        .expect("an entry with an image");
+    let entry = &entries[index];
+    let placeholder = entry.images[0].placeholder.clone();
+    let spans = radian_tui::media::placeholder_spans(entry.text.len(), &entry.images);
+
+    for fold in [ToolFold::Collapsed, ToolFold::Expanded] {
+        let all = modes(fold);
+        let lines = blocks::layout(entry, &[], all, 80);
+        let row = lines
+            .iter()
+            .position(|line| line.text == placeholder)
+            .unwrap_or_else(|| panic!("the placeholder row under {fold:?}: {lines:?}"));
+        // The placeholder row maps its first cell into the selection text, past the entry's own
+        // text.
+        let start = select::locate(entries, all, 80, row, 2).expect("the placeholder row");
+        assert_eq!(
+            start.offset, spans[0].0,
+            "clicking the placeholder anchors in it"
+        );
+        // Dragging to the end of the (folded: absent) run copies exactly the placeholder.
+        let end_row = lines
+            .iter()
+            .rposition(|line| line.image.is_some())
+            .unwrap_or(row);
+        let head = select::locate(entries, all, 80, end_row, 200).expect("past the run");
+        let selection = Selection {
+            anchor: start,
+            head,
+        };
+        assert_eq!(
+            select::logical_text(entries, &selection),
+            placeholder,
+            "the run contributes no characters ({fold:?})"
+        );
+
+        // From the body's first character to the end of the run, the copy carries the entry's
+        // own text and then the placeholder line.
+        if fold == ToolFold::Expanded {
+            let selection = Selection {
+                anchor: select::Anchor {
+                    entry: index,
+                    offset: 0,
+                },
+                head,
+            };
+            assert_eq!(
+                select::logical_text(entries, &selection),
+                format!("{}\n{placeholder}", entry.text),
+                "the placeholder is part of the copied text"
+            );
+        }
+    }
 }
 
 /// A tool result's placeholder row is the only text its image contributes, and it is drawn
