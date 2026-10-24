@@ -2450,6 +2450,7 @@ dependencies = [
  "agent-extensions",
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
+ "chrono",
  "clap",
  "fs2",
  "futures-util",

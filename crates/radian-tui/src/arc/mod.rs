@@ -1,6 +1,9 @@
-//! The arc TUI's plans, task and merge pages (ADR 0048 §1, §2, §11 and §13): a view of the
+//! The arc TUI's plans, board, task and merge pages (ADR 0048 §1, §2, §11 and §13): a view of the
 //! plans, the tasks, the attempt verdicts, a worker's journal and the gate's evidence for one
 //! task, plus the owner's actions.
+//!
+//! The board groups every open task of the plans in scope by who acts next; `d` lists the
+//! finished ones.
 //!
 //! This module is the state and the frame; [`crate::cli::arc`] owns the terminal and the
 //! input loop, as `cli/attach.rs` does for the attach view. Data comes only from

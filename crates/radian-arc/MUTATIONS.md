@@ -561,6 +561,22 @@ sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian
 
 1/1 caught.
 
+## TK0085: automatic reverify and finished times follow up the TK0054 review (2026-10-24, branch `work/TK0085-tui-board-followups`)
+
+The TK0054 review found that the board's `auto_reverify_pending` dropped the `(head, main)` pair
+guard, that a reject note did not stop an automatic reverify, and that the finished list compared
+RFC 3339 strings of different fractional widths. Each mutation was applied by hand to the working
+file, backed up under `.radian/bak/` and restored from that copy (never `git checkout`), and the
+named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_board <test> --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0085-M1 | `auto_reverify_pending` ignores the recorded pairs (the pair guard is dropped) | ✅ 1 failed | `a_command_failure_whose_pair_was_reverified_waits_for_the_owner` (the re-verified pair stays in `verifying`) |
+| TK0085-M2 | `recorded_failure_main` ignores the owner's reject note | ✅ 1 failed | `a_rework_pending_task_with_an_automatic_reverify_is_not_in_needs_you` (`a reject note is no automatic rework`) |
+| TK0085-M5 | `normal_time` returns the record unchanged, so the sort compares fractional widths | ✅ 1 failed | `d_orders_records_of_one_second_by_their_instant_not_their_fraction_width` (`TK0002-failed` before `TK0001-merged`) |
+
+3/3 caught.
 ## TK0081 rework: the records stay the last section, the title and stage checks are shared (2026-10-24, branch `work/TK0081-mcp-update-task`)
 
 The review found that a rework appended after a `## Changes` section left the newest record
