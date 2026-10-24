@@ -15789,6 +15789,12 @@ fn pty_the_startup_probe_is_one_combined_pass() {
         pty.screen()
     );
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    // The graphics half of the one pass (ADR 0028 R10): the cell-size query, the kitty
+    // graphics query and the status end marker; the pre-merge keyboard probe had none of
+    // them.
+    for needle in ["\u{1b}[16t", "_Gi=31", "\u{1b}[5n"] {
+        assert!(raw.contains(needle), "the merged query carries {needle:?}");
+    }
     assert_eq!(
         raw.matches("\u{1b}[c").count(),
         1,
