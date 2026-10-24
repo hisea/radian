@@ -153,7 +153,9 @@ A cancelled plan takes no change record: it is final.
 | `verdict_set_digest` | string | no | the SHA-256 of the verification verdict set that made the task `review.awaiting_human`; a merge recomputes it |
 | `retry_at` | string | no | an absolute UTC time, `YYYY-MM-DDTHH:MM:SSZ` |
 
-The body is the brief.
+The body is the original brief, then zero or more `## Rework <n>` sections, then the `## Changes` section.
+The MCP `update_task` tool replaces the original brief and keeps every rework section and the change records below it.
+`## Changes` holds one line per successful `update_task` call, in the order they happened: `- <UTC time> update_task: <the fields the call gave, comma-separated>`, where the time has the shape `YYYY-MM-DDTHH:MM:SSZ`; the first call creates the section.
 
 ### States and phases
 

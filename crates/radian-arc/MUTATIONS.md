@@ -515,6 +515,25 @@ count and the conflict run reset each other, so the model test's bound, not a pe
 assertion, catches it. TK0052-M1 (dropping only the conflict reset on an attempt that never
 reached the gate) stays a valid mutation caught by the per-attempt assertion.
 
+## TK0081: the lead's MCP `update_task` (2026-10-24, branch `work/TK0081-mcp-update-task`)
+
+ADR 0048 decision 11: a task in `todo` of a plan that is not `cancelled` takes a new title,
+original brief, `after`, `allow_noop` or `extra_stages`; the phase does not change and every
+successful call appends one line to the task's `## Changes` section. Each mutation was applied
+to `crates/radian-arc/src/store/plan_ops.rs`, the named test was run with
+`cargo nextest run -p radian-arc --locked --profile sandbox -E 'binary(update_task)'`,
+and the file was restored from `.radian/mut/plan_ops.rs` with `cp` and compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0081-M1 | `set_brief` replaces the whole body, rework sections included (`*body = model::brief_body(brief)`) | `update_task::a_brief_change_keeps_every_rework_section_and_the_change_lines_stay_last` (both `## Rework` sections are gone) | ✅ failed |
+| TK0081-M2 | a `review` task is accepted (the state check skips `TaskState::Review`) | `update_task::every_other_state_and_a_cancelled_plan_are_refused` (the review update succeeds instead of naming `add_rework`) | ✅ failed |
+| TK0081-M3 | every update sets `phase = proposed`, moving a `todo.ready` task back | `update_task::a_ready_task_stays_ready_and_a_proposed_task_stays_proposed` (the ready task reads `todo.proposed`) | ✅ failed |
+| TK0081-M4 | the change record is not written (`append_task_change` is not called) | `update_task::every_field_changes_and_is_recorded` (no `update_task:` line in the body), and the rework test | ✅ failed |
+
+TK0081-M1 also failed `update_task::every_field_changes_and_is_recorded`, and M3 and M4 also
+failed `update_task::every_field_changes_and_is_recorded`; the table names the test that
+reports the mutation in its own terms. 4/4 caught.
 ## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
 
 `TaskDiff::fallback` was a bool, so a remote main ref that exists but shares no ancestor with the
@@ -547,3 +566,21 @@ compared with `cmp`.
 | TK0091-M1 | the copy is made but the absolute path stays in the text (`Ok(_relative) => text.push_str(named)`) | `work::a_review_rework_reads_a_copy_of_its_verdict` (`!captured.contains(".radian/arc/runs/")`), `work::a_followup_brief_copies_two_verdicts_of_another_task` | ✅ 2 failed |
 | TK0091-M2 | the path is rewritten without copying (`copy_verdict` returns the relative path before its metadata and copy) | the same two, plus `work::a_missing_verdict_stays_in_the_brief_and_is_noted` (the missing file is rewritten and no note is recorded) and `work::a_verdict_copy_never_reaches_the_branch` (no copy in the worktree) | ✅ 4 failed |
 | TK0091-M3 | a skipped copy fails the attempt (`copy_notes.first()` returns `Err` before the worker starts) | `work::a_missing_verdict_stays_in_the_brief_and_is_noted` (the worker's stdin file is never written) | ✅ failed |
+## TK0081 rework: the records stay the last section, the title and stage checks are shared (2026-10-24, branch `work/TK0081-mcp-update-task`)
+
+The review found that a rework appended after a `## Changes` section left the newest record
+structurally inside the rework, and that `update_task` repeated `add_task`'s title and
+`extra_stages` checks instead of calling them. `append_rework` now inserts above `## Changes`,
+`append_task_change` moves the whole section back to the end, and `check_title` and
+`check_stages` are the one copy of each rule that both operations call. Each mutation was
+applied to `crates/radian-arc/src/store/plan_ops.rs` by hand, the named tests were run with
+`cargo nextest run -p radian-arc --locked --profile sandbox`, the file was restored from
+`.radian/mut/plan_ops.rs` with `cp`, and `cmp` found it identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0081-M5 | `append_rework` appends at the physical end, below an existing `## Changes` section | `update_task::a_rework_added_after_a_change_keeps_the_records_last` (the rework heading sits below `## Changes`), and `store::plan_ops::tests::a_rework_goes_above_the_change_records` | ✅ failed |
+| TK0081-M6 | `append_task_change` leaves a `## Changes` section that a rework follows in place (`move_changes_last` does nothing) | `update_task::an_update_repairs_records_a_later_rework_follows` (the new record lands inside the rework section), and `store::plan_ops::tests::an_update_moves_a_changes_section_a_rework_follows` | ✅ failed |
+
+2/2 caught.
+

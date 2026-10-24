@@ -6,12 +6,17 @@
 //! plan), which is the order `radian arc list` prints. The board is read-only like the plans
 //! page: an owner's key queues the same [`super::actions::Action`] the plans page queues.
 //!
+//! A column is an open frame (ADR 0035): its top line carries the column name and count
+//! (`╭─ TODO 10 ───…`), every row starts with the `│` rail, and it ends with `╰──`. A card is
+//! three rows inside its frame, and a weak `┄` divider separates two cards (never after the
+//! last). The selected card's first line carries `❯` in the marker column, left of the rail.
+//!
 //! Three widths (ADR 0035's layout rules):
 //!
-//! - **wide** (four columns fit): the four columns side by side;
+//! - **wide** (four columns fit): the four columns side by side, each one frame;
 //! - **medium** (two fit): two columns, the left stacking `todo` over `doing`, the right
-//!   stacking `verifying` over `needs you`;
-//! - **narrow** (one fits): the four groups stacked in the same order.
+//!   stacking `verifying` over `needs you`, each group its own frame;
+//! - **narrow** (one fits): the four groups' frames stacked in the same order.
 //!
 //! A column is readable at 28 cells; two side-by-side columns need a two-cell gap, and so do
 //! four. The selection is the pair (column, card in that column), so a width change keeps the
@@ -29,7 +34,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use super::render::scroll_top;
+use super::render::{frame_bottom, frame_top, rail_with, scroll_top};
 use super::{ArcApp, Mark, format_cost, task_mark};
 use crate::theme::Theme;
 
@@ -41,7 +46,10 @@ pub const VERIFYING: usize = 2;
 pub const NEEDS_YOU: usize = 3;
 
 /// The heading each group draws, in column order.
-pub(crate) const COLUMN_HEADINGS: [&str; COLUMNS] = ["TODO", "DOING", "VERIFYING", "NEEDS YOU"];
+///
+/// A `static` rather than a `const` because the render tests read it and the env-docs
+/// scanner treats every `pub const` line's SHOUTING literals as environment variable names.
+pub static COLUMN_HEADINGS: [&str; COLUMNS] = ["TODO", "DOING", "VERIFYING", "NEEDS YOU"];
 /// The one weak line a group with no card shows.
 pub const COLUMN_EMPTY: [&str; COLUMNS] = [
     "nothing waiting",
@@ -55,7 +63,7 @@ pub const MIN_COLUMN_WIDTH: u16 = 28;
 /// The cells between two side-by-side columns.
 pub const COLUMN_GAP: u16 = 2;
 
-/// A card is three rows; the fourth separates it from the next card.
+/// A card is three rows; the frame and a `┄` divider separate two cards.
 const CARD_LINES: usize = 3;
 
 /// How the board lays its groups out at one width.
@@ -100,6 +108,8 @@ pub struct BoardCard {
     pub mark: Mark,
     /// The card is in `needs you`: it draws the `!` mark instead of the state mark.
     pub needs_you: bool,
+    /// The card is a `doing` task: line three carries its heartbeat age, never the cost.
+    pub doing: bool,
     /// For a `doing` card, the age of the wrapper's last heartbeat (`12s`), when it beat.
     pub beat: Option<String>,
 }
@@ -394,6 +404,7 @@ fn card(store: &Store, task: &TaskFile, column: usize) -> BoardCard {
         cost: task.cost_usd,
         mark: task_mark(task.state, &task.phase),
         needs_you: column == NEEDS_YOU,
+        doing: task.state == TaskState::Doing,
         beat,
     }
 }
@@ -523,7 +534,11 @@ fn draw_groups(
 ) {
     let mut lines = Vec::new();
     let mut selected_line = None;
-    for group in groups {
+    for (index, group) in groups.iter().enumerate() {
+        // Two group frames never touch: one blank container-owned row separates them.
+        if index > 0 {
+            lines.push(Line::default());
+        }
         let selected = (app.board.column == *group).then_some(app.board.row);
         let (group_lines, selected_at) =
             group_lines(*group, &app.board.columns[*group], width, selected, theme);
@@ -542,9 +557,20 @@ fn draw_groups(
     frame.render_widget(Paragraph::new(lines), rect);
 }
 
-/// One group's lines: the heading with its count, then each card in three rows and a blank, or
-/// the one weak line of an empty group. It returns the line index of the selected card, when
-/// the selection is in this group.
+/// One row inside a group's frame: the marker column (`❯` on the selected card's first line),
+/// then the frame's `│ ` rail, then the row's own content.
+fn framed(theme: &Theme, cursor: bool, line: Line<'static>) -> Line<'static> {
+    let marker = if cursor {
+        Span::styled("❯ ", theme.model)
+    } else {
+        Span::raw("  ")
+    };
+    rail_with(theme, marker, line)
+}
+
+/// One group's lines: its open frame, the name and count on the top line, each card in three
+/// rows with one `┄` divider between two cards, or the one weak line of an empty group. It
+/// returns the line index of the selected card's first line, when the selection is here.
 fn group_lines(
     group: usize,
     cards: &[BoardCard],
@@ -552,92 +578,120 @@ fn group_lines(
     selected: Option<usize>,
     theme: &Theme,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(COLUMN_HEADINGS[group], theme.notice_label),
-        Span::styled(format!(" {}", cards.len()), theme.hint),
-    ])];
-    let mut selected_at = None;
+    // The frame's rail takes the first two cells of its width; the rest is the row's content.
+    let inner = width.saturating_sub(4);
+    let label = format!("{} {}", COLUMN_HEADINGS[group], cards.len());
+    let mut lines = vec![frame_top(width, &label, theme)];
     if cards.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", COLUMN_EMPTY[group]),
-            theme.hint,
-        )));
+        lines.push(framed(
+            theme,
+            false,
+            Line::from(Span::styled(COLUMN_EMPTY[group], theme.hint)),
+        ));
+        lines.push(frame_bottom(theme));
         return (lines, None);
     }
+    let mut selected_at = None;
     for (row, card) in cards.iter().enumerate() {
-        if selected == Some(row) {
-            selected_at = Some(lines.len());
+        if row > 0 {
+            lines.push(framed(
+                theme,
+                false,
+                Line::from(Span::styled("┄".repeat(inner), theme.frame)),
+            ));
         }
         let cursor = selected == Some(row);
-        lines.push(card_line(card, width, cursor, theme));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(fit(&card.title, width.saturating_sub(2)), theme.text),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                fit(
-                    &format!("{} · {}", card.plan, card.phase),
-                    width.saturating_sub(2),
-                ),
-                theme.hint,
-            ),
-        ]));
-        lines.push(Line::default());
+        if cursor {
+            selected_at = Some(lines.len());
+        }
+        lines.push(framed(theme, cursor, card_head(card, inner, theme)));
+        lines.push(framed(
+            theme,
+            false,
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(fit(&card.title, inner.saturating_sub(2)), theme.text),
+            ]),
+        ));
+        lines.push(framed(theme, false, card_meta(card, inner, theme)));
     }
+    lines.push(frame_bottom(theme));
     (lines, selected_at)
 }
 
-/// A card's first row: the mark, the id, `#attempt`, the cost, and a `doing` task's heartbeat
-/// age.
-fn card_line(card: &BoardCard, width: usize, cursor: bool, theme: &Theme) -> Line<'static> {
+/// A card's first row: the mark and the task id (cut with `…`), with `#attempt` right-aligned
+/// on the frame's inner width.
+fn card_head(card: &BoardCard, inner: usize, theme: &Theme) -> Line<'static> {
     let (glyph, style) = if card.needs_you {
         ('!', theme.notice_label)
     } else {
         (card.mark.glyph(), card.mark.style(theme))
     };
-    let mut tail = format!("#{} {}", card.attempt, format_cost(card.cost));
-    if let Some(beat) = &card.beat {
-        tail.push_str(&format!(" · {beat}"));
-    }
-    let id_width = width.saturating_sub(4 + tail.width() + 1);
+    let attempt = format!("#{}", card.attempt);
+    let id_width = inner.saturating_sub(3 + attempt.width());
+    let id = fit(&card.id, id_width);
+    let used = id.width();
     let mut spans = vec![
-        if cursor {
-            Span::styled("❯ ", theme.model)
-        } else {
-            Span::raw("  ")
-        },
         Span::styled(format!("{glyph} "), style),
-        Span::styled(fit(&card.id, id_width), theme.text),
+        Span::styled(id, theme.text),
+        Span::raw(" ".repeat(id_width.saturating_sub(used) + 1)),
     ];
-    let used = card.id.width().min(id_width);
-    spans.push(Span::raw(" ".repeat(id_width.saturating_sub(used) + 1)));
-    spans.push(Span::styled(tail, theme.tier));
+    spans.push(Span::styled(attempt, theme.tier));
     Line::from(spans)
+}
+
+/// A card's third row, weak: the short plan id and the phase on the left, and on the right the
+/// cost for a task that is not running, or a `doing` task's heartbeat age.
+fn card_meta(card: &BoardCard, inner: usize, theme: &Theme) -> Line<'static> {
+    let right = if card.doing {
+        card.beat.clone().unwrap_or_else(|| "—".to_owned())
+    } else {
+        format_cost(card.cost)
+    };
+    let left_max = inner.saturating_sub(3 + right.width());
+    let left = fit(
+        &format!("{} · {}", plan_short(&card.plan), card.phase),
+        left_max,
+    );
+    let used = left.width();
+    let spans = vec![
+        Span::raw("  "),
+        Span::styled(left, theme.hint),
+        Span::raw(" ".repeat(left_max.saturating_sub(used) + 1)),
+        Span::styled(right, theme.hint),
+    ];
+    Line::from(spans)
+}
+
+/// A plan id without its slug: `PL0012` from `PL0012-board`.
+fn plan_short(id: &str) -> &str {
+    id.split_once('-').map_or(id, |(short, _)| short)
 }
 
 // ---- the finished list ----------------------------------------------------------------
 
+/// `d`: the finished list as one open frame titled `FINISHED <n>`, one row per task.
 fn draw_finished(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
     let theme = app.theme.clone();
     let width = area.width as usize;
-    let rows = finished_lines(app, width, &theme);
-    let visible = (area.height as usize).saturating_sub(1);
+    let count = app.board.done.len();
+    let rows = finished_lines(app, width.saturating_sub(4), &theme);
+    let visible = (area.height as usize).saturating_sub(2);
     let top = scroll_top(app.board.done_top, app.board.done_sel, visible, rows.len());
     app.board.done_top = top;
-    let mut lines = vec![Line::from(vec![
-        Span::styled("FINISHED", theme.notice_label),
-        Span::styled(format!(" {}", rows.len()), theme.hint),
-    ])];
-    lines.extend(rows.into_iter().skip(top));
+    let mut lines = vec![frame_top(width, &format!("FINISHED {count}"), &theme)];
+    for (index, row) in rows.into_iter().enumerate().skip(top) {
+        let cursor = count > 0 && index == app.board.done_sel;
+        lines.push(framed(&theme, cursor, row));
+    }
+    lines.push(frame_bottom(&theme));
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// One line per finished task, newest first: the mark, the id, the title, the plan and when.
-fn finished_lines(app: &ArcApp, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// One row per finished task, newest first: the mark, the id, the title, the plan and when.
+fn finished_lines(app: &ArcApp, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
     if app.board.done.is_empty() {
-        return vec![Line::from(Span::styled("  nothing finished", theme.hint))];
+        return vec![Line::from(Span::styled("nothing finished", theme.hint))];
     }
     let id_width = app
         .board
@@ -650,24 +704,19 @@ fn finished_lines(app: &ArcApp, width: usize, theme: &Theme) -> Vec<Line<'static
     app.board
         .done
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
+        .map(|row| {
             let when = age_text(row.age);
             let tail = format!("{} · {when}", row.plan);
-            let fixed = 2 + 2 + id_width + 2 + 2 + tail.width();
-            let title_width = width.saturating_sub(fixed);
+            let fixed = 2 + id_width + 2 + 2 + tail.width();
+            let title_width = inner.saturating_sub(fixed);
             let title = fit(&row.title, title_width);
-            let used = row.title.width().min(title_width);
+            let used = title.width();
+            let id = fit(&row.id, id_width);
+            let id_used = id.width();
             let mut spans = vec![
-                if index == app.board.done_sel {
-                    Span::styled("❯ ", theme.model)
-                } else {
-                    Span::raw("  ")
-                },
                 Span::styled(format!("{} ", row.mark.glyph()), row.mark.style(theme)),
-                Span::styled(fit(&row.id, id_width), theme.text),
+                Span::styled(id, theme.text),
             ];
-            let id_used = row.id.width().min(id_width);
             spans.push(Span::raw(" ".repeat(id_width.saturating_sub(id_used) + 2)));
             spans.push(Span::styled(title, theme.text));
             spans.push(Span::raw(" ".repeat(title_width.saturating_sub(used) + 2)));
