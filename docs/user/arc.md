@@ -524,7 +524,8 @@ A reverify claims a new attempt without a worker:
 The new attempt's verdicts are its own: an earlier attempt's verdict is not reused and no verdict is ever rewritten.
 The remote `work/<task>` must still equal `head_sha`; when it moved, `reverify` exits `3` with the moved-branch reason and the task stays in `review.verifying`, as verification does.
 
-A reverify attempt is not a retry: it changes neither `retry_count` nor `max_attempts`, costs nothing, and is not an automatic rework (`auto_rework` does not change).
+A reverify attempt is not a retry: it changes neither `retry_count` nor `max_attempts` and is not an automatic rework (`auto_rework` does not change).
+It runs no worker, so no worker cost is added, but the `review` stage it runs counts: its cost is added to the task's `cost_usd` and `total_cost_usd` when the gate's verdicts are applied, and it can pause the task in `todo.paused_budget` (see [`limits.max_cost_usd`](arc-files.md#configtoml)).
 
 It prints the claim's line and then the verification's:
 
