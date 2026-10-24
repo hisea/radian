@@ -18,7 +18,7 @@ use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
 use radian_tui::arc::render;
-use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter, TaskTab, actions};
+use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter, PlanOrder, TaskTab, actions};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -3131,4 +3131,283 @@ fn a_theme_file_recolors_only_the_plan_mark_it_names() {
         queued_role.fg,
         "the queued mark keeps the built-in default"
     );
+}
+
+// ---- the plans list's order (`o`) -----------------------------------------------
+
+/// The default order is the most urgent first — `P0`, then `P1` … `P5`, then the id — and the
+/// `PLANS` heading says which order the list uses, in the weak role.
+#[test]
+fn the_plans_page_puts_the_most_urgent_first_and_says_so() {
+    let scratch = Scratch::new("plan-order-priority");
+    let store = store(&scratch.path("repo"));
+    let p3 = add_plan(&store, "p3", "the P3 plan");
+    let p0a = add_plan(&store, "p0a", "the first P0 plan");
+    let p1 = add_plan(&store, "p1", "the P1 plan");
+    let p0b = add_plan(&store, "p0b", "the second P0 plan");
+    for (id, priority) in [(&p3, "P3"), (&p0a, "P0"), (&p1, "P1"), (&p0b, "P0")] {
+        radian_arc::store::plan_ops::set_priority(&store, id, priority).unwrap();
+    }
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    assert_eq!(
+        app.order,
+        PlanOrder::Priority,
+        "every start opens on priority"
+    );
+    let order: Vec<String> = app.plan_rows().iter().map(|row| row.id.clone()).collect();
+    assert_eq!(
+        order,
+        vec![p0a.clone(), p0b.clone(), p1.clone(), p3.clone()],
+        "P0 first, then P1, then the default P3"
+    );
+
+    let theme = app.theme.clone();
+    let terminal = render(&mut app, 140, 30);
+    let text = rows(&terminal).join("\n");
+    assert!(text.contains("PLANS · by priority"), "{text}");
+    let (row, column) = fg_of(&terminal, "PLANS · by priority");
+    assert_eq!(
+        fg(&terminal, row, column),
+        theme.hint.fg,
+        "the heading is weak"
+    );
+}
+
+/// `o` cycles `priority → state → id → priority`. The state order follows the plan marks —
+/// needs you, running, queued, paused, draft, done, cancelled — and breaks a tie by priority
+/// and then id; the heading names each order.
+#[test]
+fn o_cycles_priority_state_id_and_back() {
+    let scratch = Scratch::new("plan-order-cycle");
+    let store = store(&scratch.path("repo"));
+
+    let plan = |slug: &str| add_plan(&store, slug, &format!("the {slug} plan"));
+    let task = |plan: &str, slug: &str, state: TaskState, phase: &str| {
+        add_task(&store, plan, slug, &[], state, phase, 1, None);
+    };
+    let set = |id: &str, status: &str, auto: &str| {
+        store
+            .change_plan(id, |plan| {
+                plan.status = status.to_owned();
+                plan.auto = auto.to_owned();
+                Ok(())
+            })
+            .unwrap();
+    };
+
+    let needs = plan("needs");
+    task(&needs, "n", TaskState::Review, "awaiting_human");
+    set(&needs, "confirmed", "run");
+    let running = plan("running");
+    task(&running, "r", TaskState::Doing, "running");
+    set(&running, "confirmed", "run");
+    let queued = plan("queued");
+    task(&queued, "q", TaskState::Todo, "ready");
+    set(&queued, "confirmed", "run");
+    let paused = plan("paused");
+    task(&paused, "p", TaskState::Todo, "ready");
+    set(&paused, "confirmed", "off");
+    let draft = plan("draft");
+    task(&draft, "d", TaskState::Todo, "ready");
+    set(&draft, "draft", "off");
+    let done = plan("done");
+    task(&done, "dn", TaskState::Done, "merged");
+    set(&done, "confirmed", "off");
+    let cancelled = plan("cancelled");
+    task(&cancelled, "c", TaskState::Todo, "ready");
+    set(&cancelled, "cancelled", "off");
+    // Three more paused plans: one P2, and two at P0 whose id decides between them.
+    let paused_p2 = plan("paused-p2");
+    task(&paused_p2, "p2", TaskState::Todo, "ready");
+    set(&paused_p2, "confirmed", "off");
+    radian_arc::store::plan_ops::set_priority(&store, &paused_p2, "P2").unwrap();
+    let paused_p0a = plan("paused-p0a");
+    task(&paused_p0a, "p0a", TaskState::Todo, "ready");
+    set(&paused_p0a, "confirmed", "off");
+    radian_arc::store::plan_ops::set_priority(&store, &paused_p0a, "P0").unwrap();
+    let paused_p0b = plan("paused-p0b");
+    task(&paused_p0b, "p0b", TaskState::Todo, "ready");
+    set(&paused_p0b, "confirmed", "off");
+    radian_arc::store::plan_ops::set_priority(&store, &paused_p0b, "P0").unwrap();
+
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    // `all` holds every mark; the default view hides the done and cancelled plans.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::All);
+
+    let order = |app: &ArcApp| {
+        app.plan_rows()
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>()
+    };
+    // Priority: the two P0 paused plans, then P2, then the default P3 group by id.
+    assert_eq!(
+        order(&app),
+        vec![
+            paused_p0a.clone(),
+            paused_p0b.clone(),
+            paused_p2.clone(),
+            needs.clone(),
+            running.clone(),
+            queued.clone(),
+            paused.clone(),
+            draft.clone(),
+            done.clone(),
+            cancelled.clone(),
+        ]
+    );
+    let text = screen(&mut app, 140, 40);
+    assert!(text.contains("PLANS · by priority"), "{text}");
+
+    // `o`: the marks in order, and among the paused plans priority then id.
+    assert_eq!(app.on_key(&key(KeyCode::Char('o'))), ArcKey::Redraw);
+    assert_eq!(app.order, PlanOrder::State);
+    assert_eq!(
+        order(&app),
+        vec![
+            needs.clone(),
+            running.clone(),
+            queued.clone(),
+            paused_p0a.clone(),
+            paused_p0b.clone(),
+            paused_p2.clone(),
+            paused.clone(),
+            draft.clone(),
+            done.clone(),
+            cancelled.clone(),
+        ]
+    );
+    let text = screen(&mut app, 140, 40);
+    assert!(text.contains("PLANS · by state"), "{text}");
+
+    // `o`: the id ascending, whatever the marks and priorities.
+    assert_eq!(app.on_key(&key(KeyCode::Char('o'))), ArcKey::Redraw);
+    assert_eq!(app.order, PlanOrder::Id);
+    let mut by_id = vec![
+        needs.clone(),
+        running.clone(),
+        queued.clone(),
+        paused.clone(),
+        draft.clone(),
+        done.clone(),
+        cancelled.clone(),
+        paused_p2.clone(),
+        paused_p0a.clone(),
+        paused_p0b.clone(),
+    ];
+    by_id.sort();
+    assert_eq!(order(&app), by_id);
+    let text = screen(&mut app, 140, 40);
+    assert!(text.contains("PLANS · by id"), "{text}");
+
+    // `o`: back to priority.
+    assert_eq!(app.on_key(&key(KeyCode::Char('o'))), ArcKey::Redraw);
+    assert_eq!(app.order, PlanOrder::Priority);
+    let text = screen(&mut app, 140, 40);
+    assert!(text.contains("PLANS · by priority"), "{text}");
+}
+
+/// The list's order never moves the selection off its plan: `o`, a refresh that reorders after
+/// `-`, and `f` all keep it.
+#[test]
+fn the_order_keeps_the_selected_plan_across_o_a_refresh_and_f() {
+    let scratch = Scratch::new("plan-order-selection");
+    let store = store(&scratch.path("repo"));
+    let first = add_plan(&store, "first", "the first plan");
+    let urgent = add_plan(&store, "urgent", "the urgent plan");
+    radian_arc::store::plan_ops::set_priority(&store, &urgent, "P0").unwrap();
+    let mut app = ArcApp::with_session_dir(store.clone(), Some(scratch.path("sessions")));
+    let select = |app: &mut ArcApp, id: &str| {
+        app.plan_sel = app
+            .plans
+            .iter()
+            .position(|view| view.plan.item.id == id)
+            .unwrap_or_else(|| panic!("{id} is listed"));
+    };
+    assert_eq!(app.order, PlanOrder::Priority);
+    assert_eq!(
+        app.selected_plan().unwrap().plan.item.id,
+        urgent,
+        "P0 first"
+    );
+    select(&mut app, &first);
+
+    // `o` to state: both plans are queued, so the order is the same; the cursor stays.
+    assert_eq!(app.on_key(&key(KeyCode::Char('o'))), ArcKey::Redraw);
+    assert_eq!(app.order, PlanOrder::State);
+    assert_eq!(app.selected_plan().unwrap().plan.item.id, first);
+    // `o` to id: `first` is now the first row; still selected.
+    assert_eq!(app.on_key(&key(KeyCode::Char('o'))), ArcKey::Redraw);
+    assert_eq!(app.order, PlanOrder::Id);
+    assert_eq!(app.plan_sel, 0);
+    assert_eq!(app.selected_plan().unwrap().plan.item.id, first);
+    // `o` back to priority: `first` is the second row; still selected.
+    assert_eq!(app.on_key(&key(KeyCode::Char('o'))), ArcKey::Redraw);
+    assert_eq!(app.order, PlanOrder::Priority);
+    assert_eq!(app.plan_sel, 1);
+    assert_eq!(app.selected_plan().unwrap().plan.item.id, first);
+
+    // Three `-` presses take the P0 plan to P3, where the id puts it after `first`: the
+    // refresh reorders the list, and the cursor follows the plan, not the row.
+    select(&mut app, &urgent);
+    for _ in 0..3 {
+        assert_eq!(app.on_key(&key(KeyCode::Char('-'))), ArcKey::Redraw);
+        let action = app.take_action().expect("the step is queued");
+        let outcome = actions::run(&action, &store, &actions::Library);
+        assert!(outcome.ok, "{outcome:?}");
+        app.finish_action(outcome);
+    }
+    assert_eq!(app.plan_sel, 1);
+    assert_eq!(app.selected_plan().unwrap().plan.item.id, urgent);
+
+    // `f` changes the view; the plan is in both, so it stays selected.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::All);
+    assert_eq!(app.selected_plan().unwrap().plan.item.id, urgent);
+}
+
+/// The page's order is the page's alone: `o` never changes the order the store reads and
+/// `radian arc list` sorts into claim order.
+#[test]
+fn the_plans_page_order_does_not_change_the_claim_order() {
+    use radian_arc::store::model::claim_order;
+    let scratch = Scratch::new("plan-order-claim");
+    let store = store(&scratch.path("repo"));
+    let p3 = add_plan(&store, "p3", "the P3 plan");
+    let p0 = add_plan(&store, "p0", "the P0 plan");
+    radian_arc::store::plan_ops::set_priority(&store, &p0, "P0").unwrap();
+    let read_order = |store: &Store| {
+        store
+            .plans()
+            .unwrap()
+            .iter()
+            .map(|view| view.plan.item.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let claim_list = |store: &Store| {
+        let mut views = store.plans().unwrap();
+        views.sort_by(|one, other| claim_order(&one.plan.item, &other.plan.item));
+        views
+            .iter()
+            .map(|view| view.plan.item.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let read_before = read_order(&store);
+    let claim_before = claim_list(&store);
+    let mut app = ArcApp::with_session_dir(store.clone(), Some(scratch.path("sessions")));
+    for _ in 0..3 {
+        app.on_key(&key(KeyCode::Char('o')));
+    }
+    assert_eq!(
+        read_order(&store),
+        read_before,
+        "the store's own order never changes"
+    );
+    assert_eq!(
+        claim_list(&store),
+        claim_before,
+        "the claim order never changes"
+    );
+    assert_eq!(claim_before, vec![p0, p3], "P0 is claimed first");
 }
