@@ -41,7 +41,7 @@ pub const VERIFYING: usize = 2;
 pub const NEEDS_YOU: usize = 3;
 
 /// The heading each group draws, in column order.
-pub const COLUMN_HEADINGS: [&str; COLUMNS] = ["TODO", "DOING", "VERIFYING", "NEEDS YOU"];
+pub(crate) const COLUMN_HEADINGS: [&str; COLUMNS] = ["TODO", "DOING", "VERIFYING", "NEEDS YOU"];
 /// The one weak line a group with no card shows.
 pub const COLUMN_EMPTY: [&str; COLUMNS] = [
     "nothing waiting",
