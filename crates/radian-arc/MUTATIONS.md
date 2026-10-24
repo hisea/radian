@@ -584,3 +584,21 @@ applied to `crates/radian-arc/src/store/plan_ops.rs` by hand, the named tests we
 
 2/2 caught.
 
+## TK0091 rework: a verdict copy follows no symbolic link (2026-10-24, branch `work/TK0091-worker-verdict-copies`)
+
+The review found that the copy followed a symbolic link in two places: the source opened with
+`fs::metadata`, which follows a link, and the destination used `create_dir_all` and `fs::copy`,
+which follow a link a worker can plant in its own worktree. `open_verdict` now walks the source
+path with `symlink_metadata` and opens the file with `O_NOFOLLOW`, and `write_verdict_copy`
+creates and writes every destination component without following one. Each mutation was
+applied to `crates/radian-arc/src/work/mod.rs` by hand, the named tests ran with `cargo
+nextest run -p radian-arc --locked --profile sandbox --no-fail-fast`, and the file was restored
+from `.radian/work-fixed.rs` with `cp` and compared with `diff`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0091-M4 | the source follows a symbolic link (`open_verdict` is `File::open(path)`) | `work::tests::a_verdict_copy_that_is_a_symlink_is_skipped` (the link is copied and the path is rewritten) | ✅ failed |
+| TK0091-M5 | the destination follows a symbolic link (`create_dir_all` then `fs::write(worktree.join(relative))`) | `work::tests::a_verdict_copy_never_follows_a_link_in_the_worktree` (the link's target is overwritten), and `work::a_verdict_copy_never_follows_a_link_the_worktree_already_has` (the earlier attempt's link is followed) | ✅ 2 failed |
+
+2/2 caught.
+

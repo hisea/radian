@@ -2375,6 +2375,92 @@ fn a_missing_verdict_stays_in_the_brief_and_is_noted() {
     );
 }
 
+/// A link the worker planted in its worktree in an earlier attempt does not redirect the
+/// copy: the wrapper writes nothing outside the worktree, and the path stays in the brief
+/// with a note (ADR 0048 decision 7).
+#[cfg(unix)]
+#[test]
+fn a_verdict_copy_never_follows_a_link_the_worktree_already_has() {
+    let repo = Repo::new("verdict-copy-worktree-link");
+    init(&repo);
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let task = plan_and_task(&store, "work", "the brief\n");
+    let outside = repo.root.join("outside");
+    std::fs::create_dir_all(&outside).expect("the outside directory");
+
+    // Attempt 1's worker plants the copy directory of attempt 1 as a link out of the
+    // worktree. The next attempt is the review rework that would write the copy there.
+    let (first_capture, _) = recording_worker(&repo, "verdict-link-first-stdin.txt");
+    let worktree = repo.worktree(&task);
+    let command = format!(
+        "mkdir -p '{wt}/.radian/arc-verdicts/{task}' && ln -s '{}' \
+         '{wt}/.radian/arc-verdicts/{task}/{task}-1' && cat > '{}'",
+        outside.display(),
+        first_capture.display(),
+        wt = worktree.display(),
+    );
+    let first = run(
+        &repo,
+        &task,
+        1,
+        "tok-link-1",
+        &["--worker-command", command.as_str()],
+        &[],
+        "the brief\n",
+    );
+    assert!(
+        first_capture.is_file(),
+        "the first worker ran: {}",
+        first.stderr
+    );
+
+    let bytes = b"{\"summary\":\"the verdict\"}\n";
+    let verdict = write_verdict(&store, &task, 1, "review", bytes);
+    let body = review_rework_body(&verdict);
+    store
+        .change_task(&task, |task| {
+            task.body = body;
+            Ok(())
+        })
+        .expect("the rework brief");
+    let body = store.load_task(&task).expect("the task").item.body;
+
+    let (captured, worker) = recording_worker(&repo, "verdict-link-second-stdin.txt");
+    let run = run(
+        &repo,
+        &task,
+        2,
+        "tok-link-2",
+        &["--worker-command", worker.as_str()],
+        &[],
+        &body,
+    );
+    let captured = std::fs::read_to_string(&captured).expect("the attempt ran");
+    assert!(
+        captured.contains(&verdict.display().to_string()),
+        "the path stays in the brief:\n{captured}\nstderr: {}",
+        run.stderr
+    );
+    assert!(!captured.contains(".radian/arc-verdicts/"), "{captured}");
+    assert!(
+        !outside.join("review.json").exists(),
+        "nothing was written through the link"
+    );
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir(&task, 2).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
+    let note = execution["notes"][0]
+        .as_str()
+        .unwrap_or_else(|| panic!("no note: {execution}"));
+    assert!(
+        note.starts_with(&format!("verdict copy skipped: {}: ", verdict.display()))
+            && note.contains("symbolic link"),
+        "the note names the link: {note}"
+    );
+}
+
 /// The copy is ignored in the worktree, so it is not committed, `git status` stays clean, and
 /// the delivery check pushes the attempt (ADR 0048 decisions 7 and 8).
 #[test]

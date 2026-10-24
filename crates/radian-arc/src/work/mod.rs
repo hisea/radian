@@ -1484,8 +1484,12 @@ fn copy_verdict(named: &str, runs: &Path, worktree: &Path) -> Result<PathBuf, St
         .join(&task)
         .join(&attempt)
         .join(file);
-    let destination = worktree.join(&relative);
-    let metadata = fs::metadata(path).map_err(|error| format!("cannot read it: {error}"))?;
+    let mut source = open_verdict(path, runs)?;
+    // One handle for the checks and the read: a path swapped after the open cannot change
+    // what is copied (ADR 0048 decision 7).
+    let metadata = source
+        .metadata()
+        .map_err(|error| format!("cannot read it: {error}"))?;
     if !metadata.is_file() {
         return Err("not a regular file".to_owned());
     }
@@ -1495,14 +1499,122 @@ fn copy_verdict(named: &str, runs: &Path, worktree: &Path) -> Result<PathBuf, St
             metadata.len()
         ));
     }
-    let parent = destination
-        .parent()
-        .ok_or_else(|| format!("{} has no directory", destination.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    fs::copy(path, &destination)
-        .map_err(|error| format!("cannot copy it to {}: {error}", destination.display()))?;
+    let mut bytes = Vec::new();
+    (&mut source)
+        .take(VERDICT_COPY_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read it: {error}"))?;
+    if bytes.len() as u64 > VERDICT_COPY_LIMIT {
+        return Err(format!(
+            "{} bytes, the limit is {VERDICT_COPY_LIMIT} bytes",
+            bytes.len()
+        ));
+    }
+    write_verdict_copy(worktree, &relative, &bytes)?;
     Ok(relative)
+}
+
+/// Opens a named attempt file without following a symbolic link. A worker can plant a link in
+/// its own worktree; a link where a verdict should be is not the regular file the brief
+/// promises, so the path stays in the text with a note (ADR 0048 decision 7).
+fn open_verdict(path: &Path, runs: &Path) -> Result<File, String> {
+    let relative = path
+        .strip_prefix(runs)
+        .map_err(|_| "not a file of an attempt".to_owned())?;
+    let count = relative.components().count();
+    let mut current = runs.to_path_buf();
+    for (index, component) in relative.components().enumerate() {
+        current.push(component.as_os_str());
+        let metadata =
+            fs::symlink_metadata(&current).map_err(|error| format!("cannot read it: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("it is a symbolic link".to_owned());
+        }
+        if index + 1 < count {
+            if !metadata.is_dir() {
+                return Err("a component of it is not a directory".to_owned());
+            }
+        } else if !metadata.is_file() {
+            return Err("not a regular file".to_owned());
+        }
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // The final open does not follow a link either, so a check-then-open swap cannot
+        // hand the copy a different file.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+        .open(path)
+        .map_err(|error| format!("cannot read it: {error}"))
+}
+
+/// Writes a verdict copy under `worktree` without following a symbolic link at any component.
+/// The worker controls its worktree between attempts, so a link planted at `.radian/` or at a
+/// copy path must not let the wrapper write outside the worktree (ADR 0048 decision 7).
+fn write_verdict_copy(worktree: &Path, relative: &Path, bytes: &[u8]) -> Result<(), String> {
+    let components = relative.components().collect::<Vec<_>>();
+    let mut current = worktree.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component.as_os_str());
+        if index + 1 == components.len() {
+            write_file_without_link(&current, bytes)?;
+        } else {
+            create_dir_without_link(&current)?;
+        }
+    }
+    Ok(())
+}
+
+/// Creates `path` as a directory unless it is one already, and refuses a symbolic link or a
+/// non-directory at it.
+fn create_dir_without_link(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("{} is a symbolic link", path.display()))
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(format!("{} is not a directory", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match fs::create_dir(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                create_dir_without_link(path)
+            }
+            Err(error) => Err(format!("cannot create {}: {error}", path.display())),
+        },
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
+}
+
+/// Replaces the file at `path` with `bytes`, and refuses a symbolic link or a non-regular file
+/// already at it. A later attempt overwrites the copy of an earlier one.
+fn write_file_without_link(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!("{} is a symbolic link", path.display()));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    }
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
 /// The `runs/<task>/attempts/<attempt>/…` ids a named path carries, when it has them. A path
@@ -2283,6 +2395,7 @@ mod tests {
         let dir = crate::test_support::TempDir::named("radian-arc-verdict-copy");
         let arc = dir.join("arc");
         let worktree = dir.join("worktree");
+        fs::create_dir_all(&worktree).expect("the worktree");
         let verdict = arc.join("runs/TK0002-b/attempts/TK0002-b-3/verdicts/review.json");
         fs::create_dir_all(verdict.parent().expect("the verdict directory"))
             .expect("the verdict directory");
@@ -2307,6 +2420,83 @@ mod tests {
         assert_eq!(text, brief, "a path out of runs/ is left as it is");
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].starts_with("verdict copy skipped: "), "{notes:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A named verdict that is a symbolic link is not the regular file the brief promises: it
+    /// stays in the text with a note (ADR 0048 decision 7).
+    #[cfg(unix)]
+    #[test]
+    fn a_verdict_copy_that_is_a_symlink_is_skipped() {
+        use std::os::unix::fs::symlink;
+        let dir = crate::test_support::TempDir::named("radian-arc-verdict-source-link");
+        let arc = dir.join("arc");
+        let worktree = dir.join("worktree");
+        fs::create_dir_all(&worktree).expect("the worktree");
+        let real = dir.join("real-verdict.json");
+        fs::write(&real, b"the verdict").expect("the real verdict");
+        let verdict = arc.join("runs/TK0003-c/attempts/TK0003-c-1/verdicts/review.json");
+        fs::create_dir_all(verdict.parent().expect("the verdict directory"))
+            .expect("the verdict directory");
+        symlink(&real, &verdict).expect("the link");
+        let brief = format!("Read it: `{}`", verdict.display());
+        let (text, notes) = copy_verdicts(&brief, &arc, &worktree);
+        assert_eq!(text, brief, "the linked path stays in the text");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("symbolic link"), "{notes:?}");
+        assert!(
+            !worktree.join(VERDICT_COPY_DIR).exists(),
+            "nothing was copied"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A link the worker planted in its worktree does not redirect the copy: neither an
+    /// ancestor of the copy nor the copy file itself is followed, and nothing outside the
+    /// worktree is written (ADR 0048 decision 7).
+    #[cfg(unix)]
+    #[test]
+    fn a_verdict_copy_never_follows_a_link_in_the_worktree() {
+        use std::os::unix::fs::symlink;
+        let dir = crate::test_support::TempDir::named("radian-arc-verdict-destination-link");
+        let arc = dir.join("arc");
+        let worktree = dir.join("worktree");
+        let outside = dir.join("outside");
+        fs::create_dir_all(&worktree).expect("the worktree");
+        fs::create_dir_all(&outside).expect("the outside directory");
+        let verdict = arc.join("runs/TK0004-d/attempts/TK0004-d-1/verdicts/review.json");
+        fs::create_dir_all(verdict.parent().expect("the verdict directory"))
+            .expect("the verdict directory");
+        fs::write(&verdict, b"the verdict").expect("the verdict");
+        let brief = format!("Read it: `{}`", verdict.display());
+
+        // `.radian/` itself is a link out of the worktree.
+        symlink(&outside, worktree.join(".radian")).expect("the ancestor link");
+        let (text, notes) = copy_verdicts(&brief, &arc, &worktree);
+        assert_eq!(text, brief, "the path stays in the text");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("symbolic link"), "{notes:?}");
+        assert!(
+            !outside.join("arc-verdicts").exists(),
+            "nothing was written through the link"
+        );
+
+        // The copy file itself is a link to a file outside the worktree.
+        fs::remove_file(worktree.join(".radian")).expect("remove the link");
+        let copies = worktree.join(VERDICT_COPY_DIR).join("TK0004-d/TK0004-d-1");
+        fs::create_dir_all(&copies).expect("the copy directory");
+        let target = outside.join("target.json");
+        fs::write(&target, b"keep").expect("the target");
+        symlink(&target, copies.join("review.json")).expect("the file link");
+        let (text, notes) = copy_verdicts(&brief, &arc, &worktree);
+        assert_eq!(text, brief, "the path stays in the text");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("symbolic link"), "{notes:?}");
+        assert_eq!(
+            fs::read(&target).expect("the target"),
+            b"keep",
+            "the link's target is untouched"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
