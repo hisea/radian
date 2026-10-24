@@ -128,7 +128,7 @@ impl ThemeName {
     }
 }
 
-/// The 89 roles a [`Theme`] styles (ADR 0009, ADR 0023, ADR 0029). The config keys
+/// The 96 roles a [`Theme`] styles (ADR 0009, ADR 0023, ADR 0029). The config keys
 /// are the snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -151,6 +151,15 @@ pub enum Role {
     PriorityP3,
     PriorityP4,
     PriorityP5,
+    /// The arc plans page's seven plan marks (ADR 0048 decision 11): one role per mark, so a
+    /// plan's state reads at a glance. The mark glyph says which rule held; these color it.
+    PlanNeedsYou,
+    PlanRunning,
+    PlanQueued,
+    PlanPaused,
+    PlanDone,
+    PlanDraft,
+    PlanCancelled,
     Interrupted,
     User,
     ToolCall,
@@ -253,7 +262,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 89] = [
+    pub const ALL: [Role; 96] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -268,6 +277,13 @@ impl Role {
         Role::PriorityP3,
         Role::PriorityP4,
         Role::PriorityP5,
+        Role::PlanNeedsYou,
+        Role::PlanRunning,
+        Role::PlanQueued,
+        Role::PlanPaused,
+        Role::PlanDone,
+        Role::PlanDraft,
+        Role::PlanCancelled,
         Role::Interrupted,
         Role::User,
         Role::ToolCall,
@@ -362,6 +378,13 @@ impl Role {
             Role::PriorityP3 => "priority_p3",
             Role::PriorityP4 => "priority_p4",
             Role::PriorityP5 => "priority_p5",
+            Role::PlanNeedsYou => "plan_needs_you",
+            Role::PlanRunning => "plan_running",
+            Role::PlanQueued => "plan_queued",
+            Role::PlanPaused => "plan_paused",
+            Role::PlanDone => "plan_done",
+            Role::PlanDraft => "plan_draft",
+            Role::PlanCancelled => "plan_cancelled",
             Role::Interrupted => "interrupted",
             Role::User => "user",
             Role::ToolCall => "tool_call",
@@ -462,6 +485,13 @@ impl Role {
             Role::PriorityP3 => &mut theme.priority_p3,
             Role::PriorityP4 => &mut theme.priority_p4,
             Role::PriorityP5 => &mut theme.priority_p5,
+            Role::PlanNeedsYou => &mut theme.plan_needs_you,
+            Role::PlanRunning => &mut theme.plan_running,
+            Role::PlanQueued => &mut theme.plan_queued,
+            Role::PlanPaused => &mut theme.plan_paused,
+            Role::PlanDone => &mut theme.plan_done,
+            Role::PlanDraft => &mut theme.plan_draft,
+            Role::PlanCancelled => &mut theme.plan_cancelled,
             Role::Interrupted => &mut theme.interrupted,
             Role::User => &mut theme.user,
             Role::ToolCall => &mut theme.tool_call,
@@ -564,6 +594,15 @@ pub struct Theme {
     pub priority_p3: Style,
     pub priority_p4: Style,
     pub priority_p5: Style,
+    /// The seven plan marks on the arc plans page (ADR 0048 decision 11): needs you, running,
+    /// queued, paused, done, draft and cancelled.
+    pub plan_needs_you: Style,
+    pub plan_running: Style,
+    pub plan_queued: Style,
+    pub plan_paused: Style,
+    pub plan_done: Style,
+    pub plan_draft: Style,
+    pub plan_cancelled: Style,
     /// The `[interrupted]` marker (ADR 0003).
     pub interrupted: Style,
     pub user: Style,
@@ -843,6 +882,15 @@ impl Theme {
             priority_p3: spec(pi::YELLOW, Modifier::empty(), truecolor),
             priority_p4: spec(pi::PRIORITY_P4, Modifier::empty(), truecolor),
             priority_p5: spec(pi::GREEN, Modifier::empty(), truecolor),
+            // The seven plan marks (ADR 0048 decision 11): a warm/cool set. The orange and
+            // the amber reuse the priority constants, so the warmth is defined once.
+            plan_needs_you: spec(pi::PRIORITY_P1, Modifier::BOLD, truecolor),
+            plan_running: spec(pi::SYNTAX_VARIABLE, Modifier::empty(), truecolor),
+            plan_queued: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            plan_paused: spec(pi::PRIORITY_P2, Modifier::empty(), truecolor),
+            plan_done: spec(pi::GREEN, Modifier::empty(), truecolor),
+            plan_draft: spec(pi::DIM, Modifier::empty(), truecolor),
+            plan_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
             interrupted: spec(pi::YELLOW, Modifier::BOLD, truecolor),
             tool_call: text,
             tool_result: muted,
@@ -975,6 +1023,15 @@ impl Theme {
             priority_p3: spec(pi::YELLOW, Modifier::empty(), truecolor),
             priority_p4: spec(pi::PRIORITY_P4, Modifier::empty(), truecolor),
             priority_p5: spec(pi::GREEN, Modifier::empty(), truecolor),
+            // The seven plan marks (ADR 0048 decision 11): a warm/cool set. The orange and
+            // the amber reuse the priority constants, so the warmth is defined once.
+            plan_needs_you: spec(pi::PRIORITY_P1, Modifier::BOLD, truecolor),
+            plan_running: spec(pi::SYNTAX_VARIABLE, Modifier::empty(), truecolor),
+            plan_queued: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            plan_paused: spec(pi::PRIORITY_P2, Modifier::empty(), truecolor),
+            plan_done: spec(pi::GREEN, Modifier::empty(), truecolor),
+            plan_draft: spec(pi::DIM, Modifier::empty(), truecolor),
+            plan_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
             interrupted: spec(pi::YELLOW, Modifier::BOLD, truecolor),
             tool_call: text,
             tool_result: muted,
@@ -1094,6 +1151,15 @@ impl Theme {
             priority_p3: style(None, Modifier::empty()),
             priority_p4: style(None, Modifier::empty()),
             priority_p5: style(None, Modifier::empty()),
+            // `mono` uses no color: only the "needs you" mark is bold, so shape and weight
+            // carry the seven states.
+            plan_needs_you: style(None, Modifier::BOLD),
+            plan_running: style(None, Modifier::empty()),
+            plan_queued: style(None, Modifier::empty()),
+            plan_paused: style(None, Modifier::empty()),
+            plan_done: style(None, Modifier::empty()),
+            plan_draft: style(None, Modifier::empty()),
+            plan_cancelled: style(None, Modifier::empty()),
             interrupted: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             user: style(None, Modifier::BOLD),
             tool_call: style(None, Modifier::REVERSED),
@@ -1220,7 +1286,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 62] {
+    pub fn styles(&self) -> [Style; 69] {
         [
             self.reasoning,
             self.priority_p0,
@@ -1229,6 +1295,13 @@ impl Theme {
             self.priority_p3,
             self.priority_p4,
             self.priority_p5,
+            self.plan_needs_you,
+            self.plan_running,
+            self.plan_queued,
+            self.plan_paused,
+            self.plan_done,
+            self.plan_draft,
+            self.plan_cancelled,
             self.interrupted,
             self.user,
             self.tool_call,
@@ -1559,6 +1632,55 @@ mod tests {
             assert!(style.fg.is_none(), "{style:?}");
             assert!(style.bg.is_none(), "{style:?}");
         }
+    }
+
+    /// The seven plan marks are seven distinct colors in both palettes, "needs you" is bold,
+    /// and `mono` gives none of them a color (ADR 0048 decision 11).
+    #[test]
+    fn the_plan_roles_are_seven_distinct_colors_and_mono_has_none() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let colors = [
+                theme.plan_needs_you,
+                theme.plan_running,
+                theme.plan_queued,
+                theme.plan_paused,
+                theme.plan_done,
+                theme.plan_draft,
+                theme.plan_cancelled,
+            ];
+            for (index, one) in colors.iter().enumerate() {
+                assert!(one.fg.is_some(), "{:?}: {colors:?}", theme.name);
+                for other in colors.iter().skip(index + 1) {
+                    assert_ne!(one.fg, other.fg, "{:?}: {colors:?}", theme.name);
+                }
+            }
+            assert!(
+                theme.plan_needs_you.add_modifier.contains(Modifier::BOLD),
+                "{:?}: the needs-you mark is bold",
+                theme.name
+            );
+            // The warm roles reuse the priority constants; the ends are the palette's own.
+            assert_eq!(theme.plan_done.fg, theme.status_ok.fg);
+            assert_eq!(theme.plan_cancelled.fg, theme.status_error.fg);
+            assert_eq!(theme.plan_draft.fg, theme.hint.fg);
+        }
+        let mono = Theme::mono();
+        for style in [
+            mono.plan_needs_you,
+            mono.plan_running,
+            mono.plan_queued,
+            mono.plan_paused,
+            mono.plan_done,
+            mono.plan_draft,
+            mono.plan_cancelled,
+        ] {
+            assert!(style.fg.is_none(), "{style:?}");
+            assert!(style.bg.is_none(), "{style:?}");
+        }
+        assert!(
+            mono.plan_needs_you.add_modifier.contains(Modifier::BOLD),
+            "mono keeps the needs-you weight"
+        );
     }
 
     #[test]

@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use radian_arc::read::{AttemptView, CommandView, MergeView, TaskDiff};
-use radian_arc::store::model::{PLAN_PRIORITIES, TaskFile, TaskState, claim_order, priority_rank};
+use radian_arc::store::model::{
+    PLAN_PRIORITIES, PROPOSED_PHASE, TaskFile, TaskState, claim_order, priority_rank,
+};
 use radian_arc::store::{Loaded, PlanView, Store};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
@@ -230,6 +232,112 @@ pub fn task_mark(state: TaskState, phase: &str) -> Mark {
     }
 }
 
+/// The mark of one plan (ADR 0048 decision 11): the circle family, one per plan, the first
+/// rule that holds. A plan no rule matches draws [`PlanMark::Queued`]. The task marks stay
+/// [`Mark`]; these are only the plan list's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanMark {
+    /// `✕`: the plan is `cancelled`. The rest of the row is weak.
+    Cancelled,
+    /// `◌`: the plan is `draft`.
+    Draft,
+    /// `◉`: a task is `review.awaiting_human` or `todo.proposed`; or no task is open and a
+    /// task is `failed.*` other than `failed.cancelled`.
+    NeedsYou,
+    /// `●`: a task is `doing.*`, or a `review.*` phase other than `awaiting_human`.
+    Running,
+    /// `◍`: `auto` is `off` and a task is open.
+    Paused,
+    /// `○`: a task is open, and nothing is running.
+    Queued,
+    /// `✓`: every task is `done.*` or `failed.cancelled`, and at least one is `done`.
+    Done,
+}
+
+impl PlanMark {
+    /// The glyph.
+    pub fn glyph(self) -> char {
+        match self {
+            PlanMark::Cancelled => '✕',
+            PlanMark::Draft => '◌',
+            PlanMark::NeedsYou => '◉',
+            PlanMark::Running => '●',
+            PlanMark::Paused => '◍',
+            PlanMark::Queued => '○',
+            PlanMark::Done => '✓',
+        }
+    }
+
+    /// The theme role the mark takes.
+    pub fn style(self, theme: &Theme) -> Style {
+        match self {
+            PlanMark::Cancelled => theme.plan_cancelled,
+            PlanMark::Draft => theme.plan_draft,
+            PlanMark::NeedsYou => theme.plan_needs_you,
+            PlanMark::Running => theme.plan_running,
+            PlanMark::Paused => theme.plan_paused,
+            PlanMark::Queued => theme.plan_queued,
+            PlanMark::Done => theme.plan_done,
+        }
+    }
+}
+
+/// The mark of one plan: the first rule of ADR 0048 decision 11's table that holds.
+pub fn plan_mark(view: &PlanView) -> PlanMark {
+    let plan = &view.plan.item;
+    if plan.status == "cancelled" {
+        return PlanMark::Cancelled;
+    }
+    if plan.status == "draft" {
+        return PlanMark::Draft;
+    }
+    let tasks = &view.tasks;
+    let needs_you = tasks.iter().any(|task| {
+        (task.item.state == TaskState::Review && task.item.phase == "awaiting_human")
+            || (task.item.state == TaskState::Todo && task.item.phase == PROPOSED_PHASE)
+    });
+    let open = tasks.iter().any(|task| task_open(&task.item));
+    let failed_other = tasks
+        .iter()
+        .any(|task| task.item.state == TaskState::Failed && task.item.phase != "cancelled");
+    if needs_you || (!open && failed_other) {
+        return PlanMark::NeedsYou;
+    }
+    let running = tasks.iter().any(|task| {
+        task.item.state == TaskState::Doing
+            || (task.item.state == TaskState::Review && task.item.phase != "awaiting_human")
+    });
+    if running {
+        return PlanMark::Running;
+    }
+    if open && plan.auto == "off" {
+        return PlanMark::Paused;
+    }
+    if open {
+        return PlanMark::Queued;
+    }
+    let all_finished = tasks.iter().all(|task| {
+        task.item.state == TaskState::Done
+            || (task.item.state == TaskState::Failed && task.item.phase == "cancelled")
+    });
+    let any_done = tasks.iter().any(|task| task.item.state == TaskState::Done);
+    if all_finished && any_done {
+        return PlanMark::Done;
+    }
+    PlanMark::Queued
+}
+
+/// Whether a task is open for the plan mark's rules (ADR 0048 decision 11): `todo.ready`,
+/// `todo.retry_wait`, `doing.*` or `review.*`. `todo.proposed` has its own rule (needs you),
+/// and `todo.blocked` and `todo.paused_budget` are not open.
+fn task_open(task: &TaskFile) -> bool {
+    match task.state {
+        TaskState::Todo => matches!(task.phase.as_str(), "ready" | "retry_wait"),
+        TaskState::Doing | TaskState::Review => true,
+        TaskState::Done | TaskState::Failed => false,
+    }
+}
+
 /// How alive a `doing` task's worker looks (ADR 0048 decisions 7.9 and 9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Freshness {
@@ -271,7 +379,7 @@ pub struct PlanRow {
     pub cost: Option<f64>,
     pub merged: usize,
     pub total: usize,
-    pub mark: Mark,
+    pub mark: PlanMark,
     pub tasks: Vec<TaskRow>,
 }
 
@@ -2177,14 +2285,7 @@ fn plan_row(view: &PlanView, tasks: Vec<TaskRow>) -> PlanRow {
         .iter()
         .filter(|task| task.item.state == TaskState::Done && task.item.phase == "merged")
         .count();
-    let mark = match view.plan.item.status.as_str() {
-        // A cancelled plan is final, whatever its tasks reached: it is never a confirmed
-        // plan with work left, and it is not the same thing as a finished one.
-        "cancelled" => Mark::Failed,
-        _ if total > 0 && merged == total => Mark::Done,
-        "draft" => Mark::Todo,
-        _ => Mark::Active,
-    };
+    let mark = plan_mark(view);
     let costs: Vec<f64> = view
         .tasks
         .iter()
