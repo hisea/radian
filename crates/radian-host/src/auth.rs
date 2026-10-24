@@ -400,6 +400,28 @@ impl AuthStore {
         }
     }
 
+    /// The notice for a `keys` list on an entry that is not an `api_key` entry (ADR 0026 D1:
+    /// only `api_key` entries hold several keys, so an `oauth` entry's list is ignored). `None`
+    /// for a missing entry, an `api_key` entry, or an empty (or non-array) `keys` value.
+    pub fn ignored_keys_note(&self, provider_id: &str) -> Option<String> {
+        let entry = self.entries.get(provider_id).and_then(Value::as_object)?;
+        if entry.get("type").and_then(Value::as_str) == Some("api_key") {
+            return None;
+        }
+        if entry.get("keys").and_then(Value::as_array)?.is_empty() {
+            return None;
+        }
+        let described = match entry.get("type").and_then(Value::as_str) {
+            Some("oauth") => "an OAuth entry".to_owned(),
+            Some(kind) => format!("a `{kind}` entry"),
+            None => "an untyped entry".to_owned(),
+        };
+        Some(format!(
+            "`{provider_id}` is {described}, not an `api_key` entry; its `keys` list is \
+             ignored. Only an `api_key` entry holds several keys."
+        ))
+    }
+
     /// A named provider's declaration from its entry's `env` (ADR 0026 D10:
     /// `RADIAN_BASE_URL`, `RADIAN_KIND`), **even when the key itself is unusable** — the
     /// declaration is what tells the host which endpoint and protocol the name names. `None`
@@ -812,6 +834,11 @@ pub fn key_choices(provider_id: &str) -> Result<Vec<KeyChoice>, AuthError> {
 /// [`AuthStore::note`] for the process's store.
 pub fn resolve_note(provider_id: &str) -> Result<Option<String>, AuthError> {
     Ok(AuthStore::open()?.note(provider_id))
+}
+
+/// [`AuthStore::ignored_keys_note`] for the process's store.
+pub fn ignored_keys_note(provider_id: &str) -> Result<Option<String>, AuthError> {
+    Ok(AuthStore::open()?.ignored_keys_note(provider_id))
 }
 
 /// [`AuthStore::upsert_api_key`] for the process's store.
@@ -1605,7 +1632,8 @@ mod tests {
         assert_eq!(store.key_choices("p").unwrap().len(), 2);
     }
 
-    /// An `oauth` entry's `keys` list is ignored: only `api_key` entries have keys (D1).
+    /// An `oauth` entry's `keys` list is ignored: only `api_key` entries have keys (D1). The
+    /// host's notice path says so once, and the ignored value never joins the redaction list.
     #[test]
     fn an_oauth_entrys_keys_are_ignored() {
         let scratch = Scratch::new("oauth-keys");
@@ -1617,6 +1645,22 @@ mod tests {
         let store = scratch.open().unwrap();
         assert_eq!(store.resolve_keys("chatgpt").unwrap(), None);
         assert!(!store.resolved_keys().contains(&"sk-ignored".to_owned()));
+        let note = store
+            .ignored_keys_note("chatgpt")
+            .expect("one notice for the ignored list");
+        assert!(note.contains("chatgpt"), "{note}");
+        assert!(note.contains("OAuth"), "{note}");
+        assert!(note.contains("`keys`"), "{note}");
+        assert!(!note.contains("sk-ignored"), "{note}");
+        // An `api_key` entry's `keys` list is the real thing: no notice.
+        write_auth(
+            &scratch,
+            r#"{"p": {"type": "api_key", "key": "sk-first",
+                      "keys": [{"name": "team", "key": "sk-second"}]}}"#,
+        );
+        let store = scratch.open().unwrap();
+        assert_eq!(store.ignored_keys_note("p"), None);
+        assert_eq!(store.ignored_keys_note("missing"), None);
     }
 
     /// `add_api_key` appends in order; removing the first key promotes the next to `key`;

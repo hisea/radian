@@ -16,7 +16,8 @@
 //! request uses a different key than the previous request. The key value never appears; the
 //! name or the masked form does. The hosts drain the queue after a turn.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -31,11 +32,21 @@ pub const DEFAULT_REST: Duration = Duration::from_secs(5 * 60);
 pub const MAX_REST: Duration = Duration::from_secs(60 * 60);
 
 /// One key the pool may use: the display name (`first`, a `keys[]` name, or the masked form)
-/// and the resolved value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// and the resolved value. `Debug` never prints the value (ADR 0013, ADR 0026 D2): a panic
+/// message or a diagnostic may format a pool, and the key must not reach it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PoolKey {
     pub name: String,
     pub key: String,
+}
+
+impl fmt::Debug for PoolKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PoolKey")
+            .field("name", &self.name)
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl PoolKey {
@@ -52,8 +63,9 @@ impl PoolKey {
     }
 }
 
-/// The key one request uses, plus the one notice a switch produces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The key one request uses, plus the one notice a switch produces. `Debug` never prints the
+/// value; the fingerprint identifies the key without revealing it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PickedKey {
     /// The index in the pool, for [`KeyPool::rest_for_error`].
     pub index: usize,
@@ -62,6 +74,18 @@ pub struct PickedKey {
     pub fingerprint: String,
     /// The switch line, when this request's key differs from the previous one.
     pub notice: Option<String>,
+}
+
+impl fmt::Debug for PickedKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PickedKey")
+            .field("index", &self.index)
+            .field("name", &self.name)
+            .field("key", &"<redacted>")
+            .field("fingerprint", &self.fingerprint)
+            .field("notice", &self.notice)
+            .finish()
+    }
 }
 
 struct State {
@@ -80,6 +104,7 @@ pub struct KeyPool {
 
 impl std::fmt::Debug for KeyPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `keys` is a slice of `PoolKey`, whose own `Debug` redacts every value.
         f.debug_struct("KeyPool")
             .field("provider", &self.provider)
             .field("keys", &self.keys)
@@ -242,6 +267,9 @@ fn switch_notice(provider: &str, previous: &str, until: SystemTime, next: &str) 
 struct Registry {
     pools: HashMap<String, Arc<KeyPool>>,
     notices: Vec<String>,
+    /// The providers whose one auth-entry notice was already queued, so a pool rebuilt per
+    /// request (an `oauth` entry has no pool at all) does not repeat it.
+    noticed: HashSet<String>,
 }
 
 fn registry() -> &'static Mutex<Registry> {
@@ -261,7 +289,18 @@ pub fn pool(provider: &str) -> Option<Arc<KeyPool>> {
     {
         return Some(existing);
     }
-    let resolved = auth::resolve_keys(provider).ok().flatten()?;
+    let resolved = match auth::resolve_keys(provider) {
+        Ok(Some(resolved)) => resolved,
+        _ => {
+            // ADR 0026 D1: a `keys` list on an `oauth` entry is ignored with one notice. The
+            // pool is the host's key notice path (`SwitchableModel` asks for the pool on
+            // every request), so the notice rides it to the next drain.
+            if let Ok(Some(note)) = auth::ignored_keys_note(provider) {
+                queue_auth_notice(provider, note);
+            }
+            return None;
+        }
+    };
     if resolved.keys.is_empty() {
         return None;
     }
@@ -290,6 +329,18 @@ pub fn reload(provider: &str) -> Option<Arc<KeyPool>> {
         .pools
         .remove(provider);
     pool(provider)
+}
+
+/// Queues one entry-level notice once per provider. A refused `keys[]` item's notice comes
+/// with the pool build (cached), while an ignored `oauth` `keys` list is checked on every
+/// request that finds no pool.
+fn queue_auth_notice(provider: &str, notice: String) {
+    let mut registry = registry()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if registry.noticed.insert(provider.to_owned()) {
+        registry.notices.push(notice);
+    }
 }
 
 /// Queues one switch notice for the host to show after the turn.
@@ -449,5 +500,30 @@ mod tests {
             ],
         );
         assert_eq!(pool.keys()[1].name, crate::auth::mask_key("sk-second"));
+    }
+
+    /// ADR 0026 D2: the key value never reaches output or a panic message. Formatting a pool,
+    /// its keys or a pick (as a diagnostic or a panic payload would) shows the name, never the
+    /// value.
+    #[test]
+    fn a_debug_render_never_shows_a_key() {
+        let pool = KeyPool::new("p", keys(&["sk-first", "sk-second"]));
+        let picked = pool.pick().expect("a key");
+        for text in [
+            format!("{pool:?}"),
+            format!("{:?}", pool.keys()),
+            format!("{picked:?}"),
+        ] {
+            assert!(!text.contains("sk-first"), "{text}");
+            assert!(!text.contains("sk-second"), "{text}");
+            assert!(text.contains("<redacted>"), "{text}");
+        }
+        // The name still shows, so a diagnostic says which key it was.
+        assert!(format!("{picked:?}").contains("\"first\""));
+        assert!(
+            !picked.fingerprint.is_empty() && !picked.fingerprint.contains("sk-first"),
+            "{}",
+            picked.fingerprint
+        );
     }
 }

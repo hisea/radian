@@ -67,9 +67,9 @@ pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, KeyChoice, NamedKey, OAuthEntry,
     RADIAN_BASE_URL, ResolvedKey, ResolvedKeys, add_api_key as add_auth_api_key, auth_path,
-    has_login, key_choices as auth_key_choices, list as list_auth, mask_key, remove as remove_auth,
-    remove_key as remove_auth_key, resolve_key, resolve_keys, resolve_note, resolved_keys,
-    upsert_api_key as upsert_auth_api_key,
+    has_login, ignored_keys_note, key_choices as auth_key_choices, list as list_auth, mask_key,
+    remove as remove_auth, remove_key as remove_auth_key, resolve_key, resolve_keys, resolve_note,
+    resolved_keys, upsert_api_key as upsert_auth_api_key,
 };
 pub use goal::{GoalHooks, GoalTools, SharedGoal, fresh_share, goal_block};
 pub use key_pool::{DEFAULT_REST, KeyPool, MAX_REST, PickedKey, PoolKey};
