@@ -293,13 +293,14 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
             continue;
         }
         out.push_str(&format!(
-            "{}  {}  auto: {}  priority: {}  {}/{} merged  {}{}\n",
+            "{}  {}  auto: {}  priority: {}  {}/{} merged  total_cost_usd: {}  {}{}\n",
             view.plan.item.id,
             view.plan.item.status,
             view.plan.item.auto,
             view.plan.item.priority(),
             merged,
             view.tasks.len(),
+            cost_text(view.total_cost_usd()),
             view.plan.item.title,
             changed_marker(view.plan.changed_outside_arc)
         ));
@@ -415,6 +416,12 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
                 "max_wall_time_secs",
                 &optional_number(plan.item.max_wall_time_secs),
             );
+            field(&mut out, "cost_usd", &cost_text(view.cost_usd()));
+            field(
+                &mut out,
+                "total_cost_usd",
+                &cost_text(view.total_cost_usd()),
+            );
             field(&mut out, "tasks", &joined(&plan.item.tasks));
             field(
                 &mut out,
@@ -454,6 +461,11 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
             );
             field(&mut out, "token", &optional_text(item.token.as_deref()));
             field(&mut out, "cost_usd", &optional_number(item.cost_usd));
+            field(
+                &mut out,
+                "total_cost_usd",
+                &optional_number(item.total_cost()),
+            );
             field(&mut out, "auto_rework", &item.auto_rework.to_string());
             field(&mut out, "retry_count", &item.retry_count.to_string());
             field(&mut out, "after", &joined(&item.after));
@@ -599,6 +611,23 @@ fn optional_number<T: std::fmt::Display>(value: Option<T>) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
+/// A summed cost as the text forms print it: up to six decimals, with the trailing zeros
+/// dropped. Costs are kept in micros of a US dollar, so the rounding hides the float's own
+/// noise and nothing a session reported.
+fn cost_text(cost: f64) -> String {
+    if cost == 0.0 {
+        return "0".to_owned();
+    }
+    let mut text = format!("{cost:.6}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
 fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_json::Value {
     let item = &task.item;
     let mut value = json!({
@@ -611,6 +640,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "attempt_id": item.attempt_id,
         "token": item.token,
         "cost_usd": item.cost_usd,
+        "total_cost_usd": item.total_cost(),
         "auto_rework": item.auto_rework,
         "retry_count": item.retry_count,
         "after": item.after,
@@ -644,6 +674,8 @@ fn plan_json(view: &PlanView, with_body: bool) -> serde_json::Value {
         "priority": plan.priority(),
         "max_cost_usd": plan.max_cost_usd,
         "max_wall_time_secs": plan.max_wall_time_secs,
+        "cost_usd": view.cost_usd(),
+        "total_cost_usd": view.total_cost_usd(),
         "tasks": view
             .tasks
             .iter()

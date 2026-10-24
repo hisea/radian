@@ -263,13 +263,18 @@ The attempt's session id is in `runs/<task>/attempts/<attempt id>/execution.json
 
 Cost is counted per attempt.
 `Result.cost` is the session total, so the attempt's cost is the difference from the previous attempt's session total when both ran in the same session (`resume`), and the whole session total when the attempt has a session of its own (`fresh`).
-The delta is added to the task's `cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
-A `reverify` attempt runs no worker and costs nothing: it adds nothing to `cost_usd`.
+The delta is added to the task's `cost_usd` and its `total_cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
+A `reverify` attempt runs no worker and costs nothing, but a `review` stage it runs costs the same as any review.
+
+A `review` stage's cost counts too: when arc applies a gate's verdicts, the sum of the attempt's `review_cost_micros` (every session the stage ran; a run that reported none adds `0`) is added to the task's `cost_usd` and `total_cost_usd`, and both budgets are checked then.
+Both counters include every worker attempt and every review; `reset-budget` sets `cost_usd` back to `0` and leaves `total_cost_usd` alone.
 
 When a retry is due and the budget is used up, the task goes to `todo.paused_budget` instead of `todo.retry_wait`:
 
 - the task's `max_cost_usd`, else `[limits] max_cost_usd`;
 - the plan's `max_cost_usd`, counted over every task of the plan. A plan budget also sets the plan's `auto` to `off`.
+
+The same check runs when a review verdict is applied: a review cost that reaches the budget stops the task in `todo.paused_budget` after that gate, arc writes no automatic rework for the round, and the task waits for `reset-budget`.
 
 `reset-budget` is the only way back.
 

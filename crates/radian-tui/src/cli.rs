@@ -2980,6 +2980,7 @@ mod tests {
             attempt_id: Some("0001-b-1".to_owned()),
             token: Some("a-token".to_owned()),
             cost_usd: Some(0.5),
+            total_cost_usd: Some(0.75),
             auto_rework: 2,
             retry_count: 1,
             allow_noop: false,

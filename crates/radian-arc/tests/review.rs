@@ -18,7 +18,7 @@ use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Exit, Store, plan_ops};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 // ---- store-level fixture -------------------------------------------------------------
 
@@ -254,6 +254,68 @@ impl Fixture {
             .item
             .plan;
         plan_ops::set_auto(&self.store, &plan, level).expect("the auto level");
+    }
+
+    /// Writes the worker's own result stream with `micros` of reported cost, as a completed
+    /// attempt does, and the execution record that names its session.
+    fn write_cost_stream(&self, attempt: u32, session: &str, micros: u64) {
+        let dir = attempt_ops::run_dir(&self.store, &self.task, attempt);
+        fs::create_dir_all(&dir).expect("the attempt run dir");
+        fs::write(
+            dir.join("result.jsonl"),
+            format!(
+                "{}\n",
+                json!({
+                    "type": "Result",
+                    "outcome": "completed",
+                    "cost": {"micros": micros},
+                })
+            ),
+        )
+        .expect("the result stream");
+        fs::write(
+            dir.join("execution.json"),
+            json!({
+                "attempt_id": format!("{}-{attempt}", self.task),
+                "session_id": session,
+            })
+            .to_string(),
+        )
+        .expect("the execution record");
+    }
+
+    /// One worker attempt that reports `micros` of cost: claim, publish a commit, apply the
+    /// pushed result. The task ends in `review.verifying` for the returned head.
+    fn attempt_costing(&self, at: &str, file: &str, content: &str, micros: u64) -> String {
+        let claim = attempt_ops::claim(&self.store, &self.task).expect("the attempt claim");
+        let head = self.publish(at, file, content);
+        self.write_cost_stream(claim.attempt, &claim.session_id, micros);
+        let finish = Finish {
+            attempt_id: claim.attempt_id.clone(),
+            token: claim.token.clone(),
+            exit_code: 0,
+            outcome: "completed".to_owned(),
+            base_sha: Some(self.base.clone()),
+            head_sha: Some(head.clone()),
+            pushed: true,
+            failure: None,
+        };
+        attempt_ops::apply(
+            &self.store,
+            &self.task,
+            claim.attempt,
+            Some(&finish),
+            None,
+            Some(0),
+        )
+        .expect("the attempt result applies");
+        head
+    }
+
+    /// A lead's rework, then a worker attempt that reports `micros` of cost.
+    fn rework_costing(&self, at: &str, file: &str, content: &str, micros: u64) -> String {
+        plan_ops::add_rework(&self.store, &self.task, "fix the review").expect("a rework brief");
+        self.attempt_costing(at, file, content, micros)
     }
 
     /// Runs one rework attempt: the lead's brief, the claim, a commit on `work/<task>` at `at`,
@@ -3866,4 +3928,253 @@ fn cancel_ends_a_proposed_task_as_failed_cancelled() {
         (stored.state.as_str(), stored.phase.as_str()),
         ("failed", "cancelled")
     );
+}
+
+// ---- cost (ADR 0048 decision 12) ------------------------------------------------------
+
+/// Two worker attempts and three reviews (the first attempt's, the rework's and a
+/// `reverify`'s) make the task's total: every reported cost is added, and `reset-budget`
+/// zeroes the budget counter but leaves the total alone. Mutation: count a review nowhere and
+/// the total is short by its three costs; zero the total in `reset-budget` and the last
+/// assertion fails.
+#[test]
+fn two_attempts_and_three_reviews_make_the_total_and_reset_budget_keeps_it() {
+    let fixture = Fixture::new("cost-total-sum");
+    fixture.add_review_stage();
+
+    // The first worker attempt: $1.00.
+    let first = fixture.attempt_costing(&fixture.base.clone(), "one.txt", "one\n", 1_000_000);
+    // The first review blocks and costs $0.003; the plan is at `off`, so the task waits.
+    let first_review = FakeReview::new(
+        "cost-total-sum-review-1",
+        &[review_message(
+            "the change adds one.txt",
+            &["fix one.txt"],
+            &[],
+        )],
+        0,
+    );
+    first_review.set_cost(3_000);
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_review.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // The second worker attempt: $1.00. Its review passes and costs $0.004.
+    let _second = fixture.rework_costing(&first, "two.txt", "two\n", 1_000_000);
+    let second_review = FakeReview::new(
+        "cost-total-sum-review-2",
+        &[review_message("the rework fixes it", &[], &[])],
+        0,
+    );
+    second_review.set_cost(4_000);
+    let verified =
+        review::verify_with(&fixture.store, &fixture.task, Some(second_review.program()))
+            .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    // A reverify runs no worker; its review still costs $0.005 and counts.
+    let third_review = FakeReview::new(
+        "cost-total-sum-review-3",
+        &[review_message("still fine", &[], &[])],
+        0,
+    );
+    third_review.set_cost(5_000);
+    let reverified =
+        review::reverify_with(&fixture.store, &fixture.task, Some(third_review.program()))
+            .expect("the reverify runs");
+    assert_eq!(
+        reverified.verification.expect("the verification ran").phase,
+        "awaiting_human"
+    );
+
+    let expected = 1.0 + 1.0 + 0.003 + 0.004 + 0.005;
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        (stored.cost_usd.expect("a counted cost") - expected).abs() < 1e-9,
+        "the budget counter is every attempt and every review: {stored:?}"
+    );
+    assert!(
+        (stored.total_cost_usd.expect("a total") - expected).abs() < 1e-9,
+        "the total is the same five costs: {stored:?}"
+    );
+
+    let plan = stored.plan.clone();
+    let reset = attempt_ops::reset_budget(&fixture.store, &plan).expect("reset the plan");
+    assert_eq!(reset.kind, "plan");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        stored.cost_usd,
+        Some(0.0),
+        "reset-budget zeroes the counter"
+    );
+    assert!(
+        (stored.total_cost_usd.expect("the total stays") - expected).abs() < 1e-9,
+        "reset-budget does not change the total: {stored:?}"
+    );
+}
+
+/// The budget check happens when the review's verdict is applied: a `max_cost_usd` the
+/// review alone reaches stops the task in `todo.paused_budget` after the gate, and no review
+/// rework is written even though the plan's `auto` would write one. Mutation: skip the check
+/// and the task returns to `todo.ready` with the rework.
+#[test]
+fn a_review_cost_that_reaches_the_budget_pauses_the_task_without_a_rework() {
+    let fixture = Fixture::new("cost-review-budget");
+    fixture.add_review_stage();
+    fixture.set_auto("run");
+    fixture
+        .store
+        .change_task(&fixture.task, |task| {
+            task.max_cost_usd = Some(0.5);
+            Ok(())
+        })
+        .expect("the task limit");
+
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "cost-review-budget-fake",
+        &[review_message(
+            "the change adds one.txt",
+            &["fix one.txt"],
+            &[],
+        )],
+        0,
+    );
+    fake.set_cost(1_000_000);
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "paused_budget", "{verified:?}");
+    assert!(verified.review.is_none(), "no review rework: {verified:?}");
+    assert!(verified.conflict.is_none(), "{verified:?}");
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "paused_budget")
+    );
+    assert_eq!(
+        stored.auto_rework, 0,
+        "a budget stop is not an automatic rework"
+    );
+    assert!(
+        !stored.body.contains("## Rework"),
+        "no rework brief is written: {}",
+        stored.body
+    );
+    let plan = fixture.store.load_plan(&stored.plan).unwrap().item;
+    assert_eq!(
+        plan.auto, "run",
+        "the task's own budget paused the task, not the plan"
+    );
+}
+
+/// A review run that reports no cost adds nothing: the worker attempt's cost stays as it was.
+#[test]
+fn a_review_that_reports_no_cost_adds_nothing() {
+    let fixture = Fixture::new("review-no-cost");
+    fixture.add_review_stage();
+    let head = fixture.attempt_costing(&fixture.base.clone(), "one.txt", "one\n", 1_000_000);
+    let fake = FakeReview::new(
+        "review-no-cost-fake",
+        &[review_message("the change is fine", &[], &[])],
+        0,
+    );
+    fake.set_no_cost();
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    assert_eq!(
+        fixture
+            .verdict(&fixture.attempt_label(), Stage::Review)
+            .review_cost_micros,
+        None
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.cost_usd, Some(1.0), "the review adds 0");
+    assert_eq!(stored.total_cost_usd, Some(1.0));
+}
+
+/// A plan's `cost_usd` and `total_cost_usd` are the sums of its tasks' fields, read when the
+/// plan is read: `list`, `list --json`, `show` and `show --json` all print them.
+#[test]
+fn a_plans_cost_and_total_are_its_tasks_sums_in_list_and_show() {
+    let repo = Repo::new("plan-cost-totals");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let one = store
+        .add_task(&plan, "one", "One", vec![], false, vec![], "brief\n")
+        .expect("add a task");
+    let two = store
+        .add_task(&plan, "two", "Two", vec![], false, vec![], "brief\n")
+        .expect("add a task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    store
+        .change_task(&one, |task| {
+            task.cost_usd = Some(1.25);
+            task.total_cost_usd = Some(1.5);
+            Ok(())
+        })
+        .expect("one's costs");
+    store
+        .change_task(&two, |task| {
+            task.cost_usd = Some(0.5);
+            task.total_cost_usd = Some(0.75);
+            Ok(())
+        })
+        .expect("two's costs");
+
+    let listed = repo.radian(&["arc", "list", "--json"]);
+    assert_eq!(listed.code, 0, "{}", listed.stderr);
+    let value: Value = serde_json::from_str(&listed.stdout).expect("the list JSON");
+    let plan_json = value
+        .as_array()
+        .and_then(|plans| {
+            plans
+                .iter()
+                .find(|candidate| candidate["id"].as_str() == Some(plan.as_str()))
+        })
+        .unwrap_or_else(|| panic!("the plan is in the list: {value}"));
+    assert_eq!(plan_json["cost_usd"], 1.75, "{plan_json}");
+    assert_eq!(plan_json["total_cost_usd"], 2.25, "{plan_json}");
+    assert_eq!(plan_json["tasks"][0]["cost_usd"], 1.25, "{plan_json}");
+    assert_eq!(plan_json["tasks"][0]["total_cost_usd"], 1.5, "{plan_json}");
+
+    let text = repo.radian(&["arc", "list"]);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(
+        text.stdout.contains("total_cost_usd: 2.25"),
+        "the plan line carries the total: {}",
+        text.stdout
+    );
+
+    let shown = repo.radian(&["arc", "show", plan.as_str()]);
+    assert_eq!(shown.code, 0, "{}", shown.stderr);
+    assert!(shown.stdout.contains("cost_usd: 1.75"), "{}", shown.stdout);
+    assert!(
+        shown.stdout.contains("total_cost_usd: 2.25"),
+        "{}",
+        shown.stdout
+    );
+    let shown_task = repo.radian(&["arc", "show", one.as_str()]);
+    assert_eq!(shown_task.code, 0, "{}", shown_task.stderr);
+    assert!(
+        shown_task.stdout.contains("cost_usd: 1.25"),
+        "{}",
+        shown_task.stdout
+    );
+    assert!(
+        shown_task.stdout.contains("total_cost_usd: 1.5"),
+        "{}",
+        shown_task.stdout
+    );
+
+    let shown_json = repo.radian(&["arc", "show", plan.as_str(), "--json"]);
+    let value: Value = serde_json::from_str(&shown_json.stdout).expect("the show JSON");
+    assert_eq!(value["cost_usd"], 1.75, "{value}");
+    assert_eq!(value["total_cost_usd"], 2.25, "{value}");
+    assert_eq!(value["tasks"][0]["total_cost_usd"], 1.5, "{value}");
 }

@@ -109,8 +109,9 @@ An `--after` id must name a task of the same plan or a task whose state is `done
 
 Lists plans, each with its tasks in the plan's order.
 Plans print in claim order, the order `radian arc run` serves them in: the higher `priority` first (`P0` before `P1`), then the plan id from small to large.
-Each plan's header line shows its id, its `status`, its `auto` level, its `priority`, its progress as `<merged>/<tasks> merged`, and its title.
+Each plan's header line shows its id, its `status`, its `auto` level, its `priority`, its progress as `<merged>/<tasks> merged`, its `total_cost_usd` (the sum of its tasks' totals), and its title.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
+A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage, reset by `reset-budget`); its `total_cost_usd` also includes every review and is never reset.
 
 By default the finished work is left out, so the work in progress is what you see:
 
@@ -137,12 +138,14 @@ When everything is hidden, that line is the whole output. Nothing hidden means n
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
-The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `changed_outside_arc`, and `tasks`.
-Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
+The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `changed_outside_arc`, and `tasks`.
+Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
 
 ## `radian arc show <ID> [--json]`
 
 Prints one plan or task: every field, whether it changed outside arc, then its body.
+
+A plan prints `cost_usd` and `total_cost_usd` beside its other fields: the first is the sum of its tasks' `cost_usd` and the number its budget compares, the second is the sum of their totals. Both are computed when the plan is read and are not stored in the plan file. A task prints both of its own numbers.
 
 The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see [Plan and task files](arc-files.md#plan-and-task-files)).
 `list --plan <id>` always reads the plan.
@@ -176,7 +179,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 
 It refuses with exit `3` when the id names both a plan and a task (see [Plan and task files](arc-files.md#plan-and-task-files)), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
-- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `auto_rework`, `retry_count`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
+- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `auto_rework`, `retry_count`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
 - a plan: `status`, `auto`, `priority`.
 
 A file that already matches the ledger is a no-op and prints so.
@@ -415,15 +418,15 @@ A cancelled plan is final.
 
 ## `radian arc reset-budget <ID>`
 
-`reset-budget` returns budget-paused tasks to `todo.ready` and resets the counted cost to zero from now on.
+`reset-budget` returns budget-paused tasks to `todo.ready` and resets the counted cost, `cost_usd`, to zero from now on. The task's `total_cost_usd` does not change: it is what the task has spent in total, not the budget counter.
 The id names one plan or task; an id that names both is refused with exit `3` (see [Plan and task files](arc-files.md#plan-and-task-files)).
 
 | Argument | Value | What it does |
 |---|---|---|
 | `<ID>` | a plan or task id | Required. A plan id resets every paused task of that plan. |
 
-- Task form: the task must be `todo.paused_budget`; it moves to `todo.ready` and its `cost_usd` becomes `0`. Any other state is refused (`3`).
-- Plan form: every task of the plan that is `todo.paused_budget` moves to `todo.ready`; every task of the plan gets `cost_usd` `0`, because the plan's budget counts all of them. The plan's `auto` level is not changed.
+- Task form: the task must be `todo.paused_budget`; it moves to `todo.ready`, its `cost_usd` becomes `0`, and its `total_cost_usd` stays. Any other state is refused (`3`).
+- Plan form: every task of the plan that is `todo.paused_budget` moves to `todo.ready`; every task of the plan gets `cost_usd` `0`, because the plan's budget counts all of them. `total_cost_usd` stays on every task. The plan's `auto` level is not changed.
 
 A `cancelled` plan is refused with exit `3`, in the plan form and in the task form.
 

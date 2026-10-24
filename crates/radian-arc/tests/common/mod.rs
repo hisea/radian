@@ -845,6 +845,29 @@ impl FakeReview {
             .expect("a pid")
     }
 
+    /// Makes every run report this `Result.cost.micros` instead of the default 2000. The
+    /// program is a one-test script, so the test that changes it owns it.
+    pub fn set_cost(&self, micros: u64) {
+        let text = fs::read_to_string(&self.program).expect("the fake program");
+        assert!(
+            text.contains("\"micros\":2000"),
+            "the fake's default cost is in its program"
+        );
+        fs::write(
+            &self.program,
+            text.replacen("\"micros\":2000", &format!("\"micros\":{micros}"), 1),
+        )
+        .expect("the fake cost");
+    }
+
+    /// Makes every run report `"cost": null`, as a session with no cost does.
+    pub fn set_no_cost(&self) {
+        let text = fs::read_to_string(&self.program).expect("the fake program");
+        let replaced = text.replacen("\"cost\":{\"micros\":2000}", "\"cost\":null", 1);
+        assert_ne!(replaced, text, "the fake's default cost is in its program");
+        fs::write(&self.program, replaced).expect("the fake cost");
+    }
+
     /// Changes how long a later run sleeps before it answers.
     pub fn set_sleep(&self, run: u32, seconds: u32) {
         fs::write(
