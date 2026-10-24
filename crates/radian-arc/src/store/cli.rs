@@ -281,7 +281,7 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
     let mut hidden_tasks = 0usize;
     for view in views {
         let merged = view.tasks.iter().filter(|task| is_merged(task)).count();
-        let finished = !view.tasks.is_empty() && merged == view.tasks.len();
+        let finished = view.is_finished();
         if !all && !named && view.plan.item.is_cancelled() {
             hidden_cancelled += 1;
             hidden_tasks += merged;

@@ -3,6 +3,8 @@
 //! production source must fail this test — and a `git` call is exactly what was missed before
 //! (`prompt.rs`, `contrib.rs` and these tools ran `git status`/`git diff` unsandboxed).
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 /// A command that constructs a `git` process (any path prefix: `std::process::`, `tokio::…`).
@@ -104,10 +106,8 @@ fn every_host_git_call_is_built_from_the_shared_helper() {
 /// A scratch repository whose effective config sets one filter (all three commands) and one
 /// diff driver (both command keys) plus `diff.external`, so `hardening_env` emits every
 /// dynamic key family the manual has to list.
-fn hardening_repo() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("radian-git-keys-drift-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("a temp dir");
+fn hardening_repo() -> common::TempDir {
+    let dir = common::TempDir::named("radian-git-keys-drift");
     let run = |args: &[&str]| {
         let status = std::process::Command::new("git")
             .current_dir(&dir)

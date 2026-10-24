@@ -415,15 +415,8 @@ mod tests {
     use super::*;
 
     /// A unique directory under the temp dir, cleaned up by the caller.
-    fn temp_dir(label: &str) -> PathBuf {
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "radian-host-startup-{}-{label}-{n}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(label: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-host-startup", label)
     }
 
     /// The `--session-dir` / `RADIAN_SESSION_DIR` / default precedence (ADR 0020), the rule both

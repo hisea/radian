@@ -47,11 +47,9 @@ fn frontmatter(name: &str, description: &str) -> String {
 
 fn fixture() -> &'static Fixture {
     FIXTURE.get_or_init(|| {
-        let base = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("radian-full-reads-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+        // The fixture is `'static` (a `OnceLock`), so it uses the process-exit cleanup: under
+        // nextest the test process ends with the test.
+        let base = common::process_dir("radian-full-reads");
         let home = std::fs::canonicalize(&base).unwrap();
 
         // Every sandbox deny-read entry exists, so the expansion resolves all of them.

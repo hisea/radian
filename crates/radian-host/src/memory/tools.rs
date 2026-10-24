@@ -318,19 +318,11 @@ mod tests {
     use radian_core::{CancellationToken, ContentPart, NoopSink, ToolContext};
     use radian_memory::{Kind, Source};
 
-    fn scratch(label: &str) -> std::path::PathBuf {
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "radian-memory-tools-{}-{label}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(label: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-memory-tools", label)
     }
 
-    fn service(label: &str) -> (std::path::PathBuf, MemoryService) {
+    fn service(label: &str) -> (crate::test_support::TempDir, MemoryService) {
         let dir = scratch(label);
         let ws = dir.join("ws");
         std::fs::create_dir_all(&ws).unwrap();

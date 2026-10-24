@@ -9,17 +9,17 @@
 //! else in it can race the environment.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use radian_core::ContextBudget;
+mod common;
+
 use radian_host::{ProviderDecl, ReasoningReplayOverride, route_replays_reasoning};
 
 /// A private `RADIAN_HOME` for this test binary: the catalog cache lives under it, so the real
 /// `~/.radian` is never read.
-fn scratch() -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("radian-host-switch-budget-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn scratch() -> common::TempDir {
+    let dir = common::TempDir::named("radian-host-switch-budget");
     std::fs::create_dir_all(dir.join("cache/catalog")).unwrap();
     dir
 }

@@ -4,7 +4,9 @@
 //! Every test drives a real session against a mock provider, so the request the
 //! mock saw is the request the adapter really sent — not a reconstruction.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,14 +20,8 @@ use radian_permissions::{NoopAudit, Preset, Profile};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
-fn scratch(label: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("radian-btw-{}-{label}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-btw-{label}"))
 }
 
 fn text_reply(text: &str) -> Reply {

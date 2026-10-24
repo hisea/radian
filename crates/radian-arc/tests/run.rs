@@ -383,6 +383,78 @@ fn auto_merge_takes_all_three_to_done_merged_in_one_run() {
     assert_eq!(human.approver.as_deref(), Some("auto"));
 }
 
+/// A refused integration record is kept and reported without starting a second gate while
+/// its inputs stay the same; a moved main is a changed input and allows one new start.
+/// Mutation: clear the refused record again and the next pass starts the same gate again.
+#[test]
+fn a_refused_integration_is_not_restarted_until_its_inputs_change() {
+    let repo = Repo::new("run-integration-refused");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "integration-refused");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "merge").expect("auto merge");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    store
+        .change_task(&task, |task| {
+            task.phase = "integrating".to_owned();
+            Ok(())
+        })
+        .expect("the task integrates");
+    let inputs = radian_arc::review::integration_inputs(&store, &task).expect("the inputs");
+    write_gate_record(
+        &repo,
+        &task,
+        serde_json::json!({
+            "kind": "integration",
+            "attempt": format!("{task}-1"),
+            "status": "refused",
+            "text": "the integration cannot run",
+            "inputs": inputs,
+        }),
+    );
+
+    // The first pass reports the refusal; the old code cleared the record and the second pass
+    // then started the same gate again.
+    for pass in 1..=2 {
+        let run = repo.radian(&["arc", "run"]);
+        assert_eq!(run.code, 0, "pass {pass}: {}", run.stderr);
+        assert!(
+            run.stdout.contains(&format!(
+                "{task} integration cannot run: the integration cannot run"
+            )),
+            "pass {pass} did not report the refusal: {}",
+            run.stdout
+        );
+        assert!(
+            !run.stdout.contains("integration started"),
+            "pass {pass} started a gate with unchanged inputs: {}",
+            run.stdout
+        );
+        assert_eq!(
+            gate_record(&repo, &task).expect("the record")["status"],
+            "refused",
+            "pass {pass} did not keep the record"
+        );
+    }
+    assert!(!background::running(&store, &task));
+
+    // A moved main is a changed input: one new gate starts.
+    advance_main(&repo, "main-moved.txt", "moved\n");
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert!(
+        run.stdout.contains(&format!("{task} integration started")),
+        "a changed main started no gate: {}",
+        run.stdout
+    );
+    // Let the gate end before the fixture is removed.
+    wait_until(Duration::from_secs(60), "the integration gate", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "done")
+    });
+}
+
 /// A plan at auto `off` starts nothing; its verification still advances.
 #[test]
 fn auto_off_starts_nothing_but_still_verifies() {
@@ -2615,6 +2687,69 @@ fn a_hanging_push_ends_the_attempt_at_the_wall_time() {
     );
 }
 
+/// The wall clock covers the wrapper's own first fetch too: a remote that never answers is
+/// killed at `max_wall_time_secs`, the attempt records `wall_time`, and `start` returns
+/// instead of waiting forever. Mutation: drop the bound on the fetch and `start` never returns.
+#[test]
+fn a_hanging_fetch_ends_the_attempt_at_the_wall_time() {
+    let repo = Repo::new("run-wall-fetch");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "wall-fetch");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    tune(&repo, "max_wall_time_secs = 7200", "max_wall_time_secs = 3");
+    tune(
+        &repo,
+        "stall_timeout_secs = 900",
+        "stall_timeout_secs = 600",
+    );
+    // The first fetch waits forever: only the wrapper's clock can end it.
+    let script = repo.root.join("hanging-upload-pack.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nsleep 60\nexec git-upload-pack \"$@\"\n",
+    )
+    .expect("the hanging upload-pack");
+    executable(&script);
+    repo.git(&[
+        "config",
+        "remote.origin.uploadpack",
+        script.to_str().unwrap(),
+    ]);
+    worker_args(&repo, "http://127.0.0.1:1");
+
+    let started = Instant::now();
+    let output = run_with_deadline(&repo, &["arc", "start", &task], Duration::from_secs(40));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "start: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(25),
+        "start waited {:?} for a hanging fetch",
+        started.elapsed()
+    );
+
+    let signal: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&task, 1).join("signal.json")).expect("signal.json"),
+    )
+    .expect("signal.json parses");
+    assert_eq!(signal["reason"], "wall_time", "{signal}");
+    let result: Value = serde_json::from_str(
+        &fs::read_to_string(repo.run_dir(&task, 1).join("attempt_result.json"))
+            .expect("attempt_result.json"),
+    )
+    .expect("attempt_result.json parses");
+    assert_eq!(result["class"], "wall_time", "{result}");
+    assert_eq!(
+        state(&store, &task),
+        ("todo".to_owned(), "retry_wait".to_owned())
+    );
+}
+
 /// The gate's lock is the gate's alone: a stage command that leaves a background process
 /// behind must not keep `gates/<task>.gate.lock` after the gate exits. Mutation: leave the
 /// inherited descriptor inheritable and the orphan holds the lock.
@@ -3470,4 +3605,8 @@ fn a_priority_change_takes_effect_on_the_next_pass_and_does_not_preempt() {
         "the lowered plan's second task must wait for a slot"
     );
     cancel(&repo, &other);
+    // Stop the first attempt's gate too: a live gate outlives the test and keeps recreating
+    // files under the scratch directory after the guard dropped, which is the one way a test
+    // temp directory can survive.
+    cancel(&repo, &one);
 }

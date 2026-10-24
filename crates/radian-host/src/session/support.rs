@@ -239,9 +239,7 @@ mod tests {
     fn the_jobs_directory_is_the_sessions_own_and_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root =
-            std::env::temp_dir().join(format!("radian-host-jobs-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::test_support::TempDir::named("radian-host-jobs-dir");
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let jobs_dir = root.join("sessions/sid.jobs");

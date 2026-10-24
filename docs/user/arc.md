@@ -303,9 +303,11 @@ A line `radian exec` would reject, or one that repeats an argument the wrapper s
 
 Before it claims anything it reconciles every task in `doing` (see [Reconcile](arc-gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 
+`start` also claims the task you name when it is `todo.retry_wait`, even while its `retry_at` is still in the future: your `start` is a run-now, and the backoff exists for the scheduling loop. The claim is the same transaction as a `todo.ready` one, with the same concurrency check and the same printed line, and it clears `retry_at`.
+
 A claim is refused with exit `3` and changes nothing when:
 
-- the task is not `todo.ready`; a `todo.proposed` task names its phase and waits for `radian arc confirm`;
+- the task is not `todo.ready` or `todo.retry_wait`; a `todo.proposed` task names its phase and waits for `radian arc confirm`, and `todo.paused_budget` and every `failed.*` phase are refused;
 - its plan is not `confirmed`; a `cancelled` plan is refused, naming its status;
 - an `after` task is not `done`;
 - `[limits] concurrency` tasks are already in `doing`.
@@ -346,7 +348,7 @@ For example `TK0001-work-1 completed -> review.verifying`.
 A result whose token is not the task's current attempt prints `<attempt id> ignored: <why>` and changes nothing.
 Before its own line, `start` prints `reconciled: <line>` for each task the reconcile step changed.
 
-A pushed `completed` attempt continues into the gate in the same process, so one `start` takes a task from `todo.ready` to `review.awaiting_human` or `review.rework_pending`.
+A pushed `completed` attempt continues into the gate in the same process, so one `start` takes a task from `todo.ready` (or `todo.retry_wait`) to `review.awaiting_human` or `review.rework_pending`.
 The verification prints its own line:
 
 ```text
@@ -584,7 +586,7 @@ So the higher priority's task is verified, claimed, merged, and queued for a sta
 `priority` only decides which plan gets a free concurrency slot: a running attempt is never preempted, so a changed priority takes effect at the next free slot.
 
 The long work runs outside the pass: a worker is a separate `radian arc work` process with its own limits and record, and a gate is a separate process with its own record.
-A stage this build does not run, or a branch that moved, is reported in the summary; the gate's refusal is recorded, and `run` starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt).
+A stage this build does not run, or a branch that moved, is reported in the summary; the gate's refusal is recorded, and `run` starts no new gate for that attempt until the inputs change (for verification the branch comes back; for integration a new `head_sha`, a new main or a changed `config.toml`; or `start`/`reverify` claims a new attempt).
 A gate whose process exited without writing any record is reported as `<task> verify cannot run: its gate exited without a record` (or `<task> integration cannot run: …`), recorded for that attempt; no new gate starts while its inputs stay the same, and `show` prints the same text as the `rework_reason` (see [the gate run](arc-gate.md#the-gate-run)).
 A gate that wrote `running` and then died is restarted, and the death is counted: after [`limits.max_gate_deaths`](arc-files.md#configtoml) deaths for the same attempt and inputs the record becomes `died`, the summary prints `<task> verify cannot run: its gate died after it started`, `show` prints the same text as the `rework_reason`, and no gate starts while the inputs stay the same. A gate the loop stopped itself is `interrupted` instead, and the next loop starts it again without counting.
 The next pass applies a wrapper's early failure (a refused argument, a held worktree lock) the same way, so its concurrency slot is free at once (see [Reconcile](arc-gate.md#reconcile)).
@@ -728,7 +730,7 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
-A bare `radian arc` opens the TUI; the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
+A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
 While it is open it is the scheduling loop when it can be: it takes `runner.lock` without waiting and runs the same pass `radian arc run --watch` runs, every 30 seconds after a pass that ends quiet and at once after one of your actions changed state.
 Each transition line goes to a one-line ticker in the footer and to a scrollable log (`L`).
 When another loop holds the lock, the TUI is a viewer, its header names that loop's pid, and it takes the lock on its next refresh after that loop exits.

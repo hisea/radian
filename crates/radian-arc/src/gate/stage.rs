@@ -93,24 +93,20 @@ impl Running {
     }
 
     /// Called from the stage's wait loop. The handler sent SIGTERM when the stop was requested;
-    /// once a child ignores it for the grace, this sends SIGKILL to its group and `true` when
-    /// the child has been killed, so the loop stops treating its exit as a normal result.
-    pub(crate) fn stopped(&mut self) -> bool {
+    /// once a child ignores it for the grace, this sends SIGKILL to its group. The loop keeps
+    /// waiting and treats the exit as a normal result.
+    pub(crate) fn stopped(&mut self) {
         if !stop_requested() {
-            return false;
+            return;
         }
         match self.signalled {
             None => {
                 self.signalled = Some(Instant::now());
-                false
             }
             Some(at) => {
                 let grace = Duration::from_millis(GRACE_MILLIS.load(Ordering::SeqCst));
                 if Instant::now() >= at + grace {
                     process::signal_group(self.pid, process::SIGKILL);
-                    true
-                } else {
-                    false
                 }
             }
         }

@@ -1571,12 +1571,13 @@ async fn sandbox_denial_marks_a_unix_socket() {
     }
     // A listener outside the sandbox, under `/tmp` for the ~104-byte AF_UNIX path
     // limit; the sandboxed command connects to its canonical path.
-    let sock_path =
-        std::env::temp_dir().join(format!("radian-deny-sock-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&sock_path);
+    let sock_path = common::TempPath::new(
+        std::env::temp_dir().join(format!("radian-deny-sock-{}.sock", std::process::id())),
+    );
     #[cfg(unix)]
-    let _listener = std::os::unix::net::UnixListener::bind(&sock_path).expect("bind a listener");
-    let sock_path = std::fs::canonicalize(&sock_path).expect("canonical socket path");
+    let _listener =
+        std::os::unix::net::UnixListener::bind(sock_path.path()).expect("bind a listener");
+    let sock_path = std::fs::canonicalize(sock_path.path()).expect("canonical socket path");
     let output = call(
         &confined,
         "shell",

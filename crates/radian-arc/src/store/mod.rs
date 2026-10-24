@@ -196,6 +196,19 @@ pub struct PlanView {
     pub tasks: Vec<Loaded<model::TaskFile>>,
 }
 
+impl PlanView {
+    /// Whether the plan is finished: it is not cancelled and every task is `done.merged`. A
+    /// plan with no tasks is not finished. This is the test `radian arc list` leaves a plan
+    /// out by, and the arc TUI's `done` view shares it.
+    pub fn is_finished(&self) -> bool {
+        !self.plan.item.is_cancelled()
+            && !self.tasks.is_empty()
+            && self.tasks.iter().all(|task| {
+                task.item.state == model::TaskState::Done && task.item.phase == "merged"
+            })
+    }
+}
+
 /// What `show <id>` found. The task variant is the larger one (a task file has the attempt
 /// fields); `show` returns one at a time, so the difference costs nothing.
 #[allow(clippy::large_enum_variant)]

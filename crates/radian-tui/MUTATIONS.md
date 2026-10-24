@@ -2484,3 +2484,18 @@ quit path are checked without a worker; the pty suite runs the real pass and wor
 | TK0019-M1 | run the pass on the UI thread (`take` calls `pass.run` inline instead of spawning `run_loop`; the full loop would hang the harness, so the inline form runs one pass) | `arc_loop::the_tui_takes_the_lock_and_runs_the_pass_on_a_background_thread` (same thread id) | ✅ failed |
 | TK0019-M2 | do not release `runner.lock` on quit (drop `self.lock = None` from `ArcLoop::stop`) | `arc_loop::the_tui_takes_the_lock_and_runs_the_pass_on_a_background_thread` (the lock is still held after `stop`); the pty test `pty_arc_runs_a_task_at_auto_run_and_stops_at_awaiting_human` checks the same end to end | ✅ failed |
 | TK0019-M3 | show the committed diff instead of the worktree for a running task (`read::task_diff` never takes the live branch) | `arc_tui::a_running_task_shows_the_worktree_including_uncommitted_files` (`diff.source` is `Range`, and the uncommitted file is missing) | ✅ failed |
+## TK0047: the plans page's state view (2026-10-24, branch `work/TK0047-tui-plan-filter`)
+
+Base `76bcb8ba` (the branch point). The plans page lists one of four views and `f` cycles
+them; the header names the view and counts the plans it hides. Each mutation was applied by
+hand to the working file, the named test was run alone with `--profile sandbox
+--no-fail-fast`, and the file was restored from a copy under `.radian/mut-bak/`
+(`git status --short` empty afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0047-M1 | the default view is `all` again (`#[default]` moved from `Active` to `All`) | ✅ 1 failed | `the_default_plans_view_hides_finished_and_cancelled_plans` (`app.filter` is `All`, not `Active`) |
+| TK0047-M2 | `f` skips `cancelled` (`PlanFilter::Done.next()` returns `Active`) | ✅ 1 failed | `f_cycles_the_plan_views_in_order_and_back` (`left: Active`, `right: Cancelled` on the third press) |
+| TK0047-M3 | the selection always jumps to the first plan (`rebuild_visible` sets `plan_sel = 0`) | ✅ 1 failed | `the_selection_stays_on_a_plan_in_both_views_and_moves_to_the_first_otherwise` (`f` to `all` selects `PL0001-first`, not the held `PL0003-retro`) |
+
+3/3 caught.

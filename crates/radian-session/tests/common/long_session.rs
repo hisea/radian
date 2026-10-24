@@ -229,17 +229,29 @@ pub fn write_long_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// A unique directory under the system temp dir, removed on drop (this file is included
+    /// by several crates' test binaries, so it carries its own guard).
+    struct Guard(PathBuf);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     /// The generator must produce files the reader accepts; the measurements are meaningless
     /// otherwise. This is a normal (non-`#[ignore]`) test, so the generator is exercised by
     /// the default suite too.
     #[test]
     fn the_generated_file_parses_and_compacts() {
-        let dir = std::env::temp_dir().join(format!("long-session-gen-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = Guard(
+            std::env::temp_dir().join(format!("radian-long-session-gen-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&dir.0).unwrap();
         for (n, compactions, live_min) in [(60usize, 0usize, 60usize), (600, 3, 1)] {
-            let path = dir.join(format!("s-{n}-{compactions}.jsonl"));
+            let path = dir.0.join(format!("s-{n}-{compactions}.jsonl"));
             let stats = write_long_session(&path, "gen", n, compactions);
             assert!(stats.raw_messages >= n, "{stats:?}");
             let session = radian_session::Session::open(&path).unwrap();
@@ -254,6 +266,6 @@ mod tests {
                 );
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir.0);
     }
 }

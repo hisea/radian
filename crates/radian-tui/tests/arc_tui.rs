@@ -18,7 +18,7 @@ use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
 use radian_tui::arc::render;
-use radian_tui::arc::{ArcApp, ArcKey, Focus};
+use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -359,6 +359,9 @@ fn mark_cell(terminal: &Terminal<TestBackend>, needle: &str, mark: char) -> (u16
 fn the_plans_page_draws_the_list_and_the_selected_plan() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
+    // `all` shows the finished plan too: this test is about the list and the frame, not the
+    // default filter.
+    app.on_key(&key(KeyCode::Char('f')));
     let text = screen(&mut app, 120, 30);
     for needle in [
         "arc".to_owned(),
@@ -396,7 +399,7 @@ fn the_plan_list_scrolls_to_keep_the_selected_plan_visible() {
         .map(|n| add_plan(&store, &format!("plan-{n:02}"), &format!("plan {n}")))
         .collect();
     let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
-    // Four plans fit under the heading at this height; the rest are below the window.
+    // Five plans fit under the heading at this height; the rest are below the window.
     let text = screen(&mut app, 120, 20);
     assert!(text.contains(&ids[0]), "{text}");
     assert!(!text.contains(&ids[11]), "{text}");
@@ -415,7 +418,7 @@ fn the_plan_list_scrolls_to_keep_the_selected_plan_visible() {
         "the list scrolled past the first plan:\n{text}"
     );
     assert!(
-        rows(&terminal)[4].contains(&ids[8]),
+        rows(&terminal)[4].contains(&ids[7]),
         "the list starts at the plan that keeps the selection visible:\n{text}"
     );
 
@@ -430,6 +433,181 @@ fn the_plan_list_scrolls_to_keep_the_selected_plan_visible() {
         "selecting the first plan draws the top of the list:\n{text}"
     );
     assert!(!text.contains(&ids[11]), "{text}");
+}
+
+/// The five plan rows that fill a 20-row area exactly (16 body rows = the heading, the blank
+/// under it, five plans and the four separators between them).
+#[test]
+fn the_plan_list_holds_every_plan_that_fits_the_area_exactly() {
+    let scratch = Scratch::new("plan-fill");
+    let store = store(&scratch.path("repo"));
+    let ids: Vec<String> = (1..=5)
+        .map(|n| add_plan(&store, &format!("plan-{n:02}"), &format!("plan {n}")))
+        .collect();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    for _ in 0..4 {
+        assert_eq!(app.on_key(&key(KeyCode::Down)), ArcKey::Redraw);
+    }
+    let text = screen(&mut app, 120, 20);
+    assert!(text.contains(&ids[4]), "the last plan is visible:\n{text}");
+    assert!(
+        text.contains(&ids[0]),
+        "the list did not scroll away the first plan, because all five fit:\n{text}"
+    );
+}
+
+#[test]
+fn the_default_plans_view_hides_finished_and_cancelled_plans() {
+    let fixture = Fixture::new();
+    fixture
+        .store
+        .change_plan("PL0002-images", |plan| {
+            plan.status = "cancelled".to_owned();
+            plan.auto = "off".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = fixture.app();
+    assert_eq!(
+        app.filter,
+        PlanFilter::Active,
+        "every start opens on active"
+    );
+    let text = screen(&mut app, 140, 30);
+    assert!(text.contains(&fixture.plan), "{text}");
+    assert!(
+        !text.contains("PL0001-first"),
+        "a finished plan is hidden from active:\n{text}"
+    );
+    assert!(
+        !text.contains("PL0002-images"),
+        "a cancelled plan is hidden from active:\n{text}"
+    );
+    assert!(
+        text.contains("active · 2 hidden"),
+        "the header names the view and counts what it hides:\n{text}"
+    );
+}
+
+#[test]
+fn f_cycles_the_plan_views_in_order_and_back() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    assert_eq!(app.filter, PlanFilter::Active);
+    for expected in [
+        PlanFilter::All,
+        PlanFilter::Done,
+        PlanFilter::Cancelled,
+        PlanFilter::Active,
+    ] {
+        assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+        assert_eq!(app.filter, expected, "the `f` cycle order");
+    }
+    // A second cycle starts over.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::All);
+}
+
+#[test]
+fn the_selection_stays_on_a_plan_in_both_views_and_moves_to_the_first_otherwise() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    let selected = app.selected_plan().unwrap().plan.item.id.clone();
+    // `all` holds the selected plan: the selection stays on it.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::All);
+    assert_eq!(
+        app.selected_plan().unwrap().plan.item.id,
+        selected,
+        "the selection stays on a plan that the new view holds"
+    );
+    // `done` holds only the finished plan: the selection moves to its first plan.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::Done);
+    assert_eq!(
+        app.selected_plan().unwrap().plan.item.id,
+        "PL0001-first",
+        "the selection moves to the first plan of a view without the old one"
+    );
+}
+
+#[test]
+fn an_empty_plan_view_shows_one_weak_line_and_an_empty_frame() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    for _ in 0..3 {
+        app.on_key(&key(KeyCode::Char('f')));
+    }
+    assert_eq!(app.filter, PlanFilter::Cancelled);
+    let terminal = render(&mut app, 140, 30);
+    let text = rows(&terminal).join("\n");
+    assert!(
+        text.contains("no cancelled plans"),
+        "the empty view says so:\n{text}"
+    );
+    assert!(!text.contains('╭'), "the right frame is empty:\n{text}");
+    let (row, column) = fg_of(&terminal, "no cancelled plans");
+    assert_eq!(
+        fg(&terminal, row, column),
+        radian_tui::theme::Theme::default().hint.fg,
+        "the empty-view line is weak"
+    );
+}
+
+#[test]
+fn a_refresh_that_finishes_the_selected_plan_moves_the_selection() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    let selected = app.selected_plan().unwrap().plan.item.id.clone();
+    app.task_sel = 3;
+    let tasks: Vec<String> = fixture
+        .store
+        .plans()
+        .unwrap()
+        .into_iter()
+        .find(|view| view.plan.item.id == selected)
+        .unwrap()
+        .tasks
+        .iter()
+        .map(|task| task.item.id.clone())
+        .collect();
+    for task in tasks {
+        fixture
+            .store
+            .change_task(&task, |task| {
+                task.state = TaskState::Done;
+                task.phase = "merged".to_owned();
+                Ok(())
+            })
+            .unwrap();
+    }
+    app.refresh();
+    // The selected plan left `active`; the first plan still in it is the draft one.
+    assert_eq!(
+        app.selected_plan().unwrap().plan.item.id,
+        "PL0002-images",
+        "the selection follows a refresh that empties its plan out of the view"
+    );
+    assert_eq!(app.task_sel, 0, "the task selection resets with the plan");
+    assert_eq!(app.hidden, 2, "two finished plans are hidden now");
+}
+
+#[test]
+fn all_shows_no_hidden_count() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    let text = screen(&mut app, 140, 30);
+    assert!(
+        text.contains("active · 1 hidden"),
+        "active hides the finished plan:\n{text}"
+    );
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    let text = screen(&mut app, 140, 30);
+    assert!(text.contains("all"), "{text}");
+    assert!(
+        !text.contains("hidden"),
+        "`all` hides nothing and shows no count:\n{text}"
+    );
 }
 
 #[test]
@@ -511,6 +689,38 @@ fn the_attempts_list_scrolls_to_keep_the_selected_attempt_visible() {
 }
 
 #[test]
+fn the_attempts_window_moves_only_when_the_selection_leaves_it() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    for attempt in 1..=10 {
+        write_verdicts(&fixture, &task, attempt, &[("commands", true, None)]);
+    }
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    app.on_key(&key(KeyCode::Char('l')));
+    // The latest attempt is selected; the window shows attempts 8, 9 and 10.
+    let _ = screen(&mut app, 120, 12);
+    // Two moves up leave the selection inside the same window: attempts 8, 9 and 10 stay.
+    app.on_key(&key(KeyCode::Char('[')));
+    app.on_key(&key(KeyCode::Char('[')));
+    let text = screen(&mut app, 120, 12);
+    let attempt_rows: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("✓ commands"))
+        .collect();
+    assert!(
+        attempt_rows.iter().any(|line| line.contains("attempt 10")),
+        "the window did not move while the selection stayed inside it:\n{text}"
+    );
+    assert!(
+        !attempt_rows.iter().any(|line| line.contains("attempt 7")),
+        "the window did not pin the selection to its bottom row either:\n{text}"
+    );
+}
+
+#[test]
 fn a_cancelled_plan_is_marked_and_named_cancelled() {
     let fixture = Fixture::new();
     fixture
@@ -522,6 +732,8 @@ fn a_cancelled_plan_is_marked_and_named_cancelled() {
         })
         .unwrap();
     let mut app = fixture.app();
+    // The cancelled plan is hidden from the default view; `all` shows it with its mark.
+    app.on_key(&key(KeyCode::Char('f')));
     let theme = app.theme.clone();
     let terminal = render(&mut app, 120, 30);
     // A cancelled plan is not a confirmed one: it takes the failure mark, not `●`.
@@ -583,6 +795,8 @@ fn the_tree_places_a_branch_and_names_the_other_parent() {
 fn every_state_mark_takes_its_role() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
+    // The finished plan is hidden from the default view; `all` shows every mark.
+    app.on_key(&key(KeyCode::Char('f')));
     let theme = app.theme.clone();
     let terminal = render(&mut app, 120, 30);
 
@@ -703,7 +917,10 @@ fn the_selected_task_row_shows_the_cursor_only_with_focus() {
         .lines()
         .find(|line| line.contains(fixture.id("c")))
         .expect("the c row is drawn");
-    assert!(!row.contains('❯'), "no cursor without focus: {row}");
+    // The plan list is on the left of the divider; the task row is on the right. The cursor
+    // on the left (the selected plan) says nothing about the task list's focus.
+    let right = row.split_once('│').map(|(_, right)| right).unwrap_or("");
+    assert!(!right.contains('❯'), "no cursor without focus: {row}");
 
     app.focus = Focus::Tasks;
     let text = screen(&mut app, 120, 30);
@@ -711,8 +928,9 @@ fn the_selected_task_row_shows_the_cursor_only_with_focus() {
         .lines()
         .find(|line| line.contains(fixture.id("c")))
         .expect("the c row is drawn");
+    let right = row.split_once('│').map(|(_, right)| right).unwrap_or("");
     assert!(
-        row.contains("❯ "),
+        right.contains("❯ "),
         "the cursor is on the selected row: {row}"
     );
 }

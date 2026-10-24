@@ -135,6 +135,17 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
         };
         left.push(Span::styled(page.name(), style));
     }
+    // The plans page names its view, and counts the plans the view hides (never on `all`).
+    if app.page == Page::Plans {
+        left.push(Span::styled("  ·  ", theme.hint));
+        left.push(Span::styled(app.filter.name(), theme.text));
+        if app.filter != PlanFilter::All && app.hidden > 0 {
+            left.push(Span::styled(
+                format!(" · {} hidden", app.hidden),
+                theme.hint,
+            ));
+        }
+    }
     let mut right = vec![
         Span::styled("main ", theme.hint),
         Span::styled(
@@ -228,6 +239,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 ("p", "pause", !auto_on),
                 ("s", "start", app.start_blocker().is_some()),
                 ("g", "graph/list", false),
+                ("f", "filter", false),
                 ("L", "log", false),
                 ("tab", "pages", false),
                 ("q", "quit", false),
@@ -286,8 +298,10 @@ fn spinner_glyph(started: std::time::Instant) -> &'static str {
 fn draw_plans(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
     let rows = app.plan_rows();
     let height = area.height as usize;
-    // The `PLANS` heading and the blank line under it stay put; each plan takes three rows.
-    let visible_plans = height.saturating_sub(2) / 3;
+    // The `PLANS` heading and the blank line under it stay put; each plan takes two rows and
+    // one blank separates two plans. The blank after the last plan is not required, so the
+    // area holds `1 + 3n` rows for `n` plans.
+    let visible_plans = height.saturating_sub(1) / 3;
     app.plan_top = scroll_top(app.plan_top, app.plan_sel, visible_plans, rows.len());
     let left = plan_list_lines(app, &rows, app.plan_top);
     let right_width = area.width.saturating_sub(RIGHT_X) as usize;
@@ -306,16 +320,15 @@ fn draw_plans(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
         }
         None => {
             app.task_top = 0;
-            vec![Line::from(Span::styled(
-                app.notice
-                    .clone()
-                    .unwrap_or_else(|| "no plans yet".to_owned()),
-                if app.notice.is_some() {
-                    app.theme.status_error
-                } else {
-                    app.theme.hint
-                },
-            ))]
+            // A view with no plan leaves the right column empty; a store error keeps its one
+            // line there.
+            match &app.notice {
+                Some(notice) => vec![Line::from(Span::styled(
+                    notice.clone(),
+                    app.theme.status_error,
+                ))],
+                None => Vec::new(),
+            }
         }
     };
     for y in 0..height {
@@ -365,7 +378,10 @@ fn plan_list_lines(app: &ArcApp, rows: &[PlanRow], top: usize) -> Vec<Line<'stat
     let mut out = vec![Line::from(Span::styled("PLANS", theme.hint))];
     if rows.is_empty() {
         out.push(Line::default());
-        out.push(Line::from(Span::styled("  none yet", theme.hint)));
+        out.push(Line::from(Span::styled(
+            format!("  {}", app.filter.empty_text()),
+            theme.hint,
+        )));
         return out;
     }
     out.push(Line::default());
@@ -538,41 +554,46 @@ fn extra_text(task: &TaskRow) -> String {
 // ---- task page -----------------------------------------------------------------------
 
 fn draw_task(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
-    let Some(page) = &app.task else {
-        return;
-    };
     let theme = app.theme.clone();
     let width = area.width.saturating_sub(2);
-    let label = format!(
-        "{} {} · attempt {} · {} · plan {}",
-        page.id,
-        page.phase,
-        page.attempt
-            .map(|attempt| attempt.to_string())
-            .unwrap_or_else(|| "—".to_owned()),
-        format_cost(page.cost),
-        page.plan
-    );
-    let tab = page.tab;
-    let mut lines = vec![frame_top(width as usize, &label, &theme)];
-    lines.push(rail(
-        &theme,
-        Line::from(Span::styled(
-            fit(&page.title, width.saturating_sub(3) as usize),
-            theme.text,
-        )),
-    ));
-    lines.push(rail(
-        &theme,
-        tab_row(page, width.saturating_sub(2) as usize, &theme),
-    ));
-    lines.push(rail(&theme, Line::default()));
+    let (tab, mut lines) = {
+        let Some(page) = &app.task else {
+            return;
+        };
+        let label = format!(
+            "{} {} · attempt {} · {} · plan {}",
+            page.id,
+            page.phase,
+            page.attempt
+                .map(|attempt| attempt.to_string())
+                .unwrap_or_else(|| "—".to_owned()),
+            format_cost(page.cost),
+            page.plan
+        );
+        let mut lines = vec![frame_top(width as usize, &label, &theme)];
+        lines.push(rail(
+            &theme,
+            Line::from(Span::styled(
+                fit(&page.title, width.saturating_sub(3) as usize),
+                theme.text,
+            )),
+        ));
+        lines.push(rail(
+            &theme,
+            tab_row(page, width.saturating_sub(2) as usize, &theme),
+        ));
+        lines.push(rail(&theme, Line::default()));
+        (page.tab, lines)
+    };
     match tab {
         TaskTab::Conversation => {
             draw_conversation(frame, area, app, lines);
             return;
         }
         TaskTab::Diff => {
+            let Some(page) = &app.task else {
+                return;
+            };
             let diff = DiffState {
                 diff: &page.diff,
                 diff_loading: page.diff_loading.as_ref(),
@@ -588,13 +609,23 @@ fn draw_task(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
                 &theme,
             );
         }
-        TaskTab::Attempts => draw_attempts(
-            &mut lines,
-            page,
-            width as usize,
-            area.height as usize,
-            &theme,
-        ),
+        TaskTab::Attempts => {
+            let height = area.height as usize;
+            // The attempts window follows the selection the way the plan list does: it moves
+            // only when the selection leaves its top or its bottom row.
+            if let Some(page) = app.task.as_mut() {
+                let visible = height.saturating_sub(lines.len() + 1);
+                let current = page
+                    .attempt_index()
+                    .unwrap_or(page.attempts.len().saturating_sub(1));
+                page.attempt_top =
+                    scroll_top(page.attempt_top, current, visible, page.attempts.len());
+            }
+            let Some(page) = &app.task else {
+                return;
+            };
+            draw_attempts(&mut lines, page, width as usize, height, &theme);
+        }
     }
     lines.push(frame_bottom(&theme));
     // The last row is always the frame's tail: a body longer than the page loses its last
@@ -866,13 +897,10 @@ fn draw_attempts(
         return;
     }
     let _ = width;
-    // The rows left after the frame's first rows and its bottom. The selected attempt scrolls
-    // into view: the list follows it like a terminal list does.
+    // The rows left after the frame's first rows and its bottom. The window is kept in
+    // `attempt_top` and moves only when the selection leaves it, like the plan list.
     let visible = height.saturating_sub(lines.len() + 1);
-    let current = page
-        .attempt_index()
-        .unwrap_or(page.attempts.len().saturating_sub(1));
-    let first = current.saturating_sub(visible.saturating_sub(1));
+    let first = page.attempt_top;
     for attempt in page.attempts.iter().skip(first).take(visible) {
         let current = page.attempt == Some(attempt.attempt);
         let cursor = if current {

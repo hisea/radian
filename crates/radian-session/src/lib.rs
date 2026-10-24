@@ -29,6 +29,8 @@ mod index;
 mod reader;
 mod runtime;
 mod tail;
+#[cfg(test)]
+mod test_support;
 pub mod trace;
 mod writer;
 

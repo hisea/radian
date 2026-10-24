@@ -7,6 +7,8 @@
 //! (the `InstalledPluginInfo` schema and its link errors). A link into a throwaway config
 //! directory was run by hand and is recorded in `MUTATIONS.md`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -138,8 +140,7 @@ fn the_scripts_are_sh_and_call_only_herdr_and_radian() {
 /// misreading the flag.
 #[test]
 fn the_pane_commands_run_standalone() {
-    let dir = std::env::temp_dir().join(format!("radian-plugin-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::TempDir::named("radian-plugin");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

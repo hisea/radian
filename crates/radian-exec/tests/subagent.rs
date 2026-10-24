@@ -13,7 +13,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::{Barrier, MockServer, Reply, chunk};
@@ -28,13 +27,8 @@ const STATE_WATCHDOG: Duration = Duration::from_secs(60);
 // ---------- helpers ----------
 
 fn scratch(name: &str) -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
     // Short prefix: on macOS $TMPDIR can push the child's <home>/run/<pid>.sock past SUN_LEN (104).
-    let dir = std::env::temp_dir().join(format!(
-        "rx-sub-{name}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
+    let dir = common::process_dir(&format!("rx-sub-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

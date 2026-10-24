@@ -8,21 +8,15 @@
 //! No test here touches the network: the catalog URL points at a closed local port, which is
 //! also the real-world shape of a chatgpt route (no provider mapping *and* no catalog entry).
 
-use std::path::PathBuf;
+mod common;
 
 use radian_host::{WindowQuery, WindowSource, resolve, resolve_offline};
 
 /// The descriptor's endpoint (`provider::CHATGPT_BASE`).
 const CHATGPT_BASE: &str = "https://chatgpt.com/backend-api/codex";
 
-fn scratch(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "radian-host-chatgpt-{label}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-host-chatgpt-{label}"))
 }
 
 /// A chatgpt query with a cache path that does not exist and a URL nothing listens on.

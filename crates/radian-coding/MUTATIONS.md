@@ -707,6 +707,24 @@ The `write` swap test (`write_and_patch_cannot_reach_outside_when_the_parent_is_
 stays green under the real code: the missing-level creation never runs before the walk refuses the
 swapped link level.
 
+## Test temp directories are removed when their test ends (2026-10-23, branch `work/TK0041-tests-delete-temp-dirs`)
+
+Base: the branch's code commit. Files were backed up under `.radian/` and restored from that
+copy, not with `git checkout`; the leak test is
+`crates/radian-coding/tests/temp_leak.rs::every_test_temp_directory_is_removed_when_its_test_ends`.
+It runs one test from each large family in its own child process and only counts entries named
+with that child's pid (nextest runs tests in parallel). Run with
+`cargo nextest run --workspace --locked --profile sandbox -E 'test(=every_test_temp_directory_is_removed_when_its_test_ends)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0041-M1 | put the `radian-coding-tests-<pid>` shared root back in `tests/common/mod.rs`: create it, put each scratch dir under it, and keep removing only the child | ✅ caught: `the child tests left temp entries behind: ["radian-coding-tests-66773"]` | `every_test_temp_directory_is_removed_when_its_test_ends` |
+| TK0041-M2 | a child-process test writes its sessions outside its temp directory again: `radian-exec`'s `tests/subagent.rs` `Env::new` points `RADIAN_SESSION_DIR` at `$TMPDIR/radian-exec-sessions-<pid>` instead of `<home>/sessions` | ✅ caught: `the child tests left temp entries behind: ["radian-exec-sessions-79422"]` | `every_test_temp_directory_is_removed_when_its_test_ends` |
+
+M2's first attempt changed only the `spawn_parent_env` variable and kept `Env::sessions` under
+`<home>`; the exec test itself then failed (`child_journals` found no journal), which fails the
+leak test for the wrong reason. The recorded mutation moves the directory the test really reads
+and writes, so the child test passes and only the leftover fails the leak test.
 ## the temp file system check of `verify.sh` and `arc-gate.sh` (2026-10-23, branch `work/TK0042-verify-inode-check`)
 
 Base: the branch's first commit. Mutations were applied by hand to `scripts/temp-check.sh`, backed

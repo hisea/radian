@@ -410,9 +410,8 @@ async fn resume_replays_the_last_model_and_thinking_changes() {
     // The temp dir dies with `env`, so the file continues under a copy (the lock dies with
     // the Arc, the bytes survive the copy).
     let path = env.path.clone();
-    let copy =
-        std::env::temp_dir().join(format!("radian-switch-resume-{}.jsonl", std::process::id()));
-    std::fs::remove_file(&copy).ok();
+    let copy_dir = common::TempDir::new("switch-resume");
+    let copy = copy_dir.file("radian-switch-resume.jsonl");
     std::fs::copy(&path, &copy).unwrap();
     drop(env);
 
@@ -484,8 +483,8 @@ async fn resume_merges_every_config_change_not_one_per_kind() {
     let _ = handle.await;
 
     let path = env.path.clone();
-    let copy =
-        std::env::temp_dir().join(format!("radian-config-merge-{}.jsonl", std::process::id()));
+    let copy_dir = common::TempDir::new("config-merge");
+    let copy = copy_dir.file("radian-config-merge.jsonl");
     std::fs::copy(&path, &copy).unwrap();
     drop(env);
 
@@ -529,8 +528,8 @@ async fn the_resumed_model_gets_its_budget_when_the_resolver_arrives() {
     let _ = handle.await;
 
     let path = env.path.clone();
-    let copy =
-        std::env::temp_dir().join(format!("radian-resume-budget-{}.jsonl", std::process::id()));
+    let copy_dir = common::TempDir::new("resume-budget");
+    let copy = copy_dir.file("radian-resume-budget.jsonl");
     std::fs::copy(&path, &copy).unwrap();
     drop(env);
 

@@ -36,7 +36,6 @@
 | `build-cache-and-verify-time.md` | idea（3、4；1、2 已落地） | 无；第 4 项新 ADR | Linux worker 依赖缓存（sccache / ZFS block cloning）与合并测试二进制为 idea |
 | `images.md` | decided | 0015、0018、0028、0039、0032、0043 | 图像输入：`read` 读图、`@` 贴图、拖拽、Ctrl-V 剪贴板、`exec --image` 一次做全，host 拿字节不落盘；transcript 用 ratatui-image 渲染；硬前提是 ADR 0015 估算改按像素，否则一张图就触发压缩 |
 | `arc-landing.md` | decided | 0048 | 合并方式可配置（`push` 三种 style、`pr`、`command`，arc 只保证验过的内容落地）与钩子（`after_merge`/`after_fail`/`after_rework` 跑配置里的命令，失败只警告）；默认钩子删 worktree 与 `work/<task>` 分支 |
-| `arc-start-skips-retry-wait.md` | decided | 0048 | owner 的 `radian arc start` 也接受 `todo.retry_wait`，当场领取不等退避；调度循环照旧等 `retry_at` |
 | `arc-cost-total.md` | decided | 0048、0044 | review 的花费计入 task 预算（verdict 写下时检查上限）；task 新增不清零的 `total_cost_usd`（worker + 每次 review），plan 在 `list`/`show` 给出两个和 |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
@@ -55,7 +54,6 @@
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
 | `arc.md` | in-progress（切片 1–7 已落地） | 0032、0043、0044、0038、0020、0024、0013、0037、0022 | 替代 herdr 的派发与闸门：文件 backlog 单写者、一次性 worker、固定 sha 的 gate；产品形态为三界面 app 加 plan 层与全自动 |
-| `test-temp-leak.md` | idea | 0048 | 测试泄漏临时目录（Linux gate 机 tmpfs inode 被占满导致成批假红）：统一会删除的临时目录 helper，`verify.sh` / `arc-gate.sh` 开跑前查 inode；环境问题是否扣返工次数待定 |
 | `arc-gate-batch.md` | decided（排在 `arc-landing.md` 之后） | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
 | `arc-reviewer-profiles.md` | decided | 0048 | reviewer profile（模型、prompt 写审查范围、时限、`fix_level`，第一轮可另设模型与时限）；只审 diff，返工轮只审增量和上轮问题，`pre_existing` 由 arc 按改动行机械判定、不打回；问题分 `critical`/`major`/`minor` 并附校准例子，用户选修到哪级，task 可覆盖；review 与 commands 并行，review 失败由 arc 自动写返工；没修的问题变成 `todo.proposed` 收尾 task，新增 task 级 `confirm` |
 | `arc-serve.md` | idea | 0048、0013、0032、0034、0006、0028、0045、0043 | 远程客户端（iOS / desktop）：runner 抽库，三个壳持 `runner.lock`；serve 只听 loopback，HTTP + SSE，会话投影成 block；状态迁移钩子推 APNs，payload 只带 id 与 phase；iOS 永远 client，desktop 可 host 可 client |

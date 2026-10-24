@@ -506,7 +506,9 @@ is a first review. A rework round's prompt holds the previous blocking items, th
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
 `git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
 `suggestions` with `pre_existing` unless its `file:line` is within 3 lines of an increment
-line or within 10 lines of a previous blocking item in the same file (`ReworkRound`).
+line or within 10 lines of a previous blocking item in the same file (`ReworkRound`). A
+`critical` item and an item without a `file` or a `line` are never moved; a moved item keeps
+its `level`, and a `major` item outside both windows is still moved.
 
 Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
 such a failure, with reason `conflict` and the paths. `review::conflict_auto_rework` writes

@@ -2,7 +2,9 @@
 //! written only when the set changes, and a broken memory log never fails the turn (ADR 0021
 //! D6 / invariant 2).
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use radian_core::{CancellationToken, HookContext, Hooks, Message, ModelRequest};
@@ -13,16 +15,8 @@ use radian_memory::Kind;
 use radian_session::{EventData, Session, SessionCreatedData, SessionJournal};
 use serde_json::json;
 
-fn scratch(label: &str) -> PathBuf {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-memory-hooks-{}-{label}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-memory-hooks-{label}"))
 }
 
 type Warn = Arc<dyn Fn(&str) + Send + Sync>;

@@ -3,6 +3,8 @@
 //! error rather than a silent request with the stale token. One `#[tokio::test]` per file —
 //! see `tests/chatgpt_headers.rs`'s header comment for why.
 
+mod common;
+
 use std::sync::OnceLock;
 
 use agent_provider_openai_responses::testing::{
@@ -17,12 +19,7 @@ use serde_json::Value;
 fn isolated_home() -> std::path::PathBuf {
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-chatgpt-refresh-home-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::process_dir("radian-chatgpt-refresh-home");
         let dir = std::fs::canonicalize(&dir).unwrap();
         // SAFETY: `get_or_init` runs this once, before any `AuthStore::open()` in this binary.
         unsafe { std::env::set_var("RADIAN_HOME", &dir) };
@@ -215,12 +212,7 @@ async fn a_near_expiry_token_is_refreshed_before_the_request_and_saved() {
 #[tokio::test]
 async fn a_refresh_failure_is_a_clear_model_error_and_the_stale_entry_is_untouched() {
     let home = {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-chatgpt-refresh-fail-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::process_dir("radian-chatgpt-refresh-fail");
         std::fs::canonicalize(&dir).unwrap()
     };
     // Unlike the test above, this one never touches `RADIAN_HOME` (no `std::env::set_var`
