@@ -531,7 +531,11 @@ fn draw_groups(
 ) {
     let mut lines = Vec::new();
     let mut selected_line = None;
-    for group in groups {
+    for (index, group) in groups.iter().enumerate() {
+        // Two group frames never touch: one blank container-owned row separates them.
+        if index > 0 {
+            lines.push(Line::default());
+        }
         let selected = (app.board.column == *group).then_some(app.board.row);
         let (group_lines, selected_at) =
             group_lines(*group, &app.board.columns[*group], width, selected, theme);

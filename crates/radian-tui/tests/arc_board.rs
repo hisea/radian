@@ -617,6 +617,19 @@ fn a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups() {
             );
             assert!(head.starts_with(&wanted), "pane {pane}: {head}");
         }
+        // The container puts exactly one blank row between two group frames.
+        assert_eq!(
+            bounds[1].0,
+            bounds[0].1 + 2,
+            "one blank row between the two frames of pane {pane}:\n{}",
+            screen_rows.join("\n")
+        );
+        assert_eq!(
+            screen_rows[bounds[0].1 + 1].trim_end(),
+            "",
+            "the row between the two frames of pane {pane} is blank:\n{}",
+            screen_rows.join("\n")
+        );
     }
     // `l` moves to the other pane, `j` stays inside this one.
     assert_eq!(app.on_key(&code(KeyCode::Char('l'))), ArcKey::Redraw);
@@ -659,6 +672,21 @@ fn a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups() {
             app.board.columns[group].len()
         );
         assert!(head.starts_with(&wanted), "group {group}: {head}");
+    }
+    // Exactly one blank row separates two stacked group frames.
+    for pair in bounds.windows(2) {
+        assert_eq!(
+            pair[1].0,
+            pair[0].1 + 2,
+            "one blank row between two stacked frames:\n{}",
+            screen_rows.join("\n")
+        );
+        assert_eq!(
+            screen_rows[pair[0].1 + 1].trim_end(),
+            "",
+            "the row between two stacked frames is blank:\n{}",
+            screen_rows.join("\n")
+        );
     }
     // `l` jumps to the next group.
     let before = app.board.column;
