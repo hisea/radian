@@ -3,6 +3,9 @@
 //! test in this binary there is no intra-process concurrency and the count is exact.
 #![cfg(target_os = "linux")]
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -20,9 +23,8 @@ fn commands_do_not_leak_filter_fds() {
     }
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::SeqCst);
-    let ws = std::env::temp_dir().join(format!("radian-seccomp-fd-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&ws).unwrap();
-    let ws: PathBuf = std::fs::canonicalize(&ws).unwrap();
+    let ws = test_support::TempDir::named(&format!("radian-seccomp-fd-{n}"));
+    let ws: PathBuf = std::fs::canonicalize(&*ws).unwrap();
     let sandbox = Sandbox::from_policy(SandboxPolicy::workspace_write(&ws).unwrap()).unwrap();
     fn open_fds() -> usize {
         std::fs::read_dir("/proc/self/fd")

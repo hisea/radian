@@ -182,10 +182,9 @@ int main(void) {
     let Some((_dir, sandbox, control)) = rig("foreign-arch") else {
         return;
     };
-    let dir = std::env::temp_dir().join(format!("radian-seccomp-cc-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let src = dir.join("arch_probe.c");
-    let bin = dir.join("arch_probe");
+    let dir = TempDir::new("cc");
+    let src = dir.path().join("arch_probe.c");
+    let bin = dir.path().join("arch_probe");
     std::fs::write(&src, HELPER).unwrap();
     let built = std::process::Command::new("cc")
         .args(["-O2", "-o"])
