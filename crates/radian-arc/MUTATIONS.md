@@ -311,14 +311,18 @@ copy under `.radian/mut/` with `cp`, and compared byte for byte with `cmp`.
 
 M2's leftovers (`git remote-ext`, its script and `sleep`) were killed by hand after the run,
 because the mutation is exactly what leaves them behind; no other processes were left.
+
+## TK0052 (the automatic failure sequences end)
+
 TK0052-M1–M3 were run against the task's branch, each from a copy under `.radian/mut/`,
 restored with `cp` and compared with `cmp`, with `cargo build -p radian-tui --bin radian`
 before the `run` test (it refuses a binary older than its sources). M1 is caught by the model
 test's rule that an attempt which never reached the gate ends the conflict run, not by a
 non-ending sequence: with the retry count now kept across a conflict rework, removing the
-conflict reset makes the conflicts accumulate and the task stop sooner. The model test did
-find a non-ending sequence before the fix this task landed: `Success`, `Conflict`,
-`ModelFail` repeated. The conflict rework set `retry_count` back to `0`, the failed attempt set
+conflict reset makes the conflicts accumulate and the task stop sooner. TK0067-M2 in the last
+section exercises the bound itself, by making a conflict rework reset `retry_count` again.
+The model test did find a non-ending sequence before the fix this task landed: `Success`,
+`Conflict`, `ModelFail` repeated. The conflict rework set `retry_count` back to `0`, the failed attempt set
 the conflict run back to `0`, and neither limit was ever reached; the run passed 100 steps at
 attempt 51. A conflict rework now keeps the retry count, so `max_attempts` bounds the failures
 between conflicts (ADR 0048 decision 9).
@@ -482,3 +486,24 @@ one at a time, run against the named test with
 | TK0069-M2 | a follow-up attempt skips the footer (drop it when the stdin brief starts with the follow-up's first line) | `review::a_followup_attempt_ends_its_brief_with_the_worker_brief` | ✅ failed |
 | TK0069-M3 | `init` overwrites an existing `worker-brief.md` (the `is_file` guard is dropped) | `store::init_writes_the_default_worker_brief_once_and_keeps_an_edit` (the edited file reads back as the default) | ✅ failed |
 | TK0069-M4 | the size limit is not checked (`len > u64::MAX` instead of `len > WORKER_BRIEF_LIMIT`) | `work::an_oversized_worker_brief_is_skipped_with_a_note` (the 33 KiB footer is appended and no note is recorded) | ✅ failed |
+
+## TK0067: the repeated-error stop reports itself, and the failure bound (2026-10-24, branch `work/TK0067-failure-sequences-end-followups`)
+
+The TK0052 and TK0053 reviews left two checks to tighten. The stop line derives its count from
+`REPEATED_ERROR_LIMIT` instead of hardcoding "three", and `stop_gates` is best effort: when the
+repeated error is an unreadable `config.toml`, the stop falls back to the default grace and
+still reports the stop line. The fixture also resets the remote main to `base` before each
+sequence. Each mutation was applied to the committed file, run with `cargo nextest run -p
+radian-arc --locked --profile sandbox --no-fail-fast -E '<the test below>'` (after `cargo
+build -p radian-tui --bin radian` for M1), restored from a copy under `.radian/mut/` with
+`cp`, and compared byte for byte with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0067-M1 | `stop_gates` reads the config with `?` again, so the repeated-error stop returns the config error (`run::watch`'s branch calls `stop_gates(store)?`) | `run::a_broken_config_stops_watch_with_the_stop_line_and_stops_its_gate` (the stop line is missing; stderr is the TOML parse error) | ✅ failed |
+| TK0067-M2 | a conflict rework resets `retry_count` again (`add_rework_with` drops the conflict exception) | `failure_sequences::every_automatic_failure_sequence_ends_within_the_limits` (`Success`, `Conflict`, `ModelFail` ran 100 steps to attempt 51: every conflict rework left `retry 0`) | ✅ failed |
+
+TK0067-M2 is the check the TK0052 review asked for: it is the mutation that makes the retry
+count and the conflict run reset each other, so the model test's bound, not a per-attempt
+assertion, catches it. TK0052-M1 (dropping only the conflict reset on an attempt that never
+reached the gate) stays a valid mutation caught by the per-attempt assertion.

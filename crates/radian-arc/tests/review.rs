@@ -2900,7 +2900,7 @@ fn a_gate_rerun_gets_a_fresh_review_session_and_keeps_the_first_journal() {
     fs::remove_file(&verdict_path).expect("the review verdict is removed");
     fixture.set_verifying(&head);
 
-    let second = FakeReview::new(
+    let second = FakeReview::with_session_echo(
         "review-rerun-second",
         &[review_message("second pass", &[], &[])],
         0,
@@ -2941,7 +2941,11 @@ fn a_gate_rerun_gets_a_fresh_review_session_and_keeps_the_first_journal() {
     );
     let verdict = fixture.verdict(&attempt, Stage::Review);
     assert_eq!(verdict.result, VerdictResult::Pass);
-    assert!(!verdict.review_session_ids.is_empty());
+    assert_eq!(
+        verdict.review_session_ids,
+        vec![format!("{attempt}-review-1-1")],
+        "the verdict names the session the re-run asked for"
+    );
     let _ = fs::remove_dir_all(session_dir.path());
 }
 
