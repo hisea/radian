@@ -505,3 +505,17 @@ binary was rebuilt before M3, which runs it.
 | TK0072-M2 | the review charge ignores the attempt it recorded (`if false` in place of the `review_cost.json` check) | `review::a_repeated_review_cost_charge_adds_once` (the counter and total are `1.5`: the same review is charged twice) | ✅ failed |
 | TK0072-M3 | the text `show` prints a task's costs with raw `f64` Display (`optional_number` in place of `optional_cost`) | `review::a_tasks_text_cost_is_rounded_like_a_plans` (`cost_usd: 2.0069999999999997` instead of `2.007`) | ✅ failed |
 | TK0072-M4 | a review charge that reaches the plan budget does not switch the plan off (the `store.change_plan` call dropped) | `review::a_review_cost_that_reaches_the_plan_budget_pauses_the_plan` ("a plan budget switches the plan off") | ✅ failed |
+## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
+
+`TaskDiff::fallback` was a bool, so a remote main ref that exists but shares no ancestor with the
+head read as `no remote main` — a line that was false about the repository. `remote_main_base`
+now tells a missing ref (`git show-ref --verify`) from a ref git finds no merge base for, and
+`TaskDiff::base` is the closed set `DiffBase`. The mutation was applied by hand to the working
+file, the named test was run alone with `cargo nextest run -p radian-arc --locked --profile
+sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0084-M1 | `remote_main_base` reports a ref with no common ancestor as `MainBase::Missing` | ✅ 1 failed | `read::a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref` (`left: NoRemoteMain`, right `Unrelated`) |
+
+1/1 caught.

@@ -10,7 +10,7 @@ mod common;
 use std::fs;
 
 use common::{Repo, write};
-use radian_arc::read::{self, DiffSource, TaskDiff};
+use radian_arc::read::{self, DiffBase, DiffSource, TaskDiff};
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
 
@@ -95,7 +95,7 @@ fn the_diff_is_the_task_own_change_from_the_merge_base_with_main() {
 
     let diff = read::task_diff(&store, &task, Some(1)).unwrap();
     assert_eq!(diff.source, DiffSource::Range);
-    assert!(!diff.fallback, "the remote main ref exists");
+    assert_eq!(diff.base, DiffBase::MergeBase, "the remote main ref exists");
     assert_eq!(
         paths(&diff),
         ["y.rs"],
@@ -144,8 +144,9 @@ fn the_diff_is_the_task_own_change_from_the_merge_base_with_main() {
     // No remote main ref: the attempt's recorded base is the fallback, and the diff says so.
     repo.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
     let fallback = read::task_diff(&store, &task, Some(1)).unwrap();
-    assert!(
-        fallback.fallback,
+    assert_eq!(
+        fallback.base,
+        DiffBase::NoRemoteMain,
         "the fallback is marked for the source line"
     );
     assert_eq!(
@@ -197,8 +198,69 @@ fn a_no_change_diff_without_a_remote_main_ref_keeps_the_fallback() {
         paths(&diff)
     );
     assert_eq!(diff.source, DiffSource::Range);
-    assert!(
-        diff.fallback,
+    assert_eq!(
+        diff.base,
+        DiffBase::NoRemoteMain,
         "the source line still says there is no remote main ref"
+    );
+}
+
+/// A remote main ref that exists but shares no ancestor with the attempt's head is not a missing
+/// ref: the diff falls back to the recorded base and says `no merge base with main`, so the page
+/// never claims a ref is absent while it is there.
+#[test]
+fn a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref() {
+    let repo = Repo::new("read-diff-unrelated");
+    let base = repo.main_sha();
+    repo.git(&["checkout", "-q", "-B", "work/T-read-unrelated", &base]);
+    let head = commit(&repo, "y.rs", "the task's change\n", "the task change");
+
+    let store = store(&repo);
+    let plan = store
+        .add_plan("read", "the read plan", "a request\n")
+        .unwrap();
+    let task = store
+        .add_task(
+            &plan,
+            "unrelated",
+            "the unrelated task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .unwrap();
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "verifying".to_owned();
+            task.attempt = 1;
+            task.base_sha = Some(base.clone());
+            task.head_sha = Some(head.clone());
+            Ok(())
+        })
+        .unwrap();
+    finish(&repo, &task, 1, &base, &head);
+
+    // A root commit with no parent, pointed at by the remote main ref: both refs exist, and git
+    // has no merge base for them.
+    repo.git(&["checkout", "-q", "--orphan", "unrelated"]);
+    write(&repo.clone.join("other.rs"), "an unrelated history\n");
+    repo.git(&["add", "other.rs"]);
+    repo.git(&["commit", "-q", "-m", "an unrelated root"]);
+    let other = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &other]);
+
+    let diff = read::task_diff(&store, &task, Some(1)).unwrap();
+    assert_eq!(
+        diff.base,
+        DiffBase::Unrelated,
+        "the ref exists, so the line must not say there is no remote main"
+    );
+    assert_eq!(
+        paths(&diff),
+        ["y.rs"],
+        "the recorded base is the fallback range: {:?}",
+        paths(&diff)
     );
 }
