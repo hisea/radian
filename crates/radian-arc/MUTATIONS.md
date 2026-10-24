@@ -455,6 +455,18 @@ alone, and the file was restored from a copy under `.radian/mut-bak/`.
 
 1/1 caught.
 
+## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
+
+`run --watch` became `radian arc serve`; `run` is one pass. The mutation was applied by hand to
+the working file, the named test was run alone, and the file was restored from a copy under
+`.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0079-M3 | `serve` drops the interval lower bound (`MIN_INTERVAL_SECS` becomes `0`) | ✅ 1 timed out | `radian-tui::arc a_serve_interval_outside_five_to_3600_is_a_usage_error` (`serve --interval 4` is accepted and runs the loop until nextest's timeout, instead of exiting 2) |
+
+1/1 caught.
+
 ## TK0076: the diff is the task's own change from the merge base with main (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
 
 `read::task_diff` diffed the attempt's `base_sha..head_sha`, so a task branch that merged a

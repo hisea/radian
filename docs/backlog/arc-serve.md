@@ -15,14 +15,14 @@ arc 的全部状态是 `<repo>/.radian/arc/` 下的文件，单写者，没有�
 
 ## 方向（未定）
 
-1. **runner 抽库。** 把调度 pass、事件广播、serve 做成 radian-arc 里的一个模块；`radian arc run --watch`、arc TUI、desktop app 是它的三个壳，谁跑它谁持有 `runner.lock`。ADR 0048 里「TUI 与 `run` 用同一状态机、同一组文件」不变。
+1. **runner 抽库。** 把调度 pass、事件广播、serve 做成 radian-arc 里的一个模块；`radian arc serve`、arc TUI、desktop app 是它的三个壳，谁跑它谁持有 `runner.lock`。ADR 0048 里「TUI 与 `run` 用同一状态机、同一组文件」不变。
 2. **serve 只听 loopback，走 HTTP + SSE。** 读接口返回与 `list --json` / `show --json` 相同的结构；写接口只有 owner 动作（confirm、cancel、auto，后续可加 merge / reject）；事件流一行一个状态迁移；会话接口把 journal 投影成 TUI 用的 block 列表再发出，正在跑的会话续推新 block，客户端不解析 journal 格式。暴露到局域网外由 Tailscale（`tailscale serve`）或 ssh 端口转发完成，radian 不管。可选 bearer token 作第二道锁。
 3. **通知钩子。** 状态迁移时执行配置里的一条命令（形如 `[hooks] on_transition`），传 task id、旧 phase、新 phase，与 `arc-landing.md` 的 `after_merge` / `after_fail` 同一族。锁屏通知只能经 APNs：钩子命令自己调 APNs，或推给自托管的 Bark / ntfy。payload 只带 id 与 phase，正文由客户端连 serve 取回（ADR 0034 的口径）。
 4. **客户端。** iOS 永远是 client；desktop app 可 host（本机跑循环加 serve，持有 `runner.lock`，有任务在跑时持防睡眠断言）也可 client（循环在别处）。UI 只面向一个接口，两个实现：进程内直调与 HTTP。应用设计文档里「app 打开即持有 `runner.lock`」只对 desktop 成立。
 
 ## 待决问题
 
-- serve 合进 `run --watch`（`--serve <port>`）还是独立子命令；若独立，用 ADR 0032 预留的 `serve` 名还是 `arc serve`。
+- 调度循环已是独立子命令 `radian arc serve`（ADR 0048 §13）；远程接口是它的一个 `--listen` 选项，不再合进循环名，也不再占用 ADR 0032 预留的顶层 `serve` 名。
 - token 是必须项还是可选项；`tailscale serve` 的身份头要不要认。
 - 菜单栏常驻的 desktop app 是否算 ADR 0048 v0 排除的「resident daemon」；落地时 ADR 要明说。
 - APNs 直发是否进 radian（desktop app 持 `.p8` 密钥）：是一个新的出站网络面，默认关闭。
@@ -31,4 +31,4 @@ arc 的全部状态是 `<repo>/.radian/arc/` 下的文件，单写者，没有�
 
 ## 验收
 
-未定。至少：手机在 tailnet 内不装 ssh 客户端也能完成上面四件事；serve 进程不在时锁屏通知仍能送达；`run --watch`、TUI、desktop host 三个壳对同一组文件产生相同的状态迁移。
+未定。至少：手机在 tailnet 内不装 ssh 客户端也能完成上面四件事；serve 进程不在时锁屏通知仍能送达；`serve`、TUI、desktop host 三个壳对同一组文件产生相同的状态迁移。

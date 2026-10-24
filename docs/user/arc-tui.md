@@ -4,7 +4,7 @@ description: The arc TUI: the plans, board, task and merge pages, every mark and
 
 # arc: the TUI
 
-This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
+This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the scheduling loop is in [`arc-loop`](arc-loop.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 `radian arc` opens a view of plans, tasks, verdicts, journals and merges; the pages themselves read the store, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (take and release at once, never creating it) and never holds it. Header: `arc`, tabs `plans · board · task · merge` (`merge` for a task in `review.*` or `done`), then on the plans page the view and the plans it hides (`active · 14 hidden`; a zero count is omitted), on the board page its scope (`all plans` or the plan id, and `finished` while the list is open), `main <sha>` and the loop state.
 
@@ -12,7 +12,7 @@ This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the 
 
 ## The loop
 
-The TUI is never the scheduling loop: it holds no `runner.lock` and runs no pass. When it opens, it starts `radian arc run --watch` with the default interval when no loop holds the lock; `R` starts one the same way while none runs. The loop is a detached process in the repository root: it has its own session, its input and output go to `/dev/null`, and its lines go to [`loop.log`](arc-files.md). Starting a loop asks nothing: it is the default way arc runs.
+The TUI is never the scheduling loop: it holds no `runner.lock` and runs no pass. When it opens, it starts `radian arc serve` with the default interval when no loop holds the lock; `R` starts one the same way while none runs. The loop is a detached process in the repository root: it has its own session, its input and output go to `/dev/null`, and its lines go to [`loop.log`](arc-files.md). Starting a loop asks nothing: it is the default way arc runs.
 
 The header reads the probe: `loop ● running (pid <n>)` while any loop holds the lock, whoever started it; the pid appears when the holder recorded a readable one, so a lock with none shows plain `loop ● running`. `loop ◌ starting` lasts from a start until the process the TUI started writes its own pid into `runner.lock`: a start in flight is followed through its child, not by a probe, so it does not see another process's lock until the child exits or the 10 seconds run out. `loop ○ stopped` is shown when none holds the lock. A start that fails (the process cannot start, it exits, or it records no pid within 10 seconds) shows `loop ○ stopped` and one footer line with the reason, the exit code when the process exited (`3` a rejected worker line, `4` another holder), and the last `radian arc: <message>` line of `loop.log` when there is one. `R` while a loop runs starts nothing and says so in the footer. Quitting the TUI never stops a loop: the loop keeps running, and the next time you open the TUI it shows that loop's pid.
 
@@ -128,10 +128,10 @@ The TUI's owner actions are the CLI's own library calls, run in the TUI process;
 | merge | `r` | `reject` with a note | a one-line note float: `Enter` rejects, `Esc` cancels; an empty note is refused like the CLI |
 | merge | `v` | `reverify` | none |
 
-`y` confirms and `n` (or `Esc`) closes a confirmation float without changing anything. `start` in the TUI does what `radian arc start` does; the scheduling loop (the `radian arc run --watch` the TUI starts, or one started by hand) is what schedules the rest.
+`y` confirms and `n` (or `Esc`) closes a confirmation float without changing anything. `start` in the TUI does what `radian arc start` does; the scheduling loop (the `radian arc serve` the TUI starts, or one started by hand) is what schedules the rest.
 
 ## Quitting
 
-`q` (or `Ctrl-C`) quits, and so does SIGTERM: the terminal is restored and the TUI exits `0`. Nothing else happens: no float about the loop, no signal to a loop, whether the TUI started it or not. A loop the TUI started keeps running with its lock, and an attempt it left running is reconciled by the next loop, exactly as when `radian arc run --watch` is killed.
+`q` (or `Ctrl-C`) quits, and so does SIGTERM: the terminal is restored and the TUI exits `0`. Nothing else happens: no float about the loop, no signal to a loop, whether the TUI started it or not. A loop the TUI started keeps running with its lock, and an attempt it left running is reconciled by the next loop, exactly as when `radian arc serve` is killed.
 
 Re-reads the store every 2 s; git, the merge page's data, a command's log and the actions run in worker threads, a frame never waits (`loading…`).

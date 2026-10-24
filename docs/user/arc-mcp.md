@@ -4,7 +4,7 @@ description: The lead's MCP server: registering it, its tools and its tool error
 
 # arc: the MCP server
 
-This page covers `radian arc mcp`; the `radian arc` commands are in [`arc`](arc.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
+This page covers `radian arc mcp`; the `radian arc` commands are in [`arc`](arc.md), the scheduling loop is in [`arc-loop`](arc-loop.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 `mcp` serves the lead's tools over standard input and output, and exits `0` when its client closes the connection.
 A client that closes before the handshake finishes exits `1` and says which handshake request was cut off.
