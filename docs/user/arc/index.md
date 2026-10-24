@@ -625,9 +625,13 @@ It exits `0` on success, `1` on an error, `2` for an empty note, `3` when the ta
 
 `serve` is the scheduling loop: `--interval`, its output, the signal handling and the repeated-error stop are in [`arc/loop`](loop.md#radian-arc-serve).
 
-## `radian arc mcp`
+## `radian arc mcp [--claude-experimental]`
 
 The lead's MCP server: registering it, its tools and its tool errors are in [`arc/mcp`](mcp.md).
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--claude-experimental` | — | off | Push task transitions to a Claude Code channel. The details are in [`arc/mcp`](mcp.md#the-claude-experimental-flag). |
 
 ## Exit codes
 

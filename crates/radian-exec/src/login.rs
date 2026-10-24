@@ -362,19 +362,48 @@ pub async fn run_login(provider: Option<String>) -> i32 {
     if is_custom(&name) {
         env.insert(radian_host::RADIAN_KIND.to_owned(), kind);
     }
-    match radian_host::AuthStore::open() {
-        Ok(mut store) => match store.upsert_api_key(&name, &key, &env) {
-            Ok(()) => {
-                println!(
-                    "saved the key for `{name}` in credentials/auth.json; use it with \\
-                     --provider {name} --model <model> (or /model {name}/<model>)"
-                );
-                0
+    let mut store = match radian_host::AuthStore::open() {
+        Ok(store) => store,
+        Err(error) => return aborted(format!("could not save the key: {error}")),
+    };
+    let existing = store.key_choices(&name).unwrap_or_default();
+    let add = if existing.is_empty() {
+        None
+    } else {
+        println!(
+            "`{name}` already has {} key(s): {}",
+            existing.len(),
+            existing
+                .iter()
+                .map(|key| format!("{} ({})", key.name, key.masked))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        match read_line("replace the current key, or add another? [r/a] ") {
+            Ok(answer) if answer.trim().eq_ignore_ascii_case("a") => {
+                match read_line("name for the new key (empty allowed): ") {
+                    Ok(name) => Some(name),
+                    Err(error) => return aborted(error),
+                }
             }
-            Err(error) => aborted(format!("could not save the key: {error}")),
-        },
-        Err(error) => aborted(format!("could not save the key: {error}")),
+            Ok(_) => None,
+            Err(error) => return aborted(error),
+        }
+    };
+    match add {
+        Some(ref key_name) => store.add_api_key(&name, &key, Some(key_name), &env),
+        None => store.upsert_api_key(&name, &key, &env),
     }
+    .map_or_else(
+        |error| aborted(format!("could not save the key: {error}")),
+        |()| {
+            println!(
+                "saved the key for `{name}` in credentials/auth.json; use it with \\
+                     --provider {name} --model <model> (or /model {name}/<model>)"
+            );
+            0
+        },
+    )
 }
 
 /// The custom provider's questions (D10): the name — its `auth.json` slot — the protocol,
@@ -492,8 +521,21 @@ fn finish_chatgpt_login(token: &radian_host::OAuthTokenResponse) -> i32 {
     }
 }
 
-/// `radian logout <provider>`: confirm, then remove **only** that entry (D3).
-pub async fn run_logout(provider: String) -> i32 {
+/// `radian logout <provider> [name]`: confirm, then remove **only** that entry (or, with a
+/// name, that key without asking). Several keys list and ask; `all` removes every key (D3).
+pub async fn run_logout(provider: String, name: Option<String>) -> i32 {
+    if let Some(name) = name {
+        // A named removal is not a question: no terminal is needed and nothing else is read.
+        return match radian_host::AuthStore::open()
+            .and_then(|mut store| store.remove_key(&provider, Some(&name)))
+        {
+            Ok(()) => {
+                println!("removed the key named `{name}` from `{provider}`");
+                0
+            }
+            Err(error) => aborted(format!("could not remove `{name}`: {error}")),
+        };
+    }
     if !is_tty() {
         return aborted(
             "logout asks for a confirmation, so it needs a terminal; remove the entry from \
@@ -520,6 +562,55 @@ pub async fn run_logout(provider: String) -> i32 {
             }
         ));
     }
+    let keys = store.key_choices(&provider).unwrap_or_default();
+    if keys.len() > 1 {
+        println!("`{provider}` has several keys:");
+        for (index, key) in keys.iter().enumerate() {
+            println!("  {}. {} ({})", index + 1, key.name, key.masked);
+        }
+        let answer = match read_line("remove which one? number, name, or `all`: ") {
+            Ok(answer) => answer.trim().to_owned(),
+            Err(error) => return aborted(error),
+        };
+        if answer.eq_ignore_ascii_case("all") {
+            return match radian_host::AuthStore::open()
+                .and_then(|mut store| store.remove_key(&provider, None))
+            {
+                Ok(()) => {
+                    println!("removed every key for `{provider}`; every other entry is untouched");
+                    0
+                }
+                Err(error) => aborted(format!("could not remove: {error}")),
+            };
+        }
+        let picked = answer
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| keys.get(index.wrapping_sub(1)).map(|key| key.name.clone()))
+            .or_else(|| {
+                keys.iter()
+                    .any(|key| key.name == answer)
+                    .then(|| answer.clone())
+            });
+        let Some(picked) = picked else {
+            return aborted(format!(
+                "`{provider}` has no key named `{answer}`; known: {}",
+                keys.iter()
+                    .map(|key| key.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        };
+        return match radian_host::AuthStore::open()
+            .and_then(|mut store| store.remove_key(&provider, Some(&picked)))
+        {
+            Ok(()) => {
+                println!("removed the key named `{picked}` from `{provider}`");
+                0
+            }
+            Err(error) => aborted(format!("could not remove: {error}")),
+        };
+    }
     let answer = match read_line(&format!(
         "remove the stored credential for `{provider}`? [y/N] "
     )) {
@@ -531,7 +622,7 @@ pub async fn run_logout(provider: String) -> i32 {
         return 0;
     }
     match radian_host::AuthStore::open() {
-        Ok(mut store) => match store.remove(&provider) {
+        Ok(mut store) => match store.remove_key(&provider, None) {
             Ok(()) => {
                 println!("removed `{provider}`; every other entry is untouched");
                 0

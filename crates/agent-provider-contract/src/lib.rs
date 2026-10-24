@@ -889,9 +889,11 @@ mod tests {
             ModelError::Unavailable {
                 message,
                 retry_after,
+                status,
             } => ModelError::Unavailable {
                 message: message.clone(),
                 retry_after: *retry_after,
+                status: *status,
             },
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(text.clone()),
             ModelError::EmptyResponse => ModelError::EmptyResponse,
@@ -1000,6 +1002,7 @@ mod tests {
                         Some(ModelError::Unavailable {
                             message: format!("HTTP {code}: {body}"),
                             retry_after: None,
+                            status: Some(*code),
                         })
                     } else {
                         Some(ModelError::Protocol(format!("HTTP {code}: {body}")))

@@ -863,7 +863,12 @@ pub struct ArcApp {
     pub log_missing: bool,
     /// `L`: the log view is open over the page.
     pub log_open: bool,
+    /// The first line the log view draws, or the last line of the log as a sentinel while the
+    /// view follows its end.
     pub log_scroll: usize,
+    /// The rows the log view's body had on the last frame: a scroll from the end moves up from
+    /// the last page that fits.
+    log_rows: usize,
     pub theme: Theme,
     /// A store read error, drawn as one weak line instead of a blank page.
     pub notice: Option<String>,
@@ -914,6 +919,7 @@ impl ArcApp {
             log_missing: true,
             log_open: false,
             log_scroll: 0,
+            log_rows: 1,
             theme: Theme::default(),
             notice: None,
         };
@@ -1668,10 +1674,30 @@ impl ArcApp {
         self.result = Some(ResultLine { text, failed });
     }
 
-    /// Scrolls the log view by `delta` lines, clamped to its end.
+    /// The first line the log view draws: the first line of its last page while the stored
+    /// index is at the end, else the stored line, clamped to a page that fits.
+    fn log_start(&self) -> usize {
+        let rows = self.log_rows.max(1);
+        let last = self.log.len().saturating_sub(rows);
+        if self.log_scroll + 1 >= self.log.len() {
+            last
+        } else {
+            self.log_scroll.min(last)
+        }
+    }
+
+    /// Scrolls the log view by `delta` lines, clamped to its end. Scrolling down to the bottom
+    /// puts the view back at the end, where it follows new lines again.
     pub fn scroll_log(&mut self, delta: i32) {
-        let end = self.log.len().saturating_sub(1) as i32;
-        self.log_scroll = (self.log_scroll as i32).saturating_add(delta).clamp(0, end) as usize;
+        let last = self.log.len().saturating_sub(self.log_rows.max(1));
+        let next = (self.log_start() as i32)
+            .saturating_add(delta)
+            .clamp(0, last as i32) as usize;
+        self.log_scroll = if next >= last {
+            self.log.len().saturating_sub(1)
+        } else {
+            next
+        };
     }
 
     /// Pins the log view to its end.

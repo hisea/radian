@@ -12,7 +12,34 @@ Radian verifies the key with a read only request to `<base>/models` first.
 Keys live in `~/.radian/credentials/auth.json`.
 Run `radian logout <provider>` to remove one key.
 Removal asks first.
+With several keys it asks which one, or `all`; `radian logout <provider> <name>` removes that one without asking.
 Every other entry stays untouched.
+
+An entry may hold several keys.
+Keep the first as `key` and list the rest in `keys`:
+
+```json
+"opencode-go": {"type": "api_key", "key": "sk-first",
+                "keys": [{"name": "team", "key": "sk-second"}]}
+```
+
+Each `keys` item has `key` and an optional `name`.
+`key` and every `keys[].key` resolve `$NAME` or `${NAME}` the same way.
+A value starting with `!` is refused and never run; the other keys stay usable.
+The first key is named `first` when it has no name; an unnamed `keys` item shows as its masked form `sk-…cond`.
+pi reads `key` alone, so the file stays pi-readable.
+A `keys` list on an `oauth` entry is ignored, with one notice.
+A request uses the first key that is not resting.
+The session keeps that key until it rests: no rotation, so the provider's prompt cache stays on one key for this session.
+An HTTP 429 rests the key the request used: for the `Retry-After` duration when the provider sent one (at most one hour), else five minutes.
+No other error rests a key: a 5xx is the vendor's, and a 400, 401 or 403 is the request's or a dead key.
+When every key rests, the request uses the key whose rest ends soonest.
+One notice names a switch: `opencode-go: key "first" rests until 14:32; using "team"`.
+The notice goes to stderr, under `radian exec --output jsonl` too, so the machine-readable stdout stream stays JSON lines.
+With `[model] retries = 0` no failover happens inside a turn; the next turn uses the next key.
+The pool is process state only: a resumed session starts at the first key again.
+Every key is redacted from the journal, the export and the panic log.
+The usage row's title names the key in use (`Usage · team`) when the entry has several keys.
 
 Choose the provider with `--provider`: a built-in id (`opencode-go`, `chatgpt`, `anthropic`, `openai`, `openai-compatible`) or a `[providers.<name>]` name.
 An unknown provider is refused.

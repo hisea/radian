@@ -55,10 +55,14 @@ pub enum Command {
         /// URL, key). Omitted: a numbered list is shown.
         provider: Option<String>,
     },
-    /// Remove a stored credential (asks first; every other entry is untouched).
+    /// Remove a stored credential (asks first; every other entry is untouched). With a key
+    /// name, remove just that key without asking.
     Logout {
         /// The provider id the key is stored under (`radian login` printed it).
         provider: String,
+        /// The key's name (`first`, a `keys[]` name, or its masked form): remove that one
+        /// without asking.
+        name: Option<String>,
     },
 }
 

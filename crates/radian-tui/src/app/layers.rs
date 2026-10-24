@@ -127,6 +127,14 @@ impl App {
         })
     }
 
+    /// The `/logout` key picker on screen, if any.
+    pub fn logout_keys_mut(&mut self) -> Option<&mut crate::logout::LogoutKeysWizard> {
+        self.layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::LogoutKeys(wizard)) => Some(wizard.as_mut()),
+            _ => None,
+        })
+    }
+
     /// The topmost modal, if any. The input box is not editable while one is up.
     pub fn top_modal(&self) -> Option<&Modal> {
         self.layers.iter().rev().find_map(|layer| match layer {

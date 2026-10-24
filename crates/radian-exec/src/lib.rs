@@ -406,7 +406,9 @@ pub async fn run(mut cli: Cli, child_headers: Result<Vec<String>, String>) -> i3
             // D3: the credential commands are modes of their own — no model, no session
             // file; `radian login` talks to the named endpoint once (the verification).
             Some(Command::Login { provider }) => return login::run_login(provider).await,
-            Some(Command::Logout { provider }) => return login::run_logout(provider).await,
+            Some(Command::Logout { provider, name }) => {
+                return login::run_logout(provider, name).await;
+            }
             None => unreachable!("checked just above"),
         }
     }

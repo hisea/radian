@@ -1205,6 +1205,18 @@ pub(crate) mod tests {
         assert!(tight[h + 1].is_empty(), "{tight:?}");
     }
 
+    /// ADR 0035: a word that does not fit the rest of the row moves whole to the next one (the
+    /// brief's long paragraphs); a single word wider than the row still breaks at the column.
+    #[test]
+    fn a_word_that_does_not_fit_moves_whole_to_the_next_row() {
+        let texts = md("aaa bbb ccc", 7, crate::footer::Glyphs::Unicode);
+        assert_eq!(texts, ["aaa bbb", "ccc"], "{texts:?}");
+        let texts = md("aaa bbbb ccc", 7, crate::footer::Glyphs::Unicode);
+        assert_eq!(texts, ["aaa", "bbbb", "ccc"], "{texts:?}");
+        let texts = md("aaa bbbbbbbb", 7, crate::footer::Glyphs::Unicode);
+        assert_eq!(texts, ["aaa", "bbbbbbb", "b"], "{texts:?}");
+    }
+
     /// The unordered marker is `-`, and a continuation aligns to the marker's actual width.
     #[test]
     fn lists_use_a_dash_and_align_continuations_to_the_marker() {

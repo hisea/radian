@@ -27,6 +27,7 @@ pub mod highlight;
 pub mod inspector;
 pub mod keys;
 pub mod login;
+pub mod logout;
 pub mod markdown;
 pub mod media;
 pub mod mention;

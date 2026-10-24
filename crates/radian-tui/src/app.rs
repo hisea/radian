@@ -66,7 +66,7 @@ mod state;
 mod transcript;
 mod update;
 
-pub use input::{Input, MemoryResult, PickerData, SlashCompletion};
+pub use input::{Input, LogoutPick, MemoryResult, PickerData, SlashCompletion};
 use input::{PendingExpand, PendingSend};
 pub use mouse::{AUTO_SCROLL_TICK, DOUBLE_CLICK_WINDOW, MOUSE_WHEEL_LINES, MouseScrollDirection};
 use mouse::{LastClick, SelectDrag};
@@ -173,15 +173,23 @@ pub enum Effect {
         key: String,
     },
     /// Write the `/login` entry into `credentials/auth.json` (D3; only auth.json is written).
-    /// The answer is [`Input::LoginSaved`].
+    /// `add` names a key to append to an entry that already has one; `None` replaces the first
+    /// key. The answer is [`Input::LoginSaved`].
     LoginSave {
         name: String,
         key: String,
         env: Vec<(String, String)>,
+        add: Option<String>,
     },
-    /// Remove one stored credential (`/logout`, after the confirmation). The answer is
-    /// [`Input::LogoutDone`].
-    Logout { provider: String },
+    /// Remove one stored credential (`/logout`, after the confirmation), or one key from it
+    /// when `key` is `Some`. The answer is [`Input::LogoutDone`].
+    Logout {
+        provider: String,
+        key: Option<String>,
+    },
+    /// Read the entry's keys so `/logout` can list them (`Input::LogoutChoices`). No network,
+    /// no write.
+    LogoutCheck { provider: String },
     /// Sign in with ChatGPT, browser flow (ADR 0026): bind the loopback listener,
     /// try to open the authorize URL (and report it either way, as
     /// [`Input::LoginOAuthUrlReady`]), wait for the redirect, exchange, save. The terminal
@@ -376,15 +384,27 @@ impl PartialEq for Effect {
                     name: an,
                     key: ak,
                     env: ae,
+                    add: aa,
                 },
                 LoginSave {
                     name: bn,
                     key: bk,
                     env: be,
+                    add: ba,
                 },
-            ) => an == bn && ak == bk && ae == be,
+            ) => an == bn && ak == bk && ae == be && aa == ba,
             (LoginOAuthBrowser, LoginOAuthBrowser) | (LoginOAuthDevice, LoginOAuthDevice) => true,
-            (Logout { provider: a }, Logout { provider: b }) => a == b,
+            (
+                Logout {
+                    provider: a,
+                    key: ak,
+                },
+                Logout {
+                    provider: b,
+                    key: bk,
+                },
+            ) => a == b && ak == bk,
+            (LogoutCheck { provider: a }, LogoutCheck { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
             (Bell, Bell) => true,
             (SetTrust { choice: a }, SetTrust { choice: b }) => a == b,

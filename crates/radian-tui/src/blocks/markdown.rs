@@ -797,8 +797,8 @@ fn md_block_count(
 
 /// The rows [`md_wrap`] would produce for `texts` (with a synthesized `prefix_width`-wide
 /// prefix), without building a cell or a line. Mirrors `md_wrap` exactly: no space collapsing,
-/// a newline forces a row, a space at a soft break is dropped, and the indent narrows the
-/// width.
+/// a newline forces a row, a space at a soft break is dropped, a word that does not fit moves
+/// whole to the next row, and the indent narrows the width.
 fn md_wrap_count<'a>(
     texts: impl Iterator<Item = &'a str>,
     prefix_width: usize,
@@ -811,6 +811,9 @@ fn md_wrap_count<'a>(
     let mut row_non_empty = prefix_width > 0;
     let mut trailing_break = false;
     let mut last_non_empty = false;
+    // The row width just after the last space, so a word that does not fit can move whole
+    // to the next row (the mirror of `md_wrap_marked`'s last-space rule).
+    let mut last_space = 0usize;
     for text in texts {
         for ch in text.chars() {
             if ch == '\n' {
@@ -819,21 +822,40 @@ fn md_wrap_count<'a>(
                 used = 0;
                 row_non_empty = false;
                 trailing_break = true;
+                last_space = 0;
                 continue;
             }
             let cell = ascii_width(ch).unwrap_or_else(|| UnicodeWidthChar::width(ch).unwrap_or(0));
-            if used + cell > width && row_non_empty {
+            let mut skipped = false;
+            while used + cell > width && row_non_empty {
+                // Break before the word that does not fit, not inside it. A word wider than
+                // the row still breaks on a character boundary.
+                if ch != ' ' && last_space > 1 && used > last_space {
+                    lines += 1;
+                    last_non_empty = row_non_empty;
+                    used -= last_space;
+                    last_space = 0;
+                    continue;
+                }
                 lines += 1;
                 last_non_empty = row_non_empty;
                 used = 0;
                 row_non_empty = false;
                 trailing_break = false;
+                last_space = 0;
                 if ch == ' ' {
-                    continue;
+                    skipped = true;
+                    break;
                 }
+            }
+            if skipped {
+                continue;
             }
             used += cell;
             row_non_empty = true;
+            if ch == ' ' {
+                last_space = used;
+            }
             trailing_break = false;
         }
     }
@@ -1091,7 +1113,8 @@ pub(super) fn md_chars(pieces: &[MdPiece]) -> Vec<Option<usize>> {
 }
 
 /// Wraps Markdown pieces to `width`, one body line per wrapped row, with `indent` leading
-/// spaces on every row.
+/// spaces on every row. Words break at spaces; a single word wider than the row breaks on a
+/// character boundary (a long path), as the transcript does.
 fn md_wrap(pieces: Vec<MdPiece>, width: usize, indent: usize) -> Vec<BodyLine> {
     md_wrap_marked(pieces, width, indent, None)
 }
@@ -1183,13 +1206,39 @@ fn md_wrap_marked(
             continue;
         }
         let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > width && !row.is_empty() {
+        let mut skipped = false;
+        while used + w > width && !row.is_empty() {
+            // A word that has started but does not fit its row moves whole to the next
+            // one: break at the last space rather than inside the word (ADR 0035's
+            // word wrap). A single word wider than the row still breaks on a character
+            // boundary below, as the transcript does.
+            if ch != ' '
+                && let Some(space) = row.iter().rposition(|(cell, _, _)| *cell == ' ')
+            {
+                let cell_width = |cell: &Cell| UnicodeWidthChar::width(cell.0).unwrap_or(0);
+                let before: usize = row[..space].iter().map(cell_width).sum();
+                let word: Vec<Cell> = row.split_off(space + 1);
+                let word_width: usize = word.iter().map(cell_width).sum();
+                if before > 0 && word_width > 0 {
+                    row.pop();
+                    flush(&mut row, &mut out, &mut first);
+                    used = word_width;
+                    row = word;
+                    continue;
+                }
+                // Put the word back: this branch cannot split the row.
+                row.extend(word);
+            }
             flush(&mut row, &mut out, &mut first);
             used = 0;
             if ch == ' ' {
-                trailing_break = false;
-                continue;
+                skipped = true;
             }
+            break;
+        }
+        if skipped {
+            trailing_break = false;
+            continue;
         }
         used += w;
         row.push((ch, style, offset));

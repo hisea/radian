@@ -133,8 +133,8 @@ async fn http_status_matrix_is_classified_and_never_shows_a_secret() {
         assert_eq!(error.is_transient(), transient, "{code}");
         if transient {
             assert!(
-                matches!(error, ModelError::Unavailable { .. }),
-                "{code} must be Unavailable: {error}"
+                matches!(error, ModelError::Unavailable { status: Some(found), .. } if found == code),
+                "{code} must be Unavailable with its status: {error}"
             );
         } else {
             assert!(

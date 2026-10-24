@@ -94,6 +94,10 @@ impl LoopContext<'_> {
                 let _ = gate.send(chatgpt_usage_active(&route.provider));
             }
         }
+        let turn_over = matches!(
+            &event,
+            UiEvent::Runtime(radian_session::RuntimeEvent::TurnFinished { .. })
+        );
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
             UiEvent::Runtime(event) => {
@@ -175,8 +179,15 @@ impl LoopContext<'_> {
                 return true;
             }
         };
-        // The completion menu's current-value markers read these; keep them in step with the
-        // app (the footer's `reasoning` item is the same value).
+        // ADR 0026 D2: the key pool queues one line per key switch and the host shows it as
+        // a transcript notice after the turn. The pool itself is live process state; nothing
+        // about keys is journaled.
+        if turn_over {
+            let notices = radian_host::key_pool::take_notices();
+            if !notices.is_empty() {
+                app.update(AppInput::SessionDone(notices));
+            }
+        }
         if let Some(level) = app.session.thinking_level.clone() {
             self.current_thinking = level;
         }
@@ -847,26 +858,46 @@ impl LoopContext<'_> {
                 base_url,
                 key,
             } => {
+                // The replace-or-add question is answered by whether the entry already has a
+                // key; reading it here keeps `App` free of I/O (ADR 0023 U3).
+                let existing = radian_host::auth::key_choices(&name)
+                    .map(|keys| !keys.is_empty())
+                    .unwrap_or(false);
                 let protocol = radian_host::Protocol::from_kind(protocol)
                     .unwrap_or(radian_host::Protocol::OpenAiCompatible);
                 let tx = self.tx.clone();
                 self.runtime.spawn(async move {
                     let result = radian_host::login::verify(&name, protocol, &base_url, &key).await;
-                    let _ = tx.send(UiEvent::Command(AppInput::LoginVerified { name, result }));
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginVerified {
+                        name,
+                        result,
+                        existing,
+                    }));
                 });
                 Ok(())
             }
             // The save: the only place `/login` writes, and it is `auth.json` (D3 — the
-            // config file stays read-only).
-            Effect::LoginSave { name, key, env } => {
+            // config file stays read-only). `add` appends a key to an entry that already has
+            // one; `None` replaces the first key.
+            Effect::LoginSave {
+                name,
+                key,
+                env,
+                add,
+            } => {
                 let env: std::collections::BTreeMap<String, String> = env.into_iter().collect();
                 let result = radian_host::AuthStore::open()
-                    .and_then(|mut store| store.upsert_api_key(&name, &key, &env))
+                    .and_then(|mut store| match &add {
+                        Some(new_name) => store.add_api_key(&name, &key, Some(new_name), &env),
+                        None => store.upsert_api_key(&name, &key, &env),
+                    })
                     .map_err(|error| error.to_string());
                 if result.is_ok() {
-                    // The session's redaction list must know the new key from now on
-                    //: the panic log and an export read it live.
+                    // The redaction list and the key pool both follow the file: every key in
+                    // `auth.json` is redacted (ADR 0013 T4), and the new key is usable at
+                    // once (ADR 0026 D2).
                     refresh_secrets(&self.host.secrets);
+                    radian_host::key_pool::reload(&name);
                 }
                 self.send(AppInput::LoginSaved { name, result });
                 Ok(())
@@ -954,12 +985,30 @@ impl LoopContext<'_> {
                 });
                 Ok(())
             }
-            // `/logout` after the `y`: remove the entry, everything else byte-for-byte (D3).
-            Effect::Logout { provider } => {
-                let result = radian_host::AuthStore::open()
-                    .and_then(|mut store| store.remove(&provider))
+            // `/logout` before any choice: read the keys so the app can list them. One key
+            // keeps the ordinary confirmation; several open the picker (ADR 0026 D3).
+            Effect::LogoutCheck { provider } => {
+                let choices = radian_host::AuthStore::open()
+                    .and_then(|store| store.key_choices(&provider))
                     .map_err(|error| error.to_string());
-                self.send(AppInput::LogoutDone { provider, result });
+                self.send(AppInput::LogoutChoices { provider, choices });
+                Ok(())
+            }
+            // `/logout` after the choice: remove the entry (or one key), everything else
+            // byte-for-byte (D3). Removing the first key promotes the next to `key`.
+            Effect::Logout { provider, key } => {
+                let result = radian_host::AuthStore::open()
+                    .and_then(|mut store| store.remove_key(&provider, key.as_deref()))
+                    .map_err(|error| error.to_string());
+                if result.is_ok() {
+                    refresh_secrets(&self.host.secrets);
+                    radian_host::key_pool::reload(&provider);
+                }
+                self.send(AppInput::LogoutDone {
+                    provider,
+                    key,
+                    result,
+                });
                 Ok(())
             }
             // The clipboard write is I/O, so it lives here (ADR 0023 U3); its result is the

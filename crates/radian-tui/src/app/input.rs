@@ -9,6 +9,17 @@ use super::*;
 ///
 /// [`Input::Action`] is the keymap's semantic action. [`Input::Char`] and
 /// [`Input::FindBackspace`] are the two editing intents that are deliberately **not** bindings
+/// The `/logout` key picker's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogoutPick {
+    /// The highlighted row (a key, or `all`).
+    Selected,
+    /// Every key, regardless of the cursor.
+    All,
+    /// Keep everything.
+    Cancel,
+}
+
 /// (typing, and the find box's own backspace, which belongs to the box like the approval keys
 /// belong to the prompt). Everything else is a host fact or the result of an [`Effect`].
 pub enum Input {
@@ -186,6 +197,8 @@ pub enum Input {
     LoginVerified {
         name: String,
         result: Result<(), String>,
+        /// Whether the entry already had a key, so the wizard asks replace-or-add (D3).
+        existing: bool,
     },
     /// The `auth.json` write of a `/login` finished: the wizard closes either way. The
     /// success notice names the provider and the way to switch to it (D3). Shared by the
@@ -206,10 +219,21 @@ pub enum Input {
     },
     /// The hardcoded answer to a `/logout` confirmation (`true` = remove).
     ConfirmLogout(bool),
-    /// A `/logout` removal finished: the provider and the outcome. The notice names the
-    /// provider (the removal is otherwise silent, D3's confirmation being the record).
+    /// The entry's keys, read by [`Effect::LogoutCheck`]: the modal lists them, or the single
+    /// key takes the ordinary confirmation.
+    LogoutChoices {
+        provider: String,
+        choices: Result<Vec<radian_host::KeyChoice>, String>,
+    },
+    /// The `/logout` key list's cursor moved.
+    LogoutMove(i32),
+    /// The `/logout` key list chose an option: the highlighted row, every key, or keep.
+    LogoutChosen(LogoutPick),
+    /// A `/logout` removal finished: the provider, the key (when one was removed) and the
+    /// outcome. The notice names what was removed.
     LogoutDone {
         provider: String,
+        key: Option<String>,
         result: Result<(), String>,
     },
     /// The startup trust modal's cursor moved (ADR 0031 T3).
