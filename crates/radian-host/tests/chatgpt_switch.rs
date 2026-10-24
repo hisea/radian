@@ -7,6 +7,8 @@
 //! untested combination is this function called with `"chatgpt"` specifically). One
 //! `#[tokio::test]` per file — see `tests/chatgpt_headers.rs`'s header comment for why.
 
+mod common;
+
 use std::sync::OnceLock;
 
 use agent_provider_openai_responses::testing::{
@@ -19,8 +21,7 @@ use serde_json::Value;
 fn isolated_home() -> std::path::PathBuf {
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("radian-chatgpt-switch-home-{}", std::process::id()));
+        let dir = common::process_dir("radian-chatgpt-switch-home");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();

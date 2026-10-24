@@ -2,6 +2,8 @@
 //! local keep-alive mock open **one** TCP connection. One `#[tokio::test]` in this file —
 //! see `tests/chatgpt_headers.rs`'s header comment for why (`RADIAN_HOME` is process-wide).
 
+mod common;
+
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,10 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 fn isolated_home() -> std::path::PathBuf {
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("radian-chatgpt-reuse-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::process_dir("radian-chatgpt-reuse-home");
         let dir = std::fs::canonicalize(&dir).unwrap();
         // SAFETY: `get_or_init` runs this once, before any `AuthStore::open()` in this binary.
         unsafe { std::env::set_var("RADIAN_HOME", &dir) };

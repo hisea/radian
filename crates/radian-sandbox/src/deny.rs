@@ -378,8 +378,7 @@ mod tests {
     use super::*;
 
     fn policy() -> SandboxPolicy {
-        let ws = std::env::temp_dir().join(format!("radian-deny-test-{}", std::process::id()));
-        std::fs::create_dir_all(&ws).unwrap();
+        let ws = crate::test_support::process_dir("radian-deny-test");
         let ws = std::fs::canonicalize(&ws).unwrap();
         SandboxPolicy::new(crate::policy::SandboxMode::WorkspaceWrite, &ws).unwrap()
     }

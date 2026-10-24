@@ -86,10 +86,16 @@ mod tests {
     /// A distinct workspace directory per label. `FullAccess` is transparent (no probe), so
     /// these tests never pay the enforced backend's probe cost.
     fn workspace(label: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("radian-slot-test-{}-{label}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(&dir).unwrap()
+        use std::collections::BTreeMap;
+        use std::sync::Mutex;
+        static DIRS: Mutex<BTreeMap<String, std::path::PathBuf>> = Mutex::new(BTreeMap::new());
+        let mut dirs = DIRS.lock().unwrap();
+        dirs.entry(label.to_owned())
+            .or_insert_with(|| {
+                let dir = crate::test_support::process_dir(&format!("radian-slot-test-{label}"));
+                std::fs::canonicalize(&dir).unwrap()
+            })
+            .clone()
     }
 
     fn sandbox(label: &str) -> Sandbox {

@@ -874,8 +874,7 @@ mod tests {
     /// entry. Only absolute paths are accepted.
     #[test]
     fn resolve_allow_unix_sockets_expands_home_and_skips_bad_entries() {
-        let dir = std::env::temp_dir().join("radian-host-sandbox-sock-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-host-sandbox-sock-test");
         let sock = dir.join("h.sock");
         std::fs::write(&sock, b"").unwrap();
         let raw = vec![

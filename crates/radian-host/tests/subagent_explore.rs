@@ -10,8 +10,9 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+mod common;
+
 use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
@@ -23,8 +24,6 @@ use radian_host::{
 use radian_permissions::{ApprovalPolicy, NoopAudit, Preset, Profile};
 use serde_json::{Value, json};
 
-static SEQ: AtomicU64 = AtomicU64::new(0);
-
 /// The switched route's key lives in the process-global `RADIAN_HOME` auth file, so cases
 /// that switch (and the plain case, which shares the home) run one at a time. An async mutex:
 /// the guard is held across awaits by design.
@@ -33,17 +32,11 @@ fn serial() -> &'static tokio::sync::Mutex<()> {
     SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn scratch(label: &str) -> PathBuf {
-    let n = SEQ.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-subagent-explore-{label}-{}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+fn scratch(label: &str) -> common::TempDir {
+    let dir = common::TempDir::named(&format!("radian-subagent-explore-{label}"));
     // The session directory lives here, and the session warns when it is accessible to other
     // users; 0700 is what a real `~/.radian` has.
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&*dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     dir
 }
 
@@ -52,12 +45,10 @@ fn isolated_home() -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
         // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
-        let dir = PathBuf::from("/tmp").join(format!(
+        let dir = common::process_dir_at(PathBuf::from("/tmp").join(format!(
             "radian-subagent-explore-home-{}",
             std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        )));
         let dir = std::fs::canonicalize(&dir).unwrap();
         // SAFETY: `get_or_init` runs this once, before any session is opened; the cases only
         // ever upsert the same entry.
@@ -177,7 +168,7 @@ async fn wait_until(what: &str, mut predicate: impl FnMut() -> bool) {
 }
 
 struct Case {
-    dir: PathBuf,
+    dir: common::TempDir,
     argv_path: PathBuf,
     server: MockServer,
     session: Arc<radian_host::LocalSession>,
@@ -219,7 +210,7 @@ async fn open_case(
     let session = open_session(
         SessionSetup {
             session_id: SessionId::new(format!("explore-test-{label}")),
-            session_dir: dir.clone(),
+            session_dir: dir.to_path_buf(),
             workspace: workspace.clone(),
             // `explore` needs the read tools rooted at a workspace.
             coding_root: Some(workspace.clone()),

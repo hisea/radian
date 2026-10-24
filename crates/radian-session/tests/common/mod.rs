@@ -29,17 +29,20 @@ pub fn created() -> SessionCreatedData {
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A unique directory under `std::env::temp_dir()`, removed on drop.
+///
+/// There is no shared per-process root: under nextest every test is its own process, so a
+/// root would outlive the test that created it and leak one directory per test.
 pub struct TempDir {
     path: PathBuf,
 }
 
 impl TempDir {
     pub fn new(label: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("radian-session-tests-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = root.join(format!("{label}-{n}"));
+        let path = std::env::temp_dir().join(format!(
+            "radian-session-tests-{}-{label}-{n}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&path).unwrap();
         Self { path }
     }
@@ -56,6 +59,20 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TempDir {
+    fn as_ref(&self) -> &Path {
+        &self.path
     }
 }
 

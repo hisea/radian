@@ -3,7 +3,9 @@
 //! with the common dir. The environment has `git`; a skip keeps the suite honest if it does
 //! not.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -20,17 +22,8 @@ fn git_available() -> bool {
 }
 
 /// A fresh, uniquely named scratch directory under the system temp dir.
-fn scratch(tag: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-contrib-git-{}-{tag}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("the scratch dir is creatable");
-    dir
+fn scratch(tag: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-contrib-git-{tag}"))
 }
 
 /// Runs git in `dir`, failing the test on a non-zero status.

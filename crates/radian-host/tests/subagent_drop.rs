@@ -10,6 +10,8 @@
 //! path a driver-task abort takes. Tokio's `kill_on_drop` signals only the leader's pid, so the
 //! mutation (no fallback in the guard) leaves the grandchild alive.
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,14 +23,8 @@ use radian_permissions::{ApprovalPolicy, NoopAudit, Profile};
 use radian_sandbox::SandboxSlot;
 use serde_json::{Value, json};
 
-fn scratch(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "radian-subagent-drop-{}-{label}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-subagent-drop-{label}"))
 }
 
 /// An executable stub child that **ignores SIGTERM** (the fallback's case): it starts a
@@ -95,7 +91,7 @@ async fn dropping_the_call_leaves_no_grandchild_alive() {
             executable: Some(child),
             ..SubagentParts::default()
         },
-        dir.clone(),
+        dir.to_path_buf(),
         "parent",
         workspace,
         None,

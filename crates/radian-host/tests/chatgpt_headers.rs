@@ -4,6 +4,8 @@
 //! `auth.json` (`AuthStore::open()`/`ensure_fresh` read `RADIAN_HOME`, a process-global; a
 //! second test in the same binary would race it under the default parallel test runner).
 
+mod common;
+
 use std::sync::OnceLock;
 
 use agent_provider_openai_responses::testing::{
@@ -20,12 +22,7 @@ use serde_json::Value;
 fn isolated_home() -> std::path::PathBuf {
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-chatgpt-headers-home-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::process_dir("radian-chatgpt-headers-home");
         let dir = std::fs::canonicalize(&dir).unwrap();
         // SAFETY: `get_or_init` runs this once, before any `AuthStore::open()` in this binary.
         unsafe { std::env::set_var("RADIAN_HOME", &dir) };

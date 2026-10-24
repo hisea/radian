@@ -740,12 +740,18 @@ fn run_inner(options: &Options) -> Result<(), Error> {
         "started_at": crate::store::plan_ops::utc_now(),
     });
     if let Some(written) = read_value(&store, &task.id) {
-        if let Some(inputs) = written
+        if let Some(written_inputs) = written
             .get("inputs")
             .and_then(Value::as_str)
             .filter(|inputs| !inputs.is_empty())
         {
-            running["inputs"] = json!(inputs);
+            running["inputs"] = json!(written_inputs);
+            // The pass computed an integration's digest; the integration stage has no plan to
+            // re-derive it from, so its refusal, error and done records keep the digest the
+            // gate was started with. A verification re-plans and replaces it below.
+            if kind == "integration" {
+                inputs = written_inputs.to_owned();
+            }
         }
         if let Some(deaths) = written.get("deaths").and_then(Value::as_u64) {
             running["deaths"] = json!(deaths);

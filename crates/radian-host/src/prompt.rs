@@ -614,9 +614,7 @@ mod tests {
     /// exactly as today. Setting the flag from the tier again fails the `false` half.
     #[test]
     fn the_runtime_unix_socket_sentence_follows_the_backend() {
-        let dir =
-            std::env::temp_dir().join(format!("radian-prompt-sockets-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-prompt-sockets");
         for (backend, expect_sentence) in [(&SOCKETS_DENIED, true), (&SOCKETS_OPEN, false)] {
             let sandbox = radian_sandbox::Sandbox::from_backend(
                 backend,
@@ -646,10 +644,7 @@ mod tests {
     /// filter in the host.
     #[test]
     fn the_session_layer_reads_git_state_without_running_a_filter() {
-        let dir =
-            std::env::temp_dir().join(format!("radian-prompt-gitfilter-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-prompt-gitfilter");
         let run = |args: &[&str]| {
             assert!(
                 std::process::Command::new("git")
@@ -669,10 +664,7 @@ mod tests {
         run(&["add", "tracked.txt"]);
         run(&["commit", "-q", "-m", "init"]);
 
-        let marker = std::env::temp_dir().join(format!(
-            "radian-prompt-gitfilter-marker-{}",
-            std::process::id()
-        ));
+        let marker = dir.join("gitfilter-marker");
         let _ = std::fs::remove_file(&marker);
         let script = dir.join("evil-clean.sh");
         std::fs::write(
@@ -734,9 +726,7 @@ mod tests {
     #[tokio::test]
     async fn every_docs_index_path_opens_through_read() {
         use radian_core::{NoopSink, ToolCall, ToolContext, ToolProvider, ToolSession};
-        let dir = std::env::temp_dir().join(format!("radian-prompt-docs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-prompt-docs");
         let tools =
             radian_coding::CodingTools::with_read_roots(&dir, radian_coding::ReadRoots::none())
                 .unwrap();

@@ -5,7 +5,8 @@
 //! the way the event loop does and feed the result back in.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+
+mod common;
 
 use radian_host::memory::{MemoryService, ScopeSelection, WriteScope};
 use radian_memory::Kind;
@@ -17,20 +18,12 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-fn scratch(label: &str) -> PathBuf {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-tui-command-{}-{label}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-tui-command-{label}"))
 }
 
 /// An `App` wired to a fresh project memory service.
-fn app_with_memory(label: &str) -> (PathBuf, App, MemoryService) {
+fn app_with_memory(label: &str) -> (common::TempDir, App, MemoryService) {
     let dir = scratch(label);
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();

@@ -18,7 +18,7 @@ A key you leave out takes its default.
 | `repository.remote` | string | `"origin"` | A remote name that exists in the repository | When arc reads the main branch or pushes a task branch. |
 | `repository.main_branch` | string | `"main"` (`init` writes what it found) | A branch name | When a task starts from main, and when main is checked before a merge. |
 | `limits.concurrency` | integer | `1` | 1 or more | When `radian arc run` starts tasks: how many attempts may be in flight at once. A running gate takes no slot. |
-| `limits.max_attempts` | integer | `3` | 1 or more | When a task fails and arc decides whether to retry: how many retries the task gets since its last rework. The count is the task's [`retry_count`](#task-fields); the attempt number is never compared with the limit. |
+| `limits.max_attempts` | integer | `3` | 1 or more | When a task fails and arc decides whether to retry: how many retries the task gets since its last lead or review rework. The count is the task's [`retry_count`](#task-fields); the attempt number is never compared with the limit, and a conflict rework keeps the count. |
 | `limits.stall_timeout_secs` | integer | `900` | seconds | When a worker prints no new line for that long. |
 | `limits.max_wall_time_secs` | integer | `7200` | seconds | As an absolute limit on one attempt, on top of the stall timeout. |
 | `limits.git_remote_timeout_secs` | integer | `300` | seconds, `1` or more | A git call that talks to a remote (`fetch`, `push`, `ls-remote`): the call, and everything it started, is killed when it runs this long. It takes effect at the next git call. A local git call (`diff`, `log`, `merge-base`, `status`, a local `merge`) is not bounded. In the worker wrapper the shorter of this and the attempt's remaining wall time applies. |
@@ -34,10 +34,14 @@ A key you leave out takes its default.
 | `ids.task_prefix` | string | `"TK"` | 1 to 4 ASCII uppercase letters; must differ from `ids.plan_prefix` | When a task id is created. |
 | `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
 | `gate.command_timeout_secs` | integer | `3600` | seconds | Per gate command line. |
-| `gate.review.exec_args` | array of strings | not set: `[worker] exec_args` | any `radian exec` argument except `--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p` | The review session's model route, after the stage's own arguments. Every review run. |
+| `gate.review.exec_args` | array of strings | not set: `[worker] exec_args` | any `radian exec` argument except `--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p` | The review session's model route, after the stage's own arguments. Every review run except a first review's when `gate.review.first.exec_args` is set. |
+| `gate.review.concurrency` | integer | `2` | `1` or more | When the review stage starts: how many review sessions may run at once in the repository. Each session holds one of the locks `gates/review-0.lock` … `gates/review-<n-1>.lock` and its own checkout, `gates/review-<n>/`; `1` runs one review at a time. A change takes effect at the next review. |
+| `gate.review.first` | table | empty | `exec_args` and `timeout_secs`, each optional | A task's first review, a review stage run when no earlier attempt of the task has a `review` verdict. Each key set here replaces the same `[gate.review]` key for that review; a rework review never reads it. A change takes effect at the next first review. |
+| `gate.review.first.exec_args` | array of strings | not set: `gate.review.exec_args` (and then `worker.exec_args`) | any `radian exec` argument except `--tools`, `--session-id`, `--workspace`, `--profile`, `--resume`, `--deny-read`, `--mcp-config`, `--yes`, `--output`, `--no-config-mcp`, `-p` | The first review session's model route, after the stage's own arguments. Unset, the first review uses `gate.review.exec_args`. |
+| `gate.review.first.timeout_secs` | integer | not set: `gate.review.timeout_secs` | seconds; `1` or more | The wall-time limit of one first-review session. Unset, the first review uses `gate.review.timeout_secs`. |
 | `gate.review.prompt_file` | string | not set: only the built-in prompt | a path relative to the repository root, without `..` | Appended to the built-in review prompt when the `review` stage runs. |
 | `gate.review.timeout_secs` | integer | `900` | seconds; `0` waits forever | The wall-time limit of one review session. |
-| `gate.review.propose_followups` | boolean | `true` | `true`, `false` | When a task merges: `true` lets arc add one `todo.proposed` task with the items the task's last review suggested but the merge left unfixed (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)); `false` turns it off. The lead's MCP `add_task` on a confirmed plan is not affected. |
+| `gate.review.propose_followups` | boolean | `true` | `true`, `false` | When a task merges: `true` lets arc add one `todo.proposed` task with the items every review round of the task suggested but the merge left unfixed (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)); `false` turns it off. The lead's MCP `add_task` on a confirmed plan is not affected. |
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
 | `gate.profiles.<name>.stages` | array of tables | `[{ stage = "commands", required = true }, { stage = "human", required = true }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs, in order. `integration` is not a profile stage: it always runs at merge. |
 | `gate.profiles.<name>.commands` | array of strings | `[]` | Shell command lines | The `commands` stage runs them in order on its own checkout. |
@@ -106,7 +110,7 @@ A cancelled plan takes no change record: it is final.
 | `token` | string | no | the current attempt's random token; a result is applied only when it matches |
 | `cost_usd` | number | no | the task's counted cost in US dollars, summed over its attempts; `reset-budget` makes it `0` |
 | `auto_rework` | integer | no | `0` or more; how many reworks arc counted while the plan's `auto` was not `off`; `0` when absent |
-| `retry_count` | integer | no | `0` or more; how many retries arc started since the task's last rework; `0` when absent. A rework sets it back to `0`, and `max_attempts` counts it. |
+| `retry_count` | integer | no | `0` or more; how many retries arc started since the task's last lead or review rework; `0` when absent. The lead's brief and the review rework set it back to `0`; a conflict rework keeps it, and `max_attempts` counts it. |
 | `allow_noop` | boolean | yes | `true`, `false`; `false` when the task is new |
 | `extra_stages` | list of strings | yes | gate stages added to the profile (`[]` when there are none) |
 | `max_attempts` | integer | no | 1 or more; overrides `limits.max_attempts` for this task |
@@ -132,6 +136,7 @@ The body is the brief.
 | `failed` | `exhausted`, `cancelled`, `irrecoverable` |
 
 A new task is `todo` / `ready`.
+A `todo` / `retry_wait` task is claimed at once by `radian arc start`, without waiting for its `retry_at`; the scheduling loop waits for `retry_at` (see [`radian arc start`](arc.md#radian-arc-start-task)).
 A task the lead adds to a confirmed plan (MCP `add_task`) or arc proposes from a merged task's review is `todo` / `proposed`: the scheduling loop never claims it and `start` refuses it until you run `radian arc confirm <task>`.
 A plan is done when all of its tasks are merged; `done` is not a stored plan status.
 A `cancelled` plan is final: `radian arc cancel <plan>` sets it after ending every open task of the plan (see [`radian arc cancel`](arc.md#radian-arc-cancel-id)).
@@ -180,7 +185,8 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). |
 | `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |
 | `attempts/<task>/…` | The host-local attempt records: `base_sha`, `last_head`, and per attempt `start.json`, `identity.json`, `status.json`, `heartbeat.json`. |
-| `gates/<stage>/` | One checkout per gate stage. |
+| `gates/<stage>/` | One checkout per gate stage; the review stage uses one per concurrency slot, `gates/review-<n>/`. |
+| `gates/review-<n>.lock` | One review slot's lock. |
 | `gates/<task>.gate.lock` | The lock one task's running gate holds. |
 | `worktrees/<task>/` | The worker's checkout for that task (the worker wrapper creates it). |
 | `state.lock` | The short lock every change takes. |

@@ -3,6 +3,8 @@
 //! footer's usage snapshot (ADR 0027). One `#[tokio::test]` per file —
 //! see `tests/chatgpt_headers.rs`.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::OnceLock;
@@ -13,10 +15,7 @@ use radian_host::{AuthStore, ChatGptUsage, OAuthEntry, Remaining, UsageFetcher a
 fn isolated_home() -> std::path::PathBuf {
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("radian-chatgpt-usage-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::process_dir("radian-chatgpt-usage-home");
         let dir = std::fs::canonicalize(&dir).unwrap();
         // SAFETY: `get_or_init` runs this once, before any `AuthStore::open()` in this binary.
         unsafe { std::env::set_var("RADIAN_HOME", &dir) };

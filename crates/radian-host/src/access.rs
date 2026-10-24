@@ -175,16 +175,8 @@ pub fn remember_for(workspace: &Path, tier: Preset) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn scratch(label: &str) -> PathBuf {
-        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "radian-access-test-{}-{label}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(label: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-access-test", label)
     }
 
     #[test]

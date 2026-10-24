@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, Once};
 
 use radian_coding::{CodingTools, ReadRoots};
 use radian_core::{
@@ -12,21 +13,41 @@ use serde_json::{Value, json};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A unique directory under `std::env::temp_dir()`, removed on drop.
+///
+/// There is no shared per-process root: under nextest every test is its own process, so a
+/// root would outlive the test that created it and leak one directory per test. The prefix
+/// keeps a leftover traceable to this crate, and the pid plus counter keep parallel tests
+/// (under plain `cargo test`) apart.
 pub struct TempDir {
     path: PathBuf,
 }
 
 impl TempDir {
     pub fn new(label: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("radian-coding-tests-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        Self::named_with("radian-coding-tests", label)
+    }
+
+    /// A named scratch directory whose own prefix identifies the test family (the caller keeps
+    /// the prefix it already had, as `docs/backlog/test-temp-leak.md` asks).
+    pub fn named(prefix: &str) -> Self {
+        Self::named_with(prefix, "scratch")
+    }
+
+    fn named_with(prefix: &str, label: &str) -> Self {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = root.join(format!("{label}-{n}"));
+        let path =
+            std::env::temp_dir().join(format!("{prefix}-{}-{label}-{n}", std::process::id()));
         std::fs::create_dir_all(&path).unwrap();
         Self { path }
     }
 
     pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Lets a test keep its existing `dir.join(..)` / `&dir` calls when a helper returns a
+    /// guard instead of a `PathBuf`.
+    pub fn as_path(&self) -> &Path {
         &self.path
     }
 
@@ -45,16 +66,84 @@ impl TempDir {
     }
 }
 
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TempDir {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// A temporary file (a Unix socket leaves its inode behind) removed on drop.
+pub struct TempPath(PathBuf);
+
+impl TempPath {
+    pub fn new(path: PathBuf) -> Self {
+        let _ = std::fs::remove_file(&path);
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
-        // The shared parent is deliberately left in place. Removing it while another test
-        // thread sits between `create_dir_all(parent)` and `create_dir_all(child)` makes that
-        // child creation fail with a spurious `AlreadyExists` (the parent vanished between
-        // `mkdir`'s EEXIST and the `is_dir()` check) or `InvalidInput`. That race is
-        // pre-existing and unrelated to any one test; the empty directory lives in the
-        // system temp dir, which the OS cleans up.
     }
+}
+
+/// A unique directory under the system temp dir that is removed when the test process exits.
+///
+/// A `OnceLock` fixture is `'static`, so a `Drop` guard cannot own its directory. Under
+/// nextest every test is its own process, so process exit is the end of the test; a plain
+/// `cargo test` removes the fixture after the last test of the binary. The prefix keeps a
+/// leftover traceable to this crate.
+pub fn process_dir(prefix: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    EXIT_DIRS.lock().unwrap().push(path.clone());
+    EXIT_HOOK.call_once(|| unsafe {
+        // SAFETY: the callback only touches this module's registry.
+        atexit(remove_exit_dirs);
+    });
+    path
+}
+
+static EXIT_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static EXIT_HOOK: Once = Once::new();
+
+extern "C" fn remove_exit_dirs() {
+    if let Ok(dirs) = EXIT_DIRS.lock() {
+        for dir in dirs.iter().rev() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn atexit(callback: extern "C" fn()) -> i32;
+}
+
+#[cfg(not(unix))]
+unsafe fn atexit(_callback: extern "C" fn()) -> i32 {
+    // Tests run on macOS and Linux; elsewhere the directory is left to the OS.
+    0
 }
 
 /// A sentinel directory that lives *outside* any workspace root, used as the escape target.

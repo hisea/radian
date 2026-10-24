@@ -7,6 +7,8 @@
 //! `--mcp-config` for `explore` again) fails the explore assertion; dropping it for `general`
 //! too fails the general assertion.
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,16 +19,8 @@ use radian_permissions::{ApprovalPolicy, NoopAudit, Profile};
 use radian_sandbox::SandboxSlot;
 use serde_json::{Value, json};
 
-fn scratch(label: &str) -> PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-subagent-mcp-{}-{label}-{unique}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-subagent-mcp-{label}"))
 }
 
 /// An executable stub that records its argv (one argument per line), then exits.
@@ -91,7 +85,7 @@ async fn run_child(arguments: Value, coding_root: Option<PathBuf>, trust: bool) 
             trust,
             ..SubagentParts::default()
         },
-        dir.clone(),
+        dir.to_path_buf(),
         "parent",
         workspace,
         coding_root,

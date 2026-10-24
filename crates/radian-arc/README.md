@@ -213,6 +213,8 @@ gate (`gate::background::stop`) before it returns.
 
 `GateCheckout::new(repository, stage, remote)` owns
 `<repository>/.radian/arc/gates/<stage>/`, a detached linked worktree of the main checkout.
+`GateCheckout::review_slot(repository, slot, remote)` owns the review stage's slot checkout,
+`<repository>/.radian/arc/gates/review-<slot>/`, so two review sessions never share a tree.
 `remote` is the repository's remote name, the `[repository] remote` of `config.toml`; the gate
 never assumes `origin`. `prepare(sha)` fetches that remote, resolves `sha` to a full commit
 (failing when it does not exist), creates the worktree when it is missing, otherwise detaches
@@ -234,6 +236,11 @@ crashed process releases the lock when its descriptor closes.
 `integration` holds its own `<repository>/.radian/arc/gates/integration.lock` for its whole
 stage, so two integration runs never work in the shared `gates/integration/` checkout at the
 same time.
+
+`review` takes one of the slot locks `<repository>/.radian/arc/gates/review-<n>.lock`
+(`SlotLock`), `n` from 0 to `[gate.review] concurrency - 1`; a free slot is taken at once and a
+busy one is waited for. Slot `n` also names the checkout that session alone reads
+(`gates/review-<n>/`), so the lock count is what bounds concurrent reviews.
 
 ## `commands`
 
@@ -470,19 +477,23 @@ task stays in `review.verifying`. An existing verdict for the current attempt an
 reused, so a gate that died between stages resumes.
 
 `review` (`ReviewRun`) is a read-only session on the same candidate, after `commands` and
-before `human` (a profile that lists both must list `commands` first). It runs one
-`radian exec` per run in `gates/review/` with `--tools read,grep,glob`, no `--mcp-config` and
-`--no-config-mcp`, a model route from `[gate.review] exec_args` (default
-`[worker] exec_args`), and `[gate.review] timeout_secs`. The prompt is built from the brief,
-the commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The
-last fenced `json` block of the final message is parsed; an empty `blocking` list passes,
-any item fails with `review_blocking`. An item is `{level, file, line, text, pre_existing}`;
-a plain string is an item with only its text, so an old verdict reads and re-serializes
-unchanged (the digest is computed from the re-serialized verdict). Unusable output (no block,
-a missing field, a level outside `REVIEW_LEVELS`, a timeout, a session error) runs the session
-once more; two unusable runs fail with `review_output`, or `review_timeout` when the last run
-timed out. The verdict records `review`, `review_session_ids`, `review_cost_micros` and, in a
-rework round, `review_pre_existing`.
+before `human` (a profile that lists both must list `commands` first). Up to
+`[gate.review] concurrency` sessions run at once (default 2), each in its slot checkout
+`gates/review-<n>/`. It runs one `radian exec` per run with `--tools read,grep,glob`, no
+`--mcp-config` and `--no-config-mcp`. Its model route and wall-time limit come from
+`[gate.review] exec_args` (default `[worker] exec_args`) and `[gate.review] timeout_secs`; a
+task's first review reads `[gate.review.first] exec_args` and `timeout_secs` first, and a
+rework review never does (`ReviewConfig::choice`). The prompt is built from the brief, the
+commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The last
+fenced `json` block of the final message is parsed; an empty `blocking` list passes, any item
+fails with `review_blocking`. An item is `{level, file, line, text, pre_existing}`; a plain
+string is an item with only its text, so an old verdict reads and re-serializes unchanged (the
+digest is computed from the re-serialized verdict). Unusable output (no block, a missing
+field, a level outside `REVIEW_LEVELS`, a timeout, a session error) runs the session once more;
+two unusable runs fail with `review_output`, or `review_timeout` when the last run timed out.
+The verdict records `review`, `review_session_ids`, `review_cost_micros`, `review_settings`
+(`round`, the `exec_args` source key, `timeout_secs` and its source key) and, in a rework
+round, `review_pre_existing`.
 
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)
@@ -490,7 +501,9 @@ is a first review. A rework round's prompt holds the previous blocking items, th
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
 `git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
 `suggestions` with `pre_existing` unless its `file:line` is within 3 lines of an increment
-line or within 10 lines of a previous blocking item in the same file (`ReworkRound`).
+line or within 10 lines of a previous blocking item in the same file (`ReworkRound`). A
+`critical` item and an item without a `file` or a `line` are never moved; a moved item keeps
+its `level`, and a `major` item outside both windows is still moved.
 
 Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
 such a failure, with reason `conflict` and the paths. `review::conflict_auto_rework` writes
@@ -537,11 +550,18 @@ force. A main that moved after integration, or a rejected push, makes it integra
 success the task is `done.merged` and its worktree is removed; the branch stays.
 
 `finish_integration` then asks `review::propose_followup` for the task's review follow-up
-(ADR 0048 decision 10): the items of the task's newest `review` verdict's `suggestions` (the
-moved `pre_existing` items among them), never a `blocking` item, become one `todo.proposed`
-task of the same plan, `after` the merged task, when `[gate.review] propose_followups` is
-true and the plan does not already hold it. A failure to add it is a warning after the merge,
-not a failed merge.
+(ADR 0048 decision 10): it reads every `review` verdict of the task, oldest attempt first, and
+collects every round's `suggestions` (the moved `pre_existing` items among them), never a
+`blocking` item, so a round that only had blocking items contributes nothing. Repeats are
+dropped: two items are the same when their `file`, `line` and `text` match after a leading tag
+that repeats the item's own level is removed and whitespace is collapsed, and the newest copy
+is kept. The rest become one `todo.proposed` task of the same plan, `after` the merged task,
+when `[gate.review] propose_followups` is true and the plan does not already hold it; its brief
+groups the items by the round they came from (`From review <n> (attempt <n>):`) and names the
+path of every review verdict. A task
+that is itself a review follow-up gets none of its own; its review's unfixed items stay in its
+verdict and in the task's final report. A failure to add the follow-up is a warning after the
+merge, not a failed merge.
 
 `merge_step` reads `runs/<task>/gate.json` for a finished integration, and a
 `review.ready_to_merge` task finishes the newest passing integration verdict for its head.
@@ -570,7 +590,9 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   uncommitted files is left in place and reported as a warning, never forced away.
 - The follow-up's slug is `<merged task slug>-followups` cut from the end to
   `SLUG_MAX_CHARS`, then a trailing `-` from the cut is removed so it stays a valid slug. A
-  plan that already holds the follow-up (the same title and `after`) gets no second one.
+  plan that already holds the follow-up (the same title and `after`) gets no second one. A
+  follow-up task gets none of its own: its title and single `after` entry are the ones arc
+  gives a follow-up, the same test `has_followup` uses, so the chain stops after one level.
 - `confirm` of a task checks `worker_args` first, as `confirm` of a plan does, so a broken
   worker line leaves the task `todo.proposed` instead of making it runnable.
 - The remote is always a parameter, never the literal `origin`: the caller passes
@@ -603,5 +625,6 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 
 The arc TUI lives in `radian-tui` (`src/arc/`, with its terminal loop in `src/cli/arc.rs`);
 this crate owns the read-only views it draws ([`read`](src/read.rs): the remote main, a
-task's attempts and verdicts, a task's diff). The gate stages `mutation` and `ci` are
-refused until they are built.
+task's attempts and verdicts, a task's diff, and the merge page's stage rows, review and
+commits). The owner's keys there are the same library calls as the CLI's subcommands. The
+gate stages `mutation` and `ci` are refused until they are built.

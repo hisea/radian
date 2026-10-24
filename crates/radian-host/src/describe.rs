@@ -226,12 +226,9 @@ mod tests {
     /// Unix-socket whitelist and an unsandboxed MCP — none of which radian is enforcing here.
     #[test]
     fn the_inherited_sandbox_line_claims_no_local_rules() {
-        let dir =
-            std::env::temp_dir().join(format!("radian-describe-inherited-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-describe-inherited");
         let sandbox = Sandbox::inherited(&dir);
         let (line, facts) = describe(SandboxMode::WorkspaceWrite, Some(&sandbox), TUI_WORDING);
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert!(line.contains("sandbox inherited"), "{line}");
         // The line is the exact one the ADR names, not the `workspace` tier's `(probe: …)`
@@ -306,8 +303,7 @@ mod tests {
     /// this catches.
     #[test]
     fn the_startup_line_reports_the_sandboxes_effective_git_access() {
-        let dir = std::env::temp_dir().join(format!("radian-describe-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-describe");
         let writable = Sandbox::from_backend(&GIT_WRITABLE, SandboxMode::WorkspaceWrite, &dir)
             .expect("a test sandbox");
         let (_, facts) = describe(SandboxMode::WorkspaceWrite, Some(&writable), TUI_WORDING);

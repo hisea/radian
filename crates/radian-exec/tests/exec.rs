@@ -10,7 +10,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
@@ -23,15 +22,7 @@ const EXIT_WATCHDOG: Duration = Duration::from_secs(120);
 /// A fresh directory that no test shares, so nothing touches the user's real HOME, config or
 /// credentials.
 fn fresh_dir(prefix: &str) -> PathBuf {
-    static DIRS: AtomicU64 = AtomicU64::new(0);
-    // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
-    let dir = PathBuf::from("/tmp").join(format!(
-        "radian-exec-exec-{prefix}-{}-{}",
-        std::process::id(),
-        DIRS.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::process_dir_in(Path::new("/tmp"), &format!("radian-exec-exec-{prefix}"))
 }
 
 /// One isolated environment: a HOME (also `RADIAN_HOME`) and a session dir. Two runs that are

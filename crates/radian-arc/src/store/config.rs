@@ -30,6 +30,8 @@ pub const OPTIONAL_KEYS: &[&str] = &[
     "limits.max_cost_usd",
     "gate.review.exec_args",
     "gate.review.prompt_file",
+    "gate.review.first.exec_args",
+    "gate.review.first.timeout_secs",
 ];
 
 /// The whole file.
@@ -293,8 +295,13 @@ command_timeout_secs = 3600
 [gate.review]
 # exec_args = ["--model", "m"]   # not set: the same as [worker] exec_args
 timeout_secs = 900              # wall-time limit of one review session; 0 waits forever
+concurrency = 2                 # how many review sessions run at once in this repository; 1 or more
 propose_followups = true        # add the review's follow-up task when a task merges
 # prompt_file = "review.md"      # not set: the built-in prompt only
+
+[gate.review.first]
+# exec_args = ["--model", "m"]   # not set: the same as [gate.review] exec_args
+# timeout_secs = 1800            # not set: the same as [gate.review] timeout_secs
 
 [gate.profiles.default]
 stages = [{{ stage = "commands", required = true }}, {{ stage = "human", required = true }}]
@@ -347,26 +354,49 @@ pub fn parse(text: &str) -> Result<Config, String> {
     if let Some(file) = &config.gate.review.prompt_file {
         check_prompt_file(file)?;
     }
+    if config.gate.review.concurrency == 0 {
+        return Err(
+            "`gate.review.concurrency` is 0; it must be 1 or more (how many review sessions run \
+             at once in the repository)"
+                .to_owned(),
+        );
+    }
+    if config.gate.review.first.timeout_secs == Some(0) {
+        return Err(
+            "`gate.review.first.timeout_secs` is 0; it must be 1 or more (the wall-time limit of \
+             a first review's session)"
+                .to_owned(),
+        );
+    }
     Ok(config)
 }
 
-/// Names a `gate.review.exec_args` that is not an array of strings before the TOML
-/// deserializer reports a position without the key. A non-array value is refused by name.
+/// Names a `gate.review.exec_args` or `gate.review.first.exec_args` that is not an array of
+/// strings before the TOML deserializer reports a position without the key. A non-array value
+/// is refused by name.
 fn check_review_shape(text: &str) -> Result<(), String> {
     let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
     let Some(review) = document.get("gate").and_then(|gate| gate.get("review")) else {
         return Ok(());
     };
+    check_exec_args_shape(review, "gate.review.exec_args")?;
+    if let Some(first) = review.get("first") {
+        check_exec_args_shape(first, "gate.review.first.exec_args")?;
+    }
+    Ok(())
+}
+
+/// `key` under `review`, when present, must be an array of strings.
+fn check_exec_args_shape(review: &toml::Value, key: &str) -> Result<(), String> {
     if let Some(exec_args) = review.get("exec_args")
         && !exec_args
             .as_array()
             .is_some_and(|items| items.iter().all(toml::Value::is_str))
     {
-        return Err(
-            "`gate.review.exec_args` must be an array of strings (the `radian exec` arguments \
-             of the review session)"
-                .to_owned(),
-        );
+        return Err(format!(
+            "`{key}` must be an array of strings (the `radian exec` arguments of the review \
+             session)"
+        ));
     }
     Ok(())
 }
