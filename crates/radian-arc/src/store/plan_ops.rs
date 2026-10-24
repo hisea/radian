@@ -19,7 +19,7 @@
 //!   `todo.ready`.
 
 use super::model::{self, TaskState};
-use super::{Error, Store};
+use super::{Error, Store, cancelled_plan};
 
 /// The heading change records are appended under.
 pub const CHANGE_RECORDS_HEADING: &str = "## Change records";
@@ -71,6 +71,9 @@ pub fn confirm(store: &Store, id: &str) -> Result<Confirmed, Error> {
     match store.resolve_kind(id)? {
         super::Kind::Plan => {
             store.change_plan(id, |plan| {
+                if plan.is_cancelled() {
+                    return Err(cancelled_plan(&plan.id));
+                }
                 if plan.status == "confirmed" {
                     return Err(Error::Refused(format!(
                         "plan `{}` is already `confirmed`",
@@ -89,6 +92,11 @@ pub fn confirm(store: &Store, id: &str) -> Result<Confirmed, Error> {
             Ok(Confirmed::Plan(id.to_owned()))
         }
         super::Kind::Task => {
+            // A cancelled plan is final, so a proposed task of one cannot be revived.
+            let plan = store.load_plan(&store.load_task(id)?.item.plan)?;
+            if plan.item.is_cancelled() {
+                return Err(cancelled_plan(&plan.item.id));
+            }
             store.change_task(id, |task| {
                 if task.state != TaskState::Todo || task.phase != model::PROPOSED_PHASE {
                     return Err(Error::Refused(format!(
@@ -117,6 +125,9 @@ pub fn set_auto(store: &Store, plan: &str, level: &str) -> Result<(), Error> {
         )));
     }
     store.change_plan(plan, |plan| {
+        if plan.is_cancelled() {
+            return Err(cancelled_plan(&plan.id));
+        }
         if level != "off" && plan.status != "confirmed" {
             return Err(Error::Refused(format!(
                 "plan `{}` is `{}`; only a confirmed plan can use auto level `{level}`",
@@ -142,6 +153,9 @@ pub fn set_priority(store: &Store, plan: &str, priority: &str) -> Result<(), Err
         )));
     }
     store.change_plan(plan, |plan| {
+        if plan.is_cancelled() {
+            return Err(cancelled_plan(&plan.id));
+        }
         plan.priority = Some(priority.to_owned());
         Ok(())
     })?;
@@ -194,6 +208,9 @@ pub fn update_plan(
     }
     let now = utc_now();
     store.change_plan(plan, |plan| {
+        if plan.is_cancelled() {
+            return Err(cancelled_plan(&plan.id));
+        }
         if plan.status != "confirmed" {
             if change_record.is_some() {
                 return Err(Error::Refused(format!(
@@ -250,6 +267,11 @@ pub fn add_rework_with(
 ) -> Result<(), Error> {
     if brief.trim().is_empty() {
         return Err(Error::Usage("the rework brief is empty".to_owned()));
+    }
+    // A cancelled plan is final: its tasks take no rework either.
+    let plan = store.load_plan(&store.load_task(task)?.item.plan)?;
+    if plan.item.is_cancelled() {
+        return Err(cancelled_plan(&plan.item.id));
     }
     store.change_task(task, |task| {
         if task.state != TaskState::Review {

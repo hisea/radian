@@ -75,6 +75,10 @@ copy.
 | M58 | `radian arc reverify` refuses a stuck `review.verifying` task again (`attempt_ops` sets `gate_stuck = false`) | `run::reverify_reruns_a_task_whose_gate_left_no_record`, `run::reverify_reruns_a_task_whose_gate_died` (exit 3, no attempt) | ✅ 2 failed |
 | M59 | `background::stop` ignores a gate whose record is still `started` (`STARTED => false`, no lock check) | `run::sigterm_to_watch_stops_a_gate_that_has_not_written_running` (the gate outlives the loop and later writes `done`) | ✅ failed |
 | M60 | `background::stop` assumes a gate with no start time is alive (`started.is_empty() \|\| …`); the extra mutation of the brief's item (d) | `run::stop_without_a_start_time_returns_as_soon_as_the_gate_is_gone` (waits its whole grace and then the kill window) | ✅ failed |
+| TK0034-M1 | the plan form forgets to set `auto` `off` (both writes in `cancel_plan` dropped) | `attempt::cancelling_a_plan_ends_every_open_task_and_the_plan` | ✅ failed |
+| TK0034-M2 | `list` shows a cancelled plan without `--all` (the cancelled-plan skip in `render` dropped) | `list::a_cancelled_plan_is_hidden_until_all_in_text_and_json` | ✅ failed |
+| TK0034-M3 | the claim path ignores the plan status (`start_ready` drops its `status != "confirmed"` check and `attempt_ops::claim` drops its plan-status refusal) | `run::a_run_pass_claims_and_gates_nothing_from_a_cancelled_plan` | ✅ failed |
+| TK0034-M4 | the pass drops the step that ends a cancelled plan's `doing.reconciling` task (the `end_reconciling_of_cancelled_plans` loop removed from `one_pass`) | `run::a_pass_ends_a_task_a_plan_cancel_left_reconciling` | ✅ failed |
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -220,3 +224,20 @@ afterwards. The test lives in `radian-tui`, where the diff tab is drawn.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0033-tui-pages-continued-M2 | a merged task always diffs `<candidate>^1..<candidate>`, even when the candidate is the head | ✅ 1 failed | `radian-tui::arc_tui a_fast_forward_merged_task_shows_every_commit_of_its_branch` (`first.txt`, the branch's first commit, is missing from the file list) |
+## TK0034 (cancel a plan)
+
+TK0034-M1–M3 were run against `de2a816f`, each applied to the committed file, restored
+from a copy under `.radian/mut/` with `cp`, and compared byte for byte with `cmp`. M1
+removes both `plan.auto = "off"` writes in `cancel_plan`; the plan test sees `auto` still
+`run`. M2 removes the cancelled-plan skip from `render`; the list test prints the plan
+without `--all`. M3 is one logical change in two places: the loop's plan-status condition
+in `start_ready` and the claim transaction's plan-status refusal in `attempt_ops::claim`.
+The claim transaction's check alone would mask the loop's filter, so the run test's ready
+task is claimed only when both are gone; the same mutation also fails the draft-plan claim
+test, which pins the transaction's side. The run test's second half (`verify started` is
+absent) pins the separate `verifying_tasks` cancelled-plan filter.
+
+TK0034-M4 was run against the code of `2bd7e155`, with the same backup, `cp` restore and
+`cmp` check. The whole step is removed from `one_pass`, so the pass prints `no transition`
+and the task stays at `doing.reconciling`; the test's line assertion fails. The binary was
+rebuilt before the run, because the sync tests refuse one older than its sources.

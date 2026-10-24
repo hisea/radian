@@ -63,7 +63,7 @@ Plans and tasks count in separate number sequences: a new id takes the next free
 An id without a prefix is not an id (exit `2`).
 Any prefix of 1 to 4 uppercase letters is a well-formed id, and the kind comes from the directory it is looked up in (`plans/` or `tasks/`), not from the prefix: an item created under an earlier prefix keeps working after the prefix changes.
 The id is the file name and never changes.
-An id names one item: `show`, `adopt`, `reset-budget`, and the MCP `show` tool refuse an id that names both a plan file and a task file with exit `3` (the MCP tool: a tool error), name both files, and change nothing.
+An id names one item: `show`, `adopt`, `reset-budget`, `cancel`, and the MCP `show` tool refuse an id that names both a plan file and a task file with exit `3` (the MCP tool: a tool error), name both files, and change nothing.
 
 ### Plan fields
 
@@ -72,7 +72,7 @@ An id names one item: `show`, `adopt`, `reset-budget`, and the MCP `show` tool r
 | `schema_version` | integer | yes | `1` |
 | `id` | string | yes | `<PREFIX><NNNN>-<slug>`, prefix `PL` by default |
 | `title` | string | yes | any text |
-| `status` | string | yes | `draft`, `confirmed` |
+| `status` | string | yes | `draft`, `confirmed`, `cancelled` |
 | `auto` | string | yes | `off`, `run`, `merge`; only a `confirmed` plan may use `run` or `merge` |
 | `priority` | string | no | `P0`, `P1`, `P2`, `P3`, `P4`, `P5`; `P0` is the highest; a file without the field reads as `P3` |
 | `max_cost_usd` | number | no | 0 or more, US dollars |
@@ -82,6 +82,7 @@ An id names one item: `show`, `adopt`, `reset-budget`, and the MCP `show` tool r
 The body is the request text, then a `## Change records` section.
 Each change record is a `### <UTC time>` line (the shape `YYYY-MM-DDTHH:MM:SSZ`), a blank line, and the text of the change.
 A confirmed plan gains records only; a draft plan may have its request text replaced, which keeps the records below it.
+A cancelled plan takes no change record: it is final.
 `priority` is written only once you set it with [`radian arc priority`](arc.md#radian-arc-priority-plan-priority); until then the field is absent and the plan reads as `P3`, so an older plan file is written back unchanged.
 
 ### Task fields
@@ -129,6 +130,8 @@ The body is the brief.
 A new task is `todo` / `ready`.
 A task the lead adds to a confirmed plan (MCP `add_task`) or arc proposes from a merged task's review is `todo` / `proposed`: the scheduling loop never claims it and `start` refuses it until you run `radian arc confirm <task>`.
 A plan is done when all of its tasks are merged; `done` is not a stored plan status.
+A `cancelled` plan is final: `radian arc cancel <plan>` sets it after ending every open task of the plan (see [`radian arc cancel`](arc.md#radian-arc-cancel-id)).
+No command confirms it, adds a task to it, changes its `auto` or `priority`, resets its budget, or starts, reverifies or gates its tasks, and `list` hides it unless `--all`.
 
 ### The review states
 
@@ -148,6 +151,7 @@ A task leaves `doing` for `review.verifying` when a pushed attempt ends.
 | `review.rework_pending`, `review.awaiting_human` | `review.verifying` | `radian arc reverify`, or `radian arc run` reverifying a `commands` or integration command failure by itself once main moved: a new attempt is claimed without a worker; its verdicts are its own. |
 | `review.verifying` | `review.awaiting_human` (again) | `radian arc run` or `radian arc start` re-verifies a task a moved branch or a changed digest sent back. |
 | `review` (any phase) | `todo.ready` | The lead adds a rework brief (`add_rework`); the next claim starts the next attempt. |
+| `review` (any phase) | `failed.cancelled` | `radian arc cancel <task>`; a running gate is signalled first. |
 | `todo.proposed` | `todo.ready` | `radian arc confirm <task>`: the task is confirmed, and its plan's `status` and `auto` do not change. |
 | `todo.proposed` | `failed.cancelled` | `radian arc cancel <task>`. |
 

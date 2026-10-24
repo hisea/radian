@@ -16,7 +16,7 @@ use radian_arc::attempt;
 use radian_arc::gate::background;
 use radian_arc::gate::{Stage, Verdict};
 use radian_arc::store::model::TaskState;
-use radian_arc::store::{Store, plan_ops};
+use radian_arc::store::{Store, attempt_ops, plan_ops};
 use serde_json::Value;
 
 fn setup(repo: &Repo) -> Store {
@@ -374,6 +374,115 @@ fn auto_off_starts_nothing_but_still_verifies() {
             .join(format!("{ready}-1"))
             .exists(),
         "auto off started the ready task"
+    );
+}
+
+/// A cancelled plan is final for the loop: even when an outside edit puts a task back at
+/// `todo.ready` and the plan back at `auto` `run`, a pass claims nothing and starts no gate.
+#[test]
+fn a_run_pass_claims_and_gates_nothing_from_a_cancelled_plan() {
+    let repo = Repo::new("run-cancelled");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "cancelled");
+    let ready = add_task(&store, &plan, "ready", &[]);
+    let verifying = add_task(&store, &plan, "verify", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    attempt::cancel_any(&store, &plan).expect("the plan cancels");
+
+    // The state only an outside change can leave: an open task and `auto` `run`.
+    store
+        .change_plan(&plan, |plan| {
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .expect("auto run");
+    store
+        .change_task(&ready, |task| {
+            task.state = TaskState::Todo;
+            task.phase = "ready".to_owned();
+            Ok(())
+        })
+        .expect("ready");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &verifying);
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(
+        !run.stdout.contains("started"),
+        "a cancelled plan's ready task is not claimed:\n{}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("verify started"),
+        "a cancelled plan's task is not gated:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        state(&store, &ready),
+        ("todo".to_owned(), "ready".to_owned())
+    );
+    assert_eq!(
+        state(&store, &verifying),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+}
+
+/// A plan cancel leaves a `doing` task whose wrapper never confirms its end at
+/// `doing.reconciling`. The plan is final, so the next pass ends the task at
+/// `failed.cancelled` instead of leaving it in `doing`, where it would hold a
+/// `[limits] concurrency` slot for good.
+#[test]
+fn a_pass_ends_a_task_a_plan_cancel_left_reconciling() {
+    let repo = Repo::new("run-cancelled-reconciling");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "cancelled-reconciling");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(&repo, "cancel_grace_secs = 10", "cancel_grace_secs = 0");
+
+    // The claim writes a fresh `start.json`, so reconcile sees a live attempt and leaves it.
+    // The task has no identity record, so `cancel` signals nothing and waits no grace; with
+    // no `AttemptFinished` the task goes to `doing.reconciling`.
+    attempt_ops::claim(&store, &task).expect("claim");
+    store
+        .change_task(&task, |task| {
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("running");
+
+    let canceled = attempt::cancel_any(&store, &plan).expect("the plan cancels");
+    let lines = canceled.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == &format!("{task} doing.reconciling")),
+        "{lines:?}"
+    );
+    assert_eq!(
+        state(&store, &task),
+        ("doing".to_owned(), "reconciling".to_owned())
+    );
+    assert_eq!(plan_auto(&store, &plan), "off");
+    assert_eq!(
+        store.load_plan(&plan).expect("the plan reads").item.status,
+        "cancelled"
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(
+        run.stdout.contains(&format!(
+            "{task} doing.reconciling -> failed.cancelled (its plan is cancelled)"
+        )),
+        "{run:?}"
+    );
+    assert_eq!(
+        state(&store, &task),
+        ("failed".to_owned(), "cancelled".to_owned())
     );
 }
 

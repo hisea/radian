@@ -5,7 +5,9 @@
 //! pass and the next pass reads what it left (ADR 0048 decision 13). A pass, repeated until
 //! one changes nothing:
 //!
-//! 1. reconcile every task in `doing` (apply a result that is there, leave a live attempt);
+//! 1. reconcile every task in `doing` (apply a result that is there, leave a live attempt),
+//!    and end every `doing.reconciling` task a plan cancel left behind at
+//!    `failed.cancelled` (its plan is final);
 //! 2. release every retry whose `retry_at` has passed;
 //! 3. re-verify, without a worker, every task a `commands` or integration command failure
 //!    blocked, once the remote main moved (ADR 0048 decision 9);
@@ -275,6 +277,16 @@ fn one_pass(
     // 1. Doing: apply a finished attempt, leave a live one alone.
     for applied in crate::attempt::reconcile(store)? {
         transitions.push(format!("reconciled: {}", applied.line()));
+        changed = true;
+    }
+
+    // 1b. A task a plan cancel left at `doing.reconciling` stays in `doing` otherwise, and
+    // counts against the concurrency limit for good. The plan is final, so the pass ends the
+    // task instead of waiting for the owner (ADR 0048 decisions 3 and 9).
+    for id in crate::attempt::end_reconciling_of_cancelled_plans(store)? {
+        transitions.push(format!(
+            "{id} doing.reconciling -> failed.cancelled (its plan is cancelled)"
+        ));
         changed = true;
     }
 
@@ -549,13 +561,19 @@ fn task_claim_order(store: &Store) -> Result<Vec<String>, Error> {
     Ok(ids)
 }
 
-/// Every task in `review.rework_pending`, in claim order. A file that changed outside arc is
-/// skipped.
+/// Whether the task's plan is `cancelled`: the loop neither claims nor gates its tasks
+/// (ADR 0048 decisions 3 and 13).
+fn plan_is_cancelled(store: &Store, plan: &str) -> Result<bool, Error> {
+    Ok(store.load_plan(plan)?.item.is_cancelled())
+}
+
+/// Every task in `review.rework_pending`, in claim order. A file that changed outside arc and
+/// a task of a `cancelled` plan are skipped.
 fn rework_pending_tasks(store: &Store) -> Result<Vec<String>, Error> {
     let mut ids = Vec::new();
     for id in task_claim_order(store)? {
         let loaded = store.load_task(&id)?;
-        if loaded.changed_outside_arc {
+        if loaded.changed_outside_arc || plan_is_cancelled(store, &loaded.item.plan)? {
             continue;
         }
         if loaded.item.state == TaskState::Review && loaded.item.phase == "rework_pending" {
@@ -565,13 +583,13 @@ fn rework_pending_tasks(store: &Store) -> Result<Vec<String>, Error> {
     Ok(ids)
 }
 
-/// Every task in `review.verifying`, in claim order. A file that changed outside arc is
-/// skipped.
+/// Every task in `review.verifying`, in claim order. A file that changed outside arc and a task
+/// of a `cancelled` plan are skipped.
 fn verifying_tasks(store: &Store) -> Result<Vec<String>, Error> {
     let mut ids = Vec::new();
     for id in task_claim_order(store)? {
         let loaded = store.load_task(&id)?;
-        if loaded.changed_outside_arc {
+        if loaded.changed_outside_arc || plan_is_cancelled(store, &loaded.item.plan)? {
             continue;
         }
         if loaded.item.state == TaskState::Review && loaded.item.phase == "verifying" {
@@ -743,6 +761,10 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
     let mut lines = Vec::new();
     for view in plans_in_claim_order(store)? {
         let plan = &view.plan.item;
+        // A cancelled plan waits on nothing: the loop never serves it again.
+        if plan.is_cancelled() {
+            continue;
+        }
         let open: Vec<&crate::store::Loaded<model::TaskFile>> = view
             .tasks
             .iter()

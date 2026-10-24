@@ -102,7 +102,7 @@ Reads the brief from stdin to end of input, writes `tasks/<id>.md`, appends the 
 | `--allow-noop` | — | The task may deliver no change on purpose. Off by default. |
 | `--stage` | `NAME` | An extra gate stage to run for this task. Repeat the flag. The value is `commands`, `mutation`, `review`, `ci`, or `human`. |
 
-A task can only be added to a plan whose `status` is `draft`; a confirmed plan exits `3`.
+A task can only be added to a plan whose `status` is `draft`; a confirmed or cancelled plan exits `3`.
 An `--after` id must name a task of the same plan or a task whose state is `done`; anything else exits `3`.
 
 ## `radian arc list [--plan <ID>] [--all] [--json]`
@@ -115,7 +115,8 @@ Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>
 By default the finished work is left out, so the work in progress is what you see:
 
 - every task in `done.merged` is left out; a plan that is shown still counts those tasks in its `<merged>/<tasks> merged` header;
-- a plan whose tasks are all `done.merged` (a finished plan) is left out too; a plan with no tasks is always shown.
+- a plan whose tasks are all `done.merged` (a finished plan) is left out too; a plan with no tasks is always shown;
+- a `cancelled` plan is left out; `--all` shows it.
 
 Every other state is shown, `failed.*` included: a failed task needs attention.
 
@@ -125,14 +126,14 @@ When the default left something out, the last line counts it:
 3 finished plans and 12 merged tasks hidden (--all to show)
 ```
 
-The count covers every plan and every merged task that was not printed. A part that is `0` is left out of the line, and a count of `1` is singular: `1 finished plan and 1 merged task hidden (--all to show)`, or `2 merged tasks hidden (--all to show)` when no whole plan was left out.
+The count covers every plan and every merged task that was not printed. A part that is `0` is left out of the line, and a count of `1` is singular: `1 finished plan and 1 merged task hidden (--all to show)`, `2 cancelled plans and 3 merged tasks hidden (--all to show)`, or `2 merged tasks hidden (--all to show)` when no whole plan was left out.
 When everything is hidden, that line is the whole output. Nothing hidden means no such line.
 
 | Flag | Value | What it does |
 |---|---|---|
-| `--plan` | `ID` | Only this plan. It follows the default filter: its merged tasks are hidden unless `--all`, and a finished plan is still printed with its header line, so you see that it exists. |
-| `--all` | — | No filter: print every plan and every task, `done.merged` history included. It takes no value. |
-| `--json` | — | Print one JSON array instead of lines. The array is never filtered: it holds every plan and every task, with or without `--all`. |
+| `--plan` | `ID` | Only this plan. It follows the default filter: its merged tasks are hidden unless `--all`, and a finished or cancelled plan is still printed with its header line, so you see that it exists. |
+| `--all` | — | No filter: print every plan and every task, `done.merged` history and cancelled plans included. It takes no value. |
+| `--json` | — | Print one JSON array instead of lines. Without `--all` it follows the same filter: a cancelled plan is left out, and a plan named with `--plan` is always included. |
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
@@ -198,8 +199,8 @@ A proposed task you do not want is ended with `radian arc cancel` (`failed.cance
 |---|---|---|
 | `<ID>` | a plan id, or a task id | Required. An id that names both a plan and a task is refused (`3`), naming both files. |
 
-A plan confirm refuses with exit `3` when the plan has no tasks, when it is already confirmed, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and [`worker.exec_args`](arc-files.md#configtoml)).
-A task confirm refuses with exit `3` for a task in any state other than `todo.proposed`, for a file that changed outside arc, and for a rejected worker line.
+A plan confirm refuses with exit `3` when the plan has no tasks, when it is already confirmed, when it is cancelled, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and [`worker.exec_args`](arc-files.md#configtoml)).
+A task confirm refuses with exit `3` for a task in any state other than `todo.proposed`, for a task whose plan is `cancelled`, for a file that changed outside arc, and for a rejected worker line.
 A refusal writes nothing.
 
 It prints `<plan> confirmed` or `<task> todo.ready`.
@@ -227,6 +228,7 @@ radian arc auto <PLAN> <LEVEL>
 
 `radian arc run` makes the transitions of these levels; it does not run in the background.
 `off` is accepted on any plan; `run` and `merge` need a `confirmed` plan and otherwise exit `3`.
+A `cancelled` plan is final: any level, `off` included, is refused with exit `3`.
 A value outside the set is a usage error (`2`).
 
 ### Automatic reworks
@@ -265,7 +267,7 @@ The plan's state does not matter: a `draft` plan can be set too.
 `list`, `show`, and the MCP `list` and `show` tools print the plan's priority.
 
 A value outside the set (`P6`, `p1`, `high`) is refused with exit `3`, and the message lists every value.
-A refusal writes nothing.
+A `cancelled` plan is refused with exit `3`; a refusal writes nothing.
 
 The command prints `<plan> priority <PRIORITY>`, for example `PL0001-first priority P1`.
 It exits `0` on success, `3` for a value outside the set or a plan file that changed outside arc, and `4` when another process holds `state.lock`.
@@ -304,7 +306,7 @@ Before it claims anything it reconciles every task in `doing` (see [Reconcile](a
 A claim is refused with exit `3` and changes nothing when:
 
 - the task is not `todo.ready`; a `todo.proposed` task names its phase and waits for `radian arc confirm`;
-- its plan is not `confirmed`;
+- its plan is not `confirmed`; a `cancelled` plan is refused, naming its status;
 - an `after` task is not `done`;
 - `[limits] concurrency` tasks are already in `doing`.
 
@@ -358,27 +360,58 @@ When verification cannot run (a moved branch, a stage this build does not have),
 `start` exits `0` when the task left `doing`, `1` when it is still in `doing` after the attempt (or on an internal error), `3` when the claim is refused or verification refuses, and `4` when another process holds `state.lock`.
 `start` waits for the wrapper, so it exits only after the attempt ends; `radian arc run` does not wait.
 
-## `radian arc cancel <TASK>`
+## `radian arc cancel <ID>`
 
-`cancel` stops one task.
-It reconciles `doing` tasks first, as `start` does.
+`cancel` stops one task, or ends every open task of a plan and the plan itself.
+It is your action (there is no MCP tool for it), and it reconciles `doing` tasks first, as `start` does.
 
 | Argument | Value | What it does |
 |---|---|---|
-| `<TASK>` | `ID` | The task id. Required. |
+| `<ID>` | a plan or task id | Required. An id that names both a plan and a task is refused (`3`), naming both files; an id that names neither exits `1`. |
 
-### What cancel does
+### Task form
 
 | The task is | What `cancel` does |
 |---|---|
 | `todo` (any phase) | moves it to `failed.cancelled` |
 | `doing`, starting or running | SIGTERM to the wrapper, then SIGKILL after `[limits] cancel_grace_secs`; when the wrapper's `AttemptFinished` arrives the task goes to `failed.cancelled`; when it never arrives the task goes to `doing.reconciling` |
 | `doing.reconciling` | checks the wrapper's pid and start time; signals it if it is still that process; moves the task to `failed.cancelled` |
-| `review`, `done`, `failed` | refused with exit `3` |
+| `review` (any phase) | stops a gate that is running for the task, then moves the task to `failed.cancelled` |
+| `done`, `failed` | refused with exit `3` |
+
+When a gate is running for a `review` task (its `runs/<task>/gate.json` record is `started` or `running`), `cancel` signals the gate process the same way a scheduling-loop stop does: SIGTERM, `[limits] cancel_grace_secs`, then SIGKILL, and the gate's record becomes `interrupted`.
+The task moves only after the gate is stopped.
 
 The wrapper's pid and its start time both come from the attempt record, so a pid the operating system reused is never signalled.
 `cancel` prints `<task> <state>.<phase>`, for example `TK0001-work failed.cancelled`.
-It exits `0` when it stopped the task or left it `doing.reconciling`, `3` for a refused state, and `4` when another process holds `state.lock`.
+
+### Plan form
+
+A plan id runs these steps in this order:
+
+1. the plan's `auto` becomes `off`;
+2. every task of the plan in `todo`, `doing` or `review` is cancelled by the task form's rules;
+3. a task in `done` or `failed` is left as it is;
+4. the plan's `status` becomes `cancelled`.
+
+A task a gate is running for is stopped as the task form stops it.
+If a task's cancel leaves it `doing.reconciling`, the plan still becomes `cancelled`; the next `radian arc run` pass ends the task at `failed.cancelled`, after the same process check the task form makes (see [Reconcile](arc-gate.md#reconcile)).
+A plan that is already `cancelled` is refused with exit `3`.
+
+`cancel` prints one `<task> <state>.<phase>` line for each task it changed, in the plan's task order, then `<plan> cancelled`:
+
+```text
+TK0002-b failed.cancelled
+TK0003-c failed.cancelled
+PL0001-plan cancelled
+```
+
+A cancelled plan is final.
+`confirm`, `auto`, `priority`, `start`, `reverify`, `reset-budget`, `add task`, and the MCP `add_task`, `update_plan` and `add_rework` tools refuse it with exit `3` (the MCP tools: an error naming the status).
+`radian arc run` never claims, gates or merges its tasks, and the summary does not list it as waiting.
+`list` hides it unless `--all`, and `show <plan>` and `show <task>` still read it and its tasks.
+
+`cancel` exits `0` when it stopped the task or plan or left a task `doing.reconciling`, `1` when the id names nothing, `3` for a refused state or an id that names both a plan and a task, and `4` when another process holds `state.lock`.
 
 ## `radian arc reset-budget <ID>`
 
@@ -391,6 +424,8 @@ The id names one plan or task; an id that names both is refused with exit `3` (s
 
 - Task form: the task must be `todo.paused_budget`; it moves to `todo.ready` and its `cost_usd` becomes `0`. Any other state is refused (`3`).
 - Plan form: every task of the plan that is `todo.paused_budget` moves to `todo.ready`; every task of the plan gets `cost_usd` `0`, because the plan's budget counts all of them. The plan's `auto` level is not changed.
+
+A `cancelled` plan is refused with exit `3`, in the plan form and in the task form.
 
 It prints `<id>: <n> task(s) ready` and exits `0`.
 An id that names no plan or task exits `1`.
@@ -415,6 +450,7 @@ Any other `review.verifying` task, including one whose gate is still running, is
 A plan paused by the automatic rework limit does not block `reverify` when the task's own reason is a failed verification stage.
 
 A task whose `commands` or integration stage failed with `command_failed` or `timeout` is also re-verified by `radian arc run` once main moved (see [A command failure and a moved main](arc-gate.md#a-command-failure-and-a-moved-main)).
+A task of a `cancelled` plan is refused with exit `3`.
 That automatic path is the only one that re-runs an integration failure.
 `reverify` ignores the automatic path's two guards: it runs whether or not the `(head_sha, main)` pair was re-verified before, and whether or not `limits.max_auto_reverify` is used up; it does not use up the count.
 
@@ -521,6 +557,7 @@ It takes `runner.lock`, makes every transition the auto levels allow now, saves 
 A pass only schedules: it starts a worker or a gate, collects what one left, and moves the state, so a pass ends in seconds.
 Waiting for you, a `retry_at` in the future, a running worker, or a running gate does not keep it running.
 A task of a plan at `auto` `off` is never started or merged by `run`; its verification still advances.
+A task of a `cancelled` plan is never claimed, gated or merged, and a cancelled plan is not listed in the summary.
 
 Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](arc-files.md#configtoml)).
 
@@ -531,7 +568,7 @@ Before its first pass, and before each pass claims a task, it checks the worker'
 
 One pass repeats until a pass changes nothing, in this order:
 
-1. reconcile every task in `doing` (see [Reconcile](arc-gate.md#reconcile)): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one;
+1. reconcile every task in `doing` (see [Reconcile](arc-gate.md#reconcile)): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one. A `doing.reconciling` task of a `cancelled` plan is ended at `failed.cancelled` after the same process check `cancel` makes;
 2. move every `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`;
 3. re-verify, by itself, a task a `commands` or integration command failure blocked, once main moved (see [A command failure and a moved main](arc-gate.md#a-command-failure-and-a-moved-main)): claim a new attempt without a worker. The two guards of that path apply, and an automatic reverify is not a retry: it does not count toward `max_attempts` or `auto_rework`;
 4. for every task in `review.verifying` (every plan, including a task that a moved branch or a changed digest sent back, and one step 3 just claimed): apply the verdicts a background gate left, or start its gate in the background;
@@ -555,6 +592,7 @@ Use `--watch` to keep advancing.
 `run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end.
 A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, a conflict rework prints `<task> conflict with main -> todo.ready (automatic rework)`, or when the task has had `limits.max_conflict_rework` conflict reworks in a row, `<task> conflict with main -> review.rework_pending: <reason>`, an automatic reverify prints `<task> main moved (<short sha>) -> auto reverify`, or when the task used its count, `<task> main moved (<short sha>) -> auto reverify limit reached: <reason>`, and the follow-up task arc proposes when a task merges prints `<new task id> proposed (follow-ups from <task id>)` (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)).
 The limit's `<reason>` is the text `show` prints as the `rework_reason`: `the task used <n> automatic reverifies and `[limits] max_auto_reverify` is <max>`.
+A task a plan cancel left at `doing.reconciling` prints `<task> doing.reconciling -> failed.cancelled (its plan is cancelled)`.
 One line per `(head_sha, remote main)` pair is printed, so a summary that repeats every interval does not print it again.
 When a pass changes nothing, a summary of what waits on whom ends the pass:
 
@@ -647,7 +685,7 @@ There is no tool to confirm a plan or a task, start a task, merge, reject, chang
 `add_plan` creates a `draft` plan with `auto` `off`.
 The `slug` rule and the title rule are the ones on this page; an empty title is refused.
 
-`add_task` depends on the plan's state. On a `draft` plan it keeps the rules of `radian arc add task`, and the new task is `todo.ready`: it is confirmed with the plan. On a `confirmed` plan the new task is `todo.proposed`, and it waits for you to confirm it with `radian arc confirm <task>`; the plan keeps its `status` and `auto`. In both cases each `after` id must name a task of the same plan or a task whose state is `done`, and each `extra_stages` name must be a gate stage.
+`add_task` depends on the plan's state. On a `draft` plan it keeps the rules of `radian arc add task`, and the new task is `todo.ready`: it is confirmed with the plan. On a `confirmed` plan the new task is `todo.proposed`, and it waits for you to confirm it with `radian arc confirm <task>`; the plan keeps its `status` and `auto`. A `cancelled` plan is refused, and the error names the status. In both cases each `after` id must name a task of the same plan or a task whose state is `done`, and each `extra_stages` name must be a gate stage.
 
 `update_plan` depends on the plan's state:
 
@@ -655,8 +693,10 @@ The `slug` rule and the title rule are the ones on this page; an empty title is 
 - on a `confirmed` plan, `title` and `request` are refused (`3`) because the request text is never rewritten, and `change_record` is required: it is appended under the plan's `## Change records` heading with the UTC time, and the plan returns to `draft` with `auto` `off`, keeping its tasks' state. New tasks can be added again.
 
 A call with no field at all is refused: it would change nothing.
+A `cancelled` plan is refused by `update_plan`, and the error names the status.
 
 `add_rework` applies only to a task whose state is `review` (any phase); anything else is refused (`3`).
+A task of a `cancelled` plan is refused, and the error names the status.
 The brief is appended under `## Rework <n>`, where `n` is the task's `attempt` plus one, and the task moves to `todo.ready`.
 It does not change `attempt`: the attempt number belongs to the claim that starts the next run.
 

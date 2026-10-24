@@ -784,7 +784,7 @@ fn the_retry_count_is_a_field_of_show_and_list_json() {
 }
 
 #[test]
-fn list_hides_finished_work_unless_all_and_json_is_unfiltered() {
+fn list_hides_finished_work_unless_all_and_json_holds_it_here() {
     let scratch = fixture("list-filter");
     init(&scratch);
     let store = radian_arc::store::Store::at(scratch.repo());
@@ -857,7 +857,7 @@ fn list_hides_finished_work_unless_all_and_json_is_unfiltered() {
     assert_eq!(plain.code, Some(0), "{plain:?}");
     assert_eq!(
         plain.out, with_all.out,
-        "`--all` changes nothing about the JSON"
+        "`--all` changes nothing here: no plan is cancelled"
     );
     let value: serde_json::Value = serde_json::from_str(&plain.out).expect("list --json parses");
     let plans = value.as_array().expect("an array of plans");

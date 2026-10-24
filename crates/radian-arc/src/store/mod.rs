@@ -599,6 +599,8 @@ impl Store {
             false
         } else if plan.item.status == "confirmed" && allow_confirmed {
             true
+        } else if plan.item.is_cancelled() {
+            return Err(cancelled_plan(plan_id));
         } else {
             return Err(Error::Refused(format!(
                 "plan `{plan_id}` is `{}`; a confirmed plan gets no new tasks",
@@ -955,6 +957,14 @@ fn require_unchanged(id: &str, changed: bool) -> Result<(), Error> {
         return Err(Error::ChangedOutsideArc(id.to_owned()));
     }
     Ok(())
+}
+
+/// The refusal every command that changes a plan uses when the plan is `cancelled` (ADR 0048
+/// decisions 3 and 9): a cancelled plan is final. The message names the status.
+pub(crate) fn cancelled_plan(id: &str) -> Error {
+    Error::Refused(format!(
+        "plan `{id}` is `cancelled`; a cancelled plan is final"
+    ))
 }
 
 /// The fields `adopt` refuses to accept from an outside change, for the fields that differ
