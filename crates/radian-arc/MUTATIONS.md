@@ -277,15 +277,16 @@ test passes the round and reaches `awaiting_human`. M2 returns `false` for an it
 `file` or no `line`, so an unplaced item is demoted again: the `vague` item of the mixed unit
 test moves, and all three items of the unplaced test move. M3 writes `level: None` on a moved
 item, so the demoted `major` item loses its grade in the verdict and in the follow-up brief.
-M4 keeps only the newest `review` verdict in `review_verdict_files` (the follow-up's old
-input), so the two-round test's failing round is unread and the merge proposes no follow-up.
+M4 keeps only the newest `review` verdict in `review_verdicts` (the follow-up's input), so every
+earlier round goes unread and the merge proposes no follow-up. It was re-run on the merged
+follow-up code, after TK0045 replaced the single-verdict read.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0051-M1 | let the window rule move a `critical` item again (`if false && level == CRITICAL`) | ✅ 2 failed | `gate::review::tests::a_critical_item_blocks_wherever_it_is`; `review::a_critical_item_far_from_the_rework_and_the_previous_items_still_blocks` |
 | TK0051-M2 | demote an item without a `file` or a `line` again (the `let … else` returns `false`) | ✅ 2 failed | `gate::review::tests::an_item_without_a_place_stays_blocking_at_its_level`; `gate::review::tests::a_pre_existing_item_is_moved_and_marked` |
 | TK0051-M3 | drop the `level` of a moved item (`level: None` in `mark_pre_existing`) | ✅ 2 failed | `gate::review::tests::a_major_item_outside_the_windows_is_moved_and_keeps_its_level`; `review::a_demoted_major_item_reaches_the_followup_at_its_level` |
-| TK0051-M4 | read only the newest review verdict again (`review_verdict_files` keeps just its last entry) | ✅ 1 failed | `review::a_major_item_a_failing_round_demoted_reaches_the_followup` |
+| TK0051-M4 | read only the newest review verdict again (`review_verdicts` keeps just its last entry) | ✅ 3 failed | `review::a_major_item_a_failing_round_demoted_reaches_the_followup`; `review::a_pre_existing_item_from_an_earlier_round_is_carried`; `review::a_followup_holds_every_round_grouped_and_drops_a_repeat` |
 ## TK0045 (the follow-up holds every review round)
 
 TK0045-M1–M4 were run on the branch's working code before the code commit, each from a copy
