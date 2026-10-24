@@ -15,17 +15,24 @@
 //! - `update_plan` replaces a draft plan's title or request text, and appends a change
 //!   record to a confirmed one. A change record returns the plan to `draft` with `auto`
 //!   `off`, and the tasks keep their state.
+//! - `update_task` replaces a `todo` task's title or original brief, its `after` list,
+//!   `allow_noop` or `extra_stages`, keeps the phase, and appends one line to the task's
+//!   `## Changes` section (ADR 0048 decision 11).
 //! - `add_rework` appends a rework brief to a task in `review` and returns it to
 //!   `todo.ready`.
 
 use super::model::{self, TaskState};
-use super::{Error, Store, cancelled_plan};
+use super::{Error, STAGE_NAMES, Store, cancelled_plan, check_after};
 
 /// The heading change records are appended under.
 pub const CHANGE_RECORDS_HEADING: &str = "## Change records";
 
 /// The heading each rework brief is appended under, with its number.
 pub const REWORK_HEADING: &str = "## Rework";
+
+/// The heading a task's `update_task` records are appended under, at the end of the body
+/// (ADR 0048 decision 11).
+pub const TASK_CHANGES_HEADING: &str = "## Changes";
 
 /// What the heading says after its number when arc, not the lead, wrote the rework: a conflict
 /// with main (ADR 0048 decision 9).
@@ -324,6 +331,106 @@ pub fn update_plan(
     Ok(())
 }
 
+/// `update_task`: the lead's one way to change a task (ADR 0048 decision 11).
+///
+/// Only a task in `todo` (any phase) of a plan that is not `cancelled` is changed. The phase
+/// is kept: a `todo.proposed` task stays proposed and a `todo.ready` one stays ready. The
+/// `title`, `after` and `extra_stages` rules are [`super::add_task`]'s, through
+/// [`check_after`]; `brief` replaces only the original brief, and every rework section is
+/// kept. Each successful call appends one line to the task's [`TASK_CHANGES_HEADING`].
+#[allow(clippy::too_many_arguments)]
+pub fn update_task(
+    store: &Store,
+    task: &str,
+    title: Option<&str>,
+    brief: Option<&str>,
+    after: Option<Vec<String>>,
+    allow_noop: Option<bool>,
+    extra_stages: Option<Vec<String>>,
+) -> Result<(), Error> {
+    if title.is_none()
+        && brief.is_none()
+        && after.is_none()
+        && allow_noop.is_none()
+        && extra_stages.is_none()
+    {
+        return Err(Error::Usage(
+            "nothing to update: give a title, a brief, an after list, allow_noop or \
+             extra_stages"
+                .to_owned(),
+        ));
+    }
+    if let Some(title) = title
+        && title.trim().is_empty()
+    {
+        return Err(Error::Usage("the title is empty".to_owned()));
+    }
+    if let Some(brief) = brief
+        && brief.trim().is_empty()
+    {
+        return Err(Error::Usage("the brief is empty".to_owned()));
+    }
+    if let Some(stages) = &extra_stages {
+        for stage in stages {
+            if !STAGE_NAMES.contains(&stage.as_str()) {
+                return Err(Error::Usage(format!(
+                    "`{stage}` is not a gate stage; stages are {}",
+                    STAGE_NAMES.join(", ")
+                )));
+            }
+        }
+    }
+    // A cancelled plan is final: its tasks take no change either.
+    let plan = store.load_plan(&store.load_task(task)?.item.plan)?;
+    if plan.item.is_cancelled() {
+        return Err(cancelled_plan(&plan.item.id));
+    }
+    let now = utc_now();
+    store.change_task(task, |task_file| {
+        if task_file.state != TaskState::Todo {
+            if task_file.state == TaskState::Review {
+                return Err(Error::Refused(format!(
+                    "task `{}` is `review.{}`; add a rework brief with `add_rework`",
+                    task_file.id, task_file.phase
+                )));
+            }
+            return Err(Error::Refused(format!(
+                "task `{}` is `{}.{}`; `update_task` changes only a `todo` task",
+                task_file.id,
+                task_file.state.as_str(),
+                task_file.phase
+            )));
+        }
+        if let Some(after) = &after {
+            check_after(store, &task_file.plan, Some(&task_file.id), after)?;
+        }
+        let mut changed = Vec::new();
+        if let Some(title) = title {
+            task_file.title = title.trim().to_owned();
+            changed.push("title");
+        }
+        if let Some(brief) = brief {
+            set_brief(&mut task_file.body, brief);
+            changed.push("brief");
+        }
+        if let Some(after) = after {
+            task_file.after = after;
+            changed.push("after");
+        }
+        if let Some(allow_noop) = allow_noop {
+            task_file.allow_noop = allow_noop;
+            changed.push("allow_noop");
+        }
+        if let Some(stages) = extra_stages {
+            task_file.extra_stages = stages;
+            changed.push("extra_stages");
+        }
+        append_task_change(&mut task_file.body, &now, &changed);
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// `add_rework`: the lead's rework brief for a task in `review` (decision 6).
 ///
 /// The brief goes under `<REWORK_HEADING> <n>` with `n` one past the task's attempt, and the
@@ -424,6 +531,57 @@ fn append_rework(body: &mut String, number: u32, brief: &str, heading_suffix: &s
     body.push_str(&format!("{REWORK_HEADING} {number}{heading_suffix}\n\n"));
     body.push_str(brief.trim_end());
     body.push('\n');
+}
+
+/// Replaces the original brief of a task body and keeps every rework section and the change
+/// records below it (ADR 0048 decision 11). The original brief is the text before the first
+/// `## Rework <n>` section, or before `## Changes` when the task has no rework yet.
+fn set_brief(body: &mut String, brief: &str) {
+    let kept_at = [REWORK_HEADING, TASK_CHANGES_HEADING]
+        .iter()
+        .filter_map(|heading| section_start(body, heading))
+        .min();
+    let kept = kept_at.map(|at| body[at..].to_owned()).unwrap_or_default();
+    let mut new = model::brief_body(brief);
+    if !kept.is_empty() {
+        if !new.is_empty() {
+            new.push('\n');
+        }
+        new.push_str(&kept);
+    }
+    *body = new;
+}
+
+/// Appends one `update_task` line to the body's `## Changes` section, creating the section at
+/// the end of the body the first time. `fields` is the call's fields in a fixed order.
+fn append_task_change(body: &mut String, now: &str, fields: &[&str]) {
+    let mut head = body.trim_end().to_owned();
+    if section_start(&head, TASK_CHANGES_HEADING).is_none() {
+        if !head.is_empty() {
+            head.push_str("\n\n");
+        }
+        head.push_str(TASK_CHANGES_HEADING);
+    }
+    head.push('\n');
+    head.push_str(&format!("- {now} update_task: {}\n", fields.join(", ")));
+    *body = head;
+}
+
+/// The byte offset of the first line that is `heading` or starts with `heading` and a space.
+fn section_start(body: &str, heading: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\n', '\r']);
+        let found = text == heading
+            || text
+                .strip_prefix(heading)
+                .is_some_and(|rest| rest.starts_with(' '));
+        if found {
+            return Some(offset);
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// The current time as the stored shape of an absolute UTC time,

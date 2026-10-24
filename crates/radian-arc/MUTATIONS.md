@@ -489,3 +489,23 @@ one at a time, run against the named test with
 | TK0069-M2 | a follow-up attempt skips the footer (drop it when the stdin brief starts with the follow-up's first line) | `review::a_followup_attempt_ends_its_brief_with_the_worker_brief` | ✅ failed |
 | TK0069-M3 | `init` overwrites an existing `worker-brief.md` (the `is_file` guard is dropped) | `store::init_writes_the_default_worker_brief_once_and_keeps_an_edit` (the edited file reads back as the default) | ✅ failed |
 | TK0069-M4 | the size limit is not checked (`len > u64::MAX` instead of `len > WORKER_BRIEF_LIMIT`) | `work::an_oversized_worker_brief_is_skipped_with_a_note` (the 33 KiB footer is appended and no note is recorded) | ✅ failed |
+
+## TK0081: the lead's MCP `update_task` (2026-10-24, branch `work/TK0081-mcp-update-task`)
+
+ADR 0048 decision 11: a task in `todo` of a plan that is not `cancelled` takes a new title,
+original brief, `after`, `allow_noop` or `extra_stages`; the phase does not change and every
+successful call appends one line to the task's `## Changes` section. Each mutation was applied
+to `crates/radian-arc/src/store/plan_ops.rs`, the named test was run with
+`cargo nextest run -p radian-arc --locked --profile sandbox -E 'binary(update_task)'`,
+and the file was restored from `.radian/mut/plan_ops.rs` with `cp` and compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0081-M1 | `set_brief` replaces the whole body, rework sections included (`*body = model::brief_body(brief)`) | `update_task::a_brief_change_keeps_every_rework_section_and_the_change_lines_stay_last` (both `## Rework` sections are gone) | ✅ failed |
+| TK0081-M2 | a `review` task is accepted (the state check skips `TaskState::Review`) | `update_task::every_other_state_and_a_cancelled_plan_are_refused` (the review update succeeds instead of naming `add_rework`) | ✅ failed |
+| TK0081-M3 | every update sets `phase = proposed`, moving a `todo.ready` task back | `update_task::a_ready_task_stays_ready_and_a_proposed_task_stays_proposed` (the ready task reads `todo.proposed`) | ✅ failed |
+| TK0081-M4 | the change record is not written (`append_task_change` is not called) | `update_task::every_field_changes_and_is_recorded` (no `update_task:` line in the body), and the rework test | ✅ failed |
+
+TK0081-M1 also failed `update_task::every_field_changes_and_is_recorded`, and M3 and M4 also
+failed `update_task::every_field_changes_and_is_recorded`; the table names the test that
+reports the mutation in its own terms. 4/4 caught.
