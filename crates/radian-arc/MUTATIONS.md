@@ -47,7 +47,7 @@ copy.
 | M33 | treat the whole task's own diff as the increment (drop the intersection with `previous..sha`) | `review::a_rework_prompt_holds_the_increment_and_the_previous_items`, `review::a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes` | ✅ 2 failed |
 | M34 | drop rule (b) of `ReworkRound::keeps` (an earlier unfixed item stops blocking) | `review::a_blocking_item_near_an_unfixed_previous_item_still_blocks` | ✅ failed |
 | M35 | write the review rework when the plan's `auto` is `off` | `review::a_failed_review_with_auto_off_waits_for_the_lead` | ✅ failed |
-| M36 | treat a review of the commit the previous review reviewed as a rework round (drop the `previous.sha != sha` guard) | `review::a_reverify_of_the_same_head_is_a_first_review_and_still_blocks` | ✅ failed |
+| M36 | treat a review of the commit the previous review reviewed as a rework round (drop the `previous.sha != sha` guard) | `review::a_reverify_of_the_same_head_gets_the_first_review_prompt_and_still_blocks` | ✅ failed |
 | M37 | drop the recorded-pair guard in `review::auto_reverify` | `run::the_same_head_and_main_are_reverified_automatically_once` | ✅ failed |
 | M38 | drop the count (`len >= u32::MAX` instead of `len >= max_auto_reverify`) | `run::max_auto_reverify_stops_the_step_and_says_why` | ✅ failed |
 | M39 | also reverify a review failure (`stage == "review"` passes the fixable check) | `run::only_a_command_failure_of_an_auto_plan_is_reverified` | ✅ failed |
