@@ -561,6 +561,23 @@ sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian
 
 1/1 caught.
 
+## TK0091: the worker reads a brief's verdict from a copy in its worktree (2026-10-24, branch `work/TK0091-worker-verdict-copies`)
+
+ADR 0048 decision 7: when the wrapper composes an attempt's brief, it copies every file the
+text names under `<repository>/.radian/arc/runs/` into the worker's worktree at
+`.radian/arc-verdicts/<task>/<attempt>/<file>` and replaces the path in the text; a copy that
+cannot be made stays in the text with one `verdict copy skipped:` note. Each mutation was
+applied to the working file, `cargo build -p radian-tui --bin radian -p agent-extensions --bin
+mcp-fixture` ran before the test (the work tests refuse an older binary), the test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --no-fail-fast -E 'binary(work) and
+test(verdict)'`, and the file was restored from `.radian/mut/work_mod.rs` with `cp` and
+compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0091-M1 | the copy is made but the absolute path stays in the text (`Ok(_relative) => text.push_str(named)`) | `work::a_review_rework_reads_a_copy_of_its_verdict` (`!captured.contains(".radian/arc/runs/")`), `work::a_followup_brief_copies_two_verdicts_of_another_task` | ✅ 2 failed |
+| TK0091-M2 | the path is rewritten without copying (`copy_verdict` returns the relative path before its metadata and copy) | the same two, plus `work::a_missing_verdict_stays_in_the_brief_and_is_noted` (the missing file is rewritten and no note is recorded) and `work::a_verdict_copy_never_reaches_the_branch` (no copy in the worktree) | ✅ 4 failed |
+| TK0091-M3 | a skipped copy fails the attempt (`copy_notes.first()` returns `Err` before the worker starts) | `work::a_missing_verdict_stays_in_the_brief_and_is_noted` (the worker's stdin file is never written) | ✅ failed |
 ## TK0085: automatic reverify and finished times follow up the TK0054 review (2026-10-24, branch `work/TK0085-tui-board-followups`)
 
 The TK0054 review found that the board's `auto_reverify_pending` dropped the `(head, main)` pair
@@ -594,4 +611,43 @@ applied to `crates/radian-arc/src/store/plan_ops.rs` by hand, the named tests we
 | TK0081-M6 | `append_task_change` leaves a `## Changes` section that a rework follows in place (`move_changes_last` does nothing) | `update_task::an_update_repairs_records_a_later_rework_follows` (the new record lands inside the rework section), and `store::plan_ops::tests::an_update_moves_a_changes_section_a_rework_follows` | ✅ failed |
 
 2/2 caught.
+
+## TK0091 rework: a verdict copy follows no symbolic link (2026-10-24, branch `work/TK0091-worker-verdict-copies`)
+
+The review found that the copy followed a symbolic link in two places: the source opened with
+`fs::metadata`, which follows a link, and the destination used `create_dir_all` and `fs::copy`,
+which follow a link a worker can plant in its own worktree. `open_verdict` now walks the source
+path with `symlink_metadata` and opens the file with `O_NOFOLLOW`, and `write_verdict_copy`
+creates and writes every destination component without following one. Each mutation was
+applied to `crates/radian-arc/src/work/mod.rs` by hand, the named tests ran with `cargo
+nextest run -p radian-arc --locked --profile sandbox --no-fail-fast`, and the file was restored
+from `.radian/work-fixed.rs` with `cp` and compared with `diff`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0091-M4 | the source follows a symbolic link (`open_verdict` is `File::open(path)`) | `work::tests::a_verdict_copy_that_is_a_symlink_is_skipped` (the link is copied and the path is rewritten) | ✅ failed |
+| TK0091-M5 | the destination follows a symbolic link (`create_dir_all` then `fs::write(worktree.join(relative))`) | `work::tests::a_verdict_copy_never_follows_a_link_in_the_worktree` (the link's target is overwritten), and `work::a_verdict_copy_never_follows_a_link_the_worktree_already_has` (the earlier attempt's link is followed) | ✅ 2 failed |
+
+2/2 caught.
+
+## TK0091 rework 2: the verdict copy descends by handle (2026-10-24, branch `work/TK0091-worker-verdict-copies`)
+
+The review found that `write_verdict_copy` still checked each destination parent with
+`symlink_metadata` and then resolved the name again in `create_dir` and the file open, so a
+process left behind in the worktree could rename a checked directory and put a link in its place
+between the check and the use. `write_verdict_copy` now opens every destination directory once,
+with `O_DIRECTORY | O_NOFOLLOW`, and descends with `mkdirat`, `openat` and `fstatat` relative to
+the held parent handle; the copy file is opened on that handle with `O_CREAT | O_TRUNC |
+O_NOFOLLOW`. The source was already opened with `O_NOFOLLOW`. Each mutation was applied to
+`crates/radian-arc/src/work/mod.rs` by hand, the named tests ran with `cargo nextest run -p
+radian-arc --locked --profile sandbox --no-fail-fast`, and the file was restored from
+`.radian/work-fixed.rs` with `cp` and compared with `diff`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0091-M6 | the destination directory open follows a link (`O_NOFOLLOW` dropped from `open_dir_at`) | `work::tests::a_verdict_copy_never_follows_a_link_in_the_worktree` (the `.radian` link is followed and the copy lands outside), and `work::tests::a_verdict_copy_survives_a_directory_swapped_for_a_link` (the swapped link is followed) | ✅ 2 failed |
+| TK0091-M7 | the destination directory is opened by pathname (`fs::File::open(shown)` in `open_dir_at`) | the same two tests | ✅ 2 failed |
+| TK0091-M8 | the copy file is opened through a link (`O_NOFOLLOW` dropped from `write_file_at`) | `work::tests::a_verdict_copy_never_follows_a_link_in_the_worktree` (the link's target is truncated with the verdict bytes) | ✅ failed |
+
+3/3 caught.
 

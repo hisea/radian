@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::Reply;
@@ -2131,5 +2131,394 @@ fn a_worker_brief_that_is_not_utf8_is_skipped_with_a_note() {
     assert_eq!(
         execution["notes"],
         json!(["worker-brief.md skipped: not UTF-8"])
+    );
+}
+
+/// Writes a verdict file the way the gate does: `runs/<task>/attempts/<task>-<n>/verdicts/<stage>.json`.
+fn write_verdict(store: &Store, task: &str, attempt: u32, stage: &str, bytes: &[u8]) -> PathBuf {
+    let path = store
+        .root()
+        .join("runs")
+        .join(task)
+        .join("attempts")
+        .join(format!("{task}-{attempt}"))
+        .join("verdicts")
+        .join(format!("{stage}.json"));
+    std::fs::create_dir_all(path.parent().expect("the verdict directory"))
+        .expect("the verdict directory");
+    std::fs::write(&path, bytes).expect("the verdict");
+    path
+}
+
+/// One plan and one task whose body is `body`, in `store`.
+fn plan_and_task(store: &Store, slug: &str, body: &str) -> String {
+    let plan = store.add_plan("p", "P", "request").expect("a plan");
+    store
+        .add_task(&plan, slug, "A task", Vec::new(), false, Vec::new(), body)
+        .expect("a task")
+}
+
+/// The brief of a review rework (ADR 0048 decision 9) naming `verdict`.
+fn review_rework_body(verdict: &Path) -> String {
+    format!(
+        "## Rework 1 (review)\n\nThe review found these items. Fix them and nothing else, append \
+         commits to the branch, and do not rebase.\n\n- [major] one.txt:1 the line is wrong\n\n\
+         Read the verdict for detail: `{}`",
+        verdict.display()
+    )
+}
+
+/// A review rework's stdin names the verdict's copy in the worktree, the copy holds the
+/// verdict's bytes, and the task file keeps the absolute path (ADR 0048 decision 7).
+/// Mutations: copy but keep the absolute path in the text; rewrite the path without copying.
+#[test]
+fn a_review_rework_reads_a_copy_of_its_verdict() {
+    let repo = Repo::new("verdict-copy-review");
+    init(&repo);
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let task = plan_and_task(&store, "work", "the brief\n");
+    let bytes =
+        b"{\"summary\":\"the verdict\",\"blocking\":[],\"suggestions\":[],\"verified\":[]}\n";
+    let verdict = write_verdict(&store, &task, 1, "review", bytes);
+    let body = review_rework_body(&verdict);
+    store
+        .change_task(&task, |task| {
+            task.body = body;
+            Ok(())
+        })
+        .expect("the rework brief");
+    let body = store.load_task(&task).expect("the task").item.body;
+
+    let (captured, worker) = recording_worker(&repo, "verdict-review-stdin.txt");
+    let run = run(
+        &repo,
+        &task,
+        2,
+        "tok-v1",
+        &["--worker-command", worker.as_str()],
+        &[],
+        &body,
+    );
+    let captured = std::fs::read_to_string(&captured).expect("the worker read stdin");
+    let relative = format!(".radian/arc-verdicts/{task}/{task}-1/review.json");
+    assert!(
+        captured.contains(&relative),
+        "the brief names the copy:\n{captured}\nstderr: {}",
+        run.stderr
+    );
+    assert!(
+        !captured.contains(".radian/arc/runs/"),
+        "the absolute path is still in the brief:\n{captured}"
+    );
+    let copy = repo.worktree(&task).join(&relative);
+    assert_eq!(
+        std::fs::read(&copy).expect("the copy exists in the worktree"),
+        bytes,
+        "the copy is the verdict's bytes"
+    );
+    let stored = store.load_task(&task).expect("the task").item;
+    assert!(
+        stored.body.contains(&verdict.display().to_string()),
+        "the task file keeps the absolute path:\n{}",
+        stored.body
+    );
+}
+
+/// A follow-up brief names two verdicts of another task: both are copied under that task's
+/// own ids and both paths are rewritten (ADR 0048 decision 7).
+#[test]
+fn a_followup_brief_copies_two_verdicts_of_another_task() {
+    let repo = Repo::new("verdict-copy-followup");
+    init(&repo);
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let plan = store.add_plan("p", "P", "request").expect("a plan");
+    let other = store
+        .add_task(
+            &plan,
+            "other",
+            "Other",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the other brief\n",
+        )
+        .expect("the other task");
+    let first_bytes = b"{\"summary\":\"first\"}\n";
+    let second_bytes = b"{\"summary\":\"second\"}\n";
+    let first = write_verdict(&store, &other, 1, "review", first_bytes);
+    let second = write_verdict(&store, &other, 2, "review", second_bytes);
+    let followup = store
+        .add_task(
+            &plan,
+            "work",
+            "Follow-ups",
+            vec![other.clone()],
+            false,
+            Vec::new(),
+            "placeholder\n",
+        )
+        .expect("the follow-up task");
+    let body = format!(
+        "The items below are from the review of `{other}`, which is now merged; fix each one, or \
+         leave it with a one-line reason in the final answer.\n\nFrom review 1 (attempt 1):\n- \
+         [minor] one.txt:1 a nicer name\n\nRead the verdicts for detail: `{}`, `{}`",
+        first.display(),
+        second.display()
+    );
+    store
+        .change_task(&followup, |task| {
+            task.body = body;
+            Ok(())
+        })
+        .expect("the follow-up brief");
+    let body = store.load_task(&followup).expect("the task").item.body;
+
+    let (captured, worker) = recording_worker(&repo, "verdict-followup-stdin.txt");
+    let run = run(
+        &repo,
+        &followup,
+        1,
+        "tok-v2",
+        &["--worker-command", worker.as_str()],
+        &[],
+        &body,
+    );
+    let captured = std::fs::read_to_string(&captured).expect("the worker read stdin");
+    for (attempt, bytes) in [(1, first_bytes as &[u8]), (2, second_bytes)] {
+        let relative = format!(".radian/arc-verdicts/{other}/{other}-{attempt}/review.json");
+        assert!(
+            captured.contains(&relative),
+            "the brief names the copy:\n{captured}\nstderr: {}",
+            run.stderr
+        );
+        assert_eq!(
+            std::fs::read(repo.worktree(&followup).join(&relative)).expect("the copy exists"),
+            bytes
+        );
+    }
+    assert!(
+        !captured.contains(".radian/arc/runs/"),
+        "an absolute path is still in the brief:\n{captured}"
+    );
+}
+
+/// A verdict the brief names that does not exist stays in the text; the attempt runs with one
+/// note line, and `show` prints it (ADR 0048 decision 7). Mutation: fail the attempt instead.
+#[test]
+fn a_missing_verdict_stays_in_the_brief_and_is_noted() {
+    let repo = Repo::new("verdict-copy-missing");
+    init(&repo);
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let task = plan_and_task(&store, "work", "the brief\n");
+    let missing = store
+        .root()
+        .join("runs")
+        .join(&task)
+        .join("attempts")
+        .join(format!("{task}-1"))
+        .join("verdicts/review.json");
+    let body = review_rework_body(&missing);
+    store
+        .change_task(&task, |task| {
+            task.body = body;
+            Ok(())
+        })
+        .expect("the rework brief");
+    let body = store.load_task(&task).expect("the task").item.body;
+
+    let (captured, worker) = recording_worker(&repo, "verdict-missing-stdin.txt");
+    let run = run(
+        &repo,
+        &task,
+        1,
+        "tok-v3",
+        &["--worker-command", worker.as_str()],
+        &[],
+        &body,
+    );
+    let captured = std::fs::read_to_string(&captured).expect("the attempt ran");
+    assert!(
+        captured.contains(&missing.display().to_string()),
+        "the missing path stays in the brief:\n{captured}\nstderr: {}",
+        run.stderr
+    );
+    assert!(!captured.contains(".radian/arc-verdicts/"), "{captured}");
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir(&task, 1).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
+    let note = execution["notes"][0]
+        .as_str()
+        .unwrap_or_else(|| panic!("no note: {execution}"));
+    assert!(
+        note.starts_with(&format!("verdict copy skipped: {}: ", missing.display())),
+        "the note names the path: {note}"
+    );
+
+    // `show` prints the current attempt's notes; the wrapper ran outside a claim here.
+    store
+        .change_task(&task, |task| {
+            task.attempt = 1;
+            task.attempt_id = Some(format!("{}-1", task.id));
+            Ok(())
+        })
+        .expect("the task names attempt 1");
+    let shown = repo.radian(&["arc", "show", &task]);
+    assert_eq!(shown.code, 0, "{}", shown.stderr);
+    assert!(
+        shown
+            .stdout
+            .contains("attempt_note: verdict copy skipped: "),
+        "show prints the note:\n{}",
+        shown.stdout
+    );
+}
+
+/// A link the worker planted in its worktree in an earlier attempt does not redirect the
+/// copy: the wrapper writes nothing outside the worktree, and the path stays in the brief
+/// with a note (ADR 0048 decision 7).
+#[cfg(unix)]
+#[test]
+fn a_verdict_copy_never_follows_a_link_the_worktree_already_has() {
+    let repo = Repo::new("verdict-copy-worktree-link");
+    init(&repo);
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let task = plan_and_task(&store, "work", "the brief\n");
+    let outside = repo.root.join("outside");
+    std::fs::create_dir_all(&outside).expect("the outside directory");
+
+    // Attempt 1's worker plants the copy directory of attempt 1 as a link out of the
+    // worktree. The next attempt is the review rework that would write the copy there.
+    let (first_capture, _) = recording_worker(&repo, "verdict-link-first-stdin.txt");
+    let worktree = repo.worktree(&task);
+    let command = format!(
+        "mkdir -p '{wt}/.radian/arc-verdicts/{task}' && ln -s '{}' \
+         '{wt}/.radian/arc-verdicts/{task}/{task}-1' && cat > '{}'",
+        outside.display(),
+        first_capture.display(),
+        wt = worktree.display(),
+    );
+    let first = run(
+        &repo,
+        &task,
+        1,
+        "tok-link-1",
+        &["--worker-command", command.as_str()],
+        &[],
+        "the brief\n",
+    );
+    assert!(
+        first_capture.is_file(),
+        "the first worker ran: {}",
+        first.stderr
+    );
+
+    let bytes = b"{\"summary\":\"the verdict\"}\n";
+    let verdict = write_verdict(&store, &task, 1, "review", bytes);
+    let body = review_rework_body(&verdict);
+    store
+        .change_task(&task, |task| {
+            task.body = body;
+            Ok(())
+        })
+        .expect("the rework brief");
+    let body = store.load_task(&task).expect("the task").item.body;
+
+    let (captured, worker) = recording_worker(&repo, "verdict-link-second-stdin.txt");
+    let run = run(
+        &repo,
+        &task,
+        2,
+        "tok-link-2",
+        &["--worker-command", worker.as_str()],
+        &[],
+        &body,
+    );
+    let captured = std::fs::read_to_string(&captured).expect("the attempt ran");
+    assert!(
+        captured.contains(&verdict.display().to_string()),
+        "the path stays in the brief:\n{captured}\nstderr: {}",
+        run.stderr
+    );
+    assert!(!captured.contains(".radian/arc-verdicts/"), "{captured}");
+    assert!(
+        !outside.join("review.json").exists(),
+        "nothing was written through the link"
+    );
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir(&task, 2).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
+    let note = execution["notes"][0]
+        .as_str()
+        .unwrap_or_else(|| panic!("no note: {execution}"));
+    assert!(
+        note.starts_with(&format!("verdict copy skipped: {}: ", verdict.display()))
+            && note.contains("symbolic link"),
+        "the note names the link: {note}"
+    );
+}
+
+/// The copy is ignored in the worktree, so it is not committed, `git status` stays clean, and
+/// the delivery check pushes the attempt (ADR 0048 decisions 7 and 8).
+#[test]
+fn a_verdict_copy_never_reaches_the_branch() {
+    let repo = Repo::new("verdict-copy-clean");
+    init(&repo);
+    // The repository's `.gitignore` ignores `/.radian/`; the test clone needs the same rule.
+    let exclude = repo.clone.join(".git/info/exclude");
+    let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    text.push_str("\n/.radian/\n");
+    std::fs::write(&exclude, text).expect("the clone's exclude file");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let task = plan_and_task(&store, "work", "the brief\n");
+    let verdict = write_verdict(
+        &store,
+        &task,
+        1,
+        "review",
+        b"{\"summary\":\"the verdict\"}\n",
+    );
+    let body = review_rework_body(&verdict);
+    store
+        .change_task(&task, |task| {
+            task.body = body;
+            Ok(())
+        })
+        .expect("the rework brief");
+    let body = store.load_task(&task).expect("the task").item.body;
+
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo change > change.txt && git add change.txt && git commit -m change",
+        ),
+        text_reply("done"),
+    ]);
+    let run = run(
+        &repo,
+        &task,
+        1,
+        "tok-v4",
+        &[],
+        &model_args(mock.base_url()),
+        &body,
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let finished = run.finished();
+    assert_eq!(finished["outcome"], json!("completed"));
+    assert_eq!(finished["pushed"], json!(true));
+    assert_eq!(finished["dirty"], json!([]), "the copy is not dirty");
+
+    let worktree = repo.worktree(&task);
+    let copy = worktree.join(format!(".radian/arc-verdicts/{task}/{task}-1/review.json"));
+    assert!(copy.is_file(), "the copy is in the worktree");
+    assert_eq!(repo.git_at(&worktree, &["status", "--short"]), "");
+    let tracked = repo.git_at(&worktree, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(
+        !tracked.contains(".radian"),
+        "the copies are not committed:\n{tracked}"
     );
 }

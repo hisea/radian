@@ -84,6 +84,10 @@ A missing file and one that is empty after trimming change nothing.
 A file over 32 KiB (32,768 bytes), a file that is not UTF-8, a path that is not a regular file (a FIFO, a directory, a device), and a read error are not appended: the attempt runs without the section, its record carries one line `worker-brief.md skipped: <reason>`, and [`radian arc show`](arc.md#radian-arc-show-id-json) prints it as `attempt_note`.
 The worker never reads the file itself: its sandbox denies `.radian/arc/`, and the wrapper puts the content on the worker's stdin.
 
+A brief that points at a file under `.radian/arc/runs/` gets a copy as well: when the wrapper composes the brief, it copies the file into the worker's worktree at `.radian/arc-verdicts/<task>/<attempt>/<file>` and puts that worktree-relative path in the brief, so the worker reads the copy and the sandbox rule does not change.
+The task file keeps the absolute path.
+A file that is missing, is not a regular file, is larger than 1 MiB, or cannot be copied stays in the brief as the path it already had, and the attempt record carries `verdict copy skipped: <path>: <reason>` in its notes, next to the `worker-brief.md skipped:` line.
+
 ## Plan and task files
 
 A plan file is `plans/<id>.md`; a task file is `tasks/<id>.md`.
