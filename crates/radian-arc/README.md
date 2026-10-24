@@ -550,11 +550,12 @@ force. A main that moved after integration, or a rejected push, makes it integra
 success the task is `done.merged` and its worktree is removed; the branch stays.
 
 `finish_integration` then asks `review::propose_followup` for the task's review follow-up
-(ADR 0048 decision 10): the items of the task's newest `review` verdict's `suggestions` (the
-moved `pre_existing` items among them), never a `blocking` item, become one `todo.proposed`
-task of the same plan, `after` the merged task, when `[gate.review] propose_followups` is
-true and the plan does not already hold it. A failure to add it is a warning after the merge,
-not a failed merge.
+(ADR 0048 decision 10): the `suggestions` of every `review` verdict of the task, each finding
+once (the moved `pre_existing` items among them), never a `blocking` item, become one
+`todo.proposed` task of the same plan, `after` the merged task, when
+`[gate.review] propose_followups` is true and the plan does not already hold it. Every round is
+read because a failing round can carry a demoted item and a later round can pass with nothing
+to suggest. A failure to add it is a warning after the merge, not a failed merge.
 
 `merge_step` reads `runs/<task>/gate.json` for a finished integration, and a
 `review.ready_to_merge` task finishes the newest passing integration verdict for its head.

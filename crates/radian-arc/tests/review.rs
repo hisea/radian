@@ -3656,6 +3656,114 @@ fn a_demoted_major_item_reaches_the_followup_at_its_level() {
     );
 }
 
+/// A `major` item that a failing round demoted is carried to the follow-up even when a later
+/// round passes with nothing to suggest: every review verdict is read, not only the newest.
+/// Mutation: read only the newest verdict → the merge proposes no follow-up.
+#[test]
+fn a_major_item_a_failing_round_demoted_reaches_the_followup() {
+    let fixture = Fixture::new("followup-two-rounds");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "followup-two-rounds-first",
+        &[review_object_message(
+            "the change adds old.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // The rework adds another file. This round fails on a `critical` item in the increment and
+    // demotes a `major` item 29 lines from the previous review's item.
+    let second = fixture.rework(&first, "new.txt", "new\n");
+    let second_fake = FakeReview::new(
+        "followup-two-rounds-second",
+        &[review_object_message(
+            "the rework adds new.txt and leaves the bypass",
+            &[
+                review_item("critical", "new.txt", 1, "a permission bypass"),
+                review_item("major", "old.txt", 30, "this line is still wrong"),
+            ],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(second_fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    let report = verdict.review.clone().expect("a report");
+    assert_eq!(verdict.review_pre_existing, Some(1), "{report:?}");
+    assert_eq!(
+        report.blocking,
+        vec![ReviewItem {
+            level: Some("critical".to_owned()),
+            file: Some("new.txt".to_owned()),
+            line: Some(1),
+            text: "a permission bypass".to_owned(),
+            pre_existing: false,
+        }]
+    );
+
+    // The next round fixes the bypass and suggests nothing: the demoted item must still reach
+    // the follow-up.
+    fixture.rework(&second, "three.txt", "three\n");
+    let third_fake = FakeReview::new(
+        "followup-two-rounds-third",
+        &[review_object_message(
+            "the rework fixes the bypass",
+            &[],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(third_fake.program()))
+        .expect("the second rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
+    let followup = merged.followup.expect("a follow-up task").task;
+    let task = fixture.store.load_task(&followup).expect("the task").item;
+    assert!(
+        task.body
+            .contains("[major] old.txt:30 this line is still wrong"),
+        "the failing round's demoted item was lost: {}",
+        task.body
+    );
+    assert!(
+        !task.body.contains("permission bypass"),
+        "a blocking item is carried: {}",
+        task.body
+    );
+    let failing = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(format!("{}-2", fixture.task))
+        .join("verdicts")
+        .join("review.json");
+    assert!(
+        task.body.contains(&failing.display().to_string()),
+        "the failing round's verdict is not named: {}",
+        task.body
+    );
+}
+
 /// The scheduling loop passes over a `todo.proposed` task, and `start` refuses it (exit 3,
 /// naming the phase).
 ///

@@ -246,7 +246,7 @@ impl Reverified {
 }
 
 /// The follow-up task arc proposed for a merged task's review (ADR 0048 decision 10): the
-/// items the task's last review suggested, which the merge left unfixed.
+/// items the task's review verdicts suggested, which the merge left unfixed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Followup {
     /// The new task's id.
@@ -1461,26 +1461,35 @@ fn review_rework_brief(rework: &ReviewRework) -> String {
 
 // ---- the review's follow-up task (ADR 0048 decision 10) -------------------------------
 
-/// The review's follow-up task of one merged task (ADR 0048 decision 10): the items the
-/// task's last review suggested become one `todo.proposed` task of the same plan, `after` the
-/// merged task. Nothing from `blocking` is carried: the review passed for the merge only
-/// because none was left.
+/// The review's follow-up task of one merged task (ADR 0048 decision 10): every item the
+/// task's review verdicts suggested become one `todo.proposed` task of the same plan, `after`
+/// the merged task. Every verdict is read, not only the newest: a round that failed can carry a
+/// demoted item, and a later round can pass with nothing to suggest. Nothing from `blocking`
+/// is carried: the review passed for the merge only because none was left.
 ///
 /// `None` when `[gate.review] propose_followups` is `false`, when the task has no review
-/// verdict, when the review suggested nothing, or when the plan already holds this task's
+/// verdict, when the reviews suggested nothing, or when the plan already holds this task's
 /// follow-up: a task gets at most one.
 fn propose_followup(store: &Store, task: &model::TaskFile) -> Result<Option<Followup>, Error> {
     if !store.config()?.gate.review.propose_followups {
         return Ok(None);
     }
-    let Some((verdict_path, verdict)) = latest_review_verdict(store, &task.id) else {
-        return Ok(None);
-    };
-    let items = verdict
-        .review
-        .as_ref()
-        .map(|review| review.suggestions.clone())
-        .unwrap_or_default();
+    let mut items: Vec<ReviewItem> = Vec::new();
+    let mut verdicts: Vec<PathBuf> = Vec::new();
+    for (path, verdict) in review_verdict_files(store, &task.id) {
+        let Some(review) = verdict.review else {
+            continue;
+        };
+        if review.suggestions.is_empty() {
+            continue;
+        }
+        for item in review.suggestions {
+            if !items.iter().any(|kept| same_finding(kept, &item)) {
+                items.push(item);
+            }
+        }
+        verdicts.push(path);
+    }
     if items.is_empty() {
         return Ok(None);
     }
@@ -1498,7 +1507,7 @@ fn propose_followup(store: &Store, task: &model::TaskFile) -> Result<Option<Foll
         vec![task.id.clone()],
         false,
         Vec::new(),
-        &followup_brief(&task.id, &items, &verdict_path),
+        &followup_brief(&task.id, &items, &verdicts),
     )?;
     Ok(Some(Followup {
         task: id,
@@ -1542,20 +1551,33 @@ fn followup_title(task: &str) -> String {
     format!("Follow-ups from {task}'s review")
 }
 
+/// Whether two items are the same finding: a later round that reports it again does not put a
+/// second line in the follow-up. `pre_existing` is arc's mark, not part of the finding.
+fn same_finding(left: &ReviewItem, right: &ReviewItem) -> bool {
+    left.level == right.level
+        && left.file == right.file
+        && left.line == right.line
+        && left.text == right.text
+}
+
 /// The fixed brief of `task`'s follow-up (ADR 0048 decision 10): the line that says where the
 /// items come from and what to do with each, the items as `[level] path:line text`, and the
-/// review verdict to read for detail.
-fn followup_brief(task: &str, items: &[ReviewItem], verdict: &Path) -> String {
+/// review verdicts the items came from, to read for detail.
+fn followup_brief(task: &str, items: &[ReviewItem], verdicts: &[PathBuf]) -> String {
     let items = items
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
+    let verdicts = verdicts
+        .iter()
+        .map(|path| format!("- `{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         "The items below are from the review of `{task}`, which is now merged; fix each one, \
          or leave it with a one-line reason in the final answer.\n\n{items}\n\n\
-         Read the verdict for detail: `{}`",
-        verdict.display()
+         Read the verdicts for detail:\n{verdicts}"
     )
 }
 
@@ -2564,15 +2586,25 @@ fn task_verdicts(store: &Store, task: &str) -> Result<Vec<Verdict>, Error> {
         .collect())
 }
 
+/// Every `review` verdict of `task` and its path, in attempt order: the rounds the follow-up
+/// collects items from.
+fn review_verdict_files(store: &Store, task: &str) -> Vec<(PathBuf, Verdict)> {
+    task_verdict_files(store, task)
+        .map(|files| {
+            files
+                .into_iter()
+                .filter(|(_, verdict)| verdict.stage == Stage::Review)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The task's newest `review` verdict and its path, across every attempt: what `show`
 /// reports as the review's summary and findings. A later review (a rework, a `reverify`)
 /// replaces an earlier one.
 #[must_use]
 pub fn latest_review_verdict(store: &Store, task: &str) -> Option<(PathBuf, Verdict)> {
-    task_verdict_files(store, task)
-        .ok()?
-        .into_iter()
-        .rfind(|(_, verdict)| verdict.stage == Stage::Review)
+    review_verdict_files(store, task).into_iter().next_back()
 }
 
 /// The task's newest `review` verdict from an attempt other than `label`, with its path: the
@@ -2755,7 +2787,14 @@ mod tests {
             text: "a nicer name".to_owned(),
             pre_existing: true,
         }];
-        let brief = followup_brief("TK0001-work", &items, Path::new("/r/verdicts/review.json"));
+        let brief = followup_brief(
+            "TK0001-work",
+            &items,
+            &[
+                PathBuf::from("/r/verdicts/review-1.json"),
+                PathBuf::from("/r/verdicts/review-2.json"),
+            ],
+        );
         assert!(
             brief.contains(
                 "The items below are from the review of `TK0001-work`, which is now merged"
@@ -2769,6 +2808,10 @@ mod tests {
                 .any(|line| line == "[minor] a.rs:7 a nicer name"),
             "{brief}"
         );
-        assert!(brief.contains("/r/verdicts/review.json"), "{brief}");
+        assert!(
+            brief.contains("- `/r/verdicts/review-1.json`")
+                && brief.contains("- `/r/verdicts/review-2.json`"),
+            "{brief}"
+        );
     }
 }
