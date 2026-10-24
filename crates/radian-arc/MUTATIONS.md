@@ -254,3 +254,19 @@ stages fail: with `commands` failing alone the review passes, and scanning it fi
 nothing. M3 leaves the stage that was not signalled alive past the test's 3 s deadline; the
 handler is the only SIGTERM source, because the wait loop now only escalates to SIGKILL after
 `cancel_grace_secs`.
+
+## TK0045 (the follow-up holds every review round)
+
+TK0045-M1–M4 were run on the branch's working code before the code commit, each from a copy
+under `.radian/`, restored with `cp` and compared with `cmp`; the restored files match the
+commit. M1 turns the new `review_verdicts` read back into
+`latest_review_verdict`, so every test that needs an earlier round loses its item. M2 removes
+the `find`/replace from `followup_items`. M3 writes `self.text` again in `ReviewItem`'s
+`Display`. M4 removes the `is_followup` early return from `propose_followup`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0045-M1 | read only the newest `review` verdict again (`latest_review_verdict`) | `review::a_followup_holds_every_round_grouped_and_drops_a_repeat`, `review::a_round_with_only_blocking_items_carries_nothing`, `review::a_pre_existing_item_from_an_earlier_round_is_carried` | ✅ 3 failed |
+| TK0045-M2 | drop the deduplication (every round's item is carried) | `review::a_followup_holds_every_round_grouped_and_drops_a_repeat` (the repeat is under both rounds) | ✅ failed |
+| TK0045-M3 | keep the duplicated level tag in `Display` (write `self.text`) | `review::a_rework_brief_prints_a_duplicated_level_tag_once`, `review::a_followup_brief_prints_a_duplicated_level_tag_once` | ✅ 2 failed |
+| TK0045-M4 | propose a follow-up for a merged follow-up task (drop the `is_followup` guard) | `review::a_merge_of_a_followup_task_proposes_no_followup` (it gets `TK0003-…-followups-followups`) | ✅ failed |
