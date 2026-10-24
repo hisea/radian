@@ -382,6 +382,7 @@ The wrapper enforces the attempt's limits itself, so they hold even after the pr
 
 - no new line in `runs/<task>/attempts/<attempt id>/result.jsonl` for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the worker's process group;
 - `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the wrapper started does the same; this clock also bounds the wrapper's own git steps, so a fetch or a push still running at the limit is stopped the same way.
+- a fetch, a push or an `ls-remote` is also bounded by [`limits.git_remote_timeout_secs`](arc-files.md#configtoml); whichever of it and the attempt's remaining wall time is shorter applies, and the call, with everything it started, is killed when it runs out.
 - after `[limits] cancel_grace_secs` the worker gets SIGKILL.
 
 A limit of `0` means no limit for that timer.

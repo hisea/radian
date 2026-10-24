@@ -273,6 +273,19 @@ nothing. M3 leaves the stage that was not signalled alive past the test's 3 s de
 handler is the only SIGTERM source, because the wait loop now only escalates to SIGKILL after
 `cancel_grace_secs`.
 
+## TK0053 (bounded remote git calls and a re-run's review session)
+
+TK0053-M1–M3 were run against `a4a778f8`, each applied to the committed file, restored from a
+copy under `.radian/mut/` with `cp`, and compared byte for byte with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0053-M1 | the merge push calls the unbounded `git` helper again (`push_candidate` drops `run_remote`) | `review::a_merge_push_that_hangs_reports_the_line_and_kills_its_child` | ✅ timed out (180 s: the push never returned) |
+| TK0053-M2 | the timeout kills only the git pid (`kill(pid, SIGKILL)`, not `kill(-pid, SIGKILL)`) | `git_remote::a_gate_fetch_that_hangs_fails_with_the_line_and_kills_its_child` | ✅ timed out (180 s: `git remote-ext` and its child kept the pipes open) |
+| TK0053-M3 | the review stage reuses a journal's session id (`session_for` ignores the existing file) | `review::a_gate_rerun_gets_a_fresh_review_session_and_keeps_the_first_journal` | ✅ failed: the re-run asked for `...-review-1`, not `...-review-1-1` |
+
+M2's leftovers (`git remote-ext`, its script and `sleep`) were killed by hand after the run,
+because the mutation is exactly what leaves them behind; no other processes were left.
 TK0052-M1–M3 were run against the task's branch, each from a copy under `.radian/mut/`,
 restored with `cp` and compared with `cmp`, with `cargo build -p radian-tui --bin radian`
 before the `run` test (it refuses a binary older than its sources). M1 is caught by the model
