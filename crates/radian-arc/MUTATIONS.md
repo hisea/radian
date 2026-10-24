@@ -583,3 +583,20 @@ applied to `crates/radian-arc/src/store/plan_ops.rs` by hand, the named tests we
 
 2/2 caught.
 
+## TK0092: a brief heading that only starts like a rework is brief text (2026-10-24, branch `work/TK0092-mcp-update-task-followups`)
+
+The TK0081 review found that `set_brief` treated any line beginning `## Rework ` as a rework
+boundary, so an original brief with a heading such as `## Rework notes` was kept instead of
+replaced. `set_brief` now looks for the numbered heading the tool contract names,
+`## Rework <n>` (`rework_section_start`, which reads the number through `rework_number` and
+keeps `## Rework 2 (review)`). The mutation was applied to
+`crates/radian-arc/src/store/plan_ops.rs` by hand, the named tests were run with
+`cargo nextest run -p radian-arc --locked --profile sandbox --no-fail-fast`, the file was
+restored from `.radian/mut/plan_ops.rs` with `cp`, and `cmp` found it identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0092-M1 | `set_brief` looks for `REWORK_HEADING` with the generic `section_start`, so `## Rework notes` again ends the original brief | `update_task::a_brief_heading_that_is_not_a_numbered_rework_is_replaced` (`## Rework notes` and its text stay in the body), and `store::plan_ops::tests::a_heading_that_only_starts_like_a_rework_is_part_of_the_brief` | ✅ 2 failed |
+
+1/1 caught.
+
