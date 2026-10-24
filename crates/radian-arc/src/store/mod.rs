@@ -667,14 +667,7 @@ impl Store {
     ) -> Result<String, Error> {
         check_new(slug, title)?;
         check_id(plan_id)?;
-        for stage in &extra_stages {
-            if !STAGE_NAMES.contains(&stage.as_str()) {
-                return Err(Error::Usage(format!(
-                    "`{stage}` is not a gate stage; stages are {}",
-                    STAGE_NAMES.join(", ")
-                )));
-            }
-        }
+        check_stages(&extra_stages)?;
         let _lock = self.lock_state()?;
         let plan = self.load_plan(plan_id)?;
         require_unchanged(plan_id, plan.changed_outside_arc)?;
@@ -1049,8 +1042,26 @@ fn check_new(slug: &str, title: &str) -> Result<(), Error> {
             model::SLUG_MAX_CHARS
         )));
     }
+    check_title(title)
+}
+
+/// The title rule `add_task` and `update_task` share (ADR 0048 decision 11).
+pub(crate) fn check_title(title: &str) -> Result<(), Error> {
     if title.trim().is_empty() {
         return Err(Error::Usage("the title is empty".to_owned()));
+    }
+    Ok(())
+}
+
+/// The `extra_stages` rule `add_task` and `update_task` share (ADR 0048 decision 11).
+pub(crate) fn check_stages(stages: &[String]) -> Result<(), Error> {
+    for stage in stages {
+        if !STAGE_NAMES.contains(&stage.as_str()) {
+            return Err(Error::Usage(format!(
+                "`{stage}` is not a gate stage; stages are {}",
+                STAGE_NAMES.join(", ")
+            )));
+        }
     }
     Ok(())
 }

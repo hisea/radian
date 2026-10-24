@@ -523,3 +523,22 @@ sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian
 | TK0084-M1 | `remote_main_base` reports a ref with no common ancestor as `MainBase::Missing` | ✅ 1 failed | `read::a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref` (`left: NoRemoteMain`, right `Unrelated`) |
 
 1/1 caught.
+
+## TK0081 rework: the records stay the last section, the title and stage checks are shared (2026-10-24, branch `work/TK0081-mcp-update-task`)
+
+The review found that a rework appended after a `## Changes` section left the newest record
+structurally inside the rework, and that `update_task` repeated `add_task`'s title and
+`extra_stages` checks instead of calling them. `append_rework` now inserts above `## Changes`,
+`append_task_change` moves the whole section back to the end, and `check_title` and
+`check_stages` are the one copy of each rule that both operations call. Each mutation was
+applied to `crates/radian-arc/src/store/plan_ops.rs` by hand, the named tests were run with
+`cargo nextest run -p radian-arc --locked --profile sandbox`, the file was restored from
+`.radian/mut/plan_ops.rs` with `cp`, and `cmp` found it identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0081-M5 | `append_rework` appends at the physical end, below an existing `## Changes` section | `update_task::a_rework_added_after_a_change_keeps_the_records_last` (the rework heading sits below `## Changes`), and `store::plan_ops::tests::a_rework_goes_above_the_change_records` | ✅ failed |
+| TK0081-M6 | `append_task_change` leaves a `## Changes` section that a rework follows in place (`move_changes_last` does nothing) | `update_task::an_update_repairs_records_a_later_rework_follows` (the new record lands inside the rework section), and `store::plan_ops::tests::an_update_moves_a_changes_section_a_rework_follows` | ✅ failed |
+
+2/2 caught.
+

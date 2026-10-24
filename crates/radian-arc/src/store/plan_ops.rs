@@ -22,7 +22,7 @@
 //!   `todo.ready`.
 
 use super::model::{self, TaskState};
-use super::{Error, STAGE_NAMES, Store, cancelled_plan, check_after};
+use super::{Error, Store, cancelled_plan, check_after, check_stages, check_title};
 
 /// The heading change records are appended under.
 pub const CHANGE_RECORDS_HEADING: &str = "## Change records";
@@ -360,10 +360,8 @@ pub fn update_task(
                 .to_owned(),
         ));
     }
-    if let Some(title) = title
-        && title.trim().is_empty()
-    {
-        return Err(Error::Usage("the title is empty".to_owned()));
+    if let Some(title) = title {
+        check_title(title)?;
     }
     if let Some(brief) = brief
         && brief.trim().is_empty()
@@ -371,14 +369,7 @@ pub fn update_task(
         return Err(Error::Usage("the brief is empty".to_owned()));
     }
     if let Some(stages) = &extra_stages {
-        for stage in stages {
-            if !STAGE_NAMES.contains(&stage.as_str()) {
-                return Err(Error::Usage(format!(
-                    "`{stage}` is not a gate stage; stages are {}",
-                    STAGE_NAMES.join(", ")
-                )));
-            }
-        }
+        check_stages(stages)?;
     }
     // A cancelled plan is final: its tasks take no change either.
     let plan = store.load_plan(&store.load_task(task)?.item.plan)?;
@@ -520,17 +511,32 @@ fn append_change_record(body: &mut String, now: &str, record: &str) {
     body.push_str(&format!("\n### {now}\n\n{}\n", record.trim_end()));
 }
 
-/// Appends one rework brief as its own section, with `heading_suffix` after its number.
+/// Appends one rework brief as its own section, with `heading_suffix` after its number. The
+/// `## Changes` section stays terminal, so a rework goes above it (ADR 0048 decision 11).
 fn append_rework(body: &mut String, number: u32, brief: &str, heading_suffix: &str) {
+    let section = format!(
+        "{REWORK_HEADING} {number}{heading_suffix}\n\n{}\n",
+        brief.trim_end()
+    );
     let head = body.trim_end().to_owned();
     body.clear();
+    if let Some((start, _)) = changes_section(&head) {
+        let before = head[..start].trim_end();
+        if !before.is_empty() {
+            body.push_str(before);
+            body.push_str("\n\n");
+        }
+        body.push_str(&section);
+        body.push('\n');
+        body.push_str(&head[start..]);
+        body.push('\n');
+        return;
+    }
     if !head.is_empty() {
         body.push_str(&head);
         body.push_str("\n\n");
     }
-    body.push_str(&format!("{REWORK_HEADING} {number}{heading_suffix}\n\n"));
-    body.push_str(brief.trim_end());
-    body.push('\n');
+    body.push_str(&section);
 }
 
 /// Replaces the original brief of a task body and keeps every rework section and the change
@@ -553,8 +559,11 @@ fn set_brief(body: &mut String, brief: &str) {
 }
 
 /// Appends one `update_task` line to the body's `## Changes` section, creating the section at
-/// the end of the body the first time. `fields` is the call's fields in a fixed order.
+/// the end of the body the first time. `fields` is the call's fields in a fixed order. A
+/// `## Changes` section a rework was appended below moves back to the end first, so the records
+/// stay the body's last section (ADR 0048 decision 11).
 fn append_task_change(body: &mut String, now: &str, fields: &[&str]) {
+    move_changes_last(body);
     let mut head = body.trim_end().to_owned();
     if section_start(&head, TASK_CHANGES_HEADING).is_none() {
         if !head.is_empty() {
@@ -565,6 +574,45 @@ fn append_task_change(body: &mut String, now: &str, fields: &[&str]) {
     head.push('\n');
     head.push_str(&format!("- {now} update_task: {}\n", fields.join(", ")));
     *body = head;
+}
+
+/// The `## Changes` section: where it starts and where it ends, which is the next `## ` heading
+/// or the body's end.
+fn changes_section(body: &str) -> Option<(usize, usize)> {
+    let start = section_start(body, TASK_CHANGES_HEADING)?;
+    let after_heading = start + TASK_CHANGES_HEADING.len();
+    let end = body[after_heading..]
+        .find("\n## ")
+        .map(|at| after_heading + at + 1)
+        .unwrap_or(body.len());
+    Some((start, end))
+}
+
+/// Moves the body's `## Changes` section to the end when a later section follows it, so the
+/// change records are the body's last section (ADR 0048 decision 11).
+fn move_changes_last(body: &mut String) {
+    let Some((start, end)) = changes_section(body) else {
+        return;
+    };
+    if end == body.len() {
+        return;
+    }
+    let section = body[start..end].trim_end().to_owned();
+    let mut rest = body[..start].trim_end().to_owned();
+    let after = body[end..].trim_end();
+    if !after.is_empty() {
+        if !rest.is_empty() {
+            rest.push_str("\n\n");
+        }
+        rest.push_str(after);
+    }
+    body.clear();
+    if !rest.is_empty() {
+        body.push_str(&rest);
+        body.push_str("\n\n");
+    }
+    body.push_str(&section);
+    body.push('\n');
 }
 
 /// The byte offset of the first line that is `heading` or starts with `heading` and a space.
@@ -670,6 +718,44 @@ mod tests {
         );
         assert!(body.contains("a change"), "{body}");
         assert!(!body.contains("the request"), "{body}");
+    }
+
+    /// The change records stay the body's last section: a rework appended after a first
+    /// `update_task` goes above them, and the next record keeps the records last (ADR 0048
+    /// decision 11).
+    #[test]
+    fn a_rework_goes_above_the_change_records() {
+        let mut body = model::brief_body("the brief");
+        append_task_change(&mut body, "2026-01-02T03:04:05Z", &["title"]);
+        append_rework(&mut body, 1, "do it again", "");
+        assert_eq!(
+            body,
+            "the brief\n\n## Rework 1\n\ndo it again\n\n## Changes\n\
+             - 2026-01-02T03:04:05Z update_task: title\n"
+        );
+        append_task_change(&mut body, "2026-01-03T00:00:00Z", &["brief"]);
+        assert_eq!(
+            body,
+            "the brief\n\n## Rework 1\n\ndo it again\n\n## Changes\n\
+             - 2026-01-02T03:04:05Z update_task: title\n\
+             - 2026-01-03T00:00:00Z update_task: brief\n"
+        );
+    }
+
+    /// A task file whose records ended up above a later rework is repaired: the whole section
+    /// moves to the end, in order, before the new line is added.
+    #[test]
+    fn an_update_moves_a_changes_section_a_rework_follows() {
+        let mut body = "the brief\n\n## Changes\n- 2026-01-02T03:04:05Z update_task: title\n\n\
+                        ## Rework 1\n\ndo it again\n"
+            .to_owned();
+        append_task_change(&mut body, "2026-01-03T00:00:00Z", &["after"]);
+        assert_eq!(
+            body,
+            "the brief\n\n## Rework 1\n\ndo it again\n\n## Changes\n\
+             - 2026-01-02T03:04:05Z update_task: title\n\
+             - 2026-01-03T00:00:00Z update_task: after\n"
+        );
     }
 
     #[test]

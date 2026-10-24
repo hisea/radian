@@ -399,6 +399,107 @@ fn a_brief_change_keeps_every_rework_section_and_the_change_lines_stay_last() {
 }
 
 #[test]
+fn a_bad_title_or_stage_is_refused_the_way_add_task_refuses_it() {
+    let (_scratch, store, plan) = setup("checks");
+    let task = add_task(&store, &plan, "work", &[]);
+    let server = ArcServer::new(store.clone());
+
+    let error = update_err(&server, json!({"task": task, "title": "  "}));
+    assert!(error.contains("the title is empty"), "{error}");
+
+    let error = update_err(&server, json!({"task": task, "extra_stages": ["nope"]}));
+    assert!(error.contains("is not a gate stage"), "{error}");
+    assert_eq!(
+        store.load_task(&task).expect("reads").item.title,
+        "Task work",
+        "a refused call writes nothing"
+    );
+}
+
+#[test]
+fn a_rework_added_after_a_change_keeps_the_records_last() {
+    let (_scratch, store, plan) = setup("late-rework");
+    let task = add_task(&store, &plan, "work", &[]);
+    let server = ArcServer::new(store.clone());
+
+    update_ok(&server, json!({"task": task, "title": "First change"}));
+    set_state(&store, &task, TaskState::Review, "awaiting_human");
+    let reworked = server
+        .dispatch(
+            "add_rework",
+            json!({"task": task, "brief": "do it again"})
+                .as_object()
+                .cloned(),
+        )
+        .expect("the rework succeeds");
+    let body = reworked["body"].as_str().expect("a body");
+    let rework_at = body.find("## Rework 1").expect("the rework heading");
+    let changes_at = body.find("## Changes").expect("the changes heading");
+    assert!(
+        rework_at < changes_at,
+        "the rework goes above the records: {body}"
+    );
+    assert!(
+        body.trim_end().ends_with("update_task: title"),
+        "the record stays the last line: {body}"
+    );
+
+    let updated = update_ok(&server, json!({"task": task, "brief": "a better brief"}));
+    let body = updated["body"].as_str().expect("a body");
+    assert!(
+        body.starts_with("a better brief\n\n## Rework 1\n"),
+        "{body}"
+    );
+    assert_eq!(body.matches("## Changes").count(), 1, "{body}");
+    let changes_at = body.find("## Changes").expect("the changes heading");
+    let last_rework = body.rfind("## Rework").expect("the rework heading");
+    assert!(last_rework < changes_at, "the records stay last: {body}");
+    assert_eq!(change_lines(body).len(), 2, "{body}");
+    assert!(body.trim_end().ends_with("update_task: brief"), "{body}");
+    assert!(
+        !store.load_task(&task).expect("reads").changed_outside_arc,
+        "the file is the one arc wrote"
+    );
+}
+
+#[test]
+fn an_update_repairs_records_a_later_rework_follows() {
+    let (_scratch, store, plan) = setup("repair");
+    let task = add_task(&store, &plan, "work", &[]);
+    store
+        .change_task(&task, |task| {
+            task.body = "the brief\n\n## Changes\n\
+                         - 2026-01-02T03:04:05Z update_task: title\n\n\
+                         ## Rework 1\n\ndo it again\n"
+                .to_owned();
+            Ok(())
+        })
+        .expect("the test writes a record above a rework");
+    let server = ArcServer::new(store.clone());
+
+    let updated = update_ok(&server, json!({"task": task, "allow_noop": true}));
+    let body = updated["body"].as_str().expect("a body");
+    assert_eq!(
+        body.lines().take(6).collect::<Vec<_>>(),
+        vec!["the brief", "", "## Rework 1", "", "do it again", ""],
+        "{body}"
+    );
+    assert_eq!(body.matches("## Changes").count(), 1, "{body}");
+    let changes_at = body.find("## Changes").expect("the changes heading");
+    assert!(
+        body.rfind("## Rework").expect("the rework heading") < changes_at,
+        "the whole section moved below the rework: {body}"
+    );
+    assert_eq!(change_lines(body).len(), 2, "{body}");
+    assert_eq!(change_lines(body)[0].1, "title", "{body}");
+    assert_eq!(change_lines(body)[1].1, "allow_noop", "{body}");
+    assert!(
+        body.trim_end().ends_with("update_task: allow_noop"),
+        "{body}"
+    );
+}
+
+#[test]
 fn show_reads_the_file_arc_wrote() {
     let (_scratch, store, plan) = setup("show");
     let task = add_task(&store, &plan, "work", &[]);
