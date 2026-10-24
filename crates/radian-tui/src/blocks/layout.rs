@@ -23,6 +23,12 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     if is_ask_entry(entry) {
         return layout(entry, &[], modes, width).len();
     }
+    // An entry with images (ADR 0028 R10) goes through the layout: its placeholder row and
+    // the image's fixed run are part of the shape, and one function computes them for the
+    // count, the drawing and the text-only paths.
+    if !entry.images.is_empty() {
+        return layout(entry, &[], modes, width).len();
+    }
     if let Some(count) = cheap_count(entry, modes) {
         return count;
     }
@@ -330,6 +336,7 @@ fn layout_unstripped(
                 reason: false,
                 md: None,
                 syntax: None,
+                image: None,
             }]
         }
         (EntryKind::Reasoning, _) => {
@@ -341,7 +348,10 @@ fn layout_unstripped(
             // The thin user row (ADR 0035): `❯ 文本`, no background,
             // no half-cell padding and no rail. Just the wrapped text; the marker column is
             // drawn, not part of the body.
-            prose_lines(&text, body_width)
+            let mut lines = prose_lines(&text, body_width);
+            // ADR 0028 R10: each image's fixed run sits directly under its placeholder line.
+            insert_user_images(&mut lines, entry);
+            lines
         }
         (EntryKind::Assistant, _) => {
             let mut lines = Vec::new();
@@ -468,6 +478,7 @@ fn layout_unstripped(
                     reason: false,
                     md: None,
                     syntax: None,
+                    image: None,
                 }]
             }
         }
@@ -494,10 +505,59 @@ fn layout_unstripped(
                 modes,
                 entry.fold_override,
             );
-            body_plan_lines(&plan.lines, &text, body_width)
+            let mut lines = body_plan_lines(&plan.lines, &text, body_width);
+            // ADR 0028 R10: the image's placeholder row and run follow the tool body. The
+            // placeholder always shows; the run only when the body is drawn in full.
+            append_tool_images(&mut lines, entry, modes);
+            lines
         }
         (EntryKind::Context, _) => super::context_lines(entry, modes, width),
         _ => prose_lines(&text, body_width),
+    }
+}
+
+/// One image's fixed run of rows (ADR 0028 R10): empty, source-less rows the frame overlays
+/// the image onto. `end` is the source offset a click on the run anchors to, so a selection
+/// dragged across it neither jumps nor copies anything.
+fn image_run(index: usize, end: usize) -> Vec<BodyLine> {
+    std::iter::repeat_with(|| BodyLine::image_row(index, end))
+        .take(usize::from(crate::media::IMAGE_HEIGHT_ROWS))
+        .collect()
+}
+
+/// A user message's image runs, each directly under the line carrying its `[image: …]`
+/// placeholder (ADR 0028 R10). The placeholder is part of the message's own text, so the run
+/// goes after the display line that holds the placeholder's last source character; a
+/// placeholder that cannot be located (a foreign text shape) gets its run at the end.
+fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry) {
+    let mut search = 0usize;
+    for (index, image) in entry.images.iter().enumerate() {
+        let Some(found) = entry.text[search..].find(&image.placeholder) else {
+            continue;
+        };
+        let start = search + found;
+        let end = start + image.placeholder.len();
+        search = end;
+        let last = end.saturating_sub(1);
+        let after = lines
+            .iter()
+            .rposition(|line| line.chars.contains(&Some(last)))
+            .map_or(lines.len(), |at| at + 1);
+        lines.splice(after..after, image_run(index, end));
+    }
+}
+
+/// A tool result's image rows (ADR 0028 R10): each image's placeholder row, then its run when
+/// the body is drawn in full. The placeholder row is always drawn — that is what the folded
+/// block shows instead of the image.
+fn append_tool_images(lines: &mut Vec<BodyLine>, entry: &Entry, modes: DisplayModes) {
+    let end = entry.text.len();
+    let visible = crate::media::rows_visible(entry, modes);
+    for (index, image) in entry.images.iter().enumerate() {
+        lines.push(BodyLine::image_placeholder(image.placeholder.clone(), end));
+        if visible {
+            lines.extend(image_run(index, end));
+        }
     }
 }
 
@@ -509,6 +569,15 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
+    // An entry with images (ADR 0028 R10): the same layout the drawing uses, so the search
+    // and the find geometry include the placeholder rows and the image runs (which are empty
+    // and never match).
+    if !entry.images.is_empty() {
+        return layout(entry, &parse_blocks_for(entry, mode), modes, width)
+            .into_iter()
+            .map(|line| line.text)
+            .collect();
+    }
     // The stripped edge lines are part of the shape: the text-only path takes them from the
     // layout when there are any (see `has_blank_edge`), so the search geometry and the drawing
     // cannot disagree.

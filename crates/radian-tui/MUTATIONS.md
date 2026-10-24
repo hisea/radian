@@ -2840,3 +2840,16 @@ restored from that copy (never `git checkout`), and the named test ran alone wit
 
 2/2 caught. TK0085-M1, -M2 and -M5 mutate `radian-arc` and are recorded in
 `crates/radian-arc/MUTATIONS.md`.
+
+## TK0014: the transcript draws images with ratatui-image (2026-10-24, branch `work/TK0014-image-render`)
+
+Each mutation was applied by hand, backed up under `.radian/` and restored from that copy (never
+`git checkout`), and the named test ran alone.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0014-M1 | a second, separate startup probe (`supports_keyboard_enhancement`) beside the merged one | ✅ 1 failed | `pty_the_startup_probe_is_one_combined_pass` (`one device-attributes query, not two probes`: left 2, right 1) |
+| TK0014-M2 | the folded state draws the image run too (`rows_visible` always true) | ✅ 1 failed | `a_folded_tool_result_shows_the_placeholder_but_not_the_image` |
+| TK0014-M3 | the image rows carry their payload as text, so search matches inside them | ✅ 3 failed | `selection_and_search_never_see_the_image_rows` (`search must not match inside the image rows`, 12 matches) |
+
+3/3 caught.

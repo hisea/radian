@@ -57,6 +57,18 @@ shlex = "2"
 # No syntect themes: colors come from the Radian theme (ADR 0029).
 syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
 ratatui = "0.30.2"
+# Images in the transcript (ADR 0028; docs/backlog/images.md Q8): `ratatui-image` probes the
+# terminal and picks the graphics protocol (kitty, iTerm2, sixel, half blocks). The
+# `chafa-dyn` default is **never** on: it links libchafa dynamically and the binary then fails
+# to start where the library is missing. `image-defaults` pulls the `image` decoder this crate
+# already needs, and `crossterm` is the backend the TUI already uses.
+ratatui-image = { version = "11.1.0", default-features = false, features = ["image-defaults", "crossterm"] }
+# The decoder behind the transcript image (ADR 0028 R10): the parts carry base64, and the
+# four accepted formats are the magic-number set `radian-coding` accepts. `ratatui-image`'s
+# `image-defaults` turns every format on anyway; naming them here keeps the intent visible.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# The image parts' base64 payload: decode once per image for the transcript (ADR 0028 R10).
+base64 = "0.22"
 serde_json.workspace = true
 # The TOML theme files (ADR 0029): the same parser the config uses
 # (`radian-host`), so a `[roles]` table and `[tui.colors]` share one value shape

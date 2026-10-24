@@ -708,6 +708,10 @@ pub struct App {
     /// Images attached in the composer by a dropped absolute path (Q7). They join the next
     /// message after its text; Backspace on an empty input removes the newest.
     pub composer_images: Vec<radian_coding::LoadedImage>,
+    /// The transcript's decoded image protocols (ADR 0028 R10), keyed by the image payload.
+    /// Decoded once and reused across frames; a failed decode is remembered, so a broken image
+    /// costs one attempt and then draws as its placeholder row only.
+    pub images: crate::media::ImageCache,
     pub quit: bool,
     /// `/new` was accepted: the loop leaves, the host ends this session and opens a fresh
     /// one in the same terminal. Set with `quit` (the same exit), read by the loop's caller;

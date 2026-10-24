@@ -28,6 +28,7 @@ pub mod inspector;
 pub mod keys;
 pub mod login;
 pub mod markdown;
+pub mod media;
 pub mod mention;
 pub mod panel;
 pub mod picker;

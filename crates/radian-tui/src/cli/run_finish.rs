@@ -156,6 +156,11 @@ pub(super) fn build_startup_screen(
         context_line,
         format!("context: {}", session.facts().context_line),
     ];
+    // ADR 0028 R10: which graphics protocol the startup probe picked, and the cell size it
+    // measured. The troubleshooting page points here when an image does not draw.
+    if let Some(line) = radian_tui::terminal::images_line() {
+        startup_lines.push(line);
+    }
     // ADR 0034 H1: the startup line says reporting is on, and names a rejected resume command.
     if herdr.is_some() {
         startup_lines.push(match &herdr_note {
