@@ -420,7 +420,7 @@ fn plan_frame_lines(
         .flatten();
     for task in row.tasks.iter().skip(top).take(visible) {
         let cursor = selected == Some(task.id.as_str());
-        let line = task_row_line(task, id_width, phase_width, cursor, theme);
+        let line = task_row_line(task, id_width, phase_width, cursor, app.loop_running, theme);
         out.push(rail(theme, line));
     }
     out.push(frame_bottom(theme));
@@ -457,12 +457,13 @@ fn task_columns(tasks: &[TaskRow], content: usize) -> (usize, usize) {
 }
 
 /// One task row inside the plan frame: connector, mark, id, `state.phase`, `#attempt`, cost,
-/// and `waits`/`also after` when they apply.
+/// the worker's freshness for a `doing` task, and `waits`/`also after` when they apply.
 fn task_row_line(
     task: &TaskRow,
     id_width: usize,
     phase_width: usize,
     cursor: bool,
+    loop_running: bool,
     theme: &Theme,
 ) -> Line<'static> {
     let mut spans = Vec::new();
@@ -495,11 +496,45 @@ fn task_row_line(
         format!(" {}", format_cost(task.cost)),
         theme.tier,
     ));
+    if let Some(freshness) = task.freshness {
+        let (text, style) = freshness_text(freshness, theme);
+        spans.push(Span::styled(format!("  {text}"), style));
+        if !loop_running {
+            // A stored `doing` state is not live progress when nothing schedules.
+            spans.push(Span::styled("  loop stopped", theme.hint));
+        }
+    }
     let extra = extra_text(task);
     if !extra.is_empty() {
         spans.push(Span::styled(format!("  {extra}"), theme.hint));
     }
     Line::from(spans)
+}
+
+/// The heartbeat line of a `doing` task: `heartbeat 12s ago`, in the warning style with
+/// `stalled?` once the beat is older than the stall window, or `starting` before the first one.
+fn freshness_text(freshness: Freshness, theme: &Theme) -> (String, Style) {
+    match freshness {
+        Freshness::Starting => ("starting".to_owned(), theme.hint),
+        Freshness::Beating { age } => (format!("heartbeat {} ago", age_text(age)), theme.hint),
+        Freshness::Stalled { age } => (
+            format!("heartbeat {} ago stalled?", age_text(age)),
+            theme.status_warn,
+        ),
+    }
+}
+
+/// A heartbeat's age: `12s`, `5m54s`, `3h07m`, or `12d` from one day up.
+fn age_text(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else if secs < 86_400 {
+        format!("{}h{:02}m", secs / 3_600, (secs % 3_600) / 60)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
 }
 
 fn extra_text(task: &TaskRow) -> String {
