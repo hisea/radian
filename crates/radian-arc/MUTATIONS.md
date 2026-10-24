@@ -744,6 +744,7 @@ drives the real binary.
 | TK0088-M4 | the baseline compares against an empty map instead of `None`, so every existing tracked task is `new` | `arc_mcp::the_channel_reports_the_tracked_transitions_and_stays_silent_for_the_rest` (the baseline wait receives `TK0001-work new -> review.awaiting_human`) | ✅ failed |
 
 4/4 caught.
+
 ## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
 
 `run --watch` became `radian arc serve`; `run` is one pass. The mutation was applied by hand to
