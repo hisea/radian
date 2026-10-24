@@ -500,3 +500,18 @@ one at a time, run against the named test with
 | TK0069-M2 | a follow-up attempt skips the footer (drop it when the stdin brief starts with the follow-up's first line) | `review::a_followup_attempt_ends_its_brief_with_the_worker_brief` | ✅ failed |
 | TK0069-M3 | `init` overwrites an existing `worker-brief.md` (the `is_file` guard is dropped) | `store::init_writes_the_default_worker_brief_once_and_keeps_an_edit` (the edited file reads back as the default) | ✅ failed |
 | TK0069-M4 | the size limit is not checked (`len > u64::MAX` instead of `len > WORKER_BRIEF_LIMIT`) | `work::an_oversized_worker_brief_is_skipped_with_a_note` (the 33 KiB footer is appended and no note is recorded) | ✅ failed |
+
+## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
+
+`TaskDiff::fallback` was a bool, so a remote main ref that exists but shares no ancestor with the
+head read as `no remote main` — a line that was false about the repository. `remote_main_base`
+now tells a missing ref (`git show-ref --verify`) from a ref git finds no merge base for, and
+`TaskDiff::base` is the closed set `DiffBase`. The mutation was applied by hand to the working
+file, the named test was run alone with `cargo nextest run -p radian-arc --locked --profile
+sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0084-M1 | `remote_main_base` reports a ref with no common ancestor as `MainBase::Missing` | ✅ 1 failed | `read::a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref` (`left: NoRemoteMain`, right `Unrelated`) |
+
+1/1 caught.
