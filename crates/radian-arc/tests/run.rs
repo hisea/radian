@@ -2378,9 +2378,10 @@ fn stop_without_a_start_time_returns_as_soon_as_the_gate_is_gone() {
 // ---- the commands and review pair (ADR 0048 decision 10) ------------------------------
 
 /// A gate killed while only the review ran resumes with the commands verdict reused: the next
-/// pass starts a new gate, which runs the review and not the commands. Mutation: run the pair
-/// sequentially, or ignore the recorded commands verdict, and the command's counter has two
-/// lines.
+/// pass starts a new gate, which runs the review and not the commands. Mutation: ignore the
+/// recorded commands verdict, and the command's counter has two lines. A sequential pair still
+/// writes the commands verdict before the review starts, so this test passes under that
+/// mutation; `the_commands_and_review_stages_start_before_either_ends` catches it.
 #[test]
 fn a_gate_killed_during_the_review_resumes_with_the_commands_verdict_reused() {
     let repo = Repo::new("run-pair-resume");

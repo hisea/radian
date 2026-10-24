@@ -536,18 +536,52 @@ pub fn run_stages(
     let pair = pair_positions(plan);
     let mut index = 0;
     while index < plan.stages.len() {
-        let spec = plan.stages[index];
-        if spec.stage == Stage::Human {
-            index += 1;
-            continue;
-        }
         if let Some((commands_at, review_at)) = pair
             && index == commands_at
         {
             if !run_pair(store, plan, review_program, &mut reused)? {
                 return Ok(reused);
             }
+            // `review` already ran beside `commands`, so a stage listed between them runs
+            // now, once both have a verdict: the list's order is kept without a silent skip.
+            if !run_listed(
+                store,
+                plan,
+                commands_at + 1..review_at,
+                review_program,
+                &mut reused,
+            )? {
+                return Ok(reused);
+            }
             index = review_at + 1;
+            continue;
+        }
+        if !run_listed(
+            store,
+            plan,
+            std::iter::once(index),
+            review_program,
+            &mut reused,
+        )? {
+            return Ok(reused);
+        }
+        index += 1;
+    }
+    Ok(reused)
+}
+
+/// Runs the stages at `indices`, in that order, skipping `human`, reusing a verdict already
+/// written and stopping at the first failure. Returns whether every listed stage passed.
+fn run_listed(
+    store: &Store,
+    plan: &Verification,
+    indices: impl IntoIterator<Item = usize>,
+    review_program: Option<&Path>,
+    reused: &mut Vec<Stage>,
+) -> Result<bool, Error> {
+    for index in indices {
+        let spec = plan.stages[index];
+        if spec.stage == Stage::Human {
             continue;
         }
         let verdict = match recorded_verdict(store, plan, &spec)? {
@@ -558,16 +592,17 @@ pub fn run_stages(
             None => run_stage(store, plan, &spec, review_program)?,
         };
         if !verdict.is_pass() {
-            return Ok(reused);
+            return Ok(false);
         }
-        index += 1;
     }
-    Ok(reused)
+    Ok(true)
 }
 
-/// The `(commands, review)` positions when the plan lists both. `Profile::validate` refuses
-/// `review` before `commands`, so the two are in that order; an extra stage is only appended,
-/// so a pair with `review` first cannot arise from a valid task either.
+/// The `(commands, review)` positions when the plan lists both with `commands` first.
+///
+/// `Profile::validate` refuses `review` before `commands` within one profile, but a profile of
+/// only `review` plus a task `extra_stages` of `commands` is valid and lists the two in that
+/// order: `pair_positions` then returns `None` and they run sequentially in the listed order.
 fn pair_positions(plan: &Verification) -> Option<(usize, usize)> {
     let commands = plan
         .stages
@@ -2650,6 +2685,18 @@ fn clear_reason(store: &Store, task: &str, label: &str) {
 
 /// Every verdict file of every attempt of `task`, in attempt order, with its path.
 fn task_verdict_files(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict)>, Error> {
+    task_verdict_files_except(store, task, None)
+}
+
+/// Every verdict file of every attempt of `task` except the attempt `except`, in attempt order,
+/// with its path. A stage that runs beside another one skips its own attempt's directory: the
+/// other stage may be writing a verdict there, and a read between `Verdict::write_new`'s
+/// create and its write would fail.
+fn task_verdict_files_except(
+    store: &Store,
+    task: &str,
+    except: Option<&str>,
+) -> Result<Vec<(PathBuf, Verdict)>, Error> {
     let attempts = store.root().join("runs").join(task).join("attempts");
     let mut verdicts = Vec::new();
     let Ok(entries) = fs::read_dir(&attempts) else {
@@ -2662,6 +2709,10 @@ fn task_verdict_files(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict
         .collect();
     dirs.sort();
     for dir in dirs {
+        if except.is_some_and(|label| dir.file_name().and_then(|name| name.to_str()) == Some(label))
+        {
+            continue;
+        }
         let verdict_dir = dir.join("verdicts");
         let Ok(entries) = fs::read_dir(&verdict_dir) else {
             continue;
@@ -2701,17 +2752,17 @@ pub fn latest_review_verdict(store: &Store, task: &str) -> Option<(PathBuf, Verd
 /// The task's newest `review` verdict from an attempt other than `label`, with its path: the
 /// candidate previous review of a rework round (ADR 0048 decision 10). A verdict with an
 /// empty `sha` is not one, and the stage ignores it when its `sha` is the commit under review.
+///
+/// The whole current attempt is skipped, not only its `review.json`: the review thread runs
+/// beside the commands thread, which may be between the create and the write of its
+/// `commands.json` (`Verdict::write_new`), and a read of that file would fail and lose the
+/// earlier review.
 #[must_use]
 pub fn previous_review(store: &Store, task: &str, label: &str) -> Option<(PathBuf, Verdict)> {
-    let current = verdict_path(store.repo(), task, label, Stage::Review).ok();
-    task_verdict_files(store, task)
+    task_verdict_files_except(store, task, Some(label))
         .ok()?
         .into_iter()
-        .rfind(|(path, verdict)| {
-            verdict.stage == Stage::Review
-                && !verdict.sha.is_empty()
-                && Some(path) != current.as_ref()
-        })
+        .rfind(|(_, verdict)| verdict.stage == Stage::Review && !verdict.sha.is_empty())
 }
 
 /// The digest of the verification set for `sha`: every counted verdict except the owner's
