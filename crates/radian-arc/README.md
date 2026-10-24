@@ -164,9 +164,10 @@ integration failure while the plan is not `off` in the task's `auto_rework`; pas
 
 `attempt_ops::apply` counts retries, not attempts: a retryable failure raises the task's
 `retry_count` and sets `todo.retry_wait` while the count is below the task's `max_attempts`
-(else `[limits] max_attempts`), and the failure after the limit is `failed.exhausted`. Every
-rework (`plan_ops::add_rework_with`) sets `retry_count` back to `0`, so a rework's
-instructions get their own retries; a `reverify` attempt is not a retry and changes neither
+(else `[limits] max_attempts`), and the failure after the limit is `failed.exhausted`. The lead's
+rework and the review rework (`plan_ops::add_rework_with`) set `retry_count` back to `0`, so
+their instructions get their own retries; a conflict rework keeps it, so the failures between
+conflicts still use up `max_attempts`; a `reverify` attempt is not a retry and changes neither
 `retry_count` nor the decision.
 
 ## The scheduling loop

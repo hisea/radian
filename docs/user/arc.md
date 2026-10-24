@@ -472,7 +472,7 @@ PL0001-plan cancelled
 ```
 
 A cancelled plan is final.
-`confirm`, `auto`, `priority`, `start`, `reverify`, `reset-budget`, `add task`, and the MCP `add_task`, `update_plan` and `add_rework` tools refuse it with exit `3` (the MCP tools: an error naming the status).
+`confirm`, `auto`, `priority`, `start`, `reverify`, `reset-budget`, `add task`, and the MCP `add_task`, `update_task`, `update_plan` and `add_rework` tools refuse it with exit `3` (the MCP tools: an error naming the status).
 `radian arc run` never claims, gates or merges its tasks, and the summary does not list it as waiting.
 `list` hides it unless `--all`, and `show <plan>` and `show <task>` still read it and its tasks.
 

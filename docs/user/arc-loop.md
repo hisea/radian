@@ -89,10 +89,10 @@ The summary is printed only when it differs from the summary the loop printed la
 A pass that returns an error prints one `radian arc: <message>` line and the loop waits its interval and runs the next pass; the lock and every state file stay as they are.
 A one-shot `run` prints the same line and exits `1` instead.
 
-A repeated error stops the loop: when three passes in a row return the same error text, it prints one line, `radian arc: the same error three passes in a row; stopping (fix it and start the loop again)`, stops the gates the way a stop signal does (see below; workers are left alone), releases `runner.lock`, and exits `1`.
+A repeated error stops the loop: when three passes in a row return the same error text, it prints one line, `radian arc: the same error 3 passes in a row; stopping (fix it and start the loop again)`, stops the gates the way a stop signal does (see below; workers are left alone), releases `runner.lock`, and exits `1`.
 A pass that succeeds, or a different error, starts the count again.
 A one-shot `run` is unchanged.
-The number three is a constant, not a configuration key.
+The number `3` is a constant, not a configuration key.
 
 On SIGINT or SIGTERM the loop starts no new worker and no new gate.
 A Ctrl-C in the terminal reaches the loop only: each worker and each gate runs in its own process group, and both treat SIGINT exactly as SIGTERM.

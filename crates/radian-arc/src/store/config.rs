@@ -91,7 +91,8 @@ impl Default for Repository {
 pub struct Limits {
     /// How many tasks run at once.
     pub concurrency: u32,
-    /// How many retries one task gets since its last rework before it is `failed.exhausted`.
+    /// How many retries one task gets since its last lead or review rework before it is
+    /// `failed.exhausted`. A conflict rework keeps the count.
     pub max_attempts: u32,
     /// No new line on the worker's jsonl stream for this long is a stall.
     pub stall_timeout_secs: u64,

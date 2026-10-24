@@ -916,7 +916,7 @@ fn ignored(task: &model::TaskFile, finish: Option<&Finish>, reason: String) -> A
 }
 
 /// The retry time for an attempt that failed: 10 s for the first retry, doubled per retry
-/// since the task's last rework, capped at 5 minutes.
+/// since the task's last lead or review rework, capped at 5 minutes.
 pub fn retry_at_after(retry_count: u32) -> String {
     let delay = retry_delay_secs(retry_count);
     let at = chrono::Utc::now() + chrono::Duration::seconds(delay as i64);

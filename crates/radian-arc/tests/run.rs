@@ -1640,6 +1640,21 @@ fn runner_lock_is_free(repo: &Repo) -> bool {
     free
 }
 
+/// How many times `text` appears in `loop.log`: the loop writes every line there before it
+/// writes it to stdout, so a test can wait for a pass without guessing how long it took.
+fn loop_log_count(repo: &Repo, text: &str) -> usize {
+    fs::read_to_string(repo.arc().join("loop.log"))
+        .map(|log| log.matches(text).count())
+        .unwrap_or(0)
+}
+
+/// Waits until `loop.log` holds `count` copies of `text`.
+fn wait_for_loop_log(repo: &Repo, text: &str, count: usize) {
+    wait_until(Duration::from_secs(30), text, || {
+        loop_log_count(repo, text) >= count
+    });
+}
+
 /// Three passes in a row with the same error stop `serve`: one stop line, exit `1`, and the
 /// lock released. A gate the loop started is stopped the way a signal stops it, so a broken
 /// configuration does not leave a build running; a worker is not signalled (this test starts
@@ -1693,11 +1708,9 @@ fn three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stop = format!("radian arc: {}", radian_arc::run::repeated_error_stop());
     assert!(
-        stderr.contains(
-            "radian arc: the same error three passes in a row; stopping (fix it and start the \
-             loop again)"
-        ),
+        stderr.contains(&stop),
         "the stop line is missing: {stdout}{stderr}"
     );
     assert_eq!(
@@ -1721,6 +1734,94 @@ fn three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock() {
     );
 }
 
+/// The motivating permanent error is `config.toml` itself: breaking it makes every pass fail
+/// before it can read the gate's grace, so the stop must not report that config error instead
+/// of the stop line. The stop line is still printed, exit `1`, and the gate is stopped with the
+/// default grace (the configured one cannot be read).
+#[test]
+fn a_broken_config_stops_serve_with_the_stop_line_and_stops_its_gate() {
+    let repo = Repo::new("run-watch-broken-config");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "watch-broken-config");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    tune(&repo, "cancel_grace_secs = 10", "cancel_grace_secs = 1");
+    // A gate that holds its lock until stopped, started by a first, successful pass.
+    let wake = repo.root.join("gate.wake");
+    commands(
+        &repo,
+        &format!("while [ ! -f '{}' ]; do sleep 0.2; done", wake.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+    let first = repo.radian(&["arc", "run"]);
+    assert_eq!(first.code, 0, "run: {}", first.stderr);
+    wait_until(Duration::from_secs(30), "the gate's running record", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "running")
+    });
+    let gate = gate_record(&repo, &task).expect("the record")["pid"]
+        .as_u64()
+        .expect("the gate pid") as u32;
+    assert!(process_alive(gate), "the gate did not start");
+
+    // The config no longer parses once the loop is already running: the store opened while it
+    // was valid, so every later pass fails before `stop_gates` reads the grace.
+    let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
+    wait_for_loop_log(&repo, "no transition", 1);
+    tune(
+        &repo,
+        "cancel_grace_secs = 1",
+        "cancel_grace_secs = \"one\"",
+    );
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        if watch.try_wait().expect("try_wait").is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "three identical config errors did not stop serve"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = watch.wait_with_output().expect("the watch loop stops");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the repeated config error did not exit 1: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stop = format!("radian arc: {}", radian_arc::run::repeated_error_stop());
+    assert!(
+        stderr.contains(&stop),
+        "the stop line is missing: {stdout}{stderr}"
+    );
+    assert!(
+        !stderr.contains("cancel_grace_secs"),
+        "the config error was reported instead of the stop line: {stderr}"
+    );
+    // The final config error is printed twice; the third is replaced by the stop line. (A
+    // transient read of the half-written file may print a different error line of its own.)
+    assert_eq!(
+        stdout.matches("cancel_grace_secs").count(),
+        2,
+        "the loop printed the third error instead of the stop line: {stdout}"
+    );
+
+    // The gate is stopped, with the default grace because the config cannot be read.
+    wait_until(Duration::from_secs(20), "the stopped gate to exit", || {
+        !process_alive(gate)
+    });
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["status"], "interrupted", "{record}");
+    assert!(
+        runner_lock_is_free(&repo),
+        "the repeated-error stop kept runner.lock"
+    );
+}
+
 /// Two identical errors then a pass that succeeds do not stop the loop: the success starts the
 /// count again. Mutation: never reset the count and this stops on the third pass.
 #[test]
@@ -1733,14 +1834,15 @@ fn two_identical_errors_then_a_success_do_not_stop_serve() {
     set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
 
     let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
-    // Pass 1 at once, pass 2 after 5 s. Fix the config before pass 3 at 10 s.
-    std::thread::sleep(Duration::from_secs(7));
+    // Wait for the two error lines; then fix the config while the loop waits for pass 3.
+    wait_for_loop_log(&repo, "worker.exec_args must not repeat", 2);
     assert!(
         watch.try_wait().expect("try_wait").is_none(),
         "two identical errors stopped serve"
     );
     set_exec_args(&repo, BAD_EXEC_ARGS_A, "exec_args = []");
-    std::thread::sleep(Duration::from_secs(5));
+    // The first successful pass prints `no transition`; the errors before it did not stop it.
+    wait_for_loop_log(&repo, "no transition", 1);
     assert!(
         watch.try_wait().expect("try_wait").is_none(),
         "the successful pass did not reset the count"
@@ -1763,7 +1865,7 @@ fn two_identical_errors_then_a_success_do_not_stop_serve() {
         2,
         "{stdout}"
     );
-    assert!(!stdout.contains("three passes in a row"), "{stdout}");
+    assert!(!stdout.contains("passes in a row"), "{stdout}");
 }
 
 /// Different errors do not accumulate: two in a row may be anything, the third must be the
@@ -1779,16 +1881,21 @@ fn different_errors_do_not_stop_serve() {
     set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
 
     let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
-    // Pass 1: A. Change to B before pass 2, then back to A before pass 3.
-    std::thread::sleep(Duration::from_secs(1));
+    // Wait for each error line before changing the config for the next pass, so a slow pass
+    // cannot be mistaken for the one the test meant.
+    wait_for_loop_log(&repo, "worker.exec_args must not repeat", 1);
     set_exec_args(&repo, BAD_EXEC_ARGS_A, BAD_EXEC_ARGS_B);
-    std::thread::sleep(Duration::from_secs(5));
+    wait_for_loop_log(
+        &repo,
+        "worker.exec_args is not a `radian exec` argument list",
+        1,
+    );
     assert!(
         watch.try_wait().expect("try_wait").is_none(),
         "two different errors stopped serve"
     );
     set_exec_args(&repo, BAD_EXEC_ARGS_B, BAD_EXEC_ARGS_A);
-    std::thread::sleep(Duration::from_secs(6));
+    wait_for_loop_log(&repo, "worker.exec_args must not repeat", 2);
     assert!(
         watch.try_wait().expect("try_wait").is_none(),
         "three errors that are not all the same stopped serve"
@@ -1814,7 +1921,7 @@ fn different_errors_do_not_stop_serve() {
         stdout.contains("worker.exec_args is not a `radian exec` argument list"),
         "{stdout}"
     );
-    assert!(!stdout.contains("three passes in a row"), "{stdout}");
+    assert!(!stdout.contains("passes in a row"), "{stdout}");
 }
 
 /// A refusal is reported once and keeps its record: later passes start no gate for the same
