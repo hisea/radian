@@ -199,8 +199,10 @@ fn a_failed_task_in_the_chain_is_reported_as_never_running() {
     let store = initialized(&scratch);
     let plan = store.add_plan("never", "Never", "request").unwrap();
     let failed = add_task(&store, &plan, "failed", &[]);
-    set_state(&store, &failed, TaskState::Failed, "cancelled");
+    // The second task comes first: once every task is `failed.cancelled` the plan is cancelled
+    // by its tasks and takes no new task.
     let waiting = add_task(&store, &plan, "waiting", std::slice::from_ref(&failed));
+    set_state(&store, &failed, TaskState::Failed, "cancelled");
 
     let text = show_text(&store, &waiting).expect("show reads the task");
     assert!(
@@ -549,6 +551,9 @@ fn a_real_confirm_warns_about_a_chain_that_can_never_finish() {
     let (repo, store) = cli_fixture("confirm-warning");
     let plan = confirmed_plan(&store, "warn");
     let failed = add_task(&store, &plan, "failed", &[]);
+    // An open task keeps the plan out of the cancelled rule: a plan whose tasks are all
+    // `failed.cancelled` is cancelled and takes no confirm.
+    add_task(&store, &plan, "open", &[]);
     set_state(&store, &failed, TaskState::Failed, "cancelled");
     plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
     let proposed = store

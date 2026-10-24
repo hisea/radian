@@ -104,39 +104,39 @@ Reads the brief from stdin to end of input, writes `tasks/<id>.md`, appends the 
 | `--allow-noop` | — | The task may deliver no change on purpose. Off by default. |
 | `--stage` | `NAME` | An extra gate stage to run for this task. Repeat the flag. The value is `commands`, `mutation`, `review`, `ci`, or `human`. |
 
-A task can only be added to a plan whose `status` is `draft`; a confirmed or cancelled plan exits `3`.
+A task can only be added to a plan that is `draft` and not cancelled by its tasks; a confirmed or cancelled plan exits `3`.
 An `--after` id must name a task of the same plan or a task whose state is `done`; anything else exits `3`.
 
 ## `radian arc list [--plan <ID>] [--all] [--json]`
 
-Lists plans, each with its tasks in the plan's order.
-Plans print in claim order, the order `radian arc run` serves them in: the higher `priority` first (`P0` before `P1`), then the plan id from small to large.
-Each plan's header line shows its id, its `status`, its `auto` level, its `priority`, its progress as `<merged>/<tasks> merged`, its `total_cost_usd` (the sum of its tasks' totals), and its title.
+Lists plans in claim order — the order `radian arc run` serves them in: the higher `priority` first (`P0` before `P1`), then the plan id — each with its tasks in plan order.
+Each plan's header line shows its id, `status`, `auto` level, `priority`, progress as `<merged>/<tasks> merged`, `total_cost_usd` (its tasks' totals sum) and title.
+The progress total leaves out `failed.cancelled` tasks: one merged task and one cancelled follow-up read `1/1`, an all-cancelled plan `0/0`.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
-A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage, reset by `reset-budget`); its `total_cost_usd` also includes every review and is never reset.
+A task's `cost_usd` is the budget counter (worker attempts and `review` stages, reset by `reset-budget`); `total_cost_usd` adds every review and never resets.
 
-By default the finished work is left out, so the work in progress is what you see:
+By default finished work is left out, so you see the work in progress:
 
-- every task in `done.merged` is left out; a plan that is shown still counts those tasks in its `<merged>/<tasks> merged` header;
-- a plan whose tasks are all `done.merged` (a finished plan) is left out too; a plan with no tasks is always shown;
-- a `cancelled` plan is left out; `--all` shows it.
+- every `done.merged` task is left out; a shown plan still counts them in its header;
+- a **finished** plan is left out: at least one task, every task `done.merged` or `failed.cancelled`, at least one `done.merged`. A plan with no tasks is shown;
+- a `cancelled` plan is left out and `--all` shows it: its `status` is `cancelled`, or every task is `failed.cancelled`; that derives from its tasks and never rewrites `status`.
 
-Every other state is shown, `failed.*` included: a failed task needs attention.
+Every other state is shown, `failed.*` included; a `failed.cancelled` task stays listed (and in `show`).
 
-When the default left something out, the last line counts it:
+When the default left something out, a last line counts it:
 
 ```text
 3 finished plans and 12 merged tasks hidden (--all to show)
 ```
 
-The count covers every plan and every merged task that was not printed. A part that is `0` is left out of the line, and a count of `1` is singular: `1 finished plan and 1 merged task hidden (--all to show)`, `2 cancelled plans and 3 merged tasks hidden (--all to show)`, or `2 merged tasks hidden (--all to show)` when no whole plan was left out.
-When everything is hidden, that line is the whole output. Nothing hidden means no such line.
+The count covers every plan and merged task not printed. A `0` part is omitted and `1` is singular: `1 finished plan and 1 merged task hidden (--all to show)`, `2 cancelled plans and 3 merged tasks hidden (--all to show)`, or `2 merged tasks hidden (--all to show)` when no whole plan was left out.
+When everything is hidden, that line is the whole output; nothing hidden means no line.
 
 | Flag | Value | What it does |
 |---|---|---|
-| `--plan` | `ID` | Only this plan. It follows the default filter: its merged tasks are hidden unless `--all`, and a finished or cancelled plan is still printed with its header line, so you see that it exists. |
+| `--plan` | `ID` | Only this plan, following the default filter; a finished or cancelled plan still prints its header line, so you see that it exists. |
 | `--all` | — | No filter: print every plan and every task, `done.merged` history and cancelled plans included. It takes no value. |
-| `--json` | — | Print one JSON array instead of lines. Without `--all` it follows the same filter: a cancelled plan is left out, and a plan named with `--plan` is always included. |
+| `--json` | — | Print one JSON array instead of lines. Without `--all` it follows the same cancelled-plan filter (by `status` or by its tasks); a plan named with `--plan` is always included. |
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
@@ -461,7 +461,7 @@ A task a gate is running for is stopped as the task form stops it.
 If a task's cancel leaves it `doing.reconciling`, the plan still becomes `cancelled`; the next `radian arc run` pass ends the task at `failed.cancelled`, after the same process check the task form makes (see [Reconcile](arc-gate.md#reconcile)).
 That pass waits no second grace: the plan form already sent the wrapper its SIGTERM, so the pass checks the wrapper's pid and start time and kills it at once when it is still there.
 A task the lead adds to the plan while these steps run is cancelled too: the plan's tasks are read once more after the status becomes `cancelled`, and a task added after the first read is ended by the task form's rules.
-A plan that is already `cancelled` is refused with exit `3`.
+A plan that is already `cancelled` — by its `status`, or by all its tasks being `failed.cancelled` — is refused with exit `3`.
 
 `cancel` prints one `<task> <state>.<phase>` line for each task it changed, in the plan's task order, then `<plan> cancelled`:
 
@@ -472,7 +472,7 @@ PL0001-plan cancelled
 ```
 
 A cancelled plan is final.
-`confirm`, `auto`, `priority`, `start`, `reverify`, `reset-budget`, `add task`, and the MCP `add_task`, `update_task`, `update_plan` and `add_rework` tools refuse it with exit `3` (the MCP tools: an error naming the status).
+`cancel`, `confirm`, `auto`, `priority`, `start`, `reverify`, `reset-budget`, `add task`, and the MCP `add_task`, `update_task`, `update_plan` and `add_rework` tools refuse it with exit `3` (the MCP tools: an error naming the status).
 `radian arc run` never claims, gates or merges its tasks, and the summary does not list it as waiting.
 `list` hides it unless `--all`, and `show <plan>` and `show <task>` still read it and its tasks.
 
@@ -650,7 +650,9 @@ The header shows `loop ● running (pid <n>)` for any holder (the pid appears wh
 The newest transition line `loop.log` gained since the TUI opened is the footer's ticker, and `L` opens a view of the last 500 lines.
 `q` and SIGTERM close the TUI and nothing else: a loop it started keeps running, and an attempt it left running is reconciled by the next loop.
 A running task's diff tab shows the worker's worktree against the attempt's `base_sha`, uncommitted files included (`live · worktree`), refreshed every 5 seconds.
-A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, board, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md). Each plan carries one of seven marks — `✕` cancelled, `◌` draft, `◉` needs you, `●` running, `◍` paused, `○` queued, `✓` done — each in its own `plan_*` theme role; the rules that pick one and the columns of both lists are in [the plans page](arc-tui.md#the-plans-page). The plans page's `x` cancels the selected task or plan, `c` confirms a draft plan or a proposed task (depending on the focused column), `+`/`-` move the selected plan's priority, and `o` cycles the list's order (`priority`, `state`, `id`); the page draws `P<n>` with the plan's id and in the frame label.
+A bare `radian arc` opens the TUI; the plans, board, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
+The plans page shows one of four views (`active` by default, then `all`, `done`, `cancelled`; `f` cycles them) and each plan draws one of seven marks — `✕` cancelled, `◌` draft, `◉` needs you, `●` running, `◍` paused, `○` queued, `✓` done — in its own `plan_*` theme role, with `P<n>` by its id and in the frame label.
+Its `x`, `c`, `+`/`-` and `o` cancel, confirm, step the priority and cycle the order (`priority`, `state`, `id`); the mark rules and the columns are in [the plans page](arc-tui.md#the-plans-page).
 
 ## Not built yet
 

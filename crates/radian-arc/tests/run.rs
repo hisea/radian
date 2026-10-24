@@ -591,6 +591,34 @@ fn a_run_pass_claims_and_gates_nothing_from_a_cancelled_plan() {
     );
 }
 
+/// A plan whose tasks are all `failed.cancelled` is cancelled by its tasks, so a pass lists
+/// it as waiting on nothing: a cancelled task is not work left to do.
+#[test]
+fn a_pass_lists_a_plan_whose_tasks_are_all_cancelled_as_waiting_on_nothing() {
+    let repo = Repo::new("run-tasks-cancelled");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "stopped");
+    let one = add_task(&store, &plan, "one", &[]);
+    let two = add_task(&store, &plan, "two", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    for task in [&one, &two] {
+        attempt::cancel(&store, task).expect("the task cancels on its own");
+    }
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(
+        run.stdout.contains("nothing waits"),
+        "a cancelled plan waits on nothing:\n{}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains(&plan),
+        "the cancelled plan is not in the summary:\n{}",
+        run.stdout
+    );
+}
+
 /// A plan cancel leaves a `doing` task whose wrapper never confirms its end at
 /// `doing.reconciling`. The plan is final, so the next pass ends the task at
 /// `failed.cancelled` instead of leaving it in `doing`, where it would hold a
