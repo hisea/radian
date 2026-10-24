@@ -423,14 +423,28 @@ fn finished_row(store: &Store, plan: &PlanFile, task: &TaskFile) -> FinishedRow 
 }
 
 /// Every plan `arc` paused through one of `plans`' tasks: its automatic rework limit wrote
-/// `paused.json` next to the attempt and set the plan's `auto` to `off`.
+/// `paused.json` next to the attempt, or a plan budget set the plan's `auto` to `off` and left
+/// the task it stopped in `todo.paused_budget`.
+///
+/// A task budget also leaves its task in `todo.paused_budget`, but it leaves the plan's `auto`
+/// alone, so only the task itself waits for the owner. `radian arc pause` writes no marker
+/// either: the plan's `auto` is `off`, which is also the level a plan is confirmed at, so the
+/// board cannot tell the two apart.
 fn paused_plans(plans: &[PlanView], store: &Store) -> BTreeSet<String> {
     let mut paused = BTreeSet::new();
     for view in plans {
+        let mut plan_paused = false;
         for task in &view.tasks {
-            if let Some(plan) = attempt_ops::paused_plan(store, &task.item.id, task.item.attempt) {
-                paused.insert(plan);
+            if attempt_ops::paused_plan(store, &task.item.id, task.item.attempt).is_some() {
+                plan_paused = true;
             }
+        }
+        let budget_paused = view.plan.item.auto == "off"
+            && view.tasks.iter().any(|task| {
+                task.item.state == TaskState::Todo && task.item.phase == "paused_budget"
+            });
+        if plan_paused || budget_paused {
+            paused.insert(view.plan.item.id.clone());
         }
     }
     paused
@@ -679,6 +693,7 @@ fn draw_finished(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
     let visible = (area.height as usize).saturating_sub(2);
     let top = scroll_top(app.board.done_top, app.board.done_sel, visible, rows.len());
     app.board.done_top = top;
+    // The empty list's one placeholder line is not a finished task.
     let mut lines = vec![frame_top(width, &format!("FINISHED {count}"), &theme)];
     for (index, row) in rows.into_iter().enumerate().skip(top) {
         let cursor = count > 0 && index == app.board.done_sel;

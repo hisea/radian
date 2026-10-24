@@ -2569,6 +2569,7 @@ from that copy (never `git checkout`), and the named test ran alone with
 | TK0054-M4 | the medium layout stacks `todo` over `verifying` on the left and `doing` over `needs you` on the right | ✅ 1 failed | `a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` ("todo over doing on the left: 0, 41") |
 
 4/4 caught.
+
 ## TK0063: the plans page's columns and plan marks (2026-10-24, branch `work/TK0063-tui-plans-align-and-marks`)
 
 Base `93e078fe` (the branch point; `origin/main` has since moved). The plan summary row is three
@@ -2587,6 +2588,7 @@ file was restored from that copy (never `git checkout`).
 
 5/5 caught. The M5 edit landed on both palettes' identical literals; the dark palette is the one
 the test checks first.
+
 ## TK0059: the task page's brief tab (2026-10-24, branch `work/TK0059-tui-task-brief-tab`)
 
 Base `b335c1de` (the branch point). The task page gains `brief` as its first tab: the task
@@ -2603,6 +2605,7 @@ arc_tui <test> --no-fail-fast`, and the file was restored from a copy under `.ra
 | TK0059-M3 | `Shift-Tab` from `brief` goes to `conversation` (`TaskTab::previous`'s `Brief` arm returns `Conversation`) | ✅ 1 failed | `the_task_tabs_cycle_in_order_in_both_directions` (`left: Conversation`, `right: Attempts`) |
 
 3/3 caught.
+
 ## TK0057: the merge page's command log (2026-10-24, branch `work/TK0057-tui-merge-actions-followups`)
 
 The review of TK0018 found two faults in the off-thread command log. `read_log_tail` dropped
@@ -2672,6 +2675,7 @@ working file, the named test was run alone, and the file was restored from a cop
 | TK0066-M2 | `f` only advances with the plan column focused (`KeyCode::Char('f') if self.focus == Focus::Plans`) | ✅ 1 failed | `arc_tui::f_advances_the_view_whichever_column_has_focus` (the press answers `Ignored`, not `Redraw`) |
 
 2/2 caught.
+
 ## TK0070: the plans page's cancel, proposed-task confirm and priority follow-ups (2026-10-24, branch `work/TK0070-tui-cancel-confirm-priority-followups`)
 
 Base `47e2397e` (the branch point). The review of TK0050 found four UI faults: a cancelled plan
@@ -2709,6 +2713,7 @@ the named test was run alone, and the file was restored to the same bytes.
 | TK0073-M2 | `f` on the conversation tab pins nothing (`TaskTab::Conversation => {}`) | ✅ 1 failed | `arc_tui::the_conversation_tab_follows_a_running_attempts_journal` (`follow shows the end` misses `filler-39`) |
 
 2/2 caught.
+
 ## TK0076: the diff tab's file list keeps room for the diff (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
 
 The file list took every row but five, so a task with many changed files left the selected
@@ -2744,6 +2749,7 @@ hand to `crates/radian-tui/src/arc/mod.rs`, the named test was run alone with
 | TK0078-M2 | `o` keeps the selection index instead of the plan (`plan_sel` restored after `rebuild_visible(None)`) | ✅ 1 failed | `the_order_keeps_the_selected_plan_across_o_a_refresh_and_f` (after `o` to id the cursor is `1`, not `0`) |
 | TK0078-M3 | the default order is `id` (`#[default]` moved from `Priority` to `Id`) | ✅ 3 failed | `the_plans_page_puts_the_most_urgent_first_and_says_so`, `o_cycles_priority_state_id_and_back`, `the_order_keeps_the_selected_plan_across_o_a_refresh_and_f` (all `left: Id`, `right: Priority`) |
 | TK0078-M4 | state order puts done before running (`Done => 1`, `Running => 5` in `plan_mark_rank`) | ✅ 1 failed | `o_cycles_priority_state_id_and_back` (left `needs`, `done`, `queued`, …) |
+
 ## TK0077: the loop follow-ups from the TK0019 review (2026-10-24, branch `work/TK0077-tui-loop-followups`)
 
 The review of TK0019 found that `L` on the merge page opened the loop log under an open command
@@ -2812,3 +2818,18 @@ result line when it opens. Each mutation was applied by hand to `src/arc/mod.rs`
 | TK0087-M3 | `open_theme` drops `theme::load`'s warnings | ✅ 1 failed | `arc_theme::an_unknown_theme_opens_with_the_fallback_and_warns_in_the_footer` (no footer line names `future`) |
 
 3/3 caught.
+## TK0085: the board's finished list follows up the TK0054 review (2026-10-24, branch `work/TK0085-tui-board-followups`)
+
+The TK0054 review found that a plan budget's pause left the plan's other tasks in the columns,
+and that an empty finished list counted its one placeholder line as a task. Each mutation was
+applied by hand to `crates/radian-tui/src/arc/board.rs`, backed up under `.radian/bak/` and
+restored from that copy (never `git checkout`), and the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_board <test> --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0085-M3 | only the automatic-rework `paused.json` marks a plan paused (`budget_paused` requires `auto == "pause"`) | ✅ 1 failed | `a_plan_budget_pause_puts_every_task_in_needs_you_but_a_task_budget_does_not` (`TK0002-paused-ready needs the owner`) |
+| TK0085-M4 | the finished heading counts the drawn rows, placeholder included (`rows.len()`) | ✅ 1 failed | `an_empty_finished_list_counts_no_row` (`FINISHED 1` above `nothing finished`) |
+
+2/2 caught. TK0085-M1, -M2 and -M5 mutate `radian-arc` and are recorded in
+`crates/radian-arc/MUTATIONS.md`.
