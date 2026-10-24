@@ -305,6 +305,7 @@ file was compared byte for byte with `cmp`, and `git status --short` was empty a
 | TK0038-M1 | do not add the review stage's cost in `attempt_ops::charge_review_cost` (`task.add_cost(cost_usd)` dropped) | `review::two_attempts_and_three_reviews_make_the_total_and_reset_budget_keeps_it` (the counter and total are short by the three reviews), `review::a_review_cost_that_reaches_the_budget_pauses_the_task_without_a_rework` (the task never reaches the limit) | ✅ 2 failed |
 | TK0038-M2 | `reset-budget` also zeroes `total_cost_usd` (both the task and the plan form) | `review::two_attempts_and_three_reviews_make_the_total_and_reset_budget_keeps_it` (the total is `0` after the reset) | ✅ failed |
 | TK0038-M3 | skip the budget check at the review verdict (`let paused = false` in `charge_review_cost`) | `review::a_review_cost_that_reaches_the_budget_pauses_the_task_without_a_rework` (the task goes back to `todo.ready` with the review rework instead of `todo.paused_budget`) | ✅ failed |
+
 ## TK0053 (bounded remote git calls and a re-run's review session)
 
 TK0053-M1–M3 were run against `a4a778f8`, each applied to the committed file, restored from a
@@ -489,3 +490,18 @@ one at a time, run against the named test with
 | TK0069-M2 | a follow-up attempt skips the footer (drop it when the stdin brief starts with the follow-up's first line) | `review::a_followup_attempt_ends_its_brief_with_the_worker_brief` | ✅ failed |
 | TK0069-M3 | `init` overwrites an existing `worker-brief.md` (the `is_file` guard is dropped) | `store::init_writes_the_default_worker_brief_once_and_keeps_an_edit` (the edited file reads back as the default) | ✅ failed |
 | TK0069-M4 | the size limit is not checked (`len > u64::MAX` instead of `len > WORKER_BRIEF_LIMIT`) | `work::an_oversized_worker_brief_is_skipped_with_a_note` (the 33 KiB footer is appended and no note is recorded) | ✅ failed |
+
+## TK0072 (cost total follow-ups)
+
+TK0072-M1–M4 were run against `9596fc2f`, each applied to the committed file, run with
+`cargo nextest run -p radian-arc --locked --profile sandbox --no-fail-fast -E '<the test below>'`,
+and restored from a copy under `.radian/mut/` with `cp`; the restored file was compared byte for
+byte with `cmp`, and `git status --short` named only this section afterwards. The `radian`
+binary was rebuilt before M3, which runs it.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0072-M1 | `reset-budget` does not materialize an older file's total (`total_cost_usd = Some(task.running_total())` dropped from `reset_counted_cost`) | `attempt::reset_budget_keeps_an_old_tasks_cost_as_its_total` (the task and plan forms both leave the total unset, so it reads `0` after the reset) | ✅ failed |
+| TK0072-M2 | the review charge ignores the attempt it recorded (`if false` in place of the `review_cost.json` check) | `review::a_repeated_review_cost_charge_adds_once` (the counter and total are `1.5`: the same review is charged twice) | ✅ failed |
+| TK0072-M3 | the text `show` prints a task's costs with raw `f64` Display (`optional_number` in place of `optional_cost`) | `review::a_tasks_text_cost_is_rounded_like_a_plans` (`cost_usd: 2.0069999999999997` instead of `2.007`) | ✅ failed |
+| TK0072-M4 | a review charge that reaches the plan budget does not switch the plan off (the `store.change_plan` call dropped) | `review::a_review_cost_that_reaches_the_plan_budget_pauses_the_plan` ("a plan budget switches the plan off") | ✅ failed |
