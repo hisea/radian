@@ -5,6 +5,8 @@
 //! `open_session` uses — with stub role/memory/skills/facts layers, so a reorder inside it
 //! fails here (the unit tests in `hooks.rs` cover each hook behavior on its own).
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -19,17 +21,8 @@ use radian_permissions::{
 use radian_session::{SessionCreatedData, SessionJournal};
 use serde_json::json;
 
-fn scratch(label: &str) -> std::path::PathBuf {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let n = N.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-command-hooks-{}-{label}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    let ws = dir.join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    std::fs::canonicalize(&ws).unwrap()
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::canonical(&format!("radian-command-hooks-{label}"))
 }
 
 /// A counting approver: every `ask` gets the scripted answer.
@@ -104,10 +97,9 @@ fn production_chain(
     permissions: Arc<PermissionHooks>,
     commands: Arc<CommandHooks>,
 ) -> impl Hooks {
-    let dir = ws.parent().unwrap().to_path_buf();
     let journal = Arc::new(
         SessionJournal::create(
-            dir.join("s.jsonl"),
+            ws.join("journal.jsonl"),
             "sid",
             SessionCreatedData::new("/work/example", json!({"provider": "example"})),
         )

@@ -6,6 +6,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -25,25 +27,21 @@ use tokio::net::UnixStream;
 // Fixtures
 // ---------------------------------------------------------------------------
 
-fn scratch(label: &str) -> PathBuf {
+fn scratch(label: &str) -> common::TempDir {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     // A short base: `$TMPDIR` on macOS can push `<home>/run/<pid>.sock` past `SUN_LEN`, and a
     // Unix socket path has a hard length cap. `/tmp` is far below it.
     let dir = PathBuf::from("/tmp").join(format!("radian-ctl-{}-{label}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(&dir).unwrap()
+    common::TempDir::at(dir)
 }
 
 /// A private `RADIAN_HOME` for this test binary (skills/context resolution reads it).
 fn isolated_home() -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("radian-control-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::process_dir("radian-control-home");
         let dir = std::fs::canonicalize(&dir).unwrap();
         // SAFETY: `get_or_init` runs this once, before any session is opened.
         unsafe { std::env::set_var("RADIAN_HOME", &dir) };
@@ -97,7 +95,7 @@ fn model(
 /// A session with the control server bound and a recording event sink (so the `subscribe`
 /// fan-out has something to carry).
 struct Fixture {
-    scratch: PathBuf,
+    scratch: common::TempDir,
     home: PathBuf,
     session: Arc<LocalSession>,
     server: Arc<ControlServer>,

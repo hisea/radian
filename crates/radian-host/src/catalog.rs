@@ -2002,7 +2002,7 @@ mod provider_models_tests {
     /// the list may be for a different account).
     #[test]
     fn the_cache_round_trips_per_key() {
-        let root = std::env::temp_dir().join(format!("radian-pm-test-{}", std::process::id()));
+        let root = crate::test_support::TempDir::named("radian-pm-test");
         write_provider_models_at(
             &root,
             "cache-test",

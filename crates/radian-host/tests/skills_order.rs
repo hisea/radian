@@ -6,6 +6,8 @@
 //! calls [`radian_host::session_hooks`] — the one function `open_session` uses — so swapping
 //! `memory` and `skills` inside it fails here.
 
+mod common;
+
 use std::sync::Arc;
 
 use radian_core::{CancellationToken, HookContext, Hooks, Message, ModelRequest};
@@ -16,16 +18,8 @@ use radian_permissions::{NoopAudit, PermissionHooks, Profile};
 use radian_session::{SessionCreatedData, SessionJournal};
 use serde_json::json;
 
-fn scratch(label: &str) -> std::path::PathBuf {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-skills-order-{}-{label}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-skills-order-{label}"))
 }
 
 fn journal(dir: &std::path::Path) -> Arc<SessionJournal> {

@@ -6,6 +6,8 @@
 //! where a script would otherwise leave a grandchild behind (the 5 s timeout test), so the
 //! runner's `kill_on_drop` reaps the direct child.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,16 +17,8 @@ use radian_host::{
     FooterSnapshot, SegmentRole,
 };
 
-fn scratch(label: &str) -> PathBuf {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-command-footer-{}-{label}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-command-footer-{label}"))
 }
 
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
