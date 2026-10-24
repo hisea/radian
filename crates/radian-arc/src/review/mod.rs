@@ -1103,11 +1103,11 @@ pub fn auto_reverify(store: &Store, task_id: &str) -> Result<AutoReverify, Error
     }
 }
 
-/// The task and the remote main, when an automatic reverify applies to `task_id` (ADR 0048
-/// decision 9): the plan's `auto` is not `off`, the task is in `review.rework_pending` for a
-/// `commands` or integration command failure or timeout, and the remote main is no longer the
-/// main that failing verdict recorded.
-fn auto_reverify_cause(
+/// The task and the main its failing verdict recorded, when the stored side of an automatic
+/// reverify applies to `task_id` (ADR 0048 decision 9): the plan's `auto` is not `off`, the task
+/// is in `review.rework_pending`, and the attempt failed a `commands` or integration stage with
+/// a reason a moved main can fix. It does not ask the remote: [`auto_reverify_cause`] adds that.
+fn auto_reverify_stored_cause(
     store: &Store,
     task_id: &str,
 ) -> Result<Option<(model::TaskFile, String)>, Error> {
@@ -1126,6 +1126,19 @@ fn auto_reverify_cause(
     let Some(recorded_main) = recorded_failure_main(store, &task)? else {
         return Ok(None);
     };
+    Ok(Some((task, recorded_main)))
+}
+
+/// The task and the remote main, when an automatic reverify applies to `task_id` (ADR 0048
+/// decision 9): the stored side holds, and the remote main is no longer the main that failing
+/// verdict recorded.
+fn auto_reverify_cause(
+    store: &Store,
+    task_id: &str,
+) -> Result<Option<(model::TaskFile, String)>, Error> {
+    let Some((task, recorded_main)) = auto_reverify_stored_cause(store, task_id)? else {
+        return Ok(None);
+    };
     let (remote, main_branch) = store.repository_names()?;
     let Some(main_sha) = ls_remote_branch(store.repo(), &remote, &main_branch)? else {
         return Ok(None);
@@ -1134,6 +1147,29 @@ fn auto_reverify_cause(
         return Ok(None);
     }
     Ok(Some((task, main_sha)))
+}
+
+/// Whether a scheduling pass could still leave this `review.rework_pending` task by itself
+/// (ADR 0048 decision 9): the stored side of [`auto_reverify`] holds, `[limits]
+/// max_auto_reverify` is not `0`, and the task has not used its count.
+///
+/// It does not ask the remote for main. The pass also needs main to have moved, and this answer
+/// is what the arc TUI's board reads for every card on each two-second refresh: a frame never
+/// runs git. A `false` therefore means that no automatic reverify is coming.
+#[must_use]
+pub fn auto_reverify_pending(store: &Store, task_id: &str) -> bool {
+    let Ok(Some(_)) = auto_reverify_stored_cause(store, task_id) else {
+        return false;
+    };
+    let Ok(config) = store.config() else {
+        return false;
+    };
+    let max = config.limits.max_auto_reverify;
+    if max == 0 {
+        return false;
+    }
+    let record = read_auto_reverify(store, task_id);
+    (record.reverified.len() as u64) < u64::from(max)
 }
 
 /// The main sha the failing verdict of `task`'s current attempt recorded, when the failure is

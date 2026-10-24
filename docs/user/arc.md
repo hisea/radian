@@ -30,6 +30,7 @@ It finds:
 - the main branch: `origin`'s own HEAD when it is known, else the checked-out branch, else `main`.
 
 It writes `config.toml` with those values, and it creates the layout below.
+It writes `worker-brief.md` with a short default when it does not exist, and never overwrites an existing file (see [the worker brief](arc-files.md#worker-briefmd)).
 A second `init` keeps an existing `config.toml` byte for byte and creates nothing twice.
 
 It adds the arc paths to `.git/info/exclude`, a local file: `init` never changes a committed `.gitignore`.
@@ -47,6 +48,7 @@ Each line is added once; a second run adds nothing.
 | `/.radian/arc/state.lock` | excluded | excluded |
 | `/.radian/arc/runner.lock` | excluded | excluded |
 | `/.radian/arc/worktrees/` | excluded | excluded |
+| `/.radian/arc/worker-brief.md` | excluded | excluded |
 
 `--track` makes git see `config.toml`, `plans/`, and `tasks/`, so you can commit them when you want; arc never commits them.
 Removing a line that an earlier run added is up to you: `init` only appends.
@@ -144,6 +146,8 @@ Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `atte
 ## `radian arc show <ID> [--json]`
 
 Prints one plan or task: every field, whether it changed outside arc, then its body.
+For a task it also prints the current attempt's notes as `attempt_note`, such as `worker-brief.md skipped: not UTF-8` (see [the worker brief](arc-files.md#worker-briefmd)).
+`show --json` carries them as `attempt_notes`, a list of strings (empty when there are none).
 
 A plan prints `cost_usd` and `total_cost_usd` beside its other fields: the first is the sum of its tasks' `cost_usd` and the number its budget compares, the second is the sum of their totals. Both are computed when the plan is read and are not stored in the plan file. A task prints both of its own numbers.
 
@@ -376,6 +380,7 @@ The claim records the attempt's session id in its `start.json` before the worker
 A fresh attempt after the first cannot see the earlier conversation, so its stdin opens with a hand-off section, `## Where the previous attempt left off`: the newest earlier attempt's final report (cut at 8,000 characters, with a note when it is cut; a `reverify` attempt runs no worker and writes none, so the section walks back to the attempt before it and names it), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote main and the branch tip.
 The section says the full history is on the branch and to read the files rather than assume.
 The brief follows it, and a `merge-main` conflict section still comes first.
+When [`worker-brief.md`](arc-files.md#worker-briefmd) exists, its content is the last section of every brief, so the order is: the `merge-main` conflict section, the hand-off, the task's brief, then the standing worker instructions.
 
 Before the worker starts, the wrapper runs the profile's `before_attempt` steps in the worktree (see the [`before_attempt` row](arc-files.md#configtoml)); a first attempt's steps do nothing.
 `merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; a conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see [A conflict with main](arc-gate.md#a-conflict-with-main)).
@@ -729,7 +734,7 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 ## The TUI
 
 The TUI never holds `runner.lock` and runs no pass. When it opens, it starts `radian arc serve` with the default interval as a detached process if no loop holds the lock; `R` starts one the same way while none runs.
-The header shows `loop ● running (pid <n>)` for any holder, `loop ◌ starting` until a start's lock appears, and `loop ○ stopped` when none runs; a failed start adds one footer line with its reason and exit code.
+The header shows `loop ● running (pid <n>)` for any holder (the pid appears when the holder recorded a readable one, otherwise it is plain `loop ● running`), `loop ◌ starting` until the loop it started records its own pid in `runner.lock`, and `loop ○ stopped` when none runs; a failed start adds one footer line with its reason and exit code.
 The newest transition line `loop.log` gained since the TUI opened is the footer's ticker, and `L` opens a view of the last 500 lines.
 `q` and SIGTERM close the TUI and nothing else: a loop it started keeps running, and an attempt it left running is reconciled by the next loop.
 A running task's diff tab shows the worker's worktree against the attempt's `base_sha`, uncommitted files included (`live · worktree`), refreshed every 5 seconds.

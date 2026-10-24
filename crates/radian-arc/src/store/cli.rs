@@ -183,6 +183,15 @@ fn init(track: bool) -> Result<String, Error> {
         }
     ));
     out.push_str(&format!(
+        "  worker brief {} ({})\n",
+        report.worker_brief_path.display(),
+        if report.worker_brief_created {
+            "created"
+        } else {
+            "kept"
+        }
+    ));
+    out.push_str(&format!(
         "  exclude      {} ({})\n",
         report.exclude_path.display(),
         if report.exclude_added.is_empty() {
@@ -470,6 +479,9 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                         .as_deref(),
                 ),
             );
+            for note in super::attempt_ops::attempt_notes(store, &item.id, item.attempt) {
+                field(&mut out, "attempt_note", &note);
+            }
             field(&mut out, "token", &optional_text(item.token.as_deref()));
             field(&mut out, "cost_usd", &optional_number(item.cost_usd));
             field(
@@ -1103,6 +1115,14 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
                 object.insert(
                     "session_id".to_owned(),
                     json!(super::attempt_ops::attempt_session_id(
+                        store,
+                        &task.item.id,
+                        task.item.attempt
+                    )),
+                );
+                object.insert(
+                    "attempt_notes".to_owned(),
+                    json!(super::attempt_ops::attempt_notes(
                         store,
                         &task.item.id,
                         task.item.attempt

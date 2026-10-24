@@ -44,6 +44,23 @@ pub use model::{
 pub const ARC_DIR: &str = ".radian/arc";
 /// The file `init` writes once.
 pub const CONFIG_FILE: &str = "config.toml";
+/// The repository's standing worker instructions (ADR 0048 decision 7): every brief the
+/// wrapper composes ends with this file's content when it exists and is not empty. `init`
+/// writes the default once and never overwrites it.
+pub const WORKER_BRIEF_FILE: &str = "worker-brief.md";
+/// The default `worker-brief.md` `init` writes. It lives here, in one place, and the manual
+/// quotes it verbatim (a drift test in `crates/radian-arc/tests/` compares them).
+pub const WORKER_BRIEF_DEFAULT: &str = "\
+Work only on the current branch.\n\
+Commit everything that belongs to the change, and end with `git status --short` printing nothing.\n\
+Put scratch files only under `.radian/`.\n\
+Never change `.radian/arc/`.\n\
+While iterating, run only the tests being changed, and run each named crate in full once at the \
+end; never the whole workspace.\n\
+In a `MUTATIONS.md`, add a new section at the end of the file, with one blank line before its \
+`##` heading.\n\
+End with a short report: the commits, the tests you ran, the decisions you made, and any open \
+questions.";
 /// The short lock every state change takes.
 pub const STATE_LOCK: &str = "state.lock";
 /// The lock a scheduling loop holds for its lifetime.
@@ -259,6 +276,9 @@ pub struct InitReport {
     pub main_branch: String,
     pub config_path: PathBuf,
     pub config_created: bool,
+    /// The standing worker instructions file `init` writes when it is missing.
+    pub worker_brief_path: PathBuf,
+    pub worker_brief_created: bool,
     pub exclude_path: PathBuf,
     /// The lines this run appended to the exclude file (empty on a second run).
     pub exclude_added: Vec<String>,
@@ -379,6 +399,15 @@ impl Store {
             write_atomic(&config_path, config::default_text(&main_branch).as_bytes())?;
             true
         };
+        // The standing worker instructions (ADR 0048 decision 7). A file the owner edited is
+        // never overwritten: `init` only fills in the generic default.
+        let worker_brief_path = root.join(WORKER_BRIEF_FILE);
+        let worker_brief_created = if worker_brief_path.is_file() {
+            false
+        } else {
+            write_atomic(&worker_brief_path, WORKER_BRIEF_DEFAULT.as_bytes())?;
+            true
+        };
         let exclude_path = git::exclude_path(&repository).map_err(Error::Failed)?;
         let exclude_added = add_exclude_lines(&exclude_path, track)?;
         let checks = vec![
@@ -394,6 +423,8 @@ impl Store {
             main_branch,
             config_path,
             config_created,
+            worker_brief_path,
+            worker_brief_created,
             exclude_path,
             exclude_added,
             checks,
@@ -1152,6 +1183,7 @@ pub fn exclude_lines(track: bool) -> Vec<String> {
             "/.radian/arc/state.lock",
             "/.radian/arc/runner.lock",
             "/.radian/arc/worktrees/",
+            "/.radian/arc/worker-brief.md",
         ]
         .map(str::to_owned),
     );
