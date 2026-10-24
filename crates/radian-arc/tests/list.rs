@@ -402,3 +402,155 @@ fn the_json_holds_every_plan_and_every_task() {
         .expect("the empty plan is in the JSON");
     assert_eq!(empty["tasks"].as_array().unwrap().len(), 0);
 }
+
+/// A merged task and a cancelled follow-up make a finished plan (ADR 0048 decision 3): the
+/// default list leaves it out, `--all` shows it with both tasks, and its progress reads `1/1`
+/// because a cancelled task is not work left to do.
+#[test]
+fn a_merged_task_and_a_cancelled_follow_up_finish_the_plan_and_read_1_of_1() {
+    let scratch = fixture("merged-cancelled");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("done", "Done plan", "request").unwrap();
+    let merged = store
+        .add_task(&plan, "one", "One", vec![], false, vec![], "brief")
+        .unwrap();
+    let cancelled = store
+        .add_task(&plan, "two", "Two", vec![], false, vec![], "brief")
+        .unwrap();
+    set_state(&store, &merged, TaskState::Done, "merged");
+    set_state(&store, &cancelled, TaskState::Failed, "cancelled");
+
+    let views = store.plans().expect("the plans read");
+    let text = list_text(&views, false);
+    assert!(!text.contains(&plan), "the finished plan is hidden: {text}");
+    assert_eq!(
+        text,
+        "1 finished plan and 1 merged task hidden (--all to show)\n"
+    );
+
+    let all = list_text(&views, true);
+    assert!(
+        all.contains(&format!(
+            "{plan}  draft  auto: off  priority: P3  1/1 merged  total_cost_usd: 0  Done plan"
+        )),
+        "a cancelled task is not in the progress total: {all}"
+    );
+    assert!(all.contains(&merged), "the merged task: {all}");
+    assert!(
+        all.contains(&format!("{cancelled}  failed.cancelled  attempt 0  Two")),
+        "the cancelled task stays listed: {all}"
+    );
+    assert!(!all.contains("hidden"), "{all}");
+
+    let named = list_plan_text(&store.plan_view(&plan).expect("the plan reads"), false);
+    assert!(
+        named.contains("1/1 merged"),
+        "a named plan keeps its header: {named}"
+    );
+    assert!(
+        named.contains(&cancelled),
+        "its cancelled task stays listed: {named}"
+    );
+    assert_eq!(
+        named.lines().last(),
+        Some("1 merged task hidden (--all to show)")
+    );
+}
+
+/// A merged task with an open follow-up is not a finished plan: it stays in the default list,
+/// its merged task is hidden, and its progress reads `1/2`.
+#[test]
+fn a_merged_task_and_a_ready_task_keep_the_plan_shown_and_read_1_of_2() {
+    let scratch = fixture("merged-ready");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("open", "Open plan", "request").unwrap();
+    let merged = store
+        .add_task(&plan, "one", "One", vec![], false, vec![], "brief")
+        .unwrap();
+    let ready = store
+        .add_task(&plan, "two", "Two", vec![], false, vec![], "brief")
+        .unwrap();
+    set_state(&store, &merged, TaskState::Done, "merged");
+
+    let views = store.plans().expect("the plans read");
+    let text = list_text(&views, false);
+    assert!(
+        text.contains(&format!(
+            "{plan}  draft  auto: off  priority: P3  1/2 merged  total_cost_usd: 0  Open plan"
+        )),
+        "{text}"
+    );
+    assert!(text.contains(&ready), "the open task is shown: {text}");
+    assert!(!text.contains(&merged), "the merged task is hidden: {text}");
+    assert_eq!(
+        text.lines().last(),
+        Some("1 merged task hidden (--all to show)")
+    );
+}
+
+/// A plan whose tasks are all `failed.cancelled` is cancelled by its tasks (ADR 0048 decision
+/// 3): the default list hides it as it hides a `cancelled` plan, `--all` shows it, and its
+/// progress reads `0/0`.
+#[test]
+fn a_plan_whose_tasks_are_all_cancelled_is_cancelled_and_reads_0_of_0() {
+    let scratch = fixture("tasks-cancelled");
+    let store = initialized(&scratch);
+    let plan = store
+        .add_plan("stopped", "Stopped plan", "request")
+        .unwrap();
+    let one = store
+        .add_task(&plan, "one", "One", vec![], false, vec![], "brief")
+        .unwrap();
+    let two = store
+        .add_task(&plan, "two", "Two", vec![], false, vec![], "brief")
+        .unwrap();
+    set_state(&store, &one, TaskState::Failed, "cancelled");
+    set_state(&store, &two, TaskState::Failed, "cancelled");
+
+    let views = store.plans().expect("the plans read");
+    assert!(
+        views[0].is_cancelled(),
+        "all its tasks cancelled: it is cancelled"
+    );
+    assert!(!views[0].is_finished(), "nothing merged: not finished");
+    let text = list_text(&views, false);
+    assert!(!text.contains(&plan), "it is hidden: {text}");
+    assert_eq!(text, "1 cancelled plan hidden (--all to show)\n");
+
+    let all = list_text(&views, true);
+    assert!(
+        all.contains(&format!(
+            "{plan}  draft  auto: off  priority: P3  0/0 merged  total_cost_usd: 0  Stopped plan"
+        )),
+        "{all}"
+    );
+    assert!(all.contains(&one) && all.contains(&two), "{all}");
+    assert!(all.contains("failed.cancelled"), "{all}");
+
+    let hidden = list_json(&store, None, false).expect("the JSON builds");
+    assert_eq!(hidden.as_array().map(Vec::len), Some(0), "{hidden}");
+    let shown = list_json(&store, None, true).expect("the JSON builds");
+    assert_eq!(shown.as_array().map(Vec::len), Some(1), "{shown}");
+    assert!(store.show(&plan).is_ok(), "`show` still reads it");
+}
+
+/// A plan with no tasks is never finished and never cancelled: the default list shows it, with
+/// `0/0` progress.
+#[test]
+fn a_plan_with_no_tasks_is_shown() {
+    let scratch = fixture("no-tasks");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("empty", "Empty plan", "request").unwrap();
+    let view = store.plan_view(&plan).expect("the plan reads");
+    assert!(!view.is_finished(), "no task means no finished plan");
+    assert!(!view.is_cancelled(), "no task means no cancelled plan");
+    assert_eq!(view.progress(), (0, 0));
+    let text = list_text(&store.plans().expect("the plans read"), false);
+    assert!(
+        text.contains(&format!(
+            "{plan}  draft  auto: off  priority: P3  0/0 merged  total_cost_usd: 0  Empty plan"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("hidden"), "{text}");
+}

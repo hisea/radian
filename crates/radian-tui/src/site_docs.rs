@@ -4,10 +4,12 @@
 //! The pages come from the same `radian_coding::docs::DOCS` table the binary embeds, so the
 //! web manual and `radian docs` can never drift apart. Markdown becomes HTML with
 //! `pulldown-cmark` (tables, strikethrough, heading attributes); raw HTML in a page is
-//! escaped, never passed through. Links between pages (`foo.md`, `foo.md#bar`) become
-//! `foo.html` (`#bar` included) and fail the build when the target page or heading does
-//! not exist; relative links out of the manual become `blob/main` URLs. No JavaScript is
-//! emitted on any page.
+//! escaped, never passed through. A page's output path is its name under `docs/user/`
+//! (`arc/loop.md` -> `arc/loop.html`), and its asset and page links resolve from that
+//! page's own directory. Links between pages (`foo.md`, `../foo.md`, `foo.md#bar`)
+//! resolve from the source page's directory, as GitHub renders them, and fail the build
+//! when the target page or heading does not exist; relative links out of the manual become
+//! `blob/main` URLs. No JavaScript is emitted on any page.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
 use std::collections::{HashMap, HashSet};
@@ -45,9 +47,9 @@ pub struct DocHeading {
 /// One rendered page.
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
-    /// The file name in `DOCS` (`commands.md`).
+    /// The file name in `DOCS` (`commands.md`, `arc/loop.md`).
     pub name: String,
-    /// The stem (`commands`); `index` for the landing page.
+    /// The stem (`commands`, `arc/loop`); `index` for the landing page.
     pub stem: String,
     /// The first `# ` heading's plain text.
     pub title: String,
@@ -164,13 +166,18 @@ pub fn page_html(site: &RenderedSite, index: usize) -> String {
     out.push_str("\">\n<meta property=\"og:title\" content=\"");
     escape_into(&page.title, &mut out);
     out.push_str(" · radian docs\">\n<meta property=\"og:type\" content=\"article\">\n");
-    out.push_str("<link rel=\"icon\" href=\"../favicon.svg\" type=\"image/svg+xml\">\n");
+    let assets = asset_prefix(&page.stem);
+    out.push_str(&format!(
+        "<link rel=\"icon\" href=\"{assets}favicon.svg\" type=\"image/svg+xml\">\n"
+    ));
     out.push_str("<meta name=\"color-scheme\" content=\"light dark\">\n");
     out.push_str("<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n");
     out.push_str("<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n");
     out.push_str("<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap\">\n");
     out.push_str("<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Sora:wght@600&text=radian&display=swap\">\n");
-    out.push_str("<link rel=\"stylesheet\" href=\"../docs.css\">\n</head>\n<body>\n");
+    out.push_str(&format!(
+        "<link rel=\"stylesheet\" href=\"{assets}docs.css\">\n</head>\n<body>\n"
+    ));
     out.push_str("<div class=\"sheet\">\n<header class=\"top\">\n<nav aria-label=\"Main\">\n");
     out.push_str("<a class=\"brand lf-sora\" href=\"/\" aria-label=\"radian home\">\n");
     out.push_str("<svg class=\"mark-a\" viewBox=\"1.6 4.4 20.8 18\" aria-hidden=\"true\"><path d=\"M3 21 L21 21 A18 18 0 0 0 12.73 5.85 Z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/><path d=\"M21 21 A18 18 0 0 0 12.73 5.85\" fill=\"none\" stroke=\"var(--accent)\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>\n");
@@ -220,7 +227,7 @@ fn sidebar_into(site: &RenderedSite, current: usize, out: &mut String) {
 fn sidebar_link(site: &RenderedSite, i: usize, current: usize, out: &mut String) {
     let page = &site.pages[i];
     out.push_str("<a href=\"");
-    out.push_str(&href_of(&page.stem));
+    out.push_str(&relative_href(&site.pages[current].stem, &page.stem));
     out.push('"');
     if i == current {
         out.push_str(" aria-current=\"page\"");
@@ -247,13 +254,56 @@ fn toc_into(page: &RenderedPage, out: &mut String) {
     out.push_str("</ul>\n</nav>\n");
 }
 
-/// The output file name for a stem: `index.html` for the landing page, `<stem>.html` else.
-fn href_of(stem: &str) -> String {
+/// The output file for a page stem: `index.html` for the landing page, `<stem>.html` for
+/// every other page (`arc/loop` -> `arc/loop.html`, `arc/index` -> `arc/index.html`).
+pub fn output_path(stem: &str) -> String {
     if stem == "index" {
         "index.html".to_owned()
     } else {
         format!("{stem}.html")
     }
+}
+
+/// The directory that holds a page's output (`arc` for `arc/loop`), empty at the root.
+fn page_dir(stem: &str) -> &str {
+    stem.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
+}
+
+/// `to`'s output path relative to the directory that holds `from`'s page: `gate.html` from
+/// `arc/loop` to `arc/gate`, `../configuration.html` from `arc/loop` to `configuration`.
+fn relative_href(from: &str, to: &str) -> String {
+    let from_dir: Vec<&str> = page_dir(from)
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let target = output_path(to);
+    let mut parts: Vec<&str> = target.split('/').collect();
+    let name = parts.pop().unwrap_or("");
+    let common = from_dir
+        .iter()
+        .zip(parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut out = String::new();
+    for _ in common..from_dir.len() {
+        out.push_str("../");
+    }
+    for part in &parts[common..] {
+        out.push_str(part);
+        out.push('/');
+    }
+    out.push_str(name);
+    out
+}
+
+/// The `../` prefix that reaches the site root's assets (`docs.css`, `favicon.svg`) from a
+/// page: root pages need one, `arc/` pages two.
+fn asset_prefix(stem: &str) -> String {
+    let depth = page_dir(stem)
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .count();
+    "../".repeat(depth + 1)
 }
 
 /// The sidebar groups from the landing page: each `## ` section in order with the
@@ -722,9 +772,10 @@ fn lang_attr(lang: &str) -> String {
     }
 }
 
-/// Rewrites one link destination: page links become `.html`, repo links become `blob/main`
-/// URLs, external links and same-page fragments pass through. Unknown pages and headings
-/// fail the build with the source page and the link.
+/// Rewrites one link destination: page links become relative `.html` paths from the source
+/// page's directory, repo links become `blob/main` URLs, external links and same-page
+/// fragments pass through. Unknown pages and headings fail the build with the source page
+/// and the link.
 fn resolve_link(dest: &str, ctx: &mut Ctx<'_>) -> Result<String, SiteError> {
     let dest = dest.trim();
     let (path, fragment) = match dest.split_once('#') {
@@ -747,39 +798,57 @@ fn resolve_link(dest: &str, ctx: &mut Ctx<'_>) -> Result<String, SiteError> {
     if has_scheme(path) {
         return Ok(dest.to_owned());
     }
-    if path.contains('/') || path.starts_with('.') {
-        // A link into the repo (`../adr/…`): resolve it against `docs/user/` and point
-        // at the file on `main`.
-        let mut href = format!("{REPO_BLOB}/{}", repo_path(path));
+    let source = stem_of(ctx.page);
+    let source_dir = page_dir(source);
+    // A page link is written relative to its source page, as GitHub renders it
+    // (`gate.md` and `../configuration.md` from `arc/loop.md`).
+    if path.ends_with(".md")
+        && let Some(resolved) = join_docs_user(source_dir, path)
+        && let Some(stem) = resolved.strip_suffix(".md")
+        && ctx.stems.contains(stem)
+    {
+        if let Some(id) = fragment
+            && !id.is_empty()
+            && !ctx
+                .ids
+                .get(stem)
+                .is_some_and(|headings| headings.iter().any(|h| h.id == id))
+        {
+            return Err(SiteError {
+                page: ctx.page.to_owned(),
+                link: dest.to_owned(),
+                reason: format!("`{path}` has no heading `#{id}`"),
+            });
+        }
+        let mut href = relative_href(source, stem);
         if let Some(id) = fragment {
             href.push('#');
             href.push_str(id);
         }
         return Ok(href);
     }
-    if path.ends_with(".md") {
-        let stem = stem_of(path);
-        if ctx.stems.contains(stem) {
-            if let Some(id) = fragment
-                && !id.is_empty()
-                && !ctx
-                    .ids
-                    .get(stem)
-                    .is_some_and(|headings| headings.iter().any(|h| h.id == id))
-            {
-                return Err(SiteError {
-                    page: ctx.page.to_owned(),
-                    link: dest.to_owned(),
-                    reason: format!("`{path}` has no heading `#{id}`"),
-                });
-            }
-            let mut href = href_of(stem);
-            if let Some(id) = fragment {
-                href.push('#');
-                href.push_str(id);
-            }
-            return Ok(href);
+    // A path under `docs/user/` that is not in the table is a missing page, never a repo
+    // link: `missing.md` from `arc/loop.md` names `docs/user/arc/missing.md`.
+    if path.ends_with(".md")
+        && let Some(resolved) = join_docs_user(source_dir, path)
+        && repo_has(&format!("docs/user/{resolved}"))
+    {
+        let mut href = format!("{REPO_BLOB}/docs/user/{resolved}");
+        if let Some(id) = fragment {
+            href.push('#');
+            href.push_str(id);
         }
+        return Ok(href);
+    }
+    if path.contains('/') || path.starts_with('.') {
+        // A link out of the manual (`../adr/…`): resolve it from the source page's directory
+        // and point at the file on `main`.
+        let mut href = format!("{REPO_BLOB}/{}", repo_path(path, source_dir));
+        if let Some(id) = fragment {
+            href.push('#');
+            href.push_str(id);
+        }
+        return Ok(href);
     }
     // A bare name (`ARCHITECTURE.md`): a repo file when it exists, else a link to a
     // page that is not in the table, which fails the build.
@@ -818,13 +887,38 @@ fn has_scheme(path: &str) -> bool {
         && !scheme.contains('/')
 }
 
-/// Resolves a repo-relative link against `docs/user/` (a leading `/` counts from the
-/// repo root instead), collapsing `.` and `..`.
-fn repo_path(path: &str) -> String {
+/// Resolves a link relative to `source_dir` (the page's directory under `docs/user/`) to a
+/// normalized path under `docs/user/`, or `None` when the link leaves that directory.
+fn join_docs_user(source_dir: &str, path: &str) -> Option<String> {
     let mut parts: Vec<&str> = if path.starts_with('/') {
         Vec::new()
     } else {
-        vec!["docs", "user"]
+        source_dir
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect()
+    };
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            rest => parts.push(rest),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Resolves a repo-relative link from `source_dir` (the page's directory under `docs/user/`)
+/// to a repo path (a leading `/` counts from the repo root instead), collapsing `.` and `..`.
+fn repo_path(path: &str, source_dir: &str) -> String {
+    let mut parts: Vec<&str> = if path.starts_with('/') {
+        Vec::new()
+    } else {
+        let mut base = vec!["docs", "user"];
+        base.extend(source_dir.split('/').filter(|part| !part.is_empty()));
+        base
     };
     for part in path.split('/') {
         match part {
@@ -843,7 +937,7 @@ fn repo_path(path: &str) -> String {
 
 /// Whether `id` is a heading on `page`.
 fn check_fragment(page: &str, id: &str, ctx: &mut Ctx<'_>) -> Result<(), SiteError> {
-    let stem = stem_of(page.strip_suffix(".md").unwrap_or(page));
+    let stem = stem_of(page);
     let known = ctx
         .ids
         .get(stem)

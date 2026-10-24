@@ -591,6 +591,34 @@ fn a_run_pass_claims_and_gates_nothing_from_a_cancelled_plan() {
     );
 }
 
+/// A plan whose tasks are all `failed.cancelled` is cancelled by its tasks, so a pass lists
+/// it as waiting on nothing: a cancelled task is not work left to do.
+#[test]
+fn a_pass_lists_a_plan_whose_tasks_are_all_cancelled_as_waiting_on_nothing() {
+    let repo = Repo::new("run-tasks-cancelled");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "stopped");
+    let one = add_task(&store, &plan, "one", &[]);
+    let two = add_task(&store, &plan, "two", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    for task in [&one, &two] {
+        attempt::cancel(&store, task).expect("the task cancels on its own");
+    }
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(
+        run.stdout.contains("nothing waits"),
+        "a cancelled plan waits on nothing:\n{}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains(&plan),
+        "the cancelled plan is not in the summary:\n{}",
+        run.stdout
+    );
+}
+
 /// A plan cancel leaves a `doing` task whose wrapper never confirms its end at
 /// `doing.reconciling`. The plan is final, so the next pass ends the task at
 /// `failed.cancelled` instead of leaving it in `doing`, where it would hold a
@@ -3422,6 +3450,106 @@ fn a_command_failure_is_reverified_automatically_once_main_moves() {
         !repo.attempt_dir(&task, 2).join("identity.json").exists(),
         "the automatic reverify started a worker"
     );
+}
+
+/// A worker attempt whose `commands` stage failed at `max_auto_rework`, then an automatic
+/// reverify that fails again: the failed reverify is not an automatic rework, so the count
+/// and the plan's `auto` stay as they were (ADR 0048 decisions 9 and 12). Mutation: count the
+/// failed reverify and the plan pauses at `off`.
+#[test]
+fn a_failed_automatic_reverify_does_not_count_as_an_auto_rework() {
+    let repo = Repo::new("run-auto-reverify-no-count");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-no-count");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(&repo, "max_auto_rework = 2", "max_auto_rework = 1");
+    // The tree stays broken for the worker's gate and the reverify's gate alike.
+    commands(&repo, "false");
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "rework_pending"
+    });
+    let failed = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(failed.auto_rework, 1, "the worker's failure counts");
+    assert_eq!(plan_auto(&store, &plan), "run", "the limit is not passed");
+
+    advance_main(&repo, "main-move.txt", "moved\n");
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        attempt(&store, &task) == 2 && state(&store, &task).1 == "rework_pending"
+    });
+    assert!(run.contains("auto reverify"), "{run}");
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        stored.auto_rework, 1,
+        "the failed automatic reverify counted: {run}"
+    );
+    assert_eq!(
+        plan_auto(&store, &plan),
+        "run",
+        "the plan paused on the failed reverify: {run}"
+    );
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "rework_pending"),
+        "{run}"
+    );
+    assert_eq!(stored.attempt, 2, "{run}");
+}
+
+/// The same for the owner's `radian arc reverify`: its failure leaves `auto_rework` and the
+/// plan's `auto` alone (ADR 0048 decisions 9 and 12).
+#[test]
+fn a_failed_hand_reverify_does_not_count_as_an_auto_rework() {
+    let repo = Repo::new("run-hand-reverify-no-count");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "hand-no-count");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(&repo, "max_auto_rework = 2", "max_auto_rework = 1");
+    commands(&repo, "false");
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "rework_pending"
+    });
+    let failed = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(failed.auto_rework, 1, "the worker's failure counts");
+
+    advance_main(&repo, "main-move.txt", "moved\n");
+    let reverified = repo.radian(&["arc", "reverify", &task]);
+    assert_eq!(reverified.code, 0, "reverify: {}", reverified.stderr);
+    assert!(
+        reverified
+            .stdout
+            .contains(&format!("{task}-2 reverify -> review.verifying")),
+        "{}",
+        reverified.stdout
+    );
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        stored.auto_rework, 1,
+        "the failed hand reverify counted: {}",
+        reverified.stdout
+    );
+    assert_eq!(
+        plan_auto(&store, &plan),
+        "run",
+        "the plan paused on the failed hand reverify: {}",
+        reverified.stdout
+    );
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "rework_pending"),
+        "{}",
+        reverified.stdout
+    );
+    assert_eq!(stored.attempt, 2, "{}", reverified.stdout);
 }
 
 /// While main stands still, the failure is not re-verified: nothing runs again.

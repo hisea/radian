@@ -551,11 +551,13 @@ fn apply_gate_outcome(
     // remote a second time; `finish_verification` is the pass's own state move.
     clear_gate_record(store, task);
     let verified = review::finish_verification(store, &plan)?;
-    // `run.rs`'s hook: a verification that ended in `review.rework_pending` without a conflict
-    // counts one automatic rework (`review_auto_rework` already counted its own pause).
+    // `run.rs`'s hook: a verification of a worker attempt that ended in `review.rework_pending`
+    // without a conflict counts one automatic rework (`review_auto_rework` already counted its
+    // own pause); a failed reverify attempt does not count (ADR 0048 decisions 9 and 12).
     if verified.phase == "rework_pending"
         && verified.conflict.is_none()
         && verified.paused.is_none()
+        && !attempt_ops::is_reverify_attempt(store, task)?
     {
         attempt_ops::record_auto_rework(store, task)?;
     }

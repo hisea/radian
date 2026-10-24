@@ -606,13 +606,18 @@ fn advance_verification(
                         // A review rework already counted itself and may have paused the plan;
                         // every other failure to `rework_pending` counts here (ADR 0048
                         // decisions 9 and 12). A conflict that reached its own limit is never
-                        // an automatic rework: it does not pause the plan.
+                        // an automatic rework: it does not pause the plan. Neither does a
+                        // failed reverify attempt, whether the loop or the owner started it.
                         let paused = match &verified.paused {
                             Some(paused) => Some(paused.clone()),
                             None if verified.phase == "rework_pending"
                                 && verified.conflict.is_none() =>
                             {
-                                attempt_ops::record_auto_rework(store, task_id)?
+                                if attempt_ops::is_reverify_attempt(store, task_id)? {
+                                    None
+                                } else {
+                                    attempt_ops::record_auto_rework(store, task_id)?
+                                }
                             }
                             None => None,
                         };
@@ -733,10 +738,10 @@ pub(crate) fn task_claim_order(store: &Store) -> Result<Vec<String>, Error> {
     Ok(ids)
 }
 
-/// Whether the task's plan is `cancelled`: the loop neither claims nor gates its tasks
-/// (ADR 0048 decisions 3 and 13).
+/// Whether the task's plan is `cancelled`, by its `status` or by its tasks: the loop neither
+/// claims nor gates its tasks (ADR 0048 decisions 3 and 13).
 fn plan_is_cancelled(store: &Store, plan: &str) -> Result<bool, Error> {
-    Ok(store.load_plan(plan)?.item.is_cancelled())
+    store.plan_is_cancelled(plan)
 }
 
 /// Every task in `review.rework_pending`, in claim order. A file that changed outside arc and
@@ -870,8 +875,12 @@ fn merge_auto(
                         transitions.note(note);
                     }
                     let after = store.load_task(&task.item.id)?.item;
+                    // A failed integration of a worker attempt counts; the same failure of a
+                    // reverify attempt does not (ADR 0048 decisions 9 and 12).
+                    let reverify = attempt_ops::is_reverify_attempt(store, &task.item.id)?;
                     if after.state == TaskState::Review
                         && after.phase == "rework_pending"
+                        && !reverify
                         && let Some(paused) = attempt_ops::record_auto_rework(store, &task.item.id)?
                     {
                         transitions.push(format!("{} paused: {}", paused.plan, paused.text));
@@ -951,7 +960,7 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
     for view in plans_in_claim_order(store)? {
         let plan = &view.plan.item;
         // A cancelled plan waits on nothing: the loop never serves it again.
-        if plan.is_cancelled() {
+        if view.is_cancelled() {
             continue;
         }
         let open: Vec<&crate::store::Loaded<model::TaskFile>> = view

@@ -474,6 +474,45 @@ fn radian_docs_prints_index_and_pages() {
     assert_eq!(body, *expected, "page bytes match the table");
 }
 
+/// A directory topic opens its `index.md`; a page under `arc/` reads by its path, and the
+/// old prefixed names are unknown.
+#[test]
+fn radian_docs_reads_directory_topics_and_nested_pages() {
+    let bin = env!("CARGO_BIN_EXE_radian");
+    let (_, loop_page) = radian_coding::docs::lookup_topic("arc/loop").expect("arc/loop exists");
+    for topic in ["arc/loop", "arc/loop.md"] {
+        let output = std::process::Command::new(bin)
+            .args(["docs", topic])
+            .output()
+            .expect("radian docs runs");
+        assert!(output.status.success(), "{topic}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            *loop_page,
+            "{topic} prints arc/loop.md"
+        );
+    }
+    // A topic that names a directory opens its `index.md`.
+    let (_, index_page) = radian_coding::docs::lookup_topic("arc").expect("arc opens its index");
+    let index = std::process::Command::new(bin)
+        .args(["docs", "arc"])
+        .output()
+        .expect("radian docs arc runs");
+    assert!(index.status.success(), "{index:?}");
+    assert_eq!(String::from_utf8_lossy(&index.stdout), *index_page);
+    // The old prefixed name is not kept as an alias.
+    let missing = std::process::Command::new(bin)
+        .args(["docs", "arc-loop"])
+        .output()
+        .expect("radian docs arc-loop runs");
+    assert_eq!(missing.status.code(), Some(2), "{missing:?}");
+    let err = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        err.contains("unknown docs topic `arc-loop`") && err.contains("arc/loop"),
+        "the refusal names the topic and lists the new path: {err}"
+    );
+}
+
 /// An unknown topic exits 2 and lists the pages.
 #[test]
 fn radian_docs_unknown_topic_exits_two_and_lists_pages() {

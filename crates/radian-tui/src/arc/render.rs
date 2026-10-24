@@ -299,15 +299,26 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
             Span::styled(fit(&result.text, width.saturating_sub(2)), style),
         ]);
     }
+    // `Esc` at the top level: one weak line says how to leave, until the next key.
+    if app.quit_hint {
+        return Line::from(vec![
+            Span::styled("  ", theme.hint),
+            Span::styled("q quits", theme.hint),
+        ]);
+    }
     if app.log_open {
         return Line::from(vec![
             Span::styled("  ", theme.hint),
-            Span::styled("j/k scroll   f end   L close   q quit", theme.hint),
+            Span::styled(
+                "j/k scroll   f end   esc close   L close   q quit",
+                theme.hint,
+            ),
         ]);
     }
     let hints: Vec<Hint> = match app.page {
         Page::Plans => {
-            let plan = app.selected_plan().map(|view| &view.plan.item);
+            let selected = app.selected_plan();
+            let plan = selected.map(|view| &view.plan.item);
             let draft = plan.is_some_and(|plan| plan.status == "draft");
             let confirmed = plan.is_some_and(|plan| plan.status == "confirmed");
             let auto_on = plan.is_some_and(|plan| plan.auto != "off");
@@ -320,10 +331,17 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 Focus::Plans => plan.is_some(),
                 Focus::Tasks => task.is_some(),
             };
-            let priority = plan.is_some_and(|plan| !plan.is_cancelled());
-            vec![
+            let priority = selected.is_some_and(|view| !view.is_cancelled());
+            let mut hints = vec![
                 Hint::new("↑↓", "select", false),
                 Hint::new("enter", "open task", false),
+            ];
+            // Only in the task column: from the plan column `Esc` is the top level, which has
+            // nowhere to go and so shows no `esc back`.
+            if app.focus == Focus::Tasks {
+                hints.push(Hint::new("esc", "back", false));
+            }
+            hints.extend([
                 Hint::new("c", "confirm", !can_confirm),
                 Hint::new("x", "cancel", !have_item),
                 Hint::new("a", "auto", !confirmed),
@@ -343,7 +361,8 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 // last and is the first view key the row drops when it is tight.
                 Hint::secondary("o", "order", false),
                 Hint::essential("q", "quit", false),
-            ]
+            ]);
+            hints
         }
         Page::Board => {
             if app.board.finished {
@@ -351,7 +370,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                     Hint::new("j/k", "scroll", false),
                     Hint::new("enter", "task", app.board.selected_done().is_none()),
                     Hint::new("d", "columns", false),
-                    Hint::new("esc", "columns", false),
+                    Hint::new("esc", "back", false),
                     Hint::essential("q", "quit", false),
                 ]
             } else {
@@ -390,6 +409,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                     Hint::new("M", "merge page", !review),
                     Hint::new("p", "plan", card.is_none()),
                     Hint::new("d", "finished", false),
+                    Hint::new("esc", "back", false),
                     Hint::secondary("b", "plans", false),
                     Hint::essential("q", "quit", false),
                 ]

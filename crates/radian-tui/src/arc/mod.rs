@@ -80,7 +80,8 @@ pub enum PlanFilter {
     Active,
     /// Every plan.
     All,
-    /// The finished plans only: every task `done.merged`, and not cancelled.
+    /// The finished plans only: [`radian_arc::store::PlanView::is_finished`], and not
+    /// cancelled.
     Done,
     /// The cancelled plans only.
     Cancelled,
@@ -107,14 +108,15 @@ impl PlanFilter {
         }
     }
 
-    /// Whether this view lists `view`. The "finished" test is the one `radian arc list` uses
-    /// ([`radian_arc::store::PlanView::is_finished`]); a plan with no tasks is active.
+    /// Whether this view lists `view`. The finished and cancelled tests are the ones
+    /// `radian arc list` uses ([`radian_arc::store::PlanView::is_finished`] and
+    /// [`radian_arc::store::PlanView::is_cancelled`]); a plan with no tasks is active.
     pub fn shows(self, view: &PlanView) -> bool {
         match self {
-            PlanFilter::Active => !view.plan.item.is_cancelled() && !view.is_finished(),
+            PlanFilter::Active => !view.is_cancelled() && !view.is_finished(),
             PlanFilter::All => true,
-            PlanFilter::Done => view.is_finished(),
-            PlanFilter::Cancelled => view.plan.item.is_cancelled(),
+            PlanFilter::Done => !view.is_cancelled() && view.is_finished(),
+            PlanFilter::Cancelled => view.is_cancelled(),
         }
     }
 
@@ -313,7 +315,8 @@ pub fn task_mark(state: TaskState, phase: &str) -> Mark {
 /// [`Mark`]; these are only the plan list's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanMark {
-    /// `✕`: the plan is `cancelled`. The rest of the row is weak.
+    /// `✕`: a cancelled plan, by its `status` or by all its tasks being `failed.cancelled`.
+    /// The rest of the row is weak.
     Cancelled,
     /// `◌`: the plan is `draft`.
     Draft,
@@ -326,7 +329,8 @@ pub enum PlanMark {
     Paused,
     /// `○`: a task is open, and nothing is running.
     Queued,
-    /// `✓`: every task is `done.*` or `failed.cancelled`, and at least one is `done`.
+    /// `✓`: [`radian_arc::store::PlanView::is_finished`]: every task is `done.merged` or
+    /// `failed.cancelled`, and at least one is `done.merged`.
     Done,
 }
 
@@ -358,10 +362,11 @@ impl PlanMark {
     }
 }
 
-/// The mark of one plan: the first rule of ADR 0048 decision 11's table that holds.
+/// The mark of one plan: the first rule of ADR 0048 decision 11's table that holds. The
+/// cancelled and finished rules are the store's own, so `list` and this mark never disagree.
 pub fn plan_mark(view: &PlanView) -> PlanMark {
     let plan = &view.plan.item;
-    if plan.status == "cancelled" {
+    if view.is_cancelled() {
         return PlanMark::Cancelled;
     }
     if plan.status == "draft" {
@@ -392,12 +397,7 @@ pub fn plan_mark(view: &PlanView) -> PlanMark {
     if open {
         return PlanMark::Queued;
     }
-    let all_finished = tasks.iter().all(|task| {
-        task.item.state == TaskState::Done
-            || (task.item.state == TaskState::Failed && task.item.phase == "cancelled")
-    });
-    let any_done = tasks.iter().any(|task| task.item.state == TaskState::Done);
-    if all_finished && any_done {
+    if view.is_finished() {
         return PlanMark::Done;
     }
     PlanMark::Queued
@@ -840,6 +840,9 @@ pub struct ArcApp {
     pub pending: Option<Pending>,
     /// The last action's line, shown until the next key.
     pub result: Option<ResultLine>,
+    /// `Esc` at the top level (the plans page's plan column): the footer shows one weak line,
+    /// `q quits`, until the next key. `Esc` never quits the TUI.
+    pub quit_hint: bool,
     /// The command log the runner should read, off the UI thread.
     log_request: Option<LogRequest>,
     /// The log the runner is reading: one at a time, and a reply for anything else is stale.
@@ -900,6 +903,7 @@ impl ArcApp {
             action: None,
             pending: None,
             result: None,
+            quit_hint: false,
             log_request: None,
             log_pending: None,
             float: None,
@@ -1435,7 +1439,7 @@ impl ArcApp {
     /// [`ArcApp::start_blocker`] for one task of one plan: the board asks it about the card it
     /// shows.
     fn start_blocker_for(&self, view: &PlanView, item: &TaskFile) -> Option<String> {
-        if view.plan.item.is_cancelled() {
+        if view.is_cancelled() {
             return Some(format!("plan {} is cancelled", view.plan.item.id));
         }
         if view.plan.item.status != "confirmed" {
@@ -1680,6 +1684,58 @@ impl ArcApp {
         ArcKey::Quit
     }
 
+    /// `Esc`: one level back, from the innermost thing open. A float closes changing nothing
+    /// (as `n` does), then an overlay view (`L`'s log, a merge command's log, the board's
+    /// finished list), then the merge page, the task page, the board, and the plans page's
+    /// task column. At the top level — the plans page's plan column — nothing happens and the
+    /// footer says how to leave. `Esc` never quits (the manual's "Leaving and going back").
+    fn go_back(&mut self) -> ArcKey {
+        // Level 1: a float, on any page, closes as `n` does.
+        if self.float.is_some() {
+            self.float = None;
+            return ArcKey::Redraw;
+        }
+        // Level 2: the overlay view that is on screen. The loop's log draws over every page,
+        // a merge command's log only over the merge page, and the board's finished list only
+        // over the board's columns. A view the current page keeps hidden is not a level: `b`
+        // leaves the merge page (and its log) behind, and a task opened from the finished list
+        // leaves that list behind, so `Esc` must return to the page underneath instead.
+        if self.log_open {
+            self.log_open = false;
+            return ArcKey::Redraw;
+        }
+        if self.page == Page::Merge && self.merge.as_ref().is_some_and(|page| page.log.is_some()) {
+            if let Some(page) = self.merge.as_mut() {
+                page.log = None;
+            }
+            return ArcKey::Redraw;
+        }
+        if self.page == Page::Board && self.board.finished {
+            self.board.show_columns();
+            return ArcKey::Redraw;
+        }
+        // An action in flight takes no page key: its result lands on the footer when it ends.
+        if self.pending.is_some() {
+            return ArcKey::Ignored;
+        }
+        // Levels 3-6: the pages, each back to the one it was opened from, its selection kept.
+        match self.page {
+            Page::Merge => self.close_merge(),
+            Page::Task => self.close_task(),
+            Page::Board => self.page = Page::Plans,
+            Page::Plans => {
+                if self.focus == Focus::Tasks {
+                    // The plan selection is kept; only the focus moves back.
+                    self.focus = Focus::Plans;
+                } else {
+                    // Level 7: the top level, with nowhere to go.
+                    self.quit_hint = true;
+                }
+            }
+        }
+        ArcKey::Redraw
+    }
+
     /// One key press.
     pub fn on_key(&mut self, key: &KeyEvent) -> ArcKey {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1687,10 +1743,16 @@ impl ArcApp {
         if key.code == KeyCode::Char('c') && ctrl {
             return ArcKey::Quit;
         }
-        // An open float takes every key first (ADR 0035: floats only): the reject note may
-        // hold a `q` without leaving the TUI.
+        // The next key clears the last action's line (ADR 0048 §11) and the top-level hint.
+        self.result = None;
+        self.quit_hint = false;
+        // `Esc` steps back one level; it never quits, whatever is on top.
+        if key.code == KeyCode::Esc {
+            return self.go_back();
+        }
+        // An open float takes every other key first (ADR 0035: floats only): the reject note
+        // may hold a `q` without leaving the TUI.
         if self.float.is_some() {
-            self.result = None;
             return self.on_float_key(key);
         }
         // `L` opens and closes the loop's log from any page (ADR 0048 decision 13). A merge
@@ -1727,12 +1789,7 @@ impl ArcApp {
             };
         }
         if self.log_open {
-            self.result = None;
             return match key.code {
-                KeyCode::Esc => {
-                    self.log_open = false;
-                    ArcKey::Redraw
-                }
                 KeyCode::Char('j') | KeyCode::Down => {
                     self.scroll_log(1);
                     ArcKey::Redraw
@@ -1756,8 +1813,6 @@ impl ArcApp {
         if self.pending.is_some() {
             return ArcKey::Ignored;
         }
-        // The next key clears the last action's line (ADR 0048 §11).
-        self.result = None;
         // `b` opens the board from any page; on the board it goes back to the plans page.
         if key.code == KeyCode::Char('b') && !ctrl {
             if self.page == Page::Board {
@@ -1778,7 +1833,6 @@ impl ArcApp {
 
     fn on_plans_key(&mut self, key: &KeyEvent) -> ArcKey {
         match key.code {
-            KeyCode::Esc => ArcKey::Quit,
             KeyCode::Tab => {
                 if self.selected_task().is_some() {
                     self.open_task();
@@ -1935,13 +1989,13 @@ impl ArcApp {
         };
         let plan = view.plan.item.id.clone();
         let current = view.plan.item.priority().to_owned();
-        let cancelled = view.plan.item.is_cancelled();
+        let cancelled = view.is_cancelled();
         self.step_plan_priority(&plan, &current, cancelled, delta)
     }
 
     /// [`ArcApp::step_priority`] for one plan: the board steps the selected card's plan.
-    /// `cancelled` is [`radian_arc::store::model::PlanFile::is_cancelled`] of that plan: a
-    /// cancelled plan queues the step even at an end, so the CLI's refusal is what shows.
+    /// `cancelled` is [`radian_arc::store::PlanView::is_cancelled`] of that plan: a cancelled
+    /// plan queues the step even at an end, so the CLI's refusal is what shows.
     fn step_plan_priority(
         &mut self,
         plan: &str,
@@ -2011,7 +2065,7 @@ impl ArcApp {
     fn on_board_key(&mut self, key: &KeyEvent) -> ArcKey {
         if self.board.finished {
             return match key.code {
-                KeyCode::Esc | KeyCode::Char('d') => {
+                KeyCode::Char('d') => {
                     self.board.show_columns();
                     ArcKey::Redraw
                 }
@@ -2037,10 +2091,6 @@ impl ArcApp {
             };
         }
         match key.code {
-            KeyCode::Esc => {
-                self.page = Page::Plans;
-                ArcKey::Redraw
-            }
             KeyCode::Left | KeyCode::Char('h') => {
                 self.board.move_horizontal(-1);
                 ArcKey::Redraw
@@ -2135,7 +2185,7 @@ impl ArcApp {
                 };
                 let plan = view.plan.item.id.clone();
                 let current = view.plan.item.priority().to_owned();
-                let cancelled = view.plan.item.is_cancelled();
+                let cancelled = view.is_cancelled();
                 self.step_plan_priority(&plan, &current, cancelled, -1)
             }
             KeyCode::Char('-') => {
@@ -2144,7 +2194,7 @@ impl ArcApp {
                 };
                 let plan = view.plan.item.id.clone();
                 let current = view.plan.item.priority().to_owned();
-                let cancelled = view.plan.item.is_cancelled();
+                let cancelled = view.is_cancelled();
                 self.step_plan_priority(&plan, &current, cancelled, 1)
             }
             // The merge page's own keys land there: a card in `review.*` opens it, and its `M`,
@@ -2191,10 +2241,6 @@ impl ArcApp {
             return ArcKey::Ignored;
         };
         match key.code {
-            KeyCode::Esc => {
-                self.close_task();
-                ArcKey::Redraw
-            }
             // The tabs cycle both ways; `Tab` no longer leaves the page (`Esc` does).
             KeyCode::BackTab => {
                 page.tab = page.tab.previous();
@@ -2319,17 +2365,16 @@ impl ArcApp {
                     self.queue_action(action);
                     ArcKey::Redraw
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                KeyCode::Char('q') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.quit_key()
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
                     self.float = None;
                     ArcKey::Redraw
                 }
                 _ => ArcKey::Ignored,
             },
             Float::Reject { note } => match key.code {
-                KeyCode::Esc => {
-                    self.float = None;
-                    ArcKey::Redraw
-                }
                 KeyCode::Enter => {
                     if note.trim().is_empty() {
                         // The CLI refuses an empty note (exit 2); the float stays open.
@@ -2366,13 +2411,13 @@ impl ArcApp {
 
     /// The merge page's keys (ADR 0048 §11).
     fn on_merge_key(&mut self, key: &KeyEvent) -> ArcKey {
-        // A command's log takes the keys first: it scrolls, and Esc closes it.
+        // A command's log takes the other keys first: it scrolls. `Esc` never reaches here:
+        // [`Self::go_back`] closes the log, then the page.
         if self.merge.as_ref().is_some_and(|page| page.log.is_some()) {
             let Some(page) = self.merge.as_mut() else {
                 return ArcKey::Ignored;
             };
             match key.code {
-                KeyCode::Esc => page.log = None,
                 KeyCode::Char('j') | KeyCode::Down => {
                     if let Some(log) = &mut page.log {
                         log.scroll(1);
@@ -2396,7 +2441,7 @@ impl ArcApp {
             return ArcKey::Ignored;
         };
         match key.code {
-            KeyCode::Esc | KeyCode::Tab => {
+            KeyCode::Tab => {
                 self.close_merge();
                 ArcKey::Redraw
             }
@@ -2525,12 +2570,7 @@ fn attempts_with_current(attempts: Vec<AttemptView>, attempt: u32) -> Vec<Attemp
 
 /// A plan as the page draws it: the summary line and its tasks.
 fn plan_row(view: &PlanView, tasks: Vec<TaskRow>) -> PlanRow {
-    let total = view.plan.item.tasks.len();
-    let merged = view
-        .tasks
-        .iter()
-        .filter(|task| task.item.is_merged())
-        .count();
+    let (merged, total) = view.progress();
     let mark = plan_mark(view);
     let costs: Vec<f64> = view
         .tasks

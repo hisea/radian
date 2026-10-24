@@ -1,35 +1,41 @@
-//! The bundled user manual (`docs/user/*.md`), compiled into the binary.
+//! The bundled user manual (`docs/user/`), compiled into the binary.
 //!
 //! The pages live in `docs/user/` as English Markdown. This table embeds each page with
 //! `include_str!`, so the binary and the source tree always carry the same text. No file
 //! is written at startup and nothing is read from `~/.radian/`: the pages come from
 //! memory only.
 //!
-//! The virtual root is `radian://docs/`. `read` opens `radian://docs/<page>.md` and lists
-//! `radian://docs/`. Every other file tool refuses the prefix.
+//! A page name is its path under `docs/user/` (`commands.md`, `arc/loop.md`). The virtual
+//! root is `radian://docs/`. `read` opens `radian://docs/<page>.md`, lists `radian://docs/`,
+//! and opens a directory's `index.md` for `radian://docs/<dir>` or `radian://docs/<dir>/`.
+//! Every other file tool refuses the prefix.
 
 /// The virtual root, with the trailing slash. `radian://docs` without it names the same root.
 pub const DOCS_PREFIX: &str = "radian://docs/";
 /// The bare prefix every virtual path starts with (`write`/`patch` refuse it).
 pub const VIRTUAL_PREFIX: &str = "radian://";
 
-/// One page: the file name and its full text, frontmatter included.
+/// One page: the file name (its path under `docs/user/`) and its full text, frontmatter
+/// included.
 pub const DOCS: &[(&str, &str)] = &[
     (
-        "arc-files.md",
-        include_str!("../../../docs/user/arc-files.md"),
+        "arc/files.md",
+        include_str!("../../../docs/user/arc/files.md"),
     ),
     (
-        "arc-gate.md",
-        include_str!("../../../docs/user/arc-gate.md"),
+        "arc/gate.md",
+        include_str!("../../../docs/user/arc/gate.md"),
     ),
     (
-        "arc-loop.md",
-        include_str!("../../../docs/user/arc-loop.md"),
+        "arc/index.md",
+        include_str!("../../../docs/user/arc/index.md"),
     ),
-    ("arc-mcp.md", include_str!("../../../docs/user/arc-mcp.md")),
-    ("arc-tui.md", include_str!("../../../docs/user/arc-tui.md")),
-    ("arc.md", include_str!("../../../docs/user/arc.md")),
+    (
+        "arc/loop.md",
+        include_str!("../../../docs/user/arc/loop.md"),
+    ),
+    ("arc/mcp.md", include_str!("../../../docs/user/arc/mcp.md")),
+    ("arc/tui.md", include_str!("../../../docs/user/arc/tui.md")),
     ("cli.md", include_str!("../../../docs/user/cli.md")),
     (
         "commands.md",
@@ -108,9 +114,28 @@ pub fn is_root(user: &str) -> bool {
     user == "radian://docs" || user == "radian://docs/"
 }
 
-/// The page name for `radian://docs/<page>`, or `None` when `user` is not under the root.
-pub fn page_name(user: &str) -> Option<&str> {
-    user.strip_prefix(DOCS_PREFIX)
+/// The page name for a `radian://docs/<path>`, or `None` when `user` is not under the root.
+/// A path that does not end in `.md` names a directory, whose page is its `index.md`
+/// (`radian://docs/arc` and `radian://docs/arc/` both name `arc/index.md`).
+pub fn page_name(user: &str) -> Option<String> {
+    let rest = user.strip_prefix(DOCS_PREFIX)?;
+    Some(directory_page(rest).unwrap_or_else(|| rest.to_owned()))
+}
+
+/// The page a bundled-manual directory names (`radian://docs/arc/` -> `arc/index.md`),
+/// or `None` when `user` is not a bundled-manual directory.
+pub fn dir_page(user: &str) -> Option<String> {
+    let rest = user.strip_prefix(DOCS_PREFIX)?;
+    directory_page(rest)
+}
+
+/// The `index.md` of a directory path, or `None` when `rest` names a file (it ends in
+/// `.md`) or is the root (handled by [`is_root`]).
+fn directory_page(rest: &str) -> Option<String> {
+    if rest.is_empty() || rest.ends_with(".md") {
+        return None;
+    }
+    Some(format!("{}/index.md", rest.trim_end_matches('/')))
 }
 
 /// Whether `user` starts with the virtual prefix (`radian://`).
@@ -140,19 +165,26 @@ pub fn description(text: &str) -> &str {
     ""
 }
 
-/// Looks up a `radian docs` topic: `commands` or `commands.md` both find the page.
+/// Looks up a `radian docs` topic: `commands` or `commands.md` both find the page, and a
+/// topic that names a directory opens its `index.md` (`arc` -> `arc/index.md`).
 pub fn lookup_topic(topic: &str) -> Option<(&'static str, &'static str)> {
     let name = if topic.ends_with(".md") {
         topic.to_owned()
     } else {
         format!("{topic}.md")
     };
-    find(&name).map(|text| {
-        let page = DOCS
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(n, _)| *n)
-            .unwrap_or("");
-        (page, text)
+    find_entry(&name).or_else(|| {
+        let dir = topic.trim_end_matches('/');
+        if dir.is_empty() {
+            return None;
+        }
+        find_entry(&format!("{dir}/index.md"))
     })
+}
+
+/// One table entry by exact page name.
+fn find_entry(name: &str) -> Option<(&'static str, &'static str)> {
+    DOCS.iter()
+        .find(|(page, _)| *page == name)
+        .map(|(page, text)| (*page, *text))
 }
