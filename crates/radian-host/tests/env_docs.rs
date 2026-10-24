@@ -17,17 +17,14 @@
 //! code uses it as one: `NAME` is the first argument of an environment call — `env::var(`,
 //! `env::var_os(`, `var_os(`, `env::set_var(`, `env::remove_var(`, `.env(`, `.env_remove(`,
 //! or the env-lookup `get(` — with an optional path prefix (`crate::home::NAME`,
-//! `home::NAME`). A constant whose identifier is never used that way names nothing by itself:
-//! `pub const COLUMN_HEADINGS: [&str; N] = ["TODO", …]` is a board heading, not three
-//! variables, and a literal that merely appears beside a write call (`pub const BOARD_LABEL:
-//! &str = "TODO"` next to `.env("TODO", …)`) is not a use either.
-//!
-//! The one exception is a constant that holds a *list* of names (`pub const INHERITED_ENV:
-//! &[&str] = &["RADIAN_SESSION_ID", "RADIAN_CWD"]`): the list is never passed to a call, so
-//! each entry counts when an environment call names that same literal — the write calls that
-//! set the names are what make the entries variables. This applies only to an array or slice
-//! type (`[&str; N]`, `&[&str]`), never to a scalar (`&str`). Dropping the exception would
-//! lose `RADIAN_SESSION_ID` and `RADIAN_CWD`, two real variables the manual documents.
+//! `home::NAME`). A constant whose identifier is never used that way names nothing, whatever
+//! its value or type: `pub const COLUMN_HEADINGS: [&str; N] = ["TODO", …]` is a board
+//! heading, `pub const BOARD_LABEL: &str = "TODO"` beside `.env("TODO", …)` is not a use,
+//! and the same holds for a list constant (`pub const BOARD_LABELS: &[&str] = &["TODO"]`) —
+//! a call's literal argument never promotes a constant's entries. Write literals are not a
+//! source, only the read forms above; so a name that only the code sets (`RADIAN_SESSION_ID`,
+//! `RADIAN_CWD`, which a footer command receives) is not collected here. The manual documents
+//! those beside `RADIAN_CHILD_HEADERS`.
 
 use std::path::{Path, PathBuf};
 
@@ -104,34 +101,28 @@ fn is_identifier(text: &str) -> bool {
         && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// The first argument of every environment call on this line: an identifier (a path prefix
-/// such as `crate::home::RADIAN_HOME_ENV` reduced to its last segment) or a quoted literal.
-fn env_call_arguments(code: &str, identifiers: &mut Vec<String>, literals: &mut Vec<String>) {
+/// The identifier argument of every environment call on this line, with an optional path
+/// prefix (`crate::home::RADIAN_HOME_ENV`) reduced to its last segment. A quoted literal is
+/// not collected: a write call's literal is not a read, so it names no constant.
+fn env_call_arguments(code: &str, identifiers: &mut Vec<String>) {
     for call in ENV_CALLS {
         let mut rest = code;
         while let Some(at) = rest.find(call) {
             rest = &rest[at + call.len()..];
             let end = rest.find([',', ')']).unwrap_or(rest.len());
             let argument = rest[..end].trim();
-            if let Some(inner) = argument.strip_prefix('"').and_then(|a| a.strip_suffix('"')) {
-                literals.push(inner.to_owned());
-            } else {
-                let last = argument.rsplit("::").next().unwrap_or(argument);
-                if is_identifier(last) {
-                    identifiers.push(last.to_owned());
-                }
+            let last = argument.rsplit("::").next().unwrap_or(argument);
+            if is_identifier(last) {
+                identifiers.push(last.to_owned());
             }
         }
     }
 }
 
-/// A `pub const` (or `pub(crate) const`) definition on this line: its identifier, whether the
-/// declared type is a list of names, and the literals of its value.
+/// A `pub const` (or `pub(crate) const`) definition on this line: its identifier and the
+/// literals of its value.
 struct ConstDefinition {
     name: String,
-    /// The type is an array or slice (`[&str; N]`, `&[&str]`): the value lists names rather
-    /// than holding one. Such a constant is never itself an environment-call argument.
-    list: bool,
     literals: Vec<String>,
 }
 
@@ -153,7 +144,6 @@ fn const_definition(code: &str) -> Option<ConstDefinition> {
     let equals = start + code[start..].find('=')?;
     Some(ConstDefinition {
         name,
-        list: code[start..equals].contains('['),
         literals: string_literals(&code[equals..]),
     })
 }
@@ -167,13 +157,12 @@ fn push_name(names: &mut Vec<String>, name: &str) {
 /// Every environment variable name in `sources`. Whole files are passed at once because a
 /// constant is defined in one module and used in another.
 fn env_names(sources: &[&str]) -> Vec<String> {
-    // Pass one: the arguments the environment calls name — an identifier means a constant
-    // holds a variable's name; a literal means a listed entry is used as one.
+    // Pass one: the identifiers the environment calls name. A constant is a variable's name
+    // only when its identifier appears here; a call's literal argument is never collected.
     let mut identifiers: Vec<String> = Vec::new();
-    let mut literals: Vec<String> = Vec::new();
     for source in sources {
         for line in source.lines() {
-            env_call_arguments(code_of(line), &mut identifiers, &mut literals);
+            env_call_arguments(code_of(line), &mut identifiers);
         }
     }
     let mut names: Vec<String> = Vec::new();
@@ -188,17 +177,10 @@ fn env_names(sources: &[&str]) -> Vec<String> {
             let Some(definition) = const_definition(code) else {
                 continue;
             };
-            // A scalar constant names its literal only when the code passes its identifier
-            // to an environment call. A list constant is never passed to a call; one of its
-            // entries is a variable only when a call names that same literal.
-            let named_by_identifier = identifiers.contains(&definition.name);
-            for literal in &definition.literals {
-                let counts = if definition.list {
-                    literals.contains(literal)
-                } else {
-                    named_by_identifier
-                };
-                if counts {
+            // The constant names its literals only when the code passes its identifier to an
+            // environment call. Neither its name alone nor a literal shared with a call counts.
+            if identifiers.contains(&definition.name) {
+                for literal in &definition.literals {
                     push_name(&mut names, literal);
                 }
             }
@@ -308,19 +290,15 @@ fn a_constant_set_on_a_child_yields_its_literal() {
 }
 
 #[test]
-fn a_list_constant_names_only_the_entries_an_environment_call_uses() {
-    // The list is never an environment-call argument; the entries the write calls set are
-    // the variables. The unused list's entry is not named by any call, so it stays out.
-    let source = "pub const INHERITED_ENV: &[&str] = &[\"RADIAN_SESSION_ID\", \"RADIAN_CWD\"];\n\
-                  pub const UNUSED_ENV_LIST: &[&str] = &[\"RADIAN_NOT_SET\"];\n\
-                  fn setup(command: &mut Command, id: &str, cwd: &str) {\n\
-                      command.env(\"RADIAN_SESSION_ID\", id);\n\
-                      command.env(\"RADIAN_CWD\", cwd);\n\
+fn a_list_constant_named_only_by_a_write_literal_yields_nothing() {
+    // The identifier is never an environment-call argument: a matching `.env("TODO", …)`
+    // literal must not promote a list's entries either, or a board heading becomes a variable.
+    let source = "pub const BOARD_LABELS: &[&str] = &[\"TODO\", \"DOING\"];\n\
+                  pub const UNUSED_LABELS: &[&str] = &[\"RADIAN_NOT_SET\"];\n\
+                  fn setup(command: &mut Command, value: &str) {\n\
+                      command.env(\"TODO\", value);\n\
                   }";
-    assert_eq!(
-        env_names(&[source]),
-        vec!["RADIAN_SESSION_ID".to_owned(), "RADIAN_CWD".to_owned()]
-    );
+    assert_eq!(env_names(&[source]), Vec::<String>::new());
 }
 
 #[test]

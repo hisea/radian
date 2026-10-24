@@ -1395,20 +1395,28 @@ a `cp` under `.radian/` (never `git checkout`), and runs
 with `--no-fail-fast`.
 
 Before the change the scanner found 27 names (`.radian/env-names-before.txt`); the new scanner
-finds the same 27 (`.radian/env-names-after.txt`) — no name was dropped, and none was added.
-The rework narrowed the constant rule: a scalar constant needs its identifier as an
-environment-call argument, and only a list-typed constant (`[&str; N]`, `&[&str]`) may take an
-entry from a call's literal; M1–M3 were re-run against that scanner.
+finds 25 (`.radian/after-r3.sorted`). The two that drop out, `RADIAN_SESSION_ID` and
+`RADIAN_CWD`, exist only as `pub const INHERITED_ENV: &[&str] = &["RADIAN_SESSION_ID",
+"RADIAN_CWD"]` (`crates/radian-host/src/command_footer.rs:83`), whose identifier no environment
+call passes; the code only sets them with literal `.env("RADIAN_SESSION_ID", …)` /
+`.env("RADIAN_CWD", …)` writes (lines 403/405), and a write literal is not a source. They are
+set-only names (their manual row says "set by radian, never read back"), so the row stays; the
+scanner no longer discovers them. Every other name is unchanged.
+
+The constant rule is uniform: a `pub const` names a variable only when its identifier is an
+environment-call argument; a call's literal argument never promotes a constant's value, scalar or
+list. M1–M5 were run against that scanner.
 
 | # | Mutation | Result | Test(s) that caught it |
 |---|---|---|---|
-| TK0090-M1 | count every constant's literals again (the old rule: every all-caps literal on a `pub const` line is a variable, `let counts = true`) | ✅ 7 failed | `a_heading_constant_is_not_environment_variables` (`TODO`, `DOING`, `VERIFYING`), `a_constant_used_outside_an_environment_call_yields_nothing` (`HELLO_WORLD`), `a_scalar_constant_named_only_by_a_write_literal_yields_nothing` (`TODO`), and the positive tests, which also report their unused decoy constants (`RADIAN_HOME_LABEL` in both `RADIAN_HOME` tests, `RADIAN_CHILD_HEADERS_LABEL`, `RADIAN_NOT_SET`) |
-| TK0090-M2 | drop `.env(` from the accepted environment calls (`ENV_CALLS`) | ✅ 2 failed | `a_constant_set_on_a_child_yields_its_literal` and `a_list_constant_names_only_the_entries_an_environment_call_uses` (no name found) |
+| TK0090-M1 | count every constant's literals again (the old rule: every all-caps literal on a `pub const` line is a variable, `if true`) | ✅ 7 failed | `a_heading_constant_is_not_environment_variables` (`TODO`, `DOING`, `VERIFYING`), `a_constant_used_outside_an_environment_call_yields_nothing` (`HELLO_WORLD`), the scalar and list literal-promotion tests (`TODO`), and the positive tests, which also report their unused decoy constants (`RADIAN_HOME_LABEL` in both `RADIAN_HOME` tests, `RADIAN_CHILD_HEADERS_LABEL`) |
+| TK0090-M2 | drop `.env(` from the accepted environment calls (`ENV_CALLS`) | ✅ 1 failed | `a_constant_set_on_a_child_yields_its_literal` (no name found) |
 | TK0090-M3 | delete the `RADIAN_HOME` row from `docs/user/environment.md` | ✅ 1 failed | `every_env_var_appears_in_environment_md`: `these variables are missing from docs/user/environment.md: ["RADIAN_HOME"]` |
-| TK0090-M4 | let a scalar constant's literal count whenever an environment call names it (`named_by_identifier \|\| literals.contains(literal)`) | ✅ 1 failed | `a_scalar_constant_named_only_by_a_write_literal_yields_nothing` (reports `TODO` from a `BOARD_LABEL` that is never an environment-call argument) |
+| TK0090-M4 | let a constant's literal count whenever an environment call names it (`named_by_identifier \|\| call literals contains(literal)`) | ✅ 2 failed | `a_scalar_constant_named_only_by_a_write_literal_yields_nothing` and `a_list_constant_named_only_by_a_write_literal_yields_nothing` (both report `TODO`) |
+| TK0090-M5 | restore the removed list exception (a list-typed constant's entry counts when an environment call names the same literal) | ✅ 1 failed | `a_list_constant_named_only_by_a_write_literal_yields_nothing`: left `["TODO"]`, right `[]` (the review's `BOARD_LABELS` case) |
 
-4/4 caught. M1 leaves the real scan green on this tree only because `COLUMN_HEADINGS` is
-`pub(crate) const`, which the old substring `pub const` never matched — the sample tests are
-what pin the rule. The decoy constants on the positive tests are what make them fail under
-the old unconditional-constant rule; without them those tests passed for the wrong reason.
+5/5 caught. M1 stays a sample-only catch: `COLUMN_HEADINGS` is `pub(crate) const`, which the old
+substring `pub const` never matched, so the real scan is green under M1; the sample tests pin the
+rule. The decoy constants on the positive tests are what make them fail under the old
+unconditional-constant rule.
 
