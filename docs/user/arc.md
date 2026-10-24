@@ -740,7 +740,7 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
 The TUI never holds `runner.lock` and runs no pass. When it opens, it starts `radian arc run --watch` with the default interval as a detached process if no loop holds the lock; `R` starts one the same way while none runs.
 The header shows `loop ● running (pid <n>)` for any holder, `loop ◌ starting` until a start's lock appears, and `loop ○ stopped` when none runs; a failed start adds one footer line with its reason and exit code.
-The newest line `loop.log` gained since the TUI opened is the footer's ticker, and `L` opens the last 500 lines.
+The newest transition line `loop.log` gained since the TUI opened is the footer's ticker, and `L` opens a view of the last 500 lines.
 `q` and SIGTERM close the TUI and nothing else: a loop it started keeps running, and an attempt it left running is reconciled by the next loop.
 A running task's diff tab shows the worker's worktree against the attempt's `base_sha`, uncommitted files included (`live · worktree`), refreshed every 5 seconds.
 
