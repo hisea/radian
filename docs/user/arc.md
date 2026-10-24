@@ -147,6 +147,7 @@ Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `atte
 
 Prints one plan or task: every field, whether it changed outside arc, then its body.
 For a task it also prints the current attempt's notes as `attempt_note`, such as `worker-brief.md skipped: not UTF-8` (see [the worker brief](arc-files.md#worker-briefmd)).
+`show --json` carries them as `attempt_notes`, a list of strings (empty when there are none).
 
 A plan prints `cost_usd` and `total_cost_usd` beside its other fields: the first is the sum of its tasks' `cost_usd` and the number its budget compares, the second is the sum of their totals. Both are computed when the plan is read and are not stored in the plan file. A task prints both of its own numbers.
 
