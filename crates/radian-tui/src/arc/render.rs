@@ -161,7 +161,11 @@ fn footer_line(app: &ArcApp) -> Line<'static> {
 
 fn draw_plans(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
     let rows = app.plan_rows();
-    let left = plan_list_lines(app, &rows);
+    let height = area.height as usize;
+    // The `PLANS` heading and the blank line under it stay put; each plan takes three rows.
+    let visible_plans = height.saturating_sub(2) / 3;
+    app.plan_top = scroll_top(app.plan_top, app.plan_sel, visible_plans, rows.len());
+    let left = plan_list_lines(app, &rows, app.plan_top);
     let right_width = area.width.saturating_sub(RIGHT_X) as usize;
     let right = match rows.get(app.plan_sel) {
         Some(row) => {
@@ -169,20 +173,27 @@ fn draw_plans(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
                 .selected_plan()
                 .map(|view| view.plan.item.title.clone())
                 .unwrap_or_default();
-            plan_frame_lines(app, row, &title, right_width)
+            // The frame's own rows (top, blank, title, blank, bottom) leave this many rows
+            // for its tasks; the list scrolls to keep the selected task visible.
+            let visible_tasks = height.saturating_sub(5);
+            let selected = app.task_sel.min(row.tasks.len().saturating_sub(1));
+            app.task_top = scroll_top(app.task_top, selected, visible_tasks, row.tasks.len());
+            plan_frame_lines(app, row, &title, right_width, app.task_top, visible_tasks)
         }
-        None => vec![Line::from(Span::styled(
-            app.notice
-                .clone()
-                .unwrap_or_else(|| "no plans yet".to_owned()),
-            if app.notice.is_some() {
-                app.theme.status_error
-            } else {
-                app.theme.hint
-            },
-        ))],
+        None => {
+            app.task_top = 0;
+            vec![Line::from(Span::styled(
+                app.notice
+                    .clone()
+                    .unwrap_or_else(|| "no plans yet".to_owned()),
+                if app.notice.is_some() {
+                    app.theme.status_error
+                } else {
+                    app.theme.hint
+                },
+            ))]
+        }
     };
-    let height = area.height as usize;
     for y in 0..height {
         let left_line = left.get(y).cloned().unwrap_or_default();
         let left_width = left_line.width();
@@ -209,8 +220,23 @@ fn draw_plans(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
     }
 }
 
-/// The left column: `PLANS`, then each plan in two rows (the id and its summary).
-fn plan_list_lines(app: &ArcApp, rows: &[PlanRow]) -> Vec<Line<'static>> {
+/// The first item to draw so that `selected` stays inside `visible` rows: a terminal list, which
+/// scrolls only when the selection leaves the top or the bottom, and keeps its place otherwise.
+fn scroll_top(top: usize, selected: usize, visible: usize, len: usize) -> usize {
+    if visible == 0 || len <= visible {
+        return 0;
+    }
+    let mut top = top.min(len - visible);
+    if selected < top {
+        top = selected;
+    } else if selected >= top + visible {
+        top = (selected + 1 - visible).min(len - visible);
+    }
+    top
+}
+
+/// The left column: `PLANS`, then each plan from `top` in two rows (the id and its summary).
+fn plan_list_lines(app: &ArcApp, rows: &[PlanRow], top: usize) -> Vec<Line<'static>> {
     let theme = &app.theme;
     let mut out = vec![Line::from(Span::styled("PLANS", theme.hint))];
     if rows.is_empty() {
@@ -219,7 +245,7 @@ fn plan_list_lines(app: &ArcApp, rows: &[PlanRow]) -> Vec<Line<'static>> {
         return out;
     }
     out.push(Line::default());
-    for (index, row) in rows.iter().enumerate() {
+    for (index, row) in rows.iter().enumerate().skip(top) {
         let selected = index == app.plan_sel;
         let cursor = if selected {
             Span::styled("❯ ", theme.model)
@@ -231,23 +257,18 @@ fn plan_list_lines(app: &ArcApp, rows: &[PlanRow]) -> Vec<Line<'static>> {
             Span::styled(format!("{} ", row.mark.glyph()), row.mark.style(theme)),
             Span::styled(fit(&row.id, LEFT_WIDTH as usize - 6), theme.text),
         ]));
-        let details = if row.status == "draft" {
-            format!(
-                "draft · auto {} · {}/{} · {}",
-                row.auto,
-                row.merged,
-                row.total,
-                format_cost(row.cost)
-            )
-        } else {
-            format!(
-                "auto {} · {}/{} · {}",
-                row.auto,
-                row.merged,
-                row.total,
-                format_cost(row.cost)
-            )
+        let prefix = match row.status.as_str() {
+            "draft" => "draft · ",
+            "cancelled" => "cancelled · ",
+            _ => "",
         };
+        let details = format!(
+            "{prefix}auto {} · {}/{} · {}",
+            row.auto,
+            row.merged,
+            row.total,
+            format_cost(row.cost)
+        );
         out.push(Line::from(Span::styled(
             format!("    {}", fit(&details, LEFT_WIDTH as usize - 5)),
             theme.tier,
@@ -257,8 +278,15 @@ fn plan_list_lines(app: &ArcApp, rows: &[PlanRow]) -> Vec<Line<'static>> {
     out
 }
 
-/// The right column: the selected plan's open frame.
-fn plan_frame_lines(app: &ArcApp, row: &PlanRow, title: &str, width: usize) -> Vec<Line<'static>> {
+/// The right column: the selected plan's open frame, its tasks from `top`.
+fn plan_frame_lines(
+    app: &ArcApp,
+    row: &PlanRow,
+    title: &str,
+    width: usize,
+    top: usize,
+    visible: usize,
+) -> Vec<Line<'static>> {
     let theme = &app.theme;
     let label = format!(
         "{} {} · auto {} · {}/{} merged · {}",
@@ -285,7 +313,7 @@ fn plan_frame_lines(app: &ArcApp, row: &PlanRow, title: &str, width: usize) -> V
     let selected = (app.focus == Focus::Tasks)
         .then(|| row.tasks.get(app.task_sel).map(|task| task.id.as_str()))
         .flatten();
-    for task in &row.tasks {
+    for task in row.tasks.iter().skip(top).take(visible) {
         let cursor = selected == Some(task.id.as_str());
         let line = task_row_line(task, id_width, phase_width, cursor, theme);
         out.push(rail(theme, line));
@@ -427,7 +455,13 @@ fn draw_task(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
             area.height.saturating_sub(4) as usize,
             &theme,
         ),
-        TaskTab::Attempts => draw_attempts(&mut lines, page, width as usize, &theme),
+        TaskTab::Attempts => draw_attempts(
+            &mut lines,
+            page,
+            width as usize,
+            area.height as usize,
+            &theme,
+        ),
     }
     lines.push(frame_bottom(&theme));
     // The last row is always the frame's tail: a body longer than the page loses its last
@@ -626,7 +660,13 @@ fn draw_diff(
     }
 }
 
-fn draw_attempts(lines: &mut Vec<Line<'static>>, page: &TaskPage, width: usize, theme: &Theme) {
+fn draw_attempts(
+    lines: &mut Vec<Line<'static>>,
+    page: &TaskPage,
+    width: usize,
+    height: usize,
+    theme: &Theme,
+) {
     if page.attempts.is_empty() {
         lines.push(rail(
             theme,
@@ -635,7 +675,14 @@ fn draw_attempts(lines: &mut Vec<Line<'static>>, page: &TaskPage, width: usize, 
         return;
     }
     let _ = width;
-    for attempt in &page.attempts {
+    // The rows left after the frame's first rows and its bottom. The selected attempt scrolls
+    // into view: the list follows it like a terminal list does.
+    let visible = height.saturating_sub(lines.len() + 1);
+    let current = page
+        .attempt_index()
+        .unwrap_or(page.attempts.len().saturating_sub(1));
+    let first = current.saturating_sub(visible.saturating_sub(1));
+    for attempt in page.attempts.iter().skip(first).take(visible) {
         let current = page.attempt == Some(attempt.attempt);
         let cursor = if current {
             Span::styled("❯ ", theme.model)
