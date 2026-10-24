@@ -666,6 +666,39 @@ fn confirm_a_proposed_task_moves_it_to_ready_and_prints_the_phase() {
     assert!(again.err.contains("todo.ready"), "{again:?}");
 }
 
+/// The CLI declares `--dry-run`: it prints what the confirm would do, the chain and the queue
+/// place, and leaves the plan a draft.
+#[test]
+fn confirm_dry_run_prints_the_chain_without_writing() {
+    let scratch = fixture("confirm-dry");
+    init(&scratch);
+    let plan = add_plan(&scratch, "dry");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+
+    let dry = run(&scratch, &["arc", "confirm", "--dry-run", &plan], "");
+    assert_eq!(dry.code, Some(0), "{dry:?}");
+    assert!(
+        dry.out.contains(&format!("would: {plan} confirmed")),
+        "{}",
+        dry.out
+    );
+    assert!(
+        dry.out.contains(&format!("{task} waits on: nothing")),
+        "{}",
+        dry.out
+    );
+    assert!(
+        dry.out
+            .contains(&format!("{task} queue: 1 of 1 todo.ready")),
+        "{}",
+        dry.out
+    );
+    let stored = radian_arc::store::Store::at(scratch.repo())
+        .load_plan(&plan)
+        .expect("the plan reads");
+    assert_eq!(stored.item.status, "draft", "the dry run wrote the plan");
+}
+
 #[test]
 fn auto_needs_a_confirmed_plan_and_a_level_from_the_set() {
     let scratch = fixture("auto");

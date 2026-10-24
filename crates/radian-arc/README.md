@@ -595,6 +595,13 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   gives a follow-up, the same test `has_followup` uses, so the chain stops after one level.
 - `confirm` of a task checks `worker_args` first, as `confirm` of a plan does, so a broken
   worker line leaves the task `todo.proposed` instead of making it runnable.
+- `store::chain` is the one walk of a task's `after` graph: `show`, `show --json`, `confirm`,
+  its `--dry-run` and the MCP `show` tool use it. It returns `waits_on` and `blocks` (breadth
+  first, nearest first, each task once), the first entry that can never reach `done.merged`
+  (a `failed.*` task, a task of a `cancelled` plan, or an id that names no file), and one
+  `after` cycle. `queue_position` is the task's place among the `todo.ready` tasks. The dry
+  run calls `plan_ops::confirm_dry_run`, which shares `confirm_with`'s checks and writes
+  nothing; it checks the lock with `Store::check_state_lock`, which never creates the file.
 - The remote is always a parameter, never the literal `origin`: the caller passes
   `[repository] remote`.
 - A checkout that exists and is not a linked worktree is an error, unless it is an empty
