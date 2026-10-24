@@ -79,13 +79,20 @@ static STOP: AtomicBool = AtomicBool::new(false);
 /// How many passes in a row may return the same error text before `watch` stops. A constant,
 /// not a configuration key: a permanent error (a `config.toml` that cannot be read, a
 /// directory that cannot be written) would otherwise print the same line unattended all
-/// night.
+/// night. [`repeated_error_stop`] spells the line from it; the user manual and ADR 0048 quote
+/// the value, so change them with it.
 pub const REPEATED_ERROR_LIMIT: u32 = 3;
 
 /// The one line the loop's last pass reports instead of the repeated error; the CLI prints it
-/// with its usual `radian arc: ` prefix and exits `1`.
-pub const REPEATED_ERROR_STOP: &str = "the same error three passes in a row; stopping (fix it \
-                                        and start the loop again)";
+/// with its usual `radian arc: ` prefix and exits `1`. The count is [`REPEATED_ERROR_LIMIT`],
+/// so the line cannot drift from the constant.
+#[must_use]
+pub fn repeated_error_stop() -> String {
+    format!(
+        "the same error {REPEATED_ERROR_LIMIT} passes in a row; stopping (fix it and start the \
+         loop again)"
+    )
+}
 
 /// What one `run` did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -158,13 +165,13 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
 /// [`Exit`](crate::store::Exit) `0` through the caller.
 ///
 /// Three passes in a row that return the same error text stop the loop
-/// ([`REPEATED_ERROR_LIMIT`]): the loop reports [`REPEATED_ERROR_STOP`] instead of the third
+/// ([`REPEATED_ERROR_LIMIT`]): the loop reports [`repeated_error_stop`] instead of the third
 /// error, stops the gates the way a signal does (workers are left alone) and returns an error,
 /// so the caller exits `1`. A pass that succeeds, or a different error, starts the count again.
 ///
 /// # Errors
 ///
-/// The same as [`run`], and [`REPEATED_ERROR_STOP`] after three identical pass errors.
+/// The same as [`run`], and [`repeated_error_stop`] after three identical pass errors.
 pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> Result<(), Error> {
     let mut log = LoopLog::new(store);
     let lock = take_lock(store, &mut log)?;
@@ -199,8 +206,8 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
                     _ => 1,
                 };
                 if count >= REPEATED_ERROR_LIMIT {
-                    stop_gates(store)?;
-                    return Err(Error::Failed(REPEATED_ERROR_STOP.to_owned()));
+                    stop_gates(store);
+                    return Err(Error::Failed(repeated_error_stop()));
                 }
                 sink(&format!("radian arc: {text}\n"));
                 repeated = Some((text, count));
@@ -220,7 +227,7 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
         }
     }
     if stop_requested() {
-        stop_gates(store)?;
+        stop_gates(store);
     }
     drop(lock);
     Ok(())
@@ -228,12 +235,23 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
 
 /// Stops the gates a watch loop leaves running: a short grace, then SIGKILL. Each gate arc
 /// stopped records `interrupted`, so the next loop starts it again and counts no death.
-fn stop_gates(store: &Store) -> Result<(), Error> {
-    let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
-    for id in store.task_ids()? {
+///
+/// Best effort: the repeated-error stop may be running because `config.toml` itself cannot be
+/// read, so an unreadable config falls back to the default grace and an unreadable task list
+/// stops nothing. The caller then reports the stop line, not the config error.
+fn stop_gates(store: &Store) {
+    let grace = Duration::from_secs(
+        store
+            .config()
+            .map(|config| config.limits.cancel_grace_secs)
+            .unwrap_or_else(|_| crate::store::config::Limits::default().cancel_grace_secs),
+    );
+    let Ok(ids) = store.task_ids() else {
+        return;
+    };
+    for id in ids {
         crate::gate::background::stop(store, &id, grace);
     }
-    Ok(())
 }
 
 /// The writer of `.radian/arc/loop.log`: every line a scheduling loop prints, prefixed with an

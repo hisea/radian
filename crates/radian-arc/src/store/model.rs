@@ -359,8 +359,9 @@ pub struct TaskFile {
     /// How many reworks arc counted while the plan's `auto` level was not `off`
     /// (`[limits] max_auto_rework`).
     pub auto_rework: u32,
-    /// How many retries arc started since the task's last rework. `max_attempts` counts
-    /// this, not the attempt number; every rework sets it back to `0`.
+    /// How many retries arc started since the task's last lead or review rework. `max_attempts`
+    /// counts this, not the attempt number; a lead or review rework sets it back to `0`, and a
+    /// conflict rework keeps it.
     pub retry_count: u32,
     pub allow_noop: bool,
     /// Gate stages this brief adds to the profile's.
