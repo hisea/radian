@@ -416,7 +416,16 @@ fn an_awaiting_human_task_is_the_owners_only_at_auto_off() {
 fn a_rework_pending_task_with_an_automatic_reverify_is_not_in_needs_you() {
     let fixture = Fixture::new();
     write_command_failure(&fixture, fixture.id("rework"), 1);
-    write_reject_note(&fixture, fixture.id("manual-rework"), 1);
+    // The reject note's task has the same command failure, in a plan whose auto level is not
+    // `off`, so only the note can keep it out of `verifying`.
+    fixture
+        .store
+        .change_plan(&fixture.manual, |plan| {
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    write_command_failure(&fixture, fixture.id("manual-rework"), 1);
     let mut app = fixture.board();
     app.rebuild_board();
     assert!(
@@ -425,8 +434,17 @@ fn a_rework_pending_task_with_an_automatic_reverify_is_not_in_needs_you() {
         app.board.columns
     );
     assert!(
+        column_ids(&app, board::VERIFYING).contains(&fixture.id("manual-rework")),
+        "without a note the command failure is one a pass can reverify: {:?}",
+        app.board.columns
+    );
+
+    write_reject_note(&fixture, fixture.id("manual-rework"), 1);
+    app.refresh();
+    assert!(
         column_ids(&app, board::NEEDS_YOU).contains(&fixture.id("manual-rework")),
-        "a reject note is no automatic rework"
+        "a reject note is no automatic rework: {:?}",
+        app.board.columns
     );
 
     // With the task's automatic reverifies used up, nothing automatic is coming.
@@ -447,6 +465,41 @@ fn a_rework_pending_task_with_an_automatic_reverify_is_not_in_needs_you() {
     assert!(
         column_ids(&app, board::NEEDS_YOU).contains(&fixture.id("rework")),
         "the automatic reverify count is used up: {:?}",
+        app.board.columns
+    );
+}
+
+/// A `(head_sha, main)` pair the pass re-verified already cannot be revisited until main moves,
+/// so the card waits for the owner instead of claiming a gate is coming.
+#[test]
+fn a_command_failure_whose_pair_was_reverified_waits_for_the_owner() {
+    let fixture = Fixture::new();
+    write_command_failure(&fixture, fixture.id("rework"), 1);
+    let mut app = fixture.board();
+    app.rebuild_board();
+    assert!(
+        column_ids(&app, board::VERIFYING).contains(&fixture.id("rework")),
+        "the first look at the failure has a pass coming: {:?}",
+        app.board.columns
+    );
+
+    // The pass already re-verified this head against the main the failing verdict recorded.
+    let dir = fixture.store.root().join("runs").join(fixture.id("rework"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("auto_reverify.json"),
+        json!({
+            "reverified": [
+                {"head_sha": "c".repeat(40), "main_sha": "a".repeat(40), "at": "2026-10-20T10:00:00Z"}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    app.refresh();
+    assert!(
+        column_ids(&app, board::NEEDS_YOU).contains(&fixture.id("rework")),
+        "the pair is spent: {:?}",
         app.board.columns
     );
 }
@@ -763,6 +816,146 @@ fn a_long_column_scrolls_to_keep_the_selected_card_visible() {
         "the selected card is drawn:\n{text}"
     );
     assert!(!text.contains(&ids[0]), "the column scrolled:\n{text}");
+}
+
+/// A plan budget pauses the whole plan (`auto` becomes `off` and the stopped task stays in
+/// `todo.paused_budget`), so every open task waits for the owner. A task budget leaves the
+/// plan's level alone: only the stopped task waits.
+#[test]
+fn a_plan_budget_pause_puts_every_task_in_needs_you_but_a_task_budget_does_not() {
+    let scratch = Scratch::new("budget-pause");
+    let store = store(&scratch.path("repo"));
+
+    let paused = add_plan(&store, "paused", "the paused plan");
+    let paused_budget = add_task(
+        &store,
+        &paused,
+        "paused-budget",
+        TaskState::Todo,
+        "paused_budget",
+        1,
+    );
+    let paused_ready = add_task(&store, &paused, "paused-ready", TaskState::Todo, "ready", 0);
+    let paused_doing = add_task(
+        &store,
+        &paused,
+        "paused-doing",
+        TaskState::Doing,
+        "running",
+        1,
+    );
+    confirm(&store, &paused, "off");
+
+    let running = add_plan(&store, "running", "the running plan");
+    let task_budget = add_task(
+        &store,
+        &running,
+        "task-budget",
+        TaskState::Todo,
+        "paused_budget",
+        1,
+    );
+    let running_ready = add_task(
+        &store,
+        &running,
+        "running-ready",
+        TaskState::Todo,
+        "ready",
+        0,
+    );
+    let running_doing = add_task(
+        &store,
+        &running,
+        "running-doing",
+        TaskState::Doing,
+        "running",
+        1,
+    );
+    confirm(&store, &running, "run");
+
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    app.on_key(&code(KeyCode::Char('b')));
+    app.rebuild_board();
+    let needs = column_ids(&app, board::NEEDS_YOU);
+    for id in [&paused_budget, &paused_ready, &paused_doing, &task_budget] {
+        assert!(
+            needs.contains(&id.as_str()),
+            "{id} needs the owner: {:?}",
+            app.board.columns
+        );
+    }
+    assert!(
+        column_ids(&app, board::TODO).contains(&running_ready.as_str()),
+        "a task budget keeps the plan's other tasks running: {:?}",
+        app.board.columns
+    );
+    assert!(
+        column_ids(&app, board::DOING).contains(&running_doing.as_str()),
+        "a task budget keeps the plan's other tasks running: {:?}",
+        app.board.columns
+    );
+}
+
+/// The finished times come from records with different fractional widths: a verdict writes
+/// microseconds, `execution.json` milliseconds. The list orders by the instant, not the text.
+#[test]
+fn d_orders_records_of_one_second_by_their_instant_not_their_fraction_width() {
+    let scratch = Scratch::new("finished-order");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "times", "the times plan");
+    let merged = add_task(&store, &plan, "merged", TaskState::Done, "merged", 1);
+    let failed = add_task(&store, &plan, "failed", TaskState::Failed, "exhausted", 1);
+    confirm(&store, &plan, "off");
+
+    // 100.001 ms is after 100 ms, although the millisecond string sorts after the microsecond
+    // one; the merged task takes its time from the integration verdict, the failed one from
+    // the wrapper's `execution.json`.
+    let label = format!("{merged}-1");
+    let mut integration = Verdict::human("c".repeat(40), true, None);
+    integration.stage = Stage::Integration;
+    integration.candidate_sha = Some("d".repeat(40));
+    integration.base_sha = Some("a".repeat(40));
+    integration.ended_at = "2026-10-20T10:00:00.100001Z".to_owned();
+    integration
+        .write_new(&verdict_path(store.repo(), &merged, &label, Stage::Integration).unwrap())
+        .unwrap();
+    let dir = radian_arc::store::attempt_ops::run_dir(&store, &failed, 1);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("execution.json"),
+        json!({ "ended_at": "2026-10-20T10:00:00.100Z" }).to_string(),
+    )
+    .unwrap();
+
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    app.on_key(&code(KeyCode::Char('b')));
+    app.rebuild_board();
+    assert_eq!(
+        app.board
+            .done
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>(),
+        vec![merged, failed],
+        "the later instant comes first: {:?}",
+        app.board.done
+    );
+}
+
+/// The placeholder line is not a finished task: an empty list counts `0`.
+#[test]
+fn an_empty_finished_list_counts_no_row() {
+    let scratch = Scratch::new("finished-empty");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "open", "an open plan");
+    add_task(&store, &plan, "ready", TaskState::Todo, "ready", 0);
+    confirm(&store, &plan, "off");
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    app.on_key(&code(KeyCode::Char('b')));
+    assert_eq!(app.on_key(&code(KeyCode::Char('d'))), ArcKey::Redraw);
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("FINISHED 0"), "{text}");
+    assert!(text.contains("nothing finished"), "{text}");
 }
 
 #[test]
