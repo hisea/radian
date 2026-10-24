@@ -503,6 +503,9 @@ pub const LOG_BYTES: u64 = 512 * 1024;
 
 /// Reads the last [`LOG_BYTES`] of `path` as text, dropping the line the cut may have split.
 ///
+/// A cut that lands exactly on a line start keeps that first line whole: only a cut inside a
+/// line drops through the newline that ends it.
+///
 /// # Errors
 ///
 /// The file cannot be opened, seeked or read.
@@ -511,6 +514,17 @@ pub fn read_log_tail(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let len = file.metadata().map_err(|error| error.to_string())?.len();
     let cut = len.saturating_sub(LOG_BYTES);
+    // The byte before the cut says whether the cut split a line or landed on its start.
+    let at_line_start = if cut > 0 {
+        file.seek(SeekFrom::Start(cut - 1))
+            .map_err(|error| error.to_string())?;
+        let mut previous = [0u8; 1];
+        file.read_exact(&mut previous)
+            .map_err(|error| error.to_string())?;
+        previous[0] == b'\n'
+    } else {
+        false
+    };
     if cut > 0 {
         file.seek(SeekFrom::Start(cut))
             .map_err(|error| error.to_string())?;
@@ -519,7 +533,7 @@ pub fn read_log_tail(path: &Path) -> Result<String, String> {
     file.read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    if cut == 0 {
+    if cut == 0 || at_line_start {
         return Ok(text);
     }
     // The first line of a tail starts mid-line; the next newline ends it.
@@ -706,6 +720,8 @@ pub struct ArcApp {
     pub result: Option<ResultLine>,
     /// The command log the runner should read, off the UI thread.
     log_request: Option<LogRequest>,
+    /// The log the runner is reading: one at a time, and a reply for anything else is stale.
+    log_pending: Option<LogRequest>,
     /// The confirmation or reject float, which takes the keys until it closes.
     pub float: Option<Float>,
     pub main_sha: Option<String>,
@@ -746,6 +762,7 @@ impl ArcApp {
             pending: None,
             result: None,
             log_request: None,
+            log_pending: None,
             float: None,
             main_sha: None,
             loop_running: false,
@@ -1129,14 +1146,22 @@ impl ArcApp {
         self.action.take()
     }
 
-    /// The runner takes the command log it should read on a worker thread, if any.
+    /// The runner takes the command log it should read on a worker thread, if any. The request
+    /// stays pending until the runner applies its reply, so a second read cannot start meanwhile.
     pub fn take_log_request(&mut self) -> Option<LogRequest> {
-        self.log_request.take()
+        let request = self.log_request.take()?;
+        self.log_pending = Some(request.clone());
+        Some(request)
     }
 
     /// Records the log a worker read for `request`: the float opens on the merge page that
-    /// asked for it, and a reply for another task is dropped.
+    /// asked for it, and a reply for anything but the pending request is dropped (a reply that
+    /// arrives out of order must not open an earlier command's log).
     pub fn apply_log(&mut self, request: &LogRequest, result: Result<String, String>) -> bool {
+        if self.log_pending.as_ref() != Some(request) {
+            return false;
+        }
+        self.log_pending = None;
         let Some(page) = &mut self.merge else {
             return false;
         };
@@ -1870,6 +1895,11 @@ impl ArcApp {
 
     /// Queues the selected command's log for the runner to read on a worker thread.
     fn open_log(&mut self) {
+        // One read at a time: the pending reply opens its float, and a second Enter must not
+        // queue a read whose reply could land first.
+        if self.log_pending.is_some() {
+            return;
+        }
         let selected = self
             .merge
             .as_ref()
