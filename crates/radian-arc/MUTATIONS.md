@@ -504,3 +504,20 @@ sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian
 | TK0084-M1 | `remote_main_base` reports a ref with no common ancestor as `MainBase::Missing` | ✅ 1 failed | `read::a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref` (`left: NoRemoteMain`, right `Unrelated`) |
 
 1/1 caught.
+
+## TK0080: one finished-plan rule, and cancelled tasks out of progress (2026-10-24, branch `work/TK0080-finished-plan-one-rule`)
+
+`PlanView::is_finished` counted only `done.merged`, so a plan with a merged task and a cancelled
+follow-up stayed in `list`'s default view; `progress` counted a cancelled task as work left to do.
+Both rules now live in `radian-arc`, next to each other, and `list`, `list --json`, the TUI's views
+and the plan mark read them. Each mutation was applied by hand to the working file, the named test
+was run with `cargo nextest run -p radian-arc --locked --profile sandbox -E 'binary(list)'`, and the
+file was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0080-M1 | `is_finished` requires every task `done.merged` again (the `failed.cancelled` arm is dropped) | ✅ 1 failed | `list::a_merged_task_and_a_cancelled_follow_up_finish_the_plan_and_read_1_of_1` (the finished plan is printed by default) |
+| TK0080-M2 | `progress`'s total counts cancelled tasks (`self.tasks.len()`) | ✅ 2 failed | `list::a_merged_task_and_a_cancelled_follow_up_finish_the_plan_and_read_1_of_1` and `list::a_plan_whose_tasks_are_all_cancelled_is_cancelled_and_reads_0_of_0` (`1/2` and `0/2` instead of `1/1` and `0/0`) |
+| TK0080-M4 | a plan whose tasks are all cancelled is not cancelled (`is_cancelled` drops `is_cancelled_by_tasks`) | ✅ 1 failed | `list::a_plan_whose_tasks_are_all_cancelled_is_cancelled_and_reads_0_of_0` (the plan is shown by default instead of hidden) |
+
+3/3 caught.
