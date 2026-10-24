@@ -37,9 +37,10 @@ pub mod background;
 pub use checkout::{GateCheckout, gates_dir};
 pub use commands::CommandRun;
 pub use config::{
-    BEFORE_ATTEMPT_STEPS, DEFAULT_COMMAND_TIMEOUT_SECS, DEFAULT_REVIEW_TIMEOUT_SECS, GateConfig,
-    LISTED_STAGES, MERGE_MAIN, Profile, ReviewConfig, STAGE_NAMES, Stage, StageSpec,
-    default_before_attempt, effective_stages,
+    BEFORE_ATTEMPT_STEPS, DEFAULT_COMMAND_TIMEOUT_SECS, DEFAULT_REVIEW_CONCURRENCY,
+    DEFAULT_REVIEW_TIMEOUT_SECS, FirstReviewConfig, GateConfig, LISTED_STAGES, MERGE_MAIN, Profile,
+    ReviewChoice, ReviewConfig, STAGE_NAMES, Stage, StageSpec, default_before_attempt,
+    effective_stages,
 };
 pub use error::GateError;
 pub use exclusive::ExclusiveLock;
@@ -49,7 +50,7 @@ pub use review::{
     REVIEW_TOOLS, ReviewRun, owned_name, parse_report,
 };
 pub use verdict::{
-    CommandRecord, REVIEW_LEVELS, ReviewItem, ReviewReport, VERDICT_SCHEMA_VERSION, Verdict,
-    VerdictResult, attempt_dir, now_utc, required_passed, valid_verdicts, verdict_path,
+    CommandRecord, REVIEW_LEVELS, ReviewItem, ReviewReport, ReviewSettings, VERDICT_SCHEMA_VERSION,
+    Verdict, VerdictResult, attempt_dir, now_utc, required_passed, valid_verdicts, verdict_path,
     verdict_set_digest,
 };

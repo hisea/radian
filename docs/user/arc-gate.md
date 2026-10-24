@@ -19,6 +19,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   `human` is your approval and does not run here.
   When the profile lists both `commands` and `review`, those two start at the same time; every other stage keeps its order.
 - Every stage runs against the verification candidate, in its own checkout under `.radian/arc/gates/<stage>/`.
+  The review stage's checkouts are one per concurrency slot, `.radian/arc/gates/review-<n>/`.
   The candidate is `verified_sha` when the remote main is an ancestor of it; otherwise it is a merge commit of `verified_sha` onto the remote main, built in that checkout and never pushed.
   The merge uses arc's own commit identity, so the same inputs build the same tree.
   `verified_sha` stays the task's commit: the approval, the digest and `merge` bind to it, and the candidate is evidence only.
@@ -28,8 +29,12 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   Nothing is pushed.
 - `review` is a read-only radian session, not the worker session.
   It runs at the same time as `commands` when the profile lists both and before `human`; a profile that lists both must list `commands` first.
-  For each run it starts one `radian exec` in its own checkout, `.radian/arc/gates/review/`, on the candidate, with the candidate as the workspace and only the `read`, `grep` and `glob` tools mounted: no shell tool, no write tool, and no MCP server.
+  For each run it starts one `radian exec` in its own slot checkout, `.radian/arc/gates/review-<n>/`, on the candidate, with the candidate as the workspace and only the `read`, `grep` and `glob` tools mounted: no shell tool, no write tool, and no MCP server.
   Its model route is `[gate.review] exec_args`, and `[gate.review] timeout_secs` limits one session.
+  A task's **first review** is a review stage run when no earlier attempt of the task has a `review` verdict.
+  It reads `[gate.review.first] exec_args` and `[gate.review.first] timeout_secs` when they are set; an unset key falls back to the same `[gate.review]` key and, for `exec_args`, then to `worker.exec_args`.
+  A rework review never reads `[gate.review.first]`.
+  Both keys are read when the stage starts, so a change takes effect at the next review.
   The prompt is built in: the task's brief, the commit list and the diff from the merge base of the remote main and `verified_sha` to `verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
   A rework round's prompt holds the increment instead of the full diff (see [A rework round](#a-rework-round)).
   `[gate.review] prompt_file` is appended to it.
@@ -43,13 +48,13 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage; the suggestions a merged task's last review left become its follow-up task (see [The review's follow-up](#the-reviews-follow-up)).
   A blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items, each as `[level] path:line text` with the parts an item does not have left out.
   No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
-  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros` and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
+  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros`, `review_settings` (`round`, `first` or `rework`; the `exec_args` source key; `timeout_secs` and the key it came from) and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
 - `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), and `review_timeout` (the last run hit `[gate.review] timeout_secs`).
 - When the profile lists both `commands` and `review`, the round's outcome follows the profile order.
   A `commands` failure decides it with the commands reason, even when the review passed or failed too: the review verdict is still written, its cost counts, `show` lists its items, and arc writes no automatic review rework for that round.
   When `commands` passes and `review` fails, the review path runs (see [A failed review](#a-failed-review)).
   Both verdicts are written when each stage ends, and a verdict already written is reused: a gate that died while the pair ran resumes only the stage without a verdict.
-  The gate waits for both stages to end before it decides; a failing stage does not kill the other, and the review is bounded by `[gate.review] timeout_secs`.
+  The gate waits for both stages to end before it decides; a failing stage does not kill the other, and the review is bounded by its own limit.
   A stop signal to the gate reaches both running stages.
 - This build runs `commands` and `review`.
   A profile or a task that lists `mutation` or `ci` is refused with `stage <name> is not built yet`; the task stays in `review.verifying` and `show` prints that reason.
@@ -61,6 +66,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   The gate process holds `gates/<task>.gate.lock` from the moment a pass starts it, so the pass that follows starts no second gate for the same commit.
   A signalled or killed gate releases the lock; the next pass starts it again, and the verdicts already written are reused.
   Stages of different tasks still queue on their own locks: one `commands` stage at a time, one checkout per stage, and the review stage has its own.
+  Up to [`gate.review.concurrency`](arc-files.md#configtoml) review sessions run at once (default `2`, `1` or more); each takes one of the locks `gates/review-0.lock` … `gates/review-<n-1>.lock` and the checkout of that slot, so no two sessions share a checkout. With `1`, a second review waits for the first.
   The `review` stage is a read-only session, so it does not wait for another task's `commands`.
 - The gate's own output is `runs/<task>/gate.log`.
 - `runs/<task>/gate.json` holds one record, with the attempt it ran for.
@@ -89,7 +95,8 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 ### A rework round
 
 A review is a rework round when an earlier attempt of the same task has a review verdict for a `sha` other than the commit under review; the newest such verdict is the previous review.
-A review of the same commit as the previous review (a `reverify` of an unchanged head) is a first review: it gets the full diff, and no item is pre-existing.
+A review of the same commit as the previous review (a `reverify` of an unchanged head) gets the first review's prompt: the full diff, and no item is pre-existing.
+It reads the `[gate.review]` settings, not `[gate.review.first]`, because an earlier review verdict exists, so it is not a first review.
 The first review of a task is unchanged.
 
 A rework round's prompt holds the brief, the previous review's blocking items, the commit list `<previous sha>..<sha>`, and the increment instead of the full diff.

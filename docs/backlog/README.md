@@ -58,6 +58,7 @@
 | `test-temp-leak.md` | idea | 0048 | 测试泄漏临时目录（Linux gate 机 tmpfs inode 被占满导致成批假红）：统一会删除的临时目录 helper，`verify.sh` / `arc-gate.sh` 开跑前查 inode；环境问题是否扣返工次数待定 |
 | `arc-gate-batch.md` | decided（排在 `arc-landing.md` 之后） | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
 | `arc-reviewer-profiles.md` | decided | 0048 | reviewer profile（模型、prompt 写审查范围、时限、`fix_level`，第一轮可另设模型与时限）；只审 diff，返工轮只审增量和上轮问题，`pre_existing` 由 arc 按改动行机械判定、不打回；问题分 `critical`/`major`/`minor` 并附校准例子，用户选修到哪级，task 可覆盖；review 与 commands 并行，review 失败由 arc 自动写返工；没修的问题变成 `todo.proposed` 收尾 task，新增 task 级 `confirm` |
+| `arc-serve.md` | idea | 0048、0013、0032、0034、0006、0028、0045、0043 | 远程客户端（iOS / desktop）：runner 抽库，三个壳持 `runner.lock`；serve 只听 loopback，HTTP + SSE，会话投影成 block；状态迁移钩子推 APNs，payload 只带 id 与 phase；iOS 永远 client，desktop 可 host 可 client |
 | `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 
 只占索引行（暂无文件；来源都是总报告 `research/2026-10-18-area-deep-dive/README.md`）：

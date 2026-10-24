@@ -39,16 +39,17 @@ use super::checkout::GateCheckout;
 use super::commands::kill_group;
 use super::config::Stage;
 use super::error::GateError;
-use super::exclusive::DirLock;
+use super::exclusive::SlotLock;
 use super::integration::candidate_for;
 use super::verdict::{
-    REVIEW_LEVELS, ReviewItem, ReviewReport, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult,
-    attempt_dir, now_utc, verdict_path,
+    REVIEW_LEVELS, ReviewItem, ReviewReport, ReviewSettings, VERDICT_SCHEMA_VERSION, Verdict,
+    VerdictResult, attempt_dir, now_utc, verdict_path,
 };
 
-/// The lock file of the review stage under `gates/`, so two reviews never share the
-/// `gates/review/` checkout.
-pub(crate) const REVIEW_LOCK: &str = "review.lock";
+/// The prefix of the review stage's slot locks under `gates/`: `review-0.lock` …
+/// `review-<concurrency-1>.lock` (ADR 0048 decision 10). A slot number also names that
+/// slot's checkout, `gates/review-<n>/`.
+pub(crate) const REVIEW_SLOT: &str = "review";
 
 /// The built-in tools a review session mounts. The one closed list the stage, the tests and
 /// the manual read: a name that is not here is not mounted at all (`radian exec --tools`).
@@ -195,6 +196,10 @@ pub struct ReviewRun<'a> {
     pub main_ref: &'a str,
     /// The model route: the stage's own `radian exec` arguments before them.
     pub exec_args: &'a [String],
+    /// How many review sessions may run at once in the repository (ADR 0048 decision 10).
+    pub concurrency: u32,
+    /// The settings this session runs with, for the verdict (ADR 0048 decision 10).
+    pub settings: ReviewSettings,
     /// A file appended to the built-in prompt, or `None`.
     pub prompt_file: Option<&'a Path>,
     /// The previous review, when this review is a rework round (ADR 0048 decision 10).
@@ -216,9 +221,12 @@ impl ReviewRun<'_> {
     /// The checkout, a log file, the prompt file, a git command, or the verdict write failed.
     /// A conflict, unusable output and a blocking finding are `fail` verdicts, not errors.
     pub fn run(&self) -> Result<Verdict, GateError> {
-        let _lock = DirLock::acquire(self.repository, REVIEW_LOCK)?;
+        // One review slot for the whole stage: its lock keeps at most `concurrency` sessions
+        // running, and its number names the checkout this session alone reads (ADR 0048
+        // decision 10).
+        let slot = SlotLock::acquire(self.repository, REVIEW_SLOT, self.concurrency)?;
         let started_at = now_utc();
-        let checkout = GateCheckout::new(self.repository, Stage::Review, self.remote);
+        let checkout = GateCheckout::review_slot(self.repository, slot.slot(), self.remote);
         let candidate = candidate_for(
             self.repository,
             self.remote,
@@ -305,6 +313,7 @@ impl ReviewRun<'_> {
             review_session_ids: sessions,
             review_cost_micros: cost,
             review_pre_existing: pre_existing,
+            review_settings: Some(self.settings.clone()),
         };
         verdict.write_new(&verdict_path(
             self.repository,
@@ -424,7 +433,7 @@ impl ReviewRun<'_> {
         command.arg("exec");
         // A gate stage does not read the backlog (ADR 0048 decision 5). The stage's own
         // checkout is under `gates/review/`, so that entry stays readable.
-        for path in deny_paths(self.repository) {
+        for path in deny_paths(self.repository, checkout) {
             command.arg("--deny-read").arg(path);
         }
         command
@@ -909,11 +918,11 @@ pub fn owned_name(arg: &str) -> Option<&'static str> {
     })
 }
 
-/// The arc entries the review session must not read: everything except the stage checkouts,
-/// and inside `gates/` every stage but `review` (the session's own workspace). The fixed
-/// entries are denied before they exist; any other that exists now is denied too (ADR 0048
-/// decision 5: a gate stage does not read the backlog).
-fn deny_paths(repository: &Path) -> Vec<PathBuf> {
+/// The arc entries the review session must not read: everything except `workspace` (the
+/// session's own slot checkout), and inside `gates/` every stage and every other review
+/// slot. The fixed entries are denied before they exist; any other that exists now is denied
+/// too (ADR 0048 decision 5: a gate stage does not read the backlog).
+fn deny_paths(repository: &Path, workspace: &Path) -> Vec<PathBuf> {
     const FIXED: &[&str] = &[
         "config.toml",
         "plans",
@@ -929,7 +938,7 @@ fn deny_paths(repository: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = FIXED.iter().map(|name| arc.join(name)).collect();
     if let Ok(stages) = fs::read_dir(arc.join("gates")) {
         for stage in stages.flatten() {
-            if stage.file_name() != "review" {
+            if stage.path() != workspace {
                 paths.push(stage.path());
             }
         }

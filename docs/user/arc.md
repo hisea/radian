@@ -9,13 +9,13 @@ It keeps a plan and its tasks as files in the repository, runs each task as a se
 
 This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `priority`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and `run`.
-`radian arc run` is the scheduling loop, and a bare `radian arc` opens the read-only TUI (see [The arc TUI](#the-arc-tui)).
+`radian arc run` is the scheduling loop, and a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc-tui`](arc-tui.md)).
 
-This page holds the `radian arc` commands; the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
+This page holds the `radian arc` commands; the gate and its failures are in [`arc-gate`](arc-gate.md), the TUI in [`arc-tui`](arc-tui.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 ## `radian arc`
 
-`radian arc` with no subcommand opens the read-only TUI; its pages and keys are in [The arc TUI](#the-arc-tui).
+`radian arc` with no subcommand opens the TUI; its pages and keys are in [`arc-tui`](arc-tui.md).
 Without setup, `radian arc` and every subcommand except `init` refuse with a line that names `radian arc init` and exit `3`; without a terminal, `radian arc` exits `2`.
 
 ## `radian arc init [--track]`
@@ -155,10 +155,10 @@ The id names one plan or task. An id that names both a plan and a task is refuse
 |---|---|---|
 | `--json` | — | Print one JSON object instead of fields. |
 
-The object holds the same keys as in `list --json`, plus `body`, `session_id`, `rework_reason`, and the newest review verdict's `review`, `review_verdict`, `review_session_ids` and `review_cost_micros`.
+The object holds the same keys as in `list --json`, plus `body`, `session_id`, `rework_reason`, and the newest review verdict's `review`, `review_verdict`, `review_session_ids`, `review_cost_micros` and `review_settings`.
 An unset field is `null`; `session_id` is the current attempt's worker session id from its `execution.json`, and `null` when that attempt's wrapper wrote no record; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a gate that died after it started, a reject note, the automatic rework limit that paused the plan, a conflict that reached `limits.max_conflict_rework`, or an automatic reverify count that is used up).
-`review` is `{"summary", "blocking", "suggestions", "verified"}` from the newest `review` verdict, or `null`; each item of `blocking` and `suggestions` is an object with `text` and, when it has them, `level`, `file`, `line` and `pre_existing` (see [the review stage](arc-gate.md#the-gate-run)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none).
-For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_blocking`, `review_suggestions`, `review_verified`, `review_session_ids` and `review_cost_micros`.
+`review` is `{"summary", "blocking", "suggestions", "verified"}` from the newest `review` verdict, or `null`; each item of `blocking` and `suggestions` is an object with `text` and, when it has them, `level`, `file`, `line` and `pre_existing` (see [the review stage](arc-gate.md#the-gate-run)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none); `review_settings` is `{"round", "exec_args", "timeout_secs", "timeout"}` (the round `first` or `rework`, the config key the session's arguments came from, its wall-time limit in seconds and the key that limit came from), or `null`.
+For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_blocking`, `review_suggestions`, `review_verified`, `review_session_ids`, `review_cost_micros`, and `review_round`, `review_exec_args`, `review_timeout_secs` and `review_timeout`.
 The text form prints `session_id` after `attempt_id`.
 An id that names nothing exits `1`.
 
@@ -723,20 +723,13 @@ Every subcommand of this page uses these codes.
 Code `2` covers a bad flag or an argument value outside a closed set; a slug, an id, or a stage name that the rules refuse is also `2`.
 A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
-## The arc TUI
+## The TUI
 
-`radian arc` opens a read-only view of plans, tasks, verdicts and journals; it writes no arc state and probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · task · merge` (`merge` disabled), `main <sha>` and loop state.
-
-Plan marks: `✓` (merged, green), `●` (confirmed, accent), `◻` (draft, weak), `×` (cancelled, red), then id and `auto <level> · <merged>/<total> · <cost>` (`draft · ` or `cancelled · ` first; `—` when no cost). Frame: `<id> <status> · auto <level> · <n>/<m> merged · <cost>`, then title, tasks: a task after a plan task sits under its first parent (`├─`/`└─`), other parents are `also after <ids>`, roots in plan order, each task once. A row: mark, id, `state.phase` (mark's color), `#attempt`, cost, and `waits <ids>` for an unmerged-parent todo. Marks: `✓` done.merged green, `×` failed red, `●` doing/verifying accent, `!` awaiting_human/rework_pending accent bold (you or the lead acts), `◻` todo weak. Keys: `↑`/`↓` move in the focused column (the plan list, or the task list after `→`), `→`/`←` focus the task list/plan list, `Tab`/`Enter` open the task page (`Tab` on it goes back), `g` toggles the flat list (`after <ids>`), `Esc`/`q`/`Ctrl-C` quit. A list longer than its area scrolls so the selected row stays visible: it moves only when the selection leaves the top or the bottom.
-
-Task frame: `<id> <state.phase> · attempt <N> · <cost> · plan <id>`, the title, `conversation · diff · attempts` and `attempt 1 2 3` (latest by default; `[`/`]` switch). Conversation: the selected attempt's worker journal through the attach view — the session id in its `execution.json`, or the task id when it wrote none (see [worker sessions](arc-gate.md#failures-retries-and-the-budget)), names `~/.radian/sessions/<session id>.jsonl` (one weak line if none); `j`/`k` scroll, `f` follows. Diff: the merge commit's first-parent diff when merged, else the task's `base_sha..head_sha` (a merge that fast-forwarded main shows the whole branch, not only its last commit); files show `+N`/`-N`, the selected file's diff is a frame titled with its path, `n`/`p` file, `j`/`k` scroll, `f` end. Attempts: each attempt's verdicts (`✓ commands`, `× integration (conflict)`). `h`/`l` (or `←`/`→`) change tab, `[`/`]` attempt, `Tab`/`Esc` back, `q`/`Ctrl-C` quit.
-
-Re-reads the store every 2 s; git runs in worker threads, a frame never waits (`loading…`).
+A bare `radian arc` opens the TUI; the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
 
 ## Not built yet
 
 The gate stages `mutation` and `ci` are not built: verification refuses a profile or task that lists one, and the task stays in `review.verifying`.
-The arc TUI's `merge` page and the owner's actions are not built; the TUI is not a scheduling loop (only `radian arc run` schedules) and holds no `runner.lock`.
 
 ## See also
 

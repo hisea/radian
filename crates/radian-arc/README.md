@@ -213,6 +213,8 @@ gate (`gate::background::stop`) before it returns.
 
 `GateCheckout::new(repository, stage, remote)` owns
 `<repository>/.radian/arc/gates/<stage>/`, a detached linked worktree of the main checkout.
+`GateCheckout::review_slot(repository, slot, remote)` owns the review stage's slot checkout,
+`<repository>/.radian/arc/gates/review-<slot>/`, so two review sessions never share a tree.
 `remote` is the repository's remote name, the `[repository] remote` of `config.toml`; the gate
 never assumes `origin`. `prepare(sha)` fetches that remote, resolves `sha` to a full commit
 (failing when it does not exist), creates the worktree when it is missing, otherwise detaches
@@ -234,6 +236,11 @@ crashed process releases the lock when its descriptor closes.
 `integration` holds its own `<repository>/.radian/arc/gates/integration.lock` for its whole
 stage, so two integration runs never work in the shared `gates/integration/` checkout at the
 same time.
+
+`review` takes one of the slot locks `<repository>/.radian/arc/gates/review-<n>.lock`
+(`SlotLock`), `n` from 0 to `[gate.review] concurrency - 1`; a free slot is taken at once and a
+busy one is waited for. Slot `n` also names the checkout that session alone reads
+(`gates/review-<n>/`), so the lock count is what bounds concurrent reviews.
 
 ## `commands`
 
@@ -470,19 +477,23 @@ task stays in `review.verifying`. An existing verdict for the current attempt an
 reused, so a gate that died between stages resumes.
 
 `review` (`ReviewRun`) is a read-only session on the same candidate, after `commands` and
-before `human` (a profile that lists both must list `commands` first). It runs one
-`radian exec` per run in `gates/review/` with `--tools read,grep,glob`, no `--mcp-config` and
-`--no-config-mcp`, a model route from `[gate.review] exec_args` (default
-`[worker] exec_args`), and `[gate.review] timeout_secs`. The prompt is built from the brief,
-the commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The
-last fenced `json` block of the final message is parsed; an empty `blocking` list passes,
-any item fails with `review_blocking`. An item is `{level, file, line, text, pre_existing}`;
-a plain string is an item with only its text, so an old verdict reads and re-serializes
-unchanged (the digest is computed from the re-serialized verdict). Unusable output (no block,
-a missing field, a level outside `REVIEW_LEVELS`, a timeout, a session error) runs the session
-once more; two unusable runs fail with `review_output`, or `review_timeout` when the last run
-timed out. The verdict records `review`, `review_session_ids`, `review_cost_micros` and, in a
-rework round, `review_pre_existing`.
+before `human` (a profile that lists both must list `commands` first). Up to
+`[gate.review] concurrency` sessions run at once (default 2), each in its slot checkout
+`gates/review-<n>/`. It runs one `radian exec` per run with `--tools read,grep,glob`, no
+`--mcp-config` and `--no-config-mcp`. Its model route and wall-time limit come from
+`[gate.review] exec_args` (default `[worker] exec_args`) and `[gate.review] timeout_secs`; a
+task's first review reads `[gate.review.first] exec_args` and `timeout_secs` first, and a
+rework review never does (`ReviewConfig::choice`). The prompt is built from the brief, the
+commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The last
+fenced `json` block of the final message is parsed; an empty `blocking` list passes, any item
+fails with `review_blocking`. An item is `{level, file, line, text, pre_existing}`; a plain
+string is an item with only its text, so an old verdict reads and re-serializes unchanged (the
+digest is computed from the re-serialized verdict). Unusable output (no block, a missing
+field, a level outside `REVIEW_LEVELS`, a timeout, a session error) runs the session once more;
+two unusable runs fail with `review_output`, or `review_timeout` when the last run timed out.
+The verdict records `review`, `review_session_ids`, `review_cost_micros`, `review_settings`
+(`round`, the `exec_args` source key, `timeout_secs` and its source key) and, in a rework
+round, `review_pre_existing`.
 
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)
@@ -605,5 +616,6 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 
 The arc TUI lives in `radian-tui` (`src/arc/`, with its terminal loop in `src/cli/arc.rs`);
 this crate owns the read-only views it draws ([`read`](src/read.rs): the remote main, a
-task's attempts and verdicts, a task's diff). The gate stages `mutation` and `ci` are
-refused until they are built.
+task's attempts and verdicts, a task's diff, and the merge page's stage rows, review and
+commits). The owner's keys there are the same library calls as the CLI's subcommands. The
+gate stages `mutation` and `ci` are refused until they are built.

@@ -2,14 +2,15 @@
 //!
 //! The view is read-only. This loop enters the terminal, draws one frame, reads one key at a
 //! time, re-reads the store every [`ARC_REFRESH`] seconds, and runs git (the remote main and a
-//! task's diff) on worker threads so a frame never waits on it. It holds no `runner.lock`:
+//! task's diff), the merge page's data, a command's log and the owner's actions on worker
+//! threads so a frame never waits on any of them. It holds no `runner.lock`:
 //! the header only reports whether another process does. `q` (or Ctrl-C) leaves through the
 //! same clean-exit path as `attach`.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use radian_tui::arc::{ArcApp, ArcKey, render};
+use radian_tui::arc::{ArcApp, ArcKey, actions, render};
 
 use super::*;
 
@@ -18,6 +19,8 @@ const ARC_REFRESH: Duration = Duration::from_secs(2);
 /// The input poll: a key, a resize or an idle tick, at the same granularity as the other
 /// full-screen views.
 const ARC_POLL: Duration = Duration::from_millis(100);
+/// How often an action in flight redraws its spinner (ADR 0027: a rotating frame every 250 ms).
+const ARC_SPINNER: Duration = Duration::from_millis(250);
 
 /// One worker-thread reply.
 enum GitReply {
@@ -28,6 +31,18 @@ enum GitReply {
         id: String,
         attempt: u32,
         result: Result<radian_arc::read::TaskDiff, String>,
+    },
+    /// The merge page's data.
+    Merge {
+        id: String,
+        result: Box<Result<radian_arc::read::MergeView, String>>,
+    },
+    /// An owner action's line.
+    Action(actions::Outcome),
+    /// A command's log, read on a worker thread.
+    Log {
+        request: radian_tui::arc::LogRequest,
+        result: Result<String, String>,
     },
 }
 
@@ -60,6 +75,8 @@ pub(super) fn run_arc() -> ExitCode {
     let mut main_pending = false;
     let mut main_at = None;
     let mut diff_pending: Option<(String, u32)> = None;
+    let mut merge_pending: Option<String> = None;
+    let mut spinner_at = Instant::now();
     let mut refresh_at = Instant::now() + ARC_REFRESH;
     let mut dirty = true;
     loop {
@@ -85,6 +102,23 @@ pub(super) fn run_arc() -> ExitCode {
                         dirty = true;
                     }
                 }
+                GitReply::Merge { id, result } => {
+                    if merge_pending.as_deref() == Some(id.as_str()) {
+                        merge_pending = None;
+                    }
+                    if app.apply_merge(&id, *result) {
+                        dirty = true;
+                    }
+                }
+                GitReply::Action(outcome) => {
+                    app.finish_action(outcome);
+                    dirty = true;
+                }
+                GitReply::Log { request, result } => {
+                    if app.apply_log(&request, result) {
+                        dirty = true;
+                    }
+                }
             }
         }
         app.apply_pending_scroll();
@@ -97,6 +131,32 @@ pub(super) fn run_arc() -> ExitCode {
             }
             dirty = false;
         }
+        // An owner action runs on a worker thread; the footer's spinner advances until its
+        // reply, so the view keeps drawing while a merge or a `start` takes its time.
+        if app.pending.is_some() && spinner_at.elapsed() >= ARC_SPINNER {
+            spinner_at = Instant::now();
+            dirty = true;
+        }
+        if let Some(action) = app.take_action() {
+            spinner_at = Instant::now();
+            let store = app.store.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let outcome = actions::run(&action, &store, &actions::Library);
+                let _ = tx.send(GitReply::Action(outcome));
+            });
+            dirty = true;
+        }
+        // A command's log is read on a worker thread, from its end and bounded: a big log
+        // never blocks the frame or loads whole into memory.
+        if let Some(request) = app.take_log_request() {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let result = radian_tui::arc::read_log_tail(&request.path);
+                let _ = tx.send(GitReply::Log { request, result });
+            });
+            dirty = true;
+        }
         // The header's remote main: once at start, then every refresh. Never on the draw
         // path.
         if !main_pending && main_at.is_none_or(|at: Instant| at.elapsed() >= ARC_REFRESH) {
@@ -108,9 +168,9 @@ pub(super) fn run_arc() -> ExitCode {
                 let _ = tx.send(GitReply::Main(sha));
             });
         }
-        // The diff tab's file list: a request per selected attempt, off the UI thread. A
-        // switch while one is in flight starts the new attempt's request at once; the old
-        // reply is dropped by the app.
+        // The diff: the task page's selected attempt, or the merge page's. A request per
+        // attempt, off the UI thread. A switch while one is in flight starts the new
+        // attempt's request at once; the old reply is dropped by the app.
         if let Some((id, attempt)) = app.diff_request()
             && diff_pending.as_ref() != Some(&(id.clone(), attempt))
         {
@@ -126,6 +186,26 @@ pub(super) fn run_arc() -> ExitCode {
                     id,
                     attempt,
                     result,
+                });
+            });
+            dirty = true;
+        }
+        // The merge page's stage rows, review and commits. The gate lock tells the view which
+        // stage is running; the probe never starts or stops anything.
+        if let Some(id) = app.merge_request()
+            && merge_pending.as_deref() != Some(id.as_str())
+        {
+            app.mark_merge_loading();
+            merge_pending = Some(id.clone());
+            let store = app.store.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let running = radian_arc::gate::background::running(&store, &id);
+                let result = radian_arc::read::merge_view(&store, &id, running)
+                    .map_err(|error| error.message());
+                let _ = tx.send(GitReply::Merge {
+                    id,
+                    result: Box::new(result),
                 });
             });
             dirty = true;

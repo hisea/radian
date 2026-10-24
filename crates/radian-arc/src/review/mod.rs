@@ -35,8 +35,9 @@ use serde_json::{Value, json};
 use sha2::Digest;
 
 use crate::gate::{
-    CommandRun, IntegrationRun, PreviousReview, ReviewItem, ReviewRun, Stage, StageSpec, Verdict,
-    attempt_dir, effective_stages, merge_ready, required_passed, verdict_path, verdict_set_digest,
+    CommandRun, IntegrationRun, PreviousReview, ReviewItem, ReviewRun, ReviewSettings, Stage,
+    StageSpec, Verdict, attempt_dir, effective_stages, merge_ready, required_passed, verdict_path,
+    verdict_set_digest,
 };
 use crate::store::attempt_ops::Paused;
 use crate::store::{Error, Store, model};
@@ -689,28 +690,36 @@ fn run_stage(
         .map_err(gate_error),
         Stage::Review => {
             let review = &plan.config.gate.review;
-            let (exec_args, key) = match &review.exec_args {
-                Some(args) => (args.as_slice(), "gate.review.exec_args"),
-                None => (plan.config.worker.exec_args.as_slice(), "worker.exec_args"),
-            };
+            // A review that follows an earlier one of this task is a rework round: the stage
+            // reviews the increment and judges the items arc moved (ADR 0048 decision 10).
+            let earlier = previous_review(store, &task.id, &plan.label);
+            // A first review is a review stage run when no earlier attempt of the task has a
+            // review verdict; only it reads `[gate.review.first]` (ADR 0048 decision 10).
+            let first = earlier.is_none();
+            let choice = review.choice(first, &plan.config.worker.exec_args);
             // The stage owns the read-only mount and the session flags: an argument that
             // repeated one would overrule them (ADR 0048 decision 10).
-            if let Some(owned) = exec_args
+            if let Some(owned) = choice
+                .exec_args
                 .iter()
                 .find_map(|arg| crate::gate::owned_name(arg))
             {
                 return Err(Error::Refused(format!(
-                    "`{key}` must not repeat `{owned}`: the review stage sets it on the \
-                     review session's `radian exec` line"
+                    "`{}` must not repeat `{owned}`: the review stage sets it on the \
+                     review session's `radian exec` line",
+                    choice.exec_args_key
                 )));
             }
+            let settings = ReviewSettings {
+                round: if first { "first" } else { "rework" }.to_owned(),
+                exec_args: choice.exec_args_key.to_owned(),
+                timeout_secs: choice.timeout_secs,
+                timeout: choice.timeout_key.to_owned(),
+            };
             let prompt_file = review
                 .prompt_file
                 .as_ref()
                 .map(|file| store.repo().join(file));
-            // A review that follows an earlier one of this task is a rework round: the stage
-            // reviews the increment and judges the items arc moved (ADR 0048 decision 10).
-            let earlier = previous_review(store, &task.id, &plan.label);
             let earlier = earlier.as_ref().map(|(_, verdict)| PreviousReview {
                 sha: verdict.sha.clone(),
                 blocking: verdict
@@ -727,10 +736,12 @@ fn run_stage(
                 sha: &plan.head,
                 brief: &task.body,
                 main_ref: &plan.main_ref,
-                exec_args,
+                exec_args: choice.exec_args,
+                concurrency: review.concurrency,
+                settings,
                 prompt_file: prompt_file.as_deref(),
                 previous: earlier.as_ref(),
-                timeout: review.timeout(),
+                timeout: std::time::Duration::from_secs(choice.timeout_secs),
                 program: review_program,
             }
             .run()
