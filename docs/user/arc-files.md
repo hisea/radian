@@ -51,9 +51,10 @@ A key you leave out takes its default.
 A stage may be listed once per profile: a profile that lists a stage twice, or that lists `integration`, is refused by name.
 A per-task field of the same name overrides a `[limits]` value for that task; a plan budget adds to the task budgets.
 
-An attempt's worker session id is in `runs/<task>/attempts/<attempt id>/execution.json`.
+An attempt's worker session id is decided by its claim, which writes it to `attempts/<task>/<attempt>/start.json`; the wrapper writes the session it used to `identity.json` when it spawns the worker and to `execution.json` when it ends.
+A reader takes the first of those records that names one: `execution.json`, then `identity.json`, then `start.json`.
 With `worker.rework_session = "fresh"` it is `<task>-<attempt>`; with `resume` it is the task id.
-`radian arc show` prints it as `session_id`, and `radian attach <session id>` opens that session's journal.
+`radian arc show` prints it as `session_id` (known from the claim on, not only after the attempt ends), and `radian attach <session id>` opens that session's journal.
 
 ## Plan and task files
 
