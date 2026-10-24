@@ -9,7 +9,7 @@
 //! The result line is the text the CLI would print, or the error text and the CLI's exit
 //! reason. [`ArcOps`] is the seam a test uses to see which library call an action made.
 
-use radian_arc::attempt::{self, Started};
+use radian_arc::attempt::{self, Cancelled, Started};
 use radian_arc::review::{self, Merged, Rejected, Reverified};
 use radian_arc::store::plan_ops::{self, Confirmed};
 use radian_arc::store::{Error, Store};
@@ -19,10 +19,14 @@ use radian_arc::store::{Error, Store};
 pub enum Action {
     /// `radian arc confirm <id>`: a draft plan or a `todo.proposed` task.
     Confirm(String),
+    /// `radian arc priority <plan> <level>`.
+    Priority { plan: String, level: String },
     /// `radian arc auto <plan> <level>`.
     Auto { plan: String, level: String },
     /// `radian arc pause <plan>`.
     Pause(String),
+    /// `radian arc cancel <id>`: one task, or a whole plan.
+    Cancel(String),
     /// `radian arc start <task>`.
     Start(String),
     /// `radian arc merge <task>`.
@@ -38,6 +42,8 @@ impl Action {
     pub fn label(&self) -> &'static str {
         match self {
             Action::Confirm(_) => "confirm",
+            Action::Cancel(_) => "cancel",
+            Action::Priority { .. } => "priority",
             Action::Auto { .. } => "auto",
             Action::Pause(_) => "pause",
             Action::Start(_) => "start",
@@ -83,6 +89,10 @@ impl Outcome {
 /// own implementation to see which call ran.
 pub trait ArcOps {
     fn confirm(&self, store: &Store, id: &str) -> Result<Confirmed, Error>;
+    /// `radian arc cancel <id>`: the task or plan form.
+    fn cancel(&self, store: &Store, id: &str) -> Result<Cancelled, Error>;
+    /// `radian arc priority <plan> <level>`.
+    fn set_priority(&self, store: &Store, plan: &str, level: &str) -> Result<(), Error>;
     fn set_auto(&self, store: &Store, plan: &str, level: &str) -> Result<(), Error>;
     fn pause(&self, store: &Store, plan: &str) -> Result<(), Error>;
     fn start(&self, store: &Store, task: &str) -> Result<Started, Error>;
@@ -97,6 +107,14 @@ pub struct Library;
 impl ArcOps for Library {
     fn confirm(&self, store: &Store, id: &str) -> Result<Confirmed, Error> {
         plan_ops::confirm(store, id)
+    }
+
+    fn cancel(&self, store: &Store, id: &str) -> Result<Cancelled, Error> {
+        attempt::cancel_any(store, id)
+    }
+
+    fn set_priority(&self, store: &Store, plan: &str, level: &str) -> Result<(), Error> {
+        plan_ops::set_priority(store, plan, level)
     }
 
     fn set_auto(&self, store: &Store, plan: &str, level: &str) -> Result<(), Error> {
@@ -129,6 +147,14 @@ pub fn run(action: &Action, store: &Store, ops: &dyn ArcOps) -> Outcome {
     match action {
         Action::Confirm(id) => match ops.confirm(store, id) {
             Ok(confirmed) => Outcome::line(confirmed.line()),
+            Err(error) => Outcome::error(&error),
+        },
+        Action::Cancel(id) => match ops.cancel(store, id) {
+            Ok(cancelled) => Outcome::line(cancelled.lines().join(" · ")),
+            Err(error) => Outcome::error(&error),
+        },
+        Action::Priority { plan, level } => match ops.set_priority(store, plan, level) {
+            Ok(()) => Outcome::line(format!("{plan} priority {level}")),
             Err(error) => Outcome::error(&error),
         },
         Action::Auto { plan, level } => match ops.set_auto(store, plan, level) {

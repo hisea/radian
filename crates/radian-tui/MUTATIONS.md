@@ -2487,3 +2487,21 @@ hand to the working file, the named test was run alone with `--profile sandbox
 | TK0047-M3 | the selection always jumps to the first plan (`rebuild_visible` sets `plan_sel = 0`) | ✅ 1 failed | `the_selection_stays_on_a_plan_in_both_views_and_moves_to_the_first_otherwise` (`f` to `all` selects `PL0001-first`, not the held `PL0003-retro`) |
 
 3/3 caught.
+
+## TK0050: the plans page's cancel, proposed-task confirm and priority (2026-10-24, branch `work/TK0050-tui-cancel-confirm-priority`)
+
+Base `c697e101` (the branch point). The plans page's `x` asks before it cancels, `c` confirms
+a proposed task with the task column focused, and `+`/`-` step the selected plan's priority
+toward `P0`/`P5`; the page draws the priority in six new theme roles. Each mutation was
+applied by hand to the working file, the named test was run alone with `--profile sandbox
+--no-fail-fast`, and the file was restored from a copy under `.radian/mut-bak/`
+(`git status --short` showed only the intended changes afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0050-M1 | `x` queues the cancel without the confirmation float (`self.queue_action(action)` instead of `Float::Confirm`) | ✅ 1 failed | `x_on_a_task_asks_and_n_changes_nothing_while_y_cancels_it` (`no cancel float: None`) |
+| TK0050-M2 | `c` confirms the selected plan even with the task column focused (the proposed-task branch is replaced by the plan id) | ✅ 1 failed | `c_confirms_a_proposed_task_and_refuses_a_ready_one` (`left: Some(Confirm("PL0001-p"))`, `right: Some(Confirm("TK0004-proposed"))`) |
+| TK0050-M3 | `+` moves toward `P5` (the `+` and `-` handlers swap their step sign) | ✅ 1 failed | `plus_and_minus_move_the_priority_and_stop_at_the_ends` (`left: level "P4"`, `right: level "P2"`) |
+| TK0050-M4 | the dark palette swaps `priority_p0` and `priority_p5` (`P0` gets `GREEN`, `P5` gets `RED`) | ✅ 1 failed | `theme::tests::the_priority_roles_are_six_distinct_colors_and_mono_has_none` (`P0` is green, not `status_error`'s red) |
+
+4/4 caught.
