@@ -306,11 +306,18 @@ the `find`/replace from `followup_items`. M3 writes `self.text` again in `Review
 | TK0045-M3 | keep the duplicated level tag in `Display` (write `self.text`) | `review::a_rework_brief_prints_a_duplicated_level_tag_once`, `review::a_followup_brief_prints_a_duplicated_level_tag_once` | ✅ 2 failed |
 | TK0045-M4 | propose a follow-up for a merged follow-up task (drop the `is_followup` guard) | `review::a_merge_of_a_followup_task_proposes_no_followup` (it gets `TK0003-…-followups-followups`) | ✅ failed |
 
-## TK0019 (the running task's live diff)
+## TK0019 (the running task's live diff and `loop.log`)
 
-TK0019-M3 mutates `read::task_diff`'s live-worktree branch (`radian-arc/src/read.rs`). The test
-lives with the page that draws it (`radian-tui/tests/arc_tui.rs`), so the row is recorded in
-`crates/radian-tui/MUTATIONS.md` with M1 and M2.
+TK0019-M3 mutates `read::task_diff`'s live-worktree branch (`radian-arc/src/read.rs`); the test
+lives with the page that draws it (`radian-tui/tests/arc_tui.rs`). TK0019-M7 and M8 mutate the
+`loop.log` writer in `radian-arc/src/run.rs`; their rows are recorded in
+`crates/radian-tui/MUTATIONS.md` with M1–M6 so the task's numbering stays in one place.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0019-M7 | the rotation keeps appending to the 1 MiB file (`rotate_if_needed` does nothing) | `run::a_full_loop_log_is_rotated_to_loop_log_1` (`loop.log.1` is not the old content; the new file holds `old line`) | ✅ failed |
+| TK0019-M8 | `run` without `--watch` writes no `loop.log` (`run` calls `run_quiet` without the `LoopLog` sink) | `run::run_appends_every_printed_line_to_loop_log` (no `loop.log`) | ✅ failed |
+
 ## TK0035 (a refused integration, the wrapper setup and the heartbeat)
 
 TK0035-M1–M3 were run against `29d77904`, each applied to the committed file, restored from a

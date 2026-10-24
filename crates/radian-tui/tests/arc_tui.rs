@@ -369,7 +369,7 @@ fn the_plans_page_draws_the_list_and_the_selected_plan() {
         "task".to_owned(),
         "merge".to_owned(),
         "main —".to_owned(),
-        "loop ◻ stopped".to_owned(),
+        "loop ○ stopped".to_owned(),
         "PLANS".to_owned(),
         "PL0001-first".to_owned(),
         "auto off · 1/1 · $0.12".to_owned(),
@@ -859,7 +859,7 @@ fn the_header_reports_the_remote_main_and_the_loop_state() {
     app.apply_main(Some("8a3ec2ba".to_owned()));
     let text = screen(&mut app, 120, 30);
     assert!(text.contains("main 8a3ec2ba"), "{text}");
-    assert!(text.contains("loop ◻ stopped"), "{text}");
+    assert!(text.contains("loop ○ stopped"), "{text}");
 
     // Another process holds the lock: the header names it by the pid the holder recorded.
     fs::write(&lock_path, "4242").unwrap();
@@ -867,10 +867,10 @@ fn the_header_reports_the_remote_main_and_the_loop_state() {
     let text = screen(&mut app, 120, 30);
     assert!(text.contains("loop ● running (pid 4242)"), "{text}");
 
-    // This window holds it.
-    app.set_loop_status(LoopStatus::ThisWindow);
+    // A start is in flight until a probe sees its lock.
+    app.set_loop_status(LoopStatus::Starting);
     let text = screen(&mut app, 120, 30);
-    assert!(text.contains("loop ● running (this window)"), "{text}");
+    assert!(text.contains("loop ◌ starting"), "{text}");
 }
 
 #[test]

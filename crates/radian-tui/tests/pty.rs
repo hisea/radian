@@ -14108,7 +14108,7 @@ async fn pty_arc_opens_switches_pages_and_quits() {
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("loop ● running (this window)", wait_positive()),
+        pty.wait_for_screen("loop ● running (pid ", wait_positive()),
         "the header's loop state is missing:\n{}",
         pty.screen()
     );
@@ -14152,6 +14152,8 @@ async fn pty_arc_opens_switches_pages_and_quits() {
         "q must quit the arc view:\n{}",
         pty.screen()
     );
+    // Opening the TUI started a loop; quitting leaves it running, so the test stops it.
+    stop_arc_loop(&repo);
 }
 
 /// The owner acts from the TUI: `m` opens the merge page of a `review.awaiting_human` task,
@@ -14216,9 +14218,11 @@ async fn pty_arc_merges_a_verified_task_from_the_merge_page() {
         "q must quit the arc view:\n{}",
         pty.screen()
     );
+    // The TUI's loop is still running after the merge page's action; stop it here.
+    stop_arc_loop(&repo);
 }
 
-// ---- ADR 0048 §13: the TUI is the scheduling loop ------------------------------------
+// ---- ADR 0048 §13: the TUI starts the loop and never holds it -------------------------
 
 /// A repository arc runs its own loop in: a bare `origin`, one plan with one `todo.ready` task,
 /// the task's plan confirmed at `auto`, and a config whose worker is the mock model and whose
@@ -14292,34 +14296,6 @@ fn wait_until(limit: Duration, what: &str, mut predicate: impl FnMut() -> bool) 
     }
 }
 
-/// The task's `(state, phase)` as the store has them now.
-fn arc_task_state(repo: &Path, task: &str) -> (String, String) {
-    let store = radian_arc::store::Store::at(repo);
-    let item = store.load_task(task).expect("the task reads").item;
-    (item.state.as_str().to_owned(), item.phase)
-}
-
-/// Waits for the task's `(state, phase)`, naming the state it saw last when it does not get
-/// there.
-fn wait_for_state(repo: &Path, task: &str, want: (&str, &str), limit: Duration) {
-    let deadline = Instant::now() + limit;
-    loop {
-        let state = arc_task_state(repo, task);
-        if state == (want.0.to_owned(), want.1.to_owned()) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{task} is {}.{}, not {}.{} in {limit:?}",
-            state.0,
-            state.1,
-            want.0,
-            want.1
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// Whether `runner.lock` can be taken: true when no loop holds it.
 fn arc_lock_free(repo: &Path) -> bool {
     use fs2::FileExt;
@@ -14354,15 +14330,44 @@ fn run_arc_cli(home: &Path, repo: &Path, args: &[&str]) -> (Option<i32>, String,
     )
 }
 
-/// The pass thread's wait is test-only short, so a test does not wait 30 s per pass.
-const ARC_LOOP_ENV: [(&str, &str); 1] = [("RADIAN_ARC_TEST_PASS_INTERVAL_MS", "200")];
+/// The pid the holder of `runner.lock` recorded, when it did.
+fn arc_loop_pid(repo: &Path) -> Option<u32> {
+    std::fs::read_to_string(repo.join(".radian/arc/runner.lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
 
-/// The TUI takes the lock, starts a `todo.ready` task at auto `run`, verifies it and stops at
-/// `review.awaiting_human`; the start is on the footer's ticker. Quitting releases the lock, so
-/// a one-shot `run` afterwards is not refused with `4`.
+/// Stops the loop a test started and waits for its lock to be free.
+fn stop_arc_loop(repo: &Path) {
+    if let Some(pid) = arc_loop_pid(repo) {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+        wait_until(
+            Duration::from_secs(10),
+            "the loop to release its lock",
+            || arc_lock_free(repo),
+        );
+    }
+}
+
+/// Whether `pid` exists (a `kill -0` probe).
+fn arc_process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Opening the TUI on a free `runner.lock` starts `radian arc run --watch`; the loop takes the
+/// lock, advances a `todo.ready` task at auto `run` (its start line reaches the ticker from
+/// `loop.log`), and quitting the TUI leaves the loop running with the lock still held. The test
+/// stops the loop at the end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_arc_runs_a_task_at_auto_run_and_stops_at_awaiting_human() {
-    let scratch = TempDir::new("arc-loop-run");
+async fn pty_arc_starts_a_loop_and_quitting_leaves_it_running() {
+    let scratch = TempDir::new("arc-start-loop");
     let repo = scratch.path().join("repo");
     let server = MockServer::start(vec![
         tool_reply(
@@ -14374,10 +14379,10 @@ async fn pty_arc_runs_a_task_at_auto_run_and_stops_at_awaiting_human() {
     ])
     .await;
     let task = arc_loop_repo(&repo, "run", &server.base_url);
-    let mut pty = Pty::spawn_in(&["arc"], &ARC_LOOP_ENV, &repo, 30, 140);
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 140);
     assert!(
-        pty.wait_for_screen("loop ● running (this window)", wait_positive()),
-        "this window does not say it holds the loop:\n{}",
+        pty.wait_for_screen("loop ● running (pid ", wait_positive()),
+        "the TUI started no loop:\n{}",
         pty.screen()
     );
     assert!(
@@ -14385,57 +14390,16 @@ async fn pty_arc_runs_a_task_at_auto_run_and_stops_at_awaiting_human() {
             &format!("{task}-1 started -> doing.running"),
             wait_positive()
         ),
-        "the ticker does not show the start:\n{}",
+        "the loop's start line never reached the ticker:\n{}",
         pty.screen()
     );
-    wait_for_state(
-        &repo,
-        &task,
-        ("review", "awaiting_human"),
-        Duration::from_secs(90),
-    );
-
-    pty.send(b"q");
-    assert_eq!(
-        pty.wait_for_exit(wait_positive()),
-        Some(0),
-        "q must quit the arc view:\n{}",
-        pty.screen()
-    );
-    assert!(arc_lock_free(&repo), "quitting releases runner.lock");
-    let (code, stdout, stderr) = run_arc_cli(pty.home.path(), &repo, &["arc", "run"]);
+    let pid = arc_loop_pid(&repo).expect("the loop wrote its pid into runner.lock");
     assert_ne!(
-        code,
-        Some(4),
-        "a later run is not refused: {stdout}{stderr}"
+        pid.to_string(),
+        app_pid(&pty),
+        "the loop is not the TUI's process"
     );
-}
 
-/// At auto `merge` the same loop merges the verified task and pushes it to `origin`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_arc_merges_at_auto_merge() {
-    let scratch = TempDir::new("arc-loop-merge");
-    let repo = scratch.path().join("repo");
-    let server = MockServer::start(vec![
-        tool_reply(
-            "c1",
-            "shell",
-            &json!({"command": "printf 'the work\\n' > work.txt && git add work.txt && git commit -q -m work"}).to_string(),
-        ),
-        text_reply("done"),
-    ])
-    .await;
-    let task = arc_loop_repo(&repo, "merge", &server.base_url);
-    let mut pty = Pty::spawn_in(&["arc"], &ARC_LOOP_ENV, &repo, 30, 140);
-    wait_for_state(&repo, &task, ("done", "merged"), Duration::from_secs(120));
-    assert_eq!(
-        arc_git(&repo, &["ls-remote", "origin", "refs/heads/main"])
-            .split_whitespace()
-            .next()
-            .unwrap_or_default(),
-        arc_git(&repo, &["rev-parse", &format!("refs/heads/work/{task}")]),
-        "main holds the task's commit"
-    );
     pty.send(b"q");
     assert_eq!(
         pty.wait_for_exit(wait_positive()),
@@ -14443,36 +14407,49 @@ async fn pty_arc_merges_at_auto_merge() {
         "q must quit the arc view:\n{}",
         pty.screen()
     );
-    assert!(arc_lock_free(&repo), "quitting releases runner.lock");
+    assert!(
+        arc_process_alive(pid),
+        "quitting the TUI stopped the loop it started"
+    );
+    assert!(
+        !arc_lock_free(&repo),
+        "the loop still holds runner.lock after the TUI quit"
+    );
+    stop_arc_loop(&repo);
 }
 
-/// A second loop cannot take `runner.lock`: `radian arc run` exits `4` while the TUI holds it.
+/// The TUI's loop is the only holder: `radian arc run` while the TUI is open exits `4`, and
+/// quitting the TUI does not release the lock.
 #[test]
-fn pty_arc_refuses_a_second_arc_run_while_it_holds_the_lock() {
-    let scratch = TempDir::new("arc-loop-locked");
+fn pty_arc_starts_one_loop_so_a_second_arc_run_exits_four() {
+    let scratch = TempDir::new("arc-start-locked");
     let repo = scratch.path().join("repo");
     arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
-    let mut pty = Pty::spawn_in(&["arc"], &ARC_LOOP_ENV, &repo, 30, 140);
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 140);
     assert!(
-        pty.wait_for_screen("loop ● running (this window)", wait_positive()),
-        "this window does not say it holds the loop:\n{}",
+        pty.wait_for_screen("loop ● running (pid ", wait_positive()),
+        "the TUI started no loop:\n{}",
         pty.screen()
     );
+    let pid = arc_loop_pid(&repo).expect("the loop wrote its pid");
     let (code, stdout, stderr) = run_arc_cli(pty.home.path(), &repo, &["arc", "run"]);
     assert_eq!(code, Some(4), "a second run exits 4: {stdout}{stderr}");
     pty.send(b"q");
     assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
-    assert!(arc_lock_free(&repo));
+    assert!(arc_process_alive(pid), "quitting stopped the loop");
+    assert!(!arc_lock_free(&repo), "the loop still holds the lock");
+    stop_arc_loop(&repo);
 }
 
-/// A TUI opened while `radian arc run --watch` holds the lock is a viewer: its header names the
-/// holder's pid, and its next refresh after that loop exits takes the lock.
+/// A TUI opened while `radian arc run --watch` holds the lock starts no loop: its header names
+/// the holder's pid, and quitting leaves that loop alone. When the watch loop exits, the header
+/// goes back to `stopped` and the TUI starts nothing by itself (`R` is the only way).
 #[test]
-fn pty_arc_is_a_viewer_while_arc_run_watch_holds_the_lock_then_takes_it() {
-    let scratch = TempDir::new("arc-loop-viewer");
+fn pty_arc_is_a_viewer_while_arc_run_watch_holds_the_lock() {
+    let scratch = TempDir::new("arc-start-viewer");
     let repo = scratch.path().join("repo");
     arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
-    let home = TempDir::new("arc-loop-viewer-home");
+    let home = TempDir::new("arc-start-viewer-home");
     let mut watch = std::process::Command::new(BIN)
         .args(["arc", "run", "--watch", "--interval", "5"])
         .current_dir(&repo)
@@ -14490,46 +14467,56 @@ fn pty_arc_is_a_viewer_while_arc_run_watch_holds_the_lock_then_takes_it() {
         !arc_lock_free(&repo)
     });
     let pid = watch.id();
-    let mut pty = Pty::spawn_in(&["arc"], &ARC_LOOP_ENV, &repo, 30, 140);
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 140);
     assert!(
         pty.wait_for_screen(&format!("loop ● running (pid {pid})"), wait_positive()),
         "the header does not name the holder's pid:\n{}",
         pty.screen()
     );
 
-    // The watch loop stops; the TUI takes the lock on its next refresh.
-    assert_eq!(
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) },
-        0,
-        "SIGTERM reaches arc run --watch"
-    );
-    let _ = watch.wait();
-    assert!(
-        pty.wait_for_screen("loop ● running (this window)", wait_positive()),
-        "the TUI did not take the released lock:\n{}",
-        pty.screen()
-    );
+    // Quitting the TUI leaves the watch loop running.
     pty.send(b"q");
     assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
-    assert!(arc_lock_free(&repo));
+    assert!(
+        arc_process_alive(pid),
+        "quitting the TUI stopped the watch loop"
+    );
+    assert!(!arc_lock_free(&repo), "the watch loop still holds the lock");
+
+    // The watch loop stops; the TUI is gone, so nothing starts another one.
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+    let _ = watch.wait();
+    wait_until(
+        Duration::from_secs(10),
+        "the watch loop's lock release",
+        || arc_lock_free(&repo),
+    );
+    assert!(
+        arc_lock_free(&repo),
+        "the lock is free after the watch loop exits"
+    );
 }
 
-/// SIGTERM stops the loop like `--watch` does: no new work, the lock released, exit `0`.
+/// SIGTERM closes the TUI and nothing else: the loop it started keeps running with the lock
+/// held. The test stops the loop at the end.
 #[test]
-fn pty_arc_sigterm_releases_the_lock_and_exits_zero() {
-    let scratch = TempDir::new("arc-loop-sigterm");
+fn pty_arc_sigterm_closes_the_tui_and_leaves_the_loop_running() {
+    let scratch = TempDir::new("arc-start-sigterm");
     let repo = scratch.path().join("repo");
     arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
-    let mut pty = Pty::spawn_in(&["arc"], &ARC_LOOP_ENV, &repo, 30, 140);
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 140);
     assert!(
-        pty.wait_for_screen("loop ● running (this window)", wait_positive()),
-        "this window does not hold the loop:\n{}",
+        pty.wait_for_screen("loop ● running (pid ", wait_positive()),
+        "the TUI started no loop:\n{}",
         pty.screen()
     );
-    let pid = app_pid(&pty);
+    let pid = arc_loop_pid(&repo).expect("the loop wrote its pid");
+    let app = app_pid(&pty);
     let status = std::process::Command::new("kill")
         .arg("-TERM")
-        .arg(&pid)
+        .arg(&app)
         .status()
         .expect("kill runs");
     assert!(status.success(), "SIGTERM reaches the arc view");
@@ -14539,78 +14526,12 @@ fn pty_arc_sigterm_releases_the_lock_and_exits_zero() {
         "SIGTERM must stop the view cleanly:\n{}",
         pty.screen()
     );
-    assert!(arc_lock_free(&repo), "SIGTERM releases runner.lock");
-}
-
-/// `q` while an attempt runs asks first; `y` quits, the lock is free, and a later `arc run`
-/// reconciles the attempt the TUI left running.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_arc_quit_asks_with_a_running_attempt_and_a_later_run_reconciles_it() {
-    let scratch = TempDir::new("arc-loop-quit");
-    let repo = scratch.path().join("repo");
-    let server = MockServer::start(vec![slow_text_reply("done", Duration::from_secs(8))]).await;
-    let task = arc_loop_repo(&repo, "run", &server.base_url);
-    let mut pty = Pty::spawn_in(&["arc"], &ARC_LOOP_ENV, &repo, 30, 140);
-    wait_for_state(&repo, &task, ("doing", "running"), Duration::from_secs(60));
     assert!(
-        pty.wait_for_screen(
-            &format!("{task}-1 started -> doing.running"),
-            wait_positive()
-        ),
-        "the start is not on the ticker:\n{}",
-        pty.screen()
+        arc_process_alive(pid),
+        "SIGTERM on the TUI reached the loop it started"
     );
-
-    // `q` asks; `n` stays, and the view is still there.
-    pty.send(b"q");
-    assert!(
-        pty.wait_for_screen("the loop stops.", wait_positive()),
-        "q did not ask while the attempt runs:\n{}",
-        pty.screen()
-    );
-    assert!(
-        pty.screen().contains("the next loop reconciles it"),
-        "the float does not say what happens to the attempt:\n{}",
-        pty.screen()
-    );
-    pty.send(b"n");
-    assert!(
-        pty.wait_until_gone("the loop stops.", wait_positive()),
-        "n did not close the float:\n{}",
-        pty.screen()
-    );
-    pty.send(b"q");
-    assert!(pty.wait_for_screen("the loop stops.", wait_positive()));
-    pty.send(b"y");
-    assert_eq!(
-        pty.wait_for_exit(wait_positive()),
-        Some(0),
-        "y must quit the arc view:\n{}",
-        pty.screen()
-    );
-    assert!(arc_lock_free(&repo), "quitting releases runner.lock");
-
-    // The worker was left running: a later one-shot `run` applies its result.
-    let attempt = repo
-        .join(".radian/arc/runs")
-        .join(&task)
-        .join("attempts")
-        .join(format!("{task}-1"))
-        .join("attempt_finished.json");
-    wait_until(Duration::from_secs(60), "the attempt's record", || {
-        attempt.is_file()
-    });
-    let (code, stdout, stderr) = run_arc_cli(pty.home.path(), &repo, &["arc", "run"]);
-    assert_eq!(code, Some(0), "the later run: {stdout}{stderr}");
-    assert!(
-        stdout.contains("reconciled:"),
-        "the later run did not reconcile the attempt: {stdout}{stderr}"
-    );
-    assert_ne!(
-        arc_task_state(&repo, &task).0,
-        "doing",
-        "the task left doing"
-    );
+    assert!(!arc_lock_free(&repo), "the loop still holds runner.lock");
+    stop_arc_loop(&repo);
 }
 
 // ---------- lost input: a resize must not eat a typed key ----------

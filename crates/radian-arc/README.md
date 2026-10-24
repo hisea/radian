@@ -200,8 +200,8 @@ on the next pass; a refusal that changed nothing is a summary note, not a spin.
 
 At quiet, the report lists each open plan and task with what it waits on (a person, an
 `after` task, a retry time, a rework brief, a free concurrency slot). `run::run` hands every
-transition line to its sink as it makes it and returns the report; `radian arc run` prints the
-summary with `Report::render_summary`.
+line it prints (each transition, then the summary) to its sink, and every line also goes to
+`.radian/arc/loop.log` through `run::LoopLog`.
 
 `run::watch` repeats the pass every `--interval` seconds (default 30, 5 to 3600) until SIGINT
 or SIGTERM; it holds `runner.lock` for the whole loop, prints the summary only when it changed,
@@ -209,10 +209,13 @@ prints a pass error as one `radian arc: <message>` line and runs the next pass, 
 worker or gate once the signal arrived, leaves a running worker alone, and signals a running
 gate (`gate::background::stop`) before it returns.
 
-`run::pass` is the same pass-to-quiet for a caller that holds `runner.lock` itself: the arc TUI
-runs it on a background thread when it takes the lock, and `run::stop_gates` is what both loops
-call once they stop. `Store::try_runner_lock` writes the holder's pid into `runner.lock` (the
-flock is the lock) so a viewer's header can name the loop it is watching.
+`run::LoopLog` is the one writer of `loop.log`, used by `run` and `watch`: each line gets an
+RFC 3339 UTC timestamp and a space, is appended and flushed at once, and a log at or above
+1 MiB is renamed to `loop.log.1` before the next line (one old file is kept). A write error
+prints one `radian arc:` line for the whole process and the loop goes on. The arc TUI reads
+the file for its ticker and log view; it never holds `runner.lock`. `Store::try_runner_lock`
+writes the holder's pid into `runner.lock` (the flock is the lock) so a viewer's header can
+name the loop it is watching.
 
 ## Gate checkout
 

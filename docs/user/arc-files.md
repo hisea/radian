@@ -187,6 +187,8 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `worktrees/<task>/` | The worker's checkout for that task (the worker wrapper creates it). |
 | `state.lock` | The short lock every change takes. |
 | `runner.lock` | The lock a scheduling loop holds; its holder writes its pid there, which a viewer's header reads. |
+| `loop.log` | Every line the scheduling loop prints, each prefixed with an RFC 3339 UTC timestamp and a space, flushed per line: the transition lines, the summary, and the `radian arc:` error lines. The arc TUI's ticker and log view read it. A log that reaches 1 MiB is renamed to `loop.log.1` before the next line. |
+| `loop.log.1` | The previous `loop.log`, kept when the log rotated. One old file is kept. |
 
 Every change is one transaction under `state.lock`:
 take the lock (waiting up to 5 seconds, then exit `4`), compare the file with the ledger, write a temporary file, flush it to disk, rename it over the old one, flush the directory, record the new version and hash in the ledger, release.

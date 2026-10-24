@@ -32,9 +32,14 @@
 //! Every transition line is written through the caller's sink and flushed when the loop makes
 //! it; the summary of what waits on whom prints when the pass ends. `watch` repeats a pass
 //! after `--interval` seconds until SIGINT or SIGTERM, holds `runner.lock` the whole time, and
-//! prints the summary only when it changed. [`pass`] is that same pass for a caller that holds
-//! `runner.lock` itself: the arc TUI (ADR 0048 decision 13) runs it on a background thread.
+//! prints the summary only when it changed.
+//!
+//! Every line a loop prints also goes to `.radian/arc/loop.log`, each prefixed with an RFC 3339
+//! UTC timestamp, flushed per line ([`LoopLog`]). The arc TUI reads that file for its ticker
+//! and its log view (ADR 0048 decision 13).
 
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -54,6 +59,19 @@ pub const MAX_INTERVAL_SECS: u64 = 3600;
 /// How often an `--interval` wait looks at the stop flag: a signal must end the loop promptly,
 /// not after the whole interval.
 const STOP_POLL: Duration = Duration::from_millis(100);
+
+/// The log every `radian arc run` appends the lines it prints to (ADR 0048 decision 13).
+/// It sits in `.radian/arc/` and carries one RFC 3339 UTC timestamp and a space before each
+/// line.
+pub const LOOP_LOG: &str = "loop.log";
+/// The one old log a rotation keeps, in place of `loop.log`.
+pub const LOOP_LOG_OLD: &str = "loop.log.1";
+/// A `loop.log` at or above this size is rotated before the next line is written: the file
+/// becomes `loop.log.1` (replacing an older one) and a new `loop.log` starts.
+pub const LOOP_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Set once when writing `loop.log` failed, so one process prints one line, not one per pass.
+static LOG_WRITE_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// Set by the SIGINT/SIGTERM handler a `watch` loop installs.
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -92,15 +110,30 @@ impl Report {
 }
 
 /// Runs one pass to quiet, holding `runner.lock` for its lifetime. `emit` receives each
-/// transition line with its newline, as the loop makes it.
+/// transition line with its newline, as the loop makes it, and then the summary. Every line is
+/// also appended to [`LOOP_LOG`].
 ///
 /// # Errors
 ///
 /// Another process holds `runner.lock` ([`Error::Locked`], exit 4), a file arc needs cannot be
 /// read or written, or the store did not settle within [`MAX_PASSES`] passes.
 pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
-    let _lock = take_lock(store)?;
-    run_quiet(store, emit, None)
+    let mut log = LoopLog::new(store);
+    let lock = take_lock(store, &mut log)?;
+    let mut sink = |text: &str| {
+        log.write(text);
+        emit(text);
+    };
+    let report = match run_quiet(store, &mut sink, None) {
+        Ok(report) => report,
+        Err(error) => {
+            sink(&format!("radian arc: {}\n", error.message()));
+            return Err(error);
+        }
+    };
+    sink(&report.render_summary());
+    drop(lock);
+    Ok(report)
 }
 
 /// Runs a pass, then waits `interval_secs` and runs another, until SIGINT or SIGTERM. Holds
@@ -117,7 +150,12 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
 ///
 /// The same as [`run`].
 pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> Result<(), Error> {
-    let _lock = take_lock(store)?;
+    let mut log = LoopLog::new(store);
+    let lock = take_lock(store, &mut log)?;
+    let mut sink = |text: &str| {
+        log.write(text);
+        emit(text);
+    };
     STOP.store(false, Ordering::SeqCst);
     catch_stop_signals();
     let mut last: Option<String> = None;
@@ -125,13 +163,13 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
         if stop_requested() {
             break;
         }
-        let report = match run_quiet(store, emit, Some(&STOP)) {
+        let report = match run_quiet(store, &mut sink, Some(&STOP)) {
             Ok(report) => report,
             // One task's error does not end the loop: print it and run the next pass. The
             // lock and every state file stay as they are; a one-shot `run` still returns
             // the error and exits non-zero.
             Err(error) => {
-                emit(&format!("radian arc: {}\n", error.message()));
+                sink(&format!("radian arc: {}\n", error.message()));
                 if stop_requested() || !wait_interval(interval_secs) {
                     break;
                 }
@@ -140,7 +178,7 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
         };
         let summary = report.render_summary();
         if last.as_deref() != Some(summary.as_str()) {
-            emit(&summary);
+            sink(&summary);
             last = Some(summary);
         }
         if stop_requested() || !wait_interval(interval_secs) {
@@ -150,30 +188,13 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
     if stop_requested() {
         stop_gates(store)?;
     }
+    drop(lock);
     Ok(())
-}
-
-/// Runs the passes of one scheduling loop until one changes nothing, for a caller that holds
-/// `runner.lock` itself (the arc TUI, ADR 0048 decision 13). It is the same function `run` and
-/// `--watch` use; waiting, claiming, gating and merging are theirs too.
-///
-/// `stop` is checked between passes and between the steps of a pass: once it is set, no further
-/// pass starts, an automatic reverify is not claimed, and no attempt and no gate is started.
-/// Work already running (a worker or a gate is a separate process) still ends normally. `emit`
-/// receives each transition line with its newline, as the loop makes it.
-///
-/// # Errors
-///
-/// A file arc needs cannot be read or written, or the store did not settle within
-/// [`MAX_PASSES`] passes. A caller that holds the lock reports `Error::Locked` itself.
-pub fn pass(store: &Store, emit: &mut dyn FnMut(&str), stop: &AtomicBool) -> Result<Report, Error> {
-    run_quiet(store, emit, Some(stop))
 }
 
 /// Stops the gates a loop leaves running when it stops: a short grace, then SIGKILL. Each
 /// gate arc stopped records `interrupted`, so the next loop starts it again and counts no
-/// death. Public because the arc TUI's loop ends the same way `--watch` does on SIGTERM
-/// (ADR 0048 decision 13).
+/// death.
 pub fn stop_gates(store: &Store) -> Result<(), Error> {
     let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
     for id in store.task_ids()? {
@@ -182,10 +203,90 @@ pub fn stop_gates(store: &Store) -> Result<(), Error> {
     Ok(())
 }
 
-fn take_lock(store: &Store) -> Result<crate::store::RunnerLock, Error> {
-    store
-        .try_runner_lock()?
-        .ok_or(Error::Locked(crate::store::RUNNER_LOCK))
+/// The writer of `.radian/arc/loop.log`: every line a scheduling loop prints, prefixed with an
+/// RFC 3339 UTC timestamp and a space, appended and flushed as it prints. A log at or above
+/// [`LOOP_LOG_MAX_BYTES`] becomes `loop.log.1` (replacing an older one) before the next line,
+/// so one old file is kept. A write error prints one `radian arc:` line for the whole process
+/// and the loop goes on.
+pub struct LoopLog {
+    path: PathBuf,
+}
+
+impl LoopLog {
+    /// The log of `store`'s repository.
+    #[must_use]
+    pub fn new(store: &Store) -> Self {
+        Self {
+            path: store.root().join(LOOP_LOG),
+        }
+    }
+
+    /// Appends `text`: one timestamped line per line of `text`, each flushed.
+    pub fn write(&mut self, text: &str) {
+        for line in text.lines() {
+            self.write_line(line);
+        }
+    }
+
+    /// The log's path.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn write_line(&mut self, line: &str) {
+        self.rotate_if_needed();
+        let stamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let result = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .and_then(|mut file| {
+                writeln!(file, "{stamp} {line}")?;
+                file.flush()
+            });
+        if let Err(error) = result {
+            self.report(error);
+        }
+    }
+
+    /// Rotates a full log before the line that would grow it past the limit.
+    fn rotate_if_needed(&mut self) {
+        let full = std::fs::metadata(&self.path).is_ok_and(|meta| meta.len() >= LOOP_LOG_MAX_BYTES);
+        if !full {
+            return;
+        }
+        let old = self.path.with_file_name(LOOP_LOG_OLD);
+        let result = std::fs::remove_file(&old)
+            .or_else(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(error),
+            })
+            .and_then(|()| std::fs::rename(&self.path, &old));
+        if let Err(error) = result {
+            self.report(error);
+        }
+    }
+
+    /// One line per process, as decision 13 asks; a loop that cannot write its log still runs.
+    fn report(&self, error: std::io::Error) {
+        if !LOG_WRITE_FAILED.swap(true, Ordering::SeqCst) {
+            eprintln!("radian arc: cannot write {}: {error}", self.path.display());
+        }
+    }
+}
+
+fn take_lock(store: &Store, log: &mut LoopLog) -> Result<crate::store::RunnerLock, Error> {
+    match store.try_runner_lock()? {
+        Some(lock) => Ok(lock),
+        None => {
+            let error = Error::Locked(crate::store::RUNNER_LOCK);
+            // The line `radian arc run` prints for this is part of what the TUI's loop.log
+            // reader may name when a loop it started exited 4.
+            log.write(&format!("radian arc: {}\n", error.message()));
+            Err(error)
+        }
+    }
 }
 
 /// The passes of one `run` or one `watch` pass, until a pass changes nothing. When `stop` is

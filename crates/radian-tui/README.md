@@ -846,14 +846,16 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   (`m`): do the stage marks, the `on <sha>` column and the `summary` frame read at your width, is
   the command row's log legible in its float, and does a moved branch (push to `work/<task>`) make
   every mark weak with the moved row? Press `M` and check that the float says
-  `merge <task> onto main? y/n`; `n` must change nothing. While the TUI is open it holds the
-  loop: does the header read `loop ● running (this window)`, does a started task's line appear on
-  the footer's ticker, and does `L` open the log with the same lines and the pass summaries? With
-  a task in `doing.running`, does its diff tab say `live · worktree` and show the worker's
-  uncommitted files (marked `uncommitted`) within a few seconds? Start a second `radian arc run`
-  from another terminal and check that it exits `4`; press `q` while an attempt runs and check
-  that the float says the loop stops and the next loop reconciles it (`n` stays, `y` quits and
-  releases the lock). pty automation asserts the pages, the keys,
+  `merge <task> onto main? y/n`; `n` must change nothing. Opening the TUI with no loop running
+  starts one: does the header go from `loop ◌ starting` to `loop ● running (pid <n>)`, does a
+  started task's line appear on the footer's ticker, and does `L` open the log with the same
+  lines and the pass summaries? With a task in `doing.running`, does its diff tab say
+  `live · worktree` and show the worker's uncommitted files (marked `uncommitted`) within a few
+  seconds? Start a second `radian arc run` from another terminal and check that it exits `4`;
+  press `q` and check that the loop it started is still running (its pid in the header, then
+  `loop ● running` when you open the TUI again) and that the attempt is reconciled by the next
+  pass. With a loop already running, opening the TUI must start nothing and name that loop's
+  pid; `R` must say why it does nothing. pty automation asserts the pages, the keys,
   the marks and the footer's result line, not the feel.
 - **radian as a herdr agent** (ADR 0034, slice ④): the pty tests can only watch a fake
   socket, so the real herdr is yours. In a herdr pane (its env sets `HERDR_ENV=1`), start `radian`,

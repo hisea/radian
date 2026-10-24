@@ -4,18 +4,19 @@
 //!
 //! This module is the state and the frame; [`crate::cli::arc`] owns the terminal and the
 //! input loop, as `cli/attach.rs` does for the attach view. Data comes only from
-//! `radian_arc`'s read side (`radian_arc::read`), the store's own loaders and a command's log
-//! (queued here, read by the runner on a worker thread); the page state writes no file and
-//! starts no process. An owner's action is queued here and executed by the runner through
-//! [`actions`], in this process, with the library calls the CLI makes. The scheduling loop is
-//! [`looping`]: it takes `runner.lock` (or reports the pid another loop wrote there) and runs
-//! the pass on its own thread, so the frame never waits on a pass.
+//! `radian_arc`'s read side (`radian_arc::read`), the store's own loaders, a command's log
+//! (queued here, read by the runner on a worker thread) and the scheduling loop's
+//! `loop.log` ([`loop_log`], read by the runner); the page state writes no file and starts no
+//! process. An owner's action is queued here and executed by the runner through [`actions`],
+//! in this process, with the library calls the CLI makes. [`looping`] starts the detached
+//! `radian arc run --watch` when no loop holds `runner.lock`; this window never holds it.
 //!
 //! The layout follows ADR 0035: columns 1-2 are the marker column, text starts at column 3,
 //! open frames (`╭─ label ───`, `│ `, `╰──`) carry the structure, the cursor is `❯`, and every
 //! color is a theme role.
 
 pub mod actions;
+pub mod loop_log;
 pub mod looping;
 pub mod render;
 
@@ -30,7 +31,7 @@ use ratatui::style::Style;
 
 use crate::attach::AttachView;
 use crate::theme::Theme;
-use looping::{LoopEvent, LoopStatus};
+use looping::LoopStatus;
 
 /// The left plan column's width in cells, from column 3 to the divider.
 pub const LEFT_WIDTH: u16 = 35;
@@ -168,6 +169,8 @@ pub enum ArcKey {
     Redraw,
     /// Not a key this page acts on.
     Ignored,
+    /// `R`: the runner starts a loop when the probe says none runs.
+    StartLoop,
 }
 
 /// A task's state mark (ADR 0048's state table, drawn as ADR 0035's marks).
@@ -465,8 +468,6 @@ pub enum Float {
     },
     /// The reject note, one line.
     Reject { note: String },
-    /// `q` while this TUI's loop runs and attempts are in flight (ADR 0048 decision 13).
-    Quit { running: usize },
 }
 
 /// The merge page's state: the task's stage rows, the review's findings, the commits, the
@@ -599,14 +600,17 @@ pub struct ArcApp {
     /// The confirmation or reject float, which takes the keys until it closes.
     pub float: Option<Float>,
     pub main_sha: Option<String>,
-    /// What the scheduling loop is doing: this window runs it, another process does, or no
-    /// one does (ADR 0048 decision 13). The runner sets it from its [`looping::ArcLoop`].
+    /// What the scheduling loop is doing: another process holds `runner.lock`, this TUI has
+    /// just started one, or none runs (ADR 0048 decision 13). The runner sets it from its
+    /// [`looping::LoopStarter`].
     pub loop_status: LoopStatus,
-    /// The last transition line the pass produced, one line in the footer.
+    /// The newest transition line `loop.log` gained since the TUI opened, one line in the
+    /// footer.
     pub ticker: Option<String>,
-    /// The pass's transitions and summaries, the log view's lines (the last
-    /// [`LOG_LINES`]).
+    /// The tail of `loop.log`, the log view's lines (the last [`loop_log::MAX_LINES`]).
     pub log: Vec<String>,
+    /// `loop.log` does not exist: the log view says so instead of drawing an empty frame.
+    pub log_missing: bool,
     /// `L`: the log view is open over the page.
     pub log_open: bool,
     pub log_scroll: usize,
@@ -651,6 +655,7 @@ impl ArcApp {
             loop_status: LoopStatus::Stopped,
             ticker: None,
             log: Vec::new(),
+            log_missing: true,
             log_open: false,
             log_scroll: 0,
             theme: Theme::default(),
@@ -1263,38 +1268,39 @@ impl ArcApp {
         true
     }
 
-    /// How many tasks are in `doing`: the attempts a quit would leave running.
-    pub fn running_attempts(&self) -> usize {
-        self.plans
-            .iter()
-            .flat_map(|view| view.tasks.iter())
-            .filter(|task| task.item.state == TaskState::Doing)
-            .count()
-    }
-
-    /// Adds one event the pass produced: a transition goes to the ticker and the log, a detail
-    /// (the summary, an error) to the log only. Returns whether the frame changed.
-    pub fn push_loop_event(&mut self, event: LoopEvent) -> bool {
-        match event {
-            LoopEvent::Transition(line) => {
-                self.ticker = Some(line.clone());
-                self.push_log(line);
+    /// Replaces the log view with one read of `loop.log`: `None` means the file is missing.
+    /// The view follows new lines while it was scrolled to the bottom, and a new transition
+    /// line becomes the ticker. Returns whether the frame changed.
+    pub fn apply_loop_log(&mut self, read: Option<loop_log::LoopLogRead>) -> bool {
+        match read {
+            None => {
+                let changed = !self.log_missing || !self.log.is_empty();
+                self.log_missing = true;
+                self.log.clear();
+                self.log_scroll = 0;
+                changed
             }
-            LoopEvent::Detail(text) => {
-                for line in text.lines() {
-                    self.push_log(line.to_owned());
+            Some(read) => {
+                let at_end = self.log_scroll + 1 >= self.log.len();
+                let changed = self.log_missing || self.log != read.lines || read.ticker.is_some();
+                self.log_missing = false;
+                self.log = read.lines;
+                if at_end {
+                    self.log_end();
+                } else {
+                    self.log_scroll = self.log_scroll.min(self.log.len().saturating_sub(1));
                 }
+                if let Some(ticker) = read.ticker {
+                    self.ticker = Some(ticker);
+                }
+                changed
             }
         }
-        true
     }
 
-    /// Appends one log line, keeping the last [`LOG_LINES`].
-    fn push_log(&mut self, line: String) {
-        self.log.push(line);
-        if self.log.len() > LOG_LINES {
-            self.log.drain(..self.log.len() - LOG_LINES);
-        }
+    /// Sets the footer's result line (a start that failed, a key that cannot act now).
+    pub fn set_result(&mut self, text: String, failed: bool) {
+        self.result = Some(ResultLine { text, failed });
     }
 
     /// Scrolls the log view by `delta` lines, clamped to its end.
@@ -1308,16 +1314,9 @@ impl ArcApp {
         self.log_scroll = self.log.len().saturating_sub(1);
     }
 
-    /// `q`: when this window is the scheduling loop and attempts are in flight, ask first
-    /// (ADR 0048 decision 13).
+    /// `q` closes this window; it never stops a loop (ADR 0048 decision 13).
     fn quit_key(&mut self) -> ArcKey {
-        let running = self.running_attempts();
-        if self.loop_status == LoopStatus::ThisWindow && running > 0 {
-            self.float = Some(Float::Quit { running });
-            ArcKey::Redraw
-        } else {
-            ArcKey::Quit
-        }
+        ArcKey::Quit
     }
 
     /// One key press.
@@ -1338,6 +1337,26 @@ impl ArcApp {
             self.log_open = !self.log_open;
             self.result = None;
             return ArcKey::Redraw;
+        }
+        // `R` starts a loop when the probe says none runs; the runner does it, and the footer
+        // says why when one already runs (ADR 0048 decision 13).
+        if key.code == KeyCode::Char('R') && !ctrl {
+            self.result = None;
+            return match self.loop_status {
+                LoopStatus::Stopped => ArcKey::StartLoop,
+                LoopStatus::Starting => {
+                    self.set_result("a loop is starting".to_owned(), false);
+                    ArcKey::Redraw
+                }
+                LoopStatus::Elsewhere(pid) => {
+                    let text = pid.map_or_else(
+                        || "a loop is already running".to_owned(),
+                        |pid| format!("a loop is already running (pid {pid})"),
+                    );
+                    self.set_result(text, false);
+                    ArcKey::Redraw
+                }
+            };
         }
         if self.log_open {
             self.result = None;
@@ -1627,17 +1646,6 @@ impl ArcApp {
                     self.float = None;
                     self.queue_action(action);
                     ArcKey::Redraw
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.float = None;
-                    ArcKey::Redraw
-                }
-                _ => ArcKey::Ignored,
-            },
-            Float::Quit { .. } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.float = None;
-                    ArcKey::Quit
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.float = None;

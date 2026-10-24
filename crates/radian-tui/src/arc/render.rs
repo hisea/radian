@@ -18,12 +18,12 @@ use crate::theme::Theme;
 
 /// The header row and the blank row under it.
 const HEADER_ROWS: u16 = 2;
-/// The frame rule and the key-hint row at the bottom, plus the loop's ticker line when the
-/// pass has produced a transition.
+/// The frame rule and the key-hint row at the bottom, plus the loop's ticker line when
+/// `loop.log` has gained a transition since the TUI opened.
 const FOOTER_ROWS: u16 = 2;
 
 /// The footer's rows in this frame: the ticker takes one only while it has a line to show, so
-/// a store with no pass keeps the body's old size.
+/// a repository with no loop keeps the body's old size.
 fn footer_rows(app: &ArcApp) -> u16 {
     FOOTER_ROWS + u16::from(app.ticker.is_some())
 }
@@ -156,12 +156,12 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
     ];
     match app.loop_status {
         super::looping::LoopStatus::Stopped => {
-            right.push(Span::styled("◻ ", theme.hint));
+            right.push(Span::styled("○ ", theme.hint));
             right.push(Span::styled("stopped", theme.hint));
         }
-        super::looping::LoopStatus::ThisWindow => {
-            right.push(Span::styled("● ", theme.model));
-            right.push(Span::styled("running (this window)", theme.text));
+        super::looping::LoopStatus::Starting => {
+            right.push(Span::styled("◌ ", theme.hint));
+            right.push(Span::styled("starting", theme.hint));
         }
         super::looping::LoopStatus::Elsewhere(pid) => {
             right.push(Span::styled("● ", theme.model));
@@ -182,8 +182,8 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
     Line::from(left)
 }
 
-/// The footer's one-line ticker: the pass's last transition, or nothing (ADR 0048 decision
-/// 13).
+/// The footer's one-line ticker: the newest transition line `loop.log` gained since the TUI
+/// opened, or nothing (ADR 0048 decision 13).
 fn ticker_line(app: &ArcApp, width: usize) -> Line<'static> {
     let Some(text) = &app.ticker else {
         return Line::default();
@@ -233,12 +233,12 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
             let auto_on = plan.is_some_and(|plan| plan.auto != "off");
             vec![
                 ("↑↓", "select", false),
-                ("enter", "open task", false),
+                ("enter", "open", false),
                 ("c", "confirm", !draft),
                 ("a", "auto", !confirmed),
                 ("p", "pause", !auto_on),
                 ("s", "start", app.start_blocker().is_some()),
-                ("g", "graph/list", false),
+                ("g", "flat", false),
                 ("f", "filter", false),
                 ("L", "log", false),
                 ("tab", "pages", false),
@@ -1283,18 +1283,6 @@ fn draw_float(frame: &mut Frame, area: Rect, app: &ArcApp, float: &Float) {
             ]))
             .hint("enter", "reject")
             .hint("esc", "cancel"),
-        Float::Quit { running } => {
-            let attempts = if *running == 1 {
-                "1 running attempt keeps running; the next loop reconciles it".to_owned()
-            } else {
-                format!("{running} running attempts keep running; the next loop reconciles them")
-            };
-            crate::panel::Panel::new("quit")
-                .row(Line::from(Span::styled("the loop stops.", theme.text)))
-                .row(Line::from(Span::styled(attempts, theme.hint)))
-                .hint("y", "quit")
-                .hint("n", "stay")
-        }
     };
     let lines = panel.lines(width, theme, crate::footer::Glyphs::Unicode);
     let height = (lines.len() as u16).min(area.height);
@@ -1340,17 +1328,22 @@ fn draw_log(frame: &mut Frame, area: Rect, app: &ArcApp, log: &LogView) {
     frame.render_widget(Paragraph::new(lines), rect);
 }
 
-/// The loop's log (`L`): the pass's transitions and summaries, scrollable, over the page
-/// (ADR 0048 decision 13).
+/// The loop's log (`L`): the tail of `loop.log`, scrollable, over the page (ADR 0048
+/// decision 13).
 fn draw_loop_log(frame: &mut Frame, area: Rect, app: &ArcApp) {
     let theme = &app.theme;
     let width = area.width as usize;
     let inner = width.saturating_sub(4);
     let mut lines = vec![frame_top(width, "log", theme)];
-    if app.log.is_empty() {
+    if app.log_missing {
         lines.push(rail(
             theme,
-            Line::from(Span::styled("no transitions yet", theme.hint)),
+            Line::from(Span::styled("no loop log yet", theme.hint)),
+        ));
+    } else if app.log.is_empty() {
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled("no lines yet", theme.hint)),
         ));
     } else {
         let rows = (area.height as usize).saturating_sub(2);
