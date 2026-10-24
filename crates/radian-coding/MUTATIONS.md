@@ -725,3 +725,16 @@ M2's first attempt changed only the `spawn_parent_env` variable and kept `Env::s
 `<home>`; the exec test itself then failed (`child_journals` found no journal), which fails the
 leak test for the wrong reason. The recorded mutation moves the directory the test really reads
 and writes, so the child test passes and only the leftover fails the leak test.
+## the temp file system check of `verify.sh` and `arc-gate.sh` (2026-10-23, branch `work/TK0042-verify-inode-check`)
+
+Base: the branch's first commit. Mutations were applied by hand to `scripts/temp-check.sh`, backed
+up under `.radian/temp-check.sh.bak` and restored from that copy (never `git checkout`); run with
+`cargo nextest run -p radian-coding --locked --profile sandbox --no-fail-fast --test temp_check`.
+The new tests first ran against the source without `scripts/temp-check.sh`: all nine failed (the
+helper did not exist).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0042-M1 | compare with `-gt` where the inode check means `-lt` (`inode_free -gt inode_limit`) | ✅ 5 failed | `low_inodes_fail_with_the_line` (10 free passed the check), also `plenty_free_passes`, `macos_and_gnu_inode_output_both_parse`, and both override tests |
+| TK0042-M2 | ignore `RADIAN_VERIFY_MIN_FREE_INODES` (`local inode_limit="50000"`) | ✅ 2 failed | `the_inode_limit_can_be_overridden_and_zero_turns_it_off` (the `0` and lowered-limit runs failed) and `a_non_numeric_limit_fails_the_check` |
+
