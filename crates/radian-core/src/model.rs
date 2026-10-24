@@ -207,10 +207,16 @@ pub enum ModelError {
     ///
     /// `retry_after` is the provider's `Retry-After` header, already parsed to a duration; the
     /// core honours it (capped) instead of its own backoff. `None` means the provider sent none.
+    ///
+    /// `status` is the HTTP status an adapter read, when the error came from a response (a
+    /// `429`, a `503`). It is `None` for an error the provider marked overloaded without a
+    /// status. A host may read it to tell a quota `429` from a server `5xx`; it never has to
+    /// match the message text (ADR 0017 §2).
     #[error("model unavailable: {message}")]
     Unavailable {
         message: String,
         retry_after: Option<Duration>,
+        status: Option<u16>,
     },
     /// The provider refused the request because the input is over its context window.
     ///
@@ -316,6 +322,7 @@ mod tests {
             ModelError::Unavailable {
                 message: "HTTP 429: slow down".into(),
                 retry_after: Some(Duration::from_secs(1)),
+                status: Some(429),
             }
             .is_transient()
         );
@@ -329,6 +336,36 @@ mod tests {
         assert!(!ModelError::ContextOverflow("HTTP 400: prompt is too long".into()).is_transient());
     }
 
+    /// ADR 0017 §2: `Unavailable` carries the HTTP status when a response produced it, so the
+    /// host can tell a quota `429` from a `5xx` without reading the message. An error the
+    /// provider marked overloaded without a status has none, and stays transient.
+    #[test]
+    fn unavailable_carries_the_http_status_when_there_is_one() {
+        let with_status = ModelError::Unavailable {
+            message: "HTTP 429: slow down".into(),
+            retry_after: None,
+            status: Some(429),
+        };
+        assert!(matches!(
+            with_status,
+            ModelError::Unavailable {
+                status: Some(429),
+                ..
+            }
+        ));
+        assert!(with_status.is_transient());
+        let overload = ModelError::Unavailable {
+            message: "the provider is overloaded".into(),
+            retry_after: None,
+            status: None,
+        };
+        assert!(matches!(
+            overload,
+            ModelError::Unavailable { status: None, .. }
+        ));
+        assert!(overload.is_transient());
+    }
+
     /// Only a provider that sent `Retry-After` can ask for a specific wait.
     #[test]
     fn retry_after_is_only_carried_by_unavailable() {
@@ -336,6 +373,7 @@ mod tests {
             ModelError::Unavailable {
                 message: "HTTP 429".into(),
                 retry_after: Some(Duration::from_secs(7)),
+                status: Some(429),
             }
             .retry_after(),
             Some(Duration::from_secs(7))
@@ -344,6 +382,7 @@ mod tests {
             ModelError::Unavailable {
                 message: "HTTP 500".into(),
                 retry_after: None,
+                status: Some(500),
             }
             .retry_after(),
             None

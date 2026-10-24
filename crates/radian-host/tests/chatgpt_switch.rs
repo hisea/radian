@@ -98,7 +98,7 @@ async fn switching_to_chatgpt_mid_session_resolves_a_working_route() {
         thinking_budget: None,
     };
     let args = ctx
-        .args_for("chatgpt", "gpt-5.4")
+        .args_for("chatgpt", "gpt-5.4", None)
         .expect("a logged-in chatgpt route resolves");
     assert_eq!(args.provider, Provider::ChatGpt);
     assert!(args.api_key.is_none(), "chatgpt carries no static api_key");
@@ -154,7 +154,7 @@ async fn switching_to_chatgpt_without_a_login_is_refused() {
         thinking: "medium".to_owned(),
         thinking_budget: None,
     };
-    let error = match ctx.args_for("anthropic", "claude-x") {
+    let error = match ctx.args_for("anthropic", "claude-x", None) {
         Err(error) => error,
         Ok(_) => panic!("anthropic has no stored credential in this test's home"),
     };

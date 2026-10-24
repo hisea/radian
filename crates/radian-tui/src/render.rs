@@ -33,7 +33,7 @@ pub use input::{
 pub use panels::{
     QUESTION_KEYS, access_panel, login_panel, logout_panel, question_panel, trust_panel,
 };
-use panels::{access_height, login_height, question_height, trust_height};
+use panels::{access_height, login_height, logout_keys_panel, question_height, trust_height};
 use status::{status_height, status_lines};
 use transcript::apply_selection;
 pub use transcript::{
@@ -93,6 +93,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             app.footer_glyphs(),
         )
         .len() as u16,
+        Some(Modal::LogoutKeys(wizard)) => {
+            logout_keys_panel(wizard, area.width as usize, &app.theme, app.footer_glyphs()).len()
+                as u16
+        }
         // The trust prompt lists up to five options plus a header and the two borders.
         Some(Modal::Trust(wizard)) => {
             trust_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
@@ -327,6 +331,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::ConfirmLogout(provider)) => {
             let lines = logout_panel(
                 provider,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
+        }
+        Some(Modal::LogoutKeys(wizard)) => {
+            let lines = logout_keys_panel(
+                wizard,
                 input_area.width as usize,
                 &app.theme,
                 app.footer_glyphs(),

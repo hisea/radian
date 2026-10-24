@@ -311,7 +311,11 @@ impl App {
                     .unwrap_or(LoginOutcome::Stay);
                 self.login_outcome(outcome)
             }
-            Input::LoginVerified { name: _, result } => {
+            Input::LoginVerified {
+                name: _,
+                result,
+                existing,
+            } => {
                 // Only a wizard still waiting consumes the answer (D3).
                 let waiting = matches!(
                     self.top_modal(),
@@ -323,7 +327,7 @@ impl App {
                 }
                 let outcome = self
                     .login_modal_mut()
-                    .and_then(|wizard| wizard.verified(&result))
+                    .and_then(|wizard| wizard.verified(&result, existing))
                     .unwrap_or(LoginOutcome::Stay);
                 self.login_outcome(outcome)
             }
@@ -362,17 +366,81 @@ impl App {
                 };
                 self.remove_modal(|modal| matches!(modal, Modal::ConfirmLogout(_)));
                 if confirmed {
-                    UpdateResult::effect(Effect::Logout { provider })
+                    UpdateResult::effect(Effect::Logout {
+                        provider,
+                        key: None,
+                    })
                 } else {
                     self.push_notice(format!("kept `{provider}`"));
                     UpdateResult::dirty()
                 }
             }
-            Input::LogoutDone { provider, result } => {
-                match result {
-                    Ok(()) => {
-                        self.push_notice(format!("removed the stored credential for `{provider}`"))
+            Input::LogoutChoices { provider, choices } => {
+                match choices {
+                    Err(error) => {
+                        self.push_notice(format!("could not read `{provider}`: {error}"));
                     }
+                    Ok(keys) if keys.is_empty() => {
+                        self.push_notice(format!("`{provider}` has no stored key"));
+                    }
+                    Ok(keys) if keys.len() == 1 => {
+                        self.push_modal(Modal::ConfirmLogout(provider));
+                    }
+                    Ok(keys) => {
+                        self.push_modal(Modal::LogoutKeys(Box::new(
+                            crate::logout::LogoutKeysWizard::new(provider, keys),
+                        )));
+                    }
+                }
+                UpdateResult::dirty()
+            }
+            Input::LogoutMove(delta) => {
+                if let Some(wizard) = self.logout_keys_mut() {
+                    wizard.move_cursor(delta);
+                }
+                UpdateResult::dirty()
+            }
+            Input::LogoutChosen(pick) => {
+                let Some(wizard) = self.logout_keys_mut() else {
+                    return UpdateResult::none();
+                };
+                let provider = wizard.provider.clone();
+                let selected = wizard.selected();
+                self.remove_modal(|modal| matches!(modal, Modal::LogoutKeys(_)));
+                match pick {
+                    crate::app::LogoutPick::Cancel => {
+                        self.push_notice(format!("kept `{provider}`"));
+                        UpdateResult::dirty()
+                    }
+                    crate::app::LogoutPick::All => UpdateResult::effect(Effect::Logout {
+                        provider,
+                        key: None,
+                    }),
+                    crate::app::LogoutPick::Selected => match selected {
+                        Some(key) => UpdateResult::effect(Effect::Logout {
+                            provider,
+                            key: Some(key),
+                        }),
+                        None => UpdateResult::effect(Effect::Logout {
+                            provider,
+                            key: None,
+                        }),
+                    },
+                }
+            }
+            Input::LogoutDone {
+                provider,
+                key,
+                result,
+            } => {
+                match result {
+                    Ok(()) => match key {
+                        Some(key) => self.push_notice(format!(
+                            "removed the key named `{key}` from `{provider}`"
+                        )),
+                        None => self
+                            .push_notice(format!("removed the stored credential for `{provider}`")),
+                    },
                     Err(error) => {
                         self.push_notice(format!("could not remove `{provider}`: {error}"))
                     }
@@ -650,6 +718,21 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') => Some(Input::ConfirmLogout(true)),
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     Some(Input::ConfirmLogout(false))
+                }
+                _ => None,
+            },
+            // The `/logout` key picker is hardcoded like the confirmation: arrows move,
+            // Enter chooses the highlighted row (a key or `all`), `a` jumps to `all`, and
+            // `n`/Esc keeps everything (ADR 0026 D3).
+            Modal::LogoutKeys(_) => match key.code {
+                KeyCode::Up => Some(Input::LogoutMove(-1)),
+                KeyCode::Down => Some(Input::LogoutMove(1)),
+                KeyCode::Enter => Some(Input::LogoutChosen(crate::app::LogoutPick::Selected)),
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    Some(Input::LogoutChosen(crate::app::LogoutPick::All))
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Some(Input::LogoutChosen(crate::app::LogoutPick::Cancel))
                 }
                 _ => None,
             },

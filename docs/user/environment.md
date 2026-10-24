@@ -22,7 +22,7 @@ A command flag always wins over a variable; a variable always wins over the conf
 
 | Variable | Allowed values | Default when unset | What it does |
 |---|---|---|---|
-| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | any secret text | none | Conventional key names. Store `$NAME` or `${NAME}` as the `auth.json` key value and radian resolves it at runtime: the entry `env` object first, then the process environment. Any valid environment name works, not just these two. A missing variable is an error naming the provider and the name. Radian reads exactly the names your entries reference; anything else in the environment is ignored. |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | any secret text | none | Conventional key names. Store `$NAME` or `${NAME}` as the `auth.json` `key` value, or as any `keys[].key`, and radian resolves it at runtime: the entry `env` object first, then the process environment. Any valid environment name works, not just these two. A missing variable is an error naming the provider and the name. Radian reads exactly the names your entries reference; anything else in the environment is ignored. |
 | `RADIAN_BASE_URL`, `RADIAN_KIND` | URL text; `openai-compatible` or `anthropic` | none | Fields of an `auth.json` entry `env` object, written by `login` for custom endpoints. They select the endpoint and the wire protocol for a named provider. Radian never reads these names from the process environment. |
 
 Keys come only from `auth.json`: there is no key flag and no key file field.
@@ -76,7 +76,7 @@ See `mcp` and `configuration` for those rules.
 | Path | What changes it |
 |---|---|
 | `~/.radian/config/config.toml` (or `$RADIAN_HOME`, `--config`, `RADIAN_CONFIG`) | Every configuration key. See `configuration`. A missing file is an empty configuration. |
-| `~/.radian/credentials/auth.json` | Every stored key. A missing entry refuses the run and points at `radian login`. The file is `0600`; wide permissions warn. |
+| `~/.radian/credentials/auth.json` | Every stored key, including every `keys[]` item. A missing entry refuses the run and points at `radian login`. The file is `0600`; wide permissions warn. |
 | `~/.radian/trust/trust.json` | Your remembered per-project trust choices. Confirming the trust prompt writes it. |
 | `~/.radian/sessions/` (or `--session-dir`, `RADIAN_SESSION_DIR`) | The session files `--resume`, `--list`, `--search`, `--export`, `--fork`, and `attach` read. |
 | `<workspace>/.radian/config.toml` | May only narrow the tier (`[permissions] profile = "workspace"`). Wider values, `[sandbox]` keys, and other keys are refused or skipped by name. |

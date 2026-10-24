@@ -108,6 +108,10 @@ pub struct UsageArgs {
     /// The provider's resolved secret, when its spawn gate found one (the api key for
     /// `opencode-go`); `None` for a provider whose fetch refreshes its own login (chatgpt).
     pub secret: Option<String>,
+    /// The provider's key pool, when it has one (ADR 0026 D2). A fetch that authenticates
+    /// with an API key reads the pool's **current** key at each fetch, so a rest and a switch
+    /// reach the next refresh; `secret` is the first key and stays as the fallback.
+    pub pool: Option<Arc<crate::key_pool::KeyPool>>,
 }
 
 /// A [`UsageFetcher`] as an ordinary contributor (ADR 0027 C3): its snapshot enters the store

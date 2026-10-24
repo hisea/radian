@@ -177,6 +177,7 @@ impl OpenAiCompatible {
                     ModelError::Unavailable {
                         message,
                         retry_after,
+                        status: Some(status.as_u16()),
                     }
                 } else {
                     ModelError::Protocol(message)
@@ -249,9 +250,11 @@ impl OpenAiCompatible {
             ModelError::Unavailable {
                 message,
                 retry_after,
+                status,
             } => ModelError::Unavailable {
                 message: scrub(message),
                 retry_after,
+                status,
             },
             // ADR 0018: an overflow body may echo the key too, so it is masked like the rest.
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(scrub(text)),

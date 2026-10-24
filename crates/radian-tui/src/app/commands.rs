@@ -28,8 +28,18 @@ impl App {
                     key,
                 });
             }
-            LoginOutcome::Save { name, key, env } => {
-                return UpdateResult::effect(Effect::LoginSave { name, key, env });
+            LoginOutcome::Save {
+                name,
+                key,
+                env,
+                add,
+            } => {
+                return UpdateResult::effect(Effect::LoginSave {
+                    name,
+                    key,
+                    env,
+                    add,
+                });
             }
             LoginOutcome::BeginOAuthBrowser => {
                 return UpdateResult::effect(Effect::LoginOAuthBrowser);
@@ -213,21 +223,24 @@ impl App {
                 self.push_modal(Modal::Login(Box::new(LoginWizard::new(step))));
                 UpdateResult::dirty()
             }
-            // `/logout <provider>`: confirm first (`y`/`n`), then remove (D3).
-            command::Outcome::Logout(provider) => {
-                if provider.is_empty() {
-                    self.push_notice("usage: /logout <provider>");
-                    return UpdateResult::dirty();
+            // `/logout <provider>`: read the entry's keys first, so several keys are listed
+            // and one key keeps the ordinary confirmation (ADR 0026 D3). A named key is
+            // removed without asking.
+            command::Outcome::Logout(request) => match request {
+                command::LogoutRequest::Notice(text) => {
+                    self.push_notice(text);
+                    UpdateResult::dirty()
                 }
-                if let Some(extra) = provider.strip_prefix("__extra__") {
-                    self.push_notice(format!(
-                        "unexpected extra name {extra:?}; usage: /logout <provider>"
-                    ));
-                    return UpdateResult::dirty();
+                command::LogoutRequest::Key { provider, key } => {
+                    UpdateResult::effect(Effect::Logout {
+                        provider,
+                        key: Some(key),
+                    })
                 }
-                self.push_modal(Modal::ConfirmLogout(provider));
-                UpdateResult::dirty()
-            }
+                command::LogoutRequest::Provider(provider) => {
+                    UpdateResult::effect(Effect::LogoutCheck { provider })
+                }
+            },
             command::Outcome::AutoToggle(on) => {
                 // ADR 0026 D9: the in-session switch. `/auto on` needs no confirmation (it is
                 // typed, not one keypress), and a no-op switch is still recorded — the audit

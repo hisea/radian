@@ -234,6 +234,13 @@ impl EventSink for Ui {
                 // End this turn's streamed line (and close a reasoning line) so the next
                 // turn's output starts on its own line.
                 self.end_of_turn();
+                // ADR 0026 D2: a key switch's one notice line goes to stderr, after the turn.
+                // It goes to stderr in `--output jsonl` mode too: stdout is the machine stream
+                // and stderr is status. Draining on every turn also keeps the process-global
+                // queue from growing across turns.
+                for notice in radian_host::key_pool::take_notices() {
+                    eprintln!("{notice}");
+                }
                 *self.last_status.lock().unwrap() = Some(status.clone());
                 match &status {
                     RunStatus::Completed => {}

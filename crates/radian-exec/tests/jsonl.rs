@@ -188,6 +188,81 @@ async fn default_p_stdout_is_only_model_text() {
     );
 }
 
+/// Writes a two-key `openai-compatible` credential entry under `home`, pointing at
+/// `base_url`, for the key-pool test (ADR 0026 D1).
+fn write_two_keys(home: &Path, base_url: &str) {
+    let credentials = home.join("credentials");
+    std::fs::create_dir_all(&credentials).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let auth = credentials.join("auth.json");
+    let entry = json!({
+        "openai-compatible": {
+            "type": "api_key",
+            "key": "sk-first",
+            "keys": [{"name": "team", "key": "sk-second"}],
+            "env": {"RADIAN_BASE_URL": base_url},
+        }
+    });
+    std::fs::write(&auth, serde_json::to_string(&entry).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// ADR 0026 D2 under `--output jsonl`: a quota `429` rests the first key, the retry uses the
+/// second, and the one switch notice goes to stderr. stdout stays the machine stream (every
+/// line is a JSON object), so a consumer that pipes stdout sees no notice line.
+#[tokio::test]
+async fn a_key_switch_notice_goes_to_stderr_in_jsonl_mode() {
+    let server = MockServer::start(vec![Reply::status(429, "quota"), text_reply("ok")]).await;
+    let env = Env::fresh("key-switch-notice");
+    write_two_keys(&env.home, &server.base_url);
+    let (code, out, err) = feed(
+        spawn(
+            &[
+                "--model",
+                "m",
+                "--session-id",
+                "key-switch",
+                "--output",
+                "jsonl",
+                "-p",
+                "hi",
+            ],
+            &env,
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("rests until"), "one switch notice: {err}");
+    assert!(err.contains("using \"team\""), "{err}");
+    assert!(
+        !err.contains("sk-first") && !err.contains("sk-second"),
+        "no key value: {err}"
+    );
+    // stdout is still only the machine stream: no notice line joins it.
+    for line in out.lines() {
+        serde_json::from_str::<Value>(line)
+            .unwrap_or_else(|error| panic!("stdout is JSON lines only ({error}): {line}"));
+        assert!(!line.contains("rests until"), "no notice on stdout: {line}");
+    }
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "the 429 and its one retry");
+    assert_eq!(requests[0].header("authorization"), Some("Bearer sk-first"));
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some("Bearer sk-second")
+    );
+}
+
 /// The golden stdout: every durable line is byte-identical to the journal file, live lines
 /// carry only their deltas, and the `Result` line matches its fixture's field set.
 #[tokio::test]

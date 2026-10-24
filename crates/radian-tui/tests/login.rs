@@ -88,6 +88,13 @@ fn the_login_panel_snapshot_at_80_120_and_ascii() {
 fn the_logout_panel_snapshot_at_80_120_and_ascii() {
     let mut app = App::new("m", "s");
     submit(&mut app, "/logout corp");
+    app.update(Input::LogoutChoices {
+        provider: "corp".to_owned(),
+        choices: Ok(vec![radian_host::KeyChoice {
+            name: "first".to_owned(),
+            masked: "sk-…irst".to_owned(),
+        }]),
+    });
 
     let screen = draw(&mut app, 80, 24);
     assert!(screen.contains("╭─ /logout "), "{screen}");
@@ -214,6 +221,7 @@ fn the_custom_walk_ends_in_verify_then_save() {
         .update(Input::LoginVerified {
             name: "corp".to_owned(),
             result: Ok(()),
+            existing: false,
         })
         .effects;
     assert_eq!(
@@ -231,6 +239,7 @@ fn the_custom_walk_ends_in_verify_then_save() {
                     "openai-compatible".to_owned()
                 ),
             ],
+            add: None,
         }]
     );
 
@@ -274,6 +283,7 @@ fn a_failed_verification_can_still_be_saved() {
         app.update(Input::LoginVerified {
             name: "openai".to_owned(),
             result: Err("https://api.openai.com/v1/models rejected the key (HTTP 401)".to_owned()),
+            existing: false,
         })
         .effects
         .is_empty()
@@ -309,6 +319,7 @@ fn esc_cancels_and_a_late_answer_is_dropped() {
         app.update(Input::LoginVerified {
             name: "x".to_owned(),
             result: Ok(()),
+            existing: false,
         })
         .effects
         .is_empty()
@@ -316,7 +327,8 @@ fn esc_cancels_and_a_late_answer_is_dropped() {
     assert!(app.top_modal().is_none());
 }
 
-/// `/logout <provider>` confirms; `y` removes (the loop's effect), `n` keeps.
+/// `/logout <provider>` reads the entry's keys first; one key keeps the confirmation and `y`
+/// removes the whole entry (ADR 0026 D3).
 #[test]
 fn logout_confirms_then_removes_or_keeps() {
     let mut app = App::new("m", "s");
@@ -329,7 +341,20 @@ fn logout_confirms_then_removes_or_keeps() {
 
     let mut app = App::new("m", "s");
     let effects = submit(&mut app, "/logout corp");
-    assert!(effects.is_empty(), "the confirmation is not an effect yet");
+    assert_eq!(
+        effects,
+        vec![Effect::LogoutCheck {
+            provider: "corp".to_owned()
+        }],
+        "the host reads the keys first"
+    );
+    app.update(Input::LogoutChoices {
+        provider: "corp".to_owned(),
+        choices: Ok(vec![radian_host::KeyChoice {
+            name: "first".to_owned(),
+            masked: "sk-…irst".to_owned(),
+        }]),
+    });
     assert!(app.pending_logout().is_some());
 
     // `n` keeps it; nothing was sent to the host.
@@ -342,18 +367,32 @@ fn logout_confirms_then_removes_or_keeps() {
     );
 
     let mut app = App::new("m", "s");
-    assert!(submit(&mut app, "/logout corp").is_empty());
+    assert_eq!(
+        submit(&mut app, "/logout corp"),
+        vec![Effect::LogoutCheck {
+            provider: "corp".to_owned()
+        }]
+    );
+    app.update(Input::LogoutChoices {
+        provider: "corp".to_owned(),
+        choices: Ok(vec![radian_host::KeyChoice {
+            name: "first".to_owned(),
+            masked: "sk-…irst".to_owned(),
+        }]),
+    });
     let effects = app.on_key(key(KeyCode::Char('y'))).effects;
     assert_eq!(
         effects,
         vec![Effect::Logout {
             provider: "corp".to_owned(),
+            key: None,
         }]
     );
     assert!(app.pending_logout().is_none());
     // The removal result names the provider either way.
     app.update(Input::LogoutDone {
         provider: "corp".to_owned(),
+        key: None,
         result: Ok(()),
     });
     assert!(
@@ -363,6 +402,85 @@ fn logout_confirms_then_removes_or_keeps() {
         "{:?}",
         notices(&app)
     );
+}
+
+/// ADR 0026 D3: several keys are listed (each named and masked, plus `all`); Enter removes the
+/// choice, `a` removes every key, and a named `/logout <provider> <name>` skips the question.
+#[test]
+fn logout_lists_several_keys_and_removes_the_chosen_one() {
+    let mut app = App::new("m", "s");
+    assert_eq!(
+        submit(&mut app, "/logout opencode-go"),
+        vec![Effect::LogoutCheck {
+            provider: "opencode-go".to_owned()
+        }]
+    );
+    app.update(Input::LogoutChoices {
+        provider: "opencode-go".to_owned(),
+        choices: Ok(vec![
+            radian_host::KeyChoice {
+                name: "first".to_owned(),
+                masked: "sk-…irst".to_owned(),
+            },
+            radian_host::KeyChoice {
+                name: "team".to_owned(),
+                masked: "sk-…cond".to_owned(),
+            },
+        ]),
+    });
+    let screen = draw(&mut app, 80, 24);
+    assert!(screen.contains("╭─ /logout "), "{screen}");
+    assert!(screen.contains("1 first (sk-…irst)"), "{screen}");
+    assert!(screen.contains("2 team (sk-…cond)"), "{screen}");
+    assert!(screen.contains("all keys"), "{screen}");
+
+    // Down picks `team`; Enter removes exactly it.
+    app.on_key(key(KeyCode::Down));
+    let effects = app.on_key(key(KeyCode::Enter)).effects;
+    assert_eq!(
+        effects,
+        vec![Effect::Logout {
+            provider: "opencode-go".to_owned(),
+            key: Some("team".to_owned()),
+        }]
+    );
+    assert!(app.logout_keys_mut().is_none());
+
+    // `a` removes every key, whatever the cursor.
+    let mut app = App::new("m", "s");
+    submit(&mut app, "/logout opencode-go");
+    app.update(Input::LogoutChoices {
+        provider: "opencode-go".to_owned(),
+        choices: Ok(vec![
+            radian_host::KeyChoice {
+                name: "first".to_owned(),
+                masked: "sk-…irst".to_owned(),
+            },
+            radian_host::KeyChoice {
+                name: "team".to_owned(),
+                masked: "sk-…cond".to_owned(),
+            },
+        ]),
+    });
+    let effects = app.on_key(key(KeyCode::Char('a'))).effects;
+    assert_eq!(
+        effects,
+        vec![Effect::Logout {
+            provider: "opencode-go".to_owned(),
+            key: None,
+        }]
+    );
+
+    // A named key is removed without asking.
+    let mut app = App::new("m", "s");
+    assert_eq!(
+        submit(&mut app, "/logout opencode-go team"),
+        vec![Effect::Logout {
+            provider: "opencode-go".to_owned(),
+            key: Some("team".to_owned()),
+        }]
+    );
+    assert!(app.top_modal().is_none());
 }
 
 /// `/login`'s first level completes the built-in descriptors plus `custom` — no host needed

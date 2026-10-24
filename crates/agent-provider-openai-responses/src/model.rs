@@ -122,6 +122,7 @@ impl OpenAiResponses {
                     ModelError::Unavailable {
                         message,
                         retry_after,
+                        status: Some(status.as_u16()),
                     }
                 } else {
                     ModelError::Protocol(message)
@@ -237,9 +238,11 @@ impl OpenAiResponses {
             ModelError::Unavailable {
                 message,
                 retry_after,
+                status,
             } => ModelError::Unavailable {
                 message: scrub(message),
                 retry_after,
+                status,
             },
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(scrub(text)),
             // The core's own fixed string; it carries no provider text to scrub.

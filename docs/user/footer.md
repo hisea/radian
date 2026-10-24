@@ -187,8 +187,10 @@ compaction is on (` auto` under `ascii`), else empty.
 Placeholders: `value`. Default format: `{value}`. Icons: none. Role: none
 (normal text; dim while stale). Priority: `50`. Shows only while the current
 provider reports a usage snapshot: each window's remaining share, each
-window's reset countdown, then the plan word. Hides for a provider with no
-usage source, or when the stored snapshot belongs to another provider.
+window's reset countdown, then the plan word. When the provider's entry holds
+several keys the title is `Usage · <key name>` (`Usage` alone with one), and a
+key switch shows on the next refresh. Hides for a provider with no usage
+source, or when the stored snapshot belongs to another provider.
 `/usage` prints the same snapshot in full.
 
 ### `tokens`

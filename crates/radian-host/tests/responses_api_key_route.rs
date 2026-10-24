@@ -81,7 +81,7 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
     // Responses even though the built-in table now also says so; the endpoint is the credential's
     // override (the mock), and the credential is an API key, not OAuth.
     let args = ctx
-        .args_for("opencode-go", "muse-spark-1.3-contributor")
+        .args_for("opencode-go", "muse-spark-1.3-contributor", None)
         .expect("the route resolves");
     assert_eq!(args.provider, Provider::ChatGpt);
     assert_eq!(args.base_url, server.base_url);
@@ -129,7 +129,7 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
     }
 
     // An `npm` radian has no adapter for is refused by name, never silently sent as chat.
-    let error = match ctx.args_for("opencode-go", "gemini-4-argon-contributor") {
+    let error = match ctx.args_for("opencode-go", "gemini-4-argon-contributor", None) {
         Err(error) => error,
         Ok(_) => panic!("a Google model must be refused"),
     };
@@ -140,7 +140,7 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
 
     // A plain chat model on the same descriptor still resolves to the chat protocol.
     let chat = ctx
-        .args_for("opencode-go", "deepseek-v4.1-flash")
+        .args_for("opencode-go", "deepseek-v4.1-flash", None)
         .expect("the chat route resolves");
     assert_eq!(chat.provider, Provider::OpenAiCompatible);
 }

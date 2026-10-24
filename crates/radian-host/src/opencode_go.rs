@@ -204,20 +204,30 @@ fn chain(error: &dyn std::error::Error) -> String {
 /// The provider id this source fetches for (the snapshot's `provider`).
 const PROVIDER: &str = "opencode-go";
 
-/// The opencode-go usage fetch (ADR 0027).
+/// The opencode-go usage fetch (ADR 0027). The key is read from the provider's pool at each
+/// fetch (ADR 0026 D2), so a rested key and a switch reach the next refresh.
 pub struct OpencodeGoUsage {
+    /// The first key, the fallback when no pool is attached.
     key: String,
+    pool: Option<std::sync::Arc<crate::key_pool::KeyPool>>,
     url: String,
     client: reqwest::Client,
 }
 
 /// The descriptor's `Endpoint` build for opencode-go: the key the TUI resolved from `auth.json`
-/// and the descriptor's endpoint. The period is the runner's, not the fetch's.
+/// (and the provider's pool, when it has one) and the descriptor's endpoint. The period is the
+/// runner's, not the fetch's.
 pub fn endpoint(args: &UsageArgs) -> Box<dyn UsageFetcher> {
-    Box::new(OpencodeGoUsage::with_url(
-        args.secret.clone().unwrap_or_default(),
-        args.url.clone(),
-    ))
+    let key = args
+        .pool
+        .as_ref()
+        .and_then(|pool| pool.current())
+        .map(|key| key.key)
+        .or_else(|| args.secret.clone())
+        .unwrap_or_default();
+    let mut usage = OpencodeGoUsage::with_url(key, args.url.clone());
+    usage.pool = args.pool.clone();
+    Box::new(usage)
 }
 
 impl OpencodeGoUsage {
@@ -225,6 +235,7 @@ impl OpencodeGoUsage {
     pub fn with_url(key: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             key: key.into(),
+            pool: None,
             url: url.into(),
             // A refresh that hangs would hold the runner's task; the period is a minute.
             client: reqwest::Client::builder()
@@ -234,11 +245,49 @@ impl OpencodeGoUsage {
         }
     }
 
+    /// For tests: the pool decides the key at each fetch.
+    pub fn with_pool(
+        pool: std::sync::Arc<crate::key_pool::KeyPool>,
+        url: impl Into<String>,
+    ) -> Self {
+        let key = pool.current().map(|key| key.key).unwrap_or_default();
+        Self {
+            key,
+            pool: Some(pool),
+            url: url.into(),
+            client: reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+        }
+    }
+
+    /// The key this fetch sends: the pool's current key, else the first-key fallback.
+    fn current_key(&self) -> String {
+        self.pool
+            .as_ref()
+            .and_then(|pool| pool.current())
+            .map(|key| key.key)
+            .unwrap_or_else(|| self.key.clone())
+    }
+
+    /// `Usage` alone for one key; `Usage · <key name>` when the entry has several (ADR 0027
+    /// C4). The name comes from the pool, never the key.
+    fn title(&self) -> String {
+        match &self.pool {
+            Some(pool) if pool.len() > 1 => match pool.current() {
+                Some(key) => format!("Usage · {}", key.name),
+                None => "Usage".to_owned(),
+            },
+            _ => "Usage".to_owned(),
+        }
+    }
+
     async fn fetch(&self) -> Result<UsageSnapshot, String> {
         let response = self
             .client
             .get(&self.url)
-            .bearer_auth(&self.key)
+            .bearer_auth(self.current_key())
             .send()
             .await
             .map_err(|error| format!("opencode-go usage request failed: {}", chain(&error)))?;
@@ -255,8 +304,10 @@ impl OpencodeGoUsage {
             .map_err(|error| format!("opencode-go usage body failed: {error}"))?;
         let parsed: UsageResponse = serde_json::from_str(&body)
             .map_err(|error| format!("opencode-go usage was not JSON: {error}"))?;
-        snapshot(&parsed, SystemTime::now())
-            .ok_or_else(|| "opencode-go usage had no windows".to_owned())
+        let mut snapshot = snapshot(&parsed, SystemTime::now())
+            .ok_or_else(|| "opencode-go usage had no windows".to_owned())?;
+        snapshot.title = self.title();
+        Ok(snapshot)
     }
 }
 
@@ -476,5 +527,74 @@ mod tests {
             ],
             "no percent, no window"
         );
+    }
+
+    /// ADR 0027 C4 / ADR 0026 D2: the fetch reads the pool's **current** key at each fetch, and
+    /// a several-key entry's title carries that key's name. A switch refreshes on the next
+    /// period; the other keys' windows are not fetched.
+    #[tokio::test]
+    async fn the_fetch_uses_the_current_key_and_names_it_in_the_title() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            let body = r#"{"usage":{"rolling":{"percent":2}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let pool = std::sync::Arc::new(crate::key_pool::KeyPool::new(
+            "opencode-go",
+            vec![
+                crate::key_pool::PoolKey {
+                    name: "first".to_owned(),
+                    key: "sk-first".to_owned(),
+                },
+                crate::key_pool::PoolKey {
+                    name: "team".to_owned(),
+                    key: "sk-second".to_owned(),
+                },
+            ],
+        ));
+        // The session used the first key, it rested, and the pool moved to `team`.
+        pool.pick().expect("the first key");
+        pool.rest(0, Duration::from_secs(300));
+        assert_eq!(pool.pick().expect("the second key").name, "team");
+
+        let fetcher = OpencodeGoUsage::with_pool(pool, format!("http://{addr}/usage"));
+        let snapshot = fetcher.fetch().await.expect("a fetch");
+        assert_eq!(snapshot.title, "Usage · team");
+        let head = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the request arrived");
+        assert!(
+            head.to_lowercase()
+                .contains("authorization: bearer sk-second"),
+            "{head}"
+        );
+        assert!(!head.contains("sk-first"), "{head}");
+        assert!(!format!("{snapshot:?}").contains("sk-second"));
+    }
+
+    /// One key keeps the plain `Usage` title.
+    #[test]
+    fn one_key_keeps_the_plain_title() {
+        let pool = std::sync::Arc::new(crate::key_pool::KeyPool::new(
+            "opencode-go",
+            vec![crate::key_pool::PoolKey {
+                name: "first".to_owned(),
+                key: "sk-first".to_owned(),
+            }],
+        ));
+        let fetcher = OpencodeGoUsage::with_pool(pool, "http://127.0.0.1:9/usage");
+        assert_eq!(fetcher.title(), "Usage");
     }
 }
