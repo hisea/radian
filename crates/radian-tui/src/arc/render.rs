@@ -780,7 +780,8 @@ fn task_row_line(
 }
 
 /// The heartbeat line of a `doing` task: `heartbeat 12s ago`, in the warning style with
-/// `stalled?` once the beat is older than the stall window, or `starting` before the first one.
+/// `stalled?` once the beat is older than the stall window, `heartbeat unreadable` when the file
+/// exists but its time cannot be used, or `starting` before the first one.
 fn freshness_text(freshness: Freshness, theme: &Theme) -> (String, Style) {
     match freshness {
         Freshness::Starting => ("starting".to_owned(), theme.hint),
@@ -789,6 +790,7 @@ fn freshness_text(freshness: Freshness, theme: &Theme) -> (String, Style) {
             format!("heartbeat {} ago stalled?", age_text(age)),
             theme.status_warn,
         ),
+        Freshness::Unreadable => ("heartbeat unreadable".to_owned(), theme.status_warn),
     }
 }
 

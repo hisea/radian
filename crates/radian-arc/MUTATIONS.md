@@ -384,6 +384,7 @@ the working file, restored from a copy under `.radian/mut/` with `cp`, and compa
 |---|---|---|---|
 | TK0048-M1 | the claim omits `session_id` from `start.json` | ✅ 2 failed | `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (the running attempt answers `None`, and `show --json` prints `null`) |
 | TK0048-M2 | `attempt_session_id` reads `execution.json` only again | ✅ 3 failed | `attempt::a_session_id_is_read_from_the_identity_record_when_execution_is_missing`, `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (no `execution.json` exists before the wrapper ends) |
+
 ## TK0035 (a refused integration, the wrapper setup and the heartbeat)
 
 TK0035-M1–M3 were run against `29d77904`, each applied to the committed file, restored from a

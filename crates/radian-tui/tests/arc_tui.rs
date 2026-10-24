@@ -1741,7 +1741,16 @@ fn the_conversation_tab_follows_a_running_attempts_journal() {
     fs::create_dir_all(&sessions).unwrap();
     let session = format!("{task}-1");
     write_start(&fixture, &task, 1, &session);
-    write_journal(&sessions, &session, "the running worker", "is writing");
+    write_journal(&sessions, &session, "the running worker", "filler-00");
+    // More lines than the frame shows, so only a pinned follow keeps the tail in view.
+    for index in 2..41 {
+        append_journal(
+            &sessions,
+            &session,
+            index,
+            &format!("filler-{:02}", index - 1),
+        );
+    }
     let mut app = ArcApp::with_session_dir(fixture.store.clone(), Some(sessions.clone()));
     app.plan_sel = app
         .plans
@@ -1750,20 +1759,27 @@ fn the_conversation_tab_follows_a_running_attempts_journal() {
         .unwrap();
     app.task_sel = fixture.pos("g");
     app.open_task();
+    // The first frame measures the viewport; `k` then pauses the follow and `f` resumes it.
+    let text = screen(&mut app, 120, 30);
+    assert!(!text.contains("no session journal yet"), "{text}");
+    app.on_key(&key(KeyCode::Char('k')));
+    app.apply_pending_scroll();
     app.on_key(&key(KeyCode::Char('f')));
     app.apply_pending_scroll();
     let text = screen(&mut app, 120, 30);
-    assert!(text.contains("the running worker"), "{text}");
-    assert!(text.contains("is writing"), "{text}");
-    assert!(!text.contains("no session journal yet"), "{text}");
+    assert!(text.contains("filler-39"), "follow shows the end:\n{text}");
+    assert!(!text.contains("filler-00"), "follow is at the end:\n{text}");
 
     // The worker writes another line; the refresh polls the same journal and the followed
     // view shows it.
-    append_journal(&sessions, &session, "and one more line");
+    append_journal(&sessions, &session, 41, "and one more line");
     app.refresh();
     app.apply_pending_scroll();
     let text = screen(&mut app, 120, 30);
-    assert!(text.contains("and one more line"), "{text}");
+    assert!(
+        text.contains("and one more line"),
+        "follow did not tail the growing journal:\n{text}"
+    );
 }
 
 /// The task frame's state alone does not say whether a `doing` worker is alive (ADR 0048
@@ -1804,6 +1820,28 @@ fn a_doing_tasks_row_reports_its_worker_heartbeat_and_a_stopped_loop() {
         1,
         None,
     );
+    // A beat file that exists but holds no time, and a task that is not `doing`: neither may
+    // borrow the doing rows' labels.
+    let unreadable = add_task(
+        &store,
+        &plan,
+        "unreadable",
+        &[],
+        TaskState::Doing,
+        "running",
+        3,
+        None,
+    );
+    let todo = add_task(
+        &store,
+        &plan,
+        "waiting",
+        &[],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
     store
         .change_plan(&plan, |plan| {
             plan.status = "confirmed".to_owned();
@@ -1813,6 +1851,7 @@ fn a_doing_tasks_row_reports_its_worker_heartbeat_and_a_stopped_loop() {
     // A beat from just now, and one far past the default 900-second stall window.
     write_heartbeat(&store, &fresh, 1, &radian_arc::store::plan_ops::utc_now());
     write_heartbeat(&store, &old, 2, "2000-01-01T00:00:00Z");
+    write_heartbeat(&store, &unreadable, 3, "not a time");
 
     let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
     app.plan_sel = app
@@ -1828,11 +1867,33 @@ fn a_doing_tasks_row_reports_its_worker_heartbeat_and_a_stopped_loop() {
         "a fresh beat shows its age:\n{text}"
     );
     assert!(text.contains("starting"), "no beat yet:\n{text}");
+    assert!(
+        text.contains("heartbeat unreadable"),
+        "a present but unreadable beat says so:\n{text}"
+    );
     assert!(text.contains("stalled?"), "an old beat:\n{text}");
     assert_eq!(
         text.matches("loop stopped").count(),
-        3,
+        4,
         "every doing row names the stopped loop:\n{text}"
+    );
+    // A row that is not `doing` says neither: the freshness and the loop note are the doing
+    // rows'.
+    let todo_row = rows(&terminal)
+        .into_iter()
+        .find(|row| row.contains(&todo))
+        .expect("the todo row is drawn");
+    assert!(!todo_row.contains("heartbeat"), "{todo_row}");
+    assert!(!todo_row.contains("starting"), "{todo_row}");
+    assert!(!todo_row.contains("loop stopped"), "{todo_row}");
+    // The unreadable row is the one that says so, not the no-beat row.
+    let unreadable_row = rows(&terminal)
+        .into_iter()
+        .find(|row| row.contains(&unreadable))
+        .expect("the unreadable row is drawn");
+    assert!(
+        unreadable_row.contains("heartbeat unreadable"),
+        "{unreadable_row}"
     );
     // The stale beat takes the warning style.
     let (row, column) = fg_of(&terminal, "stalled?");
@@ -1894,7 +1955,7 @@ fn write_heartbeat(store: &Store, task: &str, attempt: u32, last_beat: &str) {
 }
 
 /// Appends one assistant line to an existing worker journal (the worker still writing).
-fn append_journal(dir: &Path, id: &str, assistant: &str) {
+fn append_journal(dir: &Path, id: &str, index: usize, assistant: &str) {
     use radian_core::TranscriptJournal;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1906,7 +1967,7 @@ fn append_journal(dir: &Path, id: &str, assistant: &str) {
             .expect("the journal resumes for the next line");
         journal
             .append(radian_core::JournalRecord::Message {
-                index: 2,
+                index,
                 message: radian_core::Message::assistant(assistant),
             })
             .await
