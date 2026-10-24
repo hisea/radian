@@ -19,20 +19,28 @@ use crate::theme::Theme;
 
 /// The header row and the blank row under it.
 const HEADER_ROWS: u16 = 2;
-/// The frame rule and the key-hint row at the bottom.
+/// The frame rule and the key-hint row at the bottom, plus the loop's ticker line when
+/// `loop.log` has gained a transition since the TUI opened.
 const FOOTER_ROWS: u16 = 2;
+
+/// The footer's rows in this frame: the ticker takes one only while it has a line to show, so
+/// a repository with no loop keeps the body's old size.
+fn footer_rows(app: &ArcApp) -> u16 {
+    FOOTER_ROWS + u16::from(app.ticker.is_some())
+}
 
 /// Draws one whole frame.
 pub fn draw(frame: &mut Frame, app: &mut ArcApp) {
     let area = frame.area();
-    if area.height <= HEADER_ROWS + FOOTER_ROWS || area.width < 20 {
+    let footer_rows = footer_rows(app);
+    if area.height <= HEADER_ROWS + footer_rows || area.width < 20 {
         return;
     }
     let body = Rect {
         x: area.x,
         y: area.y + HEADER_ROWS,
         width: area.width,
-        height: area.height - HEADER_ROWS - FOOTER_ROWS,
+        height: area.height - HEADER_ROWS - footer_rows,
     };
     draw_line(
         frame,
@@ -50,6 +58,9 @@ pub fn draw(frame: &mut Frame, app: &mut ArcApp) {
         Page::Task => draw_task(frame, body, app),
         Page::Merge => draw_merge(frame, body, app),
     }
+    if app.log_open {
+        draw_loop_log(frame, body, app);
+    }
     if let Some(log) = app
         .merge
         .as_ref()
@@ -61,7 +72,7 @@ pub fn draw(frame: &mut Frame, app: &mut ArcApp) {
     if let Some(float) = &app.float {
         draw_float(frame, body, app, float);
     }
-    let rule_y = area.y + area.height - FOOTER_ROWS;
+    let rule_y = area.y + area.height - footer_rows;
     draw_line(
         frame,
         Rect {
@@ -75,11 +86,23 @@ pub fn draw(frame: &mut Frame, app: &mut ArcApp) {
             app.theme.frame,
         )),
     );
+    if footer_rows > FOOTER_ROWS {
+        draw_line(
+            frame,
+            Rect {
+                x: area.x,
+                y: rule_y + 1,
+                width: area.width,
+                height: 1,
+            },
+            ticker_line(app, area.width as usize),
+        );
+    }
     draw_line(
         frame,
         Rect {
             x: area.x,
-            y: rule_y + 1,
+            y: rule_y + footer_rows - 1,
             width: area.width,
             height: 1,
         },
@@ -148,12 +171,25 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
         ),
         Span::styled("  ·  loop ", theme.hint),
     ];
-    if app.loop_running {
-        right.push(Span::styled("● ", theme.model));
-        right.push(Span::styled("running", theme.text));
-    } else {
-        right.push(Span::styled("◻ ", theme.hint));
-        right.push(Span::styled("stopped", theme.hint));
+    match app.loop_status {
+        super::looping::LoopStatus::Stopped => {
+            right.push(Span::styled("○ ", theme.hint));
+            right.push(Span::styled("stopped", theme.hint));
+        }
+        super::looping::LoopStatus::Starting => {
+            right.push(Span::styled("◌ ", theme.hint));
+            right.push(Span::styled("starting", theme.hint));
+        }
+        super::looping::LoopStatus::Elsewhere(pid) => {
+            right.push(Span::styled("● ", theme.model));
+            right.push(Span::styled(
+                pid.map_or_else(
+                    || "running".to_owned(),
+                    |pid| format!("running (pid {pid})"),
+                ),
+                theme.text,
+            ));
+        }
     }
     let left_width: usize = left.iter().map(span_width).sum();
     let right_width: usize = right.iter().map(span_width).sum();
@@ -161,6 +197,19 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
     left.push(Span::raw(" ".repeat(gap)));
     left.extend(right);
     Line::from(left)
+}
+
+/// The footer's one-line ticker: the newest transition line `loop.log` gained since the TUI
+/// opened, or nothing (ADR 0048 decision 13).
+fn ticker_line(app: &ArcApp, width: usize) -> Line<'static> {
+    let Some(text) = &app.ticker else {
+        return Line::default();
+    };
+    Line::from(vec![
+        Span::styled("  ", app.theme.hint),
+        Span::styled("▸ ", app.theme.model),
+        Span::styled(fit(text, width.saturating_sub(4)), app.theme.text),
+    ])
 }
 
 /// One footer hint: the key, what it does, whether the page can act on it now (weak), and how
@@ -248,6 +297,12 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
         return Line::from(vec![
             Span::styled("  ", theme.hint),
             Span::styled(fit(&result.text, width.saturating_sub(2)), style),
+        ]);
+    }
+    if app.log_open {
+        return Line::from(vec![
+            Span::styled("  ", theme.hint),
+            Span::styled("j/k scroll   f end   L close   q quit", theme.hint),
         ]);
     }
     let hints: Vec<Hint> = match app.page {
@@ -343,6 +398,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 Hint::new("h/l", "tab", false),
                 Hint::new("tab", "tabs", false),
                 Hint::new("m", "merge page", !applies),
+                Hint::new("L", "log", false),
                 Hint::new("esc", "back", false),
                 Hint::essential("q", "quit", false),
             ]
@@ -354,6 +410,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
             Hint::new("↑↓", "command", false),
             Hint::new("enter", "log", false),
             Hint::new("n/p", "file", false),
+            Hint::new("L", "log", false),
             Hint::new("esc", "back", false),
             Hint::essential("q", "quit", false),
         ],
@@ -582,7 +639,10 @@ fn plan_frame_lines(
         .flatten();
     for task in row.tasks.iter().skip(top).take(visible) {
         let cursor = selected == Some(task.id.as_str());
-        let line = task_row_line(task, &columns, cursor, app.loop_running, theme);
+        // The heartbeat is live progress only while a loop holds `runner.lock`: `starting`
+        // counts as a loop on its way, so only `stopped` adds the row's `loop stopped`.
+        let loop_running = !matches!(app.loop_status, super::looping::LoopStatus::Stopped);
+        let line = task_row_line(task, &columns, cursor, loop_running, theme);
         out.push(rail(theme, line));
     }
     out.push(frame_bottom(theme));
@@ -1022,9 +1082,21 @@ fn draw_diff(
     remaining: usize,
     theme: &Theme,
 ) {
+    // The source line of a running attempt's diff: the worker's worktree, not a commit range
+    // (ADR 0048 decision 13).
+    let live = diff
+        .diff
+        .as_ref()
+        .is_some_and(|diff| diff.source == radian_arc::read::DiffSource::Worktree);
+    if live {
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled("live · worktree", theme.hint)),
+        ));
+    }
     // After the list the frame needs five rows: the frame's bottom, a blank, the diff frame's
     // title, at least one body row and its bottom. The list is clipped to leave them.
-    let rows = remaining.saturating_sub(5).max(1);
+    let rows = remaining.saturating_sub(5 + usize::from(live)).max(1);
     if !diff_file_list(lines, diff, width.saturating_sub(2), rows, theme, true) {
         return;
     }
@@ -1088,7 +1160,8 @@ fn diff_file_list(
             Span::raw("  ")
         };
         let counts = format!(" +{} -{}", file.added, file.removed);
-        let path_width = inner.saturating_sub(2 + counts.width());
+        let mark = if file.uncommitted { " uncommitted" } else { "" };
+        let path_width = inner.saturating_sub(2 + counts.width() + mark.width());
         let mut spans = vec![
             cursor,
             Span::styled(fit(&file.path, path_width), theme.text),
@@ -1100,6 +1173,9 @@ fn diff_file_list(
             format!(" -{}", file.removed),
             theme.status_error,
         ));
+        if file.uncommitted {
+            spans.push(Span::styled(mark, theme.hint));
+        }
         lines.push(row(Line::from(spans)));
     }
     true
@@ -1569,6 +1645,37 @@ fn draw_log(frame: &mut Frame, area: Rect, app: &ArcApp, log: &LogView) {
     };
     frame.render_widget(ratatui::widgets::Clear, rect);
     frame.render_widget(Paragraph::new(lines), rect);
+}
+
+/// The loop's log (`L`): the tail of `loop.log`, scrollable, over the page (ADR 0048
+/// decision 13).
+fn draw_loop_log(frame: &mut Frame, area: Rect, app: &ArcApp) {
+    let theme = &app.theme;
+    let width = area.width as usize;
+    let inner = width.saturating_sub(4);
+    let mut lines = vec![frame_top(width, "log", theme)];
+    if app.log_missing {
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled("no loop log yet", theme.hint)),
+        ));
+    } else if app.log.is_empty() {
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled("no lines yet", theme.hint)),
+        ));
+    } else {
+        let rows = (area.height as usize).saturating_sub(2);
+        let start = app.log_scroll.min(app.log.len().saturating_sub(1));
+        for line in app.log.iter().skip(start).take(rows) {
+            lines.push(rail(
+                theme,
+                Line::from(Span::styled(fit(line, inner), theme.text)),
+            ));
+        }
+    }
+    lines.push(frame_bottom(theme));
+    draw_lines(frame, area, lines);
 }
 
 fn draw_lines(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {

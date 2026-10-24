@@ -14109,7 +14109,7 @@ async fn pty_arc_opens_switches_pages_and_quits() {
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("loop ◻ stopped", wait_positive()),
+        pty.wait_for_screen("loop ● running (pid ", wait_positive()),
         "the header's loop state is missing:\n{}",
         pty.screen()
     );
@@ -14169,6 +14169,8 @@ async fn pty_arc_opens_switches_pages_and_quits() {
         "q must quit the arc view:\n{}",
         pty.screen()
     );
+    // Opening the TUI started a loop; quitting leaves it running, so the test stops it.
+    stop_arc_loop(&repo);
 }
 
 /// The owner acts from the TUI: `m` opens the merge page of a `review.awaiting_human` task,
@@ -14233,6 +14235,320 @@ async fn pty_arc_merges_a_verified_task_from_the_merge_page() {
         "q must quit the arc view:\n{}",
         pty.screen()
     );
+    // The TUI's loop is still running after the merge page's action; stop it here.
+    stop_arc_loop(&repo);
+}
+
+// ---- ADR 0048 §13: the TUI starts the loop and never holds it -------------------------
+
+/// A repository arc runs its own loop in: a bare `origin`, one plan with one `todo.ready` task,
+/// the task's plan confirmed at `auto`, and a config whose worker is the mock model and whose
+/// gate is `true`. Returns the task id.
+fn arc_loop_repo(dir: &Path, auto: &str, base_url: &str) -> String {
+    std::fs::create_dir_all(dir).unwrap();
+    let origin = dir.with_file_name(format!(
+        "{}-origin.git",
+        dir.file_name().unwrap().to_string_lossy()
+    ));
+    arc_git(dir, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    arc_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    arc_git(dir, &["init", "-q"]);
+    arc_git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+    arc_git(dir, &["add", "README.md"]);
+    arc_git(dir, &["commit", "-q", "-m", "first"]);
+    arc_git(dir, &["config", "user.name", "arc test"]);
+    arc_git(dir, &["config", "user.email", "arc@example.com"]);
+    arc_git(dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    arc_git(dir, &["push", "-q", "-u", "origin", "main"]);
+    arc_git(dir, &["remote", "set-head", "origin", "main"]);
+
+    radian_arc::store::Store::init(dir, false).expect("arc init");
+    let config_path = dir.join(".radian/arc/config.toml");
+    let text = radian_arc::store::config::default_text("main")
+        .replace(
+            "exec_args = []",
+            &format!(
+                "exec_args = [\"--model\", \"m\", \"--base-url\", \"{base_url}\", \
+                 \"--offline-catalog\"]"
+            ),
+        )
+        .replace("\ncommands = []", "\ncommands = [\"true\"]");
+    std::fs::write(&config_path, text).expect("the loop config");
+
+    let store = radian_arc::store::Store::open(dir).expect("the store opens");
+    let plan = store
+        .add_plan("loop", "the loop plan", "a request\n")
+        .expect("the plan is created");
+    let task = store
+        .add_task(
+            &plan,
+            "work",
+            "the work task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .expect("the task is created");
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = auto.to_owned();
+            Ok(())
+        })
+        .expect("the plan is confirmed");
+    task
+}
+
+/// Waits until `predicate` holds, failing with `what` after `limit`.
+fn wait_until(limit: Duration, what: &str, mut predicate: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !predicate() {
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not happen in {limit:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Whether `runner.lock` can be taken: true when no loop holds it.
+fn arc_lock_free(repo: &Path) -> bool {
+    use fs2::FileExt;
+    let path = repo.join(".radian/arc/runner.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .expect("runner.lock opens");
+    file.try_lock_exclusive().is_ok()
+}
+
+/// Runs one `radian` command in `repo`, with `home` as the app's home.
+fn run_arc_cli(home: &Path, repo: &Path, args: &[&str]) -> (Option<i32>, String, String) {
+    let output = std::process::Command::new(BIN)
+        .args(args)
+        .current_dir(repo)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("TMPDIR", std::env::var("TMPDIR").unwrap_or_default())
+        .env("RADIAN_CATALOG_URL", fast_catalog_url())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("radian runs");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The pid the holder of `runner.lock` recorded, when it did.
+fn arc_loop_pid(repo: &Path) -> Option<u32> {
+    std::fs::read_to_string(repo.join(".radian/arc/runner.lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Stops the loop a test started and waits for its lock to be free.
+fn stop_arc_loop(repo: &Path) {
+    if let Some(pid) = arc_loop_pid(repo) {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+        wait_until(
+            Duration::from_secs(10),
+            "the loop to release its lock",
+            || arc_lock_free(repo),
+        );
+    }
+}
+
+/// Whether `pid` exists (a `kill -0` probe).
+fn arc_process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Opening the TUI on a free `runner.lock` starts `radian arc run --watch`; the loop takes the
+/// lock, advances a `todo.ready` task at auto `run` (its start line reaches the ticker from
+/// `loop.log`), and quitting the TUI leaves the loop running with the lock still held. The test
+/// stops the loop at the end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_arc_starts_a_loop_and_quitting_leaves_it_running() {
+    let scratch = TempDir::new("arc-start-loop");
+    let repo = scratch.path().join("repo");
+    let server = MockServer::start(vec![
+        tool_reply(
+            "c1",
+            "shell",
+            &json!({"command": "printf 'the work\\n' > work.txt && git add work.txt && git commit -q -m work"}).to_string(),
+        ),
+        text_reply("done"),
+    ])
+    .await;
+    let task = arc_loop_repo(&repo, "run", &server.base_url);
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 140);
+    assert!(
+        pty.wait_for_screen("loop ● running (pid ", wait_positive()),
+        "the TUI started no loop:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen(
+            &format!("{task}-1 started -> doing.running"),
+            wait_positive()
+        ),
+        "the loop's start line never reached the ticker:\n{}",
+        pty.screen()
+    );
+    let pid = arc_loop_pid(&repo).expect("the loop wrote its pid into runner.lock");
+    assert_ne!(
+        pid.to_string(),
+        app_pid(&pty),
+        "the loop is not the TUI's process"
+    );
+
+    pty.send(b"q");
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "q must quit the arc view:\n{}",
+        pty.screen()
+    );
+    assert!(
+        arc_process_alive(pid),
+        "quitting the TUI stopped the loop it started"
+    );
+    assert!(
+        !arc_lock_free(&repo),
+        "the loop still holds runner.lock after the TUI quit"
+    );
+    stop_arc_loop(&repo);
+}
+
+/// The TUI's loop is the only holder: `radian arc run` while the TUI is open exits `4`, and
+/// quitting the TUI does not release the lock.
+#[test]
+fn pty_arc_starts_one_loop_so_a_second_arc_run_exits_four() {
+    let scratch = TempDir::new("arc-start-locked");
+    let repo = scratch.path().join("repo");
+    arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 140);
+    assert!(
+        pty.wait_for_screen("loop ● running (pid ", wait_positive()),
+        "the TUI started no loop:\n{}",
+        pty.screen()
+    );
+    let pid = arc_loop_pid(&repo).expect("the loop wrote its pid");
+    let (code, stdout, stderr) = run_arc_cli(pty.home.path(), &repo, &["arc", "run"]);
+    assert_eq!(code, Some(4), "a second run exits 4: {stdout}{stderr}");
+    pty.send(b"q");
+    assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
+    assert!(arc_process_alive(pid), "quitting stopped the loop");
+    assert!(!arc_lock_free(&repo), "the loop still holds the lock");
+    stop_arc_loop(&repo);
+}
+
+/// A TUI opened while `radian arc run --watch` holds the lock starts no loop: its header names
+/// the holder's pid, and quitting leaves that loop alone. When the watch loop exits, the header
+/// goes back to `stopped` and the TUI starts nothing by itself (`R` is the only way).
+#[test]
+fn pty_arc_is_a_viewer_while_arc_run_watch_holds_the_lock() {
+    let scratch = TempDir::new("arc-start-viewer");
+    let repo = scratch.path().join("repo");
+    arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
+    let home = TempDir::new("arc-start-viewer-home");
+    let mut watch = std::process::Command::new(BIN)
+        .args(["arc", "run", "--watch", "--interval", "5"])
+        .current_dir(&repo)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("TMPDIR", std::env::var("TMPDIR").unwrap_or_default())
+        .env("RADIAN_CATALOG_URL", fast_catalog_url())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("arc run --watch starts");
+    wait_until(Duration::from_secs(10), "the watch loop's lock", || {
+        !arc_lock_free(&repo)
+    });
+    let pid = watch.id();
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 140);
+    assert!(
+        pty.wait_for_screen(&format!("loop ● running (pid {pid})"), wait_positive()),
+        "the header does not name the holder's pid:\n{}",
+        pty.screen()
+    );
+
+    // Quitting the TUI leaves the watch loop running.
+    pty.send(b"q");
+    assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
+    assert!(
+        arc_process_alive(pid),
+        "quitting the TUI stopped the watch loop"
+    );
+    assert!(!arc_lock_free(&repo), "the watch loop still holds the lock");
+
+    // The watch loop stops; the TUI is gone, so nothing starts another one.
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+    let _ = watch.wait();
+    wait_until(
+        Duration::from_secs(10),
+        "the watch loop's lock release",
+        || arc_lock_free(&repo),
+    );
+    assert!(
+        arc_lock_free(&repo),
+        "the lock is free after the watch loop exits"
+    );
+}
+
+/// SIGTERM closes the TUI and nothing else: the loop it started keeps running with the lock
+/// held. The test stops the loop at the end.
+#[test]
+fn pty_arc_sigterm_closes_the_tui_and_leaves_the_loop_running() {
+    let scratch = TempDir::new("arc-start-sigterm");
+    let repo = scratch.path().join("repo");
+    arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
+    let mut pty = Pty::spawn_in(&["arc"], &[], &repo, 30, 140);
+    assert!(
+        pty.wait_for_screen("loop ● running (pid ", wait_positive()),
+        "the TUI started no loop:\n{}",
+        pty.screen()
+    );
+    let pid = arc_loop_pid(&repo).expect("the loop wrote its pid");
+    let app = app_pid(&pty);
+    let status = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(&app)
+        .status()
+        .expect("kill runs");
+    assert!(status.success(), "SIGTERM reaches the arc view");
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "SIGTERM must stop the view cleanly:\n{}",
+        pty.screen()
+    );
+    assert!(
+        arc_process_alive(pid),
+        "SIGTERM on the TUI reached the loop it started"
+    );
+    assert!(!arc_lock_free(&repo), "the loop still holds runner.lock");
+    stop_arc_loop(&repo);
 }
 
 // ---------- lost input: a resize must not eat a typed key ----------

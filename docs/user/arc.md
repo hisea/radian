@@ -620,6 +620,9 @@ Waiting for you, a `retry_at` in the future, a running worker, or a running gate
 A task of a plan at `auto` `off` is never started or merged by `run`; its verification still advances.
 A task of a `cancelled` plan is never claimed, gated or merged, and a cancelled plan is not listed in the summary.
 
+The arc TUI never runs this pass itself: when no loop holds the lock it starts `radian arc run --watch` as a detached process (see [the TUI](#the-tui) and [`arc-tui`](arc-tui.md#the-loop)). A TUI and a `run` (or `run --watch`) exclude each other through `runner.lock`: a second loop that cannot get it exits `4`.
+Quitting the TUI never stops a loop, whether the TUI started it or not.
+
 Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](arc-files.md#configtoml)).
 
 | Flag | Value | Default | What it does |
@@ -669,10 +672,17 @@ A pass that wrote no transition line starts its summary with `no transition`.
 A file that changed outside arc is skipped and named in the summary; it does not stop the loop.
 A plan whose budget or automatic-rework limit paused it is named with its reason.
 
+### `loop.log`
+
+Every loop appends the lines it prints to `.radian/arc/loop.log`: the transition lines, the summary, and each `radian arc: <message>` error line, one line each with an RFC 3339 UTC timestamp and a space in front, flushed as it prints. Stdout and stderr are unchanged.
+The file is not a second output: it is what the arc TUI's ticker and log view read, and it is there for a loop started by hand with `nohup` too.
+At the first line after the file reaches 1 MiB it is renamed to `loop.log.1` (replacing an older one) and a new `loop.log` starts, so one old file is kept.
+A write error on `loop.log` prints one `radian arc: cannot write …` line for the whole process, and the loop goes on.
+
 ### `--watch`
 
-`radian arc run --watch` repeats the pass. After every pass (which always ends quiet) it waits `--interval` seconds, then runs another pass; it holds `runner.lock` for the whole loop, so a second `run` exits `4` as usual.
-It is a foreground loop that you start and stop, not a daemon: while it is not running, nothing advances.
+`radian arc run --watch` repeats the pass. After every pass (which always ends quiet) it waits `--interval` seconds, then runs another pass; it holds `runner.lock` for the whole loop, so a second `run` exits `4` as usual, and a TUI opened meanwhile starts nothing and names this loop's pid.
+It is a loop, not a daemon: nothing supervises it, and while it is not running nothing advances until a person (or the TUI) starts one. Quitting a TUI that started it leaves it running.
 
 With `--watch`, the summary is printed only when it differs from the summary the loop printed last, so a quiet loop does not repeat the same lines every interval. Every transition line is still printed when it happens.
 
@@ -713,6 +723,11 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
+The TUI never holds `runner.lock` and runs no pass. When it opens, it starts `radian arc run --watch` with the default interval as a detached process if no loop holds the lock; `R` starts one the same way while none runs.
+The header shows `loop ● running (pid <n>)` for any holder, `loop ◌ starting` until a start's lock appears, and `loop ○ stopped` when none runs; a failed start adds one footer line with its reason and exit code.
+The newest transition line `loop.log` gained since the TUI opened is the footer's ticker, and `L` opens a view of the last 500 lines.
+`q` and SIGTERM close the TUI and nothing else: a loop it started keeps running, and an attempt it left running is reconciled by the next loop.
+A running task's diff tab shows the worker's worktree against the attempt's `base_sha`, uncommitted files included (`live · worktree`), refreshed every 5 seconds.
 A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md). Each plan carries one of seven marks — `✕` cancelled, `◌` draft, `◉` needs you, `●` running, `◍` paused, `○` queued, `✓` done — each in its own `plan_*` theme role; the rules that pick one and the columns of both lists are in [the arc TUI](arc-tui.md#the-plans-page). The task page's tabs are `brief · conversation · diff · attempts`, and it opens on `brief` for a task that has not run. The plans page's `x` cancels the selected task or plan, `c` confirms a draft plan or a proposed task (depending on the focused column), and `+`/`-` move the selected plan's priority; the page draws `P<n>` with the plan's id and in the frame label.
 
 ## Not built yet
