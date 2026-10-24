@@ -238,6 +238,11 @@ crashed process releases the lock when its descriptor closes.
 stage, so two integration runs never work in the shared `gates/integration/` checkout at the
 same time.
 
+Every stage preparation (`commands`, `review`, `integration`) holds
+`<repository>/.radian/arc/gates/prepare.lock` (`PREPARE_LOCK`) while it fetches and creates or
+updates its checkout, so concurrent preparations take turns on the shared repository; the
+stage work after the prepare runs unlocked.
+
 `review` takes one of the slot locks `<repository>/.radian/arc/gates/review-<n>.lock`
 (`SlotLock`), `n` from 0 to `[gate.review] concurrency - 1`; a free slot is taken at once and a
 busy one is waited for. Slot `n` also names the checkout that session alone reads
@@ -469,16 +474,18 @@ again as unverified and counts no death.
 (`review::verify` = `plan_verification`, `run_stages`, `finish_verification`); a `radian arc
 run` pass starts the same stages in a background gate and calls `review::apply_verification`
 when the gate's record says `done`. Either way the remote's `work/<task>` must still equal the
-task's `head_sha`, then the effective stages of the profile plus the task's extra stages run
-in order, except `human`, each through the gate on the verification candidate
+task's `head_sha`, then the effective stages of the profile plus the task's extra stages run,
+except `human`, each through the gate on the verification candidate
 (`candidate_for`: `verified_sha` when the remote main is its ancestor, else a merge of
-`verified_sha` onto the remote main). This build runs `commands` and `review`; a profile or
-task that lists `mutation` or `ci` is refused with `stage <name> is not built yet` and the
-task stays in `review.verifying`. An existing verdict for the current attempt and stage is
-reused, so a gate that died between stages resumes.
+`verified_sha` onto the remote main). When the list holds both `commands` and `review`, those
+two start at the same time and the round's outcome follows the list's order (`commands`
+first); every other stage runs in the list's order. This build runs `commands` and `review`; a
+profile or task that lists `mutation` or `ci` is refused with `stage <name> is not built yet`
+and the task stays in `review.verifying`. An existing verdict for the current attempt and
+stage is reused, so a gate that died between stages resumes.
 
-`review` (`ReviewRun`) is a read-only session on the same candidate, after `commands` and
-before `human` (a profile that lists both must list `commands` first). Up to
+`review` (`ReviewRun`) is a read-only session on the same candidate. It runs at the same time
+as `commands` and before `human`; a profile that lists both must list `commands` first. Up to
 `[gate.review] concurrency` sessions run at once (default 2), each in its slot checkout
 `gates/review-<n>/`. It runs one `radian exec` per run with `--tools read,grep,glob`, no
 `--mcp-config` and `--no-config-mcp`. Its model route and wall-time limit come from
