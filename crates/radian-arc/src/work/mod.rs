@@ -1020,7 +1020,7 @@ fn ensure_worktree(
         // with a different fetch configuration cannot leave it stale.
         let start = format!("{remote}/{main_branch}");
         let refspec = format!("+refs/heads/{main_branch}:refs/remotes/{start}");
-        match git(repo, &["fetch", remote, &refspec], clock) {
+        match git_remote(repo, &["fetch", remote, &refspec], clock) {
             Ok(_) => {}
             Err(failure) if failure.wall => return Err(failure),
             Err(failure) => {
@@ -1187,7 +1187,7 @@ fn merge_main(
     let main_ref = format!("refs/remotes/{}/{}", o.remote, o.main_branch);
     let short_ref = format!("{}/{}", o.remote, o.main_branch);
     let refspec = format!("+refs/heads/{0}:{1}", o.main_branch, main_ref);
-    match git(repo, &["fetch", &o.remote, &refspec], clock) {
+    match git_remote(repo, &["fetch", &o.remote, &refspec], clock) {
         Ok(_) => {}
         Err(failure) if failure.wall => return Err(failure),
         Err(failure) => {
@@ -1760,7 +1760,7 @@ fn dirty_paths(worktree: &Path, clock: &Clock) -> Result<Vec<String>, Failure> {
 
 fn push(repo: &Path, remote: &str, branch: &str, clock: &Clock) -> Result<(), Failure> {
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    let out = git_raw(repo, &["push", remote, &refspec], clock)?;
+    let out = git_remote_raw(repo, &["push", remote, &refspec], clock)?;
     if !out.status.success() {
         return Err(Failure::error(format!(
             "push failed: {}",
@@ -1777,7 +1777,7 @@ fn remote_sha_of(
     clock: &Clock,
 ) -> Result<String, Failure> {
     let reference = format!("refs/heads/{branch}");
-    let out = git_raw(repo, &["ls-remote", remote, &reference], clock)?;
+    let out = git_remote_raw(repo, &["ls-remote", remote, &reference], clock)?;
     if !out.status.success() {
         return Err(Failure::error(format!(
             "ls-remote failed: {}",
@@ -1832,6 +1832,53 @@ fn git_raw(cwd: &Path, args: &[&str], clock: &Clock) -> Result<GitOutput, Failur
 
 fn git(cwd: &Path, args: &[&str], clock: &Clock) -> Result<String, Failure> {
     let out = git_raw(cwd, args, clock)?;
+    if !out.status.success() {
+        return Err(Failure::error(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            out.stderr.trim()
+        )));
+    }
+    Ok(out.stdout)
+}
+
+/// A git command of the wrapper that talks to a remote (`fetch`, `push`, `ls-remote`): the
+/// shorter of the attempt's remaining wall time and `[limits] git_remote_timeout_secs` bounds
+/// it (ADR 0048 decision 7.8). A limit that runs out kills the command's process group; when
+/// the wall clock is the shorter limit it is the attempt's `wall_time` failure, and otherwise
+/// the call fails with `git <subcommand> timed out after <n> s`.
+fn git_remote_raw(cwd: &Path, args: &[&str], clock: &Clock) -> Result<GitOutput, Failure> {
+    if clock.expired() {
+        clock.mark()?;
+        return Err(Failure::wall());
+    }
+    let key = crate::git::remote_timeout(cwd);
+    let (limit, wall_wins) = remote_limit(key, clock.remaining());
+    match crate::git::run_with_timeout(cwd, args, Some(limit)) {
+        Ok(crate::git::TimedRun::Done(output)) => Ok(output),
+        Ok(crate::git::TimedRun::TimedOut) if wall_wins => {
+            clock.mark()?;
+            Err(Failure::wall())
+        }
+        Ok(crate::git::TimedRun::TimedOut) => {
+            Err(Failure::error(crate::git::timeout_text(args, limit)))
+        }
+        Err(error) => Err(Failure::error(error.to_string())),
+    }
+}
+
+/// The limit of one remote call of the wrapper: the shorter of the attempt's remaining wall
+/// time and `[limits] git_remote_timeout_secs` (ADR 0048 decision 7.8). `true` when the wall
+/// clock is the shorter one, so the failure is the attempt's `wall_time` and not the call's.
+fn remote_limit(key: Duration, remaining: Option<Duration>) -> (Duration, bool) {
+    match remaining {
+        Some(remaining) => (remaining.min(key), remaining <= key),
+        None => (key, false),
+    }
+}
+
+fn git_remote(cwd: &Path, args: &[&str], clock: &Clock) -> Result<String, Failure> {
+    let out = git_remote_raw(cwd, args, clock)?;
     if !out.status.success() {
         return Err(Failure::error(format!(
             "git {} failed: {}",
@@ -2031,6 +2078,28 @@ mod tests {
         let equals = strings(&[&format!("--session-dir={path}")]);
         assert!(session_exists("TK0001-task", &equals));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The wrapper bounds a remote call by the shorter of the attempt's remaining wall time
+    /// and the key, and a wall win is the attempt's `wall_time`, not the call's own failure.
+    /// Mutation: always take the key and the attempt's wall-clock failure never fires.
+    #[test]
+    fn a_remote_call_takes_the_shorter_of_the_wall_clock_and_the_key() {
+        let key = Duration::from_secs(300);
+        assert_eq!(
+            remote_limit(key, Some(Duration::from_secs(5))),
+            (Duration::from_secs(5), true)
+        );
+        assert_eq!(
+            remote_limit(key, Some(Duration::from_secs(900))),
+            (key, false)
+        );
+        assert_eq!(remote_limit(key, None), (key, false));
+        assert_eq!(
+            remote_limit(key, Some(key)),
+            (key, true),
+            "the wall clock wins a tie"
+        );
     }
 
     #[test]

@@ -255,6 +255,14 @@ impl Fixture {
         path
     }
 
+    /// Sets `[limits] git_remote_timeout_secs`.
+    fn git_remote_timeout(&self, seconds: u64) {
+        self.tune(
+            "git_remote_timeout_secs = 300",
+            &format!("git_remote_timeout_secs = {seconds}"),
+        );
+    }
+
     /// Sets the plan's auto level.
     fn set_auto(&self, level: &str) {
         let plan = self
@@ -1030,6 +1038,27 @@ fn merge_integrates_again_when_main_moves_during_the_integration() {
         fixture.repo.is_ancestor(&moved, &candidate),
         "the candidate contains the moved main"
     );
+}
+
+/// The push to the remote main is a remote call: a remote that accepts the connection and
+/// then hangs makes the push run out after the limit. The task stays where a rejected push
+/// leaves it (`review.integrating`, the next round can try again), the reason carries the
+/// line, and the child the remote spawned is gone.
+#[test]
+fn a_merge_push_that_hangs_reports_the_line_and_kills_its_child() {
+    let fixture = Fixture::new("merge-push-hang");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    fixture.git_remote_timeout(1);
+    let hang = HangRemote::install(&fixture.repo, "merge-push", "receive");
+
+    let error = review::merge(&fixture.store, &fixture.task).expect_err("the push runs out");
+    assert!(
+        error.message().contains("git push timed out after 1 s"),
+        "{error:?}"
+    );
+    assert_state(&fixture, ("review", "integrating"));
+    hang.assert_gone(hang.child_pid(), "the remote's child");
 }
 
 /// A conflict in the integration stage, with `merge-main` off, sends the task to rework with
@@ -2753,6 +2782,104 @@ fn show_exposes_the_review_findings() {
     );
     assert_eq!(value["review_session_ids"][0], "fake-review-1");
     assert_eq!(value["review_cost_micros"], 2000);
+}
+
+// ---- a gate re-run's review sessions ------------------------------------------------
+
+/// A gate that died mid-review is started again for the same attempt. The re-run must not
+/// reuse a session id whose journal exists: it takes `<attempt>-review-<run>-<k>` and writes
+/// its logs under the matching name, and the first journal is untouched.
+#[test]
+fn a_gate_rerun_gets_a_fresh_review_session_and_keeps_the_first_journal() {
+    let fixture = Fixture::new("review-rerun-sessions");
+    fixture.add_review_stage();
+    let session_dir = common::scratch("review-sessions");
+    fixture.review_exec_args(&["--model", "m", "--session-dir", common::path(&session_dir)]);
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let attempt = fixture.attempt_label();
+
+    let first = FakeReview::new(
+        "review-rerun-first",
+        &[review_message("first pass", &[], &[])],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, first.program()).phase,
+        "awaiting_human"
+    );
+    // The first run's journal, left in the session directory.
+    let journal = session_dir.join(format!("{attempt}-review-1.jsonl"));
+    fs::write(&journal, "the first journal\n").expect("the first journal");
+    let before = fs::read(&journal).expect("the first journal reads");
+    let first_log = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(&attempt)
+        .join("logs/review-1.jsonl");
+    assert!(
+        first_log.is_file(),
+        "the first run's log: {}",
+        first_log.display()
+    );
+
+    // The gate died before it wrote the verdict: remove it, as a death mid-review leaves it.
+    let verdict_path = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(&attempt)
+        .join("verdicts/review.json");
+    fs::remove_file(&verdict_path).expect("the review verdict is removed");
+    fixture.set_verifying(&head);
+
+    let second = FakeReview::new(
+        "review-rerun-second",
+        &[review_message("second pass", &[], &[])],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, second.program()).phase,
+        "awaiting_human"
+    );
+    assert_eq!(second.count(), 1);
+    let argv = second.argv(1);
+    let requested = argv
+        .iter()
+        .position(|arg| arg == "--session-id")
+        .map(|at| argv[at + 1].clone())
+        .expect("the stage passes a session id");
+    assert_eq!(
+        requested,
+        format!("{attempt}-review-1-1"),
+        "the re-run took the next free session id"
+    );
+    assert_eq!(
+        fs::read(&journal).expect("the first journal reads"),
+        before,
+        "the first journal is unchanged byte for byte"
+    );
+    let second_log = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(&attempt)
+        .join("logs/review-1-1.jsonl");
+    assert!(
+        second_log.is_file(),
+        "the re-run's log has the matching name: {}",
+        second_log.display()
+    );
+    let verdict = fixture.verdict(&attempt, Stage::Review);
+    assert_eq!(verdict.result, VerdictResult::Pass);
+    assert!(!verdict.review_session_ids.is_empty());
+    let _ = fs::remove_dir_all(session_dir.path());
 }
 
 // ---- the rework round (ADR 0048 decision 10) ------------------------------------------

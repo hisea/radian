@@ -162,6 +162,27 @@ For a task with a review verdict, the text form also prints `review_verdict`, `r
 The text form prints `session_id` after `attempt_id`.
 An id that names nothing exits `1`.
 
+### The `after` chain
+
+A task's `after` lists the tasks that must be merged before it is claimed (see [Plan and task files](arc-files.md#plan-and-task-files)).
+`show <task>` prints two more fields after `after`:
+
+- `waits_on`: every task in the `after` chain, transitively, nearest first, each as `<id> <state>.<phase>`; `-` when it waits on nothing.
+- `blocks`: every other task whose `after` chain contains this task, transitively, nearest first, in the same form; `-` when no task waits on it.
+
+The walk is breadth-first over `after` and visits each task once.
+An id that names no task is printed as `<id> missing`; only a hand-edited file that was adopted can hold one, because `add task` and the MCP `add_task` tool refuse an `after` id that names no task.
+
+A task in `waits_on` that can never become `done.merged` stops the chain for good.
+That is a `failed.*` task, a task whose plan is `cancelled` and that is not merged, or an id that names no task.
+`show` prints the first such task as `never_runs: <id> <state>.<phase>` (or `never_runs: <id> missing`).
+An `after` cycle, possible only through an adopted hand edit, is printed once as `cycle: <id> -> … -> <id>`, and the walk stops there instead of looping.
+A plan's `show` has none of these fields.
+
+The JSON object of a task holds `waits_on` and `blocks` too: arrays of `{"id": string, "state": string|null, "phase": string|null}`, nearest first, with `null` state and phase for an id that names no task.
+It also holds `never_runs` (that object, or `null`) and `cycle` (an array of ids that starts and ends with the same id, or `null`).
+The MCP `show` tool returns the same object.
+
 ## `radian arc adopt <ID>`
 
 Every file arc writes is recorded with a content hash in the ledger.
@@ -204,6 +225,37 @@ A task confirm refuses with exit `3` for a task in any state other than `todo.pr
 A refusal writes nothing.
 
 It prints `<plan> confirmed` or `<task> todo.ready`.
+
+### Trying it first: `--dry-run`
+
+| Flag | Value | What it does |
+|---|---|---|
+| `--dry-run` | — | Run every check the confirm runs, print what it would do, and write nothing. |
+
+`radian arc confirm <ID> --dry-run` runs every check the real `confirm` runs, in the same order, and refuses exactly as `confirm` would: the same message and the same exit code.
+It writes nothing: no plan or task file and no ledger entry.
+It checks `state.lock` only to find out whether another process holds it, and releases it; it does not create the lock file when it is missing, so no lock is left behind.
+
+On success it prints these lines and exits `0`:
+
+- first, the line the real confirm would print, prefixed `would: `: `would: TK0002-two todo.ready` or `would: PL0001-first confirmed`;
+- one `<id> waits on: <chain>` line per task the confirm would make `todo.ready` — the task itself, or a plan's `todo.ready` tasks in the plan's order — with the same entries as `show`'s [`waits_on`](#the-after-chain), or `<id> waits on: nothing`;
+- a `never runs: <id> <state>.<phase>` line for each such task whose chain cannot finish (the same test as `show`'s `never_runs`), and a `cycle: <id> -> … -> <id>` line for a cycle;
+- one `<id> queue: <n> of <m> todo.ready` line per such task: its place among every `todo.ready` task plus itself, in claim order (the plan's `priority`, the plan id, the task's order in the plan).
+
+When the next pass would not claim the task, the queue line ends with the reason in parentheses, in the words `radian arc run`'s summary uses: `(waiting for <id> to merge)`, or ``(waiting for you to start it (`auto` is `off`))``.
+The place is where the task would stand at that moment, not a promise: another task may be claimed or merged before it.
+
+```text
+would: TK0002-two todo.ready
+TK0002-two waits on: TK0001-one todo.ready
+TK0002-two queue: 2 of 2 todo.ready (waiting for TK0001-one to merge)
+```
+
+`--dry-run` exits `1` for an id that names nothing, `2` for a malformed id, `3` for a state that does not allow the confirm (an empty plan, an already confirmed plan, a task that is not `todo.proposed`, a file changed outside arc, a cancelled plan, a rejected worker line), and `4` when another process holds `state.lock`.
+
+A real `confirm` prints the same `never runs:` and `cycle:` lines on stderr after its line when they apply.
+They are warnings: the confirm still happens and still exits `0`.
 
 ## `radian arc auto <PLAN> <LEVEL>`
 
@@ -330,6 +382,7 @@ The wrapper enforces the attempt's limits itself, so they hold even after the pr
 
 - no new line in `runs/<task>/attempts/<attempt id>/result.jsonl` for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the worker's process group;
 - `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the wrapper started does the same; this clock also bounds the wrapper's own git steps, so a fetch or a push still running at the limit is stopped the same way.
+- a fetch, a push or an `ls-remote` is also bounded by [`limits.git_remote_timeout_secs`](arc-files.md#configtoml); whichever of it and the attempt's remaining wall time is shorter applies, and the call, with everything it started, is killed when it runs out.
 - after `[limits] cancel_grace_secs` the worker gets SIGKILL.
 
 A limit of `0` means no limit for that timer.
@@ -685,7 +738,7 @@ Every tool is one of the store's transactions: a plan or task file that changed 
 | `update_plan` | `plan` (string, required), `title` (string, optional), `request` (string, optional), `change_record` (string, optional) | the plan, as `radian arc show <plan> --json` |
 | `add_rework` | `task` (string, required), `brief` (string, required) | the task, as `radian arc show <task> --json` |
 | `list` | `plan` (string, optional: only this plan) | the JSON array `radian arc list --json` prints |
-| `show` | `id` (string, required) | the JSON object `radian arc show --json` prints |
+| `show` | `id` (string, required) | the JSON object `radian arc show --json` prints, a task's `waits_on`, `blocks`, `never_runs` and `cycle` included |
 
 There is no tool to confirm a plan or a task, start a task, merge, reject, change `auto`, or approve: those are yours (see `confirm`, `auto`, and `pause` above).
 
@@ -732,7 +785,7 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
-A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
+A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md). The plans page's `x` cancels the selected task or plan, `c` confirms a draft plan or a proposed task (depending on the focused column), and `+`/`-` move the selected plan's priority; the page draws `P<n>` with the plan's id and in the frame label.
 
 ## Not built yet
 
