@@ -383,9 +383,12 @@ fn auto_merge_takes_all_three_to_done_merged_in_one_run() {
     assert_eq!(human.approver.as_deref(), Some("auto"));
 }
 
-/// A refused integration record is kept and reported without starting a second gate while
-/// its inputs stay the same; a moved main is a changed input and allows one new start.
-/// Mutation: clear the refused record again and the next pass starts the same gate again.
+/// A real integration gate refuses after the pass recorded the digest it started with: the
+/// refused record keeps that digest and the gate's `.i2` label, so a later pass for the same
+/// attempt and inputs reports it without starting another gate. A moved main is a changed
+/// input and allows one new start.
+/// Mutation: clear the refused record again and the next pass starts the same gate again;
+/// drop the copied digest or the `.iN` attempt prefix and it does too.
 #[test]
 fn a_refused_integration_is_not_restarted_until_its_inputs_change() {
     let repo = Repo::new("run-integration-refused");
@@ -395,34 +398,71 @@ fn a_refused_integration_is_not_restarted_until_its_inputs_change() {
     plan_ops::confirm(&store, &plan).expect("confirm");
     plan_ops::set_auto(&store, &plan, "merge").expect("auto merge");
     commands(&repo, "true");
-    publish_verifying(&repo, &store, &plan, &task);
+    let head = publish_verifying(&repo, &store, &plan, &task);
+    // A verdict for the attempt's own label makes the gate take the `.i2` label, the one a
+    // pass must accept as the same attempt.
+    let verdicts = repo.run_dir(&task, 1).join("verdicts");
+    fs::create_dir_all(&verdicts).expect("the verdict directory");
+    let mut verdict = Verdict::human(head, true, None);
+    verdict.stage = Stage::Integration;
+    verdict.base_sha = Some(repo.main_sha());
+    verdict
+        .write_new(&verdicts.join("integration.json"))
+        .expect("the integration verdict");
+    // The task integrates, but it has no `base_sha`: the gate refuses before any stage runs.
     store
         .change_task(&task, |task| {
             task.phase = "integrating".to_owned();
+            task.base_sha = None;
             Ok(())
         })
         .expect("the task integrates");
     let inputs = radian_arc::review::integration_inputs(&store, &task).expect("the inputs");
-    write_gate_record(
-        &repo,
-        &task,
-        serde_json::json!({
-            "kind": "integration",
-            "attempt": format!("{task}-1"),
-            "status": "refused",
-            "text": "the integration cannot run",
-            "inputs": inputs,
-        }),
-    );
 
-    // The first pass reports the refusal; the old code cleared the record and the second pass
-    // then started the same gate again.
+    // The first pass starts the gate; it refuses and leaves the pass's digest under its own
+    // `.i2` label.
+    let first = repo.radian(&["arc", "run"]);
+    assert_eq!(first.code, 0, "run: {}", first.stderr);
+    assert!(
+        first
+            .stdout
+            .contains(&format!("{task} integration started")),
+        "the gate did not start: {}",
+        first.stdout
+    );
+    wait_until(Duration::from_secs(60), "the gate's refusal", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "refused")
+    });
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(
+        record["attempt"],
+        serde_json::json!(format!("{task}-1.i2")),
+        "the gate did not run for the next label: {record}"
+    );
+    assert_eq!(
+        record["inputs"],
+        serde_json::json!(inputs),
+        "the refused record lost the pass's digest: {record}"
+    );
+    let text = record["text"].as_str().expect("the refusal text");
+    assert!(
+        text.contains("has no `base_sha`"),
+        "the gate refused for another reason: {text}"
+    );
+    // The gate process exits right after writing the record; let its lock go before the
+    // passes that must find it.
+    wait_until(Duration::from_secs(60), "the gate to exit", || {
+        !background::running(&store, &task)
+    });
+
+    // Later passes report the refusal; the old code cleared the record and each pass then
+    // started the same gate again.
     for pass in 1..=2 {
         let run = repo.radian(&["arc", "run"]);
         assert_eq!(run.code, 0, "pass {pass}: {}", run.stderr);
         assert!(
             run.stdout.contains(&format!(
-                "{task} integration cannot run: the integration cannot run"
+                "{task} integration cannot run: task `{task}` has no `base_sha`"
             )),
             "pass {pass} did not report the refusal: {}",
             run.stdout
@@ -440,8 +480,10 @@ fn a_refused_integration_is_not_restarted_until_its_inputs_change() {
     }
     assert!(!background::running(&store, &task));
 
-    // A moved main is a changed input: one new gate starts.
+    // A moved main is a changed input: one new gate starts, with a new digest.
     advance_main(&repo, "main-moved.txt", "moved\n");
+    let changed = radian_arc::review::integration_inputs(&store, &task).expect("the inputs");
+    assert_ne!(changed, inputs, "the moved main kept the digest");
     let run = repo.radian(&["arc", "run"]);
     assert_eq!(run.code, 0, "run: {}", run.stderr);
     assert!(
@@ -449,9 +491,10 @@ fn a_refused_integration_is_not_restarted_until_its_inputs_change() {
         "a changed main started no gate: {}",
         run.stdout
     );
-    // Let the gate end before the fixture is removed.
-    wait_until(Duration::from_secs(60), "the integration gate", || {
-        gate_record(&repo, &task).is_some_and(|record| record["status"] == "done")
+    // Let the new gate refuse before the fixture is removed.
+    wait_until(Duration::from_secs(60), "the new integration gate", || {
+        gate_record(&repo, &task)
+            .is_some_and(|record| record["status"] == "refused" && record["inputs"] == changed)
     });
 }
 
