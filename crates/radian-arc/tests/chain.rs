@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use common::Repo;
 use radian_arc::store::cli::{show_json, show_text};
 use radian_arc::store::model::TaskState;
-use radian_arc::store::{Store, plan_ops};
+use radian_arc::store::{Store, chain::queue_position, plan_ops};
 
 // ---- a store under a throwaway git repository ---------------------------------------
 
@@ -285,11 +285,73 @@ fn an_adopted_cycle_is_printed_once_and_the_walk_returns() {
     let text = result.expect("show reads the task");
     let cycle_line = format!("cycle: {a} -> {b} -> {a}\n");
     assert!(text.contains(&cycle_line), "{text}");
+    let value = show_json(&store, &a).expect("show --json builds");
+    assert_eq!(value["cycle"], serde_json::json!([a, b, a]));
+    assert_eq!(value["never_runs"], serde_json::Value::Null);
     assert_eq!(
         text.matches("cycle:").count(),
         1,
         "the cycle is printed once:\n{text}"
     );
+}
+
+/// A task whose plan is `cancelled` can never merge unless it already did, and `show` names it
+/// as `never_runs` even when its own state is not `failed.*`, in text and JSON.
+#[test]
+fn a_task_of_a_cancelled_plan_in_the_chain_is_reported_as_never_running() {
+    let scratch = fixture("never-cancelled-plan");
+    let store = initialized(&scratch);
+    let gone = store.add_plan("gone", "Gone", "request").unwrap();
+    let dependency = add_task(&store, &gone, "dependency", &[]);
+    let plan = store.add_plan("waiting", "Waiting", "request").unwrap();
+    let waiting = add_task(&store, &plan, "waiting", &[]);
+    // A cross-plan dependency is only possible through an adopted hand edit: `add task`
+    // accepts a task of the same plan or one that is already `done.merged`.
+    hand_edit_and_adopt(
+        &scratch,
+        &store,
+        &waiting,
+        "after: []\n",
+        &format!("after:\n  - {dependency}\n"),
+    );
+    radian_arc::attempt::cancel_any(&store, &gone).expect("the plan cancels");
+    // The cancel ends every open task; put this one back at `todo.ready`, the shape a task of
+    // a cancelled plan has when it is not `failed.*`.
+    set_state(&store, &dependency, TaskState::Todo, "ready");
+
+    let text = show_text(&store, &waiting).expect("show reads the task");
+    assert!(
+        text.contains(&format!("never_runs: {dependency} todo.ready\n")),
+        "{text}"
+    );
+    let value = show_json(&store, &waiting).expect("show --json builds");
+    assert_eq!(
+        value["never_runs"],
+        serde_json::json!({"id": dependency, "state": "todo", "phase": "ready"})
+    );
+}
+
+/// An adopted plan edit that leaves a `todo.ready` task out of every plan's `tasks` list does
+/// not drop it from the queue total: `task_claim_order` puts such a task last.
+#[test]
+fn an_unlisted_ready_task_counts_at_the_end_of_the_queue() {
+    let scratch = fixture("queue-unlisted");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("queue", "Queue", "request").unwrap();
+    let a = add_task(&store, &plan, "a", &[]);
+    let b = add_task(&store, &plan, "b", &[]);
+    let path = scratch
+        .repo()
+        .join(".radian/arc/plans")
+        .join(format!("{plan}.md"));
+    let text = fs::read_to_string(&path).expect("the plan file reads");
+    let edited = text.replace(&format!("  - {b}\n"), "");
+    assert_ne!(edited, text, "the plan lists b: {text}");
+    fs::write(&path, edited).expect("the plan file is editable");
+    store.adopt(&plan).expect("an edit of `tasks` is adoptable");
+
+    assert_eq!(queue_position(&store, &a).expect("the queue reads"), (1, 2));
+    assert_eq!(queue_position(&store, &b).expect("the queue reads"), (2, 2));
 }
 
 // ---- confirm --dry-run and the real confirm's warnings -----------------------------
@@ -558,4 +620,35 @@ fn a_dry_run_queue_line_names_the_reason_the_pass_would_wait() {
     let run = repo.radian(&["arc", "confirm", "--dry-run", &second]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert!(run.stdout.contains("`auto` is `off`"), "{}", run.stdout);
+}
+
+/// A ready task waits for a free concurrency slot when another task holds the only one, and
+/// the dry run says so in `run`'s words.
+#[test]
+fn a_dry_run_queue_line_names_a_taken_concurrency_slot() {
+    let (repo, store) = cli_fixture("dry-slot");
+    let plan = confirmed_plan(&store, "slot");
+    let running = add_task(&store, &plan, "running", &[]);
+    plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+    plan_ops::set_auto(&store, &plan, "run").expect("the plan runs");
+    let proposed = store
+        .add_task_proposed(
+            &plan,
+            "second",
+            "Second",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "brief",
+        )
+        .expect("a proposed task is added");
+    set_state(&store, &running, TaskState::Doing, "running");
+
+    let run = repo.radian(&["arc", "confirm", "--dry-run", &proposed]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        run.stdout.contains("waiting for a free concurrency slot"),
+        "{}",
+        run.stdout
+    );
 }
