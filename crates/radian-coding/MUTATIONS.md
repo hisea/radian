@@ -725,6 +725,7 @@ M2's first attempt changed only the `spawn_parent_env` variable and kept `Env::s
 `<home>`; the exec test itself then failed (`child_journals` found no journal), which fails the
 leak test for the wrong reason. The recorded mutation moves the directory the test really reads
 and writes, so the child test passes and only the leftover fails the leak test.
+
 ## the temp file system check of `verify.sh` and `arc-gate.sh` (2026-10-23, branch `work/TK0042-verify-inode-check`)
 
 Base: the branch's first commit. Mutations were applied by hand to `scripts/temp-check.sh`, backed

@@ -8,43 +8,22 @@
 mod test_support;
 
 use std::net::TcpListener;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(label: &str) -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let n = N.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "radian-seccomp-test-{}-{label}-{n}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(std::fs::canonicalize(&dir).unwrap())
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// A `workspace` sandbox plus its `FullAccess` control over a fresh workspace. Inside
 /// another sandbox the resources (and the control) cannot be trusted, so the test prints
 /// the fixed marker and returns, exactly like the escape matrix.
-fn rig(label: &str) -> Option<(TempDir, Sandbox, Sandbox)> {
+fn rig(label: &str) -> Option<(test_support::TempDir, Sandbox, Sandbox)> {
     if radian_sandbox::confined_by_outer_sandbox() {
         println!("radian-test: skipped inside a sandbox: {label}");
         return None;
     }
-    let dir = TempDir::new(label);
-    let sandbox = Sandbox::from_policy(SandboxPolicy::workspace_write(&dir.0).unwrap()).unwrap();
-    let control = Sandbox::new(SandboxMode::FullAccess, &dir.0).unwrap();
+    let dir = test_support::TempDir::named(&format!("radian-seccomp-{label}"));
+    // The sandbox policy needs the real path (`/tmp` is a link on macOS).
+    let ws = std::fs::canonicalize(&*dir).unwrap();
+    let sandbox = Sandbox::from_policy(SandboxPolicy::workspace_write(&ws).unwrap()).unwrap();
+    let control = Sandbox::new(SandboxMode::FullAccess, &ws).unwrap();
     Some((dir, sandbox, control))
 }
 
