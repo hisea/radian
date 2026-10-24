@@ -759,7 +759,14 @@ pub struct FakeReview {
 impl FakeReview {
     /// `messages[n]` is run `n`'s final text; a missing entry repeats the last message.
     pub fn new(label: &str, messages: &[String], sleep_secs: u32) -> Self {
-        Self::with_barrier(label, messages, sleep_secs, None)
+        Self::build(label, messages, sleep_secs, None, false)
+    }
+
+    /// Like [`FakeReview::new`], but the `Result` line echoes the `--session-id` the stage
+    /// passed (falling back to `fake-review-<n>` when it passed none), so a test can assert the
+    /// verdict's `review_session_ids` names the session the stage asked for.
+    pub fn with_session_echo(label: &str, messages: &[String], sleep_secs: u32) -> Self {
+        Self::build(label, messages, sleep_secs, None, true)
     }
 
     /// [`FakeReview::new`] with `barrier` = `(wait_for, seconds)`: the run waits up to `seconds`
@@ -770,6 +777,16 @@ impl FakeReview {
         messages: &[String],
         sleep_secs: u32,
         barrier: Option<(&Path, u32)>,
+    ) -> Self {
+        Self::build(label, messages, sleep_secs, barrier, false)
+    }
+
+    fn build(
+        label: &str,
+        messages: &[String],
+        sleep_secs: u32,
+        barrier: Option<(&Path, u32)>,
+        echo_session_id: bool,
     ) -> Self {
         let dir = TempDir::new(label);
         for (index, message) in messages.iter().enumerate() {
@@ -796,6 +813,17 @@ impl FakeReview {
             ),
             None => String::new(),
         };
+        let session = if echo_session_id {
+            "sid=\"\"\n\
+             previous=\"\"\n\
+             for argument in \"$@\"; do\n\
+               if [ \"$previous\" = \"--session-id\" ]; then sid=\"$argument\"; fi\n\
+               previous=\"$argument\"\n\
+             done\n\
+             if [ -z \"$sid\" ]; then sid=\"fake-review-$n\"; fi\n"
+        } else {
+            "sid=\"fake-review-$n\"\n"
+        };
         let program = dir.path().join("fake-radian-exec");
         let script = format!(
             "#!/bin/sh\n\
@@ -807,14 +835,16 @@ impl FakeReview {
              printf '%s\\n' \"$$\" > \"$d/pid-$n\"\n\
              touch \"$d/started-$n\"\n\
              cat > \"$d/prompt-$n\"\n\
+             {session}\
              {wait}\
              s=$(cat \"$d/sleep-$n\" 2>/dev/null || printf '{sleep_secs}')\n\
              sleep \"$s\"\n\
              if [ ! -f \"$d/text-$n\" ]; then n={last}; fi\n\
-             printf '{{\"type\":\"Result\",\"session_id\":\"fake-review-%s\",\"outcome\":\"completed\",\"cost\":{{\"micros\":2000}},\"text\":' \"$n\"\n\
+             printf '{{\"type\":\"Result\",\"session_id\":\"%s\",\"outcome\":\"completed\",\"cost\":{{\"micros\":2000}},\"text\":' \"$sid\"\n\
              cat \"$d/text-$n\"\n\
              printf '}}\\n'\n",
             dir = dir.path().display(),
+            session = session,
             wait = wait,
             sleep_secs = sleep_secs,
             last = last,

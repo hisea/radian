@@ -628,7 +628,7 @@ A task of a `cancelled` plan is never claimed, gated or merged, and a cancelled 
 The arc TUI never runs this pass itself: when no loop holds the lock it starts `radian arc run --watch` as a detached process (see [the TUI](#the-tui) and [`arc-tui`](arc-tui.md#the-loop)). A TUI and a `run` (or `run --watch`) exclude each other through `runner.lock`: a second loop that cannot get it exits `4`.
 Quitting the TUI never stops a loop, whether the TUI started it or not.
 
-Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](arc-files.md#configtoml)).
+Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line as `start` does: a rejected line claims nothing and changes no file, and a one-shot `run` exits `3`; a rejection repeated for three passes ends `--watch` at `1`. Its arguments are in [`worker.exec_args`](arc-files.md#configtoml).
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|
@@ -694,10 +694,9 @@ With `--watch`, the summary is printed only when it differs from the summary the
 A pass that returns an error prints one `radian arc: <message>` line and the loop waits its interval and runs the next pass; the lock and every state file stay as they are.
 A one-shot `run` prints the same line and exits `1` instead.
 
-A repeated error stops the loop: when three passes in a row return the same error text, it prints one line, `radian arc: the same error three passes in a row; stopping (fix it and start the loop again)`, stops the gates the way a stop signal does (see below; workers are left alone), releases `runner.lock`, and exits `1`.
+A repeated error stops the loop: when three passes in a row return the same error text, it prints one line, `radian arc: the same error 3 passes in a row; stopping (fix it and start the loop again)`, stops the gates the way a stop signal does (see below; workers are left alone), releases `runner.lock`, and exits `1`.
 A pass that succeeds, or a different error, starts the count again.
-A one-shot `run` is unchanged.
-The number three is a constant, not a configuration key.
+The number `3` is a constant, not a configuration key.
 
 On SIGINT or SIGTERM the loop starts no new worker and no new gate.
 A Ctrl-C in the terminal reaches the loop only: each worker and each gate runs in its own process group, and both treat SIGINT exactly as SIGTERM.
@@ -705,7 +704,7 @@ A running worker is left alone: it is a separate process with its own limits and
 A running gate is signalled and gets `[limits] cancel_grace_secs` before SIGKILL, and so is one whose record is still `started` while it holds the gate lock; the gate forwards the signal to the stage it is running (the `commands` shell or the review session), waits for it, and exits without a record; once it is gone its record becomes `interrupted`, so a gate that did not finish is started again by the next loop as unverified and counts no death, and the verdicts it already wrote are reused, unless it exited before writing any record at all: then the next pass reports it and starts no gate while its inputs are unchanged (see [the gate run](arc-gate.md#the-gate-run)).
 The loop then prints the summary, releases `runner.lock`, and exits `0`.
 
-It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or SIGTERM with `--watch`; `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
+It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or SIGTERM with `--watch`; `1` on a git or file error or a repeated-error stop (see above); `3` when a one-shot `run` rejects the worker's `radian exec` line (a repeated rejection under `--watch` is the `1` above); and `4` when another process holds `runner.lock`. It never waits for the lock.
 
 ## `radian arc mcp`
 
