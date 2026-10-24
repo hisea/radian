@@ -13,6 +13,10 @@ publish = false
 # dev-dependency below). Off by default, so a production build or a dependent crate cannot arm
 # them.
 testing = []
+# The core's journal replay check (ADR 0001/0002/0003): a session compares its journal with its
+# transcript when it drops. A host test under this feature proves a turn's key switch writes
+# nothing key-shaped.
+journal-selfcheck = ["radian-core/journal-selfcheck"]
 
 [dependencies]
 radian-core = { version = "0.2.0", path = "../radian-core" }

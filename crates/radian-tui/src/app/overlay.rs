@@ -101,6 +101,9 @@ pub enum Modal {
     /// A `/logout` confirmation: the provider whose stored credential would be removed.
     /// `y` removes, `n`/`Esc` keeps — hardcoded, like the `/memory` confirmation.
     ConfirmLogout(String),
+    /// A `/logout` choice among several keys (ADR 0026 D3): each key named and masked, plus
+    /// `all`.
+    LogoutKeys(Box<crate::logout::LogoutKeysWizard>),
     /// The startup project-trust prompt (ADR 0031 T3). A small list whose keys are hardcoded
     /// like the approval's: a startup decision must not depend on the keymap. Boxed, like the
     /// other payload modals.

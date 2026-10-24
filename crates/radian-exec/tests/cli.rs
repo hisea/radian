@@ -9383,6 +9383,94 @@ async fn login_without_a_terminal_refuses_and_points_at_auth_json() {
     assert!(!stderr.contains("sk-"), "{stderr}");
 }
 
+/// A private `RADIAN_HOME` with a two-key `opencode-go` entry (ADR 0026 D1).
+fn home_with_two_keys() -> PathBuf {
+    let home = fresh_session_dir();
+    let credentials = home.join("credentials");
+    std::fs::create_dir_all(&credentials).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let auth = credentials.join("auth.json");
+    std::fs::write(
+        &auth,
+        r#"{"opencode-go": {"type": "api_key", "key": "sk-first",
+                            "keys": [{"name": "team", "key": "sk-second"}]}}"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    home
+}
+
+/// `radian logout <provider> <name>` removes that key without asking; removing the first key
+/// promotes the next one to `key` (ADR 0026 D1/D3).
+#[tokio::test]
+async fn logout_with_a_key_name_removes_one_and_promotes_the_next() {
+    let home = home_with_two_keys();
+    let output = tokio::process::Command::new(common::radian_bin())
+        .args(["logout", "opencode-go", "team"])
+        .env("HOME", &home)
+        .env("RADIAN_HOME", &home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .expect("spawn radian logout");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let auth: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join("credentials/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(auth["opencode-go"]["key"], "sk-first");
+    assert!(auth["opencode-go"].get("keys").is_none());
+
+    // The first key: the next one is promoted to `key`, so pi keeps reading the entry.
+    let home = home_with_two_keys();
+    let output = tokio::process::Command::new(common::radian_bin())
+        .args(["logout", "opencode-go", "first"])
+        .env("HOME", &home)
+        .env("RADIAN_HOME", &home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .expect("spawn radian logout");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let auth: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join("credentials/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(auth["opencode-go"]["key"], "sk-second");
+}
+
+/// An unknown key name is refused, naming the known ones, and nothing is removed.
+#[tokio::test]
+async fn logout_with_an_unknown_key_name_names_the_known_ones() {
+    let home = home_with_two_keys();
+    let output = tokio::process::Command::new(common::radian_bin())
+        .args(["logout", "opencode-go", "no-such-key"])
+        .env("HOME", &home)
+        .env("RADIAN_HOME", &home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .expect("spawn radian logout");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no-such-key"), "{stderr}");
+    assert!(
+        stderr.contains("first") && stderr.contains("team"),
+        "{stderr}"
+    );
+    let auth: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join("credentials/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(auth["opencode-go"]["key"], "sk-first");
+    assert_eq!(auth["opencode-go"]["keys"][0]["name"], "team");
+}
+
 /// A minimal pty: the child runs `sh -c '"$@"; echo EXITED:$?; stty -a'`, so the same pty
 /// reports the exit code and the terminal state **after** the app left (the echo-restore
 /// invariant is only observable there). Raw bytes accumulate; the reader drains them.

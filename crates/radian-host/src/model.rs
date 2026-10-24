@@ -19,6 +19,7 @@ use agent_provider_openai_compatible::{OpenAiCompatible, OpenAiCompatibleConfig}
 use agent_provider_openai_responses::{OpenAiResponses, OpenAiResponsesConfig};
 use radian_core::{Model, ModelContext, ModelError, ModelRequest, ModelResponse};
 
+use crate::key_pool::PoolKey;
 use crate::oauth_chatgpt;
 
 /// The `max_tokens` sent to Anthropic when `--max-tokens` is not given. The Messages API
@@ -649,9 +650,15 @@ pub struct RouteContext {
 
 impl RouteContext {
     /// Resolves one route into model arguments: `resolve_route` for the endpoint and headers,
-    /// `auth::resolve_key` for the credential (D2). A provider without a credential is an error
-    /// naming `/login <provider>` (D6), which the caller shows.
-    pub fn args_for(&self, provider_name: &str, model: &str) -> Result<ModelArgs, String> {
+    /// `auth::resolve_key` for the credential (D2). `api_key` is the pool's chosen key for this
+    /// request (D2); `None` uses the entry's first key. A provider without a credential is an
+    /// error naming `/login <provider>` (D6), which the caller shows.
+    pub fn args_for(
+        &self,
+        provider_name: &str,
+        model: &str,
+        api_key: Option<&str>,
+    ) -> Result<ModelArgs, String> {
         // D10: the provider name resolves through the config's declarations and the auth
         // entry's env, and the key lives under the **name**.
         let auth_env = crate::AuthStore::open()
@@ -664,7 +671,7 @@ impl RouteContext {
         // entry slice ① wrote (ADR 0026), which has no single static key to
         // return here (`credential` stays `None` for it either way — `ChatGptModel` reads
         // `auth.json` itself, per call). `has_login` is the presence check both shapes share.
-        if credential.is_none() && !crate::auth::has_login(provider_name) {
+        if credential.is_none() && api_key.is_none() && !crate::auth::has_login(provider_name) {
             return Err(format!(
                 "no credential for `{provider_name}`: run /login {provider_name} (or add an entry \
                  to ~/.radian/credentials/auth.json)"
@@ -701,7 +708,9 @@ impl RouteContext {
             provider: route.adapter(),
             base_url: route.base_url,
             model: model.to_owned(),
-            api_key: credential.as_ref().map(|credential| credential.key.clone()),
+            api_key: api_key
+                .map(str::to_owned)
+                .or_else(|| credential.as_ref().map(|credential| credential.key.clone())),
             headers: route.headers,
             include_usage: self.include_usage,
             max_tokens: self.max_tokens,
@@ -734,8 +743,13 @@ impl SwitchableModel {
         slot: Arc<ConfigSlot>,
         ctx: RouteContext,
     ) -> Self {
+        // The startup model was built with the entry's first key, so its cache entry carries
+        // that key's fingerprint; without it the first request would rebuild the model.
+        let fingerprint = crate::key_pool::pool(&initial_route.provider)
+            .and_then(|pool| pool.keys().first().map(PoolKey::fingerprint))
+            .unwrap_or_default();
         let cache = std::sync::Mutex::new(HashMap::from([(
-            Self::cache_key(&initial_route, &ctx.thinking),
+            Self::cache_key(&initial_route, &ctx.thinking, &fingerprint),
             Arc::new(initial),
         )]));
         Self {
@@ -746,10 +760,16 @@ impl SwitchableModel {
         }
     }
 
-    /// The cache key: the route **and** the thinking level in force (ADR 0026 D11) — a
-    /// `/thinking` change must rebuild the model even though the route is unchanged.
-    fn cache_key(route: &ModelRoute, thinking: &str) -> String {
-        format!("{}/{model}#{thinking}", route.provider, model = route.model)
+    /// The cache key: the route, the thinking level in force (ADR 0026 D11), and the chosen
+    /// key's fingerprint (D2). A `/thinking` change or a key switch must rebuild the model
+    /// even though the route is unchanged; without the fingerprint the second key would never
+    /// be built.
+    fn cache_key(route: &ModelRoute, thinking: &str, fingerprint: &str) -> String {
+        format!(
+            "{provider}/{model}#{thinking}#{fingerprint}",
+            provider = route.provider,
+            model = route.model
+        )
     }
 
     /// The route in force right now: the slot's model change, else the startup route.
@@ -767,21 +787,25 @@ impl SwitchableModel {
             .unwrap_or_else(|| self.ctx.thinking.clone())
     }
 
-    /// The model for the current route and thinking, built and cached on first use. The `Arc`
-    /// comes out of the lock, so the lock is never held across the request.
-    fn current(&self) -> Result<Arc<HostModel>, String> {
-        let route = self.current_route();
-        let thinking = self.current_thinking();
-        let key = Self::cache_key(&route, &thinking);
+    /// The model for `route`, `thinking` and the chosen `api_key`, built and cached on first
+    /// use. The `Arc` comes out of the lock, so the lock is never held across the request.
+    fn model_for(
+        &self,
+        route: &ModelRoute,
+        thinking: &str,
+        api_key: Option<&str>,
+        fingerprint: &str,
+    ) -> Result<Arc<HostModel>, String> {
+        let key = Self::cache_key(route, thinking, fingerprint);
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(model) = cache.get(&key) {
             return Ok(model.clone());
         }
         let ctx = RouteContext {
-            thinking: thinking.clone(),
+            thinking: thinking.to_owned(),
             ..self.ctx.clone()
         };
-        let args = ctx.args_for(&route.provider, &route.model)?;
+        let args = ctx.args_for(&route.provider, &route.model, api_key)?;
         let model = build_model(args).map(Arc::new)?;
         cache.insert(key, model.clone());
         Ok(model)
@@ -796,8 +820,31 @@ impl Model for SwitchableModel {
     ) -> Result<ModelResponse, ModelError> {
         // The route was read before the lock, so a switch that lands mid-request cannot swap
         // this call's model (D5).
-        let model = self.current().map_err(ModelError::Protocol)?;
-        model.complete(request, cx).await
+        let route = self.current_route();
+        let thinking = self.current_thinking();
+        // ADR 0026 D2: one pool per provider, process state only. The picked key is sticky
+        // until it rests; a switch queues one notice and changes the cache key, so the next
+        // request builds the next key's model.
+        let pool = crate::key_pool::pool(&route.provider);
+        let picked = pool.as_ref().and_then(|pool| pool.pick());
+        if let Some(notice) = picked.as_ref().and_then(|picked| picked.notice.clone()) {
+            crate::key_pool::push_notice(notice);
+        }
+        let api_key = picked.as_ref().map(|picked| picked.key.clone());
+        let fingerprint = picked
+            .as_ref()
+            .map(|picked| picked.fingerprint.clone())
+            .unwrap_or_default();
+        let model = self
+            .model_for(&route, &thinking, api_key.as_deref(), &fingerprint)
+            .map_err(ModelError::Protocol)?;
+        let result = model.complete(request, cx).await;
+        // ADR 0026 D2: only a quota 429 rests the key the request used. The error itself is
+        // the adapter's own and reaches core unchanged (ADR 0017).
+        if let (Some(pool), Some(picked), Err(error)) = (pool.as_ref(), picked.as_ref(), &result) {
+            pool.rest_for_error(picked.index, error);
+        }
+        result
     }
 }
 

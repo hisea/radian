@@ -1348,6 +1348,7 @@ mod tests {
                 url: endpoint.url.to_owned(),
                 session_id: "sess-1".to_owned(),
                 secret: Some("sk-not-used-by-this-test".to_owned()),
+                pool: None,
             });
             assert_eq!(fetcher.id(), id);
         }

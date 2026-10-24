@@ -1385,6 +1385,22 @@ mutation edits `src/mcp.rs` in place, restores from `.radian/mcp.rs.bak` with `c
 radian-host --lib mcp::tests::<name>` for MC-1..MC-4 and MC-6, `cargo test -p radian-host
 --test mcp_cwd` for MC-5.
 
+## TK0055: several keys for one provider (2026-10-24)
+
+Worktree `.radian/arc/worktrees/TK0055-multi-key`, branch `work/TK0055-multi-key`. Each
+mutation edits the named file in place, restores from a copy under `.radian/bak/` with `cp`
+(never `git checkout`), and runs the catching test with `--profile sandbox --no-fail-fast`.
+Every restore was confirmed byte-identical with `diff -q`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0055-M1 | the pool picks the **last** key that is not resting (`.find` → `.rfind`) | ✅ 1 failed | `radian-host::key_pool::tests::the_pool_picks_the_first_key_and_keeps_it` |
+| TK0055-M2 | a `503` rests the key (`status: Some(429)` → `Some(429 \| 503)`) | ✅ 1 failed | `radian-host::key_pool::tests::only_a_quota_429_rests_its_key` |
+| TK0055-M3 | the cache key drops the key fingerprint (`cache_key` ignores it) | ✅ 1 failed | `radian-host::key_pool_failover::a_quota_429_switches_to_the_next_key_for_the_retry` (the retry still sends `sk-first`) |
+| TK0055-M4 | `resolved_keys` returns only the first key (`.take(1)`) | ✅ 1 failed | `radian-host::auth::tests::a_keys_list_resolves_every_key_in_order_with_names` |
+| TK0055-M5 | `/logout` of the first key removes the entry instead of promoting the next | ✅ 1 failed | `radian-host::auth::tests::adding_and_removing_keys_keeps_key_as_the_first` |
+
+5/5 caught.
 ## TK0090: `env_docs` stops reporting ordinary constants (2026-10-24)
 
 Worktree `.radian/arc/worktrees/TK0090-env-docs-const-uses`, branch

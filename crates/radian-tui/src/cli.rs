@@ -326,6 +326,8 @@ enum RadianCommand {
     Logout {
         /// The provider id the key is stored under.
         provider: String,
+        /// The key's name: remove that one without asking.
+        name: Option<String>,
     },
     /// Manage durable memory: the same grammar as `radian exec memory` and the
     /// TUI's `/memory`.
@@ -927,8 +929,8 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
                 provider,
             }))
         }
-        RadianCommand::Logout { provider } => run_radian_exec(radian_exec::Cli::for_command(
-            radian_exec::Command::Logout { provider },
+        RadianCommand::Logout { provider, name } => run_radian_exec(radian_exec::Cli::for_command(
+            radian_exec::Command::Logout { provider, name },
         )),
         RadianCommand::Memory { workspace, command } => {
             run_radian_exec(radian_exec::Cli::for_memory(

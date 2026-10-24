@@ -337,6 +337,8 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::BtwKey(_)
         | Input::LoginKey(_)
         | Input::ConfirmLogout(_)
+        | Input::LogoutMove(_)
+        | Input::LogoutChosen(_)
         | Input::TrustMove(_)
         | Input::TrustChosen(_)
         | Input::AccessMove(_)
@@ -381,6 +383,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::LoginOAuthUrlReady { .. }
         | Input::LoginOAuthDeviceReady { .. }
         | Input::LogoutDone { .. }
+        | Input::LogoutChoices { .. }
         | Input::ClipboardDone(_)
         | Input::ThemeReady { .. }
         | Input::SkillExpanded { .. } => false,

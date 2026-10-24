@@ -54,7 +54,7 @@ pub const HELP: &str = "\
 /panel                open the inspector on the last page
 /login [provider]     store an API key in credentials/auth.json; custom
                       names a new endpoint (name, protocol, base URL, key)
-/logout <provider>    remove a stored credential (asks first)
+/logout <provider> [key]  remove a credential (asks first); a key name removes it
 /trust [status|on|off|forget]
                        show or change the project trust decision; a write takes
                        effect at the next start
@@ -203,8 +203,9 @@ pub enum Outcome {
     /// `/login [provider]`: open the credential wizard. `Some(id)` skips the provider
     /// choice (a built-in id or `custom`); `None` starts at the choice.
     Login(Option<String>),
-    /// `/logout <provider>`: remove one stored credential, after a confirmation.
-    Logout(String),
+    /// `/logout <provider>`: remove one stored credential, after a confirmation; a second
+    /// name removes that key without asking.
+    Logout(LogoutRequest),
     /// `/auto on|off` (and `/yolo`, its alias): the in-session auto-approval switch
     /// (ADR 0026 D9). `true` = on.
     AutoToggle(bool),
@@ -446,7 +447,7 @@ pub fn tree() -> &'static [Command] {
         },
         Command {
             name: "logout",
-            description: "remove a stored credential (asks first)",
+            description: "remove a credential (asks first); a key name removes it",
             levels: &[logout_level],
         },
         Command {
@@ -1182,7 +1183,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
             Err(usage) => Outcome::Notices(vec![usage]),
         },
         Some("/login") => Outcome::Login(login_provider(&tokens[1..])),
-        Some("/logout") => Outcome::Logout(logout_provider(&tokens[1..])),
+        Some("/logout") => Outcome::Logout(logout_request(&tokens[1..])),
         Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
         Some("/trust") => trust_request(&tokens[1..]),
         Some("/access") => access_request(&tokens[1..]),
@@ -1276,12 +1277,29 @@ fn login_provider(args: &[String]) -> Option<String> {
     }
 }
 
-/// `/logout <provider>`: exactly one name; empty is a usage notice the caller renders.
-fn logout_provider(args: &[String]) -> String {
+/// One `/logout` line: the provider, and the key when the user named one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogoutRequest {
+    /// Remove the entry, after the confirmation (or its only key, which removes the entry).
+    Provider(String),
+    /// Remove one named key without asking.
+    Key { provider: String, key: String },
+    /// A usage error the caller renders.
+    Notice(String),
+}
+
+/// One `/logout` line: `/logout <provider> [key]`.
+fn logout_request(args: &[String]) -> LogoutRequest {
     match args {
-        [one] => one.clone(),
-        [] => String::new(),
-        [_, extra, ..] => format!("__extra__{extra}"),
+        [] => LogoutRequest::Notice("usage: /logout <provider> [key]".to_owned()),
+        [one] => LogoutRequest::Provider(one.clone()),
+        [one, key] => LogoutRequest::Key {
+            provider: one.clone(),
+            key: key.clone(),
+        },
+        [_, extra, ..] => LogoutRequest::Notice(format!(
+            "unexpected extra name {extra:?}; usage: /logout <provider> [key]"
+        )),
     }
 }
 
