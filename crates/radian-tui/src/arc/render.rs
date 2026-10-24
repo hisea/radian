@@ -682,12 +682,13 @@ fn plan_frame_lines(
 }
 
 /// One task row's fixed column widths, computed once for the plan from the rows it draws
-/// (ADR 0048 decision 11): the id block (`connector + mark + id`), `state.phase`, `#n` and
-/// the cost. Every row starts `state.phase`, `#n`, the cost and the trailing text at the same
-/// column, whatever its depth; the id gets what is left of the id block.
+/// (ADR 0048 decision 11): the id block (`connector + mark + id` and the one space before the
+/// phase), `state.phase`, `#n` and the cost. Every row starts `state.phase`, `#n`, the cost and
+/// the trailing text at the same column, whatever its depth; the id gets what is left of the id
+/// block, minus that space.
 struct TaskColumns {
-    /// The connector, the mark and the id together. A deeper connector leaves the id less
-    /// room, so it is cut with `…`.
+    /// The connector, the mark, the id and the one space before `state.phase`. A deeper
+    /// connector leaves the id less room, so it is cut with `…` and the space stays.
     id: usize,
     phase: usize,
     attempt: usize,
@@ -695,8 +696,10 @@ struct TaskColumns {
 }
 
 fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
-    // The id block is `connector + mark + id`: the mark glyph and its one space are 2 cells.
+    // The id block is `connector + mark + id` and one trailing space: the mark glyph and its
+    // one space are 2 cells, and the trailing space is the gap before `state.phase`.
     let mark = 2;
+    let gap = 1;
     let lead_max = tasks
         .iter()
         .map(|task| task.connector.width() + mark)
@@ -704,7 +707,7 @@ fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
         .unwrap_or(mark);
     let id_max = tasks
         .iter()
-        .map(|task| task.connector.width() + mark + task.id.width())
+        .map(|task| task.connector.width() + mark + task.id.width() + gap)
         .max()
         .unwrap_or(16);
     let phase_max = tasks
@@ -723,9 +726,10 @@ fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
         .max()
         .unwrap_or(1);
     let mut phase = (phase_max + 2).clamp(10, 25);
-    // Never shrink the id block below the deepest connector's own width plus one id cell, so
-    // a deep row still shows a cut id rather than losing the column.
-    let min_id = (lead_max + 1).max(12);
+    // Never shrink the id block below the deepest connector's own width plus one id cell and
+    // the space before the phase, so a deep row still shows a cut id and its gap rather than
+    // losing the column.
+    let min_id = (lead_max + 1 + gap).max(12);
     let mut id = id_max.clamp(12, 34).max(min_id);
     // The cursor is always 2 cells (its cell on every row, selected or not), so the columns
     // hold on the row the cursor is on too. The `waits`/`also after` tail takes whatever is
@@ -770,7 +774,9 @@ fn task_row_line(
         format!("{} ", task.mark.glyph()),
         task.mark.style(theme),
     ));
-    let id = fit(&task.id, columns.id.saturating_sub(lead));
+    // The id block keeps its last cell for the space before the phase, so the id is cut one
+    // cell earlier and the padding always leaves that cell.
+    let id = fit(&task.id, columns.id.saturating_sub(lead + 1));
     let id_used = id.width();
     spans.push(Span::styled(id, theme.text));
     spans.push(Span::raw(
