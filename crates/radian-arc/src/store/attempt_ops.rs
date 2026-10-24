@@ -1282,6 +1282,20 @@ pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>
     }))
 }
 
+/// The plan `arc` paused through `task`'s current attempt: the `plan` field of the
+/// `paused.json` record the automatic rework limit writes. `None` when the attempt has no such
+/// record, or it names no plan.
+///
+/// The record stays on the attempt it was written for, so a later attempt (a rework, a
+/// reverify) no longer reports the plan as paused by it. The arc TUI's board reads this to
+/// decide whether every task of the plan waits for the owner.
+#[must_use]
+pub fn paused_plan(store: &Store, task: &str, attempt: u32) -> Option<String> {
+    let text = fs::read_to_string(run_dir(store, task, attempt).join(PAUSED_FILE)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value.get("plan").and_then(Value::as_str).map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

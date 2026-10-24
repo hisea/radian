@@ -6,7 +6,9 @@ description: The arc TUI: the plans, task and merge pages, every mark and key, a
 
 This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
-`radian arc` opens a view of plans, tasks, verdicts, journals and merges; the pages themselves read the store, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · task · merge` (`merge` for a task in `review.*` or `done`), then on the plans page the view and the plans it hides (`active · 14 hidden`), `main <sha>` and loop state.
+`radian arc` opens a view of plans, tasks, verdicts, journals and merges; the pages themselves read the store, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · board · task · merge` (`merge` for a task in `review.*` or `done`), then on the plans page the view and the plans it hides (`active · 14 hidden`), on the board page its scope (`all plans` or the plan id, and `finished` while the list is open), `main <sha>` and loop state.
+
+`b` opens the board from any page; on the board it goes back to the plans page. `Tab` keeps its page meaning: on the plans page it opens the task page, on the task page it goes back, and on the merge page it closes it.
 
 ## The plans page
 
@@ -30,6 +32,39 @@ A plan is finished by the same test `radian arc list` uses: every task is `done.
 The header names the view and counts the plans it hides, for example `active · 14 hidden`; `all` hides nothing and shows no count. A view with no plan shows one weak line in the plan column (`no active plans`, `no plans`, `no done plans`, or `no cancelled plans`) and leaves the right column empty.
 
 The selection stays on the same plan when that plan is in the new view; otherwise it moves to the first plan of the view. The task-column selection resets when the plan changes. The 2-second re-read keeps the view: a plan that leaves it (its last task merges in `active`, for example) disappears, and the selection follows the same rule. The view is not saved: every start opens on `active`.
+
+## The board page
+
+The board groups the open tasks of the plans it shows by who acts next. From left to right:
+
+| Column | Tasks |
+|---|---|
+| `todo` | `todo.ready`, `todo.blocked` and `todo.retry_wait`: waiting for its turn. |
+| `doing` | `doing.starting`, `doing.running`, `doing.reconciling`: a worker runs. |
+| `verifying` | `review.verifying`, `review.integrating`, `review.ready_to_merge`: a gate or a merge runs. Also `review.awaiting_human` of a plan whose `auto` is `merge` (the loop merges it), and `review.rework_pending` that a scheduling pass will still reverify by itself (a `commands` or integration command failure or timeout, with automatic reverifies left). |
+| `needs you` | `review.awaiting_human` of a plan whose `auto` is not `merge`; `review.rework_pending` that nothing automatic will leave (the review or conflict limit was reached, a command failure no automatic reverify takes, or a reject note); `todo.proposed`; `todo.paused_budget`; and every task of a plan `arc` paused through one of its tasks (the automatic rework limit wrote `paused.json` and set the plan's `auto` to `off`). |
+
+Within a column, cards keep the order `radian arc list` prints: the plan's priority (`P0` first), the plan id, then the task's order in the plan. A card is three lines: the mark, the task id, `#<attempt>` and the cost (a `doing` card also the age of the worker's last heartbeat, `5s`); the title; and, weak, the plan id and the phase (`PL0012 · rework_pending`). A card in `needs you` carries `!` instead of its state mark.
+
+The board shows the tasks of the plans the plans page's current view shows (the [`f` view](#the-plan-view), `active` by default). `p` limits it to the plan of the selected card and the header names it (`board · PL0012`); `p` again shows every plan of the view again (`board · all plans`).
+
+### Widths and keys
+
+A column reads at 28 cells. `h`/`l` (or `←`/`→`) change column, `j`/`k` (or `↑`/`↓`) move within a column, and each column scrolls to keep the selected card visible. `Enter` (or `Tab`) opens the selected card's task page; `Esc` returns to the plans page, and the task page returns to the board.
+
+- **Wide** (at least 118 cells: four 28-cell columns and their two-cell gaps): the four columns side by side.
+- **Medium** (at least 58 cells): two columns. The left stacks `todo` over `doing`, the right `verifying` over `needs you`, each group under its heading and count. `h`/`l` move between the left and the right column (`todo` ↔ `verifying`, `doing` ↔ `needs you`); `j`/`k` walk the cards of both groups of that column.
+- **Narrow** (fewer than 58 cells): one column with the four groups stacked in the order `todo`, `doing`, `verifying`, `needs you`, each under its heading and count. `j`/`k` walk every card in that order; `h`/`l` jump to the previous or next group.
+
+A group with no card shows its heading, `0` and one weak line: `nothing waiting`, `nothing running`, `nothing verifying`, or `nothing needs you`. The board re-reads the store every 2 seconds. The selection stays on the same task while it is on the board (also while the width changes), and moves to the nearest card of its column when the task leaves.
+
+### The finished list
+
+`d` replaces the columns with every `done.merged` and `failed.*` task of the plans the board shows, the most recently finished first (the time is from the task's records: the passing integration verdict of a merged task, else the attempt's end record). One row each: `✓` (green) for a merged task or `×` (red) for a failed one, the task id, the title, the plan, and when (`12m ago`, `3h ago`, `2d ago`). `j`/`k` scroll it; `Enter` opens the task page; `d` or `Esc` returns to the columns. An empty list shows one weak `nothing finished`.
+
+### The owner's actions on the board
+
+The plans page's owner keys work on the selected card, with the same rules, floats and footer lines: `s` starts a `todo.ready` task (a refusal names why), `c` confirms a `todo.proposed` task, `x` cancels the task after `cancel <task> ? y/n`, `a` cycles the card's plan's auto level (setting `merge` asks), and `+`/`-` move the plan's priority. `pause` is not on the board: `p` is the plan scope. `M`, `r` and `v` (and `m`) open the merge page of a card in `review.*`, whose own keys then merge, reject or reverify it; `Esc` there returns to the board. `q`/`Ctrl-C` quit.
 
 ## The task page
 

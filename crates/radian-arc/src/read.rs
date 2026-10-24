@@ -344,6 +344,41 @@ fn merged_candidate(store: &Store, task: &str) -> Result<Option<Verdict>, Error>
     Ok(best.map(|(_, verdict)| verdict))
 }
 
+/// When `task` reached the state it is in now, as an RFC 3339 UTC time from its records. The
+/// arc TUI's board orders its finished list by it: a merged task takes the newest passing
+/// `integration` verdict's end time, every other task the current attempt's `execution.json`
+/// end time (the wrapper's own record), and, when neither exists (a cancelled `todo` task), the
+/// task file's modification time, which is when arc wrote the final state.
+///
+/// `None` when no record and no task file can be read.
+#[must_use]
+pub fn finished_at(store: &Store, task: &str) -> Option<String> {
+    let item = store.load_task(task).ok()?.item;
+    if item.state == TaskState::Done
+        && let Ok(Some(verdict)) = merged_candidate(store, task)
+    {
+        return Some(verdict.ended_at);
+    }
+    if let Some(at) = attempt_end(store, task, item.attempt) {
+        return Some(at);
+    }
+    let path = store.root().join("tasks").join(format!("{task}.md"));
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let at: chrono::DateTime<chrono::Utc> = modified.into();
+    Some(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// The `ended_at` the wrapper wrote to one attempt's `execution.json`.
+fn attempt_end(store: &Store, task: &str, attempt: u32) -> Option<String> {
+    let path = attempt_ops::run_dir(store, task, attempt).join("execution.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("ended_at")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
 /// The range of a merged task's own change, from its passing integration verdict.
 ///
 /// A merge candidate's first-parent diff is the task's change against the main it was built

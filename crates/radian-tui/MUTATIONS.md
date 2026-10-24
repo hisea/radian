@@ -2516,3 +2516,20 @@ Base: the branch's first commit. The mutation was applied by hand to
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0049-M1 | drop `RADIAN_VERIFY_MIN_FREE_GIB` from the usage block | ✅ 1 failed | `arc_gate_without_arguments_exits_two_and_help_exits_zero` (the help did not name the two limits) |
+
+## TK0054: the board page (2026-10-24, branch `work/TK0054-tui-board`)
+
+Base: the branch's first commit. The board groups the open tasks by who acts next, `d` opens
+the finished list, and the three widths stack the groups. Each mutation was applied by hand
+to `crates/radian-tui/src/arc/board.rs`, backed up under `.radian/mut-bak/` and restored
+from that copy (never `git checkout`), and the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_board <test> --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0054-M1 | every `review.awaiting_human` task goes to `needs you`, whatever the plan's `auto` (`column_of` returns `NEEDS_YOU`) | ✅ 1 failed | `an_awaiting_human_task_is_the_owners_only_at_auto_off` (the `auto merge` task is no longer in `verifying`) |
+| TK0054-M2 | the finished list is oldest first (`done.sort_by` compares `one.at.cmp(&other.at)`) | ✅ 1 failed | `d_lists_merged_and_failed_tasks_newest_first` ("the most recently finished comes first") |
+| TK0054-M3 | `BoardLayout::of` always answers `Wide` (four columns at every width) | ✅ 1 failed | `a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` (`left: Wide`, `right: Medium`) |
+| TK0054-M4 | the medium layout stacks `todo` over `verifying` on the left and `doing` over `needs you` on the right | ✅ 1 failed | `a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` ("todo over doing on the left: 0, 41") |
+
+4/4 caught.
