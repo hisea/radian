@@ -1039,6 +1039,20 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut ArcApp, lines: Vec
             );
         }
     }
+    // The frame's rail runs down every row the transcript occupies: the view starts at
+    // column 5, so column 3 is the frame's own (ADR 0035: one left line down to the corner).
+    for row in 0..transcript.height {
+        draw_line(
+            frame,
+            Rect {
+                x: area.x + 2,
+                y: area.y + 4 + row,
+                width: 1,
+                height: 1,
+            },
+            Line::from(Span::styled("│", theme.frame)),
+        );
+    }
     draw_line(
         frame,
         Rect {
@@ -1163,7 +1177,7 @@ fn draw_diff(
         return;
     }
     lines.push(frame_bottom(theme));
-    diff_file_frame(lines, diff, width, theme);
+    diff_file_frame(lines, diff, width, theme, true);
 }
 
 /// The file list rows (or the one loading/error/empty line). Returns whether a diff follows.
@@ -1272,8 +1286,16 @@ fn diff_file_list(
 }
 
 /// The selected file's own open frame (`╭─ <path> ───`, `│ ` body rows). The caller adds the
-/// frame's bottom, so a clipped body still ends on a frame line.
-fn diff_file_frame(lines: &mut Vec<Line<'static>>, diff: &DiffState, width: usize, theme: &Theme) {
+/// frame's bottom, so a clipped body still ends on a frame line. `framed` draws the blank row
+/// that separates the list from this frame behind the outer frame's rail; the merge page draws
+/// that frame outside any outer frame, so the row stays blank there.
+fn diff_file_frame(
+    lines: &mut Vec<Line<'static>>,
+    diff: &DiffState,
+    width: usize,
+    theme: &Theme,
+    framed: bool,
+) {
     let Some(task_diff) = diff.diff else {
         return;
     };
@@ -1282,7 +1304,11 @@ fn diff_file_frame(lines: &mut Vec<Line<'static>>, diff: &DiffState, width: usiz
     }
     let index = diff.file_sel.min(task_diff.files.len() - 1);
     let file = &task_diff.files[index];
-    lines.push(Line::default());
+    if framed {
+        lines.push(rail(theme, Line::default()));
+    } else {
+        lines.push(Line::default());
+    }
     lines.push(frame_top(width, &file.path, theme));
     let body = diff_lines(file, width.saturating_sub(2), theme);
     let start = diff.diff_scroll.min(body.len().saturating_sub(1));
@@ -1432,7 +1458,7 @@ fn draw_merge(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
                 &theme,
                 false,
             );
-            diff_file_frame(&mut lines, &diff, width, &theme);
+            diff_file_frame(&mut lines, &diff, width, &theme, false);
         } else {
             let (text, style) = match &page.diff_error {
                 Some(error) => (error.clone(), theme.status_error),
@@ -1738,34 +1764,45 @@ fn draw_log(frame: &mut Frame, area: Rect, app: &ArcApp, log: &LogView) {
     frame.render_widget(Paragraph::new(lines), rect);
 }
 
-/// The loop's log (`L`): the tail of `loop.log`, scrollable, over the page (ADR 0048
-/// decision 13).
-fn draw_loop_log(frame: &mut Frame, area: Rect, app: &ArcApp) {
-    let theme = &app.theme;
+/// The loop's log (`L`): the tail of `loop.log`, over the whole body area, scrolled to its last
+/// page and filled to the frame's bottom (ADR 0048 decision 13).
+fn draw_loop_log(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
+    // The view covers the page under it: no row of the page's tabs, brief or list shows
+    // through below the log's own lines.
+    frame.render_widget(ratatui::widgets::Clear, area);
+    let theme = app.theme.clone();
     let width = area.width as usize;
+    let height = area.height as usize;
     let inner = width.saturating_sub(4);
-    let mut lines = vec![frame_top(width, "log", theme)];
-    if app.log_missing {
-        lines.push(rail(
-            theme,
-            Line::from(Span::styled("no loop log yet", theme.hint)),
-        ));
-    } else if app.log.is_empty() {
-        lines.push(rail(
-            theme,
-            Line::from(Span::styled("no lines yet", theme.hint)),
-        ));
+    // The frame's top and bottom lines leave the body this many rows; they are all drawn, so
+    // the frame fills the area whether the log has two lines or five hundred.
+    let rows = height.saturating_sub(2);
+    app.log_rows = rows.max(1);
+    let mut lines = Vec::with_capacity(height);
+    lines.push(frame_top(width, "log", &theme));
+    if app.log_missing || app.log.is_empty() {
+        let text = if app.log_missing {
+            "no loop log yet"
+        } else {
+            "no lines yet"
+        };
+        lines.push(rail(&theme, Line::from(Span::styled(text, theme.hint))));
+        for _ in 1..rows {
+            lines.push(rail(&theme, Line::default()));
+        }
     } else {
-        let rows = (area.height as usize).saturating_sub(2);
-        let start = app.log_scroll.min(app.log.len().saturating_sub(1));
-        for line in app.log.iter().skip(start).take(rows) {
-            lines.push(rail(
-                theme,
-                Line::from(Span::styled(fit(line, inner), theme.text)),
-            ));
+        let start = app.log_start();
+        for index in 0..rows {
+            match app.log.get(start + index) {
+                Some(line) => lines.push(rail(
+                    &theme,
+                    Line::from(Span::styled(fit(line, inner), theme.text)),
+                )),
+                None => lines.push(rail(&theme, Line::default())),
+            }
         }
     }
-    lines.push(frame_bottom(theme));
+    lines.push(frame_bottom(&theme));
     draw_lines(frame, area, lines);
 }
 

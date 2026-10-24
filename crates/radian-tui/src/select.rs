@@ -691,11 +691,12 @@ mod tests {
             anchor: locate(&entries, EXPANDED, 30, 0, 2).expect("wide"),
             head: locate(&entries, EXPANDED, 30, 0, 10).expect("wide"),
         };
-        // Narrow: body width 6 → "aaaa b" / "bbb c" / "cccc"; the same bytes are line 0 from
-        // column 2 through line 1's column 4.
+        // Narrow: body width 6 → "aaaa" / "bbbb" / "cccc" (a word that does not fit moves
+        // whole to the next line); the same bytes are line 0 from column 2 through line 1's
+        // column 5.
         let narrow = Selection {
             anchor: locate(&entries, EXPANDED, 8, 0, 2).expect("narrow, same text"),
-            head: locate(&entries, EXPANDED, 8, 1, 4).expect("narrow, same text"),
+            head: locate(&entries, EXPANDED, 8, 1, 5).expect("narrow, same text"),
         };
         assert_eq!(
             logical_text(&entries, &narrow),
