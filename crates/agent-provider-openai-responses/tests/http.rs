@@ -261,9 +261,10 @@ async fn a_429_is_transient_and_carries_the_retry_after() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, ModelError::Unavailable { message, retry_after }
+        matches!(&error, ModelError::Unavailable { message, retry_after, status }
             if message.contains("HTTP 429") && message.contains("slow down")
-                && *retry_after == Some(Duration::from_secs(2))),
+                && *retry_after == Some(Duration::from_secs(2))
+                && *status == Some(429)),
         "{error}"
     );
     assert!(error.is_transient());
@@ -332,8 +333,8 @@ async fn a_500_is_transient_and_a_400_is_not() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&server_error, ModelError::Unavailable { message, .. }
-            if message.contains("HTTP 500")),
+        matches!(&server_error, ModelError::Unavailable { message, status, .. }
+            if message.contains("HTTP 500") && *status == Some(500)),
         "{server_error}"
     );
     assert!(server_error.is_transient());

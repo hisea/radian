@@ -81,6 +81,29 @@ pub fn login_panel(
                 .row(value(LoginWizard::masked(&wizard.key)));
             panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
+        LoginStep::ReplaceOrAdd { cursor } => {
+            panel = panel.row(label("this provider already has a key"));
+            let items: Vec<crate::select_list::Item> = ["replace the current key", "add another"]
+                .into_iter()
+                .map(crate::select_list::Item::new)
+                .collect();
+            let list =
+                crate::select_list::view(theme, &items, "", *cursor, items.len(), inner, ascii);
+            for line in list.lines {
+                panel = panel.row(line);
+            }
+            panel = panel
+                .hint("↑/↓", "choose")
+                .hint("⏎", "next")
+                .hint("r/a", "replace/add")
+                .hint("esc", "cancel");
+        }
+        LoginStep::AddName => {
+            panel = panel
+                .row(label("name for the new key (empty allowed):"))
+                .row(value(wizard.add_name.clone()));
+            panel = panel.hint("⏎", "save").hint("esc", "cancel");
+        }
         LoginStep::Verifying => {
             panel = panel.row(label(&format!("verifying {} …", wizard.provider_name())));
             panel = panel.hint("esc", "cancel");
@@ -258,6 +281,38 @@ pub fn logout_panel(
         )))
         .hint("[y]", "remove")
         .hint("[n/esc]", "keep")
+        .lines(width, theme, glyphs)
+}
+
+/// The `/logout` key picker (ADR 0026 D3): one row per key (`1 first (sk-…irst)`), an
+/// `all keys` row, and the hardcoded hints.
+pub fn logout_keys_panel(
+    wizard: &crate::logout::LogoutKeysWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let rows = wizard.rows();
+    let items: Vec<crate::select_list::Item> = rows
+        .into_iter()
+        .map(crate::select_list::Item::new)
+        .collect();
+    let list =
+        crate::select_list::view(theme, &items, "", wizard.cursor, items.len(), inner, ascii);
+    let mut panel = crate::panel::Panel::new("/logout").row(Line::from(Span::styled(
+        format!("`{}` has several keys; remove which one?", wizard.provider),
+        theme.text,
+    )));
+    for line in list.lines {
+        panel = panel.row(line);
+    }
+    panel
+        .hint("↑/↓", "choose")
+        .hint("⏎", "remove")
+        .hint("a", "all")
+        .hint("esc", "keep")
         .lines(width, theme, glyphs)
 }
 

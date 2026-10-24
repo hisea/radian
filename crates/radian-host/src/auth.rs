@@ -58,6 +58,12 @@ pub enum AuthError {
     Corrupt { path: PathBuf, message: String },
     /// A `$NAME` / `${NAME}` reference names a variable that is not set.
     MissingEnv { provider_id: String, name: String },
+    /// `/logout <provider> <name>` named a key the entry does not have.
+    UnknownKey {
+        provider_id: String,
+        name: String,
+        known: Vec<String>,
+    },
 }
 
 impl fmt::Display for AuthError {
@@ -82,6 +88,19 @@ impl fmt::Display for AuthError {
                 f,
                 "`{provider_id}` key references ${name}, which is not set in the environment"
             ),
+            Self::UnknownKey {
+                provider_id,
+                name,
+                known,
+            } => write!(
+                f,
+                "`{provider_id}` has no key named `{name}`; known: {}",
+                if known.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    known.join(", ")
+                }
+            ),
         }
     }
 }
@@ -96,6 +115,65 @@ pub struct ResolvedKey {
     /// The entry's `env` object, with `$ENV` references already resolved. The generic
     /// `openai-compatible` provider reads [`RADIAN_BASE_URL`] from here.
     pub env: BTreeMap<String, String>,
+}
+
+/// One key of an `api_key` entry, in file order (ADR 0026 D1). `Debug` never prints it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NamedKey {
+    /// `Some("first")` for the entry's `key`, `Some(name)` for a named `keys[]` item, and
+    /// `None` for an unnamed item (shown by its masked form).
+    pub name: Option<String>,
+    pub key: String,
+    /// The 0-based position in the entry's `keys` array, or `None` for the top-level `key`.
+    /// `/logout` needs it because a refused item does not appear among the usable keys.
+    pub item: Option<usize>,
+}
+
+impl NamedKey {
+    /// The name a display uses: the stored name, or the key's masked form.
+    pub fn display_name(&self) -> String {
+        self.name.clone().unwrap_or_else(|| mask_key(&self.key))
+    }
+}
+
+impl fmt::Debug for NamedKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NamedKey")
+            .field("name", &self.display_name())
+            .field("key", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Every key of one `api_key` entry, in file order (ADR 0026 D1).
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResolvedKeys {
+    pub provider_id: String,
+    /// The entry's `key` first (named `first`), then each usable `keys[]` item.
+    pub keys: Vec<NamedKey>,
+    /// The entry's `env` object, raw (never interpolated).
+    pub env: BTreeMap<String, String>,
+    /// One line per `keys[]` item refused because its value is a `!command` (or has no
+    /// string `key`). A refused item never removes the other keys.
+    pub notices: Vec<String>,
+}
+
+impl fmt::Debug for ResolvedKeys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedKeys")
+            .field("provider_id", &self.provider_id)
+            .field("keys", &self.keys)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .field("notices", &self.notices)
+            .finish()
+    }
+}
+
+/// One key as `/logout` lists it: the display name and the masked value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyChoice {
+    pub name: String,
+    pub masked: String,
 }
 
 impl fmt::Debug for ResolvedKey {
@@ -186,10 +264,14 @@ impl AuthStore {
         &self.path
     }
 
-    /// The usable key for `provider_id`, or `None` when there is no usable `api_key` entry
-    /// (missing, `oauth`, unknown type, or a `!command` key). [`Self::note`] explains a
-    /// `None` that is a refusal rather than an absence.
-    pub fn resolve_key(&self, provider_id: &str) -> Result<Option<ResolvedKey>, AuthError> {
+    /// Every key for `provider_id`, in file order, or `None` when there is no usable
+    /// `api_key` entry (missing, `oauth`, unknown type, or no `key` at all). [`Self::note`]
+    /// explains a `None` that is a refusal rather than an absence.
+    ///
+    /// An entry's `key` is the first key (named `first`); each `keys[]` item follows it in
+    /// order. A `keys[]` item whose value starts with `!` is refused without being run and
+    /// contributes one notice; the other keys stay usable (ADR 0026 D1).
+    pub fn resolve_keys(&self, provider_id: &str) -> Result<Option<ResolvedKeys>, AuthError> {
         let Some(entry) = self.entries.get(provider_id).and_then(Value::as_object) else {
             return Ok(None);
         };
@@ -199,10 +281,6 @@ impl AuthStore {
         let Some(key) = entry.get("key").and_then(Value::as_str) else {
             return Ok(None);
         };
-        if key.starts_with('!') {
-            // A command: refused, and deliberately never run (ADR 0026 D1).
-            return Ok(None);
-        }
         // The entry's `env` object is the first lookup source, then the process environment
         // (pi: `resolveConfigValue(key, credential.env)`). Its values are copied **raw**: pi
         // does not interpolate them (only the key is resolved).
@@ -214,28 +292,105 @@ impl AuthStore {
                 }
             }
         }
-        let key = resolve_template(provider_id, key, &env)?;
-        Ok(Some(ResolvedKey {
+        let mut keys = Vec::new();
+        let mut notices = Vec::new();
+        if key.starts_with('!') {
+            // A command: refused, and deliberately never run (ADR 0026 D1).
+            notices.push(refusal(provider_id, "its `key`"));
+        } else {
+            keys.push(NamedKey {
+                name: Some("first".to_owned()),
+                key: resolve_template(provider_id, key, &env)?,
+                item: None,
+            });
+        }
+        if let Some(items) = entry.get("keys").and_then(Value::as_array) {
+            for (index, item) in items.iter().enumerate() {
+                let label = format!("keys[{}]", index + 1);
+                let Some(object) = item.as_object() else {
+                    notices.push(format!("`{provider_id}` {label} is not an object; skipped"));
+                    continue;
+                };
+                let name = object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty());
+                let shown =
+                    name.map_or_else(|| label.clone(), |name| format!("{label} \"{name}\""));
+                let Some(key) = object.get("key").and_then(Value::as_str) else {
+                    notices.push(format!("`{provider_id}` {shown} has no `key`; skipped"));
+                    continue;
+                };
+                if key.starts_with('!') {
+                    notices.push(refusal(provider_id, &shown));
+                    continue;
+                }
+                keys.push(NamedKey {
+                    name: name.map(str::to_owned),
+                    key: resolve_template(provider_id, key, &env)?,
+                    item: Some(index),
+                });
+            }
+        }
+        Ok(Some(ResolvedKeys {
             provider_id: provider_id.to_owned(),
-            key,
+            keys,
             env,
+            notices,
         }))
     }
 
+    /// The usable first key for `provider_id`, or `None` when there is no usable `api_key`
+    /// entry. [`Self::resolve_keys`] carries every key.
+    pub fn resolve_key(&self, provider_id: &str) -> Result<Option<ResolvedKey>, AuthError> {
+        let Some(resolved) = self.resolve_keys(provider_id)? else {
+            return Ok(None);
+        };
+        Ok(resolved.keys.into_iter().next().map(|first| ResolvedKey {
+            provider_id: provider_id.to_owned(),
+            key: first.key,
+            env: resolved.env,
+        }))
+    }
+
+    /// The entry's keys as `/logout` lists them: the display name and the masked value.
+    /// Empty when the entry is not an `api_key` entry or has no key. The values are **not**
+    /// resolved: a name and a mask need no `$ENV` lookup, so a missing variable never hides a
+    /// key the user wants to remove.
+    pub fn key_choices(&self, provider_id: &str) -> Result<Vec<KeyChoice>, AuthError> {
+        Ok(self
+            .entries
+            .get(provider_id)
+            .and_then(Value::as_object)
+            .map(key_slots)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|slot| KeyChoice {
+                name: slot.name,
+                masked: slot.masked,
+            })
+            .collect())
+    }
+
     /// A one-line explanation when `resolve_key` returned `None` because the entry is
-    /// **refused** (a `!command` key, or an `oauth` entry this build cannot use). `None` for
-    /// a missing entry or a usable one.
+    /// **refused** (a `!command` key, or an `oauth` entry this build cannot use), or when a
+    /// `keys[]` item was refused. `None` for a missing entry or a usable one.
     pub fn note(&self, provider_id: &str) -> Option<String> {
         let entry = self.entries.get(provider_id).and_then(Value::as_object)?;
         match entry.get("type").and_then(Value::as_str) {
             Some("api_key") => {
+                let notices = self
+                    .resolve_keys(provider_id)
+                    .ok()
+                    .flatten()
+                    .map(|resolved| resolved.notices)
+                    .unwrap_or_default();
+                if !notices.is_empty() {
+                    return Some(notices.join(" "));
+                }
                 let key = entry.get("key").and_then(Value::as_str)?;
-                key.starts_with('!').then(|| {
-                    format!(
-                        "`{provider_id}` uses a `!command` key; Radian does not run commands \
-                         from auth.json. Run `/login {provider_id}` to store a key instead."
-                    )
-                })
+                key.starts_with('!')
+                    .then(|| refusal(provider_id, "its `key`"))
             }
             Some("oauth") => Some(format!(
                 "`{provider_id}` is an OAuth entry; this build supports API keys only. Run \
@@ -281,13 +436,124 @@ impl AuthStore {
             .unwrap_or_default();
         entry.insert("type".into(), json!("api_key"));
         entry.insert("key".into(), json!(key));
-        if env.is_empty() {
-            entry.remove("env");
+        set_env(&mut entry, env);
+        self.entries
+            .insert(provider_id.to_owned(), Value::Object(entry));
+        self.write()
+    }
+
+    /// Appends a further key to the `api_key` entry for `provider_id` (ADR 0026 D1): the
+    /// entry's `key` stays the first key, and the new value joins `keys` in order. `name`
+    /// is optional; an unnamed item shows as its masked form. Merges into any existing
+    /// object so its unknown fields survive; other entries are untouched.
+    pub fn add_api_key(
+        &mut self,
+        provider_id: &str,
+        key: &str,
+        name: Option<&str>,
+        env: &BTreeMap<String, String>,
+    ) -> Result<(), AuthError> {
+        let mut entry = self
+            .entries
+            .get(provider_id)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        entry.insert("type".into(), json!("api_key"));
+        if entry.get("key").and_then(Value::as_str).is_none() {
+            // No first key yet: the new key becomes it. The file keeps a `key`, so pi reads
+            // it; the shape has no name slot on the first key, so a name is not stored.
+            entry.insert("key".into(), json!(key));
         } else {
-            entry.insert(
-                "env".into(),
-                Value::Object(env.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
-            );
+            let mut item = Map::new();
+            if let Some(name) = name.filter(|name| !name.is_empty()) {
+                item.insert("name".into(), json!(name));
+            }
+            item.insert("key".into(), json!(key));
+            let mut keys = entry
+                .get("keys")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            keys.push(Value::Object(item));
+            entry.insert("keys".into(), Value::Array(keys));
+        }
+        set_env(&mut entry, env);
+        self.entries
+            .insert(provider_id.to_owned(), Value::Object(entry));
+        self.write()
+    }
+
+    /// Removes one key from the entry, or the whole entry when `name` is `None` (the `/logout`
+    /// `all` choice). Removing the first key promotes the next one to `key`, so the file keeps
+    /// a `key` and pi keeps reading it (ADR 0026 D1). The last key removes the entry.
+    /// An unknown name is refused, naming the known ones.
+    pub fn remove_key(&mut self, provider_id: &str, name: Option<&str>) -> Result<(), AuthError> {
+        let Some(name) = name else {
+            return self.remove(provider_id);
+        };
+        let Some(entry) = self.entries.get(provider_id).and_then(Value::as_object) else {
+            return Err(AuthError::UnknownKey {
+                provider_id: provider_id.to_owned(),
+                name: name.to_owned(),
+                known: Vec::new(),
+            });
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("api_key") {
+            return Err(AuthError::UnknownKey {
+                provider_id: provider_id.to_owned(),
+                name: name.to_owned(),
+                known: Vec::new(),
+            });
+        }
+        let slots = key_slots(entry);
+        let Some(slot) = slots.iter().find(|slot| slot.name == name) else {
+            return Err(AuthError::UnknownKey {
+                provider_id: provider_id.to_owned(),
+                name: name.to_owned(),
+                known: slots.into_iter().map(|slot| slot.name).collect(),
+            });
+        };
+        if slots.len() <= 1 {
+            // The one key is gone: the entry has no credential left.
+            return self.remove(provider_id);
+        }
+        let item = slot.item;
+        let mut entry = entry.clone();
+        let mut keys = entry
+            .get("keys")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        match item {
+            // The top-level `key`: promote the next usable `keys[]` item to `key` and drop it
+            // from the list, so the file keeps a `key` and pi keeps reading it.
+            None => {
+                let next = slots
+                    .iter()
+                    .find(|slot| slot.item.is_some())
+                    .and_then(|slot| slot.item);
+                if let Some(next) = next
+                    && let Some(key) = keys
+                        .get(next)
+                        .and_then(Value::as_object)
+                        .and_then(|item| item.get("key"))
+                        .and_then(Value::as_str)
+                {
+                    entry.insert("key".into(), json!(key));
+                    keys.remove(next);
+                }
+            }
+            // A `keys[]` item: remove exactly that array element, refused items included in
+            // the numbering.
+            Some(item) => {
+                keys.remove(item.min(keys.len().saturating_sub(1)));
+            }
+        }
+        if keys.is_empty() {
+            entry.remove("keys");
+        } else {
+            entry.insert("keys".into(), Value::Array(keys));
         }
         self.entries
             .insert(provider_id.to_owned(), Value::Object(entry));
@@ -342,10 +608,12 @@ impl AuthStore {
     pub fn resolved_keys(&self) -> Vec<String> {
         let mut keys = Vec::new();
         for entry in self.list() {
-            if let Ok(Some(key)) = self.resolve_key(&entry.provider_id)
-                && !key.key.is_empty()
-            {
-                keys.push(key.key);
+            if let Ok(Some(resolved)) = self.resolve_keys(&entry.provider_id) {
+                for key in resolved.keys {
+                    if !key.key.is_empty() {
+                        keys.push(key.key);
+                    }
+                }
             }
             if let Some(oauth) = self.oauth_entry(&entry.provider_id) {
                 if !oauth.access.is_empty() {
@@ -392,7 +660,10 @@ impl AuthStore {
     /// import) must not make that provider look logged-in when nothing in this build knows
     /// how to use an oauth credential there.
     pub fn is_usable(&self, provider_id: &str) -> bool {
-        self.resolve_key(provider_id).ok().flatten().is_some()
+        self.resolve_keys(provider_id)
+            .ok()
+            .flatten()
+            .is_some_and(|resolved| !resolved.keys.is_empty())
             || (provider_id == crate::oauth_chatgpt::PROVIDER_ID
                 && self.oauth_entry(provider_id).is_some())
     }
@@ -438,9 +709,104 @@ pub fn auth_path() -> Option<PathBuf> {
     Some(credentials_dir()?.join(AUTH_FILE_NAME))
 }
 
+/// The masked form a key is shown by when it has no name: the first three characters, an
+/// ellipsis, and the last four (`sk-first` → `sk-…irst`). A value too short to leave anything
+/// hidden is only an ellipsis.
+pub fn mask_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() >= 8 {
+        let prefix: String = chars[..3].iter().collect();
+        let suffix: String = chars[chars.len() - 4..].iter().collect();
+        format!("{prefix}…{suffix}")
+    } else {
+        "…".to_owned()
+    }
+}
+
+/// One key as `/logout` lists it, with its position in the entry's `keys` array (`None` for
+/// the top-level `key`). Values stay raw: a name and a mask need no `$ENV` lookup.
+struct KeySlot {
+    name: String,
+    masked: String,
+    item: Option<usize>,
+}
+
+/// The display slots of an `api_key` entry, in file order. A `!command` value is skipped, like
+/// [`AuthStore::resolve_keys`]; the top-level `key` is first.
+fn key_slots(entry: &Map<String, Value>) -> Vec<KeySlot> {
+    if entry.get("type").and_then(Value::as_str) != Some("api_key") {
+        return Vec::new();
+    }
+    let mut slots = Vec::new();
+    if let Some(key) = entry.get("key").and_then(Value::as_str)
+        && !key.starts_with('!')
+    {
+        slots.push(KeySlot {
+            name: "first".to_owned(),
+            masked: mask_key(key),
+            item: None,
+        });
+    }
+    if let Some(keys) = entry.get("keys").and_then(Value::as_array) {
+        for (index, item) in keys.iter().enumerate() {
+            let Some(object) = item.as_object() else {
+                continue;
+            };
+            let Some(key) = object.get("key").and_then(Value::as_str) else {
+                continue;
+            };
+            if key.starts_with('!') {
+                continue;
+            }
+            let name = object
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| mask_key(key));
+            slots.push(KeySlot {
+                name,
+                masked: mask_key(key),
+                item: Some(index),
+            });
+        }
+    }
+    slots
+}
+
+/// One refused `!command` key's notice. The command is never run (ADR 0026 D1).
+fn refusal(provider_id: &str, label: &str) -> String {
+    format!(
+        "`{provider_id}` {label} uses a `!command` key; Radian does not run commands from \
+         auth.json, so that key is skipped. Run `/login {provider_id}` to store a key instead."
+    )
+}
+
+/// Writes an entry's `env` object, or removes it when empty.
+fn set_env(entry: &mut Map<String, Value>, env: &BTreeMap<String, String>) {
+    if env.is_empty() {
+        entry.remove("env");
+    } else {
+        entry.insert(
+            "env".into(),
+            Value::Object(env.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
+        );
+    }
+}
+
 /// [`AuthStore::resolve_key`] for the process's store.
 pub fn resolve_key(provider_id: &str) -> Result<Option<ResolvedKey>, AuthError> {
     AuthStore::open()?.resolve_key(provider_id)
+}
+
+/// [`AuthStore::resolve_keys`] for the process's store.
+pub fn resolve_keys(provider_id: &str) -> Result<Option<ResolvedKeys>, AuthError> {
+    AuthStore::open()?.resolve_keys(provider_id)
+}
+
+/// [`AuthStore::key_choices`] for the process's store.
+pub fn key_choices(provider_id: &str) -> Result<Vec<KeyChoice>, AuthError> {
+    AuthStore::open()?.key_choices(provider_id)
 }
 
 /// [`AuthStore::note`] for the process's store.
@@ -455,6 +821,21 @@ pub fn upsert_api_key(
     env: &BTreeMap<String, String>,
 ) -> Result<(), AuthError> {
     AuthStore::open()?.upsert_api_key(provider_id, key, env)
+}
+
+/// [`AuthStore::add_api_key`] for the process's store.
+pub fn add_api_key(
+    provider_id: &str,
+    key: &str,
+    name: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Result<(), AuthError> {
+    AuthStore::open()?.add_api_key(provider_id, key, name, env)
+}
+
+/// [`AuthStore::remove_key`] for the process's store.
+pub fn remove_key(provider_id: &str, name: Option<&str>) -> Result<(), AuthError> {
+    AuthStore::open()?.remove_key(provider_id, name)
 }
 
 /// [`AuthStore::remove`] for the process's store.
@@ -1142,6 +1523,168 @@ mod tests {
                 "{redacted}"
             );
         }
+    }
+
+    /// ADR 0026 D1: `keys[]` holds further keys in order. The first key is `first`; a named
+    /// item keeps its name; an unnamed item is shown by its masked form; `$ENV` resolves in an
+    /// item exactly as in `key`. Every key enters the redaction list.
+    #[test]
+    fn a_keys_list_resolves_every_key_in_order_with_names() {
+        let scratch = Scratch::new("keys");
+        write_auth(
+            &scratch,
+            r#"{"p": {"type": "api_key", "key": "sk-first", "keys": [
+                {"name": "team", "key": "sk-second"},
+                {"key": "$RADIAN_AUTH_TEST_KEYS_ENV"}
+            ]}}"#,
+        );
+        let store = scratch.open().unwrap();
+        // SAFETY: single-threaded test process state; restored below.
+        unsafe { std::env::set_var("RADIAN_AUTH_TEST_KEYS_ENV", "sk-from-env") };
+        let resolved = store.resolve_keys("p").unwrap().unwrap();
+        assert_eq!(
+            resolved
+                .keys
+                .iter()
+                .map(|key| (key.display_name(), key.key.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("first".to_owned(), "sk-first"),
+                ("team".to_owned(), "sk-second"),
+                ("sk-…-env".to_owned(), "sk-from-env"),
+            ]
+        );
+        assert!(resolved.notices.is_empty(), "{:?}", resolved.notices);
+        // The first key is the one `resolve_key`/pi see.
+        assert_eq!(store.resolve_key("p").unwrap().unwrap().key, "sk-first");
+        let redacted = store.resolved_keys();
+        for key in ["sk-first", "sk-second", "sk-from-env"] {
+            assert!(redacted.contains(&key.to_owned()), "{key}: {redacted:?}");
+        }
+        unsafe { std::env::remove_var("RADIAN_AUTH_TEST_KEYS_ENV") };
+    }
+
+    /// A `!command` item is refused without being run, with one notice naming it; the other
+    /// keys stay usable (ADR 0026 D1).
+    #[test]
+    fn a_command_item_is_refused_with_a_notice_and_the_others_stay_usable() {
+        let scratch = Scratch::new("keys-command");
+        let marker = scratch.root.join("ran");
+        write_auth(
+            &scratch,
+            &format!(
+                r#"{{"p": {{"type": "api_key", "key": "sk-first", "keys": [
+                    {{"name": "bad", "key": "!touch {}"}},
+                    {{"name": "team", "key": "sk-second"}}
+                ]}}}}"#,
+                marker.display()
+            ),
+        );
+        let store = scratch.open().unwrap();
+        let resolved = store.resolve_keys("p").unwrap().unwrap();
+        assert_eq!(
+            resolved
+                .keys
+                .iter()
+                .map(|key| key.display_name())
+                .collect::<Vec<_>>(),
+            vec!["first".to_owned(), "team".to_owned()]
+        );
+        assert_eq!(resolved.notices.len(), 1, "{:?}", resolved.notices);
+        assert!(
+            resolved.notices[0].contains("bad"),
+            "{:?}",
+            resolved.notices
+        );
+        assert!(
+            resolved.notices[0].contains("!command"),
+            "{:?}",
+            resolved.notices
+        );
+        assert!(!marker.exists(), "the command must never run");
+        assert_eq!(store.key_choices("p").unwrap().len(), 2);
+    }
+
+    /// An `oauth` entry's `keys` list is ignored: only `api_key` entries have keys (D1).
+    #[test]
+    fn an_oauth_entrys_keys_are_ignored() {
+        let scratch = Scratch::new("oauth-keys");
+        write_auth(
+            &scratch,
+            r#"{"chatgpt": {"type": "oauth", "access": "a", "refresh": "r", "expires": 1,
+                            "keys": [{"name": "team", "key": "sk-ignored"}]}}"#,
+        );
+        let store = scratch.open().unwrap();
+        assert_eq!(store.resolve_keys("chatgpt").unwrap(), None);
+        assert!(!store.resolved_keys().contains(&"sk-ignored".to_owned()));
+    }
+
+    /// `add_api_key` appends in order; removing the first key promotes the next to `key`;
+    /// removing the last key removes the entry; `all` removes every key; an unknown name is
+    /// refused naming the known ones (ADR 0026 D1/D3).
+    #[test]
+    fn adding_and_removing_keys_keeps_key_as_the_first() {
+        let scratch = Scratch::new("keys-add-remove");
+        write_auth(&scratch, r#"{"p": {"type": "api_key", "key": "sk-first"}}"#);
+        let mut store = scratch.open().unwrap();
+        let env = BTreeMap::new();
+        store
+            .add_api_key("p", "sk-second", Some("team"), &env)
+            .unwrap();
+        store.add_api_key("p", "sk-third", None, &env).unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(scratch.path()).unwrap()).unwrap();
+        assert_eq!(after["p"]["key"], "sk-first");
+        assert_eq!(after["p"]["keys"][0]["name"], "team");
+        assert_eq!(after["p"]["keys"][0]["key"], "sk-second");
+        assert!(after["p"]["keys"][1].get("name").is_none());
+        assert_eq!(
+            store
+                .key_choices("p")
+                .unwrap()
+                .iter()
+                .map(|key| key.name.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "first".to_owned(),
+                "team".to_owned(),
+                crate::auth::mask_key("sk-third"),
+            ]
+        );
+
+        // Removing the first key promotes the next to `key`; the old name is gone with the
+        // slot, and the file still has a `key` for pi.
+        store.remove_key("p", Some("first")).unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(scratch.path()).unwrap()).unwrap();
+        assert_eq!(after["p"]["key"], "sk-second");
+        assert_eq!(after["p"]["keys"].as_array().unwrap().len(), 1);
+        assert_eq!(store.resolve_key("p").unwrap().unwrap().key, "sk-second");
+
+        // An unknown name is refused, naming what is known. The promoted key is `first`
+        // (its old `keys[]` name went with the slot) and the unnamed item shows masked.
+        let error = store.remove_key("p", Some("no-such-key")).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("no-such-key"), "{text}");
+        assert!(text.contains("first"), "{text}");
+        assert!(text.contains(&crate::auth::mask_key("sk-third")), "{text}");
+
+        // Removing the last key removes the entry; `all` does the same when several remain.
+        store
+            .remove_key("p", Some(&crate::auth::mask_key("sk-third")))
+            .unwrap();
+        assert_eq!(store.resolve_key("p").unwrap().unwrap().key, "sk-second");
+        store.remove_key("p", Some("first")).unwrap();
+        assert!(store.resolve_key("p").unwrap().is_none());
+        write_auth(
+            &scratch,
+            r#"{"p": {"type": "api_key", "key": "a", "keys": [{"name": "b", "key": "b"}]}}"#,
+        );
+        let mut store = scratch.open().unwrap();
+        store.remove_key("p", None).unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(scratch.path()).unwrap()).unwrap();
+        assert!(after.get("p").is_none());
     }
 
     #[test]

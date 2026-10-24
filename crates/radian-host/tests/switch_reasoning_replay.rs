@@ -127,7 +127,7 @@ fn the_switch_path_carries_the_reasoning_replay() {
     // The route the model would replay under, as `args_for` resolved it, and the answer the
     // budget closure's resolver gives for the same switch. They must agree every time.
     let check = |name: &str, model: &str, expected: Option<&str>| {
-        let args = ctx.args_for(name, model).unwrap();
+        let args = ctx.args_for(name, model, None).unwrap();
         assert_eq!(args.reasoning_replay.as_deref(), expected, "{name}/{model}");
         assert_eq!(
             route_replays_reasoning(name, model, &ctx.providers),
