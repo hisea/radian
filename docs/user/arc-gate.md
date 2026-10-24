@@ -45,8 +45,8 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   ```
 
   `summary` is 2 to 6 sentences. Each item of `blocking` and `suggestions` is an object: `text` is required, and `level`, `file` and `line` are optional. `level` is one of `critical`, `major`, `minor`. A plain string is an item with only its `text`, so a verdict written before the object form still reads.
-  `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage; the suggestions a merged task's reviews left become its follow-up task (see [The review's follow-up](#the-reviews-follow-up)).
-  A blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items, each as `[level] path:line text` with the parts an item does not have left out.
+  `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage; the suggestions of every review round of a merged task become its follow-up task (see [The review's follow-up](#the-reviews-follow-up)).
+  A blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items, each as `[level] path:line text` with the parts an item does not have left out. An item whose `text` starts with a tag that repeats its own level (`[major]`, any case, spaces allowed) prints the level once: the leading tag is dropped from the text. A `text` that starts with another tag keeps it, and the verdict on disk is never rewritten.
   No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
   The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros`, `review_settings` (`round`, `first` or `rework`; the `exec_args` source key; `timeout_secs` and the key it came from) and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
 - `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), and `review_timeout` (the last run hit `[gate.review] timeout_secs`).
@@ -131,9 +131,12 @@ With `auto` `off`, the task stays in `review.rework_pending` and waits for you, 
 
 ### The review's follow-up
 
-When a task reaches `done.merged`, arc reads every `review` verdict of the task and collects every `suggestions` item, each finding once; the items a rework round moved (marked `pre_existing`) are in `suggestions`.
+When a task reaches `done.merged`, arc reads every `review` verdict of the task, oldest attempt first, and collects every `suggestions` item of every round; the items a rework round moved (marked `pre_existing`) are in `suggestions`.
 Every round is read, not only the newest: a round that failed can carry a demoted item, and a later round can pass with nothing to suggest.
-Nothing from `blocking` is collected: the review passed for the merge only because no blocking item was left.
+Nothing from `blocking` is collected: a merged task's blocking items were fixed or the review would not have passed, so a round that only had blocking items contributes nothing.
+
+Two items are the same when their `file`, `line` and `text` are equal after a leading tag that repeats the item's own level is removed and whitespace is collapsed; arc keeps the newest copy.
+An item with the same `file:line` and other text is kept as its own item.
 
 When at least one item is left, and `[gate.review] propose_followups` is `true` (the default), arc adds one task to the same plan, and no more:
 
@@ -143,9 +146,11 @@ When at least one item is left, and `[gate.review] propose_followups` is `true` 
 - its `after` is the merged task;
 - its phase is `todo.proposed`, so the loop never claims it until you confirm it (see [`confirm`](arc.md#radian-arc-confirm-id)).
 
-Its brief is fixed: one line saying the items are from the review of `<task id>`, which is now merged, and that each item is to be fixed or left with a one-line reason in the final answer; then the items, one per line, as `[level] path:line text`; then the paths of the review verdicts the items came from, one per line.
+Its brief is fixed: one line saying the items are from the review of `<task id>`, which is now merged, and that each item is to be fixed or left with a one-line reason in the final answer; then the items grouped by the round they came from, each group headed `From review <n> (attempt <n>):`, one item per line as `[level] path:line text`; then the path of every review verdict.
+An item whose `text` starts with a tag that repeats its own level prints the level once, as in the rework reason above.
 
 A task gets at most one follow-up.
+A follow-up task gets no follow-up of its own: when the merged task's title and `after` are the ones arc gives a follow-up, arc proposes nothing, and the review's unfixed items stay in its verdict and in the task's final report.
 A task merged without a review stage, or with no item left, gets none.
 With `propose_followups` `false` arc adds none (see the [`propose_followups` row](arc-files.md#configtoml)); the lead can still add a task to the plan with MCP `add_task`.
 `radian arc run` prints `<new task id> proposed (follow-ups from <task id>)`.
@@ -260,7 +265,8 @@ A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 1
 Every rework sets `retry_count` back to `0` (the lead's brief, arc's review rework, and the conflict rework), so the new instructions get their own retries.
 The attempt number is never compared with the limit; `show` prints `retry_count`.
 A `reverify` attempt is not a retry: it changes neither `retry_count` nor the limit.
-`todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; `start` does this before it claims.
+`todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; the scheduling loop and `start` do this before they claim.
+`start` also claims a `todo.retry_wait` task whose time has not come, without waiting for it (see [`start`](arc.md#radian-arc-start-task)).
 
 Every attempt of a task runs in a worker session.
 With [`worker.rework_session`](arc-files.md#configtoml) at `fresh` (the default) each attempt has a session of its own, `<task>-<attempt>`, and none is ever resumed; an attempt after the first gets the hand-off section (see [`start`](arc.md#radian-arc-start-task)).

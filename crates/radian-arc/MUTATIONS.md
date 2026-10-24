@@ -85,6 +85,13 @@ copy.
 | TK0044-M1 | take a single review lock again (`SlotLock::acquire` with 1 slot) | `review::two_tasks_reviews_overlap_with_concurrency_two` (the two reviews' intervals do not overlap) | ✅ failed |
 | TK0044-M2 | apply the `[gate.review.first]` settings to every review (force `first = true`) | `review::a_first_review_uses_the_first_settings_and_a_rework_uses_the_normal_ones` (the rework session times out and the fake records no third run) | ✅ failed |
 | TK0044-M3 | skip the owned-flag check for `gate.review.first.exec_args` | `review::a_first_exec_arg_the_review_stage_owns_is_refused` (the session runs and the stage passes) | ✅ failed |
+| TK0037-M1 | `start` refuses `todo.retry_wait` again (`attempt_ops::claim`'s guard goes back to `phase == "ready"`) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `attempt::start_refuses_a_retry_wait_task_when_every_slot_is_taken` (the second gets the wrong refusal, so its `limits.concurrency` assertion fails) | ✅ 2 failed |
+| TK0037-M2 | the scheduling loop ignores `retry_at` and claims a `todo.retry_wait` task (`run::start_ready` drops its phase check) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `run::a_future_retry_makes_run_exit_with_it_waiting` | ✅ 2 failed |
+
+TK0037-M1–M2 were run against `12da692f`, each applied to the committed file, with
+`cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` before the run
+(the sync tests refuse a binary older than its sources), restored from a copy under
+`.radian/tk0037/` with `cp`, and compared byte for byte with `cmp`.
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
@@ -279,3 +286,18 @@ input), so the two-round test's failing round is unread and the merge proposes n
 | TK0051-M2 | demote an item without a `file` or a `line` again (the `let … else` returns `false`) | ✅ 2 failed | `gate::review::tests::an_item_without_a_place_stays_blocking_at_its_level`; `gate::review::tests::a_pre_existing_item_is_moved_and_marked` |
 | TK0051-M3 | drop the `level` of a moved item (`level: None` in `mark_pre_existing`) | ✅ 2 failed | `gate::review::tests::a_major_item_outside_the_windows_is_moved_and_keeps_its_level`; `review::a_demoted_major_item_reaches_the_followup_at_its_level` |
 | TK0051-M4 | read only the newest review verdict again (`review_verdict_files` keeps just its last entry) | ✅ 1 failed | `review::a_major_item_a_failing_round_demoted_reaches_the_followup` |
+## TK0045 (the follow-up holds every review round)
+
+TK0045-M1–M4 were run on the branch's working code before the code commit, each from a copy
+under `.radian/`, restored with `cp` and compared with `cmp`; the restored files match the
+commit. M1 turns the new `review_verdicts` read back into
+`latest_review_verdict`, so every test that needs an earlier round loses its item. M2 removes
+the `find`/replace from `followup_items`. M3 writes `self.text` again in `ReviewItem`'s
+`Display`. M4 removes the `is_followup` early return from `propose_followup`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0045-M1 | read only the newest `review` verdict again (`latest_review_verdict`) | `review::a_followup_holds_every_round_grouped_and_drops_a_repeat`, `review::a_round_with_only_blocking_items_carries_nothing`, `review::a_pre_existing_item_from_an_earlier_round_is_carried` | ✅ 3 failed |
+| TK0045-M2 | drop the deduplication (every round's item is carried) | `review::a_followup_holds_every_round_grouped_and_drops_a_repeat` (the repeat is under both rounds) | ✅ failed |
+| TK0045-M3 | keep the duplicated level tag in `Display` (write `self.text`) | `review::a_rework_brief_prints_a_duplicated_level_tag_once`, `review::a_followup_brief_prints_a_duplicated_level_tag_once` | ✅ 2 failed |
+| TK0045-M4 | propose a follow-up for a merged follow-up task (drop the `is_followup` guard) | `review::a_merge_of_a_followup_task_proposes_no_followup` (it gets `TK0003-…-followups-followups`) | ✅ failed |

@@ -62,7 +62,12 @@ impl Fixture {
 
     /// Commits `file` on `work/<task>` at `at`, pushes the branch and returns the commit.
     fn publish(&self, at: &str, file: &str, content: &str) -> String {
-        let branch = format!("work/{}", self.task);
+        self.publish_for(&self.task, at, file, content)
+    }
+
+    /// The same, for another task of the plan.
+    fn publish_for(&self, task: &str, at: &str, file: &str, content: &str) -> String {
+        let branch = format!("work/{task}");
         let head = self.repo.commit_on(&branch, at, file, content);
         self.repo.git(&["push", "origin", &branch]);
         head
@@ -76,14 +81,19 @@ impl Fixture {
     /// The same, for a given attempt number.
     fn set_verifying_at(&self, head: &str, attempt: u32) {
         let base = self.base.clone();
+        self.set_verifying_for(&self.task, head, attempt, &base);
+    }
+
+    /// The same, for another task of the plan and its own base.
+    fn set_verifying_for(&self, task: &str, head: &str, attempt: u32, base: &str) {
         self.store
-            .change_task(&self.task, |task| {
+            .change_task(task, |task| {
                 task.state = TaskState::Review;
                 task.phase = "verifying".to_owned();
                 task.attempt = attempt;
                 task.attempt_id = Some(format!("{}-{attempt}", task.id));
                 task.token = Some(format!("token-{attempt}"));
-                task.base_sha = Some(base.clone());
+                task.base_sha = Some(base.to_owned());
                 task.head_sha = Some(head.to_owned());
                 Ok(())
             })
@@ -3454,13 +3464,25 @@ fn a_review_rework_at_the_auto_rework_limit_pauses_the_plan() {
 /// non-empty `blocking` fails the stage, so this is the only way to reach a merge with a
 /// blocking item on record, and it is what proves the follow-up takes none of them.
 fn write_passing_review(fixture: &Fixture, head: &str, report: ReviewReport) {
-    let path = verdict_path(
-        fixture.store.repo(),
+    write_passing_review_at(
+        fixture,
         &fixture.task,
         &fixture.attempt_label(),
-        Stage::Review,
-    )
-    .expect("the verdict path");
+        head,
+        report,
+    );
+}
+
+/// [`write_passing_review`] for another task or attempt of the plan.
+fn write_passing_review_at(
+    fixture: &Fixture,
+    task: &str,
+    attempt: &str,
+    head: &str,
+    report: ReviewReport,
+) {
+    let path =
+        verdict_path(fixture.store.repo(), task, attempt, Stage::Review).expect("the verdict path");
     let at = "2026-01-01T00:00:00.000000Z".to_owned();
     Verdict {
         schema_version: VERDICT_SCHEMA_VERSION,
@@ -3484,6 +3506,38 @@ fn write_passing_review(fixture: &Fixture, head: &str, report: ReviewReport) {
     }
     .write_new(&path)
     .expect("the review verdict is written once");
+}
+
+/// The `review.json` path of one attempt of a task.
+fn review_verdict_path(fixture: &Fixture, task: &str, attempt: u32) -> PathBuf {
+    verdict_path(
+        fixture.store.repo(),
+        task,
+        &format!("{task}-{attempt}"),
+        Stage::Review,
+    )
+    .expect("the verdict path")
+}
+
+/// A report with only a summary and the given suggestion items.
+fn suggestions(items: Vec<ReviewItem>) -> ReviewReport {
+    ReviewReport {
+        summary: "the change adds feature.txt".to_owned(),
+        blocking: Vec::new(),
+        suggestions: items,
+        verified: Vec::new(),
+    }
+}
+
+/// A review item with a level, a place and a text.
+fn item(level: &str, file: &str, line: u32, text: &str) -> ReviewItem {
+    ReviewItem {
+        level: Some(level.to_owned()),
+        file: Some(file.to_owned()),
+        line: Some(line),
+        text: text.to_owned(),
+        pre_existing: false,
+    }
 }
 
 /// A merge whose review suggested an item: the plan gains one `todo.proposed` follow-up,
@@ -4113,5 +4167,408 @@ fn cancel_ends_a_proposed_task_as_failed_cancelled() {
     assert_eq!(
         (stored.state.as_str(), stored.phase.as_str()),
         ("failed", "cancelled")
+    );
+}
+
+/// A merged task that is itself a review follow-up proposes nothing: the chain ends there.
+///
+/// Mutation: drop the `is_followup` guard in `propose_followup` → a
+/// `…-followups-followups` task appears.
+#[test]
+fn a_merge_of_a_followup_task_proposes_no_followup() {
+    let fixture = Fixture::new("followup-of-followup");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "followup-of-followup-first",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, fake.program()).phase,
+        "awaiting_human"
+    );
+    let followup = review::merge(&fixture.store, &fixture.task)
+        .expect("the merge runs")
+        .followup
+        .expect("a follow-up task")
+        .task;
+
+    plan_ops::confirm(&fixture.store, &followup).expect("the follow-up is confirmed");
+    let followup_head = fixture.publish_for(&followup, &fixture.base, "followup.txt", "followup\n");
+    fixture.set_verifying_for(&followup, &followup_head, 1, &fixture.base);
+    let attempt = format!("{followup}-1");
+    write_passing_review_at(
+        &fixture,
+        &followup,
+        &attempt,
+        &followup_head,
+        suggestions(vec![item("minor", "followup.txt", 1, "another nicer name")]),
+    );
+    let verified = review::verify(&fixture.store, &followup).expect("the verification runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let merged = review::merge(&fixture.store, &followup).expect("the merge runs");
+    assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
+    assert!(
+        merged.followup.is_none(),
+        "a follow-up task got a follow-up: {merged:?}"
+    );
+    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&plan_id)
+            .expect("the plan")
+            .item
+            .tasks,
+        vec![fixture.task.clone(), followup],
+        "the chain ends with the first follow-up"
+    );
+}
+
+/// The follow-up holds every review round's suggestions, grouped by round, and a repeat keeps
+/// the newest copy.
+///
+/// Mutation: read only the newest verdict again → round 1's own item is lost.
+#[test]
+fn a_followup_holds_every_round_grouped_and_drops_a_repeat() {
+    let fixture = Fixture::new("followup-rounds");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let first_fake = FakeReview::new(
+        "followup-rounds-first",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[
+                review_item("minor", "feature.txt", 1, "round-one item"),
+                review_item("major", "feature.txt", 2, "the repeated item"),
+            ],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "awaiting_human"
+    );
+
+    fixture.rework(&first, "two.txt", "two\n");
+    let second_fake = FakeReview::new(
+        "followup-rounds-second",
+        &[review_object_message(
+            "the rework adds two.txt",
+            &[],
+            &[
+                review_item("major", "feature.txt", 2, "the repeated item"),
+                review_item("minor", "two.txt", 1, "a new item"),
+            ],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(second_fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    let followup = merged.followup.expect("a follow-up task").task;
+    let task = fixture.store.load_task(&followup).expect("the task").item;
+    let lines: Vec<&str> = task.body.lines().collect();
+    let at = |line: &str| {
+        lines
+            .iter()
+            .position(|candidate| *candidate == line)
+            .unwrap_or_else(|| panic!("no line `{line}` in:\n{}", task.body))
+    };
+    let first_header = at("From review 1 (attempt 1):");
+    let second_header = at("From review 2 (attempt 2):");
+    let first_item = at("- [minor] feature.txt:1 round-one item");
+    let repeated = at("- [major] feature.txt:2 the repeated item");
+    let new_item = at("- [minor] two.txt:1 a new item");
+    assert!(
+        first_header < first_item && first_item < second_header,
+        "round 1's item is under its own header:\n{}",
+        task.body
+    );
+    assert!(
+        second_header < repeated && second_header < new_item,
+        "the newest copy of the repeat is under round 2:\n{}",
+        task.body
+    );
+    assert_eq!(
+        lines.iter().filter(|line| line.starts_with("- ")).count(),
+        3,
+        "the repeat is carried once:\n{}",
+        task.body
+    );
+    for attempt in [1, 2] {
+        let path = review_verdict_path(&fixture, &fixture.task, attempt);
+        assert!(
+            task.body.contains(&path.display().to_string()),
+            "the brief names attempt {attempt}'s verdict: {}",
+            task.body
+        );
+    }
+}
+
+/// A round that only had blocking items carries nothing, and an earlier round's suggestion is
+/// still carried when that blocking-only round is the newest.
+///
+/// Mutation: read only the newest verdict again → no follow-up is proposed at all.
+#[test]
+fn a_round_with_only_blocking_items_carries_nothing() {
+    let fixture = Fixture::new("followup-blocking-round");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    fixture.set_verifying(&first);
+    write_passing_review(
+        &fixture,
+        &first,
+        suggestions(vec![item("minor", "feature.txt", 1, "round one item")]),
+    );
+    assert_eq!(
+        review::verify(&fixture.store, &fixture.task)
+            .expect("the first review runs")
+            .phase,
+        "awaiting_human"
+    );
+
+    let second = fixture.rework(&first, "two.txt", "two\n");
+    let attempt = format!("{}-2", fixture.task);
+    write_passing_review_at(
+        &fixture,
+        &fixture.task,
+        &attempt,
+        &second,
+        ReviewReport {
+            summary: "the rework adds two.txt".to_owned(),
+            blocking: vec![item("major", "feature.txt", 2, "a blocking item round two")],
+            suggestions: Vec::new(),
+            verified: Vec::new(),
+        },
+    );
+    assert_eq!(
+        review::verify(&fixture.store, &fixture.task)
+            .expect("the rework round runs")
+            .phase,
+        "awaiting_human"
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    let followup = merged
+        .followup
+        .expect("round 1's suggestion is a follow-up")
+        .task;
+    let body = fixture
+        .store
+        .load_task(&followup)
+        .expect("the task")
+        .item
+        .body;
+    assert!(
+        body.contains("- [minor] feature.txt:1 round one item"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("a blocking item round two"),
+        "a blocking item was carried:\n{body}"
+    );
+    assert!(body.contains("From review 1 (attempt 1):"), "{body}");
+    assert!(
+        !body.contains("From review 2"),
+        "a round with no item gets no group:\n{body}"
+    );
+    assert!(
+        body.contains(
+            &review_verdict_path(&fixture, &fixture.task, 2)
+                .display()
+                .to_string()
+        ),
+        "the blocking-only round's verdict is still named:\n{body}"
+    );
+}
+
+/// An item a rework round moved to `pre_existing` is carried, even when a later round
+/// suggested nothing.
+///
+/// Mutation: collect only the newest verdict → the pre-existing item is lost.
+#[test]
+fn a_pre_existing_item_from_an_earlier_round_is_carried() {
+    let fixture = Fixture::new("followup-pre-existing");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "followup-pre-existing-first",
+        &[review_object_message(
+            "the change adds old.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    let second = fixture.rework(&first, "new.txt", "new\n");
+    let second_fake = FakeReview::new(
+        "followup-pre-existing-second",
+        &[review_object_message(
+            "the rework adds new.txt",
+            &[review_item(
+                "minor",
+                "old.txt",
+                30,
+                "this line was always odd",
+            )],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(second_fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let _third = fixture.rework(&second, "third.txt", "third\n");
+    let third_fake = FakeReview::new(
+        "followup-pre-existing-third",
+        &[review_object_message(
+            "the second rework adds third.txt",
+            &[],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(third_fake.program()))
+        .expect("the second rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    let followup = merged
+        .followup
+        .expect("the pre-existing item is a follow-up")
+        .task;
+    let body = fixture
+        .store
+        .load_task(&followup)
+        .expect("the task")
+        .item
+        .body;
+    assert!(
+        body.contains("- [minor] old.txt:30 this line was always odd"),
+        "the pre-existing item is carried:\n{body}"
+    );
+    assert!(body.contains("From review 2 (attempt 2):"), "{body}");
+}
+
+/// A rework brief prints an item's own level once, and keeps a different leading tag.
+///
+/// Mutation: keep the duplicated level tag (`Display` writes `self.text`) → this fails.
+#[test]
+fn a_rework_brief_prints_a_duplicated_level_tag_once() {
+    let fixture = Fixture::new("review-tag-once");
+    fixture.add_review_stage();
+    fixture.set_auto("run");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "review-tag-once-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[
+                review_item("major", "feature.txt", 1, "[major] this must change"),
+                review_item("major", "feature.txt", 2, "[minor] a different tag"),
+            ],
+            &[],
+        )],
+        0,
+    );
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "ready", "{verified:?}");
+    assert!(verified.review.is_some(), "{verified:?}");
+
+    let body = fixture
+        .store
+        .load_task(&fixture.task)
+        .expect("the task")
+        .item
+        .body;
+    assert!(
+        body.contains("- [major] feature.txt:1 this must change"),
+        "the level prints once:\n{body}"
+    );
+    assert!(
+        !body.contains("[major] feature.txt:1 [major]"),
+        "the tag is duplicated:\n{body}"
+    );
+    assert!(
+        body.contains("- [major] feature.txt:2 [minor] a different tag"),
+        "a different tag is part of the text:\n{body}"
+    );
+}
+
+/// A follow-up brief prints an item's own level once, any case and spaces allowed, and keeps
+/// a different leading tag.
+///
+/// Mutation: keep the duplicated level tag (`Display` writes `self.text`) → this fails.
+#[test]
+fn a_followup_brief_prints_a_duplicated_level_tag_once() {
+    let fixture = Fixture::new("followup-tag-once");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "followup-tag-once-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[
+                review_item("major", "feature.txt", 1, "[major] own tag"),
+                review_item("minor", "feature.txt", 2, "[MAJOR] another level's tag"),
+                review_item("minor", "feature.txt", 3, "  [ minor ]  spaced tag"),
+            ],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, fake.program()).phase,
+        "awaiting_human"
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    let followup = merged.followup.expect("a follow-up task").task;
+    let body = fixture
+        .store
+        .load_task(&followup)
+        .expect("the task")
+        .item
+        .body;
+    assert!(
+        body.contains("- [major] feature.txt:1 own tag"),
+        "the level prints once:\n{body}"
+    );
+    assert!(
+        !body.contains("[major] feature.txt:1 [major]"),
+        "the tag is duplicated:\n{body}"
+    );
+    assert!(
+        body.contains("- [minor] feature.txt:2 [MAJOR] another level's tag"),
+        "a different tag is part of the text:\n{body}"
+    );
+    assert!(
+        body.contains("- [minor] feature.txt:3 spaced tag"),
+        "an own tag in any case and with spaces is dropped:\n{body}"
     );
 }

@@ -246,7 +246,7 @@ impl Reverified {
 }
 
 /// The follow-up task arc proposed for a merged task's review (ADR 0048 decision 10): the
-/// items the task's review verdicts suggested, which the merge left unfixed.
+/// items every review of the task suggested, which the merge left unfixed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Followup {
     /// The new task's id.
@@ -1461,35 +1461,111 @@ fn review_rework_brief(rework: &ReviewRework) -> String {
 
 // ---- the review's follow-up task (ADR 0048 decision 10) -------------------------------
 
-/// The review's follow-up task of one merged task (ADR 0048 decision 10): every item the
-/// task's review verdicts suggested become one `todo.proposed` task of the same plan, `after`
-/// the merged task. Every verdict is read, not only the newest: a round that failed can carry a
-/// demoted item, and a later round can pass with nothing to suggest. Nothing from `blocking`
-/// is carried: the review passed for the merge only because none was left.
+/// One review round of a merged task: the review verdict of one attempt and the items it
+/// suggested.
+struct FollowupRound {
+    /// 1-based, oldest first.
+    number: usize,
+    /// The attempt whose review wrote it.
+    attempt: u32,
+    /// The verdict file the brief names.
+    path: PathBuf,
+    /// The `suggestions` the round left; the `pre_existing` items arc moved are here.
+    items: Vec<ReviewItem>,
+}
+
+/// The task's `review` verdicts across every attempt, oldest first, with their paths. Attempt
+/// numbers order the rounds, because `task_verdict_files` sorts their directory names as
+/// strings and `attempt-10` sorts before `attempt-2`.
+fn review_verdicts(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict)>, Error> {
+    let mut reviews: Vec<(PathBuf, Verdict)> = task_verdict_files(store, task)?
+        .into_iter()
+        .filter(|(_, verdict)| verdict.stage == Stage::Review)
+        .collect();
+    reviews.sort_by_key(|(path, _)| verdict_attempt(path).unwrap_or(0));
+    Ok(reviews)
+}
+
+/// Every review round of a task, oldest first (ADR 0048 decision 10). A round that suggested
+/// nothing is kept as a round: the brief names its verdict too.
+fn followup_rounds(reviews: &[(PathBuf, Verdict)]) -> Vec<FollowupRound> {
+    reviews
+        .iter()
+        .enumerate()
+        .map(|(index, (path, verdict))| FollowupRound {
+            number: index + 1,
+            attempt: verdict_attempt(path).unwrap_or(index as u32 + 1),
+            path: path.clone(),
+            items: verdict
+                .review
+                .as_ref()
+                .map(|review| review.suggestions.clone())
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// The attempt number a verdict path names:
+/// `<...>/attempts/<task id>-<n>/verdicts/<stage>.json`.
+fn verdict_attempt(path: &Path) -> Option<u32> {
+    let attempt = path.parent()?.parent()?.file_name()?.to_str()?;
+    attempt.rsplit_once('-')?.1.parse().ok()
+}
+
+/// What two follow-up items are the same by: `file`, `line`, and the `text` without a tag
+/// that repeats the item's own level and with its whitespace collapsed (ADR 0048 decision
+/// 10). An item with the same place and other text is a different item.
+fn followup_item_key(item: &ReviewItem) -> (Option<&str>, Option<u32>, String) {
+    (
+        item.file.as_deref(),
+        item.line,
+        item.text_without_level_tag()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// The items the follow-up carries, in round order, with the round each kept copy came from.
+/// A repeat replaces the earlier copy, so the newest one is kept and grouped under its own
+/// round.
+fn followup_items(rounds: &[FollowupRound]) -> Vec<(usize, ReviewItem)> {
+    let mut kept: Vec<(usize, ReviewItem)> = Vec::new();
+    for (index, round) in rounds.iter().enumerate() {
+        for item in &round.items {
+            let key = followup_item_key(item);
+            match kept
+                .iter_mut()
+                .find(|(_, earlier)| followup_item_key(earlier) == key)
+            {
+                Some(slot) => *slot = (index, item.clone()),
+                None => kept.push((index, item.clone())),
+            }
+        }
+    }
+    kept
+}
+
+/// The review's follow-up task of one merged task (ADR 0048 decision 10): the items every
+/// review of the task suggested — every attempt's `review` verdict, oldest first — become one
+/// `todo.proposed` task of the same plan, `after` the merged task. The `pre_existing` items
+/// are among them. Nothing from `blocking` is carried: a merged task's blocking items were
+/// fixed or the review would not have passed.
 ///
-/// `None` when `[gate.review] propose_followups` is `false`, when the task has no review
-/// verdict, when the reviews suggested nothing, or when the plan already holds this task's
-/// follow-up: a task gets at most one.
+/// `None` when `[gate.review] propose_followups` is `false`, when the merged task is itself a
+/// review follow-up (a follow-up gets none of its own), when the task has no review verdict,
+/// when no round suggested anything, or when the plan already holds this task's follow-up: a
+/// task gets at most one.
 fn propose_followup(store: &Store, task: &model::TaskFile) -> Result<Option<Followup>, Error> {
     if !store.config()?.gate.review.propose_followups {
         return Ok(None);
     }
-    let mut items: Vec<ReviewItem> = Vec::new();
-    let mut verdicts: Vec<PathBuf> = Vec::new();
-    for (path, verdict) in review_verdict_files(store, &task.id) {
-        let Some(review) = verdict.review else {
-            continue;
-        };
-        if review.suggestions.is_empty() {
-            continue;
-        }
-        for item in review.suggestions {
-            if !items.iter().any(|kept| same_finding(kept, &item)) {
-                items.push(item);
-            }
-        }
-        verdicts.push(path);
+    if is_followup(task) {
+        return Ok(None);
     }
+    let reviews = review_verdicts(store, &task.id)?;
+    let rounds = followup_rounds(&reviews);
+    let items = followup_items(&rounds);
     if items.is_empty() {
         return Ok(None);
     }
@@ -1507,12 +1583,22 @@ fn propose_followup(store: &Store, task: &model::TaskFile) -> Result<Option<Foll
         vec![task.id.clone()],
         false,
         Vec::new(),
-        &followup_brief(&task.id, &items, &verdicts),
+        &followup_brief(&task.id, &rounds, &items),
     )?;
     Ok(Some(Followup {
         task: id,
         from: task.id.clone(),
     }))
+}
+
+/// Whether `task` is itself a review follow-up: its title and its one `after` entry are the
+/// ones arc gives a follow-up. It is the same test [`has_followup`] uses, so a follow-up task
+/// never gets a follow-up of its own (ADR 0048 decision 10).
+fn is_followup(task: &model::TaskFile) -> bool {
+    match task.after.as_slice() {
+        [parent] => task.title == followup_title(parent),
+        _ => false,
+    }
 }
 
 /// Whether the plan already holds `task`'s follow-up: a task whose title and `after` are the
@@ -1551,34 +1637,43 @@ fn followup_title(task: &str) -> String {
     format!("Follow-ups from {task}'s review")
 }
 
-/// Whether two items are the same finding: a later round that reports it again does not put a
-/// second line in the follow-up. `pre_existing` is arc's mark, not part of the finding.
-fn same_finding(left: &ReviewItem, right: &ReviewItem) -> bool {
-    left.level == right.level
-        && left.file == right.file
-        && left.line == right.line
-        && left.text == right.text
-}
-
 /// The fixed brief of `task`'s follow-up (ADR 0048 decision 10): the line that says where the
-/// items come from and what to do with each, the items as `[level] path:line text`, and the
-/// review verdicts the items came from, to read for detail.
-fn followup_brief(task: &str, items: &[ReviewItem], verdicts: &[PathBuf]) -> String {
-    let items = items
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    let verdicts = verdicts
-        .iter()
-        .map(|path| format!("- `{}`", path.display()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
+/// items come from and what to do with each, the items grouped by the round they came from as
+/// `[level] path:line text`, and the path of every review verdict.
+fn followup_brief(task: &str, rounds: &[FollowupRound], items: &[(usize, ReviewItem)]) -> String {
+    let mut brief = format!(
         "The items below are from the review of `{task}`, which is now merged; fix each one, \
-         or leave it with a one-line reason in the final answer.\n\n{items}\n\n\
-         Read the verdicts for detail:\n{verdicts}"
-    )
+         or leave it with a one-line reason in the final answer."
+    );
+    for (index, round) in rounds.iter().enumerate() {
+        let group: Vec<&ReviewItem> = items
+            .iter()
+            .filter(|(from, _)| *from == index)
+            .map(|(_, item)| item)
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        brief.push_str(&format!(
+            "\n\nFrom review {} (attempt {}):",
+            round.number, round.attempt
+        ));
+        for item in group {
+            brief.push_str(&format!("\n- {item}"));
+        }
+    }
+    let paths = rounds
+        .iter()
+        .map(|round| format!("`{}`", round.path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let verdict = if rounds.len() == 1 {
+        "verdict"
+    } else {
+        "verdicts"
+    };
+    brief.push_str(&format!("\n\nRead the {verdict} for detail: {paths}"));
+    brief
 }
 
 /// The task's `extra_stages` as stage specs. Every name was checked when the task file was
@@ -2586,25 +2681,15 @@ fn task_verdicts(store: &Store, task: &str) -> Result<Vec<Verdict>, Error> {
         .collect())
 }
 
-/// Every `review` verdict of `task` and its path, in attempt order: the rounds the follow-up
-/// collects items from.
-fn review_verdict_files(store: &Store, task: &str) -> Vec<(PathBuf, Verdict)> {
-    task_verdict_files(store, task)
-        .map(|files| {
-            files
-                .into_iter()
-                .filter(|(_, verdict)| verdict.stage == Stage::Review)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// The task's newest `review` verdict and its path, across every attempt: what `show`
 /// reports as the review's summary and findings. A later review (a rework, a `reverify`)
 /// replaces an earlier one.
 #[must_use]
 pub fn latest_review_verdict(store: &Store, task: &str) -> Option<(PathBuf, Verdict)> {
-    review_verdict_files(store, task).into_iter().next_back()
+    task_verdict_files(store, task)
+        .ok()?
+        .into_iter()
+        .rfind(|(_, verdict)| verdict.stage == Stage::Review)
 }
 
 /// The task's newest `review` verdict from an attempt other than `label`, with its path: the
@@ -2776,25 +2861,25 @@ mod tests {
         );
     }
 
-    /// The brief has the fixed form: the one line, one item per line as `[level] path:line
-    /// text`, and the verdict path.
+    /// The brief has the fixed form: the one line, the items grouped by their round as
+    /// `[level] path:line text`, and the verdict path.
     #[test]
     fn the_followup_brief_names_the_task_the_items_and_the_verdict() {
-        let items = vec![ReviewItem {
+        let item = ReviewItem {
             level: Some("minor".to_owned()),
             file: Some("a.rs".to_owned()),
             line: Some(7),
             text: "a nicer name".to_owned(),
             pre_existing: true,
+        };
+        let rounds = vec![FollowupRound {
+            number: 1,
+            attempt: 2,
+            path: PathBuf::from("/r/verdicts/review.json"),
+            items: vec![item.clone()],
         }];
-        let brief = followup_brief(
-            "TK0001-work",
-            &items,
-            &[
-                PathBuf::from("/r/verdicts/review-1.json"),
-                PathBuf::from("/r/verdicts/review-2.json"),
-            ],
-        );
+        let items = vec![(0, item)];
+        let brief = followup_brief("TK0001-work", &rounds, &items);
         assert!(
             brief.contains(
                 "The items below are from the review of `TK0001-work`, which is now merged"
@@ -2802,16 +2887,37 @@ mod tests {
             "{brief}"
         );
         assert!(brief.contains("one-line reason"), "{brief}");
+        assert!(brief.contains("From review 1 (attempt 2):"), "{brief}");
         assert!(
             brief
                 .lines()
-                .any(|line| line == "[minor] a.rs:7 a nicer name"),
+                .any(|line| line == "- [minor] a.rs:7 a nicer name"),
             "{brief}"
         );
-        assert!(
-            brief.contains("- `/r/verdicts/review-1.json`")
-                && brief.contains("- `/r/verdicts/review-2.json`"),
-            "{brief}"
-        );
+        assert!(brief.contains("/r/verdicts/review.json"), "{brief}");
+    }
+
+    /// The item key drops a leading tag that repeats the item's own level and collapses
+    /// whitespace, so a repeat from a later round matches its earlier copy. A different tag
+    /// stays part of the text.
+    #[test]
+    fn the_followup_item_key_ignores_a_duplicated_level_tag_and_whitespace() {
+        let first = ReviewItem {
+            level: Some("minor".to_owned()),
+            file: Some("a.rs".to_owned()),
+            line: Some(7),
+            text: "a   nicer\n name".to_owned(),
+            pre_existing: false,
+        };
+        let repeat = ReviewItem {
+            text: "[Minor] a nicer name".to_owned(),
+            ..first.clone()
+        };
+        assert_eq!(followup_item_key(&first), followup_item_key(&repeat));
+        let other_tag = ReviewItem {
+            text: "[major] a nicer name".to_owned(),
+            ..first.clone()
+        };
+        assert_ne!(followup_item_key(&first), followup_item_key(&other_tag));
     }
 }
