@@ -7,9 +7,9 @@ description: The arc commands: every subcommand, the lead's MCP server, and the 
 arc is a plan and task orchestrator built into the same `radian` binary.
 It keeps a plan and its tasks as files in the repository, runs each task as a separate headless `radian` worker, and merges only what passes a fixed gate.
 
-This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `priority`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
-It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and `run`.
-`radian arc run` is the scheduling loop, and a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc-tui`](arc-tui.md)).
+This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `priority`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, `run`, and `serve`.
+It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and the loop.
+`radian arc serve` is the scheduling loop and `radian arc run` is one pass of it, and a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc-tui`](arc-tui.md)).
 
 This page holds the `radian arc` commands; the gate and its failures are in [`arc-gate`](arc-gate.md), the lead's MCP server in [`arc-mcp`](arc-mcp.md), the TUI in [`arc-tui`](arc-tui.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
@@ -613,22 +613,19 @@ It exits `0` on success, `1` on an error, `2` for an empty note, `3` when the ta
 
 ## `radian arc run`
 
-`run` is the scheduling loop without an interface.
+`run` is one pass of the scheduling loop without an interface; [`radian arc serve`](#radian-arc-serve) repeats it.
 It takes `runner.lock`, makes every transition the auto levels allow now, saves the state, and exits.
 A pass only schedules: it starts a worker or a gate, collects what one left, and moves the state, so a pass ends in seconds.
 Waiting for you, a `retry_at` in the future, a running worker, or a running gate does not keep it running.
 A task of a plan at `auto` `off` is never started or merged by `run`; its verification still advances.
 A task of a `cancelled` plan is never claimed, gated or merged, and a cancelled plan is not listed in the summary.
 
-The arc TUI never runs this pass itself: when no loop holds the lock it starts `radian arc run --watch` as a detached process (see [the TUI](#the-tui) and [`arc-tui`](arc-tui.md#the-loop)). A TUI and a `run` (or `run --watch`) exclude each other through `runner.lock`: a second loop that cannot get it exits `4`.
+The arc TUI never runs this pass itself: when no loop holds the lock it starts `radian arc serve` as a detached process (see [the TUI](#the-tui) and [`arc-tui`](arc-tui.md#the-loop)). A TUI and a loop (`run` or `serve`) exclude each other through `runner.lock`: a second loop that cannot get it exits `4`.
 Quitting the TUI never stops a loop, whether the TUI started it or not.
 
 Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](arc-files.md#configtoml)).
 
-| Flag | Value | Default | What it does |
-|---|---|---|---|
-| `--watch` | — | off | Repeat the loop: after a pass that ends quiet, wait `--interval` seconds and run another pass, until SIGINT or SIGTERM. Holds `runner.lock` the whole time. |
-| `--interval` | `SECONDS` | `30` | Whole seconds between passes, 5 to 3600. Only with `--watch`: without it, or with a value outside 5 to 3600, the command is a usage error (`2`). |
+`run` takes no option. The old form `radian arc run --watch`, with or without `--interval`, is refused: it is now `radian arc serve`. It exits `2` with one stderr line, ``radian arc: `run --watch` is now `radian arc serve` ``.
 
 One pass repeats until a pass changes nothing, in this order:
 
@@ -651,7 +648,7 @@ A gate that wrote `running` and then died is restarted, and the death is counted
 The next pass applies a wrapper's early failure (a refused argument, a held worktree lock) the same way, so its concurrency slot is free at once (see [Reconcile](arc-gate.md#reconcile)).
 
 A one-shot `run` starts its work and exits without waiting for it; the next `run` collects the result.
-Use `--watch` to keep advancing.
+Use [`radian arc serve`](#radian-arc-serve) to keep advancing.
 
 `run` writes one line per transition on stdout, in order, and flushes it when the loop makes the transition; it does not wait for the command to end.
 A started worker prints `<attempt id> started -> doing.running`; a started gate prints `<attempt id> verify started (pid <pid>)`, an approval prints `<task> approved -> review.integrating (<attempt id>)`, an integration prints `<task> integration started (pid <pid>)`, a conflict rework prints `<task> conflict with main -> todo.ready (automatic rework)`, or when the task has had `limits.max_conflict_rework` conflict reworks in a row, `<task> conflict with main -> review.rework_pending: <reason>`, an automatic reverify prints `<task> main moved (<short sha>) -> auto reverify`, or when the task used its count, `<task> main moved (<short sha>) -> auto reverify limit reached: <reason>`, and the follow-up task arc proposes when a task merges prints `<new task id> proposed (follow-ups from <task id>)` (see [The review's follow-up](arc-gate.md#the-reviews-follow-up)).
@@ -672,6 +669,8 @@ A pass that wrote no transition line starts its summary with `no transition`.
 A file that changed outside arc is skipped and named in the summary; it does not stop the loop.
 A plan whose budget or automatic-rework limit paused it is named with its reason.
 
+`run` exits `0` when it ran to quiet, even when a task failed; `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
+
 ### `loop.log`
 
 Every loop appends the lines it prints to `.radian/arc/loop.log`: the transition lines, the summary, and each `radian arc: <message>` error line, one line each with an RFC 3339 UTC timestamp and a space in front, flushed as it prints. Stdout and stderr are unchanged.
@@ -679,12 +678,18 @@ The file is not a second output: it is what the arc TUI's ticker and log view re
 At the first line after the file reaches 1 MiB it is renamed to `loop.log.1` (replacing an older one) and a new `loop.log` starts, so one old file is kept.
 A write error on `loop.log` prints one `radian arc: cannot write …` line for the whole process, and the loop goes on.
 
-### `--watch`
+## `radian arc serve`
 
-`radian arc run --watch` repeats the pass. After every pass (which always ends quiet) it waits `--interval` seconds, then runs another pass; it holds `runner.lock` for the whole loop, so a second `run` exits `4` as usual, and a TUI opened meanwhile starts nothing and names this loop's pid.
+`radian arc serve` is the scheduling loop: it takes `runner.lock`, repeats the pass `run` makes, and holds the lock for its whole life.
+After every pass (which always ends quiet) it waits `--interval` seconds, then runs another pass, until SIGINT or SIGTERM; a second `run` or `serve` exits `4` as usual, and a TUI opened meanwhile starts nothing and names this loop's pid.
+
+| Flag | Value | Default | What it does |
+|---|---|---|---|
+| `--interval` | `SECONDS` | `30` | Whole seconds between passes, 5 to 3600. A value outside that range is a usage error (`2`). |
+
 It is a loop, not a daemon: nothing supervises it, and while it is not running nothing advances until a person (or the TUI) starts one. Quitting a TUI that started it leaves it running.
 
-With `--watch`, the summary is printed only when it differs from the summary the loop printed last, so a quiet loop does not repeat the same lines every interval. Every transition line is still printed when it happens.
+The summary is printed only when it differs from the summary the loop printed last, so a quiet loop does not repeat the same lines every interval. Every transition line is still printed when it happens.
 
 A pass that returns an error prints one `radian arc: <message>` line and the loop waits its interval and runs the next pass; the lock and every state file stay as they are.
 A one-shot `run` prints the same line and exits `1` instead.
@@ -700,7 +705,7 @@ A running worker is left alone: it is a separate process with its own limits and
 A running gate is signalled and gets `[limits] cancel_grace_secs` before SIGKILL, and so is one whose record is still `started` while it holds the gate lock; the gate forwards the signal to the stage it is running (the `commands` shell or the review session), waits for it, and exits without a record; once it is gone its record becomes `interrupted`, so a gate that did not finish is started again by the next loop as unverified and counts no death, and the verdicts it already wrote are reused, unless it exited before writing any record at all: then the next pass reports it and starts no gate while its inputs are unchanged (see [the gate run](arc-gate.md#the-gate-run)).
 The loop then prints the summary, releases `runner.lock`, and exits `0`.
 
-It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or SIGTERM with `--watch`; `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
+It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or SIGTERM; `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
 
 ## `radian arc mcp`
 
@@ -723,7 +728,7 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
-The TUI never holds `runner.lock` and runs no pass. When it opens, it starts `radian arc run --watch` with the default interval as a detached process if no loop holds the lock; `R` starts one the same way while none runs.
+The TUI never holds `runner.lock` and runs no pass. When it opens, it starts `radian arc serve` with the default interval as a detached process if no loop holds the lock; `R` starts one the same way while none runs.
 The header shows `loop ● running (pid <n>)` for any holder, `loop ◌ starting` until a start's lock appears, and `loop ○ stopped` when none runs; a failed start adds one footer line with its reason and exit code.
 The newest transition line `loop.log` gained since the TUI opened is the footer's ticker, and `L` opens a view of the last 500 lines.
 `q` and SIGTERM close the TUI and nothing else: a loop it started keeps running, and an attempt it left running is reconciled by the next loop.
