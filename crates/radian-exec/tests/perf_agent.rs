@@ -66,12 +66,7 @@ impl Agent {
         let start = Instant::now();
         // Hermetic like the other harnesses: a fresh `~/.radian` root and `HOME`, and no
         // `RADIAN_CONFIG`, so a perf run can never read the user's real config file.
-        let home = std::env::temp_dir().join(format!(
-            "agent-perf-home-{}-{:?}",
-            std::process::id(),
-            std::time::Instant::now()
-        ));
-        std::fs::create_dir_all(&home).unwrap();
+        let home = common::process_dir("agent-perf-home");
         let mut child = Command::new(bin())
             .arg("exec")
             .args(args)

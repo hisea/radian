@@ -11,6 +11,93 @@
 //! test passed against the previous build.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, Once};
+
+// ---------- scratch directories ----------
+
+static DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A unique directory under the system temp dir, removed on drop.
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    pub fn new(label: &str) -> Self {
+        let n = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "radian-exec-long-session-{}-{label}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TempDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A unique directory under `$TMPDIR`, removed when the test process exits. Under nextest
+/// every test is its own process, so that is the end of the test; the spawned `radian` child
+/// writes its HOME, sessions and cache inside it, so they go with it.
+pub fn process_dir(prefix: &str) -> PathBuf {
+    process_dir_in(&std::env::temp_dir(), prefix)
+}
+
+/// [`process_dir`] under an explicit base (a short `/tmp` keeps the control socket path under
+/// `SUN_LEN` on macOS).
+pub fn process_dir_in(base: &Path, prefix: &str) -> PathBuf {
+    let n = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let path = base.join(format!("{prefix}-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    EXIT_DIRS.lock().unwrap().push(path.clone());
+    EXIT_HOOK.call_once(|| unsafe {
+        // SAFETY: the callback only touches this module's registry.
+        atexit(remove_exit_dirs);
+    });
+    path
+}
+
+static EXIT_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static EXIT_HOOK: Once = Once::new();
+
+extern "C" fn remove_exit_dirs() {
+    if let Ok(dirs) = EXIT_DIRS.lock() {
+        for dir in dirs.iter().rev() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn atexit(callback: extern "C" fn()) -> i32;
+}
+
+#[cfg(not(unix))]
+unsafe fn atexit(_callback: extern "C" fn()) -> i32 {
+    0
+}
 
 /// `target/debug` (or `target/release`), where the workspace build puts the binaries.
 ///

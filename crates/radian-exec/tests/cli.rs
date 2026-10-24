@@ -8,7 +8,6 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use agent_provider_anthropic::testing as anth;
@@ -119,15 +118,7 @@ fn echo_then(final_text: &str) -> Vec<Reply> {
 /// directory; a test that needs two processes to share sessions passes `--session-dir`
 /// explicitly, which overrides this.
 fn fresh_session_dir() -> PathBuf {
-    static SESSION_DIRS: AtomicU64 = AtomicU64::new(0);
-    // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
-    let dir = PathBuf::from("/tmp").join(format!(
-        "radian-exec-sessions-{}-{}",
-        std::process::id(),
-        SESSION_DIRS.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::process_dir("radian-exec-sessions")
 }
 
 /// Writes `credentials/auth.json` (0600) under `root` for the key env vars in `envs` (ADR
