@@ -1306,10 +1306,10 @@ const WORKER_BRIEF_LIMIT: u64 = 32 * 1024;
 /// The repository's standing worker instructions (ADR 0048 decision 7): the section every
 /// brief ends with, and the note the attempt record carries when the file is not appended.
 /// The file is read when the attempt's brief is composed, so an edit takes effect at the next
-/// attempt. A missing file and one that trims to nothing are no section and no note. A file
-/// over [`WORKER_BRIEF_LIMIT`], one that is not UTF-8, and a read error are skipped with a
-/// note; the attempt still runs. The worker never reads the file itself: its sandbox denies
-/// `.radian/arc/`, and the content reaches it on stdin.
+/// attempt. A missing file and one that trims to nothing are no section and no note. A path
+/// that is not a regular file, a file over [`WORKER_BRIEF_LIMIT`], one that is not UTF-8, and a
+/// read error are skipped with a note; the attempt still runs. The worker never reads the file
+/// itself: its sandbox denies `.radian/arc/`, and the content reaches it on stdin.
 fn worker_brief(arc: &Path) -> (Option<String>, Option<String>) {
     let path = arc.join(crate::store::WORKER_BRIEF_FILE);
     // One handle for the checks and the read: `metadata()` on the handle describes the file
