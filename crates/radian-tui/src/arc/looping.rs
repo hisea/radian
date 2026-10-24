@@ -132,40 +132,62 @@ impl LoopStarter {
     /// `loop.log` when there is one.
     pub fn poll(&mut self) -> Option<String> {
         if self.status == LoopStatus::Starting {
-            let probed = probe(&self.store);
-            if probed != LoopStatus::Stopped {
-                // The child is the loop now; the header names it from the lock. Dropping the
-                // handle neither waits for it nor signals it.
-                self.child = None;
-                self.started_at = None;
-                self.status = probed;
-                return None;
-            }
-            if self.started_at.is_none_or(|at| at.elapsed() < self.timeout) {
-                return None;
-            }
-            let code = self
-                .child
-                .as_mut()
-                .and_then(|child| child.try_wait().ok().flatten())
-                .and_then(|status| status.code());
-            self.child = None;
-            self.started_at = None;
-            self.status = LoopStatus::Stopped;
-            let reason = match code {
-                Some(code) => format!("the loop exited {code}"),
-                None => "the loop is running but holds no runner.lock".to_owned(),
-            };
-            return Some(match loop_log::last_error_line(&self.store) {
-                Some(line) => format!("{reason}: {line}"),
-                None => reason,
-            });
+            return self.poll_start();
         }
         let probed = probe(&self.store);
         if probed != self.status {
             self.status = probed;
         }
         None
+    }
+
+    /// Polls a start in flight without taking `runner.lock`: a probe takes the lock for an
+    /// instant, and a loop that is still starting sees it held and exits `4`. The child's own
+    /// pid in the file (written after it locks) is the signal that it took the lock; an exited
+    /// child is the failure, explained by its exit code and the last `radian arc:` line.
+    fn poll_start(&mut self) -> Option<String> {
+        let Some(child) = self.child.as_mut() else {
+            self.status = LoopStatus::Stopped;
+            return None;
+        };
+        if let Ok(Some(status)) = child.try_wait() {
+            let reason = match status.code() {
+                Some(code) => format!("the loop exited {code}"),
+                None => "the loop exited after a signal".to_owned(),
+            };
+            self.child = None;
+            self.started_at = None;
+            self.status = LoopStatus::Stopped;
+            return Some(match loop_log::last_error_line(&self.store) {
+                Some(line) => format!("{reason}: {line}"),
+                None => reason,
+            });
+        }
+        let pid = self.child.as_ref().map(Child::id);
+        if let Some(pid) = pid
+            && self.store.runner_lock_pid() == Some(pid)
+        {
+            // The child is the loop now; the header names it from the lock. Dropping the
+            // handle neither waits for it nor signals it.
+            self.child = None;
+            self.started_at = None;
+            self.status = LoopStatus::Elsewhere(Some(pid));
+            return None;
+        }
+        if self.started_at.is_none_or(|at| at.elapsed() < self.timeout) {
+            return None;
+        }
+        let reason = match pid {
+            Some(pid) => format!("the loop ({pid}) is running but holds no runner.lock"),
+            None => "the loop is running but holds no runner.lock".to_owned(),
+        };
+        self.child = None;
+        self.started_at = None;
+        self.status = LoopStatus::Stopped;
+        Some(match loop_log::last_error_line(&self.store) {
+            Some(line) => format!("{reason}: {line}"),
+            None => reason,
+        })
     }
 
     fn spawn(&self) -> std::io::Result<Child> {

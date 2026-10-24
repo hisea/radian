@@ -225,18 +225,23 @@ fn quitting_while_a_start_is_in_flight_leaves_the_loop_running() {
     starter.start().expect("the loop starts");
     // The TUI quits before its next probe: nothing waits on the child, and nothing signals it.
     drop(starter);
+    // The loop writes its pid after it locks; a probe that takes the lock here would race
+    // the starting loop's own attempt and could make it exit `4`.
     let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if store.try_runner_lock().is_ok_and(|lock| lock.is_none()) {
-            break;
+    let pid = loop {
+        if let Some(pid) = store.runner_lock_pid() {
+            break pid;
         }
         assert!(
             Instant::now() < deadline,
             "the loop never took runner.lock after the TUI quit"
         );
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let pid = store.runner_lock_pid().expect("the loop wrote its pid");
+    };
+    assert!(
+        store.try_runner_lock().unwrap().is_none(),
+        "the loop holds runner.lock"
+    );
     let guard = KillOnDrop(Some(pid));
     assert!(alive(pid), "quitting the TUI killed the loop it started");
     let _ = Command::new("kill")
@@ -342,8 +347,7 @@ fn a_start_that_exits_at_once_is_stopped_with_its_exit_code() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let mut starter =
-        LoopStarter::with_program_and_timeout(store, script, Duration::from_millis(300));
+    let mut starter = LoopStarter::with_program_and_timeout(store, script, Duration::from_secs(10));
     starter.start().expect("the process is spawned");
     assert_eq!(starter.status(), LoopStatus::Starting);
     let deadline = Instant::now() + Duration::from_secs(5);
