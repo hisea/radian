@@ -60,6 +60,28 @@ With `worker.rework_session = "fresh"` it is `<task>-<attempt>`; with `resume` i
 Every review run of an attempt has a session of its own, named `<attempt id>-review-<run>`.
 When a journal of that name already exists (a gate was started again for the same attempt), the stage uses `<attempt id>-review-<run>-<k>` with the smallest free `k` and writes the run's logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log` under the attempt's `logs/`; the review verdict's `review_session_ids` lists the ids it used.
 
+## `worker-brief.md`
+
+`<repository>/.radian/arc/worker-brief.md` is the repository's standing worker instructions.
+It is optional.
+[`radian arc init`](arc.md#radian-arc-init---track) writes it with this default when the file does not exist, and never overwrites a file you edited:
+
+```text
+Work only on the current branch.
+Commit everything that belongs to the change, and end with `git status --short` printing nothing.
+Put scratch files only under `.radian/`.
+Never change `.radian/arc/`.
+End with a short report: the commits, the tests you ran, the decisions you made, and any open questions.
+```
+
+When the file exists and is not empty after trimming, every brief a worker receives ends with its content: after the `merge-main` conflict section, the hand-off section of a fresh rework, and the task's own brief.
+That covers a first attempt, a rework (fresh or resume), and a follow-up task arc wrote.
+The wrapper reads the file when it composes an attempt's brief, so an edit takes effect at the next attempt; no restart is needed.
+A missing file and one that is empty after trimming change nothing.
+
+A file over 32 KiB (32,768 bytes), a file that is not UTF-8, and a read error are not appended: the attempt runs without the section, its record carries one line `worker-brief.md skipped: <reason>`, and [`radian arc show`](arc.md#radian-arc-show-id---json) prints it as `attempt_note`.
+The worker never reads the file itself: its sandbox denies `.radian/arc/`, and the wrapper puts the content on the worker's stdin.
+
 ## Plan and task files
 
 A plan file is `plans/<id>.md`; a task file is `tasks/<id>.md`.
@@ -173,6 +195,7 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | Path | What it holds |
 |---|---|
 | `config.toml` | The settings above. |
+| `worker-brief.md` | The repository's standing worker instructions: the last section of every worker brief. `init` writes a default once and never overwrites it. |
 | `plans/<id>.md` | One plan: its fields and the request text. |
 | `tasks/<id>.md` | One task: its fields and the brief. |
 | `ledger/plans/<id>.json` | The `state_version` and SHA-256 arc last wrote for that plan. |

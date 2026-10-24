@@ -978,6 +978,34 @@ fn session_id_in(path: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The notes the wrapper recorded for one attempt (ADR 0048 decision 7): a line such as
+/// `worker-brief.md skipped: <reason>`. The wrapper writes them to `execution.json`; an
+/// attempt that ended before that record was written leaves none, and so does a worker-less
+/// `reverify` attempt. `show` prints every one.
+pub fn attempt_notes(store: &Store, task: &str, attempt: u32) -> Vec<String> {
+    [
+        run_dir(store, task, attempt).join("execution.json"),
+        run_dir(store, task, attempt).join("attempt_finished.json"),
+    ]
+    .into_iter()
+    .find_map(|path| notes_in(&path))
+    .unwrap_or_default()
+}
+
+/// The `notes` array one record carries, when the file exists, parses, and holds one.
+fn notes_in(path: &Path) -> Option<Vec<String>> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let notes: Vec<String> = value
+        .get("notes")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    (!notes.is_empty()).then_some(notes)
+}
+
 /// The `Result.cost.micros` of one attempt's jsonl stream, when it wrote one.
 fn session_total_micros(store: &Store, task: &str, attempt: u32) -> Option<u64> {
     let text = fs::read_to_string(run_dir(store, task, attempt).join("result.jsonl")).ok()?;
