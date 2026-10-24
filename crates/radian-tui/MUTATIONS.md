@@ -2868,3 +2868,23 @@ that copy (never `git checkout`); the named test ran alone with
 | TK0097-M1 | a `/docs/arc/gate.html` link goes back to `/docs/arc-gate.html` | ✅ 1 failed | `site_docs::the_hand_written_pages_only_link_generated_docs` (`site/arc.html: link '/docs/arc-gate.html' names 'arc-gate.html', which the generator does not write`) |
 
 1/1 caught.
+## TK0082: `Esc` goes back one level, `q` quits everywhere (2026-10-24, branch `work/TK0082-tui-esc-back-q-quit`)
+
+`Esc` used to quit on the plans page, and every page and overlay kept its own `Esc` arm; `q` did
+nothing in a confirmation float. `Esc` now walks one level down from whatever is innermost open
+(`go_back` in `arc/mod.rs`) and never quits, and `q` quits from every page and overlay but the
+reject note, where it is a letter. Only a view that is on screen is a level: the merge page's
+command log and the board's finished list are skipped while another page hides them (M4, M5).
+Each mutation was applied by hand to `crates/radian-tui/src/arc/mod.rs`, the named test was run
+with `cargo nextest run -p radian-tui --locked --profile sandbox`, and the file was restored
+from a copy under `.radian/mut/` with `cp`, then compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0082-M1 | `go_back` returns `Quit` at the plans page's top level, as `Esc` used to | ✅ 9 failed | `arc_back::esc_at_the_top_level_does_not_quit_and_says_q_quits` (`Esc at the top level never quits`, `left: Quit`); every other test that walks to the top also failed |
+| TK0082-M2 | `Esc` in the task column leaves the focus there (the `self.focus = Focus::Plans` line is deleted) | ✅ 3 failed | `arc_back::esc_moves_the_focus_from_the_task_column_to_the_plan_column` (`focus` stays `Tasks`) |
+| TK0082-M3 | a `q` in the reject note quits (`KeyCode::Char('q') => self.quit_key()` in the reject arm) | ✅ 2 failed | `arc_back::q_in_the_reject_note_is_typed_then_esc_walks_out`, `arc_merge::a_q_in_the_reject_note_is_typed_and_does_not_quit` |
+| TK0082-M4 | `go_back` closes the board's finished list without asking whether the board is the page (`self.page == Page::Board &&` removed) | ✅ 1 failed | `arc_back::esc_from_a_task_opened_in_the_finished_list_keeps_the_finished_list` (the hidden list closed and the task page stayed open) |
+| TK0082-M5 | `go_back` closes a merge command log without asking whether the merge page is the page (`self.page == Page::Merge &&` removed) | ✅ 1 failed | `arc_back::esc_from_the_board_does_not_consume_a_hidden_merge_log` (the board stayed open after consuming the invisible log) |
+
+5/5 caught.
