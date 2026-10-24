@@ -3556,3 +3556,91 @@ fn the_plans_page_order_does_not_change_the_claim_order() {
     );
     assert_eq!(claim_before, vec![p0, p3], "P0 is claimed first");
 }
+
+/// The brief tab wraps at word boundaries (the renderer's Markdown wrap), never cutting a word
+/// that fits on a line, and a list item's continuation line keeps its indent.
+#[test]
+fn the_brief_wraps_at_word_boundaries_and_keeps_a_list_indent() {
+    let fixture = Fixture::new();
+    let id = fixture.id("d").to_owned();
+    fixture
+        .store
+        .change_task(&id, |task| {
+            task.body = "This is a task whose branch touches fewer files than that, and the \
+                         selected file is here.\n\n- a list item whose text is long enough to \
+                         wrap over more than one line at this width\n"
+                .to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    let text = screen(&mut app, 60, 40);
+    // The word before the break stays whole and the next line starts with the next word.
+    assert!(
+        text.contains("touches fewer files than\n"),
+        "a word that fits is not cut:\n{text}"
+    );
+    assert!(
+        text.contains("that, and the selected file is here."),
+        "the sentence continues on the next line:\n{text}"
+    );
+    assert!(
+        !text.contains("than t\n") && !text.contains("files t\n"),
+        "no word is split across rows:\n{text}"
+    );
+    // The list's continuation rows line up under the item text, two cells past the marker.
+    let rows: Vec<&str> = text.lines().collect();
+    let first = rows
+        .iter()
+        .position(|row| row.contains("- a list item"))
+        .expect("the list item is drawn");
+    let prefix = &rows[first][..rows[first].find("- a list item").unwrap()];
+    assert!(
+        rows[first + 1].starts_with(&format!("{prefix}  ")),
+        "the continuation keeps the marker width: {:?}\n{text}",
+        rows[first + 1]
+    );
+}
+
+/// The conversation tab draws the task frame's rail on every row the transcript occupies,
+/// down to the bottom corner, with a journal taller than the frame.
+#[test]
+fn the_conversation_tab_rails_every_transcript_row() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    let sessions = fixture.scratch.path("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = format!("{task}-2");
+    write_execution(&fixture, &task, 2, &session);
+    write_journal(&sessions, &session, "the worker said hello", "and replied");
+    for index in 2..42 {
+        append_journal(&sessions, &session, index, &format!("filler-{index}"));
+    }
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), Some(sessions));
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    let text = screen(&mut app, 120, 30);
+    let rows: Vec<&str> = text.lines().collect();
+    let tab = rows
+        .iter()
+        .position(|row| row.contains("brief  ·  conversation"))
+        .expect("the tab row is drawn");
+    let bottom = rows
+        .iter()
+        .rposition(|row| row.contains("╰──"))
+        .expect("the frame ends");
+    for (index, row) in rows.iter().enumerate().take(bottom).skip(tab) {
+        assert_eq!(
+            row.chars().nth(2),
+            Some('│'),
+            "row {index} is missing the frame rail: {row:?}\n{text}"
+        );
+    }
+}

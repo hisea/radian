@@ -2888,3 +2888,22 @@ from a copy under `.radian/mut/` with `cp`, then compared with `cmp`.
 | TK0082-M5 | `go_back` closes a merge command log without asking whether the merge page is the page (`self.page == Page::Merge &&` removed) | ✅ 1 failed | `arc_back::esc_from_the_board_does_not_consume_a_hidden_merge_log` (the board stayed open after consuming the invisible log) |
 
 5/5 caught.
+
+## TK0083: the log view fills the body, the brief wraps by words, the conversation tab rails its rows (2026-10-24, branch `work/TK0083-tui-log-view-and-brief-wrap`)
+
+The `L` view started at the stored index (`log_scroll`, the last line while following) and drew
+only the lines it had, so one line showed and the page under it showed through; the brief's
+Markdown wrap broke inside a word that did not fit the rest of the row; and the conversation tab
+drew its transcript below the frame without the `│` rail. Each mutation was applied by hand to
+the named file, backed up under `.radian/mut/` and restored from that copy (never
+`git checkout`); the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0083-M1 | `ArcApp::log_start` returns `log_scroll` clamped to the last line again (`arc/mod.rs`) | ✅ 2 failed | `arc_loop::the_log_view_fills_the_body_with_the_last_lines_and_follows_its_end` (the first row is line 119, not 86), `arc_loop::a_short_log_leaves_the_rest_of_its_body_cleared` (only line 1 is drawn) |
+| TK0083-M2 | `draw_loop_log` does not clear the body area (`arc/render.rs`) | ✅ 2 failed | `arc_loop::the_log_view_fills_the_body_with_the_last_lines_and_follows_its_end`, `arc_loop::a_short_log_leaves_the_rest_of_its_body_cleared` (the plans page's `the page under the log` shows to the right of a log line) |
+| TK0083-M3 | `md_wrap_marked` breaks at the column again instead of at the last space (`blocks/markdown.rs`) | ✅ 2 failed | `blocks::layout::tests::a_word_that_does_not_fit_moves_whole_to_the_next_row` (`["aaa bbb", "b ccc"]` for `["aaa", "bbbb", "ccc"]`), `arc_tui::the_brief_wraps_at_word_boundaries_and_keeps_a_list_indent` (`files than` is drawn as `files t` / `han`) |
+| TK0083-M4 | `draw_conversation` draws no rail on the transcript's rows (`arc/render.rs`) | ✅ 1 failed | `arc_tui::the_conversation_tab_rails_every_transcript_row` (row 6 has a space where the rail belongs) |
+
+4/4 caught.

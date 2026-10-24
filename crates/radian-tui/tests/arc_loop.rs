@@ -501,3 +501,121 @@ fn the_log_view_keeps_the_last_500_lines_and_follows_the_end() {
         app.log.last()
     );
 }
+
+/// The `L` view covers the whole body area below the header and fills it: opened at the end it
+/// shows the last lines that fit, the newest at the bottom, scrolling up shows earlier lines,
+/// and scrolling back to the bottom follows new lines again. The page under it never shows
+/// through a short log.
+#[test]
+fn the_log_view_fills_the_body_with_the_last_lines_and_follows_its_end() {
+    let scratch = Scratch::new("log-fill");
+    let store = store_at(&scratch.path("repo"));
+    // A plan under the overlay: a row of it must not show through the log's clear body.
+    store
+        .add_plan("under", "the page under the log", "a request\n")
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store.clone(), Some(scratch.path("sessions")));
+    let mut tail = LoopLogTail::new(&store);
+    let path = scratch.path("repo/.radian/arc/loop.log");
+    let mut log = String::new();
+    for n in 0..120 {
+        log.push_str(&format!("2026-10-24T10:00:00.000Z line {n}\n"));
+    }
+    fs::write(&path, &log).unwrap();
+    app.apply_loop_log(tail.read());
+
+    app.on_key(&key(KeyCode::Char('L')));
+    let text = screen(&mut app, 80, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let top = rows
+        .iter()
+        .position(|row| row.contains("╭─ log"))
+        .expect("the log frame is drawn");
+    let bottom = rows
+        .iter()
+        .rposition(|row| row.contains("╰──"))
+        .expect("the log frame ends");
+    // A 40-row terminal: the header takes 2 rows, the footer 2, and the frame's own top and
+    // bottom one each.
+    assert_eq!(bottom - top - 1, 34, "the frame fills the body:\n{text}");
+    assert!(
+        rows[top + 1].contains("line 86"),
+        "the first row is the first of the last page:\n{text}"
+    );
+    assert!(
+        rows[bottom - 1].contains("line 119"),
+        "the newest line is the last one:\n{text}"
+    );
+    for row in &rows[top..=bottom] {
+        assert!(
+            !row.contains("LANS")
+                && !row.contains("priority")
+                && !row.contains("retro")
+                && !row.contains("the page under"),
+            "the page under the log shows through: {row:?}\n{text}"
+        );
+    }
+
+    // `k` scrolls one line up from the last page, `j` back down to its end.
+    app.on_key(&key(KeyCode::Char('k')));
+    let text = screen(&mut app, 80, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let top = rows.iter().position(|row| row.contains("╭─ log")).unwrap();
+    let bottom = rows.iter().rposition(|row| row.contains("╰──")).unwrap();
+    assert!(
+        rows[top + 1].contains("line 85") && rows[bottom - 1].contains("line 118"),
+        "scrolling up shows earlier lines:\n{text}"
+    );
+    app.on_key(&key(KeyCode::Char('j')));
+    // At the bottom again, a new line is followed.
+    log.push_str("2026-10-24T10:00:01.000Z line 120\n");
+    fs::write(&path, &log).unwrap();
+    app.apply_loop_log(tail.read());
+    let text = screen(&mut app, 80, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let bottom = rows.iter().rposition(|row| row.contains("╰──")).unwrap();
+    assert!(
+        rows[bottom - 1].contains("line 120"),
+        "the end follows a new line:\n{text}"
+    );
+}
+
+/// A two-line log draws its two lines and leaves the rest of the body cleared (never the page
+/// under it).
+#[test]
+fn a_short_log_leaves_the_rest_of_its_body_cleared() {
+    let scratch = Scratch::new("log-short");
+    let store = store_at(&scratch.path("repo"));
+    // A plan under the overlay: a row of it must not show through the log's clear body.
+    store
+        .add_plan("under", "the page under the log", "a request\n")
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store.clone(), Some(scratch.path("sessions")));
+    let mut tail = LoopLogTail::new(&store);
+    let path = scratch.path("repo/.radian/arc/loop.log");
+    fs::write(
+        &path,
+        "2026-10-24T10:00:00.000Z line 0\n2026-10-24T10:00:01.000Z line 1\n",
+    )
+    .unwrap();
+    app.apply_loop_log(tail.read());
+    app.on_key(&key(KeyCode::Char('L')));
+    let text = screen(&mut app, 80, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let top = rows.iter().position(|row| row.contains("╭─ log")).unwrap();
+    let bottom = rows.iter().rposition(|row| row.contains("╰──")).unwrap();
+    assert!(rows[top + 1].contains("line 0"), "{text}");
+    assert!(rows[top + 2].contains("line 1"), "{text}");
+    for row in &rows[top + 3..bottom] {
+        assert!(!row.contains("line"), "a short log draws no line: {row:?}");
+    }
+    for row in &rows[top..=bottom] {
+        assert!(
+            !row.contains("LANS")
+                && !row.contains("priority")
+                && !row.contains("retro")
+                && !row.contains("the page under"),
+            "the page under the log shows through: {row:?}\n{text}"
+        );
+    }
+}
