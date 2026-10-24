@@ -6,7 +6,7 @@
 //! refuses a plan or task that changed outside arc with that reason in the tool error. That
 //! is why the lead can add tasks while a scheduling loop runs (decision 5).
 //!
-//! The six tools are in [`tools`]; there is no tool to confirm, start, merge, reject,
+//! The seven tools are in [`tools`]; there is no tool to confirm, start, merge, reject,
 //! change the auto level, or approve (decision 11).
 
 pub mod tools;
@@ -96,6 +96,26 @@ impl ArcServer {
                 )
                 .map_err(reason)?;
                 store::cli::show_json(&self.store, &plan).map_err(reason)
+            }
+            "update_task" => {
+                let task = args.required_string("task")?;
+                let title = args.optional_string("title")?;
+                let brief = args.optional_string("brief")?;
+                let after = args.optional_strings_opt("after")?;
+                let allow_noop = args.optional_flag("allow_noop")?;
+                let extra_stages = args.optional_strings_opt("extra_stages")?;
+                args.finish()?;
+                store::plan_ops::update_task(
+                    &self.store,
+                    &task,
+                    title.as_deref(),
+                    brief.as_deref(),
+                    after,
+                    allow_noop,
+                    extra_stages,
+                )
+                .map_err(reason)?;
+                store::cli::show_json(&self.store, &task).map_err(reason)
             }
             "add_rework" => {
                 let task = args.required_string("task")?;
@@ -232,14 +252,24 @@ impl Args {
     }
 
     fn optional_bool(&mut self, key: &str) -> Result<bool, String> {
+        Ok(self.optional_flag(key)?.unwrap_or(false))
+    }
+
+    /// [`Args::optional_bool`] that keeps `false` apart from an absent argument.
+    fn optional_flag(&mut self, key: &str) -> Result<Option<bool>, String> {
         match self.take(key) {
-            Some(Value::Bool(value)) => Ok(value),
+            Some(Value::Bool(value)) => Ok(Some(value)),
             Some(_) => Err(format!("invalid arguments: `{key}` must be true or false")),
-            None => Ok(false),
+            None => Ok(None),
         }
     }
 
     fn optional_strings(&mut self, key: &str) -> Result<Vec<String>, String> {
+        Ok(self.optional_strings_opt(key)?.unwrap_or_default())
+    }
+
+    /// [`Args::optional_strings`] that keeps an empty list apart from an absent argument.
+    fn optional_strings_opt(&mut self, key: &str) -> Result<Option<Vec<String>>, String> {
         match self.take(key) {
             Some(Value::Array(values)) => values
                 .into_iter()
@@ -249,11 +279,12 @@ impl Args {
                         "invalid arguments: `{key}` must be a list of strings"
                     )),
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some),
             Some(_) => Err(format!(
                 "invalid arguments: `{key}` must be a list of strings"
             )),
-            None => Ok(Vec::new()),
+            None => Ok(None),
         }
     }
 
