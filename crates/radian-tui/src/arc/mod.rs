@@ -1675,22 +1675,32 @@ impl ArcApp {
 
     /// `+`/`-` on the plans page: the selected plan's priority one step, `+` toward `P0` and
     /// `-` toward `P5` (ADR 0048 decision 3). At an end the footer says so and nothing is
-    /// queued; the next refresh draws the new value.
+    /// queued; the next refresh draws the new value. A cancelled plan is queued even at an end,
+    /// so the CLI's refusal is what the footer shows.
     fn step_priority(&mut self, delta: i32) -> ArcKey {
         let Some(view) = self.selected_plan() else {
             return ArcKey::Ignored;
         };
         let plan = view.plan.item.id.clone();
         let current = view.plan.item.priority().to_owned();
-        self.step_plan_priority(&plan, &current, delta)
+        let cancelled = view.plan.item.is_cancelled();
+        self.step_plan_priority(&plan, &current, cancelled, delta)
     }
 
     /// [`ArcApp::step_priority`] for one plan: the board steps the selected card's plan.
-    fn step_plan_priority(&mut self, plan: &str, current: &str, delta: i32) -> ArcKey {
+    /// `cancelled` is [`radian_arc::store::model::PlanFile::is_cancelled`] of that plan: a
+    /// cancelled plan queues the step even at an end, so the CLI's refusal is what shows.
+    fn step_plan_priority(
+        &mut self,
+        plan: &str,
+        current: &str,
+        cancelled: bool,
+        delta: i32,
+    ) -> ArcKey {
         let last = PLAN_PRIORITIES.len() as i32 - 1;
         let rank = (priority_rank(current) as i32).min(last);
         let level = PLAN_PRIORITIES[(rank + delta).clamp(0, last) as usize].to_owned();
-        if level == current {
+        if level == current && !cancelled {
             self.result = Some(ResultLine {
                 text: format!("plan {plan} is already {current}"),
                 failed: false,
@@ -1873,7 +1883,8 @@ impl ArcApp {
                 };
                 let plan = view.plan.item.id.clone();
                 let current = view.plan.item.priority().to_owned();
-                self.step_plan_priority(&plan, &current, -1)
+                let cancelled = view.plan.item.is_cancelled();
+                self.step_plan_priority(&plan, &current, cancelled, -1)
             }
             KeyCode::Char('-') => {
                 let Some((view, _)) = self.board_card() else {
@@ -1881,7 +1892,8 @@ impl ArcApp {
                 };
                 let plan = view.plan.item.id.clone();
                 let current = view.plan.item.priority().to_owned();
-                self.step_plan_priority(&plan, &current, 1)
+                let cancelled = view.plan.item.is_cancelled();
+                self.step_plan_priority(&plan, &current, cancelled, 1)
             }
             // The merge page's own keys land there: a card in `review.*` opens it, and its `M`,
             // `r` and `v` then act on the task (ADR 0048 §11). `m` is the task page's key.

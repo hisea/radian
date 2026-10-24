@@ -163,8 +163,71 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
     Line::from(left)
 }
 
-/// One footer hint: the key, what it does, and whether the page can act on it now (weak).
-type Hint = (&'static str, &'static str, bool);
+/// One footer hint: the key, what it does, whether the page can act on it now (weak), and how
+/// readily the row drops it when the terminal is narrow.
+struct Hint {
+    key: &'static str,
+    note: &'static str,
+    weak: bool,
+    /// `2` is dropped before `1`; `0` stays and the row clips instead.
+    drop: u8,
+}
+
+impl Hint {
+    fn new(key: &'static str, note: &'static str, weak: bool) -> Self {
+        Self {
+            key,
+            note,
+            weak,
+            drop: 1,
+        }
+    }
+
+    /// A view key the header already names: the first hint to go when the row is narrow.
+    fn secondary(key: &'static str, note: &'static str, weak: bool) -> Self {
+        Self {
+            key,
+            note,
+            weak,
+            drop: 2,
+        }
+    }
+
+    /// Always kept: the row clips rather than lose it.
+    fn essential(key: &'static str, note: &'static str, weak: bool) -> Self {
+        Self {
+            key,
+            note,
+            weak,
+            drop: 0,
+        }
+    }
+}
+
+/// Drops the hints that matter least until the row fits `width`, then draws them in order with
+/// the three-cell gap between them. The two-cell marker column is part of the row.
+fn fit_hints(mut hints: Vec<Hint>, width: usize) -> Vec<Hint> {
+    let row_width = |hints: &[Hint]| {
+        let body: usize = hints
+            .iter()
+            .map(|hint| hint.key.width() + 1 + hint.note.width())
+            .sum();
+        body + hints.len().saturating_sub(1) * 3
+    };
+    while 2 + row_width(&hints) > width {
+        let Some(index) = hints
+            .iter()
+            .enumerate()
+            .filter(|(_, hint)| hint.drop > 0)
+            .max_by_key(|(index, hint)| (hint.drop, *index))
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        hints.remove(index);
+    }
+    hints
+}
 
 fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
     let theme = &app.theme;
@@ -204,18 +267,18 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
             };
             let priority = plan.is_some_and(|plan| !plan.is_cancelled());
             vec![
-                ("↑↓", "select", false),
-                ("enter", "task", false),
-                ("c", "confirm", !can_confirm),
-                ("x", "cancel", !have_item),
-                ("a", "auto", !confirmed),
-                ("p", "pause", !auto_on),
-                ("s", "start", app.start_blocker().is_some()),
-                ("+/-", "priority", !priority),
-                ("g", "list", false),
-                ("f", "view", false),
-                ("tab", "pages", false),
-                ("q", "quit", false),
+                Hint::new("↑↓", "select", false),
+                Hint::new("enter", "open task", false),
+                Hint::new("c", "confirm", !can_confirm),
+                Hint::new("x", "cancel", !have_item),
+                Hint::new("a", "auto", !confirmed),
+                Hint::new("p", "pause", !auto_on),
+                Hint::new("s", "start", app.start_blocker().is_some()),
+                Hint::new("+/-", "priority", !priority),
+                Hint::secondary("g", "graph/list", false),
+                Hint::secondary("f", "filter", false),
+                Hint::secondary("tab", "pages", false),
+                Hint::essential("q", "quit", false),
             ]
         }
         Page::Board => {
@@ -273,37 +336,42 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 page.phase.starts_with("review.") || page.phase.starts_with("done.")
             });
             vec![
-                ("j/k", "scroll", false),
-                ("f", "follow", false),
-                ("[ ]", "attempt", false),
-                ("n/p", "file", false),
-                ("h/l", "tab", false),
-                ("tab", "tabs", false),
-                ("m", "merge page", !applies),
-                ("esc", "back", false),
-                ("q", "quit", false),
+                Hint::new("j/k", "scroll", false),
+                Hint::new("f", "follow", false),
+                Hint::new("[ ]", "attempt", false),
+                Hint::new("n/p", "file", false),
+                Hint::new("h/l", "tab", false),
+                Hint::new("tab", "tabs", false),
+                Hint::new("m", "merge page", !applies),
+                Hint::new("esc", "back", false),
+                Hint::essential("q", "quit", false),
             ]
         }
         Page::Merge => vec![
-            ("M", "merge", false),
-            ("r", "reject with note", false),
-            ("v", "reverify", false),
-            ("↑↓", "command", false),
-            ("enter", "log", false),
-            ("n/p", "file", false),
-            ("esc", "back", false),
-            ("q", "quit", false),
+            Hint::new("M", "merge", false),
+            Hint::new("r", "reject with note", false),
+            Hint::new("v", "reverify", false),
+            Hint::new("↑↓", "command", false),
+            Hint::new("enter", "log", false),
+            Hint::new("n/p", "file", false),
+            Hint::new("esc", "back", false),
+            Hint::essential("q", "quit", false),
         ],
     };
+    let hints = fit_hints(hints, width);
     let mut spans = vec![Span::styled("  ", theme.hint)];
-    for (index, (key, note, weak)) in hints.iter().enumerate() {
+    for (index, hint) in hints.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled("  ", theme.hint));
+            spans.push(Span::styled("   ", theme.hint));
         }
-        let key_style = if *weak { theme.truncation } else { theme.hint };
-        spans.push(Span::styled((*key).to_owned(), key_style));
+        let key_style = if hint.weak {
+            theme.truncation
+        } else {
+            theme.hint
+        };
+        spans.push(Span::styled(hint.key.to_owned(), key_style));
         spans.push(Span::styled(" ", key_style));
-        spans.push(Span::styled((*note).to_owned(), theme.truncation));
+        spans.push(Span::styled(hint.note.to_owned(), theme.truncation));
     }
     Line::from(spans)
 }
@@ -440,7 +508,7 @@ fn plan_list_lines(app: &ArcApp, rows: &[PlanRow], top: usize) -> Vec<Line<'stat
             cost = columns.cost,
         );
         out.push(Line::from(Span::styled(
-            format!("    {}", fit(&details, LEFT_WIDTH as usize - 5)),
+            format!("       {}", fit(&details, LEFT_WIDTH as usize - 8)),
             if cancelled { theme.hint } else { theme.tier },
         )));
         out.push(Line::default());

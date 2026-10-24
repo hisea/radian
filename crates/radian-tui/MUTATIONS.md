@@ -2613,3 +2613,23 @@ working file, the named test was run alone, and the file was restored from a cop
 | TK0066-M2 | `f` only advances with the plan column focused (`KeyCode::Char('f') if self.focus == Focus::Plans`) | ✅ 1 failed | `arc_tui::f_advances_the_view_whichever_column_has_focus` (the press answers `Ignored`, not `Redraw`) |
 
 2/2 caught.
+## TK0070: the plans page's cancel, proposed-task confirm and priority follow-ups (2026-10-24, branch `work/TK0070-tui-cancel-confirm-priority-followups`)
+
+Base `47e2397e` (the branch point). The review of TK0050 found four UI faults: a cancelled plan
+at an end showed `already P0`/`already P5` instead of the CLI's refusal, the plan summary did
+not move under the id, a plan cancel's footer line could cut away the plan, and the footer had
+shortened labels and a tighter gap to fit 120 columns. The footer now keeps the old labels and
+three-cell gap and drops its secondary view hints when the row is narrow. Each mutation was
+applied by hand to the working file, the named test was run alone, and the file was restored
+from a copy under `.radian/mut-bak/` (`git status --short` showed only the intended changes
+afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0070-M1 | a cancelled plan at an end is answered as any plan (`level == current`, without `!cancelled`) | ✅ 1 failed | `arc_merge::a_cancelled_plan_refuses_plus_with_the_cli_message` (`P0 at the end is not queued`) |
+| TK0070-M2 | the plan summary keeps four leading spaces and `LEFT_WIDTH - 5` | ✅ 1 failed | `arc_tui::the_plan_summary_starts_under_the_id` (the summary starts at column 6, not under the id) |
+| TK0070-M3 | a plan cancel joins the CLI's order, plan line last | ✅ 1 failed | `arc_merge::x_on_a_plan_counts_its_open_tasks_and_y_cancels_the_plan` (`the plan line comes first`) |
+| TK0070-M4 | the footer shortens `enter open task`/`g graph/list`/`f filter` and its gap to two cells | ✅ 1 failed | `arc_tui::the_hints_keep_their_old_labels_and_drop_when_narrow` (the wide row shows `enter task`, `g list` and `f view`) |
+| TK0070-M5 | `fit_hints` is bypassed, so the row clips instead of dropping a hint | ✅ 1 failed | `arc_tui::the_hints_keep_their_old_labels_and_drop_when_narrow` (at 120 columns the clipped row loses `q quit`) |
+
+5/5 caught.
