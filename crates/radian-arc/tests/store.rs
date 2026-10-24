@@ -857,11 +857,11 @@ fn the_manual_quotes_the_default_worker_brief() {
         .parent()
         .and_then(Path::parent)
         .expect("the crate lives in <root>/crates/radian-arc");
-    let page = read(&root.join("docs/user/arc-files.md"));
+    let page = read(&root.join("docs/user/arc/files.md"));
     let quoted = format!("```text\n{}\n```", store::WORKER_BRIEF_DEFAULT);
     assert!(
         page.contains(&quoted),
-        "docs/user/arc-files.md must quote WORKER_BRIEF_DEFAULT in a `text` block"
+        "docs/user/arc/files.md must quote WORKER_BRIEF_DEFAULT in a `text` block"
     );
 }
 

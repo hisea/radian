@@ -12,7 +12,7 @@
 - `arc-gate.sh quick|full`: the arc gate. `quick` is fmt, clippy, the two builds,
   and nextest for the crates changed since `origin/main` plus `radian-tui`; `full`
   is `verify.sh`, here or on `$ARC_GATE_HOST` inside `$ARC_GATE_TREE`. Both are
-  documented in `docs/user/arc-gate.md`, including the absolute-path trust rule.
+  documented in `docs/user/arc/gate.md`, including the absolute-path trust rule.
 - `temp-check.sh`: the temp file system check, sourced by both scripts (it is not
   a step). It reads the file system that holds `${TMPDIR:-/tmp}` with `df` and
   fails, before any build, when fewer than 50,000 inodes or fewer than 2 GiB are
@@ -22,7 +22,7 @@
   inode check and keeps the space check; a negative free space fails it. The two
   limits are `RADIAN_VERIFY_MIN_FREE_INODES` and `RADIAN_VERIFY_MIN_FREE_GIB`;
   their type, default, allowed values and when they take effect are in
-  [`docs/user/arc-gate.md`](../docs/user/arc-gate.md#a-gate-for-this-repository).
+  [`docs/user/arc/gate.md`](../docs/user/arc/gate.md#a-gate-for-this-repository).
 
 ## Release
 

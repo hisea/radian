@@ -15,7 +15,7 @@ fn page_names() -> Vec<&'static str> {
         .collect()
 }
 
-/// The docs root lists every page in directory shape.
+/// The docs root lists every page in directory shape, the arc pages under `arc/`.
 #[tokio::test]
 async fn the_docs_root_lists_every_page() {
     let dir = TempDir::new("docs-root");
@@ -28,11 +28,51 @@ async fn the_docs_root_lists_every_page() {
         for name in page_names() {
             assert!(body.contains(name), "{root} lists {name}:\n{body}");
         }
+        assert!(
+            body.contains("arc/tui.md"),
+            "{root} lists an arc page under its directory:\n{body}"
+        );
         let info = structured(&output);
         assert_eq!(
             info.get("total_entries").and_then(|v| v.as_u64()),
             Some(page_names().len() as u64),
             "{info:?}"
+        );
+    }
+}
+
+/// A bundled-manual directory opens its `index.md`; a page under it reads by its path.
+#[tokio::test]
+async fn a_docs_directory_opens_its_index() {
+    let dir = TempDir::new("docs-dir");
+    let tools = tools(dir.path());
+    let page = call(&tools, "read", json!({"path": "radian://docs/arc/mcp.md"}))
+        .await
+        .expect("a nested docs page reads");
+    let page_text = text(&page);
+    let embedded = radian_coding::docs::find("arc/mcp.md").expect("arc/mcp.md exists");
+    assert!(
+        embedded
+            .lines()
+            .next()
+            .is_some_and(|line| page_text.contains(line)),
+        "the nested page's first line is in the read:\n{page_text}"
+    );
+    let index = radian_coding::docs::find("arc/index.md").expect("arc/index.md exists");
+    for path in ["radian://docs/arc/", "radian://docs/arc"] {
+        let output = call(&tools, "read", json!({"path": path}))
+            .await
+            .expect("a docs directory opens its index");
+        let body = text(&output);
+        assert!(
+            body.contains("# arc"),
+            "{path} returns arc/index.md:\n{body}"
+        );
+        assert!(
+            index
+                .lines()
+                .any(|line| line.starts_with("# arc") && body.contains(line)),
+            "{path} returns the index page"
         );
     }
 }
@@ -359,22 +399,13 @@ fn the_manual_names_the_image_limits_from_the_code() {
     }
 }
 
-/// The hand-written table matches `docs/user/` on disk.
+/// The hand-written table matches `docs/user/` on disk, including the pages in subdirectories.
 #[test]
 fn the_table_matches_docs_user_on_disk() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let dir = manifest.join("../../docs/user");
     let mut on_disk: Vec<(String, String)> = Vec::new();
-    let entries = std::fs::read_dir(&dir).expect("docs/user exists");
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let text = std::fs::read_to_string(&path).expect("page reads");
-        on_disk.push((name, text));
-    }
+    collect_pages(&dir, &dir, &mut on_disk);
     on_disk.sort_by(|a, b| a.0.cmp(&b.0));
     let embedded: Vec<(String, String)> = radian_coding::docs::DOCS
         .iter()
@@ -388,6 +419,32 @@ fn the_table_matches_docs_user_on_disk() {
     for ((disk_name, disk_text), (tab_name, tab_text)) in on_disk.iter().zip(embedded.iter()) {
         assert_eq!(disk_name, tab_name, "page name matches");
         assert_eq!(disk_text, tab_text, "page {disk_name} text matches");
+    }
+}
+
+/// Every `*.md` page under `dir`, named by its path relative to `base` with `/` separators.
+fn collect_pages(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<(String, String)>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("{} reads: {error}", dir.display()))
+        .flatten()
+        .collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pages(&path, base, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path
+            .strip_prefix(base)
+            .expect("a page is under docs/user")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = std::fs::read_to_string(&path).expect("page reads");
+        out.push((name, text));
     }
 }
 

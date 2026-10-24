@@ -93,7 +93,7 @@ radian arc                             # open the arc TUI
 arc needs a git working tree with an `origin` remote you can push the main branch to.
 `radian arc init` checks the credential, the remote, a dry-run push and the sandbox, and warns about each one that fails.
 The gate's commands go in `.radian/arc/config.toml`.
-The commands, the gate and the files arc keeps are in [`docs/user/arc.md`](docs/user/arc.md), [`arc-gate.md`](docs/user/arc-gate.md), [`arc-files.md`](docs/user/arc-files.md), [`arc-mcp.md`](docs/user/arc-mcp.md) and [`arc-tui.md`](docs/user/arc-tui.md).
+The commands, the gate and the files arc keeps are in [`docs/user/arc/index.md`](docs/user/arc/index.md), [`arc/gate.md`](docs/user/arc/gate.md), [`arc/files.md`](docs/user/arc/files.md), [`arc/mcp.md`](docs/user/arc/mcp.md) and [`arc/tui.md`](docs/user/arc/tui.md).
 
 ## Install
 

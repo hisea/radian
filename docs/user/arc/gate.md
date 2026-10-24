@@ -4,18 +4,18 @@ description: The arc gate: verification stages, the review stage, failures, retr
 
 # arc: the gate
 
-This page covers the gate run and its failures; the commands are in [`arc`](arc.md), the scheduling loop is in [`arc-loop`](arc-loop.md), and the files arc keeps are in [`arc-files`](arc-files.md).
+This page covers the gate run and its failures; the commands are in [`arc`](index.md), the scheduling loop is in [`arc/loop`](loop.md), and the files arc keeps are in [`arc/files`](files.md).
 
 ## The gate run
 
 A task in `review.verifying` is checked against `verified_sha`, which is the pushed `head_sha` of the task's current attempt.
-`start` runs the gate in the same process after a pushed attempt, and `radian arc run` starts it as a background process: a pass starts the gate and returns, and a later pass reads its verdicts and moves the task ([`run`](arc-loop.md#radian-arc-run)).
+`start` runs the gate in the same process after a pushed attempt, and `radian arc run` starts it as a background process: a pass starts the gate and returns, and a later pass reads its verdicts and moves the task ([`run`](loop.md#radian-arc-run)).
 A gate writes its verdict files and one record, `runs/<task>/gate.json`; it never changes the task's state itself.
 
 - arc fetches `[repository] remote` first.
   The remote's `work/<task>` must still be `head_sha`.
   When it differs, arc records the reason in the attempt's `review.json` and the task stays in `review.verifying`; `show` prints the reason.
-  The fetch is a git call that talks to a remote, so [`limits.git_remote_timeout_secs`](arc-files.md#configtoml) bounds it; a fetch that runs out fails the gate with `git fetch timed out after <n> s`.
+  The fetch is a git call that talks to a remote, so [`limits.git_remote_timeout_secs`](files.md#configtoml) bounds it; a fetch that runs out fails the gate with `git fetch timed out after <n> s`.
 - The stages are the configured profile's (`gate.profile`, then `gate.profiles.<name>.stages`), in order, plus the task's `extra_stages`.
   `human` is your approval and does not run here.
   When the profile lists both `commands` and `review`, those two start at the same time; every other stage keeps its order.
@@ -68,7 +68,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   The gate process holds `gates/<task>.gate.lock` from the moment a pass starts it, so the pass that follows starts no second gate for the same commit.
   A signalled or killed gate releases the lock; the next pass starts it again, and the verdicts already written are reused.
   Stages of different tasks still queue on their own locks: one `commands` stage at a time, one checkout per stage, and the review stage has its own.
-  Up to [`gate.review.concurrency`](arc-files.md#configtoml) review sessions run at once (default `2`, `1` or more); each takes one of the locks `gates/review-0.lock` … `gates/review-<n-1>.lock` and the checkout of that slot, so no two sessions share a checkout. With `1`, a second review waits for the first.
+  Up to [`gate.review.concurrency`](files.md#configtoml) review sessions run at once (default `2`, `1` or more); each takes one of the locks `gates/review-0.lock` … `gates/review-<n-1>.lock` and the checkout of that slot, so no two sessions share a checkout. With `1`, a second review waits for the first.
   The `review` stage is a read-only session, so it does not wait for another task's `commands`.
 - The gate's own output is `runs/<task>/gate.log`.
 - `runs/<task>/gate.json` holds one record, with the attempt it ran for.
@@ -78,7 +78,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 - Before a pass starts a gate it writes to that record the inputs the gate will read and how many times a gate already died for them (`status` `started`), and names the gate process there once it exists; the gate replaces the status with `running`, keeps the inputs and the count, and an integration gate is the same.
   A gate that exits before writing any record leaves `started`: the next pass records `no_record` for that attempt with those inputs, reports it in the summary as `<task> verify cannot run: its gate exited without a record`, starts no gate while they are unchanged, and does not count the pass as changed. A new `head_sha`, a new main or a changed `config.toml` allows one new start.
 - A gate that wrote `running` and then died is restarted, and the death is counted: the record's `deaths` goes up by one for that attempt and those inputs.
-  When the count would pass [`limits.max_gate_deaths`](arc-files.md#configtoml) (integer, default `2`, `0` or more), the pass starts no gate and records `died` instead, which behaves exactly like `no_record`: the summary prints `<task> verify cannot run: its gate died after it started`, `show` prints the same text as the `rework_reason`, no gate starts while the inputs are unchanged, and the pass does not count as changed.
+  When the count would pass [`limits.max_gate_deaths`](files.md#configtoml) (integer, default `2`, `0` or more), the pass starts no gate and records `died` instead, which behaves exactly like `no_record`: the summary prints `<task> verify cannot run: its gate died after it started`, `show` prints the same text as the `rework_reason`, no gate starts while the inputs are unchanged, and the pass does not count as changed.
   A new `head_sha`, a new main or a changed `config.toml` allows one new start and begins again at 0 deaths; `0` stops at the first death, so the gate is started `1 + max_gate_deaths` times at most.
   The count needs a digest on both sides: when the gate could not be planned, there is nothing to compare and the gate is started again as before.
 - A gate that the scheduling loop stops itself is `interrupted`, not a death.
@@ -127,8 +127,8 @@ When a rework round's review still fails with blocking items and the plan's `aut
 A review that failed with `review_blocking` returns the task to `todo.ready` with a brief arc writes, the way a conflict with main does, when the plan's `auto` is not `off`.
 The heading is `## Rework <n> (review)`, with the lead's `add_rework` numbering.
 The text says the review found these items, to fix them and nothing else, to append commits and not to rebase; it lists the blocking items, one per line, as `[level] path:line text`; and it names the review verdict to read for detail.
-The worker cannot read `runs/`, so the wrapper copies the verdict into the worker's worktree at `.radian/arc-verdicts/<task>/<attempt>/<file>` and puts that worktree-relative path in the brief; the task file keeps the absolute path. A verdict that is missing, is not a regular file, is larger than 1 MiB, or cannot be copied stays in the brief as it is, and the attempt record carries `verdict copy skipped: <path>: <reason>`, which [`radian arc show`](arc.md#radian-arc-show-id-json) prints as `attempt_note`.
-It counts as an automatic rework: it raises `auto_rework`, and `max_auto_rework` pauses the plan (see the [`limits.max_auto_rework` row](arc-files.md#configtoml)); the task then stays in `review.rework_pending`.
+The worker cannot read `runs/`, so the wrapper copies the verdict into the worker's worktree at `.radian/arc-verdicts/<task>/<attempt>/<file>` and puts that worktree-relative path in the brief; the task file keeps the absolute path. A verdict that is missing, is not a regular file, is larger than 1 MiB, or cannot be copied stays in the brief as it is, and the attempt record carries `verdict copy skipped: <path>: <reason>`, which [`radian arc show`](index.md#radian-arc-show-id-json) prints as `attempt_note`.
+It counts as an automatic rework: it raises `auto_rework`, and `max_auto_rework` pauses the plan (see the [`limits.max_auto_rework` row](files.md#configtoml)); the task then stays in `review.rework_pending`.
 With `auto` `off`, the task stays in `review.rework_pending` and waits for you, as before.
 `radian arc run` prints `<task> review blocking -> todo.ready (automatic rework)`.
 
@@ -147,7 +147,7 @@ When at least one item is left, and `[gate.review] propose_followups` is `true` 
 - the slug is `<merged task slug>-followups`, cut to the 48-character slug limit;
 - the title is `Follow-ups from <task id>'s review`;
 - its `after` is the merged task;
-- its phase is `todo.proposed`, so the loop never claims it until you confirm it (see [`confirm`](arc.md#radian-arc-confirm-id)).
+- its phase is `todo.proposed`, so the loop never claims it until you confirm it (see [`confirm`](index.md#radian-arc-confirm-id)).
 
 Its brief is fixed: one line saying the items are from the review of `<task id>`, which is now merged, and that each item is to be fixed or left with a one-line reason in the final answer; then the items grouped by the round they came from, each group headed `From review <n> (attempt <n>):`, one item per line as `[level] path:line text`; then the path of every review verdict.
 The worker gets each verdict as a copy at `.radian/arc-verdicts/<task>/<attempt>/<file>` in its worktree, one copy for every task and attempt the brief names, and the task file keeps the absolute paths; the skip line is the same as for a review rework ([A failed review](#a-failed-review)).
@@ -156,7 +156,7 @@ An item whose `text` starts with a tag that repeats its own level prints the lev
 A task gets at most one follow-up.
 A follow-up task gets no follow-up of its own: when the merged task's title and `after` are the ones arc gives a follow-up, arc proposes nothing, and the review's unfixed items stay in its verdict and in the task's final report.
 A task merged without a review stage, or with no item left, gets none.
-With `propose_followups` `false` arc adds none (see the [`propose_followups` row](arc-files.md#configtoml)); the lead can still add a task to the plan with MCP `add_task`.
+With `propose_followups` `false` arc adds none (see the [`propose_followups` row](files.md#configtoml)); the lead can still add a task to the plan with MCP `add_task`.
 `radian arc run` prints `<new task id> proposed (follow-ups from <task id>)`.
 
 A follow-up arc cannot add (the plan's file changed outside arc) does not undo the merge: `radian arc merge` prints it as a `warning:` line after the merge, and `radian arc run` reports it in the summary.
@@ -171,7 +171,7 @@ The text names the main commit (short sha) and the stage, lists the conflicted p
 Every other reason, and a conflict without `merge-main`, keeps `review.rework_pending`; a `reverify` conflict takes the automatic path above.
 It never raises `auto_rework`, never pauses the plan, and never sends the task to `failed.exhausted` by itself: a conflict rework is not a retry, but it keeps the task's `retry_count` instead of resetting it, so a worker that keeps failing behind repeated conflict reworks still uses up `max_attempts`.
 
-A run of conflicts is bounded by [`limits.max_conflict_rework`](arc-files.md#configtoml) (default `3`).
+A run of conflicts is bounded by [`limits.max_conflict_rework`](files.md#configtoml) (default `3`).
 It is how many conflict reworks arc writes in a row: while it has written fewer than the limit, the conflict gets the brief above; once it has written the limit, arc writes no brief and the task stays in `review.rework_pending`.
 `radian arc run` then prints `<task> conflict with main -> review.rework_pending: <reason>`, and `show` prints the same text as part of the `rework_reason`.
 An attempt that does not end in a conflict sets the run back to `0`, and so does your own rework (`add_rework`), which is you stepping in; arc's review and conflict reworks do not.
@@ -182,7 +182,7 @@ An attempt that does not end in a conflict sets the run back to `0`, and so does
 ### A command failure and a moved main
 
 A `commands` stage, or an integration key command, can fail because of the tree rather than the task: a flaky test, or a main that is broken itself.
-When the remote main is no longer the main the failing verdict recorded, `radian arc run` re-verifies the task by itself, the way `radian arc reverify` does: it claims a new attempt without a worker and starts its gate in the background ([`run`](arc-loop.md#radian-arc-run)).
+When the remote main is no longer the main the failing verdict recorded, `radian arc run` re-verifies the task by itself, the way `radian arc reverify` does: it claims a new attempt without a worker and starts its gate in the background ([`run`](loop.md#radian-arc-run)).
 
 It applies only when all of these hold:
 
@@ -195,7 +195,7 @@ A review stage failure, a conflict, a reject note, a failed delivery check, and 
 Two guards stop a loop:
 
 - each `(head_sha, remote main)` pair is re-verified by itself at most once, and the pairs are kept in `runs/<task>/auto_reverify.json`. A main that does not move runs nothing again.
-- [`limits.max_auto_reverify`](arc-files.md#configtoml) counts the automatic reverifies of one task. When the count is used up, the task stays in `review.rework_pending`, `radian arc run` prints one line with the reason, and `show` prints the same text as the `rework_reason`. The plan is not paused.
+- [`limits.max_auto_reverify`](files.md#configtoml) counts the automatic reverifies of one task. When the count is used up, the task stays in `review.rework_pending`, `radian arc run` prints one line with the reason, and `show` prints the same text as the `rework_reason`. The plan is not paused.
 
 An automatic reverify starts no worker, is not a retry (it changes neither `retry_count` nor `max_attempts`), and does not count toward `auto_rework`.
 A hand `radian arc reverify` ignores both guards and does not use up the count.
@@ -265,21 +265,21 @@ The class is recorded in `runs/<task>/attempts/<attempt id>/attempt_result.json`
 | `reverify` (no worker: `radian arc reverify`) | `reverify` | `review.verifying`, verified at once |
 
 A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 10 seconds for the first retry, doubled for each later one, capped at 5 minutes.
-`max_attempts` (the task's, else [`limits.max_attempts`](arc-files.md#configtoml)) counts retries, not attempts: every retry raises the task's `retry_count`, and when the count has reached the limit the task goes to `failed.exhausted` instead.
+`max_attempts` (the task's, else [`limits.max_attempts`](files.md#configtoml)) counts retries, not attempts: every retry raises the task's `retry_count`, and when the count has reached the limit the task goes to `failed.exhausted` instead.
 Every rework sets `retry_count` back to `0` (the lead's brief and arc's review rework), so the new instructions get their own retries.
 A conflict rework keeps the count: it continues the same line of work, and the failures between conflicts then use up `max_attempts` even while a conflict keeps returning the task to `todo.ready`.
 The attempt number is never compared with the limit; `show` prints `retry_count`.
 A `reverify` attempt is not a retry: it changes neither `retry_count` nor the limit.
 `todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; the scheduling loop and `start` do this before they claim.
-`start` also claims a `todo.retry_wait` task whose time has not come, without waiting for it (see [`start`](arc.md#radian-arc-start-task)).
+`start` also claims a `todo.retry_wait` task whose time has not come, without waiting for it (see [`start`](index.md#radian-arc-start-task)).
 
 Every attempt of a task runs in a worker session.
-With [`worker.rework_session`](arc-files.md#configtoml) at `fresh` (the default) each attempt has a session of its own, `<task>-<attempt>`, and none is ever resumed; an attempt after the first gets the hand-off section (see [`start`](arc.md#radian-arc-start-task)).
+With [`worker.rework_session`](files.md#configtoml) at `fresh` (the default) each attempt has a session of its own, `<task>-<attempt>`, and none is ever resumed; an attempt after the first gets the hand-off section (see [`start`](index.md#radian-arc-start-task)).
 With `resume` the session id is the task id: the first attempt that reaches the model creates it, and every later attempt, a retry or a rework, continues it.
 An attempt that failed before the model started (a missing credential, a worktree that could not be prepared) leaves no session, so the next attempt creates it.
 A bad `worker.exec_args` entry no longer gets that far: `start`, `run` and `confirm` refuse it before the claim.
 The attempt's session id is decided by the claim, which writes it to `attempts/<task>/<attempt>/start.json` before the worker starts; the wrapper writes the session it used to `attempts/<task>/<attempt>/identity.json` when it spawns the worker and to `runs/<task>/attempts/<attempt id>/execution.json` when it ends.
-A reader takes the first of those records that names one: `execution.json`, then `identity.json`, then `start.json`, so the worker's journal is found by its session id from the claim on, while the attempt still runs (see [`arc-files`](arc-files.md)).
+A reader takes the first of those records that names one: `execution.json`, then `identity.json`, then `start.json`, so the worker's journal is found by its session id from the claim on, while the attempt still runs (see [`arc/files`](files.md)).
 
 Cost is counted per attempt.
 `Result.cost` is the session total, so the attempt's cost is the difference from the previous attempt's session total when both ran in the same session (`resume`), and the whole session total when the attempt has a session of its own (`fresh`).
