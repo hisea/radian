@@ -82,6 +82,9 @@ copy.
 | TK0036-M1 | run the `commands`/`review` pair one after the other again (`run_pair` calls the two stages instead of the two threads) | `review::the_commands_and_review_stages_start_before_either_ends` (the commands wait times out and fails the round) | ✅ failed |
 | TK0036-M2 | let a review failure decide the round when `commands` also failed (`finish_verification` swaps the two in its scan order) | `review::a_commands_failure_decides_the_round_when_the_review_fails_too` (the task returns to `todo.ready` with a review brief) | ✅ failed |
 | TK0036-M3 | forward the gate's stop to only the first running stage (`request_stop` signals one slot) | `run::a_signal_to_the_gate_stops_both_stages_of_the_pair` (one stage outlives the 3 s deadline) | ✅ failed |
+| TK0035-M1 | clear a refused integration record again (the old `_` arm) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the record is gone after the first pass) | ✅ failed |
+| TK0035-M2 | drop the wall-time bound on the worktree-setup fetch (call `git::run` without the clock) | `run::a_hanging_fetch_ends_the_attempt_at_the_wall_time` (40 s deadline: `start` never returned) | ✅ failed |
+| TK0035-M3 | sleep a whole `POLL` slice inside each heartbeat interval again | `work::a_one_second_stall_window_keeps_three_beats_inside_it` (mean gap 414 ms) | ✅ failed |
 | TK0044-M1 | take a single review lock again (`SlotLock::acquire` with 1 slot) | `review::two_tasks_reviews_overlap_with_concurrency_two` (the two reviews' intervals do not overlap) | ✅ failed |
 | TK0044-M2 | apply the `[gate.review.first]` settings to every review (force `first = true`) | `review::a_first_review_uses_the_first_settings_and_a_rework_uses_the_normal_ones` (the rework session times out and the fake records no third run) | ✅ failed |
 | TK0044-M3 | skip the owned-flag check for `gate.review.first.exec_args` | `review::a_first_exec_arg_the_review_stage_owns_is_refused` (the session runs and the stage passes) | ✅ failed |
@@ -267,6 +270,26 @@ nothing. M3 leaves the stage that was not signalled alive past the test's 3 s de
 handler is the only SIGTERM source, because the wait loop now only escalates to SIGKILL after
 `cancel_grace_secs`.
 
+## TK0051 (a critical review item always blocks; an unplaced item is not demoted)
+
+TK0051-M1–M4 were run against `a7833564`, each applied to the committed file, restored from a
+copy under `.radian/mut/` with `cp`, and compared byte for byte with `cmp`; `git status --short`
+was empty afterwards. M1 disables the `critical` early return in `ReworkRound::keeps`, so the
+window rule moves a critical item again: the unit test finds it in `suggestions` and the stage
+test passes the round and reaches `awaiting_human`. M2 returns `false` for an item with no
+`file` or no `line`, so an unplaced item is demoted again: the `vague` item of the mixed unit
+test moves, and all three items of the unplaced test move. M3 writes `level: None` on a moved
+item, so the demoted `major` item loses its grade in the verdict and in the follow-up brief.
+M4 keeps only the newest `review` verdict in `review_verdicts` (the follow-up's input), so every
+earlier round goes unread and the merge proposes no follow-up. It was re-run on the merged
+follow-up code, after TK0045 replaced the single-verdict read.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0051-M1 | let the window rule move a `critical` item again (`if false && level == CRITICAL`) | ✅ 2 failed | `gate::review::tests::a_critical_item_blocks_wherever_it_is`; `review::a_critical_item_far_from_the_rework_and_the_previous_items_still_blocks` |
+| TK0051-M2 | demote an item without a `file` or a `line` again (the `let … else` returns `false`) | ✅ 2 failed | `gate::review::tests::an_item_without_a_place_stays_blocking_at_its_level`; `gate::review::tests::a_pre_existing_item_is_moved_and_marked` |
+| TK0051-M3 | drop the `level` of a moved item (`level: None` in `mark_pre_existing`) | ✅ 2 failed | `gate::review::tests::a_major_item_outside_the_windows_is_moved_and_keeps_its_level`; `review::a_demoted_major_item_reaches_the_followup_at_its_level` |
+| TK0051-M4 | read only the newest review verdict again (`review_verdicts` keeps just its last entry) | ✅ 3 failed | `review::a_major_item_a_failing_round_demoted_reaches_the_followup`; `review::a_pre_existing_item_from_an_earlier_round_is_carried`; `review::a_followup_holds_every_round_grouped_and_drops_a_repeat` |
 ## TK0045 (the follow-up holds every review round)
 
 TK0045-M1–M4 were run on the branch's working code before the code commit, each from a copy
@@ -296,3 +319,13 @@ the working file, restored from a copy under `.radian/mut/` with `cp`, and compa
 |---|---|---|---|
 | TK0048-M1 | the claim omits `session_id` from `start.json` | ✅ 2 failed | `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (the running attempt answers `None`, and `show --json` prints `null`) |
 | TK0048-M2 | `attempt_session_id` reads `execution.json` only again | ✅ 3 failed | `attempt::a_session_id_is_read_from_the_identity_record_when_execution_is_missing`, `attempt::a_claim_makes_the_attempts_session_id_known_before_the_worker_ends`, `attempt::a_resume_claim_makes_the_task_session_known_before_the_worker_ends` (no `execution.json` exists before the wrapper ends) |
+## TK0035 (a refused integration, the wrapper setup and the heartbeat)
+
+TK0035-M1–M3 were run against `29d77904`, each applied to the committed file, restored from a
+copy under `.radian/mut/` with `cp`, and compared byte for byte with `cmp`, with
+`cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` before every
+run (the run tests drive the `radian` binary). M1 clears the refused record before the input
+comparison, so the first pass drops it and the test's record assertion fails (the second pass
+would then start the same gate again). M2 replaces the fetch's clock with an unbounded
+`git::run`, so `start` never returns and the test's 40-second deadline panics. M3 is the old
+heartbeat loop; the mean gap over three beats is 414 ms, where a 1 s window needs 333 ms.

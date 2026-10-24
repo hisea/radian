@@ -1756,8 +1756,6 @@ pub struct MergeContext {
     pub main_branch: String,
     pub main_ref: String,
     pub profile: crate::gate::Profile,
-    /// The phase after this call: `integrating`, or `ready_to_merge` on a resume.
-    pub phase: String,
 }
 
 /// Checks the approval's preconditions, writes the approval when the task is
@@ -1890,11 +1888,6 @@ fn prepare_merge(
         main_branch,
         main_ref,
         profile,
-        phase: if task.phase == "awaiting_human" {
-            "integrating".to_owned()
-        } else {
-            task.phase
-        },
     })
 }
 
@@ -2215,6 +2208,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
             .filter(|record| record.kind == "integration");
         // How many deaths this attempt and these inputs already have (ADR 0048 decision 10).
         let mut deaths = 0;
+        let label = attempt_label(&task)?;
         if let Some(record) = &record {
             match record.status.as_str() {
                 // A gate that wrote `running` and is gone died; arc's own stop (`interrupted`)
@@ -2226,7 +2220,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                             store,
                             task_id,
                             "integration",
-                            &attempt_label(&task)?,
+                            &label,
                             record,
                             inputs.as_deref(),
                         )? {
@@ -2245,7 +2239,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                 // wrote nothing: a new start with the same inputs would only repeat it.
                 crate::gate::background::STARTED => {
                     if !crate::gate::background::running(store, task_id)
-                        && record.attempt == attempt_label(&task)?
+                        && record.attempt == label
                         && let Some(inputs) = record.inputs.clone()
                     {
                         crate::gate::background::write_no_record(
@@ -2261,18 +2255,30 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                         )));
                     }
                 }
-                crate::gate::background::NO_RECORD | crate::gate::background::DIED => {
+                // A refused gate is reported once, and no new gate starts for this attempt
+                // while the inputs it saw are unchanged: a repeat would rerun the same
+                // refusal every interval. A new attempt, a changed config, a new head or a
+                // new main changes the inputs (ADR 0048 decision 10), as it does for a
+                // verification.
+                crate::gate::background::NO_RECORD
+                | crate::gate::background::DIED
+                | crate::gate::background::REFUSED => {
                     let current = integration_inputs(store, task_id);
-                    let reported = format!(
-                        "{task_id} integration cannot run: {}",
-                        record.text.clone().unwrap_or_else(|| {
-                            crate::gate::background::NO_RECORD_TEXT.to_owned()
-                        })
-                    );
-                    if record.attempt == attempt_label(&task)?
-                        && current.as_deref() == record.inputs.as_deref()
-                    {
-                        return Ok(MergeStep::note(reported));
+                    let same_attempt = record.attempt == label
+                        || record
+                            .attempt
+                            .strip_prefix(&label)
+                            .is_some_and(|rest| rest.starts_with(".i"));
+                    let same_inputs =
+                        record.inputs.is_some() && current.as_deref() == record.inputs.as_deref();
+                    if same_attempt && same_inputs {
+                        let text = record
+                            .text
+                            .clone()
+                            .unwrap_or_else(|| crate::gate::background::NO_RECORD_TEXT.to_owned());
+                        return Ok(MergeStep::note(format!(
+                            "{task_id} integration cannot run: {text}"
+                        )));
                     }
                     // The inputs changed (a new head, a new main, a changed profile), or the
                     // record belongs to an earlier attempt: start one new gate below.
@@ -2288,12 +2294,6 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                                 .clone()
                                 .unwrap_or_else(|| "the integration gate failed".to_owned()),
                         ));
-                    }
-                    if record.status == "refused" {
-                        return Ok(MergeStep::note(format!(
-                            "{task_id} integration cannot run: {}",
-                            record.text.clone().unwrap_or_default()
-                        )));
                     }
                     let path =
                         verdict_path(store.repo(), task_id, &record.attempt, Stage::Integration)
@@ -2326,7 +2326,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
             task_id,
             &crate::gate::background::Start {
                 kind: "integration",
-                attempt: attempt_label(&task)?,
+                attempt: label,
                 inputs: integration_inputs(store, task_id),
                 deaths,
             },

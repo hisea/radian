@@ -2483,3 +2483,18 @@ compared with `cmp`.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0048-M3 | the TUI falls back to the task id even when a session id is known (`let session = id.clone();`) | ✅ 1 failed | `arc_tui::the_conversation_tab_follows_a_running_attempts_journal` (the screen says `no session journal yet` instead of the running worker's lines) |
+## TK0047: the plans page's state view (2026-10-24, branch `work/TK0047-tui-plan-filter`)
+
+Base `76bcb8ba` (the branch point). The plans page lists one of four views and `f` cycles
+them; the header names the view and counts the plans it hides. Each mutation was applied by
+hand to the working file, the named test was run alone with `--profile sandbox
+--no-fail-fast`, and the file was restored from a copy under `.radian/mut-bak/`
+(`git status --short` empty afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0047-M1 | the default view is `all` again (`#[default]` moved from `Active` to `All`) | ✅ 1 failed | `the_default_plans_view_hides_finished_and_cancelled_plans` (`app.filter` is `All`, not `Active`) |
+| TK0047-M2 | `f` skips `cancelled` (`PlanFilter::Done.next()` returns `Active`) | ✅ 1 failed | `f_cycles_the_plan_views_in_order_and_back` (`left: Active`, `right: Cancelled` on the third press) |
+| TK0047-M3 | the selection always jumps to the first plan (`rebuild_visible` sets `plan_sel = 0`) | ✅ 1 failed | `the_selection_stays_on_a_plan_in_both_views_and_moves_to_the_first_otherwise` (`f` to `all` selects `PL0001-first`, not the held `PL0003-retro`) |
+
+3/3 caught.

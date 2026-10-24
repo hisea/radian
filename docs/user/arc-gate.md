@@ -71,7 +71,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 - The gate's own output is `runs/<task>/gate.log`.
 - `runs/<task>/gate.json` holds one record, with the attempt it ran for.
   Its `status` is one of `started`, `running`, `done`, `refused`, `error`, `no_record`, `died` and `interrupted`.
-  A pass applies a `done` record; reports a `refused` one in the summary and starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt); reports an `error` one as an error (exit `1` for a one-shot `run`); and prints the text of a `no_record` or `died` one as the reason the verification cannot run.
+  A pass applies a `done` record; reports a `refused` one in the summary and starts no new gate for that attempt until the inputs change (for verification the branch comes back; for integration a new `head_sha`, a new main or a changed `config.toml`; or `start`/`reverify` claims a new attempt); reports an `error` one as an error (exit `1` for a one-shot `run`); and prints the text of a `no_record` or `died` one as the reason the verification cannot run.
   `radian arc show` keeps printing the recorded reason.
 - Before a pass starts a gate it writes to that record the inputs the gate will read and how many times a gate already died for them (`status` `started`), and names the gate process there once it exists; the gate replaces the status with `running`, keeps the inputs and the count, and an integration gate is the same.
   A gate that exits before writing any record leaves `started`: the next pass records `no_record` for that attempt with those inputs, reports it in the summary as `<task> verify cannot run: its gate exited without a record`, starts no gate while they are unchanged, and does not count the pass as changed. A new `head_sha`, a new main or a changed `config.toml` allows one new start.
@@ -107,9 +107,16 @@ A line is an increment line when it is a new-side line of `git diff <previous sh
 A line that came in only with a merge of main is not in the task's own diff, so it drops out.
 
 arc, not the session, decides whether a blocking item is pre-existing.
-After a rework round's report is parsed, an item is moved to `suggestions` and marked `"pre_existing": true` unless its `file:line` is within 3 lines of an increment line in that file, or it is in the same file as and within 10 lines of a blocking item of the previous review, so an item that was not fixed stays blocking.
-An item with no `file` or no `line` is moved.
+After a rework round's report is parsed, an item is moved to `suggestions` and marked `"pre_existing": true` unless one of these holds:
+
+- its `file:line` is within 3 lines of an increment line in that file;
+- it is in the same file as and within 10 lines of a blocking item of the previous review, so an item that was not fixed stays blocking;
+- its `level` is `critical`: a `critical` item blocks in every round, wherever it is;
+- it has no `file` or no `line`: it stays in `blocking` at its level, because the review prompt asks for both fields and an omission is not evidence that the problem is old.
+
+A moved item keeps its `level` (`major` included), and a `major` item outside both windows is still moved, so the rework is not sent back for a problem it did not touch; `minor` items follow the same window rules.
 The stage passes when no blocking item is left, and the verdict records how many items arc moved as `review_pre_existing`.
+The follow-up task of a merged task carries a moved item at its level (see [The review's follow-up](#the-reviews-follow-up)).
 
 When a rework round's review still fails with blocking items and the plan's `auto` is not `off`, arc writes the next attempt's brief itself (see [A failed review](#a-failed-review)).
 
@@ -125,6 +132,7 @@ With `auto` `off`, the task stays in `review.rework_pending` and waits for you, 
 ### The review's follow-up
 
 When a task reaches `done.merged`, arc reads every `review` verdict of the task, oldest attempt first, and collects every `suggestions` item of every round; the items a rework round moved (marked `pre_existing`) are in `suggestions`.
+Every round is read, not only the newest: a round that failed can carry a demoted item, and a later round can pass with nothing to suggest.
 Nothing from `blocking` is collected: a merged task's blocking items were fixed or the review would not have passed, so a round that only had blocking items contributes nothing.
 
 Two items are the same when their `file`, `line` and `text` are equal after a leading tag that repeats the item's own level is removed and whitespace is collapsed; arc keeps the newest copy.
@@ -288,7 +296,8 @@ Before `start` or `cancel` acts, and after a restart, it reconciles every task i
 - only a failure before those directories exist (a task id that names no path, a directory that cannot be created) leaves no record. That attempt is applied as an infrastructure failure when its heartbeat is older than the stall window, as below;
 - the wrapper's `attempt_finished.json` is present and its token is current: the result is applied;
 - the wrapper's last heartbeat (`attempts/<task>/<attempt>/heartbeat.json`) is younger than the attempt's stall window (its `stall_timeout_secs`, else `[limits] stall_timeout_secs`): the attempt is alive and left alone.
-  The wrapper beats at most every 15 seconds and at least three times inside the attempt's stall window, from the moment the attempt directory exists until both end records are written; it keeps beating while the wrapper sets up the worktree, waits for the model, or checks and pushes the result.
+  The wrapper beats at most every 15 seconds, and at a third of the stall window when that is shorter, so three beats always fit inside the attempt's stall window; the gap between two beats is that interval.
+  It beats from the moment the attempt directory exists until both end records are written; it keeps beating while the wrapper sets up the worktree, waits for the model, or checks and pushes the result.
   When both stall values are `0` the window is three beats, 45 seconds.
   A claim whose wrapper has not beaten yet is judged by its `start.json`;
 - the heartbeat is older than that window and there is no result: the attempt is an `infrastructure` (terminated) failure and the retry rules above apply.
