@@ -842,8 +842,12 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   columns? Open the conversation tab on a task whose worker ran: do the `❯`/thinking/tool blocks
   match the main transcript, and do `j`/`k` and `f` move the way you expect? On the diff tab:
   is the file list's `+N`/`-N` readable, is the second frame's title the path, and does the
-  syntax highlighting help at your width? pty automation asserts the pages, the keys and the
-  marks, not the feel.
+  syntax highlighting help at your width? Open the merge page on a task in `review.awaiting_human`
+  (`m`): do the stage marks, the `on <sha>` column and the `summary` frame read at your width, is
+  the command row's log legible in its float, and does a moved branch (push to `work/<task>`) make
+  every mark weak with the moved row? Press `M` and check that the float says
+  `merge <task> onto main? y/n`; `n` must change nothing. pty automation asserts the pages, the keys,
+  the marks and the footer's result line, not the feel.
 - **radian as a herdr agent** (ADR 0034, slice ④): the pty tests can only watch a fake
   socket, so the real herdr is yours. In a herdr pane (its env sets `HERDR_ENV=1`), start `radian`,
   then from another pane run `herdr agent list` — radian's entry must carry `agent_session` (the

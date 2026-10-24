@@ -9,13 +9,13 @@ It keeps a plan and its tasks as files in the repository, runs each task as a se
 
 This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `priority`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and `run`.
-`radian arc run` is the scheduling loop, and a bare `radian arc` opens the read-only TUI (see [The arc TUI](#the-arc-tui)).
+`radian arc run` is the scheduling loop, and a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [The arc TUI](#the-arc-tui)).
 
 This page holds the `radian arc` commands; the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 ## `radian arc`
 
-`radian arc` with no subcommand opens the read-only TUI; its pages and keys are in [The arc TUI](#the-arc-tui).
+`radian arc` with no subcommand opens the TUI; its pages and keys are in [The arc TUI](#the-arc-tui). The plans and task pages read; the merge page and the owner's keys show the gate's evidence and run the same actions as the CLI.
 Without setup, `radian arc` and every subcommand except `init` refuse with a line that names `radian arc init` and exit `3`; without a terminal, `radian arc` exits `2`.
 
 ## `radian arc init [--track]`
@@ -725,18 +725,41 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The arc TUI
 
-`radian arc` opens a read-only view of plans, tasks, verdicts and journals; it writes no arc state and probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · task · merge` (`merge` disabled), `main <sha>` and loop state.
+`radian arc` opens a view of plans, tasks, verdicts, journals and merges; the plans and task pages write nothing, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · task · merge` (`merge` for a task in `review.*` or `done`), `main <sha>` and loop state.
 
-Plan marks: `✓` (merged, green), `●` (confirmed, accent), `◻` (draft, weak), then id and `auto <level> · <merged>/<total> · <cost>` (`draft · ` first for a draft; `—` when no cost). Frame: `<id> <status> · auto <level> · <n>/<m> merged · <cost>`, then title, tasks: a task after a plan task sits under its first parent (`├─`/`└─`), other parents are `also after <ids>`, roots in plan order, each task once. A row: mark, id, `state.phase` (mark's color), `#attempt`, cost, and `waits <ids>` for an unmerged-parent todo. Marks: `✓` done.merged green, `×` failed red, `●` doing/verifying accent, `!` awaiting_human/rework_pending accent bold (you or the lead acts), `◻` todo weak. Keys: `↑`/`↓` move in the focused column (the plan list, or the task list after `→`), `→`/`←` focus the task list/plan list, `Tab`/`Enter` open the task page (`Tab` on it goes back), `g` toggles the flat list (`after <ids>`), `Esc`/`q`/`Ctrl-C` quit.
+Plan marks: `✓` (merged, green), `●` (confirmed, accent), `◻` (draft, weak), then id and `auto <level> · <merged>/<total> · <cost>` (`draft · ` first for a draft; `—` when no cost). Frame: `<id> <status> · auto <level> · <n>/<m> merged · <cost>`, then title, tasks: a task after a plan task sits under its first parent (`├─`/`└─`), other parents are `also after <ids>`, roots in plan order, each task once. A row: mark, id, `state.phase` (mark's color), `#attempt`, cost, and `waits <ids>` for an unmerged-parent todo. Marks: `✓` done.merged green, `×` failed red, `●` doing/verifying accent, `!` awaiting_human/rework_pending accent bold (you or the lead acts), `◻` todo weak. Keys: `↑`/`↓` move in the focused column (the plan list, or the task list after `→`), `→`/`←` focus the task list/plan list, `Tab`/`Enter` open the task page (`Tab` on it goes back), `g` toggles the flat list (`after <ids>`), `c` confirm a draft plan, `a` cycle the selected plan's auto level `off → run → merge → off` (only a confirmed plan), `p` pause it (`auto off`), `s` start the selected task, `Esc`/`q`/`Ctrl-C` quit. A faint hint means the key cannot act now: `c` needs a draft plan, `a` a confirmed one, `p` an auto level other than `off`, and `s` a `todo.ready` task in a confirmed plan whose `after` tasks are merged. Pressing `s` on a task that cannot start (or `c`/`a` on the wrong plan) puts the reason in the footer and starts nothing.
 
-Task frame: `<id> <state.phase> · attempt <N> · <cost> · plan <id>`, the title, `conversation · diff · attempts` and `attempt 1 2 3` (latest by default; `[`/`]` switch). Conversation: the selected attempt's worker journal through the attach view — the session id in its `execution.json`, or the task id when it wrote none (see [worker sessions](arc-gate.md#failures-retries-and-the-budget)), names `~/.radian/sessions/<session id>.jsonl` (one weak line if none); `j`/`k` scroll, `f` follows. Diff: the merge commit's first-parent diff when merged, else the task's `base_sha..head_sha` (a merge that fast-forwarded main shows the whole branch, not only its last commit); files show `+N`/`-N`, the selected file's diff is a frame titled with its path, `n`/`p` file, `j`/`k` scroll, `f` end. Attempts: each attempt's verdicts (`✓ commands`, `× integration (conflict)`). `h`/`l` (or `←`/`→`) change tab, `[`/`]` attempt, `Tab`/`Esc` back, `q`/`Ctrl-C` quit.
+Task frame: `<id> <state.phase> · attempt <N> · <cost> · plan <id>`, the title, `conversation · diff · attempts` and `attempt 1 2 3` (latest by default; `[`/`]` switch). Conversation: the selected attempt's worker journal through the attach view — the session id in its `execution.json`, or the task id when it wrote none (see [worker sessions](arc-gate.md#failures-retries-and-the-budget)), names `~/.radian/sessions/<session id>.jsonl` (one weak line if none); `j`/`k` scroll, `f` follows. Diff: the merge commit's first-parent diff when merged, else the task's `base_sha..head_sha` (a merge that fast-forwarded main shows the whole branch, not only its last commit); files show `+N`/`-N`, the selected file's diff is a frame titled with its path, `n`/`p` file, `j`/`k` scroll, `f` end. Attempts: each attempt's verdicts (`✓ commands`, `× integration (conflict)`). `h`/`l` (or `←`/`→`) change tab, `[`/`]` attempt, `m` open the merge page (only for a task in `review.*` or `done`), `Tab`/`Esc` back, `q`/`Ctrl-C` quit.
 
-Re-reads the store every 2 s; git runs in worker threads, a frame never waits (`loading…`).
+## The merge page
+
+`m` on the task page (or the `merge` tab) opens the task in an open frame titled `<task> verified <short sha> · attempt <N>`, with the title, then one row per stage of the selected profile in the fixed order `commands`, `mutation`, `review`, `ci`, `human`, `integration`. A row is the mark, the stage name, `on <short sha>` (the task's commit the stage verified), `→ candidate <sha> over main <sha>` when the stage ran on a merge of the task onto main, and `N commands · 5m54s` (`N session · …` for `review`, `approver auto` or `approver owner` for `human`). The `commands` and `integration` rows expand to one row per command (its own mark, the line, its seconds); `↑`/`↓` select a command row and `Enter` opens its log in a scrollable frame (`j`/`k`/`↑`/`↓` scroll it, `f` follows the end, `Esc` closes it).
+
+Marks: `✓` a verdict for the task's commit passed (green), `×` a verdict failed (red, with its reason), `●` the running gate's current stage (accent), `◻` weak — `not in this profile`, or `not run yet`. When `head_sha` no longer equals `verified_sha`, a verdict no longer counts: every mark turns `◻` and a row says `the branch moved: head <sha> is not verified <sha>; the task is back in verification`.
+
+Then a `summary` frame: the `review` stage's `summary` (or a weak `no review stage in this profile`), then its non-empty groups — `blocking` (each item `×`, red), `suggestions` (`•`), `verified` (`✓`, green) — then the task's commits (`• <short sha> <subject>`, newest first). Then the file list and the selected file's diff, exactly as the task page's diff tab (`n`/`p` file, `j`/`k` scroll, `f` end). `Esc` closes the log first, then goes back to the task page; `q`/`Ctrl-C` quit.
+
+## The owner's actions
+
+The TUI's actions are the CLI's own library calls, run in the TUI process; it never runs `radian arc` as a subprocess. While one runs the footer shows a spinner; its result line stays there until the next key — the CLI's own line (`TK0009-reverify done.merged (db2450cd)`), or the error text and exit code the CLI would print (`… (exit 3)`). An action that cannot take `state.lock` shows the CLI's message and changes nothing.
+
+| Page | Key | Action | Confirmation |
+|---|---|---|---|
+| plans | `c` | `confirm` a draft plan | none |
+| plans | `a` | cycle the plan's auto level | a float for `merge` (`set auto merge on <plan>?`) |
+| plans | `p` | `pause` (auto `off`) | none |
+| plans | `s` | `start` the selected task | none |
+| merge | `M` | `merge` the task | `merge <task> onto main? y/n` |
+| merge | `r` | `reject` with a note | a one-line note float: `Enter` rejects, `Esc` cancels; an empty note is refused like the CLI |
+| merge | `v` | `reverify` | none |
+
+`y` confirms and `n` (or `Esc`) closes a confirmation float without changing anything. `start` in the TUI does what `radian arc start` does; the TUI is not a scheduling loop (only `radian arc run` schedules) and holds no `runner.lock`.
+
+Re-reads the store every 2 s; git, the merge page's data and the actions run in worker threads, a frame never waits (`loading…`).
 
 ## Not built yet
 
 The gate stages `mutation` and `ci` are not built: verification refuses a profile or task that lists one, and the task stays in `review.verifying`.
-The arc TUI's `merge` page and the owner's actions are not built; the TUI is not a scheduling loop (only `radian arc run` schedules) and holds no `runner.lock`.
 
 ## See also
 
