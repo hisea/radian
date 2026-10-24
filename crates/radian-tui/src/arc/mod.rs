@@ -163,6 +163,17 @@ pub fn task_mark(state: TaskState, phase: &str) -> Mark {
     }
 }
 
+/// How alive a `doing` task's worker looks (ADR 0048 decisions 7.9 and 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// The wrapper has written no heartbeat yet.
+    Starting,
+    /// The last beat was `age` seconds ago, inside the attempt's stall window.
+    Beating { age: u64 },
+    /// The last beat is older than the attempt's stall window.
+    Stalled { age: u64 },
+}
+
 /// One row of a plan's task list, whether drawn as the tree or as the flat list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskRow {
@@ -171,6 +182,8 @@ pub struct TaskRow {
     pub attempt: u32,
     pub cost: Option<f64>,
     pub mark: Mark,
+    /// For a `doing` task: whether its worker is alive, from the wrapper's heartbeat.
+    pub freshness: Option<Freshness>,
     /// The tree connector (`""` for a root, `"├─"`, `"└─"`, or a deeper prefix).
     pub connector: String,
     /// The other parents in this plan (`also after …`).
@@ -653,20 +666,23 @@ impl ArcApp {
 
     /// Opens, or polls, the selected attempt's worker journal.
     ///
-    /// The file is named by the session id the attempt recorded in its `execution.json`
-    /// (ADR 0048 decision 4); an attempt without a record has the task id. A view opened for
-    /// another attempt is dropped, so `[`/`]` never keeps showing the previous conversation.
+    /// The file is named by the attempt's session id (ADR 0048 decision 4): the wrapper's
+    /// `execution.json` or `identity.json`, else the claim's `start.json`. Only an attempt that
+    /// names none (an older attempt, or a worker-less `reverify`) falls back to the task id. A
+    /// view opened for another attempt is dropped, so `[`/`]` never keeps showing the previous
+    /// conversation.
     pub fn refresh_journal(&mut self) {
         let Some(page) = self.task.as_ref() else {
             return;
         };
         let id = page.id.clone();
         let attempt = page.attempt;
-        let session = attempt
-            .and_then(|attempt| {
-                radian_arc::store::attempt_ops::attempt_session_id(&self.store, &id, attempt)
-            })
-            .unwrap_or_else(|| id.clone());
+        let session = match attempt.and_then(|attempt| {
+            radian_arc::store::attempt_ops::attempt_session_id(&self.store, &id, attempt)
+        }) {
+            Some(session) => session,
+            None => id.clone(),
+        };
         let Some(page) = self.task.as_mut() else {
             return;
         };
@@ -742,12 +758,27 @@ impl ArcApp {
             .collect()
     }
 
-    /// One plan's tasks: the dependency tree, or the flat list with `after`.
+    /// One plan's tasks: the dependency tree, or the flat list with `after`. A `doing` task's
+    /// row carries its worker's freshness (ADR 0048 decisions 7.9 and 9): the frame's state
+    /// alone cannot say whether the attempt is alive.
     pub fn task_rows(&self, view: &PlanView) -> Vec<TaskRow> {
-        if self.flat {
-            return flat_rows(view);
+        let mut rows = if self.flat {
+            flat_rows(view)
+        } else {
+            tree_rows(view)
+        };
+        let default_stall = self
+            .store
+            .config()
+            .map(|config| config.limits.stall_timeout_secs)
+            .unwrap_or(0);
+        for row in &mut rows {
+            let Some(task) = view.tasks.iter().find(|task| task.item.id == row.id) else {
+                continue;
+            };
+            row.freshness = freshness(&self.store, &task.item, default_stall);
         }
-        tree_rows(view)
+        rows
     }
 
     /// Opens the selected task's page.
@@ -1786,10 +1817,31 @@ fn row(task: &TaskFile, connector: String, also_after: Vec<String>, waits: Vec<S
         attempt: task.attempt,
         cost: task.cost_usd,
         mark: task_mark(task.state, &task.phase),
+        freshness: None,
         connector,
         also_after,
         waits,
         after: Vec::new(),
+    }
+}
+
+/// Whether a `doing` task's worker is alive, from the wrapper's heartbeat and the attempt's
+/// stall window (ADR 0048 decisions 7.9 and 9). `None` for a task that is not `doing`: only a
+/// running attempt has a heartbeat to read.
+fn freshness(store: &Store, task: &TaskFile, default_stall: u64) -> Option<Freshness> {
+    if task.state != TaskState::Doing {
+        return None;
+    }
+    let Some(beat) = radian_arc::store::attempt_ops::read_heartbeat(store, &task.id, task.attempt)
+    else {
+        return Some(Freshness::Starting);
+    };
+    let stall = task.stall_timeout_secs.unwrap_or(default_stall);
+    let window = radian_arc::store::attempt_ops::liveness_window_secs(stall);
+    match radian_arc::store::attempt_ops::utc_age_secs(&beat) {
+        Some(age) if age > window => Some(Freshness::Stalled { age }),
+        Some(age) => Some(Freshness::Beating { age }),
+        None => Some(Freshness::Starting),
     }
 }
 

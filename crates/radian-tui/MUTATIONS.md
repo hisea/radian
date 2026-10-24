@@ -2471,3 +2471,15 @@ window). A cancelled plan also takes the failure mark and the `cancelled · ` pr
 | TK0040-M2 | the task list always starts at the first task (`task_top = 0`) | ✅ 1 failed | `the_task_list_scrolls_to_keep_the_selected_task_visible` (the selected `TK0011-h` is below the frame) |
 | TK0040-M3 | the attempts list always starts at the first attempt (`first = 0`) | ✅ 1 failed | `the_attempts_list_scrolls_to_keep_the_selected_attempt_visible` (with attempt 10 selected it draws attempts 1 to 3) |
 | TK0040-M4 | a cancelled plan takes `Mark::Active` (`●`), as before | ✅ 1 failed | `a_cancelled_plan_is_marked_and_named_cancelled` (`mark_cell` panics: `×` is not before `PL0002-images`) |
+
+## TK0048: the task page follows a running attempt's journal (2026-10-24, branch `work/TK0048-running-attempt-session`)
+
+A `doing.running` task has no `execution.json` yet, so the Conversation tab found nothing. The
+claim's `start.json` now names the session, and `refresh_journal` keeps the task-id lookup only
+for an attempt that names none. The mutation puts the task id back as the only lookup; it was
+applied by hand to the working file, restored from a copy under `.radian/mut/` with `cp`, and
+compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0048-M3 | the TUI falls back to the task id even when a session id is known (`let session = id.clone();`) | ✅ 1 failed | `arc_tui::the_conversation_tab_follows_a_running_attempts_journal` (the screen says `no session journal yet` instead of the running worker's lines) |

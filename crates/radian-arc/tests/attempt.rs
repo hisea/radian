@@ -227,6 +227,131 @@ fn a_resume_claim_continues_the_task_session() {
     assert!(second.resume, "a resume attempt continues the session");
 }
 
+/// ADR 0048 decision 4: the claim writes the session it decided on to `start.json`, so
+/// `attempt_session_id` and `show --json` name a running attempt's session before the wrapper
+/// has written `identity.json` or `execution.json`. Mutation: the claim omits `session_id`
+/// from `start.json`.
+#[test]
+fn a_claim_makes_the_attempts_session_id_known_before_the_worker_ends() {
+    let (repo, store) = setup("claim-session");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+
+    let claim = attempt_ops::claim(&store, task).expect("claim");
+    assert_eq!(claim.session_id, format!("{task}-1"));
+    // No wrapper record exists yet: only the claim's own record names the session.
+    assert!(
+        !attempt_ops::run_dir(&store, task, 1)
+            .join("execution.json")
+            .is_file()
+    );
+    assert!(
+        !attempt_ops::attempt_dir(&store, task, 1)
+            .join("identity.json")
+            .is_file()
+    );
+    assert_eq!(
+        attempt_ops::attempt_session_id(&store, task, 1).as_deref(),
+        Some(claim.session_id.as_str())
+    );
+
+    let shown = repo.radian(&["arc", "show", task, "--json"]);
+    assert_eq!(shown.code, 0, "show: {}", shown.stderr);
+    let value: Value = serde_json::from_str(&shown.stdout).expect("show --json is JSON");
+    assert_eq!(value["session_id"], json!(claim.session_id));
+    let text = repo.radian(&["arc", "show", task]);
+    assert_eq!(text.code, 0, "show: {}", text.stderr);
+    assert!(
+        text.stdout.contains(&format!("session_id: {task}-1")),
+        "the text form prints the running attempt's session:\n{}",
+        text.stdout
+    );
+}
+
+/// `resume` keeps one session per task, and the claim records that task id before the worker
+/// ends: `attempt_session_id` and `show --json` answer it at once.
+#[test]
+fn a_resume_claim_makes_the_task_session_known_before_the_worker_ends() {
+    let (repo, store) = setup("claim-session-resume");
+    tune(
+        &repo,
+        &[("rework_session = \"fresh\"", "rework_session = \"resume\"")],
+    );
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+
+    attempt_ops::claim(&store, task).expect("claim");
+    assert_eq!(
+        attempt_ops::attempt_session_id(&store, task, 1).as_deref(),
+        Some(task.as_str()),
+        "the task's one session"
+    );
+    let shown = repo.radian(&["arc", "show", task, "--json"]);
+    assert_eq!(shown.code, 0, "show: {}", shown.stderr);
+    let value: Value = serde_json::from_str(&shown.stdout).expect("show --json is JSON");
+    assert_eq!(value["session_id"], json!(task));
+}
+
+/// The wrapper writes `identity.json` when it spawns the worker and `execution.json` only when
+/// it ends. A reader with no `execution.json` answers from `identity.json`, and an
+/// `execution.json` that exists wins over it (ADR 0048 decision 4).
+#[test]
+fn a_session_id_is_read_from_the_identity_record_when_execution_is_missing() {
+    let (_repo, store) = setup("identity-session");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    attempt_ops::claim(&store, task).expect("claim");
+    let dir = attempt_ops::attempt_dir(&store, task, 1);
+    // The claim's record carries no field; the wrapper's identity record names the session.
+    std::fs::write(
+        dir.join(attempt_ops::START_FILE),
+        json!({"attempt_id": format!("{task}-1")}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("identity.json"),
+        json!({"session_id": format!("{task}-1")}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        attempt_ops::attempt_session_id(&store, task, 1).as_deref(),
+        Some(format!("{task}-1").as_str())
+    );
+    // The end record is the first one a reader takes.
+    let run = attempt_ops::run_dir(&store, task, 1);
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(
+        run.join("execution.json"),
+        json!({"session_id": "from-execution"}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        attempt_ops::attempt_session_id(&store, task, 1).as_deref(),
+        Some("from-execution")
+    );
+}
+
+/// An old attempt's `start.json` has no session id and no wrapper record exists: the answer is
+/// `None`, and `show --json` prints `null` rather than guessing the task id.
+#[test]
+fn an_attempt_with_no_record_of_its_session_answers_none() {
+    let (repo, store) = setup("no-session");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    let claim = attempt_ops::claim(&store, task).expect("claim");
+    std::fs::write(
+        attempt_ops::attempt_dir(&store, task, 1).join(attempt_ops::START_FILE),
+        json!({"attempt_id": claim.attempt_id}).to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(attempt_ops::attempt_session_id(&store, task, 1), None);
+    let shown = repo.radian(&["arc", "show", task, "--json"]);
+    assert_eq!(shown.code, 0, "show: {}", shown.stderr);
+    let value: Value = serde_json::from_str(&shown.stdout).expect("show --json is JSON");
+    assert_eq!(value["session_id"], Value::Null);
+}
+
 // ---- apply ----------------------------------------------------------------------------
 
 /// A pushed `completed` attempt goes to `review.verifying` with the attempt's shas.

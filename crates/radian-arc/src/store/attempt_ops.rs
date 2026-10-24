@@ -12,7 +12,7 @@
 
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -424,6 +424,10 @@ pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
         "pid": pid,
         "process_started_at": crate::process::start_time(pid),
         "started_at": super::plan_ops::utc_now(),
+        // The session the claim decided on, so `show` and the arc TUI can open a running
+        // worker's journal before the wrapper has written `identity.json` or
+        // `execution.json` (ADR 0048 decision 4).
+        "session_id": session_id,
     });
     let text = serde_json::to_string_pretty(&record)
         .map_err(|error| Error::Failed(format!("cannot encode the start record: {error}")))?;
@@ -923,12 +927,24 @@ fn attempt_cost(store: &Store, task: &str, attempt: u32) -> AttemptCost {
     }
 }
 
-/// The worker session an attempt recorded in its `execution.json`. `None` for an attempt whose
-/// wrapper wrote no record (a worker-less `reverify`) and for an attempt that never ran. This
-/// is how a later reader finds a worker's journal: by the attempt's session id, which is the
-/// task id only with `[worker] rework_session = "resume"` or for an older attempt.
+/// The worker session of one attempt. A reader takes the first record that names one: the
+/// wrapper's `execution.json`, the wrapper's `identity.json`, then the claim's `start.json`
+/// (ADR 0048 decision 4). `None` only when none of them does: an old attempt, or a worker-less
+/// `reverify` attempt. This is how a later reader finds a worker's journal, which is named by
+/// the session id, not by the task.
 pub fn attempt_session_id(store: &Store, task: &str, attempt: u32) -> Option<String> {
-    let text = fs::read_to_string(run_dir(store, task, attempt).join("execution.json")).ok()?;
+    [
+        run_dir(store, task, attempt).join("execution.json"),
+        attempt_dir(store, task, attempt).join("identity.json"),
+        attempt_dir(store, task, attempt).join(START_FILE),
+    ]
+    .into_iter()
+    .find_map(|path| session_id_in(&path))
+}
+
+/// The `session_id` one record names, when the file exists and parses.
+fn session_id_in(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
     value
         .get("session_id")

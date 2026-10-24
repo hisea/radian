@@ -1011,6 +1011,135 @@ fn the_conversation_tab_renders_the_selected_attempts_worker_journal() {
     );
 }
 
+/// A `doing.running` task has no `execution.json` yet: the claim's `start.json` names the
+/// session, so the Conversation tab opens `<task>-<attempt>.jsonl` and follows it while the
+/// worker appends. Mutation: the tab falls back to the task id even when a session id is known.
+#[test]
+fn the_conversation_tab_follows_a_running_attempts_journal() {
+    let fixture = Fixture::new();
+    let task = fixture.id("g").to_owned();
+    let sessions = fixture.scratch.path("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = format!("{task}-1");
+    write_start(&fixture, &task, 1, &session);
+    write_journal(&sessions, &session, "the running worker", "is writing");
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), Some(sessions.clone()));
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("g");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('f')));
+    app.apply_pending_scroll();
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("the running worker"), "{text}");
+    assert!(text.contains("is writing"), "{text}");
+    assert!(!text.contains("no session journal yet"), "{text}");
+
+    // The worker writes another line; the refresh polls the same journal and the followed
+    // view shows it.
+    append_journal(&sessions, &session, "and one more line");
+    app.refresh();
+    app.apply_pending_scroll();
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("and one more line"), "{text}");
+}
+
+/// The task frame's state alone does not say whether a `doing` worker is alive (ADR 0048
+/// decisions 7.9 and 9): the row adds the heartbeat's age, `stalled?` past the stall window,
+/// `starting` before the first beat, and `loop stopped` when nothing holds `runner.lock`.
+#[test]
+fn a_doing_tasks_row_reports_its_worker_heartbeat_and_a_stopped_loop() {
+    let scratch = Scratch::new("freshness");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "live", "the live plan");
+    let fresh = add_task(
+        &store,
+        &plan,
+        "fresh",
+        &[],
+        TaskState::Doing,
+        "running",
+        1,
+        None,
+    );
+    let old = add_task(
+        &store,
+        &plan,
+        "old",
+        &[],
+        TaskState::Doing,
+        "running",
+        2,
+        None,
+    );
+    add_task(
+        &store,
+        &plan,
+        "none",
+        &[],
+        TaskState::Doing,
+        "running",
+        1,
+        None,
+    );
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    // A beat from just now, and one far past the default 900-second stall window.
+    write_heartbeat(&store, &fresh, 1, &radian_arc::store::plan_ops::utc_now());
+    write_heartbeat(&store, &old, 2, "2000-01-01T00:00:00Z");
+
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == plan)
+        .unwrap();
+    let theme = app.theme.clone();
+    let terminal = render(&mut app, 160, 30);
+    let text = rows(&terminal).join("\n");
+    assert!(
+        text.contains("heartbeat 0s ago") || text.contains("heartbeat 1s ago"),
+        "a fresh beat shows its age:\n{text}"
+    );
+    assert!(text.contains("starting"), "no beat yet:\n{text}");
+    assert!(text.contains("stalled?"), "an old beat:\n{text}");
+    assert_eq!(
+        text.matches("loop stopped").count(),
+        3,
+        "every doing row names the stopped loop:\n{text}"
+    );
+    // The stale beat takes the warning style.
+    let (row, column) = fg_of(&terminal, "stalled?");
+    assert_eq!(fg(&terminal, row, column), theme.status_warn.fg);
+
+    // A held `runner.lock` is a loop that can advance the state: no row says it stopped.
+    let lock_path = app.store.root().join(radian_arc::store::RUNNER_LOCK);
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    {
+        use fs2::FileExt;
+        lock.lock_exclusive().unwrap();
+    }
+    app.refresh();
+    let text = screen(&mut app, 160, 30);
+    assert!(!text.contains("loop stopped"), "{text}");
+    {
+        fs2::FileExt::unlock(&lock).unwrap();
+    }
+}
+
 /// The attempt's `execution.json`, where the wrapper records the worker's session id.
 fn write_execution(fixture: &Fixture, task: &str, attempt: u32, session: &str) {
     let dir = radian_arc::store::attempt_ops::run_dir(&fixture.store, task, attempt);
@@ -1020,6 +1149,50 @@ fn write_execution(fixture: &Fixture, task: &str, attempt: u32, session: &str) {
         json!({ "session_id": session }).to_string(),
     )
     .unwrap();
+}
+
+/// The claim's `start.json`, which names the session before the wrapper writes its own
+/// records.
+fn write_start(fixture: &Fixture, task: &str, attempt: u32, session: &str) {
+    let dir = radian_arc::store::attempt_ops::attempt_dir(&fixture.store, task, attempt);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(radian_arc::store::attempt_ops::START_FILE),
+        json!({ "session_id": session }).to_string(),
+    )
+    .unwrap();
+}
+
+/// The wrapper's heartbeat, with the given last beat.
+fn write_heartbeat(store: &Store, task: &str, attempt: u32, last_beat: &str) {
+    let dir = radian_arc::store::attempt_ops::attempt_dir(store, task, attempt);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(radian_arc::store::attempt_ops::HEARTBEAT_FILE),
+        json!({ "last_beat": last_beat }).to_string(),
+    )
+    .unwrap();
+}
+
+/// Appends one assistant line to an existing worker journal (the worker still writing).
+fn append_journal(dir: &Path, id: &str, assistant: &str) {
+    use radian_core::TranscriptJournal;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let path = dir.join(format!("{id}.jsonl"));
+    runtime.block_on(async {
+        let journal = radian_session::SessionJournal::resume(&path, id)
+            .expect("the journal resumes for the next line");
+        journal
+            .append(radian_core::JournalRecord::Message {
+                index: 2,
+                message: radian_core::Message::assistant(assistant),
+            })
+            .await
+            .unwrap();
+    });
 }
 
 /// A worker journal: one user message and one assistant reply.
