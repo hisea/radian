@@ -607,6 +607,25 @@ impl Store {
         Ok(PlanView { plan, tasks })
     }
 
+    /// Whether the plan is cancelled ([`PlanView::is_cancelled`]): its stored `status` is
+    /// `cancelled`, or its tasks are all `failed.cancelled`. Every command that changes a plan
+    /// or one of its tasks asks this one question first, because a cancelled plan is final
+    /// (ADR 0048 decisions 3 and 9).
+    pub fn plan_is_cancelled(&self, id: &str) -> Result<bool, Error> {
+        Ok(self.plan_view(id)?.is_cancelled())
+    }
+
+    /// Refuses the plan when it is cancelled ([`Store::plan_is_cancelled`]), naming its
+    /// status: the refusal every command that would change a plan or one of its tasks makes
+    /// before it writes anything (ADR 0048 decisions 3 and 9).
+    pub fn refuse_cancelled(&self, id: &str) -> Result<(), Error> {
+        let view = self.plan_view(id)?;
+        if view.is_cancelled() {
+            return Err(cancelled_plan(&view.plan.item.id));
+        }
+        Ok(())
+    }
+
     /// `show <id>`: the plan or the task the id names. An id that names both is refused.
     pub fn show(&self, id: &str) -> Result<Item, Error> {
         check_id(id)?;
@@ -715,12 +734,13 @@ impl Store {
         let _lock = self.lock_state()?;
         let plan = self.load_plan(plan_id)?;
         require_unchanged(plan_id, plan.changed_outside_arc)?;
+        // The tasks decide too: a plan whose tasks are all `failed.cancelled` is cancelled, so
+        // a task added here would bring a final plan back to life (ADR 0048 decisions 3 and 9).
+        self.refuse_cancelled(plan_id)?;
         let proposed = if plan.item.status == "draft" {
             false
         } else if plan.item.status == "confirmed" && allow_confirmed {
             true
-        } else if plan.item.is_cancelled() {
-            return Err(cancelled_plan(plan_id));
         } else {
             return Err(Error::Refused(format!(
                 "plan `{plan_id}` is `{}`; a confirmed plan gets no new tasks",
@@ -793,6 +813,12 @@ impl Store {
     }
 
     /// Runs one state change on a plan under `state.lock`.
+    ///
+    /// This writes a plan in any state. Every command that changes a plan uses
+    /// [`Store::change_open_plan`] instead, which refuses a cancelled plan first; this one is
+    /// left for the cancel itself, which writes the final status, for `pause`, which only sets
+    /// `auto` to `off` on a plan that may already be final, and for arc's own `auto` write when
+    /// a budget or the automatic rework limit pauses a plan.
     pub fn change_plan(
         &self,
         id: &str,
@@ -802,6 +828,28 @@ impl Store {
         let loaded = self.load_plan(id)?;
         require_unchanged(id, loaded.changed_outside_arc)?;
         let mut item = loaded.item;
+        change(&mut item)?;
+        let version = self.next_version(Kind::Plan, id);
+        self.write_item(Kind::Plan, id, &item.to_text(), version)?;
+        Ok(version)
+    }
+
+    /// [`Store::change_plan`] for a plan a command may change: a plan that is cancelled
+    /// ([`Store::plan_is_cancelled`], its stored `status` or its tasks) is refused under the
+    /// same lock, before `change` runs, because a cancelled plan is final (ADR 0048 decisions
+    /// 3 and 9).
+    pub fn change_open_plan(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut model::PlanFile) -> Result<(), Error>,
+    ) -> Result<u64, Error> {
+        let _lock = self.lock_state()?;
+        let view = self.plan_view(id)?;
+        require_unchanged(id, view.plan.changed_outside_arc)?;
+        if view.is_cancelled() {
+            return Err(cancelled_plan(&view.plan.item.id));
+        }
+        let mut item = view.plan.item;
         change(&mut item)?;
         let version = self.next_version(Kind::Plan, id);
         self.write_item(Kind::Plan, id, &item.to_text(), version)?;

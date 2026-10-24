@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::model::{self, TaskState};
-use super::{Error, Kind, Store, cancelled_plan, require_unchanged};
+use super::{Error, Kind, Store, require_unchanged};
 use crate::store::config::ReworkSession;
 
 /// The wrapper's own end record, in the attempt's run directory.
@@ -390,10 +390,9 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
     }
     let plan = store.load_plan(&task.plan)?;
     require_unchanged(&task.plan, plan.changed_outside_arc)?;
+    // A cancelled plan is final, by its `status` or by its tasks (ADR 0048 decisions 3, 9).
+    store.refuse_cancelled(&task.plan)?;
     if plan.item.status != "confirmed" {
-        if plan.item.is_cancelled() {
-            return Err(cancelled_plan(&task.plan));
-        }
         return Err(Error::Refused(format!(
             "plan `{}` is `{}`; confirm it before starting its tasks",
             task.plan, plan.item.status
@@ -518,10 +517,7 @@ pub fn claim_reverify_by(
     require_unchanged(task_id, loaded.changed_outside_arc)?;
     let mut task = loaded.item;
     // A cancelled plan is final: its tasks are not re-verified.
-    let plan = store.load_plan(&task.plan)?;
-    if plan.item.is_cancelled() {
-        return Err(cancelled_plan(&task.plan));
-    }
+    store.refuse_cancelled(&task.plan)?;
     // A stuck gate: the task stayed in `review.verifying` because its gate left no record or
     // died, and the owner wants it run again (ADR 0048 decisions 10 and 11).
     let gate_stuck = task.state == TaskState::Review
@@ -1189,9 +1185,7 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
         Kind::Plan => {
             let plan = store.load_plan(id)?;
             require_unchanged(id, plan.changed_outside_arc)?;
-            if plan.item.is_cancelled() {
-                return Err(cancelled_plan(id));
-            }
+            store.refuse_cancelled(id)?;
             let mut moved = Vec::new();
             for task_id in &plan.item.tasks {
                 let task = store.load_task(task_id)?;
@@ -1224,10 +1218,7 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
         }
         Kind::Task => {
             let task = store.load_task(id)?;
-            let plan = store.load_plan(&task.item.plan)?;
-            if plan.item.is_cancelled() {
-                return Err(cancelled_plan(&plan.item.id));
-            }
+            store.refuse_cancelled(&task.item.plan)?;
             if task.item.state != TaskState::Todo || task.item.phase != "paused_budget" {
                 return Err(Error::Refused(format!(
                     "task `{id}` is `{}.{}`; only a `todo.paused_budget` task has a budget to reset",

@@ -831,26 +831,21 @@ fn a_plan_whose_tasks_are_all_cancelled_draws_x_and_is_only_in_cancelled() {
     let scratch = Scratch::new("tasks-cancelled");
     let store = store(&scratch.path("repo"));
     let plan = add_plan(&store, "stopped", "the stopped plan");
-    add_task(
-        &store,
-        &plan,
-        "one",
-        &[],
-        TaskState::Failed,
-        "cancelled",
-        0,
-        None,
-    );
-    add_task(
-        &store,
-        &plan,
-        "two",
-        &[],
-        TaskState::Failed,
-        "cancelled",
-        0,
-        None,
-    );
+    // Both tasks exist before either is cancelled: once every task is `failed.cancelled` the
+    // plan is cancelled by its tasks and takes no new task.
+    let tasks: Vec<String> = ["one", "two"]
+        .into_iter()
+        .map(|slug| add_task(&store, &plan, slug, &[], TaskState::Todo, "ready", 0, None))
+        .collect();
+    for task in &tasks {
+        store
+            .change_task(task, |task| {
+                task.state = TaskState::Failed;
+                task.phase = "cancelled".to_owned();
+                Ok(())
+            })
+            .expect("the task is cancelled");
+    }
 
     let view = store.plan_view(&plan).expect("the plan reads");
     assert!(!PlanFilter::Active.shows(&view), "it is not active");

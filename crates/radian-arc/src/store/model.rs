@@ -222,7 +222,10 @@ pub struct PlanFile {
 }
 
 impl PlanFile {
-    /// Whether the plan is `cancelled`: a final state no owner or lead command changes.
+    /// Whether the stored `status` is `cancelled`: a final state no owner or lead command
+    /// changes. A plan is cancelled by its tasks too, when every task is `failed.cancelled`
+    /// ([`crate::store::PlanView::is_cancelled`]); commands ask that question through
+    /// [`crate::store::Store::plan_is_cancelled`], not this one.
     pub fn is_cancelled(&self) -> bool {
         self.status == "cancelled"
     }

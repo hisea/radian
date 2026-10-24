@@ -109,7 +109,9 @@ fn forward(store: &Store, task_id: &str) -> Result<(Vec<Entry>, Option<Entry>), 
 }
 
 /// Whether the task a chain entry names can never reach `done.merged`: a missing file, a
-/// `failed.*` task, or a task of a `cancelled` plan that is not already merged.
+/// `failed.*` task, or a task of a `cancelled` plan that is not already merged. A plan is
+/// cancelled by its `status` or by all its tasks being `failed.cancelled`
+/// ([`Store::plan_is_cancelled`]).
 fn never_finishes(store: &Store, task: Option<&TaskFile>) -> bool {
     let Some(task) = task else {
         return true;
@@ -120,9 +122,7 @@ fn never_finishes(store: &Store, task: Option<&TaskFile>) -> bool {
     if task.state == TaskState::Done {
         return false;
     }
-    store
-        .load_plan(&task.plan)
-        .is_ok_and(|plan| plan.item.is_cancelled())
+    matches!(store.plan_is_cancelled(&task.plan), Ok(true))
 }
 
 /// The tasks whose `after` chain contains `task_id`, nearest first.

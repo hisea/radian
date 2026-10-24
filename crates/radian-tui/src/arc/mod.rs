@@ -1432,7 +1432,7 @@ impl ArcApp {
     /// [`ArcApp::start_blocker`] for one task of one plan: the board asks it about the card it
     /// shows.
     fn start_blocker_for(&self, view: &PlanView, item: &TaskFile) -> Option<String> {
-        if view.plan.item.is_cancelled() {
+        if view.is_cancelled() {
             return Some(format!("plan {} is cancelled", view.plan.item.id));
         }
         if view.plan.item.status != "confirmed" {
@@ -1932,13 +1932,13 @@ impl ArcApp {
         };
         let plan = view.plan.item.id.clone();
         let current = view.plan.item.priority().to_owned();
-        let cancelled = view.plan.item.is_cancelled();
+        let cancelled = view.is_cancelled();
         self.step_plan_priority(&plan, &current, cancelled, delta)
     }
 
     /// [`ArcApp::step_priority`] for one plan: the board steps the selected card's plan.
-    /// `cancelled` is [`radian_arc::store::model::PlanFile::is_cancelled`] of that plan: a
-    /// cancelled plan queues the step even at an end, so the CLI's refusal is what shows.
+    /// `cancelled` is [`radian_arc::store::PlanView::is_cancelled`] of that plan: a cancelled
+    /// plan queues the step even at an end, so the CLI's refusal is what shows.
     fn step_plan_priority(
         &mut self,
         plan: &str,
@@ -2132,7 +2132,7 @@ impl ArcApp {
                 };
                 let plan = view.plan.item.id.clone();
                 let current = view.plan.item.priority().to_owned();
-                let cancelled = view.plan.item.is_cancelled();
+                let cancelled = view.is_cancelled();
                 self.step_plan_priority(&plan, &current, cancelled, -1)
             }
             KeyCode::Char('-') => {
@@ -2141,7 +2141,7 @@ impl ArcApp {
                 };
                 let plan = view.plan.item.id.clone();
                 let current = view.plan.item.priority().to_owned();
-                let cancelled = view.plan.item.is_cancelled();
+                let cancelled = view.is_cancelled();
                 self.step_plan_priority(&plan, &current, cancelled, 1)
             }
             // The merge page's own keys land there: a card in `review.*` opens it, and its `M`,

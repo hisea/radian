@@ -546,3 +546,24 @@ file was restored from a copy under `.radian/` with `cp`.
 | TK0080-M4 | a plan whose tasks are all cancelled is not cancelled (`is_cancelled` drops `is_cancelled_by_tasks`) | ✅ 1 failed | `list::a_plan_whose_tasks_are_all_cancelled_is_cancelled_and_reads_0_of_0` (the plan is shown by default instead of hidden) |
 
 3/3 caught.
+
+## TK0080 rework: a plan cancelled by its tasks is final (2026-10-24, branch `work/TK0080-finished-plan-one-rule`)
+
+A plan whose tasks are all `failed.cancelled` was cancelled for `list` and the TUI but not for the
+commands that change a plan: `add task`, `cancel`, `confirm`, `auto`, `priority`, `update_plan`,
+`reset-budget` and `add_rework` read the stored `status` only, so one new task brought the plan
+back to `active`. `Store::plan_is_cancelled` and `Store::refuse_cancelled` now carry the shared
+rule, and `Store::change_open_plan` refuses under `state.lock` before a plan write. Each mutation
+was applied by hand to the working file, the named test was run with `cargo nextest run -p
+radian-arc --locked --profile sandbox -E
+'test(a_plan_its_tasks_cancelled_refuses_every_command_that_would_change_it)'`, and the file was
+restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0080-M5 | `add_task_in` drops `Store::refuse_cancelled`, so a `draft` plan whose tasks are all cancelled takes a new task (the review's trigger) | ✅ 1 failed | `attempt::a_plan_its_tasks_cancelled_refuses_every_command_that_would_change_it` (`add task: "TK0003-new"`: the task was created) |
+| TK0080-M6 | `cancel_plan` checks the stored `status` only (`loaded.item.is_cancelled()`) | ✅ 1 failed | the same test (`cancel: Plan(PlanCanceled { plan: "PL0001-plan", tasks: [] })`: the final plan cancelled again) |
+| TK0080-M7 | `change_open_plan` checks the stored `status` only (`view.plan.item.is_cancelled()`) | ✅ 1 failed | the same test (`confirm: Plan("PL0001-plan")`: the draft plan confirmed) |
+| TK0080-M8 | the loop's `waiting` summary checks the stored `status` only (`plan.is_cancelled()`), so a plan cancelled by its tasks is listed as waiting | ✅ 1 failed | `run::a_pass_lists_a_plan_whose_tasks_are_all_cancelled_as_waiting_on_nothing` (the summary prints `PL0001-stopped (auto off)` and two `failed.cancelled` lines instead of `nothing waits`) |
+
+4/4 caught.
