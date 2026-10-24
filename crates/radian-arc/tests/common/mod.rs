@@ -23,6 +23,11 @@ impl TempDir {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir =
             std::env::temp_dir().join(format!("radian-arc-{}-{label}-{n}", std::process::id()));
+        Self::at(dir)
+    }
+
+    /// Wraps an already-chosen path and creates it.
+    pub fn at(dir: PathBuf) -> Self {
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -32,9 +37,27 @@ impl TempDir {
     }
 }
 
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        // A wrapper or worker child can still have a directory here as its cwd when the test
+        // ends; on macOS `rmdir` then fails with `EBUSY` even after every file is gone. Retry
+        // briefly so the directory disappears once that child exits, instead of leaking empty
+        // directories on every run.
+        for _ in 0..100 {
+            match std::fs::remove_dir_all(&self.0) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
     }
 }
 
@@ -188,14 +211,12 @@ fn run(dir: Option<&Path>, args: &[&str]) -> String {
 /// A unique scratch directory under `$TMPDIR` — the `workspace` sandbox sets it to its own
 /// writable temp directory, the only place a sandboxed test may create files. Its length does
 /// not matter for the process control socket, because every scratch home turns that off (see
-/// [`SCRATCH_HOME_CONFIG`]).
-pub fn scratch(prefix: &str) -> PathBuf {
+/// [`SCRATCH_HOME_CONFIG`]). Removed when the guard drops.
+pub fn scratch(prefix: &str) -> TempDir {
     static DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = DIRS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let name = format!("radian-arc-work-{prefix}-{}-{n}", std::process::id());
-    let dir = std::env::temp_dir().join(name);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    TempDir::at(std::env::temp_dir().join(name))
 }
 
 /// The `config/config.toml` every scratch home gets before any process runs in it: the
@@ -385,6 +406,8 @@ pub struct Repo {
     pub remote: String,
     /// The main branch the wrapper starts from (`--main-branch`).
     pub main_branch: String,
+    /// Owns `root` and removes the whole scratch tree on drop, including on a panic.
+    _dir: TempDir,
 }
 
 impl Repo {
@@ -395,7 +418,8 @@ impl Repo {
     /// A repository whose remote and main branch are not the defaults, so a hardcoded
     /// `origin`/`main` fails to find anything.
     pub fn with(prefix: &str, remote: &str, main_branch: &str) -> Self {
-        let root = scratch(prefix);
+        let dir = scratch(prefix);
+        let root = dir.path().to_path_buf();
         let home = root.join("home");
         let sessions = root.join("sessions");
         std::fs::create_dir_all(&home).unwrap();
@@ -418,6 +442,7 @@ impl Repo {
             clone,
             remote: remote.to_owned(),
             main_branch: main_branch.to_owned(),
+            _dir: dir,
         };
         repo.git_in(
             &repo.root,

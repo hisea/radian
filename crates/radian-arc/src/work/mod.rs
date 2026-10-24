@@ -1957,8 +1957,8 @@ mod tests {
     /// fail every remaining attempt with `no session`.
     #[test]
     fn a_session_exists_only_when_its_file_is_in_the_worker_session_dir() {
-        let dir = std::env::temp_dir().join(format!("radian-arc-session-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("session dir");
+        let dir = crate::test_support::TempDir::named("radian-arc-session");
+        fs::create_dir_all(&*dir).expect("session dir");
         let path = dir.to_str().expect("utf-8 path");
         let args = strings(&["--model", "m", "--session-dir", path]);
         assert!(!session_exists("TK0001-task", &args), "no file yet");
