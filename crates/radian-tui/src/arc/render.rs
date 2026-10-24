@@ -54,6 +54,7 @@ pub fn draw(frame: &mut Frame, app: &mut ArcApp) {
     );
     match app.page {
         Page::Plans => draw_plans(frame, body, app),
+        Page::Board => super::board::draw(frame, body, app),
         Page::Task => draw_task(frame, body, app),
         Page::Merge => draw_merge(frame, body, app),
     }
@@ -121,7 +122,7 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
         Span::styled("  ", theme.hint),
         Span::styled("arc", theme.model),
     ];
-    for (index, page) in [Page::Plans, Page::Task, Page::Merge]
+    for (index, page) in [Page::Plans, Page::Board, Page::Task, Page::Merge]
         .into_iter()
         .enumerate()
     {
@@ -146,6 +147,20 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
                 format!(" · {} hidden", app.hidden),
                 theme.hint,
             ));
+        }
+    }
+    // The board names its scope: every plan of the view, or the one `p` pinned.
+    if app.page == Page::Board {
+        left.push(Span::styled("  ·  ", theme.hint));
+        left.push(Span::styled(
+            app.board
+                .plan
+                .clone()
+                .unwrap_or_else(|| "all plans".to_owned()),
+            theme.text,
+        ));
+        if app.board.finished {
+            left.push(Span::styled(" · finished", theme.text));
         }
     }
     let mut right = vec![
@@ -321,6 +336,56 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 Hint::essential("q", "quit", false),
             ]
         }
+        Page::Board => {
+            if app.board.finished {
+                vec![
+                    Hint::new("j/k", "scroll", false),
+                    Hint::new("enter", "task", app.board.selected_done().is_none()),
+                    Hint::new("d", "columns", false),
+                    Hint::new("esc", "columns", false),
+                    Hint::essential("q", "quit", false),
+                ]
+            } else {
+                let card = app.board.selected();
+                let task = card.and_then(|card| {
+                    app.all_plans
+                        .iter()
+                        .flat_map(|view| view.tasks.iter())
+                        .find(|task| task.item.id == card.id)
+                });
+                let can_start = task.is_some_and(|task| {
+                    app.all_plans
+                        .iter()
+                        .find(|view| view.plan.item.id == task.item.plan)
+                        .is_some_and(|view| app.start_blocker_for(view, &task.item).is_none())
+                });
+                let proposed = task.is_some_and(|task| {
+                    task.item.state == TaskState::Todo && task.item.phase == "proposed"
+                });
+                let plan = task.map(|task| &task.item.plan);
+                let confirmed = plan.is_some_and(|plan| {
+                    app.all_plans.iter().any(|view| {
+                        view.plan.item.id == *plan && view.plan.item.status == "confirmed"
+                    })
+                });
+                let review = task.is_some_and(|task| ArcApp::merge_page_applies(&task.item));
+                vec![
+                    Hint::new("h/l", "column", false),
+                    Hint::new("j/k", "card", card.is_none()),
+                    Hint::new("enter", "task", card.is_none()),
+                    Hint::new("s", "start", !can_start),
+                    Hint::new("c", "confirm", !proposed),
+                    Hint::new("x", "cancel", card.is_none()),
+                    Hint::new("a", "auto", !confirmed),
+                    Hint::new("+/-", "priority", card.is_none()),
+                    Hint::new("M", "merge page", !review),
+                    Hint::new("p", "plan", card.is_none()),
+                    Hint::new("d", "finished", false),
+                    Hint::secondary("b", "plans", false),
+                    Hint::essential("q", "quit", false),
+                ]
+            }
+        }
         Page::Task => {
             let applies = app.task.as_ref().is_some_and(|page| {
                 page.phase.starts_with("review.") || page.phase.starts_with("done.")
@@ -441,7 +506,7 @@ fn draw_plans(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
 
 /// The first item to draw so that `selected` stays inside `visible` rows: a terminal list, which
 /// scrolls only when the selection leaves the top or the bottom, and keeps its place otherwise.
-fn scroll_top(top: usize, selected: usize, visible: usize, len: usize) -> usize {
+pub(super) fn scroll_top(top: usize, selected: usize, visible: usize, len: usize) -> usize {
     if visible == 0 || len <= visible {
         return 0;
     }

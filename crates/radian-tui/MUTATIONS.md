@@ -2553,6 +2553,56 @@ Base: the branch's first commit. The mutation was applied by hand to
 |---|---|---|---|
 | TK0049-M1 | drop `RADIAN_VERIFY_MIN_FREE_GIB` from the usage block | ✅ 1 failed | `arc_gate_without_arguments_exits_two_and_help_exits_zero` (the help did not name the two limits) |
 
+## TK0054: the board page (2026-10-24, branch `work/TK0054-tui-board`)
+
+Base: the branch's first commit. The board groups the open tasks by who acts next, `d` opens
+the finished list, and the three widths stack the groups. Each mutation was applied by hand
+to `crates/radian-tui/src/arc/board.rs`, backed up under `.radian/mut-bak/` and restored
+from that copy (never `git checkout`), and the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_board <test> --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0054-M1 | every `review.awaiting_human` task goes to `needs you`, whatever the plan's `auto` (`column_of` returns `NEEDS_YOU`) | ✅ 1 failed | `an_awaiting_human_task_is_the_owners_only_at_auto_off` (the `auto merge` task is no longer in `verifying`) |
+| TK0054-M2 | the finished list is oldest first (`done.sort_by` compares `one.at.cmp(&other.at)`) | ✅ 1 failed | `d_lists_merged_and_failed_tasks_newest_first` ("the most recently finished comes first") |
+| TK0054-M3 | `BoardLayout::of` always answers `Wide` (four columns at every width) | ✅ 1 failed | `a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` (`left: Wide`, `right: Medium`) |
+| TK0054-M4 | the medium layout stacks `todo` over `verifying` on the left and `doing` over `needs you` on the right | ✅ 1 failed | `a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` ("todo over doing on the left: 0, 41") |
+
+4/4 caught.
+## TK0063: the plans page's columns and plan marks (2026-10-24, branch `work/TK0063-tui-plans-align-and-marks`)
+
+Base `93e078fe` (the branch point; `origin/main` has since moved). The plan summary row is three
+aligned columns, both task lists share fixed columns, and the seven circle marks take seven theme
+roles. Each mutation was applied by hand to the working file, backed up under `.radian/mut-bak/`,
+the named test ran alone with `cargo nextest run -p radian-tui --locked --profile sandbox`, and the
+file was restored from that copy (never `git checkout`).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0063-M1 | the task cost is left-aligned (`{:>width$}` → `{:<width$}`) | ✅ 1 failed | `the_flat_task_list_aligns_the_after_text_across_cost_widths` ("the costs end at one column") |
+| TK0063-M2 | the graph id block ignores the connector again (`let lead = 2`, so each level shifts the phase right) | ✅ 1 failed | `the_graph_task_list_aligns_columns_at_every_depth` ("the phase column holds at every depth") |
+| TK0063-M3 | running is checked before needs you in `plan_mark` | ✅ 1 failed | `each_plan_mark_rule_draws_its_mark_and_role` (the running-plus-proposed plan draws `●`, not `◉`) |
+| TK0063-M4 | `failed.cancelled` counts as needs you (the failed predicate drops the phase test) | ✅ 1 failed | `each_plan_mark_rule_draws_its_mark_and_role` (the done plan draws `◉`, not `✓`) |
+| TK0063-M5 | `plan_running` takes the `VIOLET` constant in the dark palette, like `plan_queued` | ✅ 1 failed | `theme::tests::the_plan_roles_are_seven_distinct_colors_and_mono_has_none` (running and queued are the same color) |
+
+5/5 caught. The M5 edit landed on both palettes' identical literals; the dark palette is the one
+the test checks first.
+## TK0059: the task page's brief tab (2026-10-24, branch `work/TK0059-tui-task-brief-tab`)
+
+Base `b335c1de` (the branch point). The task page gains `brief` as its first tab: the task
+file's body through the transcript's Markdown renderer, with no frontmatter and no worker
+hand-off. Each mutation was applied by hand to `crates/radian-tui/src/arc/mod.rs`, the named
+test was run alone with `cargo nextest run -p radian-tui --locked --profile sandbox --test
+arc_tui <test> --no-fail-fast`, and the file was restored from a copy under `.radian/`
+(`cmp` agreed afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0059-M1 | the brief keeps its frontmatter (`TaskPage::new` sets `brief: task.to_text()` instead of `task.body.clone()`) | ✅ 1 failed | `the_brief_tab_shows_the_task_body_and_no_frontmatter` (`the frontmatter key `schema_version` is drawn`) |
+| TK0059-M2 | the page always opens on `conversation` (`TaskPage::new` sets `tab: TaskTab::Conversation`) | ✅ 1 failed | `a_task_page_opens_on_the_brief_until_the_task_has_an_attempt` (`left: Conversation`, `right: Brief`) |
+| TK0059-M3 | `Shift-Tab` from `brief` goes to `conversation` (`TaskTab::previous`'s `Brief` arm returns `Conversation`) | ✅ 1 failed | `the_task_tabs_cycle_in_order_in_both_directions` (`left: Conversation`, `right: Attempts`) |
+
+3/3 caught.
 ## TK0057: the merge page's command log (2026-10-24, branch `work/TK0057-tui-merge-actions-followups`)
 
 The review of TK0018 found two faults in the off-thread command log. `read_log_tail` dropped
