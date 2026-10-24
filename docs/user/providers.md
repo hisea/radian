@@ -28,13 +28,14 @@ Each `keys` item has `key` and an optional `name`.
 A value starting with `!` is refused and never run; the other keys stay usable.
 The first key is named `first` when it has no name; an unnamed `keys` item shows as its masked form `sk-…cond`.
 pi reads `key` alone, so the file stays pi-readable.
-A `keys` list on an `oauth` entry is ignored.
+A `keys` list on an `oauth` entry is ignored, with one notice.
 A request uses the first key that is not resting.
 The session keeps that key until it rests: no rotation, so the provider's prompt cache stays on one key for this session.
 An HTTP 429 rests the key the request used: for the `Retry-After` duration when the provider sent one (at most one hour), else five minutes.
 No other error rests a key: a 5xx is the vendor's, and a 400, 401 or 403 is the request's or a dead key.
 When every key rests, the request uses the key whose rest ends soonest.
 One notice names a switch: `opencode-go: key "first" rests until 14:32; using "team"`.
+The notice goes to stderr, under `radian exec --output jsonl` too, so the machine-readable stdout stream stays JSON lines.
 With `[model] retries = 0` no failover happens inside a turn; the next turn uses the next key.
 The pool is process state only: a resumed session starts at the first key again.
 Every key is redacted from the journal, the export and the panic log.
