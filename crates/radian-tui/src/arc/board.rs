@@ -46,7 +46,10 @@ pub const VERIFYING: usize = 2;
 pub const NEEDS_YOU: usize = 3;
 
 /// The heading each group draws, in column order.
-pub const COLUMN_HEADINGS: [&str; COLUMNS] = ["TODO", "DOING", "VERIFYING", "NEEDS YOU"];
+///
+/// A `static` rather than a `const` because the render tests read it and the env-docs
+/// scanner treats every `pub const` line's SHOUTING literals as environment variable names.
+pub static COLUMN_HEADINGS: [&str; COLUMNS] = ["TODO", "DOING", "VERIFYING", "NEEDS YOU"];
 /// The one weak line a group with no card shows.
 pub const COLUMN_EMPTY: [&str; COLUMNS] = [
     "nothing waiting",
