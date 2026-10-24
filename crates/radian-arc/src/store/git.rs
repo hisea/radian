@@ -57,13 +57,30 @@ pub(crate) fn exclude_path(dir: &Path) -> Result<PathBuf, String> {
     })
 }
 
-/// Whether the remote answers (`git ls-remote`).
+/// Whether the remote answers (`git ls-remote`). The call talks to the remote, so
+/// `[limits] git_remote_timeout_secs` bounds it.
 pub(crate) fn ls_remote(dir: &Path, remote: &str) -> Result<(), String> {
-    git::ok(dir, &["ls-remote", "--exit-code", remote, "HEAD"]).map(|_| ())
+    remote_ok(dir, &["ls-remote", "--exit-code", remote, "HEAD"]).map(|_| ())
 }
 
-/// Whether a push to `remote`'s `branch` would be accepted, without changing the remote.
+/// Whether a push to `remote`'s `branch` would be accepted, without changing the remote. The
+/// call talks to the remote, so `[limits] git_remote_timeout_secs` bounds it.
 pub(crate) fn push_dry_run(dir: &Path, remote: &str, branch: &str) -> Result<(), String> {
     let refspec = format!("{branch}:{branch}");
-    git::ok(dir, &["push", "--dry-run", remote, &refspec]).map(|_| ())
+    remote_ok(dir, &["push", "--dry-run", remote, &refspec]).map(|_| ())
+}
+
+/// Runs a git command that talks to a remote and requires success, with [`git::ok`]'s failure
+/// text. A call that runs past `[limits] git_remote_timeout_secs` fails with its own line.
+fn remote_ok(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = match git::run_remote(dir, args, None).map_err(|error| error.to_string())? {
+        git::RemoteRun::Done(output) => output,
+        git::RemoteRun::TimedOut { limit } => return Err(git::timeout_text(args, limit)),
+    };
+    if !output.success() {
+        let stderr = output.stderr.trim();
+        let detail = stderr.lines().last().unwrap_or(stderr);
+        return Err(format!("git {} failed: {detail}", args.join(" ")));
+    }
+    Ok(output.stdout.trim().to_owned())
 }
