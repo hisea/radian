@@ -822,6 +822,50 @@ fn a_changed_plan_blocks_adding_a_task() {
 }
 
 #[test]
+fn init_writes_the_default_worker_brief_once_and_keeps_an_edit() {
+    let scratch = fixture("init-worker-brief");
+    let report = Store::init(&scratch.repo(), false).expect("init succeeds");
+    let path = scratch.repo().join(".radian/arc/worker-brief.md");
+    assert!(report.worker_brief_created);
+    assert_eq!(
+        report.worker_brief_path,
+        fs::canonicalize(scratch.repo())
+            .expect("the repository canonicalizes")
+            .join(".radian/arc/worker-brief.md")
+    );
+    assert_eq!(
+        read(&path),
+        store::WORKER_BRIEF_DEFAULT,
+        "init writes the default"
+    );
+
+    fs::write(&path, "my own standing instructions\n").expect("the file is writable");
+    let report = Store::init(&scratch.repo(), false).expect("the second init succeeds");
+    assert!(!report.worker_brief_created);
+    assert_eq!(
+        read(&path),
+        "my own standing instructions\n",
+        "init never overwrites an edited file"
+    );
+}
+
+/// The manual quotes the default `worker-brief.md` `init` writes, and the code holds it in
+/// one place: a change to the constant without the page fails here (ADR 0048 decision 7).
+#[test]
+fn the_manual_quotes_the_default_worker_brief() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("the crate lives in <root>/crates/radian-arc");
+    let page = read(&root.join("docs/user/arc-files.md"));
+    let quoted = format!("```text\n{}\n```", store::WORKER_BRIEF_DEFAULT);
+    assert!(
+        page.contains(&quoted),
+        "docs/user/arc-files.md must quote WORKER_BRIEF_DEFAULT in a `text` block"
+    );
+}
+
+#[test]
 fn init_refuses_outside_a_repository_and_without_an_origin_remote() {
     let scratch = Scratch::new("init-errors");
     let error = Store::init(&scratch.path("plain"), false).expect_err("no repository");

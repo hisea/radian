@@ -67,6 +67,22 @@ fn tune(repo: &Repo, from: &str, to: &str) {
     std::fs::write(&path, text.replacen(from, to, 1)).expect("write config.toml");
 }
 
+/// Writes the repository's standing worker instructions (ADR 0048 decision 7).
+fn write_worker_brief(repo: &Repo, text: &str) {
+    std::fs::create_dir_all(repo.arc()).expect("the arc directory");
+    std::fs::write(repo.arc().join("worker-brief.md"), text).expect("worker-brief.md");
+}
+
+/// A test-only fake worker (`radian arc work --worker-command`) that records the brief it
+/// received on stdin in the returned path and exits 0 without a `Result`. The wrapper then
+/// records the attempt as `terminated`, but the stdin it composed is exactly what the worker
+/// read, which is what these tests compare.
+fn recording_worker(repo: &Repo, name: &str) -> (std::path::PathBuf, String) {
+    let path = repo.root.join(name);
+    let command = format!("cat > '{}'", path.display());
+    (path, command)
+}
+
 /// The merge commits on `work/<task>`, newest first.
 fn merge_commits(repo: &Repo, task: &str) -> Vec<String> {
     let out = repo.git(&[
@@ -749,6 +765,8 @@ fn a_later_attempt_starts_the_session_when_no_earlier_attempt_created_it() {
 fn a_fresh_rework_starts_a_new_session_with_the_hand_off() {
     let repo = Repo::new("fresh-rework");
     init(&repo);
+    // This test is about the hand-off alone: the standing footer has its own tests below.
+    std::fs::remove_file(repo.arc().join("worker-brief.md")).expect("a default brief");
     let task = "TK0012-fresh";
     let mock1 = Mock::start(vec![
         shell_reply(
@@ -1845,5 +1863,273 @@ fn a_one_second_stall_window_keeps_three_beats_inside_it() {
     assert!(
         on_time + 1 >= gaps.len(),
         "more than one heartbeat gap is late for the 333 ms interval: {gaps:?}"
+    );
+}
+
+// ---- the standing worker brief (ADR 0048 decision 7) ----------------------------------
+
+/// The repository's standing instructions are the last section of a first attempt's brief,
+/// after the task body. Mutation: put the footer in front of the body.
+#[test]
+fn the_worker_brief_is_the_last_section_of_a_first_attempt() {
+    let repo = Repo::new("worker-brief-first");
+    init(&repo);
+    write_worker_brief(&repo, "## Standing\n\nstand here\n");
+    let (captured, worker) = recording_worker(&repo, "brief-first.txt");
+    let run = run(
+        &repo,
+        "TK0001-brief",
+        1,
+        "tok-brief",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&captured).expect("the worker read stdin"),
+        "the body\n\n## Standing\n\nstand here",
+        "{}",
+        run.stderr
+    );
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir("TK0001-brief", 1).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
+    assert_eq!(execution["notes"], json!([]), "the footer was appended");
+}
+
+/// A fresh rework's brief is, in order: the hand-off, the task body, then the footer. Mutation:
+/// put the footer before the body, or skip it on a later attempt.
+#[test]
+fn a_fresh_rework_puts_the_worker_brief_after_the_hand_off_and_the_body() {
+    let repo = Repo::new("worker-brief-rework");
+    init(&repo);
+    write_worker_brief(&repo, "stand here\n");
+    let (first_capture, first_worker) = recording_worker(&repo, "brief-rework-1.txt");
+    let first = run(
+        &repo,
+        "TK0002-rework",
+        1,
+        "tok-r1",
+        &["--worker-command", first_worker.as_str()],
+        &[],
+        "the first body\n",
+    );
+    assert!(first_capture.is_file(), "{}", first.stderr);
+
+    let (second_capture, second_worker) = recording_worker(&repo, "brief-rework-2.txt");
+    let second = run(
+        &repo,
+        "TK0002-rework",
+        2,
+        "tok-r2",
+        &["--worker-command", second_worker.as_str()],
+        &[],
+        "the second body\n",
+    );
+    let brief = std::fs::read_to_string(&second_capture).expect("the worker read stdin");
+    let handoff = brief
+        .find("## Where the previous attempt left off")
+        .unwrap_or_else(|| panic!("no hand-off:\n{brief}\n{}", second.stderr));
+    let body = brief.find("the second body").expect("the body");
+    let footer = brief.find("stand here").expect("the footer");
+    assert!(
+        handoff < body && body < footer,
+        "the order is hand-off, body, footer:\n{brief}"
+    );
+    assert!(
+        brief.trim_end().ends_with("stand here"),
+        "the footer is last:\n{brief}"
+    );
+}
+
+/// The wrapper reads the file when it composes each attempt's brief, so an edit between two
+/// attempts reaches the second worker.
+#[test]
+fn an_edited_worker_brief_reaches_the_next_attempt() {
+    let repo = Repo::new("worker-brief-edit");
+    init(&repo);
+    write_worker_brief(&repo, "the first standing instructions\n");
+    let (first_capture, first_worker) = recording_worker(&repo, "brief-edit-1.txt");
+    run(
+        &repo,
+        "TK0003-edit",
+        1,
+        "tok-e1",
+        &["--worker-command", first_worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    assert!(
+        std::fs::read_to_string(&first_capture)
+            .expect("the first worker read stdin")
+            .ends_with("the first standing instructions"),
+    );
+
+    write_worker_brief(&repo, "the second standing instructions\n");
+    let (second_capture, second_worker) = recording_worker(&repo, "brief-edit-2.txt");
+    run(
+        &repo,
+        "TK0003-edit",
+        2,
+        "tok-e2",
+        &["--worker-command", second_worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let brief = std::fs::read_to_string(&second_capture).expect("the second worker read stdin");
+    assert!(
+        brief
+            .trim_end()
+            .ends_with("the second standing instructions"),
+        "the edit did not reach the second attempt:\n{brief}"
+    );
+    assert!(
+        !brief.contains("the first standing instructions"),
+        "the old text stayed:\n{brief}"
+    );
+}
+
+/// A missing file and one that is only whitespace leave stdin exactly as it was before the
+/// footer existed.
+#[test]
+fn a_missing_or_blank_worker_brief_leaves_stdin_alone() {
+    let missing = Repo::new("worker-brief-missing");
+    let (missing_capture, missing_worker) = recording_worker(&missing, "brief-missing.txt");
+    run(
+        &missing,
+        "TK0004-missing",
+        1,
+        "tok-m1",
+        &["--worker-command", missing_worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&missing_capture).expect("the worker read stdin"),
+        "the body"
+    );
+
+    let blank = Repo::new("worker-brief-blank");
+    init(&blank);
+    write_worker_brief(&blank, "  \n\t\n");
+    let (blank_capture, blank_worker) = recording_worker(&blank, "brief-blank.txt");
+    run(
+        &blank,
+        "TK0005-blank",
+        1,
+        "tok-b1",
+        &["--worker-command", blank_worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&blank_capture).expect("the worker read stdin"),
+        "the body"
+    );
+}
+
+/// A file over 32 KiB is skipped: the attempt runs with the body alone, the attempt record
+/// carries one note line, and `show` prints it. Mutation: drop the size check.
+#[test]
+fn an_oversized_worker_brief_is_skipped_with_a_note() {
+    let repo = Repo::new("worker-brief-large");
+    init(&repo);
+    write_worker_brief(&repo, &"x".repeat(33 * 1024));
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let plan = store.add_plan("p", "P", "request").expect("a plan");
+    let task = store
+        .add_task(
+            &plan,
+            "large",
+            "A task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the body\n",
+        )
+        .expect("a task");
+    let (captured, worker) = recording_worker(&repo, "brief-large.txt");
+    let run = run(
+        &repo,
+        &task,
+        1,
+        "tok-l1",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&captured).expect("the worker read stdin"),
+        "the body",
+        "the oversized footer was appended: {}",
+        run.stderr
+    );
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir(&task, 1).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
+    let note = execution["notes"][0]
+        .as_str()
+        .unwrap_or_else(|| panic!("no note: {execution}"));
+    assert!(
+        note.starts_with("worker-brief.md skipped: "),
+        "the note names the file: {note}"
+    );
+    assert!(note.contains("32768"), "the note names the limit: {note}");
+
+    // `show` prints the current attempt's notes, and the wrapper ran outside a claim here: the
+    // task file has to name attempt 1 for `show` to find the record the wrapper wrote.
+    store
+        .change_task(&task, |task| {
+            task.attempt = 1;
+            task.attempt_id = Some(format!("{}-1", task.id));
+            Ok(())
+        })
+        .expect("the task names attempt 1");
+    let shown = repo.radian(&["arc", "show", &task]);
+    assert_eq!(shown.code, 0, "{}", shown.stderr);
+    assert!(
+        shown
+            .stdout
+            .contains("attempt_note: worker-brief.md skipped: "),
+        "show prints the note:\n{}",
+        shown.stdout
+    );
+}
+
+/// A file that is not UTF-8 is skipped the same way: the attempt still runs, with one note.
+#[test]
+fn a_worker_brief_that_is_not_utf8_is_skipped_with_a_note() {
+    let repo = Repo::new("worker-brief-binary");
+    init(&repo);
+    std::fs::write(repo.arc().join("worker-brief.md"), [0xff, 0xfe, 0xfd])
+        .expect("a binary worker-brief.md");
+    let (captured, worker) = recording_worker(&repo, "brief-binary.txt");
+    let run = run(
+        &repo,
+        "TK0006-binary",
+        1,
+        "tok-n1",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&captured).expect("the worker read stdin"),
+        "the body",
+        "the non-UTF-8 footer was appended: {}",
+        run.stderr
+    );
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir("TK0006-binary", 1).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
+    assert_eq!(
+        execution["notes"],
+        json!(["worker-brief.md skipped: not UTF-8"])
     );
 }

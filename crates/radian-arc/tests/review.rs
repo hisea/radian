@@ -8,6 +8,7 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use common::*;
 use radian_arc::gate::{
@@ -3822,6 +3823,101 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
         task.body.contains(&verdict_path.display().to_string()),
         "the verdict path is in the brief: {}",
         task.body
+    );
+}
+
+/// A follow-up task's attempt gets the standing worker brief as the last section of its
+/// stdin, after arc's fixed follow-up text (ADR 0048 decision 7). Mutation: skip the footer
+/// for a follow-up, or put it before the body.
+#[test]
+fn a_followup_attempt_ends_its_brief_with_the_worker_brief() {
+    let fixture = Fixture::new("followup-worker-brief");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "followup-worker-brief-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, fake.program()).phase,
+        "awaiting_human"
+    );
+    let followup = review::merge(&fixture.store, &fixture.task)
+        .expect("the merge runs")
+        .followup
+        .expect("a follow-up task")
+        .task;
+    let brief = fixture
+        .store
+        .load_task(&followup)
+        .expect("the task")
+        .item
+        .body;
+
+    // The wrapper composes the brief and records it through a test-only worker.
+    let capture = fixture.repo.repo.with_file_name("followup-stdin.txt");
+    let home = fixture.repo.repo.with_file_name("followup-home");
+    let sessions = fixture.repo.repo.with_file_name("followup-sessions");
+    fs::create_dir_all(&home).expect("a scratch home");
+    fs::create_dir_all(&sessions).expect("a scratch session dir");
+    fs::write(
+        home.join("config.toml"),
+        "schema_version = 1\n\n[control]\nenabled = false\n",
+    )
+    .expect("the scratch home's config");
+    let worker = format!("cat > '{}'", capture.display());
+    let mut child = Command::new(radian_bin())
+        .args([
+            "arc",
+            "work",
+            "--task",
+            &followup,
+            "--attempt",
+            "1",
+            "--token",
+            "tok-followup",
+            "--worker-command",
+            &worker,
+        ])
+        .current_dir(&fixture.repo.repo)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &home)
+        .env("RADIAN_HOME", &home)
+        .env("RADIAN_SESSION_DIR", &sessions)
+        .env("RADIAN_CATALOG_URL", fast_catalog_url())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn radian arc work");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(brief.as_bytes())
+            .expect("write the brief");
+    }
+    let output = child.wait_with_output().expect("wait for radian arc work");
+    let captured = fs::read_to_string(&capture).expect("the worker read stdin");
+    assert!(
+        captured.starts_with(brief.trim()),
+        "the follow-up text comes first:\n{captured}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let footer = fs::read_to_string(fixture.store.root().join("worker-brief.md"))
+        .expect("init wrote the default worker brief");
+    assert_eq!(footer, radian_arc::store::WORKER_BRIEF_DEFAULT);
+    assert!(
+        captured.trim_end().ends_with(footer.trim()),
+        "the standing worker brief is last:\n{captured}"
     );
 }
 

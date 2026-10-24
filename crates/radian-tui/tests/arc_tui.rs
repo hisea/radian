@@ -411,24 +411,34 @@ fn the_plan_summary_starts_under_the_id() {
 fn the_hints_keep_their_old_labels_and_drop_when_narrow() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
-    let wide = screen(&mut app, 160, 30);
+    let wide = screen(&mut app, 170, 30);
     for needle in [
         "↑↓ select   enter open task",
         "g graph/list",
         "f filter",
         "tab pages",
+        "R start loop",
+        "L log",
         "q quit",
     ] {
         assert!(wide.contains(needle), "missing `{needle}`:\n{wide}");
     }
 
     // At 120 the row cannot hold every hint. The view keys the header already names go first,
-    // and no label is shortened to make room.
+    // then the log view, and no label is shortened to make room.
     let narrow = screen(&mut app, 120, 30);
-    for needle in ["enter open task", "g graph/list", "+/- priority", "q quit"] {
+    for needle in ["enter open task", "+/- priority", "R start loop", "q quit"] {
         assert!(narrow.contains(needle), "missing `{needle}`:\n{narrow}");
     }
-    for dropped in ["f filter", "tab pages", "enter task", "g list", "f view"] {
+    for dropped in [
+        "f filter",
+        "tab pages",
+        "g graph/list",
+        "L log",
+        "enter task",
+        "g list",
+        "f view",
+    ] {
         assert!(
             !narrow.contains(dropped),
             "unexpected `{dropped}`:\n{narrow}"
