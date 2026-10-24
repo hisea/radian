@@ -472,7 +472,7 @@ PL0001-plan cancelled
 ```
 
 A cancelled plan is final.
-`cancel`, `confirm`, `auto`, `priority`, `start`, `reverify`, `reset-budget`, `add task`, and the MCP `add_task`, `update_plan` and `add_rework` tools refuse it with exit `3` (the MCP tools: an error naming the status).
+`cancel`, `confirm`, `auto`, `priority`, `start`, `reverify`, `reset-budget`, `add task`, and the MCP `add_task`, `update_task`, `update_plan` and `add_rework` tools refuse it with exit `3` (the MCP tools: an error naming the status).
 `radian arc run` never claims, gates or merges its tasks, and the summary does not list it as waiting.
 `list` hides it unless `--all`, and `show <plan>` and `show <task>` still read it and its tasks.
 
@@ -732,7 +732,7 @@ The header shows `loop ● running (pid <n>)` for any holder (the pid appears wh
 The newest transition line `loop.log` gained since the TUI opened is the footer's ticker, and `L` opens a view of the last 500 lines.
 `q` and SIGTERM close the TUI and nothing else: a loop it started keeps running, and an attempt it left running is reconciled by the next loop.
 A running task's diff tab shows the worker's worktree against the attempt's `base_sha`, uncommitted files included (`live · worktree`), refreshed every 5 seconds.
-A bare `radian arc` opens the TUI; the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
+A bare `radian arc` opens the TUI; the plans, board, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
 The plans page shows one of four views (`active` by default, then `all`, `done`, `cancelled`; `f` cycles them) and each plan draws one of seven marks — `✕` cancelled, `◌` draft, `◉` needs you, `●` running, `◍` paused, `○` queued, `✓` done — in its own `plan_*` theme role, with `P<n>` by its id and in the frame label.
 Its `x`, `c`, `+`/`-` and `o` cancel, confirm, step the priority and cycle the order (`priority`, `state`, `id`); the mark rules and the columns are in [the plans page](arc-tui.md#the-plans-page).
 

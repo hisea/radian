@@ -723,14 +723,7 @@ impl Store {
     ) -> Result<String, Error> {
         check_new(slug, title)?;
         check_id(plan_id)?;
-        for stage in &extra_stages {
-            if !STAGE_NAMES.contains(&stage.as_str()) {
-                return Err(Error::Usage(format!(
-                    "`{stage}` is not a gate stage; stages are {}",
-                    STAGE_NAMES.join(", ")
-                )));
-            }
-        }
+        check_stages(&extra_stages)?;
         let _lock = self.lock_state()?;
         let plan = self.load_plan(plan_id)?;
         require_unchanged(plan_id, plan.changed_outside_arc)?;
@@ -747,21 +740,7 @@ impl Store {
                 plan.item.status
             )));
         };
-        for dependency in &after {
-            check_id(dependency)?;
-            let dependency_path = self.path(Kind::Task, dependency);
-            let allowed = if dependency_path.is_file() {
-                let task = self.load_task(dependency)?;
-                task.item.plan == plan_id || task.item.state == model::TaskState::Done
-            } else {
-                false
-            };
-            if !allowed {
-                return Err(Error::Refused(format!(
-                    "`{dependency}` is neither a task of plan `{plan_id}` nor a done task"
-                )));
-            }
-        }
+        check_after(self, plan_id, None, &after)?;
         let id = self.next_id(Kind::Task, slug)?;
         let mut task = model::TaskFile::new(
             id.clone(),
@@ -1148,8 +1127,26 @@ fn check_new(slug: &str, title: &str) -> Result<(), Error> {
             model::SLUG_MAX_CHARS
         )));
     }
+    check_title(title)
+}
+
+/// The title rule `add_task` and `update_task` share (ADR 0048 decision 11).
+pub(crate) fn check_title(title: &str) -> Result<(), Error> {
     if title.trim().is_empty() {
         return Err(Error::Usage("the title is empty".to_owned()));
+    }
+    Ok(())
+}
+
+/// The `extra_stages` rule `add_task` and `update_task` share (ADR 0048 decision 11).
+pub(crate) fn check_stages(stages: &[String]) -> Result<(), Error> {
+    for stage in stages {
+        if !STAGE_NAMES.contains(&stage.as_str()) {
+            return Err(Error::Usage(format!(
+                "`{stage}` is not a gate stage; stages are {}",
+                STAGE_NAMES.join(", ")
+            )));
+        }
     }
     Ok(())
 }
@@ -1157,6 +1154,53 @@ fn check_new(slug: &str, title: &str) -> Result<(), Error> {
 fn require_unchanged(id: &str, changed: bool) -> Result<(), Error> {
     if changed {
         return Err(Error::ChangedOutsideArc(id.to_owned()));
+    }
+    Ok(())
+}
+
+/// The `after` rules `add_task` and `update_task` share (ADR 0048 decision 11): every id is
+/// well-formed and names a task of `plan_id` or a `done` task, a task never waits on itself,
+/// and the new list makes no `after` cycle.
+///
+/// `task_id` is the task whose list is being set; `None` for a task that does not exist yet,
+/// which can have no incoming edge and so cannot complete a cycle. The cycle test walks the
+/// list's tasks with [`chain::chain`], the one walk of the graph `show` and `confirm` report.
+pub(crate) fn check_after(
+    store: &Store,
+    plan_id: &str,
+    task_id: Option<&str>,
+    after: &[String],
+) -> Result<(), Error> {
+    for dependency in after {
+        check_id(dependency)?;
+        if task_id == Some(dependency.as_str()) {
+            return Err(Error::Refused(format!(
+                "`{dependency}` is the task itself; a task cannot wait on itself"
+            )));
+        }
+        let allowed = if store.path(Kind::Task, dependency).is_file() {
+            let task = store.load_task(dependency)?;
+            task.item.plan == plan_id || task.item.state == model::TaskState::Done
+        } else {
+            false
+        };
+        if !allowed {
+            return Err(Error::Refused(format!(
+                "`{dependency}` is neither a task of plan `{plan_id}` nor a done task"
+            )));
+        }
+    }
+    let Some(task_id) = task_id else {
+        return Ok(());
+    };
+    for dependency in after {
+        let chain = chain::chain(store, dependency)?;
+        if chain.waits_on.iter().any(|entry| entry.id == task_id) {
+            return Err(Error::Refused(format!(
+                "`{task_id}` cannot wait on `{dependency}`: `{dependency}` already waits on \
+                 `{task_id}`, so `after` would cycle"
+            )));
+        }
     }
     Ok(())
 }

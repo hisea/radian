@@ -1,4 +1,4 @@
-//! The six tools of `radian arc mcp` (ADR 0048 decision 11).
+//! The seven tools of `radian arc mcp` (ADR 0048 decision 11).
 //!
 //! One list is the source for both sides: `tools/list` builds its answer from it, the call
 //! dispatch matches its names, and the manual's drift test reads the same names and
@@ -52,7 +52,7 @@ pub fn names() -> Vec<&'static str> {
     TOOLS.iter().map(|tool| tool.name).collect()
 }
 
-/// The six tools, in the order `tools/list` returns them.
+/// The seven tools, in the order `tools/list` returns them.
 pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "add_plan",
@@ -149,6 +149,46 @@ pub const TOOLS: &[ToolDef] = &[
 }"#,
     },
     ToolDef {
+        name: "update_task",
+        description: "Change a task in todo. Replaces its title or its original brief (the rework sections and the change records are kept), its after list, allow_noop or extra_stages; the phase does not change. Returns the task.",
+        input_schema: r#"{
+  "type": "object",
+  "properties": {
+    "task": {
+      "type": "string",
+      "description": "The task id. Its state must be todo."
+    },
+    "title": {
+      "type": "string",
+      "description": "A new title. It may not be empty."
+    },
+    "brief": {
+      "type": "string",
+      "description": "A new original brief: the text before the first '## Rework <n>' section. Every rework section and the '## Changes' records are kept. It may not be empty."
+    },
+    "after": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "The new list of task ids that must be merged first: a task of the same plan, or a task whose state is done. No self-reference and no cycle."
+    },
+    "allow_noop": {
+      "type": "boolean",
+      "description": "Whether the task may deliver no change on purpose."
+    },
+    "extra_stages": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["commands", "mutation", "review", "ci", "human"]
+      },
+      "description": "Gate stages this task adds to the plan's profile."
+    }
+  },
+  "required": ["task"],
+  "additionalProperties": false
+}"#,
+    },
+    ToolDef {
         name: "add_rework",
         description: "Give a task in review a rework brief. The brief is appended under '## Rework <n>' and the task returns to todo.ready. Returns the task.",
         input_schema: r#"{
@@ -203,13 +243,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_six_tools_are_the_lead_tools_and_nothing_else() {
+    fn the_seven_tools_are_the_lead_tools_and_nothing_else() {
         assert_eq!(
             names(),
             vec![
                 "add_plan",
                 "add_task",
                 "update_plan",
+                "update_task",
                 "add_rework",
                 "list",
                 "show"
@@ -268,21 +309,41 @@ mod tests {
                 "`{optional}` must be optional"
             );
         }
+        // `update_task` has one required field and every other argument is optional: an
+        // absent argument means "keep the stored value".
+        let update_task = TOOLS
+            .iter()
+            .find(|tool| tool.name == "update_task")
+            .expect("update_task exists");
+        let parameters = update_task.parameters();
+        assert_eq!(
+            parameters,
+            vec![
+                ("after".to_owned(), false),
+                ("allow_noop".to_owned(), false),
+                ("brief".to_owned(), false),
+                ("extra_stages".to_owned(), false),
+                ("task".to_owned(), true),
+                ("title".to_owned(), false),
+            ]
+        );
     }
 
     #[test]
     fn the_extra_stages_are_the_gate_stages() {
-        let add_task = TOOLS
-            .iter()
-            .find(|tool| tool.name == "add_task")
-            .expect("add_task exists");
-        let schema = add_task.schema();
-        let values: Vec<&str> = schema["properties"]["extra_stages"]["items"]["enum"]
-            .as_array()
-            .expect("the stage enum is a list")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
-        assert_eq!(values, crate::store::STAGE_NAMES);
+        for name in ["add_task", "update_task"] {
+            let tool = TOOLS
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} exists"));
+            let schema = tool.schema();
+            let values: Vec<&str> = schema["properties"]["extra_stages"]["items"]["enum"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}'s stage enum is a list"))
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert_eq!(values, crate::store::STAGE_NAMES, "{name}");
+        }
     }
 }
