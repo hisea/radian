@@ -162,6 +162,8 @@ A bare `radian login` shows the numbered provider list.
 The key never echoes.
 A verification request (`GET <base>/models`) runs before the save.
 A failure shows and still offers to save.
+When the provider already has a key, it asks `replace the current key, or add another? [r/a]`.
+`a` then asks a name for the new key; empty is allowed and the key then shows masked.
 Without a terminal the command refuses and points at `auth.json` instead.
 
 ```sh
@@ -171,11 +173,15 @@ radian login anthropic
 
 `radian logout <provider>` removes one stored credential.
 It asks first.
+With several keys it lists them (`1 first (sk-…irst)  2 team (sk-…cond)`) and asks for a number, a name, or `all`.
+`radian logout <provider> <name>` removes that key without asking; an unknown name is refused naming the known ones.
+Removing the first key promotes the next one to `key`; removing the last key removes the entry.
 Every other entry stays untouched.
 Exit `0` on removal or on an explicit keep, `2` when the entry is missing or the run has no terminal.
 
 ```sh
 radian logout anthropic
+radian logout opencode-go team
 ```
 
 ## `radian memory`
