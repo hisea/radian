@@ -8,7 +8,7 @@ This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the 
 
 `radian arc` opens a view of plans, tasks, verdicts, journals and merges; the pages themselves read the store, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · board · task · merge` (`merge` for a task in `review.*` or `done`), then on the plans page the view and the plans it hides (`active · 14 hidden`), on the board page its scope (`all plans` or the plan id, and `finished` while the list is open), `main <sha>` and loop state.
 
-`b` opens the board from any page; on the board it goes back to the plans page. `Tab` keeps its page meaning: on the plans page it opens the task page, on the task page it goes back, and on the merge page it closes it.
+`b` opens the board from any page; on the board it goes back to the plans page. Outside the task page `Tab` keeps its page meaning: on the plans page it opens the selected task's page, on the board the selected card's, and on the merge page it closes it. On the task page `Tab`/`Shift-Tab` cycle that page's own four tabs instead, and only `Esc` leaves it.
 
 ## The plans page
 
