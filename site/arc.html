@@ -119,19 +119,6 @@ h2 { font: 600 28px/1.15 var(--sans); letter-spacing: -0.035em; margin: 0; text-
 h2 + p { color: var(--muted); margin: 14px 0 0; max-width: 26em; }
 
 
-/* headless pipeline */
-.pipe { display: grid; font-family: var(--mono); font-size: 12.5px; }
-.node { border: 1px solid var(--rule); background: var(--term); padding: 12px 14px; min-width: 0; overflow-wrap: anywhere; }
-.node .t { color: var(--muted); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; display: block; margin-bottom: 6px; }
-.node.on { border-color: var(--accent); }
-.node b { color: var(--accent); font-weight: 500; }
-.node .c { color: var(--muted); }
-.vline { width: 1px; height: 26px; margin-left: 28px; background: var(--muted); position: relative; }
-.vline::after { content: ""; position: absolute; left: -3px; bottom: 0; border: 3.5px solid transparent; border-top: 5px solid var(--muted); border-bottom: 0; }
-.fork { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.flow-note { margin-top: 20px; font-size: 14.5px; color: var(--muted); max-width: 48em; }
-.flow-note code { color: var(--ink); }
-
 /* works with what you have */
 .compat { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
 .compat li { display: grid; grid-template-columns: 17ch minmax(0, 1fr); gap: 16px; padding: 13px 0; border-bottom: 1px solid var(--rule); font-size: 14.5px; color: var(--muted); }
@@ -145,6 +132,9 @@ h2 + p { color: var(--muted); margin: 14px 0 0; max-width: 26em; }
 
 /* video */
 .vid { margin: 0; }
+.wf { margin-top: 48px; }
+.wf .video { display: block; }
+.wf img { display: block; width: 100%; height: auto; }
 .video { border: 1px solid var(--rule); background: #000; }
 .video video { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; }
 .vcap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 24px; margin-top: 12px; font: 400 11.5px var(--mono); color: var(--muted); }
@@ -165,7 +155,6 @@ footer a:hover { color: var(--ink); }
 @media (max-width: 880px) {
   .row { padding: 0 20px; }
   .hero-grid, .sec-grid { grid-template-columns: minmax(0, 1fr); gap: 32px; }
-  .fork { grid-template-columns: minmax(0, 1fr); }
   .compat li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }
 @media (max-width: 560px) {
@@ -239,19 +228,7 @@ footer a:hover { color: var(--ink); }
           <p><span class="en">Every step leaves a file or a journal you can read afterwards.</span><span class="zh">每一步都留下一个可以事后翻看的文件或日志。</span></p>
         </div>
         <div>
-          <div class="pipe" role="img" aria-label="A lead writes a plan and tasks; arc starts one headless radian worker per task in its own worktree; the gate checks the pushed commit; a pass is merged into the remote main, a failure goes back for rework.">
-            <div class="node on"><span class="t"><span class="en">lead · Claude Code or the radian TUI</span><span class="zh">lead · Claude Code 或 radian TUI</span></span><b>radian arc mcp</b> <span class="c"><span class="en">writes a plan and its tasks</span><span class="zh">写计划和任务</span></span></div>
-            <div class="vline"></div>
-            <div class="node"><span class="t"><span class="en">one headless worker per task</span><span class="zh">每个任务一个无头 worker</span></span><b>radian exec</b> <span class="c"><span class="en">own git worktree · own branch · own journal</span><span class="zh">自己的 worktree · 自己的分支 · 自己的日志</span></span></div>
-            <div class="vline"></div>
-            <div class="node"><span class="t"><span class="en">the gate · on the pushed commit</span><span class="zh">门禁 · 检查推上来的提交</span></span><span class="en">your commands · a read-only review session · your approval</span><span class="zh">你配置的命令 · 只读的 review 会话 · 你的批准</span></div>
-            <div class="vline"></div>
-            <div class="fork">
-              <div class="node"><span class="t"><span class="en">pass</span><span class="zh">通过</span></span><b>radian arc merge</b> <span class="c">→ <span class="en">remote main</span><span class="zh">远端 main</span></span></div>
-              <div class="node"><span class="t"><span class="en">fail</span><span class="zh">失败</span></span><span class="en">back to the task for rework</span><span class="zh">退回任务返工</span></div>
-            </div>
-          </div>
-          <ul class="steps" style="margin-top:28px">
+          <ul class="steps">
             <li><code class="k">01 · lead</code><span><span class="en">A lead writes the plan and its tasks through arc's MCP server. It cannot confirm, start or merge anything.</span><span class="zh">lead 通过 arc 的 MCP 服务器写计划和任务。它不能确认、启动或合并任何东西。</span></span></li>
             <li><code class="k">02 · confirm</code><span><span class="en">You confirm the plan. At <code>auto</code> <code>off</code> you start each task yourself; at <code>run</code> arc starts a task once the tasks it waits for are merged.</span><span class="zh">你确认计划。<code>auto</code> 为 <code>off</code> 时每个任务由你启动；为 <code>run</code> 时，arc 在任务所等的任务合并之后自己启动它。</span></span></li>
             <li><code class="k">03 · workers</code><span><span class="en">Each task runs as a separate <code>radian exec</code> process in its own worktree, on its own branch, and pushes the result.</span><span class="zh">每个任务是一个独立的 <code>radian exec</code> 进程，有自己的 worktree 和分支，做完把结果推上去。</span></span></li>
@@ -260,6 +237,11 @@ footer a:hover { color: var(--ink); }
           </ul>
         </div>
       </div>
+      <figure class="vid wf">
+        <a class="video en" href="media/arc-workflow-en.webp" target="_blank" rel="noopener"><img src="media/arc-workflow-en.webp" alt="arc: one task from request to merge. You confirm a plan; the lead writes tasks; arc's state machine claims a task; a worker pushes a branch; the commands and review stages run on it; you merge or reject; a merged task can propose a follow-up." loading="lazy"></a>
+        <a class="video zh" href="media/arc-workflow-zh.webp" target="_blank" rel="noopener"><img src="media/arc-workflow-zh.webp" alt="arc：一个 task 从需求到合并。你确认计划，lead 写任务，arc 状态机领取任务，worker 推分支，commands 和 review 阶段检查，你合并或驳回，合并后可以提出后续任务。" loading="lazy"></a>
+        <figcaption class="vcap"><span><span class="en">fig. 2 · one task from request to merge, as this repository runs it (the gate shown is this repository's own: fmt, clippy, tests)</span><span class="zh">图 2 · 一个任务从需求到合并，按这个仓库自己的跑法（图里的门禁是本仓库自己的：fmt、clippy、测试）</span></span><span><span class="en">click to enlarge</span><span class="zh">点击放大</span></span></figcaption>
+      </figure>
     </section>
   </div>
 
