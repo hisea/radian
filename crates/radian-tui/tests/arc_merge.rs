@@ -434,7 +434,7 @@ fn every_stage_passes_with_its_commands_and_the_review_groups() {
 
 #[test]
 fn the_merge_pages_file_list_takes_at_most_half_of_the_diff_area() {
-    use radian_arc::read::{DiffFile, DiffSource, TaskDiff};
+    use radian_arc::read::{DiffBase, DiffFile, DiffSource, TaskDiff};
     let fixture = Fixture::new("list", &["commands", "human"]);
     fixture.write(&mut fixture.commands(true, None));
     fixture.write(&mut fixture.human(Some("auto")));
@@ -456,7 +456,7 @@ fn the_merge_pages_file_list_takes_at_most_half_of_the_diff_area() {
         Ok(TaskDiff {
             files,
             source: DiffSource::Range,
-            fallback: false,
+            base: DiffBase::MergeBase,
         }),
     ));
     for _ in 0..39 {

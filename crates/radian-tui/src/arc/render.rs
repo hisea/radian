@@ -1094,18 +1094,29 @@ fn draw_diff(
     remaining: usize,
     theme: &Theme,
 ) {
-    // The source line: a running attempt's worktree, and the fallback when the merge base of
-    // the remote main and the head could not be read (ADR 0048 decision 13).
+    // The source line: a running attempt's worktree, and why the range does not start at the
+    // merge base of the remote main and the head (ADR 0048 decision 13).
     let live = diff
         .diff
         .as_ref()
         .is_some_and(|diff| diff.source == radian_arc::read::DiffSource::Worktree);
-    let fallback = diff.diff.as_ref().is_some_and(|diff| diff.fallback);
-    let source = match (live, fallback) {
-        (true, true) => Some("live · worktree · no remote main"),
-        (true, false) => Some("live · worktree"),
-        (false, true) => Some("base..head · no remote main"),
-        (false, false) => None,
+    let base = diff
+        .diff
+        .as_ref()
+        .map_or(radian_arc::read::DiffBase::MergeBase, |diff| diff.base);
+    let source = match (live, base) {
+        (true, radian_arc::read::DiffBase::MergeBase) => Some("live · worktree"),
+        (true, radian_arc::read::DiffBase::NoRemoteMain) => {
+            Some("live · worktree · no remote main")
+        }
+        (true, radian_arc::read::DiffBase::Unrelated) => {
+            Some("live · worktree · no merge base with main")
+        }
+        (false, radian_arc::read::DiffBase::MergeBase) => None,
+        (false, radian_arc::read::DiffBase::NoRemoteMain) => Some("base..head · no remote main"),
+        (false, radian_arc::read::DiffBase::Unrelated) => {
+            Some("base..head · no merge base with main")
+        }
     };
     if let Some(text) = source {
         lines.push(rail(theme, Line::from(Span::styled(text, theme.hint))));

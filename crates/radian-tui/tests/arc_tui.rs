@@ -1248,7 +1248,7 @@ fn follow_then_k_scrolls_the_diff_up_from_the_end() {
         Ok(TaskDiff {
             files: vec![file],
             source: radian_arc::read::DiffSource::Range,
-            fallback: false,
+            base: radian_arc::read::DiffBase::MergeBase,
         }),
     );
 
@@ -1313,7 +1313,7 @@ fn show_files(app: &mut ArcApp, count: usize) {
         Ok(TaskDiff {
             files,
             source: radian_arc::read::DiffSource::Range,
-            fallback: false,
+            base: radian_arc::read::DiffBase::MergeBase,
         }),
     ));
 }
@@ -1390,7 +1390,7 @@ fn the_file_list_takes_at_most_half_of_the_diff_area() {
 
 #[test]
 fn a_no_change_diff_still_names_the_fallback_range() {
-    use radian_arc::read::TaskDiff;
+    use radian_arc::read::{DiffBase, TaskDiff};
     let fixture = Fixture::new();
     let mut app = fixture.app();
     app.task_sel = fixture.pos("e");
@@ -1402,7 +1402,7 @@ fn a_no_change_diff_still_names_the_fallback_range() {
         &id,
         attempt,
         Ok(TaskDiff {
-            fallback: true,
+            base: DiffBase::NoRemoteMain,
             ..TaskDiff::default()
         }),
     ));
@@ -1413,6 +1413,53 @@ fn a_no_change_diff_still_names_the_fallback_range() {
         "an empty diff keeps the source line:\n{text}"
     );
     assert!(text.contains("no change yet"), "{text}");
+}
+
+/// A remote main ref that exists without a common ancestor is a different reason from a missing
+/// one, so the source line says which, for both the committed range and the live worktree.
+#[test]
+fn a_diff_without_a_merge_base_names_that_reason() {
+    use radian_arc::read::{DiffBase, DiffSource, TaskDiff};
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    let id = app.task.as_ref().unwrap().id.clone();
+    let attempt = app.task.as_ref().unwrap().attempt.unwrap();
+    assert!(app.apply_diff(
+        &id,
+        attempt,
+        Ok(TaskDiff {
+            base: DiffBase::Unrelated,
+            ..TaskDiff::default()
+        }),
+    ));
+
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("base..head · no merge base with main"),
+        "the range's own reason:\n{text}"
+    );
+    assert!(
+        !text.contains("no remote main"),
+        "the ref exists, so the line must not say it does not:\n{text}"
+    );
+
+    assert!(app.apply_diff(
+        &id,
+        attempt,
+        Ok(TaskDiff {
+            source: DiffSource::Worktree,
+            base: DiffBase::Unrelated,
+            ..TaskDiff::default()
+        }),
+    ));
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("live · worktree · no merge base with main"),
+        "the live line's own reason:\n{text}"
+    );
 }
 
 #[test]
@@ -1440,7 +1487,7 @@ fn a_long_file_list_still_leaves_the_diff_a_body_row() {
         Ok(TaskDiff {
             files,
             source: radian_arc::read::DiffSource::Range,
-            fallback: false,
+            base: radian_arc::read::DiffBase::MergeBase,
         }),
     );
 
