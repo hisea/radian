@@ -723,12 +723,12 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
-A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md). The plans page's `x` cancels the selected task or plan, `c` confirms a draft plan or a proposed task (depending on the focused column), and `+`/`-` move the selected plan's priority; the page draws `P<n>` with the plan's id and in the frame label.
 The TUI never holds `runner.lock` and runs no pass. When it opens, it starts `radian arc run --watch` with the default interval as a detached process if no loop holds the lock; `R` starts one the same way while none runs.
 The header shows `loop ● running (pid <n>)` for any holder, `loop ◌ starting` until a start's lock appears, and `loop ○ stopped` when none runs; a failed start adds one footer line with its reason and exit code.
 The newest transition line `loop.log` gained since the TUI opened is the footer's ticker, and `L` opens a view of the last 500 lines.
 `q` and SIGTERM close the TUI and nothing else: a loop it started keeps running, and an attempt it left running is reconciled by the next loop.
 A running task's diff tab shows the worker's worktree against the attempt's `base_sha`, uncommitted files included (`live · worktree`), refreshed every 5 seconds.
+A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md). The task page's tabs are `brief · conversation · diff · attempts`, and it opens on `brief` for a task that has not run. The plans page's `x` cancels the selected task or plan, `c` confirms a draft plan or a proposed task (depending on the focused column), and `+`/`-` move the selected plan's priority; the page draws `P<n>` with the plan's id and in the frame label.
 
 ## Not built yet
 

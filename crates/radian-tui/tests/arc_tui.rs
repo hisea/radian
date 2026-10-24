@@ -18,7 +18,7 @@ use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
 use radian_tui::arc::render;
-use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter, actions};
+use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter, TaskTab, actions};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1189,6 +1189,7 @@ fn the_task_page_has_the_frame_the_tabs_and_the_attempt_selector() {
             fixture.plan
         ),
         "the e task",
+        "brief",
         "conversation",
         "diff",
         "attempts",
@@ -1197,14 +1198,191 @@ fn the_task_page_has_the_frame_the_tabs_and_the_attempt_selector() {
     ] {
         assert!(text.contains(needle), "missing `{needle}`:\n{text}");
     }
-    // Tab goes back to the plans page; Tab again reopens the task page.
-    assert_eq!(app.on_key(&key(KeyCode::Tab)), ArcKey::Redraw);
+    // Esc goes back to the plans page; Tab on it reopens the task page.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
     assert_eq!(app.page, radian_tui::arc::Page::Plans);
     assert!(screen(&mut app, 120, 30).contains("PLANS"));
     app.on_key(&key(KeyCode::Tab));
     assert!(screen(&mut app, 120, 30).contains("conversation"));
     // `q` leaves from either page.
     assert_eq!(app.on_key(&key(KeyCode::Char('q'))), ArcKey::Quit);
+}
+
+/// The open task page's tab.
+fn tab(app: &ArcApp) -> TaskTab {
+    app.task.as_ref().expect("the task page is open").tab
+}
+
+#[test]
+fn the_task_tabs_cycle_in_order_in_both_directions() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    assert_eq!(
+        tab(&app),
+        TaskTab::Brief,
+        "a task without an attempt opens here"
+    );
+    let text = screen(&mut app, 120, 30);
+    assert!(
+        text.contains("brief  ·  conversation  ·  diff  ·  attempts"),
+        "the tabs are drawn in cycle order:\n{text}"
+    );
+    for expected in [
+        TaskTab::Conversation,
+        TaskTab::Diff,
+        TaskTab::Attempts,
+        TaskTab::Brief,
+    ] {
+        assert_eq!(app.on_key(&key(KeyCode::Tab)), ArcKey::Redraw);
+        assert_eq!(tab(&app), expected, "`Tab` cycles forward");
+    }
+    let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+    for expected in [
+        TaskTab::Attempts,
+        TaskTab::Diff,
+        TaskTab::Conversation,
+        TaskTab::Brief,
+    ] {
+        assert_eq!(app.on_key(&back), ArcKey::Redraw);
+        assert_eq!(tab(&app), expected, "`Shift-Tab` cycles back");
+    }
+    // A terminal that sends `Tab` with the shift modifier cycles back too.
+    let shifted = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+    assert_eq!(app.on_key(&shifted), ArcKey::Redraw);
+    assert_eq!(tab(&app), TaskTab::Attempts);
+}
+
+#[test]
+fn a_task_page_opens_on_the_brief_until_the_task_has_an_attempt() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    assert_eq!(
+        tab(&app),
+        TaskTab::Brief,
+        "an `attempt: 0` task opens on its brief"
+    );
+    app.close_task();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    assert_eq!(
+        tab(&app),
+        TaskTab::Conversation,
+        "a task with an attempt opens on its conversation"
+    );
+}
+
+#[test]
+fn the_brief_tab_shows_the_task_body_and_no_frontmatter() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("the brief"), "the body is drawn:\n{text}");
+    for key in [
+        "schema_version",
+        "allow_noop",
+        "extra_stages",
+        "cost_usd",
+        "head_sha",
+    ] {
+        assert!(
+            !text.contains(key),
+            "the frontmatter key `{key}` is drawn:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn a_brief_shows_its_rework_sections() {
+    let fixture = Fixture::new();
+    let id = fixture.id("e").to_owned();
+    fixture
+        .store
+        .change_task(&id, |task| {
+            task.body.push_str("\n## Rework 1\n\ntighten the tests\n");
+            Ok(())
+        })
+        .unwrap();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    // A task with an attempt opens on the conversation; the brief is the tab before it.
+    app.on_key(&key(KeyCode::Char('h')));
+    assert_eq!(tab(&app), TaskTab::Brief);
+    let text = screen(&mut app, 120, 40);
+    assert!(text.contains("the brief"), "{text}");
+    assert!(
+        text.contains("Rework 1"),
+        "the rework heading is drawn:\n{text}"
+    );
+    assert!(text.contains("tighten the tests"), "{text}");
+}
+
+#[test]
+fn a_rework_added_later_shows_at_the_next_refresh() {
+    let fixture = Fixture::new();
+    let id = fixture.id("e").to_owned();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('h')));
+    let text = screen(&mut app, 120, 40);
+    assert!(!text.contains("Rework"), "{text}");
+
+    radian_arc::store::plan_ops::add_rework(&fixture.store, &id, "closed the gap").unwrap();
+    app.refresh();
+    assert_eq!(
+        tab(&app),
+        TaskTab::Brief,
+        "a tab the owner picked stays picked"
+    );
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("Rework 3"),
+        "the next refresh shows the appended section (the task is at attempt 2):\n{text}"
+    );
+    assert!(text.contains("closed the gap"), "{text}");
+}
+
+#[test]
+fn a_brief_heading_is_drawn_in_the_transcript_heading_role() {
+    let fixture = Fixture::new();
+    let id = fixture.id("d").to_owned();
+    fixture
+        .store
+        .change_task(&id, |task| {
+            task.body = "## The ask\n\nthe explanation\n".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    let theme = app.theme.clone();
+    let terminal = render(&mut app, 120, 30);
+    let text = rows(&terminal).join("\n");
+    assert!(text.contains("The ask"), "{text}");
+    assert!(!text.contains("##"), "no `#` is drawn:\n{text}");
+    let (row, column) = fg_of(&terminal, "The ask");
+    assert_eq!(
+        fg(&terminal, row, column),
+        theme.md_heading.fg,
+        "the heading role's color"
+    );
+    let cell = terminal
+        .backend()
+        .buffer()
+        .cell((column, row))
+        .expect("the heading's first cell");
+    assert!(
+        cell.modifier.contains(ratatui::style::Modifier::BOLD),
+        "the heading role is bold: {cell:?}"
+    );
 }
 
 /// The run directories of `task`: one verdict file per stage of each attempt.

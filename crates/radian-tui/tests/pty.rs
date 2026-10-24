@@ -14088,8 +14088,9 @@ fn arc_merge_repo(dir: &Path) -> String {
     task
 }
 
-/// `radian arc` opens on the plans page, `Enter` opens the selected task, `Tab` switches
-/// between the plans and task pages, and `q` leaves with the terminal restored.
+/// `radian arc` opens on the plans page, `Enter` opens the selected task, `Tab` cycles the
+/// task page's tabs, `Esc` returns to the plans page, and `q` leaves with the terminal
+/// restored.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_arc_opens_switches_pages_and_quits() {
     let scratch = TempDir::new("arc-tui");
@@ -14126,21 +14127,37 @@ async fn pty_arc_opens_switches_pages_and_quits() {
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("conversation", wait_positive()),
+        pty.wait_for_screen(
+            "brief  ·  conversation  ·  diff  ·  attempts",
+            wait_positive()
+        ),
         "the task page tabs are missing:\n{}",
         pty.screen()
     );
 
-    // Tab goes back to the plans page, and Tab again reopens the task page.
-    pty.send(b"\t");
+    // The task has no attempt, so it opens on its brief. `Tab` moves to the conversation.
     assert!(
-        pty.wait_for_screen("PLANS", wait_positive()),
-        "Tab did not return to the plans page:\n{}",
+        pty.wait_for_screen("the brief", wait_positive()),
+        "the brief is not drawn:\n{}",
         pty.screen()
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("conversation", wait_positive()),
+        pty.wait_for_screen("no session journal yet", wait_positive()),
+        "Tab did not move to the conversation tab:\n{}",
+        pty.screen()
+    );
+
+    // `Esc` goes back to the plans page, and `Tab` again reopens the task page.
+    pty.send(b"\x1b");
+    assert!(
+        pty.wait_for_screen("PLANS", wait_positive()),
+        "Esc did not return to the plans page:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\t");
+    assert!(
+        pty.wait_for_screen("brief  ·  conversation", wait_positive()),
         "Tab did not reopen the task page:\n{}",
         pty.screen()
     );
