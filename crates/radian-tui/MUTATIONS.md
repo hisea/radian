@@ -2552,6 +2552,24 @@ Base: the branch's first commit. The mutation was applied by hand to
 |---|---|---|---|
 | TK0049-M1 | drop `RADIAN_VERIFY_MIN_FREE_GIB` from the usage block | ✅ 1 failed | `arc_gate_without_arguments_exits_two_and_help_exits_zero` (the help did not name the two limits) |
 
+## TK0063: the plans page's columns and plan marks (2026-10-24, branch `work/TK0063-tui-plans-align-and-marks`)
+
+Base `93e078fe` (the branch point; `origin/main` has since moved). The plan summary row is three
+aligned columns, both task lists share fixed columns, and the seven circle marks take seven theme
+roles. Each mutation was applied by hand to the working file, backed up under `.radian/mut-bak/`,
+the named test ran alone with `cargo nextest run -p radian-tui --locked --profile sandbox`, and the
+file was restored from that copy (never `git checkout`).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0063-M1 | the task cost is left-aligned (`{:>width$}` → `{:<width$}`) | ✅ 1 failed | `the_flat_task_list_aligns_the_after_text_across_cost_widths` ("the costs end at one column") |
+| TK0063-M2 | the graph id block ignores the connector again (`let lead = 2`, so each level shifts the phase right) | ✅ 1 failed | `the_graph_task_list_aligns_columns_at_every_depth` ("the phase column holds at every depth") |
+| TK0063-M3 | running is checked before needs you in `plan_mark` | ✅ 1 failed | `each_plan_mark_rule_draws_its_mark_and_role` (the running-plus-proposed plan draws `●`, not `◉`) |
+| TK0063-M4 | `failed.cancelled` counts as needs you (the failed predicate drops the phase test) | ✅ 1 failed | `each_plan_mark_rule_draws_its_mark_and_role` (the done plan draws `◉`, not `✓`) |
+| TK0063-M5 | `plan_running` takes the `VIOLET` constant in the dark palette, like `plan_queued` | ✅ 1 failed | `theme::tests::the_plan_roles_are_seven_distinct_colors_and_mono_has_none` (running and queued are the same color) |
+
+5/5 caught. The M5 edit landed on both palettes' identical literals; the dark palette is the one
+the test checks first.
 ## TK0059: the task page's brief tab (2026-10-24, branch `work/TK0059-tui-task-brief-tab`)
 
 Base `b335c1de` (the branch point). The task page gains `brief` as its first tab: the task

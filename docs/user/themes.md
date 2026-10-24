@@ -66,7 +66,7 @@ starts from one built-in palette, then sets roles.
 entries may reference each other with `$other`: chains resolve, and a loop
 only breaks the roles that use it. A missing variable warns once per name.
 
-A `[roles]` key is one of the 89 role names below. A value is one color for
+A `[roles]` key is one of the 96 role names below. A value is one color for
 the foreground, or a table with `fg`, `bg`, `bold`, `italic`, `dim` and
 `underline`. An absent field leaves the built-in value alone; `bold = false`
 turns off a bold the built-in sets. The same value shape overrides single
@@ -158,6 +158,23 @@ highest):
 
 A theme file sets them by these names; pi has no source role for them. Without
 truecolor each value becomes the nearest 256-color entry, like every role.
+
+Plan marks (the arc plans page draws one mark per plan; see
+[the arc TUI](arc-tui.md#the-plans-page) for the rule that picks it):
+
+| Role | What it paints | `dark` | `light` | `mono` |
+|---|---|---|---|---|
+| `plan_needs_you` | The `◉` mark. | `okhsl(45 75% 67%)` (orange), bold | `okhsl(45 85% 47%)` (orange), bold | bold, no color |
+| `plan_running` | The `●` mark. | `okhsl(202 58% 67%)` (cyan) | `okhsl(203 73% 46%)` (cyan) | no color |
+| `plan_queued` | The `○` mark. | `okhsl(295 50% 67%)` (violet) | `okhsl(295 60% 46%)` (violet) | no color |
+| `plan_paused` | The `◍` mark. | `okhsl(65 75% 67%)` (amber) | `okhsl(65 85% 47%)` (amber) | no color |
+| `plan_done` | The `✓` mark. | `okhsl(159 59% 67%)` (green) | `okhsl(159 75% 46%)` (green) | no color |
+| `plan_draft` | The `◌` mark. | `okhsl(229 8% 56%)` (grey) | `okhsl(229 7% 59%)` (grey) | no color |
+| `plan_cancelled` | The `✕` mark. | `okhsl(20 72% 67%)` (red) | `okhsl(20 91% 47%)` (red) | no color |
+
+A theme file sets them by these names. A theme that does not set one keeps the
+built-in default of its `appearance`; without truecolor each value becomes the
+nearest 256-color entry, like every role.
 
 Tool block backgrounds by state:
 
@@ -268,7 +285,12 @@ existing output without `--force`.
 
 What converts: pi's text levels and semantic colors map onto the matching
 roles (user message text to `user`, thinking text to `reasoning`, tool title
-to `tool_call`). The import report names every mapped value, every pi key it
+to `tool_call`). The seven plan marks take pi's tokens where pi has one:
+`success` → `plan_done`, `error` → `plan_cancelled`, `warning` →
+`plan_needs_you`, `accent` → `plan_queued`, and `dim` → `plan_draft`;
+`plan_running` and `plan_paused` have no pi source, so the report lists them
+among the roles that keep the built-in value. The import report names every
+mapped value, every pi key it
 drops, and every role that keeps the built-in value: read it for the full
 mapping of your file. What does not convert: pi roles nothing consumes
 yet (panel roles and several Markdown, diff and syntax families) are dropped
