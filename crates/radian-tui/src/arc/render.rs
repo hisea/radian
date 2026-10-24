@@ -327,6 +327,8 @@ fn scroll_top(top: usize, selected: usize, visible: usize, len: usize) -> usize 
 }
 
 /// The left column: `PLANS`, then each plan from `top` in two rows (the id and its summary).
+/// The summary row is three columns — the auto level, `merged/total` and the cost — each
+/// padded to the widest value the view lists (ADR 0048 decision 11).
 fn plan_list_lines(app: &ArcApp, rows: &[PlanRow], top: usize) -> Vec<Line<'static>> {
     let theme = &app.theme;
     let mut out = vec![Line::from(Span::styled("PLANS", theme.hint))];
@@ -338,9 +340,11 @@ fn plan_list_lines(app: &ArcApp, rows: &[PlanRow], top: usize) -> Vec<Line<'stat
         )));
         return out;
     }
+    let columns = plan_columns(rows);
     out.push(Line::default());
     for (index, row) in rows.iter().enumerate().skip(top) {
         let selected = index == app.plan_sel;
+        let cancelled = row.mark == PlanMark::Cancelled;
         let cursor = if selected {
             Span::styled("❯ ", theme.model)
         } else {
@@ -353,27 +357,51 @@ fn plan_list_lines(app: &ArcApp, rows: &[PlanRow], top: usize) -> Vec<Line<'stat
                 format!("{} ", row.priority),
                 priority_style(theme, &row.priority),
             ),
-            Span::styled(fit(&row.id, LEFT_WIDTH as usize - 8), theme.text),
+            Span::styled(
+                fit(&row.id, LEFT_WIDTH as usize - 8),
+                if cancelled { theme.hint } else { theme.text },
+            ),
         ]));
-        let prefix = match row.status.as_str() {
-            "draft" => "draft · ",
-            "cancelled" => "cancelled · ",
-            _ => "",
-        };
         let details = format!(
-            "{prefix}auto {} · {}/{} · {}",
+            "{:<auto$} · {:>count$} · {:>cost$}",
             row.auto,
-            row.merged,
-            row.total,
-            format_cost(row.cost)
+            format!("{}/{}", row.merged, row.total),
+            format_cost(row.cost),
+            auto = columns.auto,
+            count = columns.count,
+            cost = columns.cost,
         );
         out.push(Line::from(Span::styled(
             format!("    {}", fit(&details, LEFT_WIDTH as usize - 5)),
-            theme.tier,
+            if cancelled { theme.hint } else { theme.tier },
         )));
         out.push(Line::default());
     }
     out
+}
+
+/// The plan summary row's three column widths: the widest auto level, merged count and cost
+/// among the plans the view lists (ADR 0048 decision 11).
+struct PlanColumns {
+    auto: usize,
+    count: usize,
+    cost: usize,
+}
+
+fn plan_columns(rows: &[PlanRow]) -> PlanColumns {
+    PlanColumns {
+        auto: rows.iter().map(|row| row.auto.width()).max().unwrap_or(0),
+        count: rows
+            .iter()
+            .map(|row| format!("{}/{}", row.merged, row.total).width())
+            .max()
+            .unwrap_or(0),
+        cost: rows
+            .iter()
+            .map(|row| format_cost(row.cost).width())
+            .max()
+            .unwrap_or(0),
+    }
 }
 
 /// The right column: the selected plan's open frame, its tasks from `top`.
@@ -410,7 +438,7 @@ fn plan_frame_lines(
         )),
     ));
     out.push(rail(theme, Line::default()));
-    let (id_width, phase_width) = task_columns(&row.tasks, width.saturating_sub(2));
+    let columns = task_columns(&row.tasks, width.saturating_sub(2));
     // The cursor is on the task the moves act on: the row at `task_sel` in this same display
     // order, and only while the task list has the focus.
     let selected = (app.focus == Focus::Tasks)
@@ -418,56 +446,95 @@ fn plan_frame_lines(
         .flatten();
     for task in row.tasks.iter().skip(top).take(visible) {
         let cursor = selected == Some(task.id.as_str());
-        let line = task_row_line(task, id_width, phase_width, cursor, app.loop_running, theme);
+        let line = task_row_line(task, &columns, cursor, app.loop_running, theme);
         out.push(rail(theme, line));
     }
     out.push(frame_bottom(theme));
     out
 }
 
-/// The id and `state.phase` column widths for one plan's rows, shrunk to fit.
-fn task_columns(tasks: &[TaskRow], content: usize) -> (usize, usize) {
-    let id_max = tasks.iter().map(|task| task.id.width()).max().unwrap_or(16);
+/// One task row's fixed column widths, computed once for the plan from the rows it draws
+/// (ADR 0048 decision 11): the id block (`connector + mark + id`), `state.phase`, `#n` and
+/// the cost. Every row starts `state.phase`, `#n`, the cost and the trailing text at the same
+/// column, whatever its depth; the id gets what is left of the id block.
+struct TaskColumns {
+    /// The connector, the mark and the id together. A deeper connector leaves the id less
+    /// room, so it is cut with `…`.
+    id: usize,
+    phase: usize,
+    attempt: usize,
+    cost: usize,
+}
+
+fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
+    // The id block is `connector + mark + id`: the mark glyph and its one space are 2 cells.
+    let mark = 2;
+    let lead_max = tasks
+        .iter()
+        .map(|task| task.connector.width() + mark)
+        .max()
+        .unwrap_or(mark);
+    let id_max = tasks
+        .iter()
+        .map(|task| task.connector.width() + mark + task.id.width())
+        .max()
+        .unwrap_or(16);
     let phase_max = tasks
         .iter()
         .map(|task| task.phase.width())
         .max()
         .unwrap_or(12);
-    let connector_max = tasks
+    let attempt = tasks
         .iter()
-        .map(|task| task.connector.width())
+        .map(|task| format!("#{}", task.attempt).width())
         .max()
-        .unwrap_or(0);
+        .unwrap_or(2);
+    let cost = tasks
+        .iter()
+        .map(|task| format_cost(task.cost).width())
+        .max()
+        .unwrap_or(1);
     let mut phase = (phase_max + 2).clamp(10, 25);
-    let mut id = (id_max + 2).clamp(12, 34);
-    let pre = connector_max + 2;
-    // connector + mark + space + id + space + phase + space + `#N` + space + cost. The
-    // `waits`/`also after` tail takes whatever is left; a narrow page clips it rather than
-    // shortening the id or the phase.
-    let needed = |id: usize, phase: usize| pre + id + 1 + phase + 1 + 3 + 1 + 6;
+    // Never shrink the id block below the deepest connector's own width plus one id cell, so
+    // a deep row still shows a cut id rather than losing the column.
+    let min_id = (lead_max + 1).max(12);
+    let mut id = id_max.clamp(12, 34).max(min_id);
+    // The cursor is always 2 cells (its cell on every row, selected or not), so the columns
+    // hold on the row the cursor is on too. The `waits`/`also after` tail takes whatever is
+    // left; a narrow page clips it rather than shortening the fixed columns.
+    let needed = |id: usize, phase: usize| 2 + id + 1 + phase + 1 + attempt + 1 + cost;
     while needed(id, phase) > content && phase > 10 {
         phase -= 1;
     }
-    while needed(id, phase) > content && id > 12 {
+    while needed(id, phase) > content && id > min_id {
         id -= 1;
     }
-    (id, phase)
+    TaskColumns {
+        id,
+        phase,
+        attempt,
+        cost,
+    }
 }
 
 /// One task row inside the plan frame: connector, mark, id, `state.phase`, `#attempt`, cost,
-/// the worker's freshness for a `doing` task, and `waits`/`also after` when they apply.
+/// the worker's freshness for a `doing` task, and `waits`/`also after` when they apply. The
+/// columns come from [`TaskColumns`], so every row lines up however deep its connector is.
 fn task_row_line(
     task: &TaskRow,
-    id_width: usize,
-    phase_width: usize,
+    columns: &TaskColumns,
     cursor: bool,
     loop_running: bool,
     theme: &Theme,
 ) -> Line<'static> {
     let mut spans = Vec::new();
-    if cursor {
-        spans.push(Span::styled("❯ ", theme.model));
-    }
+    // The cursor cell is on every row, so a selected row keeps the same columns.
+    spans.push(if cursor {
+        Span::styled("❯ ", theme.model)
+    } else {
+        Span::raw("  ")
+    });
+    let lead = task.connector.width() + 2;
     if !task.connector.is_empty() {
         spans.push(Span::styled(task.connector.clone(), theme.frame));
     }
@@ -475,23 +542,30 @@ fn task_row_line(
         format!("{} ", task.mark.glyph()),
         task.mark.style(theme),
     ));
-    spans.push(Span::styled(
-        fit(&task.id, id_width.saturating_sub(1)),
-        theme.text,
-    ));
-    let id_used = task.id.width().min(id_width.saturating_sub(1));
-    spans.push(Span::raw(" ".repeat(id_width.saturating_sub(id_used))));
-    spans.push(Span::styled(
-        fit(&task.phase, phase_width.saturating_sub(1)),
-        task.mark.style(theme),
-    ));
-    let phase_used = task.phase.width().min(phase_width.saturating_sub(1));
+    let id = fit(&task.id, columns.id.saturating_sub(lead));
+    let id_used = id.width();
+    spans.push(Span::styled(id, theme.text));
     spans.push(Span::raw(
-        " ".repeat(phase_width.saturating_sub(phase_used)),
+        " ".repeat(columns.id.saturating_sub(lead + id_used)),
     ));
-    spans.push(Span::styled(format!("#{:<2}", task.attempt), theme.tier));
+    let phase = fit(&task.phase, columns.phase);
+    let phase_used = phase.width();
+    spans.push(Span::styled(phase, task.mark.style(theme)));
+    spans.push(Span::raw(
+        " ".repeat(columns.phase.saturating_sub(phase_used)),
+    ));
+    spans.push(Span::raw(" "));
     spans.push(Span::styled(
-        format!(" {}", format_cost(task.cost)),
+        format!(
+            "{:<width$}",
+            format!("#{}", task.attempt),
+            width = columns.attempt
+        ),
+        theme.tier,
+    ));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        format!("{:>width$}", format_cost(task.cost), width = columns.cost),
         theme.tier,
     ));
     if let Some(freshness) = task.freshness {
