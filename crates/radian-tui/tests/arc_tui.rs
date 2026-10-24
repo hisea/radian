@@ -509,6 +509,28 @@ fn f_cycles_the_plan_views_in_order_and_back() {
 }
 
 #[test]
+fn f_advances_the_view_whichever_column_has_focus() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    let selected = app.selected_plan().unwrap().plan.item.id.clone();
+    // The task column is focused, with a task held.
+    app.focus = Focus::Tasks;
+    app.task_sel = 5;
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::All);
+    assert_eq!(
+        app.selected_plan().unwrap().plan.item.id,
+        selected,
+        "the held plan stays selected when the new view holds it"
+    );
+    assert_eq!(app.task_sel, 5, "the held task selection is kept");
+    assert_eq!(app.focus, Focus::Tasks, "`f` does not move the focus");
+    // The next press still advances from the task column.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::Done);
+}
+
+#[test]
 fn the_selection_stays_on_a_plan_in_both_views_and_moves_to_the_first_otherwise() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
@@ -593,6 +615,27 @@ fn a_refresh_that_finishes_the_selected_plan_moves_the_selection() {
 }
 
 #[test]
+fn a_refresh_keeps_the_plan_view() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    // Two presses take the view from `active` to `done`; a refresh must not reset it.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::Done);
+    app.refresh();
+    assert_eq!(app.filter, PlanFilter::Done, "a refresh keeps the view");
+    let text = screen(&mut app, 140, 30);
+    assert!(
+        text.contains("merge  ·  done"),
+        "the header still names the view:\n{text}"
+    );
+    assert!(
+        text.contains("PL0001-first"),
+        "the view still lists its plan:\n{text}"
+    );
+}
+
+#[test]
 fn all_shows_no_hidden_count() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
@@ -607,6 +650,37 @@ fn all_shows_no_hidden_count() {
     assert!(
         !text.contains("hidden"),
         "`all` hides nothing and shows no count:\n{text}"
+    );
+}
+
+#[test]
+fn a_view_that_hides_no_plan_shows_no_count() {
+    let scratch = Scratch::new("zero-hidden");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "only", "the only plan");
+    add_task(
+        &store,
+        &plan,
+        "done",
+        &[],
+        TaskState::Done,
+        "merged",
+        1,
+        None,
+    );
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    // `active` hides the finished plan; `done` holds it and hides nothing.
+    let text = screen(&mut app, 140, 30);
+    assert!(text.contains("active · 1 hidden"), "{text}");
+    for _ in 0..2 {
+        assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    }
+    assert_eq!(app.filter, PlanFilter::Done);
+    let text = screen(&mut app, 140, 30);
+    assert!(text.contains("merge  ·  done"), "{text}");
+    assert!(
+        !text.contains("hidden"),
+        "a zero count is omitted, as `radian arc list` omits it:\n{text}"
     );
 }
 

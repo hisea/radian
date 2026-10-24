@@ -6,7 +6,7 @@ description: The arc TUI: the plans, task and merge pages, every mark and key, a
 
 This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
-`radian arc` opens a view of plans, tasks, verdicts, journals and merges; the pages themselves read the store, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · task · merge` (`merge` for a task in `review.*` or `done`), then on the plans page the view and the plans it hides (`active · 14 hidden`), `main <sha>` and loop state.
+`radian arc` opens a view of plans, tasks, verdicts, journals and merges; the pages themselves read the store, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · task · merge` (`merge` for a task in `review.*` or `done`), then on the plans page the view and the plans it hides (`active · 14 hidden`; a zero count is omitted), `main <sha>` and loop state.
 
 ## The plans page
 
@@ -27,7 +27,7 @@ Plan marks: `✓` (merged, green), `●` (confirmed, accent), `◻` (draft, weak
 
 A plan is finished by the same test `radian arc list` uses: every task is `done.merged`, so a plan whose tasks are all merged is finished even while its status is `draft`.
 
-The header names the view and counts the plans it hides, for example `active · 14 hidden`; `all` hides nothing and shows no count. A view with no plan shows one weak line in the plan column (`no active plans`, `no plans`, `no done plans`, or `no cancelled plans`) and leaves the right column empty.
+The header names the view and counts the plans it hides, for example `active · 14 hidden`; `all` shows no count, and a count of `0` is left out (as `radian arc list` leaves out a zero part), so a `done` view that hides no plan shows just `done`. A view with no plan shows one weak line in the plan column (`no active plans`, `no plans`, `no done plans`, or `no cancelled plans`) and leaves the right column empty.
 
 The selection stays on the same plan when that plan is in the new view; otherwise it moves to the first plan of the view. The task-column selection resets when the plan changes. The 2-second re-read keeps the view: a plan that leaves it (its last task merges in `active`, for example) disappears, and the selection follows the same rule. The view is not saved: every start opens on `active`.
 

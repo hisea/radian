@@ -837,7 +837,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   list scannable — does the state mark read at a glance, are the second line's `auto`, the
   merged/total count and the cost lined up, and is the selected plan's frame title readable at
   your width? Switch to the flat list (`g`): does `after` explain the order better than the
-  tree's connectors? On the task page: does the tree's `├─`/`└─` indentation line up, is
+  tree's connectors? Press `f` through the four views (`active` → `all` → `done` → `cancelled`):
+  does the header name each view and show the hidden count (`active · 14 hidden`; `all` shows
+  none, and a zero count is omitted), and is each list still scannable — do `done` and
+  `cancelled` read as finished work, and is an empty view's one weak line obvious? On the task
+  page: does the tree's `├─`/`└─` indentation line up, is
   `also after`/`waits` obvious as an explanation, and does a row with a long phase keep its
   columns? Open the conversation tab on a task whose worker ran: do the `❯`/thinking/tool blocks
   match the main transcript, and do `j`/`k` and `f` move the way you expect? On the diff tab:

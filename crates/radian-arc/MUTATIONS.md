@@ -418,3 +418,15 @@ TK0039-M1–M3 were applied to the working file one at a time, run with `cargo t
 radian-arc` (`--lib attempt::tests` for M1, `--test attempt` for M2 and M3), restored from a
 copy under `.radian/tk0039/` with `cp`, and compared byte for byte with `cmp`.
 
+## TK0066: one `TaskFile::is_merged` for the finished-plan rule (2026-10-24, branch `work/TK0066-tui-plan-filter-followups`)
+
+The TK0047 review found the `done.merged` predicate repeated in `PlanView::is_finished`,
+`cli::is_merged` and the TUI's `plan_row` and `start_blocker`; they now all read
+`TaskFile::is_merged`. The mutation was applied to the working file, the named test was run
+alone, and the file was restored from a copy under `.radian/mut-bak/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0066-M1 | `TaskFile::is_merged` always answers `false` | ✅ 1 failed | `list::the_default_hides_merged_tasks_and_finished_plans` (the finished plan and its merged tasks are printed) |
+
+1/1 caught.

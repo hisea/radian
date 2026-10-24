@@ -383,6 +383,13 @@ pub struct TaskFile {
 }
 
 impl TaskFile {
+    /// Whether the task is `done.merged`: the one state a finished plan is counted by and the
+    /// default `radian arc list` hides. The plan-finished rule and every per-task test read
+    /// this, so they cannot drift apart.
+    pub fn is_merged(&self) -> bool {
+        self.state == TaskState::Done && self.phase == "merged"
+    }
+
     /// The task's running total: its stored `total_cost_usd`, or its `cost_usd` for a file
     /// written before the field existed (ADR 0048 decision 12).
     pub fn running_total(&self) -> f64 {
