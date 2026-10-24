@@ -1531,8 +1531,15 @@ impl ArcApp {
             self.result = None;
             return self.on_float_key(key);
         }
-        // `L` opens and closes the loop's log from any page (ADR 0048 decision 13).
+        // `L` opens and closes the loop's log from any page (ADR 0048 decision 13). A merge
+        // page's command log closes first, with any read still in flight, so neither the open
+        // log nor a late reply covers the view `L` just opened.
         if key.code == KeyCode::Char('L') && !ctrl {
+            self.log_request = None;
+            self.log_pending = None;
+            if let Some(page) = &mut self.merge {
+                page.log = None;
+            }
             self.log_open = !self.log_open;
             self.result = None;
             return ArcKey::Redraw;
