@@ -372,9 +372,9 @@ fn the_plans_page_draws_the_list_and_the_selected_plan() {
         "loop ◻ stopped".to_owned(),
         "PLANS".to_owned(),
         "PL0001-first".to_owned(),
-        "auto off · 1/1".to_owned(),
+        "off   · 1/1 · $0.12".to_owned(),
         "PL0002-images".to_owned(),
-        "draft · auto off · 0/2 · —".to_owned(),
+        "off   · 0/2 ·     —".to_owned(),
         format!(
             "{} confirmed · P3 · auto merge · 3/8 merged · $0.61",
             fixture.plan
@@ -399,10 +399,10 @@ fn the_plan_summary_starts_under_the_id() {
     let text = screen(&mut app, 120, 30);
     let summary = text
         .lines()
-        .find(|line| line.contains("auto merge · 3/8 · $0.61"))
+        .find(|line| line.contains("merge · 3/8 · $0.61"))
         .unwrap_or_else(|| panic!("no plan summary:\n{text}"));
     assert!(
-        summary.starts_with("         auto merge · 3/8 · $0.61"),
+        summary.starts_with("         merge · 3/8 · $0.61"),
         "the summary starts under the id, past the mark and the priority: {summary:?}"
     );
 }
@@ -781,13 +781,25 @@ fn a_cancelled_plan_is_marked_and_named_cancelled() {
     app.on_key(&key(KeyCode::Char('f')));
     let theme = app.theme.clone();
     let terminal = render(&mut app, 120, 30);
-    // A cancelled plan is not a confirmed one: it takes the failure mark, not `●`.
-    let (row, column) = mark_cell(&terminal, "PL0002-images", '×');
-    assert_eq!(fg(&terminal, row, column), theme.status_error.fg);
+    // A cancelled plan is not a confirmed one: it takes the cancelled mark.
+    let (row, column) = mark_cell(&terminal, "PL0002-images", '✕');
+    assert_eq!(fg(&terminal, row, column), theme.plan_cancelled.fg);
     let text = rows(&terminal).join("\n");
     assert!(
-        text.contains("cancelled · auto off · 0/2"),
-        "the list names the status:\n{text}"
+        text.contains("off   · 0/2 ·     —"),
+        "the list names the columns without a status prefix:\n{text}"
+    );
+    assert!(
+        !text.contains("cancelled · "),
+        "the mark says cancelled, not a prefix:\n{text}"
+    );
+    // The rest of a cancelled plan's row is weak (ADR 0048 decision 11).
+    let (row, _) = fg_of(&terminal, "PL0002-images");
+    let summary = rows(&terminal)[row as usize + 1].clone();
+    assert_eq!(
+        fg(&terminal, row + 1, 4),
+        theme.hint.fg,
+        "the summary row is weak: {summary}"
     );
 }
 
@@ -839,6 +851,15 @@ fn the_tree_places_a_branch_and_names_the_other_parent() {
 #[test]
 fn every_state_mark_takes_its_role() {
     let fixture = Fixture::new();
+    // A finished *confirmed* plan draws the done mark: a draft plan's mark is `◌` whatever its
+    // tasks reached (the draft rule comes first).
+    fixture
+        .store
+        .change_plan("PL0001-first", |plan| {
+            plan.status = "confirmed".to_owned();
+            Ok(())
+        })
+        .unwrap();
     let mut app = fixture.app();
     // The finished plan is hidden from the default view; `all` shows every mark.
     app.on_key(&key(KeyCode::Char('f')));
@@ -859,11 +880,16 @@ fn every_state_mark_takes_its_role() {
     check(fixture.id("h"), '●', theme.model, "verifying");
     check(fixture.id("e"), '!', theme.notice_label, "waiting");
     check(fixture.id("d"), '◻', theme.hint, "todo");
-    // The plan list's own marks: ✓ all merged (green), ● confirmed with work left (accent),
-    // ◻ draft (weak).
-    check("PL0001-first", '✓', theme.status_ok, "a finished plan");
-    check(&fixture.plan, '●', theme.model, "a confirmed plan");
-    check("PL0002-images", '◻', theme.hint, "a draft plan");
+    // The plan list's own marks: ✓ all merged (green), ◉ a task needs the owner, ◌ draft
+    // (weak).
+    check("PL0001-first", '✓', theme.plan_done, "a finished plan");
+    check(
+        &fixture.plan,
+        '◉',
+        theme.plan_needs_you,
+        "a plan whose task waits for you",
+    );
+    check("PL0002-images", '◌', theme.plan_draft, "a draft plan");
 }
 
 #[test]
@@ -2110,5 +2136,503 @@ fn a_missing_task_journal_is_one_weak_line() {
         fg(&terminal, row, column),
         radian_tui::theme::Theme::default().hint.fg,
         "the missing-journal line is weak"
+    );
+}
+
+// ---- the plans page's columns and plan marks (ADR 0048 decision 11) ------------------
+
+/// Three plans with different auto levels, merged counts and costs: the count and the cost end
+/// at the same column on every row.
+#[test]
+fn the_plan_summary_columns_line_up_across_plans() {
+    let scratch = Scratch::new("plan-columns");
+    let store = store(&scratch.path("repo"));
+    let run = add_plan(&store, "run", "the run plan");
+    for index in 0..2 {
+        add_task(
+            &store,
+            &run,
+            &format!("run-{index}"),
+            &[],
+            TaskState::Done,
+            "merged",
+            1,
+            Some(0.06),
+        );
+    }
+    let merge = add_plan(&store, "merge", "the merge plan");
+    for index in 0..13 {
+        let (state, phase, cost) = if index < 4 {
+            (TaskState::Done, "merged", (index == 0).then_some(12.40))
+        } else {
+            (TaskState::Todo, "ready", None)
+        };
+        add_task(
+            &store,
+            &merge,
+            &format!("merge-{index}"),
+            &[],
+            state,
+            phase,
+            1,
+            cost,
+        );
+    }
+    let off = add_plan(&store, "off", "the off plan");
+    for index in 0..3 {
+        add_task(
+            &store,
+            &off,
+            &format!("off-{index}"),
+            &[],
+            TaskState::Todo,
+            "ready",
+            0,
+            None,
+        );
+    }
+    for (id, auto) in [(&run, "run"), (&merge, "merge"), (&off, "off")] {
+        store
+            .change_plan(id, |plan| {
+                plan.status = "confirmed".to_owned();
+                plan.auto = auto.to_owned();
+                Ok(())
+            })
+            .unwrap();
+    }
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    // `all` keeps the finished plan (2/2) in the list, so all three set the columns.
+    app.on_key(&key(KeyCode::Char('f')));
+    let terminal = render(&mut app, 120, 40);
+    let rows = rows(&terminal);
+    // The plan's own list row: the frame's label also names the id, but it starts with `╭─`.
+    let list_row = |id: &str| {
+        rows.iter()
+            .position(|row| row.contains(id) && !row.contains('╭'))
+            .unwrap_or_else(|| panic!("no list row for {id}:\n{}", rows.join("\n")))
+    };
+    let column_of = |row: &str, needle: &str| -> usize {
+        let byte = row
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not in `{row}`"));
+        row[..byte].chars().count()
+    };
+    let end_of = |row: &str, needle: &str| column_of(row, needle) + needle.chars().count() - 1;
+
+    let mut count_ends = Vec::new();
+    let mut cost_ends = Vec::new();
+    for (id, count, cost) in [
+        (&run, "2/2", "$0.12"),
+        (&merge, "4/13", "$12.40"),
+        (&off, "0/3", "—"),
+    ] {
+        let summary = &rows[list_row(id) + 1];
+        assert!(
+            summary.contains("run") || summary.contains("merge") || summary.contains("off"),
+            "the row names its auto level: {summary}"
+        );
+        count_ends.push(end_of(summary, count));
+        cost_ends.push(end_of(summary, cost));
+    }
+    assert_eq!(
+        count_ends[0],
+        count_ends[1],
+        "the merged counts end at one column: {count_ends:?}\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(count_ends[1], count_ends[2], "{count_ends:?}");
+    assert_eq!(
+        cost_ends[0],
+        cost_ends[1],
+        "the costs end at one column: {cost_ends:?}\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(cost_ends[1], cost_ends[2], "{cost_ends:?}");
+}
+
+/// A cancelled plan and a draft plan draw `✕` / `◌`, carry no status prefix on the summary row,
+/// and the cancelled plan's id and summary are weak.
+#[test]
+fn a_cancelled_and_a_draft_plan_draw_their_circle_marks_without_a_prefix() {
+    let scratch = Scratch::new("plan-marks");
+    let store = store(&scratch.path("repo"));
+    let draft = add_plan(&store, "draft", "the draft plan");
+    add_task(&store, &draft, "d", &[], TaskState::Todo, "ready", 0, None);
+    let gone = add_plan(&store, "gone", "the cancelled plan");
+    add_task(&store, &gone, "g", &[], TaskState::Todo, "ready", 0, None);
+    store
+        .change_plan(&gone, |plan| {
+            plan.status = "cancelled".to_owned();
+            plan.auto = "off".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    app.on_key(&key(KeyCode::Char('f')));
+    let theme = app.theme.clone();
+    let terminal = render(&mut app, 120, 30);
+    let rendered = rows(&terminal);
+    let list_row = |id: &str| {
+        rendered
+            .iter()
+            .position(|row| row.contains(id) && !row.contains('╭'))
+            .unwrap_or_else(|| panic!("no list row for {id}:\n{}", rendered.join("\n")))
+    };
+    // The left list's summary rows carry no status prefix; the right frame's label keeps the
+    // status word (ADR 0048 decision 11).
+    for (id, prefix) in [(&draft, "draft · "), (&gone, "cancelled · ")] {
+        let summary = &rendered[list_row(id) + 1];
+        assert!(
+            !summary.contains(prefix),
+            "{id}'s summary row carries no `{prefix}`: {summary}"
+        );
+    }
+    let (row, column) = mark_cell(&terminal, &draft, '◌');
+    assert_eq!(fg(&terminal, row, column), theme.plan_draft.fg);
+    let (row, column) = mark_cell(&terminal, &gone, '✕');
+    assert_eq!(fg(&terminal, row, column), theme.plan_cancelled.fg);
+    // The cancelled plan's id and summary take the weak role; the mark keeps its own.
+    let (row, column) = fg_of(&terminal, &gone);
+    assert_eq!(
+        fg(&terminal, row, column),
+        theme.hint.fg,
+        "the cancelled plan's id is weak"
+    );
+    assert_eq!(
+        fg(&terminal, row + 1, 4),
+        theme.hint.fg,
+        "the cancelled plan's summary is weak"
+    );
+}
+
+/// One fixture plan per mark rule draws that mark in that role, and the rules are checked in
+/// the decision's order: needs-you before running, running before paused.
+#[test]
+fn each_plan_mark_rule_draws_its_mark_and_role() {
+    let scratch = Scratch::new("plan-rules");
+    let store = store(&scratch.path("repo"));
+
+    let plan = |slug: &str| add_plan(&store, slug, &format!("the {slug} plan"));
+    let task = |plan: &str, slug: &str, state: TaskState, phase: &str| {
+        add_task(&store, plan, slug, &[], state, phase, 1, None)
+    };
+    let set = |id: &str, status: &str, auto: &str| {
+        store
+            .change_plan(id, |plan| {
+                plan.status = status.to_owned();
+                plan.auto = auto.to_owned();
+                Ok(())
+            })
+            .unwrap();
+    };
+
+    // Tasks are added while the plan is a draft: a cancelled plan takes no new task.
+    let cancelled = plan("cancelled");
+    task(&cancelled, "c", TaskState::Todo, "ready");
+    set(&cancelled, "cancelled", "off");
+    let draft = plan("draft");
+    task(&draft, "d", TaskState::Todo, "ready");
+    set(&draft, "draft", "off");
+    let awaiting = plan("awaiting");
+    task(&awaiting, "a", TaskState::Review, "awaiting_human");
+    set(&awaiting, "confirmed", "run");
+    let proposed = plan("proposed");
+    task(&proposed, "p", TaskState::Todo, "proposed");
+    set(&proposed, "confirmed", "run");
+    // A proposed task plus a running one: needs you wins.
+    let running_proposed = plan("running-proposed");
+    task(&running_proposed, "rp", TaskState::Done, "merged");
+    task(&running_proposed, "rr", TaskState::Doing, "running");
+    task(&running_proposed, "rq", TaskState::Todo, "proposed");
+    set(&running_proposed, "confirmed", "run");
+    let running = plan("running");
+    task(&running, "r", TaskState::Doing, "running");
+    set(&running, "confirmed", "run");
+    // Running beats paused: auto off does not hide a running task.
+    let off_running = plan("off-running");
+    task(&off_running, "or", TaskState::Doing, "running");
+    set(&off_running, "confirmed", "off");
+    let paused = plan("paused");
+    task(&paused, "pa", TaskState::Todo, "ready");
+    set(&paused, "confirmed", "off");
+    let queued = plan("queued");
+    task(&queued, "q", TaskState::Todo, "ready");
+    set(&queued, "confirmed", "run");
+    let done = plan("done");
+    task(&done, "dn", TaskState::Done, "merged");
+    task(&done, "dc", TaskState::Failed, "cancelled");
+    set(&done, "confirmed", "run");
+    // No task open and a failed one that is not cancelled: needs you.
+    let failed_only = plan("failed-only");
+    task(&failed_only, "fm", TaskState::Done, "merged");
+    task(&failed_only, "fe", TaskState::Failed, "exhausted");
+    set(&failed_only, "confirmed", "run");
+    // A failed task with an open task left is not "needs you": the plan is queued.
+    let failed_open = plan("failed-open");
+    task(&failed_open, "om", TaskState::Done, "merged");
+    task(&failed_open, "oe", TaskState::Failed, "exhausted");
+    task(&failed_open, "oq", TaskState::Todo, "ready");
+    set(&failed_open, "confirmed", "run");
+
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    // `all` shows the cancelled and finished plans too.
+    app.on_key(&key(KeyCode::Char('f')));
+    let theme = app.theme.clone();
+    let terminal = render(&mut app, 140, 60);
+    let cases = [
+        (&cancelled, '✕', theme.plan_cancelled),
+        (&draft, '◌', theme.plan_draft),
+        (&awaiting, '◉', theme.plan_needs_you),
+        (&proposed, '◉', theme.plan_needs_you),
+        (&running_proposed, '◉', theme.plan_needs_you),
+        (&running, '●', theme.plan_running),
+        (&off_running, '●', theme.plan_running),
+        (&paused, '◍', theme.plan_paused),
+        (&queued, '○', theme.plan_queued),
+        (&done, '✓', theme.plan_done),
+        (&failed_only, '◉', theme.plan_needs_you),
+        (&failed_open, '○', theme.plan_queued),
+    ];
+    let text = rows(&terminal).join("\n");
+    for (id, glyph, role) in cases {
+        assert!(
+            text.contains(id),
+            "the plan {id} is listed even at 60 rows:\n{text}"
+        );
+        let (row, column) = mark_cell(&terminal, id, glyph);
+        assert_eq!(
+            fg(&terminal, row, column),
+            role.fg,
+            "{id} draws {glyph} in its role"
+        );
+    }
+}
+
+/// The flat task list gives the cost one column, so a `—` and a `$12.40` start their `after`
+/// text at the same column.
+#[test]
+fn the_flat_task_list_aligns_the_after_text_across_cost_widths() {
+    let scratch = Scratch::new("flat-columns");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "flat", "the flat plan");
+    let base = add_task(
+        &store,
+        &plan,
+        "base",
+        &[],
+        TaskState::Done,
+        "merged",
+        1,
+        Some(0.01),
+    );
+    let cheap = add_task(
+        &store,
+        &plan,
+        "cheap",
+        &[&base],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
+    let pricey = add_task(
+        &store,
+        &plan,
+        "pricey",
+        &[&base],
+        TaskState::Todo,
+        "ready",
+        0,
+        Some(12.40),
+    );
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    app.flat = true;
+    let terminal = render(&mut app, 160, 30);
+    let rows = rows(&terminal);
+    let after = format!("after {base}");
+    let row_of = |id: &str| {
+        rows.iter()
+            .find(|row| row.contains(id) && !row.contains('╭'))
+            .unwrap_or_else(|| panic!("no task row for {id}:\n{}", rows.join("\n")))
+    };
+    let column_of = |row: &str, needle: &str| {
+        let byte = row
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not in `{row}`"));
+        row[..byte].chars().count()
+    };
+    let cheap_row = row_of(&cheap);
+    let pricey_row = row_of(&pricey);
+    assert_eq!(
+        column_of(cheap_row, &after),
+        column_of(pricey_row, &after),
+        "the `after` text starts at one column:\n{cheap_row}\n{pricey_row}"
+    );
+    // The cost itself is right-aligned in its column, so the two costs end together too.
+    let cost_end = |row: &str| {
+        let needle = if row.contains("$12.40") {
+            "$12.40"
+        } else {
+            "—"
+        };
+        let byte = row.find(needle).expect("the row carries its cost");
+        row[..byte].chars().count() + needle.chars().count() - 1
+    };
+    assert_eq!(
+        cost_end(cheap_row),
+        cost_end(pricey_row),
+        "the costs end at one column:\n{cheap_row}\n{pricey_row}"
+    );
+    assert!(
+        cheap_row.contains('—') && pricey_row.contains("$12.40"),
+        "{cheap_row}\n{pricey_row}"
+    );
+}
+
+/// The graph task list starts `state.phase` at the same column at every depth, and a deep row's
+/// id is cut with `…` when the connector leaves it less room.
+#[test]
+fn the_graph_task_list_aligns_columns_at_every_depth() {
+    let scratch = Scratch::new("graph-columns");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "chain", "the chain plan");
+    let root = add_task(
+        &store,
+        &plan,
+        "root-task-with-a-long-name",
+        &[],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
+    let one = add_task(
+        &store,
+        &plan,
+        "one-task-with-a-long-name",
+        &[&root],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
+    let two = add_task(
+        &store,
+        &plan,
+        "two-task-with-a-long-name",
+        &[&one],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
+    let three = add_task(
+        &store,
+        &plan,
+        "three-task-with-a-long-name",
+        &[&two],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    // The frame's right column is narrow here, so the id block is cut to fit.
+    let terminal = render(&mut app, 80, 30);
+    let rows = rows(&terminal);
+    let phase_rows: Vec<&String> = rows
+        .iter()
+        .filter(|row| row.contains("todo.ready"))
+        .collect();
+    assert!(
+        phase_rows.len() >= 4,
+        "four task rows are drawn (root, one, two, three):\n{}",
+        rows.join("\n")
+    );
+    assert!(three.starts_with("TK"));
+    let column_of = |row: &str| {
+        let byte = row.find("todo.ready").expect("the phase is drawn");
+        row[..byte].chars().count()
+    };
+    for row in [phase_rows[0], phase_rows[1], phase_rows[3]] {
+        assert_eq!(
+            column_of(row),
+            column_of(phase_rows[0]),
+            "the phase column holds at every depth:\n{}",
+            rows.join("\n")
+        );
+    }
+    assert!(
+        phase_rows[3].contains('…'),
+        "the depth-3 row's id is cut:\n{}",
+        rows.join("\n")
+    );
+}
+
+/// A theme file that sets `plan_running` recolors that mark only, in the rendered page.
+#[test]
+fn a_theme_file_recolors_only_the_plan_mark_it_names() {
+    let scratch = Scratch::new("plan-theme");
+    let store = store(&scratch.path("repo"));
+    let running = add_plan(&store, "running", "the running plan");
+    add_task(
+        &store,
+        &running,
+        "r",
+        &[],
+        TaskState::Doing,
+        "running",
+        1,
+        None,
+    );
+    let queued = add_plan(&store, "queued", "the queued plan");
+    add_task(&store, &queued, "q", &[], TaskState::Todo, "ready", 0, None);
+    for id in [&running, &queued] {
+        store
+            .change_plan(id, |plan| {
+                plan.status = "confirmed".to_owned();
+                plan.auto = "run".to_owned();
+                Ok(())
+            })
+            .unwrap();
+    }
+    let themes = scratch.path("themes");
+    fs::create_dir_all(&themes).unwrap();
+    fs::write(
+        themes.join("mine.toml"),
+        "name = \"mine\"\n[roles]\nplan_running = \"#123456\"\n",
+    )
+    .unwrap();
+    let (theme, warnings) = radian_tui::theme::load(Some("mine"), false, true, Some(&themes), &[]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    let queued_role = app.theme.plan_queued;
+    app.theme = theme;
+    let terminal = render(&mut app, 120, 30);
+    let (row, column) = mark_cell(&terminal, &running, '●');
+    assert_eq!(
+        fg(&terminal, row, column),
+        Some(ratatui::style::Color::Rgb(0x12, 0x34, 0x56)),
+        "the running mark takes the theme's value"
+    );
+    let (row, column) = mark_cell(&terminal, &queued, '○');
+    assert_eq!(
+        fg(&terminal, row, column),
+        queued_role.fg,
+        "the queued mark keeps the built-in default"
     );
 }
