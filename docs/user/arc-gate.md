@@ -95,7 +95,8 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 ### A rework round
 
 A review is a rework round when an earlier attempt of the same task has a review verdict for a `sha` other than the commit under review; the newest such verdict is the previous review.
-A review of the same commit as the previous review (a `reverify` of an unchanged head) is a first review: it gets the full diff, and no item is pre-existing.
+A review of the same commit as the previous review (a `reverify` of an unchanged head) gets the first review's prompt: the full diff, and no item is pre-existing.
+It reads the `[gate.review]` settings, not `[gate.review.first]`, because an earlier review verdict exists, so it is not a first review.
 The first review of a task is unchanged.
 
 A rework round's prompt holds the brief, the previous review's blocking items, the commit list `<previous sha>..<sha>`, and the increment instead of the full diff.
