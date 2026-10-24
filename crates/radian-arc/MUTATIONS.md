@@ -254,3 +254,20 @@ stages fail: with `commands` failing alone the review passes, and scanning it fi
 nothing. M3 leaves the stage that was not signalled alive past the test's 3 s deadline; the
 handler is the only SIGTERM source, because the wait loop now only escalates to SIGKILL after
 `cancel_grace_secs`.
+
+## TK0051 (a critical review item always blocks; an unplaced item is not demoted)
+
+TK0051-M1–M3 were run against `a7833564`, each applied to the committed file, restored from a
+copy under `.radian/mut/` with `cp`, and compared byte for byte with `cmp`; `git status --short`
+was empty afterwards. M1 disables the `critical` early return in `ReworkRound::keeps`, so the
+window rule moves a critical item again: the unit test finds it in `suggestions` and the stage
+test passes the round and reaches `awaiting_human`. M2 returns `false` for an item with no
+`file` or no `line`, so an unplaced item is demoted again: the `vague` item of the mixed unit
+test moves, and all three items of the unplaced test move. M3 writes `level: None` on a moved
+item, so the demoted `major` item loses its grade in the verdict and in the follow-up brief.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0051-M1 | let the window rule move a `critical` item again (`if false && level == CRITICAL`) | ✅ 2 failed | `gate::review::tests::a_critical_item_blocks_wherever_it_is`; `review::a_critical_item_far_from_the_rework_and_the_previous_items_still_blocks` |
+| TK0051-M2 | demote an item without a `file` or a `line` again (the `let … else` returns `false`) | ✅ 2 failed | `gate::review::tests::an_item_without_a_place_stays_blocking_at_its_level`; `gate::review::tests::a_pre_existing_item_is_moved_and_marked` |
+| TK0051-M3 | drop the `level` of a moved item (`level: None` in `mark_pre_existing`) | ✅ 2 failed | `gate::review::tests::a_major_item_outside_the_windows_is_moved_and_keeps_its_level`; `review::a_demoted_major_item_reaches_the_followup_at_its_level` |
