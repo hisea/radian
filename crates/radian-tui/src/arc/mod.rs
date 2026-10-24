@@ -5,10 +5,11 @@
 //! This module is the state and the frame; [`crate::cli::arc`] owns the terminal and the
 //! input loop, as `cli/attach.rs` does for the attach view. Data comes only from
 //! `radian_arc`'s read side (`radian_arc::read`), the store's own loaders and a command's log
-//! (queued here, read by the runner on a worker thread); nothing here writes a file, holds a
-//! lock, or starts a process. An owner's action is queued here and executed by the runner
-//! through [`actions`], in this process, with the library calls the CLI makes. `runner.lock` is **probed** (taken and released at once) so the header can say
-//! whether another process is the scheduling loop; a missing lock file is never created.
+//! (queued here, read by the runner on a worker thread); the page state writes no file and
+//! starts no process. An owner's action is queued here and executed by the runner through
+//! [`actions`], in this process, with the library calls the CLI makes. The scheduling loop is
+//! [`looping`]: it takes `runner.lock` (or reports the pid another loop wrote there) and runs
+//! the pass on its own thread, so the frame never waits on a pass.
 //!
 //! The layout follows ADR 0035: columns 1-2 are the marker column, text starts at column 3,
 //! open frames (`╭─ label ───`, `│ `, `╰──`) carry the structure, the cursor is `❯`, and every
