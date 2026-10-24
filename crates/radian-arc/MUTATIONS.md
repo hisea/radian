@@ -96,6 +96,8 @@ copy.
 | TK0060-M1 | the scheduling claim accepts `todo.retry_wait` (`ClaimBy::SchedulingLoop` uses the owner's phase set) | `attempt::a_scheduling_claim_refuses_a_task_that_began_backing_off` (the claim succeeds and takes attempt 1) | ✅ failed |
 | TK0065-M1 | drop the pass's digest from an integration refusal (`run_inner` copies the written inputs only for `verify`) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the refused record says `"inputs": ""`) | ✅ failed |
 | TK0065-M2 | drop the `.iN` attempt prefix acceptance (`same_attempt` compares the attempt only) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the first later pass starts a gate again) | ✅ failed |
+| TK0068-M1 | `free_concurrency_slot` always answers true (a taken slot is no reason) | `chain::a_dry_run_queue_line_names_a_taken_concurrency_slot` (the queue line carries no `(waiting for a free concurrency slot)`) | ✅ failed |
+| TK0068-M2 | `task_claim_order` walks only the ids a plan lists (`store.task_ids` replaced by the key map's ids) | `chain::an_unlisted_ready_task_counts_at_the_end_of_the_queue` (`(1, 1)` instead of `(1, 2)`) | ✅ failed |
 
 TK0060-M1 was run on this branch from a copy under `.radian/tk0060/`, restored with `cp` and
 compared with `cmp`. `TK0037-M2`'s phase check has since moved into `attempt_ops::claim_by`, so
@@ -111,6 +113,11 @@ TK0065-M1–M2 were run against this branch's working files, with the strengthen
 `run::a_refused_integration_is_not_restarted_until_its_inputs_change` in place, the same
 two-binary build before each run, and `git checkout --` to restore the file. M1 fails the
 digest assertion; M2 starts a gate on the first later pass.
+
+TK0068-M1–M2 were run against this branch's working files, each restored with the edit tool
+and checked with `git diff`, with `cargo build -p radian-tui --bin radian -p agent-extensions
+--bin mcp-fixture` before each run. M1 makes the dry run omit the concurrency reason; M2 makes
+the queue total count only plan-listed tasks.
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
