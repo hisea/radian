@@ -734,6 +734,9 @@ fn select(app: &mut ArcApp, plan: &str, task: &str, store: &Store) {
 fn c_confirms_only_a_draft_plan() {
     let fixture = ActionFixture::new("confirm");
     let mut app = fixture.app(&fixture.draft, &fixture.draft_task);
+    // A draft plan is confirmed with the plan column focused (with the task column
+    // focused `c` confirms a proposed task instead).
+    app.focus = radian_tui::arc::Focus::Plans;
     assert_eq!(app.on_key(&key(KeyCode::Char('c'))), ArcKey::Redraw);
     let action = app.take_action().expect("the draft plan is confirmed");
     assert_eq!(action, actions::Action::Confirm(fixture.draft.clone()));
@@ -753,14 +756,284 @@ fn c_confirms_only_a_draft_plan() {
 
     // A confirmed plan is not confirmed again: the key explains why and queues nothing.
     let mut app = fixture.app(&fixture.plan, &fixture.task);
+    app.focus = radian_tui::arc::Focus::Plans;
     app.on_key(&key(KeyCode::Char('c')));
     assert!(app.take_action().is_none());
     assert!(
-        app.result
-            .as_ref()
-            .is_some_and(|line| line.text.contains("only a draft plan is confirmed")),
+        app.result.as_ref().is_some_and(|line| line
+            .text
+            .contains("only a draft plan or a proposed task is confirmed")),
         "{:?}",
         app.result
+    );
+}
+
+#[test]
+fn c_confirms_a_proposed_task_and_refuses_a_ready_one() {
+    let fixture = ActionFixture::new("confirm-task");
+    // A confirmed plan takes the lead's new task as `todo.proposed` (ADR 0048 decision 3).
+    let proposed = fixture
+        .store
+        .add_task_proposed(
+            &fixture.plan,
+            "proposed",
+            "A proposed task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .unwrap();
+    let mut app = fixture.app(&fixture.plan, &proposed);
+    assert_eq!(app.focus, radian_tui::arc::Focus::Tasks);
+    assert_eq!(app.on_key(&key(KeyCode::Char('c'))), ArcKey::Redraw);
+    assert_eq!(
+        app.take_action(),
+        Some(actions::Action::Confirm(proposed.clone())),
+        "`c` on a proposed task confirms it"
+    );
+    let outcome = actions::run(
+        &actions::Action::Confirm(proposed.clone()),
+        &fixture.store,
+        &actions::Library,
+    );
+    assert!(outcome.ok, "{outcome:?}");
+    assert_eq!(outcome.text, format!("{proposed} todo.ready"));
+    assert_eq!(
+        fixture.store.load_task(&proposed).unwrap().item.phase,
+        "ready"
+    );
+
+    // A task that is not proposed is refused with the one footer line, and nothing runs.
+    let mut app = fixture.app(&fixture.plan, &fixture.task);
+    app.on_key(&key(KeyCode::Char('c')));
+    assert!(app.take_action().is_none());
+    assert!(
+        app.result.as_ref().is_some_and(|line| line
+            .text
+            .contains("only a draft plan or a proposed task is confirmed")),
+        "{:?}",
+        app.result
+    );
+}
+
+#[test]
+fn x_on_a_task_asks_and_n_changes_nothing_while_y_cancels_it() {
+    let fixture = ActionFixture::new("cancel-task");
+    let mut app = fixture.app(&fixture.plan, &fixture.task);
+    assert_eq!(app.focus, radian_tui::arc::Focus::Tasks);
+    app.on_key(&key(KeyCode::Char('x')));
+    match &app.float {
+        Some(radian_tui::arc::Float::Confirm { message, action }) => {
+            assert_eq!(message, &format!("cancel {} ?", fixture.task));
+            assert_eq!(action, &actions::Action::Cancel(fixture.task.clone()));
+        }
+        other => panic!("no cancel float: {other:?}"),
+    }
+    // `n` (and `Esc`) closes the float without queueing anything.
+    app.on_key(&key(KeyCode::Char('n')));
+    assert!(app.float.is_none());
+    assert!(app.take_action().is_none());
+    assert_eq!(fixture.phase(), "todo.ready");
+    app.on_key(&key(KeyCode::Char('x')));
+    app.on_key(&key(KeyCode::Esc));
+    assert!(app.take_action().is_none());
+    assert_eq!(fixture.phase(), "todo.ready");
+
+    // `y` runs the CLI's cancel.
+    app.on_key(&key(KeyCode::Char('x')));
+    app.on_key(&key(KeyCode::Char('y')));
+    let action = app.take_action().expect("the task cancel is queued");
+    assert_eq!(action, actions::Action::Cancel(fixture.task.clone()));
+    let outcome = actions::run(&action, &fixture.store, &actions::Library);
+    assert!(outcome.ok, "{outcome:?}");
+    assert_eq!(outcome.text, format!("{} failed.cancelled", fixture.task));
+    app.finish_action(outcome);
+    assert_eq!(fixture.phase(), "failed.cancelled");
+    assert!(
+        app.result
+            .as_ref()
+            .is_some_and(|line| line.text.contains("failed.cancelled")),
+        "{:?}",
+        app.result
+    );
+}
+
+#[test]
+fn x_on_a_plan_counts_its_open_tasks_and_y_cancels_the_plan() {
+    let fixture = ActionFixture::new("cancel-plan");
+    let mut app = fixture.app(&fixture.plan, &fixture.task);
+    app.focus = radian_tui::arc::Focus::Plans;
+    app.on_key(&key(KeyCode::Char('x')));
+    match &app.float {
+        Some(radian_tui::arc::Float::Confirm { message, action }) => {
+            assert_eq!(
+                message,
+                &format!("cancel plan {} and its 2 open tasks?", fixture.plan),
+                "both todo tasks are open"
+            );
+            assert_eq!(action, &actions::Action::Cancel(fixture.plan.clone()));
+        }
+        other => panic!("no cancel float: {other:?}"),
+    }
+    app.on_key(&key(KeyCode::Char('n')));
+    assert!(app.take_action().is_none());
+    assert_eq!(
+        fixture.store.load_plan(&fixture.plan).unwrap().item.status,
+        "confirmed",
+        "`n` changed nothing"
+    );
+
+    app.on_key(&key(KeyCode::Char('x')));
+    app.on_key(&key(KeyCode::Char('y')));
+    let action = app.take_action().expect("the plan cancel is queued");
+    assert_eq!(action, actions::Action::Cancel(fixture.plan.clone()));
+    let outcome = actions::run(&action, &fixture.store, &actions::Library);
+    assert!(outcome.ok, "{outcome:?}");
+    assert!(
+        outcome
+            .text
+            .contains(&format!("{} cancelled", fixture.plan)),
+        "{outcome:?}"
+    );
+    app.finish_action(outcome);
+    assert_eq!(
+        fixture.store.load_plan(&fixture.plan).unwrap().item.status,
+        "cancelled"
+    );
+    assert_eq!(fixture.phase(), "failed.cancelled");
+    let blocked = fixture.store.load_task(&fixture.blocked).unwrap().item;
+    assert_eq!(
+        format!("{}.{}", blocked.state.as_str(), blocked.phase),
+        "failed.cancelled",
+        "the plan form cancels every open task"
+    );
+}
+
+#[test]
+fn plus_and_minus_move_the_priority_and_stop_at_the_ends() {
+    let fixture = ActionFixture::new("priority");
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&fixture.plan)
+            .unwrap()
+            .item
+            .priority(),
+        "P3",
+        "a plan without the field reads as P3"
+    );
+    let mut app = fixture.app(&fixture.plan, &fixture.task);
+    app.focus = radian_tui::arc::Focus::Plans;
+    // `+` is toward P0: P3 -> P2 -> P1 -> P0, then it stops.
+    for expected in ["P2", "P1", "P0"] {
+        app.on_key(&key(KeyCode::Char('+')));
+        let action = app.take_action().expect("the step is queued");
+        assert_eq!(
+            action,
+            actions::Action::Priority {
+                plan: fixture.plan.clone(),
+                level: expected.to_owned(),
+            }
+        );
+        let outcome = actions::run(&action, &fixture.store, &actions::Library);
+        assert!(outcome.ok, "{outcome:?}");
+        assert_eq!(
+            outcome.text,
+            format!("{} priority {expected}", fixture.plan)
+        );
+        app.finish_action(outcome);
+    }
+    app.on_key(&key(KeyCode::Char('+')));
+    assert!(app.take_action().is_none(), "P0 is the end");
+    assert!(
+        app.result
+            .as_ref()
+            .is_some_and(|line| line.text.contains("already P0")),
+        "{:?}",
+        app.result
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&fixture.plan)
+            .unwrap()
+            .item
+            .priority(),
+        "P0"
+    );
+
+    // `-` is toward P5: P0 -> P1 -> ... -> P5, then it stops.
+    for expected in ["P1", "P2", "P3", "P4", "P5"] {
+        app.on_key(&key(KeyCode::Char('-')));
+        let action = app.take_action().expect("the step is queued");
+        assert_eq!(
+            action,
+            actions::Action::Priority {
+                plan: fixture.plan.clone(),
+                level: expected.to_owned(),
+            }
+        );
+        let outcome = actions::run(&action, &fixture.store, &actions::Library);
+        assert!(outcome.ok, "{outcome:?}");
+        app.finish_action(outcome);
+    }
+    app.on_key(&key(KeyCode::Char('-')));
+    assert!(app.take_action().is_none(), "P5 is the end");
+    assert!(
+        app.result
+            .as_ref()
+            .is_some_and(|line| line.text.contains("already P5")),
+        "{:?}",
+        app.result
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&fixture.plan)
+            .unwrap()
+            .item
+            .priority(),
+        "P5"
+    );
+}
+
+#[test]
+fn a_cancelled_plan_refuses_plus_with_the_cli_message() {
+    let fixture = ActionFixture::new("priority-cancelled");
+    // Select the plan while it is still in the default view, then cancel it in the store.
+    let mut app = fixture.app(&fixture.plan, &fixture.task);
+    fixture
+        .store
+        .change_plan(&fixture.plan, |plan| {
+            plan.status = "cancelled".to_owned();
+            plan.auto = "off".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    app.filter = radian_tui::arc::PlanFilter::All;
+    app.refresh();
+    app.focus = radian_tui::arc::Focus::Plans;
+    app.on_key(&key(KeyCode::Char('+')));
+    let action = app.take_action().expect("the step is queued");
+    let outcome = actions::run(&action, &fixture.store, &actions::Library);
+    assert!(!outcome.ok, "{outcome:?}");
+    assert!(
+        outcome.text.contains(&format!(
+            "plan `{}` is `cancelled`; a cancelled plan is final",
+            fixture.plan
+        )),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&fixture.plan)
+            .unwrap()
+            .item
+            .priority(),
+        "P3",
+        "the refusal wrote nothing"
     );
 }
 
@@ -961,6 +1234,23 @@ impl actions::ArcOps for Recorder {
         unreachable!("the seam test only merges")
     }
 
+    fn cancel(
+        &self,
+        _store: &Store,
+        _id: &str,
+    ) -> Result<radian_arc::attempt::Cancelled, radian_arc::store::Error> {
+        unreachable!("the seam test only merges")
+    }
+
+    fn set_priority(
+        &self,
+        _store: &Store,
+        _plan: &str,
+        _level: &str,
+    ) -> Result<(), radian_arc::store::Error> {
+        unreachable!("the seam test only merges")
+    }
+
     fn pause(&self, _store: &Store, _plan: &str) -> Result<(), radian_arc::store::Error> {
         unreachable!("the seam test only merges")
     }
@@ -1095,6 +1385,49 @@ fn a_held_state_lock_shows_the_cli_message_and_changes_nothing() {
         fixture.store.load_plan(&fixture.draft).unwrap().item.status,
         "draft",
         "nothing changed"
+    );
+
+    // The same message and exit code for the task cancel and the priority step.
+    let outcome = actions::run(
+        &actions::Action::Cancel(fixture.task.clone()),
+        &fixture.store,
+        &actions::Library,
+    );
+    assert!(!outcome.ok, "{outcome:?}");
+    assert!(
+        outcome
+            .text
+            .contains("state.lock is locked by another process"),
+        "{outcome:?}"
+    );
+    assert!(outcome.text.contains("(exit 4)"), "{outcome:?}");
+    assert_eq!(fixture.phase(), "todo.ready", "the task did not change");
+
+    let outcome = actions::run(
+        &actions::Action::Priority {
+            plan: fixture.plan.clone(),
+            level: "P1".to_owned(),
+        },
+        &fixture.store,
+        &actions::Library,
+    );
+    assert!(!outcome.ok, "{outcome:?}");
+    assert!(
+        outcome
+            .text
+            .contains("state.lock is locked by another process"),
+        "{outcome:?}"
+    );
+    assert!(outcome.text.contains("(exit 4)"), "{outcome:?}");
+    assert!(
+        !fixture
+            .store
+            .load_plan(&fixture.plan)
+            .unwrap()
+            .item
+            .priority
+            .is_some(),
+        "the priority did not change"
     );
 }
 

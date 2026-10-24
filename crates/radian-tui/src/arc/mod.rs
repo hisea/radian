@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use radian_arc::read::{AttemptView, CommandView, MergeView, TaskDiff};
-use radian_arc::store::model::{TaskFile, TaskState};
+use radian_arc::store::model::{PLAN_PRIORITIES, TaskFile, TaskState, priority_rank};
 use radian_arc::store::{Loaded, PlanView, Store};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
@@ -244,6 +244,7 @@ pub struct TaskRow {
 pub struct PlanRow {
     pub id: String,
     pub status: String,
+    pub priority: String,
     pub auto: String,
     pub cost: Option<f64>,
     pub merged: usize,
@@ -1285,23 +1286,70 @@ impl ArcApp {
             }
             KeyCode::Char('f') => self.cycle_filter(),
             KeyCode::Char('c') => {
-                let Some(view) = self.selected_plan() else {
-                    return ArcKey::Ignored;
+                // With the task column focused `c` confirms a proposed task; with the plan
+                // column focused it confirms a draft plan, as it always has (ADR 0048 §11).
+                let target = if self.focus == Focus::Tasks {
+                    self.selected_task()
+                        .filter(|task| {
+                            task.item.state == TaskState::Todo && task.item.phase == "proposed"
+                        })
+                        .map(|task| task.item.id.clone())
+                } else {
+                    self.selected_plan()
+                        .filter(|view| view.plan.item.status == "draft")
+                        .map(|view| view.plan.item.id.clone())
                 };
-                if view.plan.item.status != "draft" {
-                    self.result = Some(ResultLine {
-                        text: format!(
-                            "plan {} is {}; only a draft plan is confirmed",
-                            view.plan.item.id, view.plan.item.status
-                        ),
-                        failed: true,
-                    });
-                    return ArcKey::Redraw;
+                match target {
+                    Some(id) => {
+                        self.queue_action(actions::Action::Confirm(id));
+                    }
+                    None => {
+                        self.result = Some(ResultLine {
+                            text: "only a draft plan or a proposed task is confirmed".to_owned(),
+                            failed: true,
+                        });
+                    }
                 }
-                let id = view.plan.item.id.clone();
-                self.queue_action(actions::Action::Confirm(id));
                 ArcKey::Redraw
             }
+            KeyCode::Char('x') => {
+                // `x` always asks first, the way the merge page's `M` does (ADR 0048 §11);
+                // the CLI's own refusal is what a done task or a cancelled plan gets.
+                let (message, action) = match self.focus {
+                    Focus::Tasks => {
+                        let Some(task) = self.selected_task() else {
+                            return ArcKey::Ignored;
+                        };
+                        let id = task.item.id.clone();
+                        (format!("cancel {id} ?"), actions::Action::Cancel(id))
+                    }
+                    Focus::Plans => {
+                        let Some(view) = self.selected_plan() else {
+                            return ArcKey::Ignored;
+                        };
+                        let id = view.plan.item.id.clone();
+                        let open = view
+                            .tasks
+                            .iter()
+                            .filter(|task| {
+                                !task.changed_outside_arc
+                                    && matches!(
+                                        task.item.state,
+                                        TaskState::Todo | TaskState::Doing | TaskState::Review
+                                    )
+                            })
+                            .count();
+                        (
+                            format!("cancel plan {id} and its {open} open tasks?"),
+                            actions::Action::Cancel(id),
+                        )
+                    }
+                };
+                self.float = Some(Float::Confirm { message, action });
+                ArcKey::Redraw
+            }
+            KeyCode::Char('+') => self.step_priority(-1),
+            KeyCode::Char('-') => self.step_priority(1),
             KeyCode::Char('a') => {
                 let Some(view) = self.selected_plan() else {
                     return ArcKey::Ignored;
@@ -1364,6 +1412,29 @@ impl ArcApp {
             }
             _ => ArcKey::Ignored,
         }
+    }
+
+    /// `+`/`-` on the plans page: the selected plan's priority one step, `+` toward `P0` and
+    /// `-` toward `P5` (ADR 0048 decision 3). At an end the footer says so and nothing is
+    /// queued; the next refresh draws the new value.
+    fn step_priority(&mut self, delta: i32) -> ArcKey {
+        let Some(view) = self.selected_plan() else {
+            return ArcKey::Ignored;
+        };
+        let plan = view.plan.item.id.clone();
+        let current = view.plan.item.priority().to_owned();
+        let last = PLAN_PRIORITIES.len() as i32 - 1;
+        let rank = (priority_rank(&current) as i32).min(last);
+        let level = PLAN_PRIORITIES[(rank + delta).clamp(0, last) as usize].to_owned();
+        if level == current {
+            self.result = Some(ResultLine {
+                text: format!("plan {plan} is already {current}"),
+                failed: false,
+            });
+            return ArcKey::Redraw;
+        }
+        self.queue_action(actions::Action::Priority { plan, level });
+        ArcKey::Redraw
     }
 
     fn move_selection(&mut self, delta: i32) -> ArcKey {
@@ -1740,6 +1811,7 @@ fn plan_row(view: &PlanView, tasks: Vec<TaskRow>) -> PlanRow {
     PlanRow {
         id: view.plan.item.id.clone(),
         status: view.plan.item.status.clone(),
+        priority: view.plan.item.priority().to_owned(),
         auto: view.plan.item.auto.clone(),
         cost,
         merged,
