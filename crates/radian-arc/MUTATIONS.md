@@ -738,3 +738,21 @@ file was restored from `.radian/review-mod.rs.bak` with `cp`, which `cmp` found 
 
 1/1 caught.
 
+## TK0088: the Claude Code channel (2026-10-24, branch `work/TK0088-mcp-claude-experimental`)
+
+`radian arc mcp --claude-experimental` declares `claude/channel`, narrows its supported protocol
+versions, and sends task transitions as `notifications/claude/channel`. Each mutation was
+applied by hand to the committed `crates/radian-arc/src/mcp/mod.rs` at `160eb71c`, the named
+test ran alone with `cargo nextest run -p radian-tui --locked --profile sandbox -E '<the test below>'`,
+and the file was restored from `.radian/mutations/mcp.mod.rs` with `cp`, which `cmp` found
+identical. `cargo build -p radian-tui --bin radian` ran before every run: the integration test
+drives the real binary.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0088-M1 | the capability is declared without the flag (the `get_info` branch always takes the channel side) | `arc_mcp::without_the_flag_the_server_is_todays_server` (the experimental capability is declared without the flag) | ✅ failed |
+| TK0088-M2 | the version rule is dropped (`supported_protocol_versions` keeps every known version and `discover` always answers) | `arc_mcp::the_flag_declares_the_channel_and_refuses_discover` (`server/discover` returns a result whose `supportedVersions` include `2026-07-28`) | ✅ failed |
+| TK0088-M3 | `doing.running` joins `CHANNEL_PHASES` | `arc_mcp::the_channel_reports_the_tracked_transitions_and_stays_silent_for_the_rest` (the quiet wait receives `TK0002-second todo.ready -> doing.running`) | ✅ failed |
+| TK0088-M4 | the baseline compares against an empty map instead of `None`, so every existing tracked task is `new` | `arc_mcp::the_channel_reports_the_tracked_transitions_and_stays_silent_for_the_rest` (the baseline wait receives `TK0001-work new -> review.awaiting_human`) | ✅ failed |
+
+4/4 caught.

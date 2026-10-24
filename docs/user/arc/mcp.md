@@ -99,6 +99,7 @@ The name after `server:` is the name the server is registered under (here `arc`,
 A plain `--channels` accepts only Claude Code's own list of channel plugins, so the server's own name does not load through it.
 Claude Code ignores the flag in a non-interactive `-p` session, so the events reach only an interactive session.
 
+### The tools
 
 | Tool | Parameters | Result |
 |---|---|---|

@@ -307,7 +307,16 @@ struct TaskSnapshot {
 fn snapshot(store: &Store) -> Result<BTreeMap<String, TaskSnapshot>, Error> {
     let mut tasks = BTreeMap::new();
     for view in store.plans()? {
+        // A file someone changed outside arc makes the round fail: arc refuses to act on it,
+        // and the channel sends nothing from a read it cannot trust. The next round tries
+        // again (the owner may adopt it).
+        if view.plan.changed_outside_arc {
+            return Err(Error::ChangedOutsideArc(view.plan.item.id.clone()));
+        }
         for task in &view.tasks {
+            if task.changed_outside_arc {
+                return Err(Error::ChangedOutsideArc(task.item.id.clone()));
+            }
             let state = task.item.state.as_str().to_owned();
             let phase = task.item.phase.clone();
             tasks.insert(
