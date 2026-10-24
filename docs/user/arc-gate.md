@@ -274,7 +274,7 @@ With [`worker.rework_session`](arc-files.md#configtoml) at `fresh` (the default)
 With `resume` the session id is the task id: the first attempt that reaches the model creates it, and every later attempt, a retry or a rework, continues it.
 An attempt that failed before the model started (a missing credential, a worktree that could not be prepared) leaves no session, so the next attempt creates it.
 A bad `worker.exec_args` entry no longer gets that far: `start`, `run` and `confirm` refuse it before the claim.
-The attempt's session id is decided by the claim, which writes it to `attempts/<task>/<attempt id>/start.json` before the worker starts; the wrapper writes the session it used to `identity.json` when it spawns the worker and to `runs/<task>/attempts/<attempt id>/execution.json` when it ends.
+The attempt's session id is decided by the claim, which writes it to `attempts/<task>/<attempt>/start.json` before the worker starts; the wrapper writes the session it used to `identity.json` when it spawns the worker and to `runs/<task>/attempts/<attempt id>/execution.json` when it ends.
 A reader takes the first of those records that names one: `execution.json`, then `identity.json`, then `start.json`, so the worker's journal is found by its session id from the claim on, while the attempt still runs (see [`arc-files`](arc-files.md)).
 
 Cost is counted per attempt.
