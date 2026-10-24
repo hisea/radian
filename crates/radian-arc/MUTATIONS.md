@@ -509,3 +509,17 @@ and the file was restored from `.radian/mut/plan_ops.rs` with `cp` and compared 
 TK0081-M1 also failed `update_task::every_field_changes_and_is_recorded`, and M3 and M4 also
 failed `update_task::every_field_changes_and_is_recorded`; the table names the test that
 reports the mutation in its own terms. 4/4 caught.
+## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
+
+`TaskDiff::fallback` was a bool, so a remote main ref that exists but shares no ancestor with the
+head read as `no remote main` — a line that was false about the repository. `remote_main_base`
+now tells a missing ref (`git show-ref --verify`) from a ref git finds no merge base for, and
+`TaskDiff::base` is the closed set `DiffBase`. The mutation was applied by hand to the working
+file, the named test was run alone with `cargo nextest run -p radian-arc --locked --profile
+sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0084-M1 | `remote_main_base` reports a ref with no common ancestor as `MainBase::Missing` | ✅ 1 failed | `read::a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref` (`left: NoRemoteMain`, right `Unrelated`) |
+
+1/1 caught.
