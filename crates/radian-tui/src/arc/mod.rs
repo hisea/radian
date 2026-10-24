@@ -1695,19 +1695,22 @@ impl ArcApp {
             self.float = None;
             return ArcKey::Redraw;
         }
-        // Level 2: an overlay view. The loop's log draws over every page, a merge command's
-        // log over the merge page, the board's finished list over its columns.
+        // Level 2: the overlay view that is on screen. The loop's log draws over every page,
+        // a merge command's log only over the merge page, and the board's finished list only
+        // over the board's columns. A view the current page keeps hidden is not a level: `b`
+        // leaves the merge page (and its log) behind, and a task opened from the finished list
+        // leaves that list behind, so `Esc` must return to the page underneath instead.
         if self.log_open {
             self.log_open = false;
             return ArcKey::Redraw;
         }
-        if self.merge.as_ref().is_some_and(|page| page.log.is_some()) {
+        if self.page == Page::Merge && self.merge.as_ref().is_some_and(|page| page.log.is_some()) {
             if let Some(page) = self.merge.as_mut() {
                 page.log = None;
             }
             return ArcKey::Redraw;
         }
-        if self.board.finished {
+        if self.page == Page::Board && self.board.finished {
             self.board.show_columns();
             return ArcKey::Redraw;
         }
@@ -2408,13 +2411,13 @@ impl ArcApp {
 
     /// The merge page's keys (ADR 0048 §11).
     fn on_merge_key(&mut self, key: &KeyEvent) -> ArcKey {
-        // A command's log takes the keys first: it scrolls, and Esc closes it.
+        // A command's log takes the other keys first: it scrolls. `Esc` never reaches here:
+        // [`Self::go_back`] closes the log, then the page.
         if self.merge.as_ref().is_some_and(|page| page.log.is_some()) {
             let Some(page) = self.merge.as_mut() else {
                 return ArcKey::Ignored;
             };
             match key.code {
-                KeyCode::Esc => page.log = None,
                 KeyCode::Char('j') | KeyCode::Down => {
                     if let Some(log) = &mut page.log {
                         log.scroll(1);

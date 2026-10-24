@@ -3,6 +3,10 @@
 //! board, the plans page's task column — and never quits; `q` quits from everywhere but the
 //! reject note, where it is a typed character.
 //!
+//! Every test walks up to the plans page's top level and presses `Esc` once more, so it also
+//! pins the new top-level rule (a redraw with a `q quits` hint, never `Quit`) that the old
+//! per-page handlers did not have. A test that stopped halfway would pass on the old code.
+//!
 //! The plans and tasks are real files in a scratch store (`Store::at`), so the pages read them
 //! through the same `radian-arc` loaders the subcommands use.
 
@@ -54,8 +58,9 @@ fn store(dir: &Path) -> Store {
     Store::at(dir)
 }
 
-/// One confirmed plan: two `todo.ready` tasks and one `review.awaiting_human` task, so every
-/// page and the merge page apply, with more than one row to carry a selection.
+/// One confirmed plan: two `todo.ready` tasks, one `review.awaiting_human` task and one
+/// `done.merged` task (the board's finished list needs a row), so every page and the merge
+/// page apply, with more than one row to carry a selection.
 struct Fixture {
     scratch: Scratch,
     store: Store,
@@ -75,6 +80,7 @@ impl Fixture {
             ("one", TaskState::Todo, "ready", 0),
             ("two", TaskState::Todo, "ready", 0),
             ("three", TaskState::Review, "awaiting_human", 1),
+            ("four", TaskState::Done, "merged", 1),
         ] {
             let id = store
                 .add_task(
@@ -208,6 +214,25 @@ fn fg_of(terminal: &Terminal<TestBackend>, needle: &str) -> (u16, u16) {
     panic!("no row contains `{needle}`:\n{}", rows.join("\n"));
 }
 
+/// The last key: the top level, which only says how to leave and never quits.
+fn assert_top_level(app: &mut ArcApp) {
+    assert_eq!(app.page, Page::Plans, "the top level is the plans page");
+    assert_eq!(app.focus, Focus::Plans, "the plan column has the focus");
+    assert_eq!(
+        app.on_key(&key(KeyCode::Esc)),
+        ArcKey::Redraw,
+        "Esc at the top level never quits"
+    );
+    let text = screen(app, 140, 30);
+    assert!(
+        text.contains("q quits"),
+        "the footer says how to leave:\n{text}"
+    );
+    // And again: the top level stays the top level.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Plans);
+}
+
 // ---- the levels, one at a time -------------------------------------------------------
 
 #[test]
@@ -278,101 +303,97 @@ fn esc_moves_the_focus_from_the_task_column_to_the_plan_column() {
         !text.contains("esc back"),
         "the plan column shows no esc back:\n{text}"
     );
+
+    assert_top_level(&mut app);
 }
 
 #[test]
-fn esc_from_the_board_goes_back_to_the_plans_page_and_keeps_the_selection() {
-    let fixture = Fixture::new();
-    let mut app = fixture.app();
-    assert_eq!(app.on_key(&key(KeyCode::Char('b'))), ArcKey::Redraw);
-    assert_eq!(app.page, Page::Board);
-    app.board.column = board::TODO;
-    app.board.row = 1;
-    let selected = app.board.selected().map(|card| card.id.clone());
-    assert!(selected.is_some(), "a card is selected");
-
-    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
-    assert_eq!(app.page, Page::Plans);
-
-    // Back on the board, the same card is still selected.
-    app.on_key(&key(KeyCode::Char('b')));
-    assert_eq!(app.page, Page::Board);
-    assert_eq!(app.board.selected().map(|card| card.id.clone()), selected);
-}
-
-#[test]
-fn esc_from_the_task_page_goes_back_to_the_plans_page_and_keeps_the_selection() {
+fn esc_walks_back_from_the_merge_command_log_to_the_top_level() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
     app.focus = Focus::Tasks;
-    app.task_sel = fixture.pos("two");
+    app.task_sel = fixture.pos("three");
     let plan_sel = app.plan_sel;
+    let task_sel = app.task_sel;
+    let task = fixture.id("three").to_owned();
     app.open_task();
     assert_eq!(app.page, Page::Task);
 
+    assert_eq!(app.on_key(&key(KeyCode::Char('m'))), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Merge);
+    if let Some(page) = app.merge.as_mut() {
+        page.log = Some(LogView::new("cargo test", "the command printed this\n"));
+    }
+
+    // Level 2: the command log.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert!(
+        app.merge.as_ref().is_some_and(|page| page.log.is_none()),
+        "Esc closes the command log"
+    );
+    assert_eq!(app.page, Page::Merge, "and nothing under it");
+
+    // Level 3: the merge page, back to the task page it was opened from.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Task);
+    assert_eq!(app.task.as_ref().map(|page| page.id.clone()), Some(task));
+    assert!(app.merge.is_none());
+
+    // Level 4: the task page, back to the plans page with its selections kept.
     assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
     assert_eq!(app.page, Page::Plans);
     assert_eq!(app.focus, Focus::Tasks);
     assert_eq!(app.plan_sel, plan_sel, "the plan selection is kept");
-    assert_eq!(
-        app.task_sel,
-        fixture.pos("two"),
-        "the task selection is kept"
-    );
+    assert_eq!(app.task_sel, task_sel, "the task selection is kept");
+
+    // Level 6: the task column, back to the plan column.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.focus, Focus::Plans);
+    assert_eq!(app.plan_sel, plan_sel);
+    assert_eq!(app.task_sel, task_sel);
+
+    // Level 7: the top level.
+    assert_top_level(&mut app);
 }
 
 #[test]
-fn esc_from_the_task_page_goes_back_to_the_board_when_it_opened_there() {
+fn esc_from_the_merge_page_returns_to_the_board_and_then_to_the_plans_page() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
-    app.on_key(&key(KeyCode::Char('b')));
-    app.board.column = board::TODO;
-    app.board.row = 1;
-    let selected = app.board.selected().map(|card| card.id.clone());
-    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
-    assert_eq!(app.page, Page::Task);
-
-    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
-    assert_eq!(app.page, Page::Board, "the task page returns to the board");
-    assert_eq!(app.board.selected().map(|card| card.id.clone()), selected);
-}
-
-#[test]
-fn esc_from_the_merge_page_goes_back_to_the_task_page() {
-    let fixture = Fixture::new();
-    let mut app = fixture.merge();
-    let id = app.merge.as_ref().map(|page| page.id.clone());
-
-    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
-    assert_eq!(app.page, Page::Task);
-    assert_eq!(app.task.as_ref().map(|page| page.id.clone()), id);
-    assert!(app.merge.is_none());
-
-    // And the task page is the next level down.
-    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
-    assert_eq!(app.page, Page::Plans);
-}
-
-#[test]
-fn esc_from_the_merge_page_goes_back_to_the_board_when_it_opened_there() {
-    let fixture = Fixture::new();
-    let mut app = fixture.app();
-    app.on_key(&key(KeyCode::Char('b')));
+    assert_eq!(app.on_key(&key(KeyCode::Char('b'))), ArcKey::Redraw);
     app.board.column = board::NEEDS_YOU;
     app.board.row = 0;
     let selected = app.board.selected().map(|card| card.id.clone());
+    assert!(selected.is_some(), "a card is selected");
+
     assert_eq!(app.on_key(&key(KeyCode::Char('M'))), ArcKey::Redraw);
     assert_eq!(app.page, Page::Merge);
+    if let Some(page) = app.merge.as_mut() {
+        page.log = Some(LogView::new("cargo test", "the command printed this\n"));
+    }
 
+    // The log over the merge page, then the merge page back to the board.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Merge);
     assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
     assert_eq!(app.page, Page::Board, "the merge page returns to the board");
-    assert_eq!(app.board.selected().map(|card| card.id.clone()), selected);
+    assert_eq!(
+        app.board.selected().map(|card| card.id.clone()),
+        selected,
+        "the board selection is kept"
+    );
+
+    // The board, back to the plans page.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Plans);
+
+    assert_top_level(&mut app);
 }
 
 // ---- the overlay views ---------------------------------------------------------------
 
 #[test]
-fn esc_closes_the_loop_log_over_the_finished_list_one_level_at_a_time() {
+fn esc_walks_back_from_the_loop_log_over_the_finished_list_to_the_top_level() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
     app.on_key(&key(KeyCode::Char('b')));
@@ -381,47 +402,98 @@ fn esc_closes_the_loop_log_over_the_finished_list_one_level_at_a_time() {
     app.on_key(&key(KeyCode::Char('L')));
     assert!(app.log_open, "the loop's log is on top");
 
+    // The loop's log covers every page.
     assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
     assert!(!app.log_open, "Esc closes the log");
     assert!(app.board.finished, "and nothing under it");
     assert_eq!(app.page, Page::Board);
 
+    // The finished list covers the board's columns.
     assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
     assert!(!app.board.finished, "the next Esc closes the finished list");
     assert_eq!(app.page, Page::Board);
 
+    // The board goes back to the plans page.
     assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
     assert_eq!(app.page, Page::Plans, "and the next one leaves the board");
+
+    assert_top_level(&mut app);
 }
 
 #[test]
-fn esc_closes_a_merge_command_log_before_the_page() {
+fn esc_from_a_task_opened_in_the_finished_list_keeps_the_finished_list() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.on_key(&key(KeyCode::Char('b')));
+    app.on_key(&key(KeyCode::Char('d')));
+    assert!(app.board.finished, "the finished list is open");
+    let row = app.board.selected_done().map(|row| row.id.clone());
+    assert_eq!(row.as_deref(), Some(fixture.id("four")));
+
+    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Task);
+
+    // The finished list is hidden behind the task page, so it is not a level yet: Esc
+    // returns to the board with the list still open.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Board, "the task page returns to the board");
+    assert!(
+        app.board.finished,
+        "the hidden finished list is untouched, not consumed"
+    );
+    assert_eq!(
+        app.board.selected_done().map(|row| row.id.clone()),
+        row,
+        "the finished selection is kept"
+    );
+
+    // Now it is visible, so it is the next level.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert!(!app.board.finished, "the visible list closes");
+    assert_eq!(app.page, Page::Board);
+
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Plans);
+
+    assert_top_level(&mut app);
+}
+
+#[test]
+fn esc_from_the_board_does_not_consume_a_hidden_merge_log() {
     let fixture = Fixture::new();
     let mut app = fixture.merge();
     if let Some(page) = app.merge.as_mut() {
         page.log = Some(LogView::new("cargo test", "the command printed this\n"));
     }
 
-    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
-    assert!(
-        app.merge.as_ref().is_some_and(|page| page.log.is_none()),
-        "Esc closes the command log"
-    );
-    assert_eq!(app.page, Page::Merge, "and nothing under it");
+    // `b` leaves the merge page, and its log, behind.
+    assert_eq!(app.on_key(&key(KeyCode::Char('b'))), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Board);
 
     assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
-    assert_eq!(app.page, Page::Task);
+    assert_eq!(
+        app.page,
+        Page::Plans,
+        "Esc leaves the board instead of closing the invisible log"
+    );
+    assert!(
+        app.merge.as_ref().is_some_and(|page| page.log.is_some()),
+        "the merge page keeps its log for when it is visible again"
+    );
+
+    assert_top_level(&mut app);
 }
 
 // ---- floats --------------------------------------------------------------------------
 
 #[test]
-fn esc_in_a_confirm_float_closes_it_and_changes_nothing() {
+fn esc_closes_a_confirm_float_and_then_the_levels_under_it() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
     app.focus = Focus::Tasks;
     app.task_sel = 0;
     let one = fixture.id("one").to_owned();
+    let plan_sel = app.plan_sel;
     assert_eq!(app.on_key(&key(KeyCode::Char('x'))), ArcKey::Redraw);
     assert!(
         matches!(app.float, Some(radian_tui::arc::Float::Confirm { .. })),
@@ -429,6 +501,7 @@ fn esc_in_a_confirm_float_closes_it_and_changes_nothing() {
         app.float
     );
 
+    // Level 1 only: the float closes, the page and the focus stay.
     assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
     assert!(app.float.is_none(), "Esc closes the float");
     assert_eq!(app.page, Page::Plans, "and only the float");
@@ -439,30 +512,24 @@ fn esc_in_a_confirm_float_closes_it_and_changes_nothing() {
         "ready",
         "the task is unchanged"
     );
-}
 
-#[test]
-fn ctrl_c_quits_from_a_float() {
-    let fixture = Fixture::new();
+    // Then the task column, and the top level: never `Quit`.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.focus, Focus::Plans);
+    assert_eq!(app.plan_sel, plan_sel);
+    assert_top_level(&mut app);
+
+    // Ctrl-C still quits from a float, whatever Esc does.
     let mut app = fixture.app();
     app.on_key(&key(KeyCode::Char('x')));
     assert!(app.float.is_some());
-    assert_eq!(app.on_key(&ctrl_c()), ArcKey::Quit);
-
-    // And from the reject note, where `q` is a character.
-    let mut app = fixture.merge();
-    app.on_key(&key(KeyCode::Char('r')));
-    assert!(matches!(
-        app.float,
-        Some(radian_tui::arc::Float::Reject { .. })
-    ));
     assert_eq!(app.on_key(&ctrl_c()), ArcKey::Quit);
 }
 
 // ---- q -------------------------------------------------------------------------------
 
 #[test]
-fn q_quits_from_every_page_and_the_log_view() {
+fn q_quits_from_a_float_and_every_page() {
     let fixture = Fixture::new();
 
     let mut app = fixture.app();
@@ -492,10 +559,22 @@ fn q_quits_from_every_page_and_the_log_view() {
     app.on_key(&key(KeyCode::Char('L')));
     assert!(app.log_open);
     assert_eq!(app.on_key(&key(KeyCode::Char('q'))), ArcKey::Quit);
+
+    // A float takes every other key first, but `q` still leaves; only the reject note below
+    // types it.
+    let mut app = fixture.app();
+    app.focus = Focus::Tasks;
+    app.task_sel = 0;
+    assert_eq!(app.on_key(&key(KeyCode::Char('x'))), ArcKey::Redraw);
+    assert!(matches!(
+        app.float,
+        Some(radian_tui::arc::Float::Confirm { .. })
+    ));
+    assert_eq!(app.on_key(&key(KeyCode::Char('q'))), ArcKey::Quit);
 }
 
 #[test]
-fn q_in_the_reject_note_is_typed() {
+fn q_in_the_reject_note_is_typed_then_esc_walks_out() {
     let fixture = Fixture::new();
     let mut app = fixture.merge();
     assert_eq!(app.on_key(&key(KeyCode::Char('r'))), ArcKey::Redraw);
@@ -510,4 +589,25 @@ fn q_in_the_reject_note_is_typed() {
         "the `q` is a letter of the note"
     );
     assert_eq!(app.page, Page::Merge, "the TUI stays open");
+
+    // Esc closes the note float and nothing under it.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert!(app.float.is_none());
+    assert_eq!(app.page, Page::Merge);
+
+    // Then the merge page, the task page and the plans page, one level each.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Task);
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(app.page, Page::Plans);
+    assert_top_level(&mut app);
+
+    // Ctrl-C quits from the note, where `q` is a character.
+    let mut app = fixture.merge();
+    assert_eq!(app.on_key(&key(KeyCode::Char('r'))), ArcKey::Redraw);
+    assert!(matches!(
+        app.float,
+        Some(radian_tui::arc::Float::Reject { .. })
+    ));
+    assert_eq!(app.on_key(&ctrl_c()), ArcKey::Quit);
 }
