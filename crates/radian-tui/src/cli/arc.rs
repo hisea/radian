@@ -88,12 +88,14 @@ pub(super) fn run_arc() -> ExitCode {
     let mut dirty = true;
     loop {
         // The pass's transition lines: the footer's ticker and the log, and the pages re-read
-        // the store, so a task that moved shows it at once.
+        // the store, so a task that moved shows it at once. A summary alone changed no state.
         let events = arc_loop.drain();
-        if !events.is_empty() {
-            for event in events {
-                app.push_loop_event(event);
-            }
+        let mut transitioned = false;
+        for event in events {
+            transitioned |= matches!(event, looping::LoopEvent::Transition(_));
+            app.push_loop_event(event);
+        }
+        if transitioned {
             app.refresh();
             dirty = true;
         }
