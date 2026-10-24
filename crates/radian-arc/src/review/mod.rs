@@ -834,7 +834,9 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
     // whatever this round's outcome (ADR 0048 decision 12). A commands-only profile has no
     // review verdict, so nothing extra is charged then.
     let budget_paused = match review_cost(store, &task.id, &plan.label)? {
-        Some(cost) => crate::store::attempt_ops::charge_review_cost(store, &task.id, cost)?,
+        Some(cost) => {
+            crate::store::attempt_ops::charge_review_cost(store, &task.id, &plan.label, cost)?
+        }
         None => false,
     };
     if let Some((verdict, path)) = failed {

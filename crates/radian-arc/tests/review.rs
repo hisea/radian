@@ -5106,3 +5106,133 @@ fn a_plans_cost_and_total_are_its_tasks_sums_in_list_and_show() {
     assert_eq!(value["total_cost_usd"], 2.25, "{value}");
     assert_eq!(value["tasks"][0]["total_cost_usd"], 1.5, "{value}");
 }
+
+/// A task's costs are summed from micros, so the text `show` prints goes through the same
+/// rounding a plan's sums do: the float's own noise never reaches the reader. Mutation:
+/// print the raw `f64` and the noise (`2.0069999999999997`) is what the field shows.
+#[test]
+fn a_tasks_text_cost_is_rounded_like_a_plans() {
+    let repo = Repo::new("task-cost-text");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task(&plan, "one", "One", vec![], false, vec![], "brief\n")
+        .expect("add a task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let summed = 1.003_f64 + 1.004_f64;
+    store
+        .change_task(&task, |task| {
+            task.cost_usd = Some(summed);
+            task.total_cost_usd = Some(summed);
+            Ok(())
+        })
+        .expect("the costs");
+
+    let shown = repo.radian(&["arc", "show", task.as_str()]);
+    assert_eq!(shown.code, 0, "{}", shown.stderr);
+    assert!(
+        shown.stdout.contains("cost_usd: 2.007\n"),
+        "the counted cost is rounded: {}",
+        shown.stdout
+    );
+    assert!(
+        shown.stdout.contains("total_cost_usd: 2.007\n"),
+        "the total is rounded: {}",
+        shown.stdout
+    );
+    assert!(
+        !shown.stdout.contains("2.0069999999999997"),
+        "the float's noise does not print: {}",
+        shown.stdout
+    );
+}
+
+/// The review charge is idempotent for one attempt: a pass that charged the review and then
+/// died before moving the task applies again without counting the same review twice (the task
+/// is still `review.verifying` when the second application starts). Mutation: always charge
+/// and the counter and total are a second review too high.
+#[test]
+fn a_repeated_review_cost_charge_adds_once() {
+    let fixture = Fixture::new("review-cost-once");
+    fixture.add_review_stage();
+    let _head = fixture.attempt_costing(&fixture.base.clone(), "one.txt", "one\n", 1_000_000);
+    assert_eq!(
+        fixture.state(),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+    let label = fixture.attempt_label();
+
+    attempt_ops::charge_review_cost(&fixture.store, &fixture.task, &label, 0.25)
+        .expect("the first charge");
+    attempt_ops::charge_review_cost(&fixture.store, &fixture.task, &label, 0.25)
+        .expect("the repeated charge");
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        stored.cost_usd,
+        Some(1.25),
+        "one review, not two: {stored:?}"
+    );
+    assert_eq!(stored.total_cost_usd, Some(1.25), "{stored:?}");
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "verifying"),
+        "the charge does not move the task"
+    );
+}
+
+/// A plan's `max_cost_usd` that a review alone reaches pauses the task and sets the plan's
+/// `auto` to `off`, exactly as the attempt-time plan check does. Mutation: skip the plan
+/// branch and the task goes back to `todo.ready` with its review rework.
+#[test]
+fn a_review_cost_that_reaches_the_plan_budget_pauses_the_plan() {
+    let fixture = Fixture::new("cost-review-plan-budget");
+    fixture.add_review_stage();
+    fixture.set_auto("run");
+    let plan = fixture
+        .store
+        .load_task(&fixture.task)
+        .expect("the task")
+        .item
+        .plan;
+    fixture
+        .store
+        .change_plan(&plan, |plan| {
+            plan.max_cost_usd = Some(0.5);
+            Ok(())
+        })
+        .expect("the plan limit");
+
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "cost-review-plan-budget-fake",
+        &[review_message(
+            "the change adds one.txt",
+            &["fix one.txt"],
+            &[],
+        )],
+        0,
+    );
+    fake.set_cost(1_000_000);
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "paused_budget", "{verified:?}");
+    assert!(verified.review.is_none(), "no review rework: {verified:?}");
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "paused_budget")
+    );
+    assert_eq!(
+        stored.max_cost_usd, None,
+        "the task has no limit of its own"
+    );
+    assert_eq!(
+        fixture.store.load_plan(&plan).unwrap().item.auto,
+        "off",
+        "a plan budget switches the plan off"
+    );
+}

@@ -734,6 +734,52 @@ fn an_old_task_without_a_total_starts_from_its_cost() {
     );
 }
 
+/// `reset-budget` on an older task file with no `total_cost_usd` first turns its `cost_usd`
+/// into the total, so zeroing the budget counter does not discard the spend it recorded. The
+/// task form and the plan form behave alike. Mutation: zero `cost_usd` without materializing
+/// the total and `running_total` falls back to `0`.
+#[test]
+fn reset_budget_keeps_an_old_tasks_cost_as_its_total() {
+    let (_repo, store) = setup("reset-old-total");
+    let (plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["one", "two"]);
+    let one = &tasks[0];
+    let two = &tasks[1];
+
+    store
+        .change_task(one, |task| {
+            task.state = TaskState::Todo;
+            task.phase = "paused_budget".to_owned();
+            task.cost_usd = Some(1.25);
+            task.total_cost_usd = None;
+            Ok(())
+        })
+        .expect("an older task file");
+    attempt_ops::reset_budget(&store, one).expect("the task form");
+    let stored = store.load_task(one).unwrap().item;
+    assert_eq!(stored.cost_usd, Some(0.0), "the counter resets");
+    assert_eq!(
+        stored.total_cost_usd,
+        Some(1.25),
+        "the task's old cost becomes its total: {stored:?}"
+    );
+
+    store
+        .change_task(two, |task| {
+            task.cost_usd = Some(2.0);
+            task.total_cost_usd = None;
+            Ok(())
+        })
+        .expect("another older task file");
+    attempt_ops::reset_budget(&store, &plan).expect("the plan form");
+    let stored = store.load_task(two).unwrap().item;
+    assert_eq!(stored.cost_usd, Some(0.0), "the counter resets");
+    assert_eq!(
+        stored.total_cost_usd,
+        Some(2.0),
+        "the plan form keeps the old cost too: {stored:?}"
+    );
+}
+
 /// A task budget pauses the task instead of retrying; `reset-budget` makes it ready and
 /// resets its counted cost.
 #[test]

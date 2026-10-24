@@ -41,6 +41,11 @@ pub const REVERIFY_CLASS: &str = "reverify";
 pub const PAUSED_FILE: &str = "paused.json";
 /// The wrapper's heartbeat, in the host-local attempt directory (ADR 0048 decision 7.9).
 pub const HEARTBEAT_FILE: &str = "heartbeat.json";
+/// The attempt whose `review` stage cost arc has already added to the task's counters, in the
+/// task's run directory. It is not part of the task file: it is bookkeeping that keeps the
+/// charge idempotent when a pass dies between the charge and the state move, like the conflict
+/// rework count.
+pub const REVIEW_COST_FILE: &str = "review_cost.json";
 
 /// The longest gap between two heartbeats: 15 seconds, or a third of the stall window when
 /// that is shorter.
@@ -1069,7 +1074,8 @@ impl BudgetCheck {
 
 /// Charges one attempt's `review` stage cost to the task and checks the budgets (ADR 0048
 /// decision 12). `cost_usd` is the summed `review_cost_micros` of the attempt's review verdict
-/// in US dollars; a review that reported no cost charges 0 and is still checked.
+/// in US dollars; a review that reported no cost charges 0 and is still checked. `attempt` is
+/// the attempt's label (`<task>-<n>`), the id its verdicts are written under.
 ///
 /// When the task's own limit (its `max_cost_usd`, else `[limits] max_cost_usd`) or the plan's
 /// `max_cost_usd` is reached, the task moves to `todo.paused_budget` in the same transaction,
@@ -1077,18 +1083,30 @@ impl BudgetCheck {
 /// `off`. Returns whether the task was paused.
 ///
 /// The charge is made only while the task is `review.verifying`: once the verdicts are
-/// applied the task has moved, so a second application charges nothing.
+/// applied the task has moved, so a second application charges nothing. The attempt whose
+/// review cost was charged is recorded in `runs/<task>/review_cost.json` before the task
+/// write, so a pass that dies between the charge and the state move does not charge the same
+/// attempt's review a second time and inflate the counters.
 ///
 /// # Errors
 ///
 /// The task file changed outside arc, or a file could not be read or written.
-pub fn charge_review_cost(store: &Store, task_id: &str, cost_usd: f64) -> Result<bool, Error> {
+pub fn charge_review_cost(
+    store: &Store,
+    task_id: &str,
+    attempt: &str,
+    cost_usd: f64,
+) -> Result<bool, Error> {
     let (paused, pause_plan) = {
         let _lock = store.lock_state()?;
         let loaded = store.load_task(task_id)?;
         require_unchanged(task_id, loaded.changed_outside_arc)?;
         let mut task = loaded.item;
         if task.state != TaskState::Review || task.phase != "verifying" {
+            return Ok(false);
+        }
+        if read_review_cost(store, task_id).as_deref() == Some(attempt) {
+            // This attempt's review cost already landed; only the state move is left.
             return Ok(false);
         }
         task.add_cost(cost_usd);
@@ -1119,8 +1137,17 @@ pub fn charge_review_cost(store: &Store, task_id: &str, cost_usd: f64) -> Result
             task.phase = "paused_budget".to_owned();
             task.retry_at = None;
         }
+        // The record goes first: a repeated application must never charge twice. A crash
+        // between this write and the task write can undercount one review, which is the
+        // safer side of the budget. Every other fallible read is behind us, and a task write
+        // that fails removes the record again.
+        write_review_cost(store, task_id, attempt)?;
         let version = store.next_version(Kind::Task, task_id);
-        store.write_item(Kind::Task, task_id, &task.to_text(), version)?;
+        if let Err(error) = store.write_item(Kind::Task, task_id, &task.to_text(), version) {
+            // The cost did not land: let the next application charge this attempt.
+            clear_review_cost(store, task_id);
+            return Err(error);
+        }
         (paused, plan_reached)
     };
     if pause_plan {
@@ -1131,6 +1158,42 @@ pub fn charge_review_cost(store: &Store, task_id: &str, cost_usd: f64) -> Result
         });
     }
     Ok(paused)
+}
+
+fn review_cost_path(store: &Store, task: &str) -> PathBuf {
+    store.root().join("runs").join(task).join(REVIEW_COST_FILE)
+}
+
+/// The attempt whose review cost arc charged, when it recorded one.
+fn read_review_cost(store: &Store, task: &str) -> Option<String> {
+    let text = fs::read_to_string(review_cost_path(store, task)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("attempt")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn write_review_cost(store: &Store, task: &str, attempt: &str) -> Result<(), Error> {
+    let path = review_cost_path(store, task);
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Failed(format!("{} has no directory", path.display())))?;
+    fs::create_dir_all(dir)
+        .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
+    let text = serde_json::to_string_pretty(&json!({ "attempt": attempt }))
+        .map_err(|error| Error::Failed(format!("cannot encode {}: {error}", path.display())))?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, format!("{text}\n"))
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", temporary.display())))?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
+}
+
+/// Forgets the recorded charge; the next application charges the attempt again. Used when the
+/// task write itself failed, so the record does not claim a charge that never landed.
+fn clear_review_cost(store: &Store, task: &str) {
+    let _ = fs::remove_file(review_cost_path(store, task));
 }
 
 // ---- retries and reset-budget --------------------------------------------------------
@@ -1180,6 +1243,14 @@ pub struct BudgetReset {
     pub tasks: Vec<String>,
 }
 
+/// `reset-budget`'s one write: the budget counter goes back to `0` and the total stays. An
+/// older file without `total_cost_usd` gets it materialized from its `cost_usd` first, so the
+/// total cannot fall back to the zeroed counter (ADR 0048 decision 12).
+fn reset_counted_cost(task: &mut model::TaskFile) {
+    task.total_cost_usd = Some(task.running_total());
+    task.cost_usd = Some(0.0);
+}
+
 /// `radian arc reset-budget <id>`: moves the paused task, or every paused task of the plan,
 /// back to `todo.ready`, and resets the counted cost to zero from now on.
 ///
@@ -1204,7 +1275,7 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
                 // The plan's counted cost is every task's, so every task resets even when
                 // only some of them are paused.
                 store.change_task(task_id, |task| {
-                    task.cost_usd = Some(0.0);
+                    reset_counted_cost(task);
                     if paused {
                         task.state = TaskState::Todo;
                         task.phase = "ready".to_owned();
@@ -1239,7 +1310,7 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
                 task.state = TaskState::Todo;
                 task.phase = "ready".to_owned();
                 task.retry_at = None;
-                task.cost_usd = Some(0.0);
+                reset_counted_cost(task);
                 Ok(())
             })?;
             Ok(BudgetReset {

@@ -209,6 +209,7 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `runs/<task>/gate.log` | The background gate process's own output. |
 | `runs/<task>/auto_reverify.json` | The `(head_sha, remote main)` pairs a scheduling pass already re-verified for the task, and the text of the last `limits.max_auto_reverify` stop. |
 | `runs/<task>/conflict_rework.json` | How many conflict reworks arc has written for the task in a row. The lead's rework and an attempt that does not end in a conflict set it back to `0`. |
+| `runs/<task>/review_cost.json` | The attempt whose `review` stage cost arc already added to the task's counters. A pass that dies between the charge and the state move therefore charges the same review only once. |
 | `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). |
 | `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |
 | `attempts/<task>/…` | The host-local attempt records: `base_sha`, `last_head`, and per attempt `start.json`, `identity.json`, `status.json`, `heartbeat.json`. |

@@ -282,7 +282,7 @@ A reader takes the first of those records that names one: `execution.json`, then
 Cost is counted per attempt.
 `Result.cost` is the session total, so the attempt's cost is the difference from the previous attempt's session total when both ran in the same session (`resume`), and the whole session total when the attempt has a session of its own (`fresh`).
 The delta is added to the task's `cost_usd` and its `total_cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
-A `reverify` attempt runs no worker and costs nothing, but a `review` stage it runs costs the same as any review.
+A `reverify` attempt runs no worker and adds no worker cost, but a `review` stage it runs costs the same as any review.
 
 A `review` stage's cost counts too: when arc applies a gate's verdicts, the sum of the attempt's `review_cost_micros` (every session the stage ran; a run that reported none adds `0`) is added to the task's `cost_usd` and `total_cost_usd`, and both budgets are checked then.
 Both counters include every worker attempt and every review; `reset-budget` sets `cost_usd` back to `0` and leaves `total_cost_usd` alone.

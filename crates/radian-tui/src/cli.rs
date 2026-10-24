@@ -2243,9 +2243,9 @@ mod tests {
 
     // ---- the arc manual --------------------------------------------------------------
     //
-    // The arc manual is four pages: `arc.md` (the commands), `arc-gate.md` (the gate and
-    // failures), `arc-mcp.md` (the lead's MCP server) and `arc-files.md` (the config, the plan
-    // and task files, the layout).
+    // The arc manual is five pages: `arc.md` (the commands), `arc-gate.md` (the gate and
+    // failures), `arc-mcp.md` (the lead's MCP server), `arc-tui.md` (the TUI) and `arc-files.md`
+    // (the config, the plan and task files, the layout).
     // Every check locates its table by the heading it sits under and the page that holds
     // it. The heading is the anchor: `arc_tables(doc, "arc.md", "## `radian arc show")` is
     // the only way a check reads rows, so an unrelated table elsewhere on any page can

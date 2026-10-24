@@ -478,11 +478,11 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 field(&mut out, "attempt_note", &note);
             }
             field(&mut out, "token", &optional_text(item.token.as_deref()));
-            field(&mut out, "cost_usd", &optional_number(item.cost_usd));
+            field(&mut out, "cost_usd", &optional_cost(item.cost_usd));
             field(
                 &mut out,
                 "total_cost_usd",
-                &optional_number(item.total_cost()),
+                &optional_cost(item.total_cost()),
             );
             field(&mut out, "auto_rework", &item.auto_rework.to_string());
             field(&mut out, "retry_count", &item.retry_count.to_string());
@@ -649,6 +649,12 @@ fn optional_number<T: std::fmt::Display>(value: Option<T>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_owned())
+}
+
+/// A task's cost field, printed the way a summed cost is printed: `-` when the file records
+/// none, else [`cost_text`]'s rounding.
+fn optional_cost(value: Option<f64>) -> String {
+    value.map(cost_text).unwrap_or_else(|| "-".to_owned())
 }
 
 /// A summed cost as the text forms print it: up to six decimals, with the trailing zeros
