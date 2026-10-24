@@ -5184,6 +5184,55 @@ fn a_repeated_review_cost_charge_adds_once() {
     );
 }
 
+/// A pass that wrote the charge record and then died before the task write is recovered: the
+/// next application sees that the task's counters do not carry the recorded charge and adds it
+/// exactly once. Mutation: trust the recorded attempt alone and the review's cost is lost.
+#[test]
+fn a_review_charge_whose_task_write_did_not_land_is_charged_again() {
+    let fixture = Fixture::new("review-cost-recover");
+    fixture.add_review_stage();
+    let _head = fixture.attempt_costing(&fixture.base.clone(), "one.txt", "one\n", 1_000_000);
+    let label = fixture.attempt_label();
+    let path = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("review_cost.json");
+    let record = json!({
+        "attempt": label,
+        "cost_usd": 0.25,
+        // The record a pass leaves when it dies before the task write: the task still carries
+        // the worker's 1.0, not the charged 1.25.
+        "cost_after": 1.25,
+        "total_after": 1.25,
+    });
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&record).unwrap()),
+    )
+    .expect("the record of a died pass");
+
+    let paused = attempt_ops::charge_review_cost(&fixture.store, &fixture.task, &label, 0.25)
+        .expect("the recovered charge");
+    assert!(!paused);
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        stored.cost_usd,
+        Some(1.25),
+        "the review is counted once: {stored:?}"
+    );
+    assert_eq!(stored.total_cost_usd, Some(1.25), "{stored:?}");
+
+    // The record now matches the counters, so a third application charges nothing.
+    attempt_ops::charge_review_cost(&fixture.store, &fixture.task, &label, 0.25)
+        .expect("the repeated charge");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.cost_usd, Some(1.25), "{stored:?}");
+    assert_eq!(stored.total_cost_usd, Some(1.25), "{stored:?}");
+}
+
 /// A plan's `max_cost_usd` that a review alone reaches pauses the task and sets the plan's
 /// `auto` to `off`, exactly as the attempt-time plan check does. Mutation: skip the plan
 /// branch and the task goes back to `todo.ready` with its review rework.
