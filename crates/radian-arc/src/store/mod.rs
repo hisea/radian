@@ -233,13 +233,50 @@ impl PlanView {
             .sum()
     }
 
-    /// Whether the plan is finished: it is not cancelled and every task is `done.merged`. A
-    /// plan with no tasks is not finished. This is the test `radian arc list` leaves a plan
-    /// out by, and the arc TUI's `done` view shares it.
+    /// Whether the plan is finished (ADR 0048 decision 3): it has at least one task, every
+    /// task is `done.merged` or `failed.cancelled`, and at least one is `done.merged`. A plan
+    /// with no tasks is never finished. This is the one finished rule: `radian arc list` and
+    /// the arc TUI's `done` view share it, and the `✓` plan mark reads it.
     pub fn is_finished(&self) -> bool {
-        !self.plan.item.is_cancelled()
-            && !self.tasks.is_empty()
-            && self.tasks.iter().all(|task| task.item.is_merged())
+        !self.tasks.is_empty()
+            && self
+                .tasks
+                .iter()
+                .all(|task| task.item.is_merged() || task.item.is_cancelled())
+            && self
+                .tasks
+                .iter()
+                .any(|task| task.item.state == model::TaskState::Done)
+    }
+
+    /// Whether the plan's own tasks say it was cancelled: it has at least one task and every
+    /// task is `failed.cancelled`. The plan file's `status` is not rewritten.
+    pub fn is_cancelled_by_tasks(&self) -> bool {
+        !self.tasks.is_empty() && self.tasks.iter().all(|task| task.item.is_cancelled())
+    }
+
+    /// Whether the plan is cancelled: its stored `status` is `cancelled`, or its tasks are all
+    /// `failed.cancelled` ([`PlanView::is_cancelled_by_tasks`]). The one cancelled rule `list`,
+    /// its `--json` form, the arc TUI's views and the plan mark share.
+    pub fn is_cancelled(&self) -> bool {
+        self.plan.item.is_cancelled() || self.is_cancelled_by_tasks()
+    }
+
+    /// The plan's progress as `(merged, total)`: the tasks that are `done.merged`, and the
+    /// tasks that are not `failed.cancelled`. A cancelled task is not work left to do, so it
+    /// is not in the total; a plan whose tasks are all cancelled reads `0/0`.
+    pub fn progress(&self) -> (usize, usize) {
+        let merged = self
+            .tasks
+            .iter()
+            .filter(|task| task.item.is_merged())
+            .count();
+        let total = self
+            .tasks
+            .iter()
+            .filter(|task| !task.item.is_cancelled())
+            .count();
+        (merged, total)
     }
 }
 

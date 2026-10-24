@@ -77,7 +77,8 @@ pub enum PlanFilter {
     Active,
     /// Every plan.
     All,
-    /// The finished plans only: every task `done.merged`, and not cancelled.
+    /// The finished plans only: [`radian_arc::store::PlanView::is_finished`], and not
+    /// cancelled.
     Done,
     /// The cancelled plans only.
     Cancelled,
@@ -104,14 +105,15 @@ impl PlanFilter {
         }
     }
 
-    /// Whether this view lists `view`. The "finished" test is the one `radian arc list` uses
-    /// ([`radian_arc::store::PlanView::is_finished`]); a plan with no tasks is active.
+    /// Whether this view lists `view`. The finished and cancelled tests are the ones
+    /// `radian arc list` uses ([`radian_arc::store::PlanView::is_finished`] and
+    /// [`radian_arc::store::PlanView::is_cancelled`]); a plan with no tasks is active.
     pub fn shows(self, view: &PlanView) -> bool {
         match self {
-            PlanFilter::Active => !view.plan.item.is_cancelled() && !view.is_finished(),
+            PlanFilter::Active => !view.is_cancelled() && !view.is_finished(),
             PlanFilter::All => true,
-            PlanFilter::Done => view.is_finished(),
-            PlanFilter::Cancelled => view.plan.item.is_cancelled(),
+            PlanFilter::Done => !view.is_cancelled() && view.is_finished(),
+            PlanFilter::Cancelled => view.is_cancelled(),
         }
     }
 
@@ -310,7 +312,8 @@ pub fn task_mark(state: TaskState, phase: &str) -> Mark {
 /// [`Mark`]; these are only the plan list's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanMark {
-    /// `✕`: the plan is `cancelled`. The rest of the row is weak.
+    /// `✕`: a cancelled plan, by its `status` or by all its tasks being `failed.cancelled`.
+    /// The rest of the row is weak.
     Cancelled,
     /// `◌`: the plan is `draft`.
     Draft,
@@ -323,7 +326,8 @@ pub enum PlanMark {
     Paused,
     /// `○`: a task is open, and nothing is running.
     Queued,
-    /// `✓`: every task is `done.*` or `failed.cancelled`, and at least one is `done`.
+    /// `✓`: [`radian_arc::store::PlanView::is_finished`]: every task is `done.merged` or
+    /// `failed.cancelled`, and at least one is `done.merged`.
     Done,
 }
 
@@ -355,10 +359,11 @@ impl PlanMark {
     }
 }
 
-/// The mark of one plan: the first rule of ADR 0048 decision 11's table that holds.
+/// The mark of one plan: the first rule of ADR 0048 decision 11's table that holds. The
+/// cancelled and finished rules are the store's own, so `list` and this mark never disagree.
 pub fn plan_mark(view: &PlanView) -> PlanMark {
     let plan = &view.plan.item;
-    if plan.status == "cancelled" {
+    if view.is_cancelled() {
         return PlanMark::Cancelled;
     }
     if plan.status == "draft" {
@@ -389,12 +394,7 @@ pub fn plan_mark(view: &PlanView) -> PlanMark {
     if open {
         return PlanMark::Queued;
     }
-    let all_finished = tasks.iter().all(|task| {
-        task.item.state == TaskState::Done
-            || (task.item.state == TaskState::Failed && task.item.phase == "cancelled")
-    });
-    let any_done = tasks.iter().any(|task| task.item.state == TaskState::Done);
-    if all_finished && any_done {
+    if view.is_finished() {
         return PlanMark::Done;
     }
     PlanMark::Queued
@@ -2522,12 +2522,7 @@ fn attempts_with_current(attempts: Vec<AttemptView>, attempt: u32) -> Vec<Attemp
 
 /// A plan as the page draws it: the summary line and its tasks.
 fn plan_row(view: &PlanView, tasks: Vec<TaskRow>) -> PlanRow {
-    let total = view.plan.item.tasks.len();
-    let merged = view
-        .tasks
-        .iter()
-        .filter(|task| task.item.is_merged())
-        .count();
+    let (merged, total) = view.progress();
     let mark = plan_mark(view);
     let costs: Vec<f64> = view
         .tasks

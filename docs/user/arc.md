@@ -112,16 +112,17 @@ An `--after` id must name a task of the same plan or a task whose state is `done
 Lists plans, each with its tasks in the plan's order.
 Plans print in claim order, the order `radian arc run` serves them in: the higher `priority` first (`P0` before `P1`), then the plan id from small to large.
 Each plan's header line shows its id, its `status`, its `auto` level, its `priority`, its progress as `<merged>/<tasks> merged`, its `total_cost_usd` (the sum of its tasks' totals), and its title.
+The progress total counts the plan's tasks that are not `failed.cancelled`: a cancelled task is not work left to do, so a plan with one merged task and one cancelled follow-up reads `1/1`, and a plan whose tasks are all cancelled reads `0/0`.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
 A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage, reset by `reset-budget`); its `total_cost_usd` also includes every review and is never reset.
 
 By default the finished work is left out, so the work in progress is what you see:
 
 - every task in `done.merged` is left out; a plan that is shown still counts those tasks in its `<merged>/<tasks> merged` header;
-- a plan whose tasks are all `done.merged` (a finished plan) is left out too; a plan with no tasks is always shown;
-- a `cancelled` plan is left out; `--all` shows it.
+- a **finished** plan is left out too: it has at least one task, every task is `done.merged` or `failed.cancelled`, and at least one task is `done.merged`. A plan with no tasks is never finished and is always shown;
+- a `cancelled` plan is left out; `--all` shows it. A plan whose `status` is not `cancelled` but whose tasks are all `failed.cancelled` is cancelled the same way: it is derived from its tasks, and its file's `status` is not rewritten.
 
-Every other state is shown, `failed.*` included: a failed task needs attention.
+Every other state is shown, `failed.*` included: a failed task needs attention. A `failed.cancelled` task is still listed under its plan (and by `show`); only its plan's progress leaves it out.
 
 When the default left something out, the last line counts it:
 
@@ -136,7 +137,7 @@ When everything is hidden, that line is the whole output. Nothing hidden means n
 |---|---|---|
 | `--plan` | `ID` | Only this plan. It follows the default filter: its merged tasks are hidden unless `--all`, and a finished or cancelled plan is still printed with its header line, so you see that it exists. |
 | `--all` | — | No filter: print every plan and every task, `done.merged` history and cancelled plans included. It takes no value. |
-| `--json` | — | Print one JSON array instead of lines. Without `--all` it follows the same filter: a cancelled plan is left out, and a plan named with `--plan` is always included. |
+| `--json` | — | Print one JSON array instead of lines. Without `--all` it follows the same filter for cancelled plans: a plan is left out when its `status` is `cancelled` or all its tasks are `failed.cancelled`, and a plan named with `--plan` is always included. |
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 

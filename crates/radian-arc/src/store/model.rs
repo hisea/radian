@@ -383,11 +383,17 @@ pub struct TaskFile {
 }
 
 impl TaskFile {
-    /// Whether the task is `done.merged`: the one state a finished plan is counted by and the
-    /// default `radian arc list` hides. The plan-finished rule and every per-task test read
-    /// this, so they cannot drift apart.
+    /// Whether the task is `done.merged`: the one state a finished plan counts as done and
+    /// the default `radian arc list` hides. The plan-finished rule and every per-task test
+    /// read this, so they cannot drift apart.
     pub fn is_merged(&self) -> bool {
         self.state == TaskState::Done && self.phase == "merged"
+    }
+
+    /// Whether the task is `failed.cancelled`: the owner ended it. It stays visible, and it is
+    /// not counted in its plan's progress.
+    pub fn is_cancelled(&self) -> bool {
+        self.state == TaskState::Failed && self.phase == "cancelled"
     }
 
     /// The task's running total: its stored `total_cost_usd`, or its `cost_usd` for a file
