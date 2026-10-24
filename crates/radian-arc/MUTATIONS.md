@@ -259,3 +259,16 @@ stages fail: with `commands` failing alone the review passes, and scanning it fi
 nothing. M3 leaves the stage that was not signalled alive past the test's 3 s deadline; the
 handler is the only SIGTERM source, because the wait loop now only escalates to SIGKILL after
 `cancel_grace_secs`.
+
+## TK0038 (review cost counts; a task and a plan have totals)
+
+TK0038-M1–M3 were run against `2948686d` (the cost change), each applied to the committed
+file, run with `cargo nextest run -p radian-arc --locked --profile sandbox --no-fail-fast -E
+'<the tests below>'`, and restored from a copy under `.radian/mut/` with `cp`; the restored
+file was compared byte for byte with `cmp`, and `git status --short` was empty afterwards.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0038-M1 | do not add the review stage's cost in `attempt_ops::charge_review_cost` (`task.add_cost(cost_usd)` dropped) | `review::two_attempts_and_three_reviews_make_the_total_and_reset_budget_keeps_it` (the counter and total are short by the three reviews), `review::a_review_cost_that_reaches_the_budget_pauses_the_task_without_a_rework` (the task never reaches the limit) | ✅ 2 failed |
+| TK0038-M2 | `reset-budget` also zeroes `total_cost_usd` (both the task and the plan form) | `review::two_attempts_and_three_reviews_make_the_total_and_reset_budget_keeps_it` (the total is `0` after the reset) | ✅ failed |
+| TK0038-M3 | skip the budget check at the review verdict (`let paused = false` in `charge_review_cost`) | `review::a_review_cost_that_reaches_the_budget_pauses_the_task_without_a_rework` (the task goes back to `todo.ready` with the review rework instead of `todo.paused_budget`) | ✅ failed |
