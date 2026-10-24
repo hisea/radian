@@ -155,3 +155,50 @@ fn the_diff_is_the_task_own_change_from_the_merge_base_with_main() {
         paths(&fallback)
     );
 }
+
+/// A task with no commit of its own and no remote main ref: the diff is empty, but the fallback
+/// is still reported, so the page draws `base..head · no remote main` under `no change yet`.
+#[test]
+fn a_no_change_diff_without_a_remote_main_ref_keeps_the_fallback() {
+    let repo = Repo::new("read-diff-empty");
+    let base = repo.main_sha();
+    let store = store(&repo);
+    let plan = store
+        .add_plan("read", "the read plan", "a request\n")
+        .unwrap();
+    let task = store
+        .add_task(
+            &plan,
+            "empty",
+            "the empty task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .unwrap();
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "verifying".to_owned();
+            task.attempt = 1;
+            task.base_sha = Some(base.clone());
+            task.head_sha = Some(base.clone());
+            Ok(())
+        })
+        .unwrap();
+    finish(&repo, &task, 1, &base, &base);
+    repo.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+
+    let diff = read::task_diff(&store, &task, Some(1)).unwrap();
+    assert!(
+        diff.files.is_empty(),
+        "no commit of its own means no change: {:?}",
+        paths(&diff)
+    );
+    assert_eq!(diff.source, DiffSource::Range);
+    assert!(
+        diff.fallback,
+        "the source line still says there is no remote main ref"
+    );
+}

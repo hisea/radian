@@ -459,5 +459,11 @@ sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0076-M2 | `attempt_change` uses the attempt's recorded base again (`base_sha..head_sha`) | ✅ 1 failed | `read::the_diff_is_the_task_own_change_from_the_merge_base_with_main` (`left: ["x.rs", "y.rs"]`, `right: ["y.rs"]`) |
+| TK0076-M4 | an empty diff (`base_sha == head_sha`) returns `TaskDiff::default()`, dropping the fallback | ✅ 1 failed | `read::a_no_change_diff_without_a_remote_main_ref_keeps_the_fallback` (`diff.fallback` is false, so the page loses `base..head · no remote main`) |
 
-1/1 caught.
+TK0076-M4 is the rework's check: the review found that a task with no commit of its own and no
+remote main ref lost the fallback flag, so the diff tab drew only `no change yet`. The mutation
+was applied to the working file, the test was run alone with the command above, and the file was
+restored from `.radian/backup2/read.rs` with `cp` and compared with `diff -q`.
+
+2/2 caught.

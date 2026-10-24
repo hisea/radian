@@ -286,7 +286,9 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
 ///   main ref the range is that attempt's recorded `base_sha..head_sha` and [`TaskDiff::fallback`]
 ///   says so.
 ///
-/// The diff is empty when the task has no commit yet (no base or head, or both equal).
+/// The diff is empty when the task has no commit yet (no base or head, or both equal); its
+/// [`TaskDiff::fallback`] still reports a missing remote main ref, so the page says so under
+/// `no change yet`.
 ///
 /// # Errors
 ///
@@ -315,7 +317,12 @@ pub fn task_diff(store: &Store, task: &str, attempt: Option<u32>) -> Result<Task
         return Ok(TaskDiff::default());
     };
     if base == head {
-        return Ok(TaskDiff::default());
+        // No commit yet, but the range still fell back when there is no remote main ref: the
+        // page says so under `no change yet`.
+        return Ok(TaskDiff {
+            fallback,
+            ..TaskDiff::default()
+        });
     }
     diff_range(store.repo(), &base, &head).map(|mut diff| {
         diff.source = DiffSource::Range;

@@ -1379,6 +1379,33 @@ fn the_file_list_takes_at_most_half_of_the_diff_area() {
 }
 
 #[test]
+fn a_no_change_diff_still_names_the_fallback_range() {
+    use radian_arc::read::TaskDiff;
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    let id = app.task.as_ref().unwrap().id.clone();
+    let attempt = app.task.as_ref().unwrap().attempt.unwrap();
+    assert!(app.apply_diff(
+        &id,
+        attempt,
+        Ok(TaskDiff {
+            fallback: true,
+            ..TaskDiff::default()
+        }),
+    ));
+
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("base..head · no remote main"),
+        "an empty diff keeps the source line:\n{text}"
+    );
+    assert!(text.contains("no change yet"), "{text}");
+}
+
+#[test]
 fn a_long_file_list_still_leaves_the_diff_a_body_row() {
     use radian_arc::read::{DiffFile, TaskDiff};
     let fixture = Fixture::new();
