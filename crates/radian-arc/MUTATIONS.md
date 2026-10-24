@@ -721,3 +721,20 @@ restored from `.radian/mut/plan_ops.rs` with `cp`, and `cmp` found it identical.
 
 1/1 caught.
 
+## TK0093 rework 1: a reverify's failed review does not count (2026-10-24, branch `work/TK0093-reverify-failure-not-counted`)
+
+The review found that a reverify whose gate failed on its `review` stage still reached
+`review_auto_rework` and called `record_auto_rework`, so a task at `max_auto_rework` paused the
+plan on a failed reverify. `review_auto_rework` now returns `None` for an attempt
+`attempt_ops::is_reverify_attempt` marks as a worker-less reverify, before it moves the task or
+counts: the task keeps the path to `review.rework_pending` and no review rework is written. The
+mutation was applied by hand to `crates/radian-arc/src/review/mod.rs`, the named test ran alone
+with `cargo nextest run -p radian-arc --locked --profile sandbox -E '<the test below>'`, and the
+file was restored from `.radian/review-mod.rs.bak` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0093-M3 | `review_auto_rework` skips the reverify guard, so a reverify's failed `review` stage counts and pauses the plan | `review::a_reverify_whose_review_fails_does_not_count_as_an_auto_rework` (`tests/review.rs`: the pause reports count 3 at max 2, and a review rework is written) | ✅ failed |
+
+1/1 caught.
+
