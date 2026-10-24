@@ -207,7 +207,8 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     // worktree and its fetch, the model, the delivery checks and the push (ADR 0048
     // decisions 7.8 and 9). Every wrapper git command gets the time that is left.
     let started = Instant::now();
-    let repo = repo_root()?;
+    let wall = Duration::from_secs(o.max_wall_time_secs);
+    let repo = repo_root(started, wall)?;
     let arc = repo.join(".radian").join("arc");
     let worktree = arc.join("worktrees").join(&o.task);
     let branch = format!("work/{}", o.task);
@@ -235,7 +236,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         runs,
         attempt_dir,
         wrapper_pid,
-        clock: Clock::new(started, Duration::from_secs(o.max_wall_time_secs), signal),
+        clock: Clock::new(started, wall, signal),
     };
     // From here on every failure writes the attempt's finish record before the wrapper exits:
     // the next pass applies it and frees the attempt's `[limits] concurrency` slot at once
@@ -366,7 +367,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
 
     let result_path = s.runs.join("result.jsonl");
     let stderr_path = s.runs.join("stderr.log");
-    let brief = read_stdin()?;
+    let brief = read_stdin(&s.clock)?;
     let base_sha = base_sha(&s.repo, &s.arc, o, &s.branch, created, &s.clock)?;
     // The moved-ref guard: a later attempt may only run when `work/<task>` still points at
     // the tip the previous attempt ended on. Another worker can move the ref from inside its
@@ -655,7 +656,11 @@ impl Heartbeat {
                     if flag.load(Ordering::SeqCst) {
                         return;
                     }
-                    std::thread::sleep(POLL);
+                    // Sleep only what is left of the interval: a fixed poll slice would
+                    // stretch a 333 ms interval to 400 ms, and three beats would no longer
+                    // fit in a 1 s stall window.
+                    let now = Instant::now();
+                    std::thread::sleep(deadline.saturating_duration_since(now).min(POLL));
                 }
                 if flag.load(Ordering::SeqCst) {
                     return;
@@ -864,14 +869,27 @@ fn validate_rest(o: &Options) -> Result<(), Failure> {
 
 /// The repository root, found from the current directory. The wrapper runs from the main
 /// checkout: a linked worktree's `.git` is a file, and its worktrees are not the place to
-/// create another one.
-fn repo_root() -> Result<PathBuf, Failure> {
+/// create another one. The attempt's wall clock already covers this local `rev-parse`, so a
+/// command that hangs is killed at the deadline like every other wrapper git command; the
+/// attempt's own records cannot be written before the root is known.
+fn repo_root(started: Instant, wall: Duration) -> Result<PathBuf, Failure> {
     let cwd = std::env::current_dir()
         .map_err(|error| Failure::error(format!("cannot read the current directory: {error}")))?;
-    // Local `rev-parse`, before the attempt's clock exists; it names no remote and cannot
-    // wait on one.
-    let out = crate::git::run(&cwd, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| Failure::error(format!("{} is not inside a git repository", cwd.display())))?;
+    let remaining = (!wall.is_zero()).then(|| wall.saturating_sub(started.elapsed()));
+    if remaining.is_some_and(|remaining| remaining.is_zero()) {
+        return Err(Failure::wall());
+    }
+    let out = match crate::git::run_with_timeout(&cwd, &["rev-parse", "--show-toplevel"], remaining)
+    {
+        Ok(crate::git::TimedRun::Done(out)) => out,
+        Ok(crate::git::TimedRun::TimedOut) => return Err(Failure::wall()),
+        Err(_) => {
+            return Err(Failure::error(format!(
+                "{} is not inside a git repository",
+                cwd.display()
+            )));
+        }
+    };
     if !out.status.success() {
         return Err(Failure::error(format!(
             "{} is not inside a git repository",
@@ -914,19 +932,33 @@ fn ensure_worktree(
     // `git worktree add` at the same time: git writes the branch's configuration, and two
     // writers collide on `.git/config.lock` and make the second attempt fail. The
     // `worktrees/` directory's own flock makes creation (and the fetch behind it) one at a
-    // time; the guard lives until this function returns, before the worker starts.
+    // time; the guard lives until this function returns, before the worker starts. A wait
+    // that outlives the attempt's wall clock is a wall-time failure, like a git command.
     let _setup = File::open(parent).map_err(|error| {
         Failure::error(format!(
             "cannot open {} for the setup lock: {error}",
             parent.display()
         ))
     })?;
-    _setup.lock_exclusive().map_err(|error| {
-        Failure::error(format!(
-            "cannot lock {} for the setup: {error}",
-            parent.display()
-        ))
-    })?;
+    loop {
+        match _setup.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if clock.expired() {
+                    clock.mark()?;
+                    return Err(Failure::wall());
+                }
+                let wait = clock.remaining().map_or(POLL, |left| left.min(POLL));
+                std::thread::sleep(wait);
+            }
+            Err(error) => {
+                return Err(Failure::error(format!(
+                    "cannot lock {} for the setup: {error}",
+                    parent.display()
+                )));
+            }
+        }
+    }
     if worktree.join(".git").exists() {
         let top = match git(worktree, &["rev-parse", "--show-toplevel"], clock) {
             Ok(top) => top,
@@ -1845,7 +1877,35 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn read_stdin() -> Result<String, Failure> {
+fn read_stdin(clock: &Clock) -> Result<String, Failure> {
+    if clock.expired() {
+        clock.mark()?;
+        return Err(Failure::wall());
+    }
+    // A read on stdin that never sees EOF would outlive the attempt's wall time. The reader
+    // thread stays blocked if the deadline passes, which does not keep the process alive; the
+    // caller gets the wall-time failure and writes the attempt's records.
+    let Some(remaining) = clock.remaining() else {
+        return read_stdin_blocking();
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(read_stdin_blocking().map_err(|failure| failure.message));
+    });
+    match receiver.recv_timeout(remaining) {
+        Ok(Ok(brief)) => Ok(brief),
+        Ok(Err(message)) => Err(Failure::error(message)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            clock.mark()?;
+            Err(Failure::wall())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(Failure::error(
+            "cannot read the brief from stdin: the reader ended",
+        )),
+    }
+}
+
+fn read_stdin_blocking() -> Result<String, Failure> {
     let mut brief = String::new();
     std::io::stdin()
         .read_to_string(&mut brief)

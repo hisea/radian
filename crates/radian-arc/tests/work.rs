@@ -1766,3 +1766,83 @@ fn init_and_an_attempt_leave_the_main_checkout_clean() {
         "the worktree lives under the excluded worktrees/ line"
     );
 }
+
+/// A 1-second stall window gives a 333 ms heartbeat; the gap between two beats must be that
+/// interval itself, so three beats fit in the window. Mutation: sleep a whole 100 ms poll
+/// slice inside the interval and the gap becomes 400 ms.
+#[test]
+fn a_one_second_stall_window_keeps_three_beats_inside_it() {
+    let repo = Repo::new("heartbeat-gap");
+    init(&repo);
+    let task = "TK0001-beat";
+    // A worker that writes every 100 ms: the stall timer may still fire under load, but the
+    // heartbeat keeps beating until the wrapper writes its records.
+    let worker = "i=0; while [ $i -lt 25 ]; do echo tick; i=$((i+1)); sleep 0.1; done";
+    let mut child = repo.spawn(&[
+        "arc",
+        "work",
+        "--task",
+        task,
+        "--attempt",
+        "1",
+        "--token",
+        "tok-beat",
+        "--worker-command",
+        worker,
+        "--stall-timeout-secs",
+        "1",
+        "--max-wall-time-secs",
+        "0",
+        "--cancel-grace-secs",
+        "1",
+    ]);
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(b"the brief\n")
+            .expect("write the brief");
+    }
+    let heartbeat = repo.attempt_dir(task, 1).join("heartbeat.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !heartbeat.is_file() {
+        assert!(Instant::now() < deadline, "the wrapper wrote no heartbeat");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let first_seen = Instant::now();
+    let mut beats: Vec<chrono::DateTime<chrono::Utc>> = Vec::new();
+    while first_seen.elapsed() < Duration::from_millis(1600) {
+        if let Ok(text) = std::fs::read_to_string(&heartbeat)
+            && let Ok(value) = serde_json::from_str::<Value>(&text)
+            && let Some(last) = value["last_beat"].as_str()
+            && let Ok(at) = chrono::DateTime::parse_from_rfc3339(last)
+        {
+            let at = at.with_timezone(&chrono::Utc);
+            if beats.last() != Some(&at) {
+                beats.push(at);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.wait_with_output().expect("the wrapper ends");
+
+    assert!(
+        beats.len() >= 3,
+        "only {} heartbeat(s) in 1.6 s: {beats:?}",
+        beats.len()
+    );
+    let gaps: Vec<i64> = beats
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).num_milliseconds())
+        .collect();
+    // The old loop slept four 100 ms slices for a 333 ms interval: 400 ms per gap. The mean
+    // tolerates one late beat, where a single widest gap would not.
+    let mean = gaps.iter().sum::<i64>() / gaps.len() as i64;
+    assert!(
+        mean <= 375,
+        "the mean heartbeat gap in a 1 s window is {mean} ms: {gaps:?}"
+    );
+}

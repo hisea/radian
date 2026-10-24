@@ -13,7 +13,6 @@
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -159,10 +158,9 @@ pub fn run_claim(
     apply_finished(store, claim, status.code())
 }
 
-/// One wrapper child this process started, and its attempt's run directory.
+/// One wrapper child this process started.
 pub struct Spawned {
     pub child: Child,
-    pub run_dir: PathBuf,
 }
 
 /// Starts the wrapper for one claim, hands it the brief, moves the task to `doing.running`
@@ -258,7 +256,7 @@ pub fn spawn_claim(
         let _ = child.wait();
         return Err(error);
     }
-    Ok(Spawned { child, run_dir })
+    Ok(Spawned { child })
 }
 
 /// Reads what a finished wrapper left and applies it in one transaction (decision 9).

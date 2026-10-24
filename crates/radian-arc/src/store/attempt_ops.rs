@@ -25,7 +25,8 @@ use crate::store::config::ReworkSession;
 pub const ATTEMPT_FINISHED_FILE: &str = "attempt_finished.json";
 /// The wrapper's last-written end record, in the host-local attempt directory.
 pub const STATUS_FILE: &str = "status.json";
-/// The claim's host-local record: the `start` process's identity.
+/// The claim's host-local start record: the attempt id, token and `started_at`, the time a
+/// reconcile uses to judge a wrapper that has not written its first heartbeat yet.
 pub const START_FILE: &str = "start.json";
 /// Why the wrapper was signalled (`cancel`, `stall`, `wall_time`).
 pub const SIGNAL_FILE: &str = "signal.json";
@@ -412,17 +413,15 @@ pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
     task.retry_at = None;
     let version = store.next_version(Kind::Task, task_id);
     store.write_item(Kind::Task, task_id, &task.to_text(), version)?;
-    // The start process's identity, so a reconcile can tell a claim whose `start` is still
-    // coming up from an orphan. It is host-local and outside the ledger.
+    // The claim's start time, so a reconcile can judge a claim whose wrapper has not written
+    // its first heartbeat yet. It is host-local and outside the ledger. Nothing reads the
+    // claiming process's identity here: the wrapper records its own in `identity.json`.
     let dir = attempt_dir(store, task_id, number);
     fs::create_dir_all(&dir)
         .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
-    let pid = std::process::id();
     let record = json!({
         "attempt_id": attempt_id,
         "token": token,
-        "pid": pid,
-        "process_started_at": crate::process::start_time(pid),
         "started_at": super::plan_ops::utc_now(),
     });
     let text = serde_json::to_string_pretty(&record)
