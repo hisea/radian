@@ -595,3 +595,21 @@ applied to `crates/radian-arc/src/store/plan_ops.rs` by hand, the named tests we
 
 2/2 caught.
 
+## TK0093: a failed reverify is not an automatic rework (2026-10-24, branch `work/TK0093-reverify-failure-not-counted`)
+
+`attempt_ops::is_reverify_attempt` reads the class of the current attempt's
+`attempt_result.json`, which a reverify claim writes before the gate runs, and both call sites in
+`run.rs` skip `record_auto_rework` for it (ADR 0048 decisions 9 and 12). Each mutation was
+applied by hand to `crates/radian-arc/src/store/attempt_ops.rs`, the binary was rebuilt with
+`cargo build -p radian-tui --bin radian`, the named test ran alone with
+`cargo nextest run -p radian-arc --locked --profile sandbox -E '<the test below>'`, and the file
+was restored from `.radian/attempt_ops.rs.bak` with `cp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0093-M1 | `is_reverify_attempt` returns `false` for every attempt, so a failed automatic reverify counts again | `run::a_failed_automatic_reverify_does_not_count_as_an_auto_rework` (`tests/run.rs:3458`: `auto_rework` is 2, not 1) | ✅ failed |
+| TK0093-M2 | `is_reverify_attempt` returns `true` for every attempt, so no failure ever counts and the plan never pauses | `run::max_auto_rework_pauses_the_plan_and_sets_auto_off` (`tests/run.rs:777`: the first attempt has `auto_rework` 0, not 1) | ✅ failed |
+
+2/2 caught.
+
+

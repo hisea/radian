@@ -606,13 +606,18 @@ fn advance_verification(
                         // A review rework already counted itself and may have paused the plan;
                         // every other failure to `rework_pending` counts here (ADR 0048
                         // decisions 9 and 12). A conflict that reached its own limit is never
-                        // an automatic rework: it does not pause the plan.
+                        // an automatic rework: it does not pause the plan. Neither does a
+                        // failed reverify attempt, whether the loop or the owner started it.
                         let paused = match &verified.paused {
                             Some(paused) => Some(paused.clone()),
                             None if verified.phase == "rework_pending"
                                 && verified.conflict.is_none() =>
                             {
-                                attempt_ops::record_auto_rework(store, task_id)?
+                                if attempt_ops::is_reverify_attempt(store, task_id)? {
+                                    None
+                                } else {
+                                    attempt_ops::record_auto_rework(store, task_id)?
+                                }
                             }
                             None => None,
                         };
@@ -870,8 +875,12 @@ fn merge_auto(
                         transitions.note(note);
                     }
                     let after = store.load_task(&task.item.id)?.item;
+                    // A failed integration of a worker attempt counts; the same failure of a
+                    // reverify attempt does not (ADR 0048 decisions 9 and 12).
+                    let reverify = attempt_ops::is_reverify_attempt(store, &task.item.id)?;
                     if after.state == TaskState::Review
                         && after.phase == "rework_pending"
+                        && !reverify
                         && let Some(paused) = attempt_ops::record_auto_rework(store, &task.item.id)?
                     {
                         transitions.push(format!("{} paused: {}", paused.plan, paused.text));

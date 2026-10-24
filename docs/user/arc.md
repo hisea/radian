@@ -294,6 +294,7 @@ A value outside the set is a usage error (`2`).
 
 A failed stage or a failed integration sends a task to `review.rework_pending`.
 While the task's plan has an `auto` level other than `off`, arc counts that rework in the task's `auto_rework` field.
+A failed reverify does not count, whether the loop or you started it.
 When the count would go past `[limits] max_auto_rework`, arc pauses the whole plan: its `auto` becomes `off`, the task stays in `review.rework_pending`, and both `radian arc run` and `show` (as part of `rework_reason`) say why.
 arc never resets a task's count.
 A plan budget pausing the plan also sets `auto` to `off`; `run` starts and merges nothing for a plan at `off`.
