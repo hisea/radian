@@ -198,6 +198,7 @@ Two guards stop a loop:
 - [`limits.max_auto_reverify`](files.md#configtoml) counts the automatic reverifies of one task. When the count is used up, the task stays in `review.rework_pending`, `radian arc run` prints one line with the reason, and `show` prints the same text as the `rework_reason`. The plan is not paused.
 
 An automatic reverify starts no worker, is not a retry (it changes neither `retry_count` nor `max_attempts`), and does not count toward `auto_rework`.
+A reverify that fails its gate does not count either, whether `radian arc run` or `radian arc reverify` started it: the count stays as it was and the plan does not pause.
 A hand `radian arc reverify` ignores both guards and does not use up the count.
 
 ## A gate for this repository
