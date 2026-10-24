@@ -5,11 +5,11 @@
 //! TUI must never wait on git for a frame, and a diff can be large. The functions return one
 //! value each and name the file or commit they could not read.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::gate::{Stage, Verdict};
 use super::store::attempt_ops;
-use super::store::model::TaskState;
+use super::store::model::{TaskFile, TaskState};
 use super::store::{Error, Store};
 
 /// One file of a task's diff.
@@ -40,6 +40,101 @@ pub struct AttemptVerdict {
     pub passed: bool,
     /// The failure reason: `command_failed`, `timeout`, `conflict`, an owner's note.
     pub reason: Option<String>,
+}
+
+/// How one stage of the merge page stands (ADR 0048 §6, §10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageMark {
+    /// A verdict for the task's commit passed.
+    Passed,
+    /// A verdict for the task's commit failed.
+    Failed,
+    /// A gate is running and this is the stage it is on.
+    Running,
+    /// The stage is in the profile and has no verdict yet.
+    NotRun,
+    /// The profile does not list the stage.
+    NotInProfile,
+}
+
+/// One command a `commands` or `integration` stage ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandView {
+    /// The command line as the profile wrote it.
+    pub line: String,
+    /// Its wall-clock duration.
+    pub duration_ms: u64,
+    /// Its log file, when the record names one that exists.
+    pub log: Option<PathBuf>,
+    /// Whether it exited zero (a signal-killed command did not).
+    pub passed: bool,
+}
+
+/// One row of the merge page: one stage of the task's profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageView {
+    /// `commands`, `mutation`, `review`, `ci`, `human` or `integration`.
+    pub stage: &'static str,
+    pub mark: StageMark,
+    /// Why the stage failed.
+    pub reason: Option<String>,
+    /// The short commit the stage ran on (the task's commit, never the candidate).
+    pub on: Option<String>,
+    /// The short candidate commit, when the stage ran on a merge of the task onto main.
+    pub candidate: Option<String>,
+    /// The short main the candidate was built on, when there is one.
+    pub main: Option<String>,
+    /// The commands the stage ran, in order.
+    pub commands: Vec<CommandView>,
+    /// The review stage's sessions.
+    pub sessions: usize,
+    /// The stage's wall-clock duration.
+    pub duration_ms: Option<u64>,
+    /// The `human` stage's approver: `auto`, or `owner`.
+    pub approver: Option<String>,
+}
+
+/// The `review` stage's findings for the task's commit (ADR 0048 decision 10).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReviewSummaryView {
+    pub summary: String,
+    pub blocking: Vec<String>,
+    pub suggestions: Vec<String>,
+    pub verified: Vec<String>,
+}
+
+/// One commit of the task's own change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitView {
+    /// The short sha.
+    pub sha: String,
+    pub subject: String,
+}
+
+/// Everything the merge page draws for one task: the stage rows, the review's findings and
+/// the task's commits. Read-only, like the rest of this module; git runs for the commits only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeView {
+    pub task: String,
+    pub title: String,
+    /// The attempt the rows belong to.
+    pub attempt: u32,
+    /// The short `verified_sha`.
+    pub verified: Option<String>,
+    /// The short `head_sha`.
+    pub head: Option<String>,
+    /// `head_sha` is no longer `verified_sha`: every mark is weak and the page says so.
+    pub moved: bool,
+    /// One row per stage, in the fixed order.
+    pub stages: Vec<StageView>,
+    /// Whether the selected profile lists the `review` stage.
+    pub review_stage: bool,
+    /// The review verdict's findings, when the stage ran and reported.
+    pub review: Option<ReviewSummaryView>,
+    /// The task's own commits, newest first.
+    pub commits: Vec<CommitView>,
+    /// Why the commit list could not be read.
+    pub commits_error: Option<String>,
 }
 
 /// One attempt and the verdicts recorded for it.
@@ -334,6 +429,319 @@ fn attempt_number(task: &str, name: &str) -> Option<u32> {
         return None;
     }
     rest.parse().ok()
+}
+
+// ---- the merge page ------------------------------------------------------------------
+
+/// The stages in the order the merge page draws them (ADR 0048 decision 10).
+const MERGE_STAGES: [Stage; 6] = [
+    Stage::Commands,
+    Stage::Mutation,
+    Stage::Review,
+    Stage::Ci,
+    Stage::Human,
+    Stage::Integration,
+];
+
+/// Everything the merge page draws for `task` (ADR 0048 §6 and §10).
+///
+/// The rows are the profile's stages in the fixed order, plus `integration`, which always
+/// runs at merge. A stage a profile does not list is `NotInProfile`; one it lists with no
+/// verdict for the task's commit is `NotRun`, except the stage a running gate is on, which is
+/// `Running` (`gate_running` is the caller's lock probe); `human` never runs in a gate, so it
+/// stays `NotRun` until the owner approves. `head_sha` no longer `verified_sha` sets
+/// [`MergeView::moved`]: a verdict counts only for its sha, so every mark is weak then.
+///
+/// The review's findings are the newest `review` verdict for the task's commit. The commits
+/// are the task's own change: merged, `base_sha..head_sha`; otherwise the merge base of the
+/// remote main and the head, falling back to `base_sha`. Git runs for the commits only.
+///
+/// # Errors
+///
+/// The task cannot be read, or a verdict file exists but cannot be read or decoded.
+pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<MergeView, Error> {
+    let item = store.load_task(task)?.item;
+    let head = item.head_sha.clone().filter(|sha| !sha.is_empty());
+    let verified = item.verified_sha.clone().filter(|sha| !sha.is_empty());
+    let moved = match (&head, &verified) {
+        (Some(head), Some(verified)) => head != verified,
+        _ => false,
+    };
+    let target = verified.clone().or_else(|| head.clone());
+    let verdicts = all_verdicts(store, task)?;
+    let label = format!("{}-{}", item.id, item.attempt);
+
+    let config = store.config()?;
+    let profile = config.gate.selected_profile().cloned();
+    let in_profile = |stage: Stage| {
+        stage == Stage::Integration
+            || profile
+                .as_ref()
+                .is_some_and(|profile| profile.stages.iter().any(|spec| spec.stage == stage))
+    };
+    let review_stage = profile.as_ref().is_some_and(|profile| {
+        profile
+            .stages
+            .iter()
+            .any(|spec| spec.stage == Stage::Review)
+    });
+
+    let mut stages = Vec::new();
+    let mut stopped = false;
+    let mut running_marked = false;
+    for stage in MERGE_STAGES {
+        if !in_profile(stage) {
+            stages.push(StageView {
+                stage: stage.as_str(),
+                mark: StageMark::NotInProfile,
+                reason: None,
+                on: None,
+                candidate: None,
+                main: None,
+                commands: Vec::new(),
+                sessions: 0,
+                duration_ms: None,
+                approver: None,
+            });
+            continue;
+        }
+        let verdict = stage_verdict(&verdicts, &label, stage, target.as_deref());
+        let mark = match &verdict {
+            Some(verdict) if moved => {
+                stopped = true;
+                StageMark::NotRun
+            }
+            Some(verdict) => {
+                if !verdict.is_pass() {
+                    stopped = true;
+                }
+                if verdict.is_pass() {
+                    StageMark::Passed
+                } else {
+                    StageMark::Failed
+                }
+            }
+            None if !stopped && gate_running && !running_marked && stage != Stage::Human => {
+                running_marked = true;
+                stopped = true;
+                StageMark::Running
+            }
+            None => {
+                stopped = true;
+                StageMark::NotRun
+            }
+        };
+        stages.push(stage_view(stage, mark, verdict, moved));
+    }
+
+    // The review's findings are part of the merge page only when the profile has the stage.
+    let review = if review_stage {
+        verdicts
+            .iter()
+            .filter(|(_, verdict)| verdict.stage == Stage::Review)
+            .filter(|(_, verdict)| match &target {
+                Some(sha) => &verdict.sha == sha,
+                None => true,
+            })
+            .max_by(|(_, one), (_, other)| one.ended_at.cmp(&other.ended_at))
+            .and_then(|(_, verdict)| verdict.review.as_ref())
+            .map(|report| ReviewSummaryView {
+                summary: report.summary.clone(),
+                blocking: report.blocking.iter().map(ToString::to_string).collect(),
+                suggestions: report.suggestions.iter().map(ToString::to_string).collect(),
+                verified: report.verified.clone(),
+            })
+    } else {
+        None
+    };
+
+    let (commits, commits_error) = match task_commits(store, &item) {
+        Ok(commits) => (commits, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+
+    Ok(MergeView {
+        task: item.id.clone(),
+        title: item.title.clone(),
+        attempt: item.attempt,
+        verified: verified.as_deref().map(short),
+        head: head.as_deref().map(short),
+        moved,
+        stages,
+        review_stage,
+        review,
+        commits,
+        commits_error,
+    })
+}
+
+/// One stage row from its verdict (already filtered to the task's commit).
+fn stage_view(stage: Stage, mark: StageMark, verdict: Option<&Verdict>, moved: bool) -> StageView {
+    let Some(verdict) = verdict else {
+        return StageView {
+            stage: stage.as_str(),
+            mark,
+            reason: None,
+            on: None,
+            candidate: None,
+            main: None,
+            commands: Vec::new(),
+            sessions: 0,
+            duration_ms: None,
+            approver: None,
+        };
+    };
+    let on = (stage != Stage::Human && !moved).then(|| short(&verdict.sha));
+    let candidate = verdict
+        .candidate_sha
+        .as_deref()
+        .filter(|candidate| !candidate.is_empty() && *candidate != verdict.sha)
+        .map(short);
+    let main = verdict
+        .main_sha
+        .as_deref()
+        .or(verdict.base_sha.as_deref())
+        .filter(|sha| !sha.is_empty())
+        .map(short);
+    let commands = verdict
+        .commands
+        .iter()
+        .map(|record| CommandView {
+            line: record.line.clone(),
+            duration_ms: record.duration_ms,
+            log: Some(PathBuf::from(&record.log)).filter(|path| path.is_file()),
+            passed: record.exit_code == Some(0),
+        })
+        .collect();
+    let sessions = verdict.review_session_ids.len();
+    let approver = (stage == Stage::Human).then(|| {
+        verdict
+            .approver
+            .clone()
+            .unwrap_or_else(|| "owner".to_owned())
+    });
+    StageView {
+        stage: stage.as_str(),
+        mark,
+        reason: verdict.reason.clone(),
+        on,
+        candidate,
+        main,
+        commands,
+        sessions,
+        duration_ms: (stage != Stage::Human)
+            .then(|| duration_ms(&verdict.started_at, &verdict.ended_at))
+            .flatten(),
+        approver,
+    }
+}
+
+/// The verdict of `stage` for the task's commit in `label` (the current attempt), or the
+/// newest integration verdict across every attempt (integration labels grow `.iK`).
+fn stage_verdict<'a>(
+    verdicts: &'a [(String, Verdict)],
+    label: &str,
+    stage: Stage,
+    target: Option<&str>,
+) -> Option<&'a Verdict> {
+    let matches = |(verdict_label, verdict): &(String, Verdict)| {
+        verdict.stage == stage
+            && match stage {
+                Stage::Integration => true,
+                _ => verdict_label == label,
+            }
+            && target.is_none_or(|sha| verdict.sha == sha)
+    };
+    verdicts
+        .iter()
+        .filter(|entry| matches(entry))
+        .max_by(|(_, one), (_, other)| one.ended_at.cmp(&other.ended_at))
+        .map(|(_, verdict)| verdict)
+}
+
+/// Every verdict file under `runs/<task>/attempts/*/verdicts/`, with the attempt label its
+/// directory names.
+fn all_verdicts(store: &Store, task: &str) -> Result<Vec<(String, Verdict)>, Error> {
+    let root = store.root().join("runs").join(task).join("attempts");
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(Error::Failed(format!(
+                "cannot read {}: {error}",
+                root.display()
+            )));
+        }
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let label = entry.file_name().to_string_lossy().into_owned();
+        let dir = entry.path().join("verdicts");
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for file in files.flatten() {
+            if file.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let verdict = Verdict::read(&file.path())
+                .map_err(|error| Error::Failed(format!("cannot read a verdict: {error}")))?;
+            out.push((label.clone(), verdict));
+        }
+    }
+    Ok(out)
+}
+
+/// The task's own commits, newest first: `base_sha..head_sha` for a merged task; otherwise
+/// the merge base of the remote main and the head, falling back to `base_sha`.
+fn task_commits(store: &Store, task: &TaskFile) -> Result<Vec<CommitView>, String> {
+    let Some(head) = task.head_sha.clone().filter(|sha| !sha.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let base = if task.state == TaskState::Done {
+        task.base_sha.clone()
+    } else {
+        remote_main_base(store, &head).or_else(|| task.base_sha.clone())
+    };
+    let range = match base.filter(|sha| !sha.is_empty() && *sha != head) {
+        Some(base) => format!("{base}..{head}"),
+        None => head.clone(),
+    };
+    let text = crate::git::ok(
+        store.repo(),
+        &["log", "--format=%H%x1f%s", "--max-count=100", &range],
+    )?;
+    Ok(text
+        .lines()
+        .filter_map(|line| line.split_once('\u{1f}'))
+        .map(|(sha, subject)| CommitView {
+            sha: short(sha),
+            subject: subject.to_owned(),
+        })
+        .collect())
+}
+
+/// The merge base of the configured remote's main and `head`, when both exist.
+fn remote_main_base(store: &Store, head: &str) -> Option<String> {
+    let (remote, main_branch) = store.repository_names().ok()?;
+    let reference = format!("refs/remotes/{remote}/{main_branch}");
+    crate::git::ok(store.repo(), &["merge-base", &reference, head])
+        .ok()
+        .map(|sha| sha.trim().to_owned())
+        .filter(|sha| !sha.is_empty())
+}
+
+/// The 8-character sha the pages print.
+fn short(sha: &str) -> String {
+    sha.chars().take(8).collect()
+}
+
+/// The wall-clock duration between two RFC 3339 stamps, in milliseconds.
+fn duration_ms(started_at: &str, ended_at: &str) -> Option<u64> {
+    let start = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let end = chrono::DateTime::parse_from_rfc3339(ended_at).ok()?;
+    let millis = end.signed_duration_since(start).num_milliseconds();
+    u64::try_from(millis).ok()
 }
 
 #[cfg(test)]

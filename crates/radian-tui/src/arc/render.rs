@@ -46,7 +46,18 @@ pub fn draw(frame: &mut Frame, app: &mut ArcApp) {
     match app.page {
         Page::Plans => draw_plans(frame, body, app),
         Page::Task => draw_task(frame, body, app),
-        Page::Merge => {}
+        Page::Merge => draw_merge(frame, body, app),
+    }
+    if let Some(log) = app
+        .merge
+        .as_ref()
+        .filter(|_| app.page == Page::Merge)
+        .and_then(|page| page.log.as_ref())
+    {
+        draw_log(frame, body, app, log);
+    }
+    if let Some(float) = &app.float {
+        draw_float(frame, body, app, float);
     }
     let rule_y = area.y + area.height - FOOTER_ROWS;
     draw_line(
@@ -70,7 +81,7 @@ pub fn draw(frame: &mut Frame, app: &mut ArcApp) {
             width: area.width,
             height: 1,
         },
-        footer_line(app),
+        footer_line(app, area.width as usize),
     );
 }
 
@@ -124,37 +135,92 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
     Line::from(left)
 }
 
-fn footer_line(app: &ArcApp) -> Line<'static> {
+/// One footer hint: the key, what it does, and whether the page can act on it now (weak).
+type Hint = (&'static str, &'static str, bool);
+
+fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
     let theme = &app.theme;
-    let hints: &[(&str, &str)] = match app.page {
-        Page::Plans => &[
-            ("↑↓", "select"),
-            ("enter", "open task"),
-            ("g", "graph/list"),
-            ("tab", "pages"),
-            ("q", "quit"),
+    // An action in flight shows a spinner; its result line then stays until the next key.
+    if let Some(pending) = &app.pending {
+        return Line::from(vec![
+            Span::styled("  ", theme.hint),
+            Span::styled(format!("{} ", spinner_glyph(pending.started)), theme.model),
+            Span::styled(format!("{} …", pending.label), theme.text),
+        ]);
+    }
+    if let Some(result) = &app.result {
+        let style = if result.failed {
+            theme.status_error
+        } else {
+            theme.status_ok
+        };
+        return Line::from(vec![
+            Span::styled("  ", theme.hint),
+            Span::styled(fit(&result.text, width.saturating_sub(2)), style),
+        ]);
+    }
+    let hints: Vec<Hint> = match app.page {
+        Page::Plans => {
+            let plan = app.selected_plan().map(|view| &view.plan.item);
+            let draft = plan.is_some_and(|plan| plan.status == "draft");
+            let confirmed = plan.is_some_and(|plan| plan.status == "confirmed");
+            let auto_on = plan.is_some_and(|plan| plan.auto != "off");
+            vec![
+                ("↑↓", "select", false),
+                ("enter", "open task", false),
+                ("c", "confirm", !draft),
+                ("a", "auto", !confirmed),
+                ("p", "pause", !auto_on),
+                ("s", "start", app.start_blocker().is_some()),
+                ("g", "graph/list", false),
+                ("tab", "pages", false),
+                ("q", "quit", false),
+            ]
+        }
+        Page::Task => {
+            let applies = app.task.as_ref().is_some_and(|page| {
+                page.phase.starts_with("review.") || page.phase.starts_with("done.")
+            });
+            vec![
+                ("j/k", "scroll", false),
+                ("f", "follow", false),
+                ("[ ]", "attempt", false),
+                ("n/p", "file", false),
+                ("h/l", "tab", false),
+                ("m", "merge page", !applies),
+                ("esc", "back", false),
+                ("q", "quit", false),
+            ]
+        }
+        Page::Merge => vec![
+            ("M", "merge", false),
+            ("r", "reject with note", false),
+            ("v", "reverify", false),
+            ("↑↓", "command", false),
+            ("enter", "log", false),
+            ("n/p", "file", false),
+            ("esc", "back", false),
+            ("q", "quit", false),
         ],
-        Page::Task => &[
-            ("j/k", "scroll"),
-            ("f", "follow"),
-            ("[ ]", "attempt"),
-            ("n/p", "file"),
-            ("h/l", "tab"),
-            ("esc", "back"),
-            ("q", "quit"),
-        ],
-        Page::Merge => &[("q", "quit")],
     };
     let mut spans = vec![Span::styled("  ", theme.hint)];
-    for (index, (key, note)) in hints.iter().enumerate() {
+    for (index, (key, note, weak)) in hints.iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled("   ", theme.hint));
         }
-        spans.push(Span::styled((*key).to_owned(), theme.hint));
-        spans.push(Span::styled(" ", theme.hint));
+        let key_style = if *weak { theme.truncation } else { theme.hint };
+        spans.push(Span::styled((*key).to_owned(), key_style));
+        spans.push(Span::styled(" ", key_style));
         spans.push(Span::styled((*note).to_owned(), theme.truncation));
     }
     Line::from(spans)
+}
+
+/// The rotating spinner frame for an action that started at `started` (ADR 0027: the frame is
+/// a function of time).
+fn spinner_glyph(started: std::time::Instant) -> &'static str {
+    let index = (started.elapsed().as_millis() / 250) as usize % crate::spinner::ARC.len();
+    crate::spinner::ARC[index]
 }
 
 // ---- plans page ----------------------------------------------------------------------
@@ -420,13 +486,22 @@ fn draw_task(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
             draw_conversation(frame, area, app, lines);
             return;
         }
-        TaskTab::Diff => draw_diff(
-            &mut lines,
-            page,
-            width as usize,
-            area.height.saturating_sub(4) as usize,
-            &theme,
-        ),
+        TaskTab::Diff => {
+            let diff = DiffState {
+                diff: &page.diff,
+                diff_loading: page.diff_loading.as_ref(),
+                diff_error: &page.diff_error,
+                file_sel: page.file_sel,
+                diff_scroll: page.diff_scroll,
+            };
+            draw_diff(
+                &mut lines,
+                &diff,
+                width as usize,
+                area.height.saturating_sub(4) as usize,
+                &theme,
+            );
+        }
         TaskTab::Attempts => draw_attempts(&mut lines, page, width as usize, &theme),
     }
     lines.push(frame_bottom(&theme));
@@ -546,54 +621,85 @@ fn tab_row(page: &TaskPage, width: usize, theme: &Theme) -> Line<'static> {
     Line::from(left)
 }
 
-/// The diff tab: the file list inside the frame, then the selected file's own open frame.
+/// The diff a page draws: what is loaded, what is in flight, and the selection. Both the task
+/// page's diff tab and the merge page draw through the same functions.
+struct DiffState<'a> {
+    diff: &'a Option<radian_arc::read::TaskDiff>,
+    diff_loading: Option<&'a (String, u32)>,
+    diff_error: &'a Option<String>,
+    file_sel: usize,
+    diff_scroll: usize,
+}
+
+/// The task page's diff tab: the file list inside the frame, then the selected file's own open
+/// frame.
 fn draw_diff(
     lines: &mut Vec<Line<'static>>,
-    page: &TaskPage,
+    diff: &DiffState,
     width: usize,
     remaining: usize,
     theme: &Theme,
 ) {
-    let inner = width.saturating_sub(2);
-    if page.diff_loading.is_some() && page.diff.is_none() {
-        lines.push(rail(
-            theme,
-            Line::from(Span::styled("loading…", theme.hint)),
-        ));
+    // After the list the frame needs five rows: the frame's bottom, a blank, the diff frame's
+    // title, at least one body row and its bottom. The list is clipped to leave them.
+    let rows = remaining.saturating_sub(5).max(1);
+    if !diff_file_list(lines, diff, width.saturating_sub(2), rows, theme, true) {
         return;
     }
-    if let Some(error) = &page.diff_error {
-        lines.push(rail(
-            theme,
-            Line::from(Span::styled(fit(error, inner), theme.status_error)),
-        ));
-        return;
-    }
-    let Some(diff) = &page.diff else {
-        lines.push(rail(
-            theme,
-            Line::from(Span::styled("loading…", theme.hint)),
-        ));
-        return;
+    lines.push(frame_bottom(theme));
+    diff_file_frame(lines, diff, width, theme);
+}
+
+/// The file list rows (or the one loading/error/empty line). Returns whether a diff follows.
+fn diff_file_list(
+    lines: &mut Vec<Line<'static>>,
+    diff: &DiffState,
+    inner: usize,
+    rows: usize,
+    theme: &Theme,
+    framed: bool,
+) -> bool {
+    let row = |line: Line<'static>| -> Line<'static> {
+        if framed {
+            rail(theme, line)
+        } else {
+            let mut spans = vec![Span::raw("  ")];
+            spans.extend(line.spans);
+            Line::from(spans)
+        }
     };
-    if diff.files.is_empty() {
-        lines.push(rail(
-            theme,
-            Line::from(Span::styled("no change yet", theme.hint)),
-        ));
-        return;
+    if diff.diff_loading.is_some() && diff.diff.is_none() {
+        lines.push(row(Line::from(Span::styled("loading…", theme.hint))));
+        return false;
     }
-    // The task frame holds the file list; the diff frame takes the rest of the page.
-    // After the list the frame needs five rows: the task frame's bottom, a blank, the diff
-    // frame's title, at least one body row and its bottom. The list is clipped to leave
-    // them; the window follows the selected file.
-    let file_rows = diff.files.len().min(remaining.saturating_sub(5).max(1));
-    let first = page
+    if let Some(error) = diff.diff_error {
+        lines.push(row(Line::from(Span::styled(
+            fit(error, inner),
+            theme.status_error,
+        ))));
+        return false;
+    }
+    let Some(task_diff) = diff.diff else {
+        lines.push(row(Line::from(Span::styled("loading…", theme.hint))));
+        return false;
+    };
+    if task_diff.files.is_empty() {
+        lines.push(row(Line::from(Span::styled("no change yet", theme.hint))));
+        return false;
+    }
+    let file_rows = task_diff.files.len().min(rows);
+    let first = diff
         .file_sel
         .saturating_sub(file_rows.saturating_sub(1))
-        .min(diff.files.len().saturating_sub(file_rows));
-    for (index, file) in diff.files.iter().enumerate().skip(first).take(file_rows) {
-        let selected = index == page.file_sel;
+        .min(task_diff.files.len().saturating_sub(file_rows));
+    for (index, file) in task_diff
+        .files
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(file_rows)
+    {
+        let selected = index == diff.file_sel;
         let cursor = if selected {
             Span::styled("❯ ", theme.model)
         } else {
@@ -612,15 +718,26 @@ fn draw_diff(
             format!(" -{}", file.removed),
             theme.status_error,
         ));
-        lines.push(rail(theme, Line::from(spans)));
+        lines.push(row(Line::from(spans)));
     }
-    // The selected file's diff: a second open frame, `╭─ <path> ───`, `│ ` rows, `╰──`.
-    let path = &diff.files[page.file_sel].path;
-    lines.push(frame_bottom(theme));
+    true
+}
+
+/// The selected file's own open frame (`╭─ <path> ───`, `│ ` body rows). The caller adds the
+/// frame's bottom, so a clipped body still ends on a frame line.
+fn diff_file_frame(lines: &mut Vec<Line<'static>>, diff: &DiffState, width: usize, theme: &Theme) {
+    let Some(task_diff) = diff.diff else {
+        return;
+    };
+    if task_diff.files.is_empty() {
+        return;
+    }
+    let index = diff.file_sel.min(task_diff.files.len() - 1);
+    let file = &task_diff.files[index];
     lines.push(Line::default());
-    lines.push(frame_top(width, path, theme));
-    let body = diff_lines(&diff.files[page.file_sel], inner, theme);
-    let start = page.diff_scroll.min(body.len().saturating_sub(1));
+    lines.push(frame_top(width, &file.path, theme));
+    let body = diff_lines(file, width.saturating_sub(2), theme);
+    let start = diff.diff_scroll.min(body.len().saturating_sub(1));
     for line in body.into_iter().skip(start) {
         lines.push(rail(theme, line));
     }
@@ -673,6 +790,384 @@ fn draw_attempts(lines: &mut Vec<Line<'static>>, page: &TaskPage, width: usize, 
         let line = Line::from(spans);
         lines.push(rail(theme, line));
     }
+}
+
+// ---- merge page ----------------------------------------------------------------------
+
+/// The merge page (ADR 0048 §6 and §10, ADR 0035): the task's open frame with one row per
+/// stage, then the review's summary and the task's commits in a `summary` frame, then the
+/// file list and the selected file's diff through the task page's own diff functions.
+fn draw_merge(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
+    let Some(page) = &app.merge else {
+        return;
+    };
+    let theme = app.theme.clone();
+    let width = area.width as usize;
+    let inner = width.saturating_sub(4);
+    let (verified, attempt) = match &page.view {
+        Some(view) => (
+            view.verified.clone().unwrap_or_else(|| "—".to_owned()),
+            view.attempt,
+        ),
+        None => ("—".to_owned(), page.attempt),
+    };
+    let label = format!("{} verified {verified} · attempt {attempt}", page.id);
+    let mut lines = vec![frame_top(width, &label, &theme)];
+    match &page.view {
+        Some(view) => {
+            lines.push(rail(
+                &theme,
+                Line::from(Span::styled(fit(&view.title, inner), theme.text)),
+            ));
+            lines.push(rail(&theme, Line::default()));
+            if view.moved {
+                lines.push(rail(
+                    &theme,
+                    Line::from(Span::styled(moved_text(view), theme.notice_label)),
+                ));
+            }
+            let mut command_index = 0;
+            for stage in &view.stages {
+                lines.push(rail(&theme, stage_line(stage, view.moved, &theme)));
+                for command in &stage.commands {
+                    let selected = command_index == page.command_sel;
+                    lines.push(rail(&theme, command_line(command, selected, inner, &theme)));
+                    command_index += 1;
+                }
+            }
+        }
+        None => {
+            let (text, style) = match &page.error {
+                Some(error) => (error.clone(), theme.status_error),
+                None => ("loading…".to_owned(), theme.hint),
+            };
+            lines.push(rail(
+                &theme,
+                Line::from(Span::styled(fit(&text, inner), style)),
+            ));
+        }
+    }
+    lines.push(frame_bottom(&theme));
+    if let Some(view) = &page.view {
+        lines.push(Line::default());
+        summary_lines(&mut lines, view, width, &theme);
+        lines.push(Line::default());
+        let diff = DiffState {
+            diff: &page.diff,
+            diff_loading: page.diff_loading.as_ref(),
+            diff_error: &page.diff_error,
+            file_sel: page.file_sel,
+            diff_scroll: page.diff_scroll,
+        };
+        let remaining = (area.height as usize).saturating_sub(lines.len());
+        if diff
+            .diff
+            .as_ref()
+            .is_some_and(|diff| !diff.files.is_empty())
+        {
+            diff_file_list(
+                &mut lines,
+                &diff,
+                width.saturating_sub(2),
+                remaining.saturating_sub(4).max(1),
+                &theme,
+                false,
+            );
+            diff_file_frame(&mut lines, &diff, width, &theme);
+        } else {
+            let (text, style) = match &page.diff_error {
+                Some(error) => (error.clone(), theme.status_error),
+                None if page.diff_loading.is_some() => ("loading…".to_owned(), theme.hint),
+                None => ("no change yet".to_owned(), theme.hint),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {}", fit(&text, width.saturating_sub(2))),
+                style,
+            )));
+        }
+        lines.push(frame_bottom(&theme));
+    }
+    // The last row is always a frame's tail: a body longer than the page loses its last rows,
+    // never the bottom line.
+    let height = area.height as usize;
+    if lines.len() > height {
+        lines.truncate(height);
+        if let Some(last) = lines.last_mut() {
+            *last = frame_bottom(&theme);
+        }
+    }
+    draw_lines(frame, area, lines);
+}
+
+/// `the branch moved: head <sha> is not verified <sha>; the task is back in verification`.
+fn moved_text(view: &radian_arc::read::MergeView) -> String {
+    let head = view.head.clone().unwrap_or_else(|| "—".to_owned());
+    let verified = view.verified.clone().unwrap_or_else(|| "—".to_owned());
+    format!(
+        "the branch moved: head {head} is not verified {verified}; the task is back in \
+         verification"
+    )
+}
+
+/// One stage row: mark, name, `on <sha>`, the candidate, and what it ran.
+fn stage_line(stage: &radian_arc::read::StageView, moved: bool, theme: &Theme) -> Line<'static> {
+    let (glyph, style) = stage_mark(stage.mark, moved, theme);
+    let mut spans = vec![
+        Span::styled(format!("{glyph} "), style),
+        Span::styled(format!("{:<11} ", stage.stage), theme.text),
+    ];
+    if let Some(on) = &stage.on {
+        spans.push(Span::styled(format!("on {on}   "), theme.hint));
+    }
+    if let Some(candidate) = &stage.candidate {
+        spans.push(Span::styled(
+            format!("→ candidate {candidate}"),
+            theme.notice_label,
+        ));
+        if let Some(main) = &stage.main {
+            spans.push(Span::styled(format!(" over main {main}"), theme.hint));
+        }
+        spans.push(Span::styled("   ", theme.hint));
+    }
+    match stage.mark {
+        radian_arc::read::StageMark::NotInProfile => {
+            spans.push(Span::styled("not in this profile", theme.hint));
+        }
+        radian_arc::read::StageMark::NotRun if stage.reason.is_none() => {
+            spans.push(Span::styled("not run yet", theme.hint));
+        }
+        _ => {
+            let mut details = Vec::new();
+            if stage.stage == "human" {
+                if let Some(approver) = &stage.approver {
+                    details.push(format!("approver {approver}"));
+                }
+            } else if stage.stage == "review" {
+                if stage.sessions > 0 {
+                    details.push(count(stage.sessions, "session", "sessions"));
+                }
+            } else if !stage.commands.is_empty() {
+                details.push(count(stage.commands.len(), "command", "commands"));
+            }
+            if let Some(duration) = stage.duration_ms {
+                details.push(stage_duration(duration));
+            }
+            if !details.is_empty() {
+                spans.push(Span::styled(details.join(" · "), theme.hint));
+            }
+            if let Some(reason) = &stage.reason {
+                if !details.is_empty() {
+                    spans.push(Span::raw("   "));
+                }
+                spans.push(Span::styled(format!("({reason})"), theme.status_error));
+            }
+        }
+    }
+    Line::from(spans)
+}
+
+/// The mark and its role. A moved branch turns every mark weak (ADR 0048 §6).
+fn stage_mark(mark: radian_arc::read::StageMark, moved: bool, theme: &Theme) -> (char, Style) {
+    use radian_arc::read::StageMark;
+    if moved {
+        return ('◻', theme.hint);
+    }
+    match mark {
+        StageMark::Passed => ('✓', theme.status_ok),
+        StageMark::Failed => ('×', theme.status_error),
+        StageMark::Running => ('●', theme.model),
+        StageMark::NotRun | StageMark::NotInProfile => ('◻', theme.hint),
+    }
+}
+
+/// One command row: the mark, the line (truncated) and the duration in seconds.
+fn command_line(
+    command: &radian_arc::read::CommandView,
+    selected: bool,
+    inner: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let (glyph, style) = if command.passed {
+        ('✓', theme.status_ok)
+    } else {
+        ('×', theme.status_error)
+    };
+    let cursor = if selected {
+        Span::styled("❯ ", theme.model)
+    } else {
+        Span::raw("  ")
+    };
+    let seconds = format!("{}s", command.duration_ms / 1_000);
+    let line_width = inner.saturating_sub(4 + seconds.width() + 1);
+    let used = 2 + 2 + command.line.width().min(line_width);
+    let mut spans = vec![
+        cursor,
+        Span::styled(format!("{glyph} "), style),
+        Span::styled(fit(&command.line, line_width), theme.text),
+    ];
+    spans.push(Span::raw(
+        " ".repeat(inner.saturating_sub(used + seconds.width())),
+    ));
+    spans.push(Span::styled(seconds, theme.hint));
+    Line::from(spans)
+}
+
+/// The `summary` frame: the review's summary and its non-empty groups, then the commits.
+fn summary_lines(
+    lines: &mut Vec<Line<'static>>,
+    view: &radian_arc::read::MergeView,
+    width: usize,
+    theme: &Theme,
+) {
+    let inner = width.saturating_sub(4);
+    lines.push(frame_top(width, "summary", theme));
+    if !view.review_stage {
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled("no review stage in this profile", theme.hint)),
+        ));
+    } else if let Some(review) = &view.review {
+        for text in crate::render::wrap(&review.summary, inner) {
+            lines.push(rail(theme, Line::from(Span::styled(text, theme.text))));
+        }
+        let groups = [
+            ("blocking", &review.blocking, '×', theme.status_error),
+            ("suggestions", &review.suggestions, '•', theme.text),
+            ("verified", &review.verified, '✓', theme.status_ok),
+        ];
+        for (label, items, glyph, style) in groups {
+            if items.is_empty() {
+                continue;
+            }
+            lines.push(rail(theme, Line::default()));
+            lines.push(rail(
+                theme,
+                Line::from(Span::styled(label.to_owned(), theme.notice_label)),
+            ));
+            for item in items {
+                for (index, text) in crate::render::wrap(&format!("{glyph} {item}"), inner)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let text = if index == 0 {
+                        text
+                    } else {
+                        format!("  {text}")
+                    };
+                    lines.push(rail(theme, Line::from(Span::styled(text, style))));
+                }
+            }
+        }
+    } else {
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled("no review yet", theme.hint)),
+        ));
+    }
+    if !view.commits.is_empty() {
+        lines.push(rail(theme, Line::default()));
+        for commit in &view.commits {
+            lines.push(rail(
+                theme,
+                Line::from(Span::styled(
+                    fit(&format!("• {} {}", commit.sha, commit.subject), inner),
+                    theme.text,
+                )),
+            ));
+        }
+    }
+    if let Some(error) = &view.commits_error {
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled(fit(error, inner), theme.status_error)),
+        ));
+    }
+    lines.push(frame_bottom(theme));
+}
+
+/// `N commands`, `1 session`.
+fn count(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// A stage's wall time: `12s`, or `5m54s` from one minute up.
+fn stage_duration(duration_ms: u64) -> String {
+    let seconds = duration_ms / 1_000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    }
+}
+
+/// The confirmation or reject float: `panel.rs`'s rounded box, centred over the page.
+fn draw_float(frame: &mut Frame, area: Rect, app: &ArcApp, float: &Float) {
+    let theme = &app.theme;
+    let width = (area.width.saturating_sub(8) as usize)
+        .clamp(20, 72)
+        .min(area.width as usize)
+        .max(1);
+    let panel = match float {
+        Float::Confirm { message, .. } => crate::panel::Panel::new("arc")
+            .row(Line::from(Span::styled(message.clone(), theme.text)))
+            .hint("y", "yes")
+            .hint("n", "no"),
+        Float::Reject { note } => crate::panel::Panel::new("reject")
+            .row(Line::from(Span::styled("note (one line):", theme.hint)))
+            .row(Line::from(vec![
+                Span::styled("> ", theme.notice_label),
+                Span::styled(note.clone(), theme.text),
+                Span::styled("▏", theme.hint),
+            ]))
+            .hint("enter", "reject")
+            .hint("esc", "cancel"),
+    };
+    let lines = panel.lines(width, theme, crate::footer::Glyphs::Unicode);
+    let height = (lines.len() as u16).min(area.height);
+    let x = area.x + area.width.saturating_sub(width as u16) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: width as u16,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(Paragraph::new(lines), rect);
+}
+
+/// A command's log in a scrollable float, over the merge page.
+fn draw_log(frame: &mut Frame, area: Rect, app: &ArcApp, log: &LogView) {
+    let theme = &app.theme;
+    let width = (area.width.saturating_sub(6) as usize)
+        .clamp(24, 100)
+        .min(area.width as usize)
+        .max(1);
+    let height = (area.height.saturating_sub(4) as usize).clamp(5, 18);
+    let window = height.saturating_sub(2);
+    let start = log.scroll.min(log.lines.len().saturating_sub(1));
+    let inner = width.saturating_sub(4);
+    let mut panel = crate::panel::Panel::new(fit(&log.title, inner));
+    for line in log.lines.iter().skip(start).take(window) {
+        panel = panel.row(Line::from(Span::styled(fit(line, inner), theme.text)));
+    }
+    let panel = panel.hint("j/k", "scroll").hint("esc", "close");
+    let lines = panel.lines(width, theme, crate::footer::Glyphs::Unicode);
+    let h = (lines.len() as u16).min(area.height);
+    let x = area.x + area.width.saturating_sub(width as u16) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: width as u16,
+        height: h,
+    };
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(Paragraph::new(lines), rect);
 }
 
 fn draw_lines(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
