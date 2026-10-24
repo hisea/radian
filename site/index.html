@@ -88,6 +88,7 @@ nav { display: flex; align-items: center; justify-content: space-between; gap: 1
 .brand { display: flex; align-items: center; gap: 12px; font-size: 23px; line-height: 1; }
 .brand .mark-a { width: 25px; height: 22px; transform: translateY(-1px); }
 .links { display: flex; align-items: center; gap: 24px; font: 400 13px var(--mono); color: var(--muted); }
+.links a { white-space: nowrap; }
 .links a:hover { color: var(--ink); }
 .lang { display: flex; border: 1px solid var(--rule); }
 .lang button { font: 500 11px var(--mono); color: var(--muted); background: none; border: 0; padding: 5px 9px; cursor: pointer; }
@@ -184,6 +185,12 @@ h2 + p { color: var(--muted); margin: 14px 0 0; max-width: 26em; }
 .compat .k { font: 500 12.5px/1.7 var(--mono); color: var(--accent); }
 .compat code { color: var(--ink); }
 
+/* arc */
+.arcshot { display: block; border: 1px solid var(--rule); background: #000; }
+.arcshot img { display: block; width: 100%; height: auto; }
+.go { display: inline-block; margin-top: 18px; font: 500 13px var(--mono); color: var(--accent); border-bottom: 1px solid var(--accent); padding-bottom: 2px; }
+.go:hover { color: var(--ink); border-color: var(--ink); }
+
 /* install */
 .hosts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--rule); }
 .host { min-width: 0; padding: 20px; }
@@ -241,6 +248,7 @@ footer a:hover { color: var(--ink); }
       <div class="links">
         <a class="opt-link" href="#why"><span class="en">why</span><span class="zh">为什么</span></a>
         <a class="opt-link" href="#headless"><span class="en">headless</span><span class="zh">无头</span></a>
+        <a class="opt-link" href="#arc">arc</a>
         <a class="opt-link" href="#install"><span class="en">install</span><span class="zh">安装</span></a>
         <a href="/docs/"><span class="en">Docs</span><span class="zh">文档</span></a>
         <a href="https://github.com/hisea/radian">GitHub ↗</a>
@@ -514,8 +522,25 @@ footer a:hover { color: var(--ink); }
   </div>
 
   <div class="row">
+    <section class="sec" id="arc">
+      <div class="label"><i>/04</i> <span>arc</span></div>
+      <div class="sec-grid">
+        <div>
+          <h2><span class="en">Plans in, merged work out.</span><span class="zh">计划进去，合并出来。</span></h2>
+          <p><span class="en">arc is built into the same binary. It turns a request into tasks, runs each task as its own headless radian worker, and merges only what passes a fixed gate.</span><span class="zh">arc 内置在同一个二进制里。它把需求拆成任务，每个任务交给一个独立的无头 radian worker，只合并通过固定门禁的结果。</span></p>
+          <a class="go" href="/arc.html"><span class="en">Meet arc →</span><span class="zh">了解 arc →</span></a>
+        </div>
+        <a class="arcshot" href="/arc.html" aria-label="arc">
+          <img class="en" src="media/arc-en.jpg" alt="The arc TUI: the plans page with each plan's priority, auto level, merged tasks and cost" loading="lazy">
+          <img class="zh" src="media/arc-zh.jpg" alt="arc TUI：计划页，显示每个计划的优先级、自动级别、已合入任务数和花费" loading="lazy">
+        </a>
+      </div>
+    </section>
+  </div>
+
+  <div class="row">
     <section class="sec" id="install">
-      <div class="label"><i>/04</i> <span class="en">install</span><span class="zh">安装</span></div>
+      <div class="label"><i>/05</i> <span class="en">install</span><span class="zh">安装</span></div>
       <div class="sec-grid">
         <div>
           <h2><span class="en">Install.</span><span class="zh">安装。</span></h2>
@@ -539,7 +564,7 @@ footer a:hover { color: var(--ink); }
 
   <div class="row">
     <section class="sec" id="run">
-      <div class="label"><i>/05</i> <span class="en">run</span><span class="zh">运行</span></div>
+      <div class="label"><i>/06</i> <span class="en">run</span><span class="zh">运行</span></div>
       <div class="sec-grid">
         <div>
           <h2><span class="en">One binary, two ways in.</span><span class="zh">一个二进制，两种用法。</span></h2>

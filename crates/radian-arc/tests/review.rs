@@ -3911,10 +3911,29 @@ fn a_followup_attempt_ends_its_brief_with_the_worker_brief() {
     }
     let output = child.wait_with_output().expect("wait for radian arc work");
     let captured = fs::read_to_string(&capture).expect("the worker read stdin");
+    // The verdict is a copy in the worktree, so the brief the worker reads names that copy
+    // (ADR 0048 decision 7).
+    let (verdict_path, _) =
+        review::latest_review_verdict(&fixture.store, &fixture.task).expect("the review verdict");
+    let copy = format!(
+        ".radian/arc-verdicts/{}/{}-1/review.json",
+        fixture.task, fixture.task
+    );
+    let expected = brief.replacen(&verdict_path.display().to_string(), &copy, 1);
     assert!(
-        captured.starts_with(brief.trim()),
+        captured.starts_with(expected.trim()),
         "the follow-up text comes first:\n{captured}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fixture
+            .repo
+            .repo
+            .join(".radian/arc/worktrees")
+            .join(&followup)
+            .join(&copy)
+            .is_file(),
+        "the verdict copy is in the worktree"
     );
     let footer = fs::read_to_string(fixture.store.root().join("worker-brief.md"))
         .expect("init wrote the default worker brief");

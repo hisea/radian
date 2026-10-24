@@ -739,6 +739,151 @@ fn a_view_that_hides_no_plan_shows_no_count() {
     );
 }
 
+/// A plan with one merged task and one cancelled follow-up is finished (ADR 0048 decision 3):
+/// `done` holds it, `active` and `cancelled` do not, it draws `✓`, its task column still shows
+/// the cancelled task, and its list column and frame label read `1/1`.
+#[test]
+fn a_merged_and_cancelled_plan_is_done_with_a_cancelled_task_and_reads_1_of_1() {
+    let scratch = Scratch::new("done-cancelled");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "done", "the done plan");
+    let merged = add_task(
+        &store,
+        &plan,
+        "merged",
+        &[],
+        TaskState::Done,
+        "merged",
+        1,
+        None,
+    );
+    let cancelled = add_task(
+        &store,
+        &plan,
+        "cancelled",
+        &[],
+        TaskState::Failed,
+        "cancelled",
+        0,
+        None,
+    );
+    // A draft plan draws `◌` first: the plan is confirmed, as a plan whose tasks ran is.
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+
+    let view = store.plan_view(&plan).expect("the plan reads");
+    assert!(!PlanFilter::Active.shows(&view), "it is not active");
+    assert!(PlanFilter::Done.shows(&view), "it is done");
+    assert!(!PlanFilter::Cancelled.shows(&view), "it is not cancelled");
+
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    let text = screen(&mut app, 140, 30);
+    assert!(
+        !text.contains(&plan),
+        "the finished plan is not in active:\n{text}"
+    );
+    assert!(text.contains("active · 1 hidden"), "{text}");
+
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::Done);
+    let row = app
+        .plan_rows()
+        .into_iter()
+        .find(|row| row.id == plan)
+        .expect("the plan is in the done view");
+    assert_eq!(row.mark, radian_tui::arc::PlanMark::Done);
+    assert_eq!(
+        (row.merged, row.total),
+        (1, 1),
+        "a cancelled task is not counted"
+    );
+
+    let terminal = render(&mut app, 140, 30);
+    let text = rows(&terminal).join("\n");
+    assert!(text.contains(&plan), "{text}");
+    let (mark_row, mark_column) = mark_cell(&terminal, &plan, '✓');
+    assert_eq!(
+        fg(&terminal, mark_row, mark_column),
+        app.theme.plan_done.fg,
+        "the plan draws ✓ in its role"
+    );
+    assert!(
+        text.contains("1/1 merged"),
+        "the frame label reads 1/1:\n{text}"
+    );
+    assert!(
+        text.contains(&cancelled) && text.contains("failed.cancelled"),
+        "the cancelled task stays in the task column:\n{text}"
+    );
+    assert!(text.contains(&merged), "{text}");
+}
+
+/// A plan whose tasks are all `failed.cancelled` is cancelled by its tasks (ADR 0048 decision
+/// 3): it draws `✕` and is only in the `cancelled` view.
+#[test]
+fn a_plan_whose_tasks_are_all_cancelled_draws_x_and_is_only_in_cancelled() {
+    let scratch = Scratch::new("tasks-cancelled");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "stopped", "the stopped plan");
+    // Both tasks exist before either is cancelled: once every task is `failed.cancelled` the
+    // plan is cancelled by its tasks and takes no new task.
+    let tasks: Vec<String> = ["one", "two"]
+        .into_iter()
+        .map(|slug| add_task(&store, &plan, slug, &[], TaskState::Todo, "ready", 0, None))
+        .collect();
+    for task in &tasks {
+        store
+            .change_task(task, |task| {
+                task.state = TaskState::Failed;
+                task.phase = "cancelled".to_owned();
+                Ok(())
+            })
+            .expect("the task is cancelled");
+    }
+
+    let view = store.plan_view(&plan).expect("the plan reads");
+    assert!(!PlanFilter::Active.shows(&view), "it is not active");
+    assert!(!PlanFilter::Done.shows(&view), "it is not done");
+    assert!(PlanFilter::Cancelled.shows(&view), "it is cancelled");
+
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    let text = screen(&mut app, 140, 30);
+    assert!(
+        !text.contains(&plan),
+        "a plan cancelled by its tasks is not in active:\n{text}"
+    );
+
+    // `all` draws the mark.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    let terminal = render(&mut app, 140, 30);
+    let text = rows(&terminal).join("\n");
+    assert!(text.contains(&plan), "{text}");
+    let (row, column) = mark_cell(&terminal, &plan, '✕');
+    assert_eq!(
+        fg(&terminal, row, column),
+        app.theme.plan_cancelled.fg,
+        "the plan draws ✕ in its role"
+    );
+
+    // `done` does not hold it.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::Done);
+    let text = screen(&mut app, 140, 30);
+    assert!(!text.contains(&plan), "not in done:\n{text}");
+
+    // `cancelled` holds it.
+    assert_eq!(app.on_key(&key(KeyCode::Char('f'))), ArcKey::Redraw);
+    assert_eq!(app.filter, PlanFilter::Cancelled);
+    let text = screen(&mut app, 140, 30);
+    assert!(text.contains(&plan), "in cancelled:\n{text}");
+}
+
 #[test]
 fn the_task_list_scrolls_to_keep_the_selected_task_visible() {
     let fixture = Fixture::new();
