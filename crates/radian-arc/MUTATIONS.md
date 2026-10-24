@@ -224,6 +224,7 @@ afterwards. The test lives in `radian-tui`, where the diff tab is drawn.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0033-tui-pages-continued-M2 | a merged task always diffs `<candidate>^1..<candidate>`, even when the candidate is the head | ✅ 1 failed | `radian-tui::arc_tui a_fast_forward_merged_task_shows_every_commit_of_its_branch` (`first.txt`, the branch's first commit, is missing from the file list) |
+
 ## TK0034 (cancel a plan)
 
 TK0034-M1–M3 were run against `de2a816f`, each applied to the committed file, restored

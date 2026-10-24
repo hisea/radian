@@ -2437,4 +2437,4 @@ afterwards.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| TK0033-tui-pages-continued-M1 | the journal is looked up by the task id only, never by the attempt's `execution.json` session id | ✅ 1 failed | `the_conversation_tab_renders_the_selected_attempts_worker_journal` (a `fresh` attempt's `<task>-2.jsonl` is not found, so the screen says `no session journal yet`) |
+| TK0033-tui-pages-continued-M1 | the journal is looked up by the task id only, never by the attempt's `execution.json` session id | ✅ 1 failed | `the_conversation_tab_renders_the_selected_attempts_worker_journal` (the lookup finds attempt 1's `<task>.jsonl` instead of attempt 2's `<task>-2.jsonl`, so the screen shows `the first attempt` and the assertion on `the worker said hello` fails) |
