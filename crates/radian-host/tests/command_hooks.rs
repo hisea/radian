@@ -126,8 +126,7 @@ fn production_chain(
 #[tokio::test]
 async fn permissions_deny_short_circuits_before_command_hooks_run() {
     let ws = scratch("deny-first");
-    let dir = ws.parent().unwrap().to_path_buf();
-    let marker = dir.join("hook-ran");
+    let marker = ws.join("hook-ran");
     let profile = Profile::custom(
         Preset::WorkspaceWrite,
         ApprovalPolicy::OnAsk,
@@ -142,7 +141,7 @@ async fn permissions_deny_short_circuits_before_command_hooks_run() {
     let permissions = Arc::new(PermissionHooks::new(profile, None, Arc::new(NoopAudit)));
     permissions.set_turn_source(Some(InputSource::User));
     let commands = command_hooks(
-        &dir,
+        &ws,
         &ws,
         vec![radian_host::config::HookMatcher {
             matcher: Some("shell".into()),
@@ -171,7 +170,6 @@ async fn permissions_deny_short_circuits_before_command_hooks_run() {
 #[tokio::test]
 async fn allow_output_does_not_bypass_the_permission_rules() {
     let ws = scratch("allow-refused");
-    let dir = ws.parent().unwrap().to_path_buf();
     // No rules: every call asks (the conservative default).
     let profile = Profile::custom(
         Preset::WorkspaceWrite,
@@ -189,7 +187,7 @@ async fn allow_output_does_not_bypass_the_permission_rules() {
     permissions.set_turn_source(Some(InputSource::User));
     let script = r#"printf '%s' '{"hookSpecificOutput":{"permissionDecision":"allow"}}'"#;
     let commands = command_hooks(
-        &dir,
+        &ws,
         &ws,
         vec![radian_host::config::HookMatcher {
             matcher: Some("shell".into()),
