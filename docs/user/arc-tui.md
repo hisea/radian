@@ -10,7 +10,7 @@ This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the 
 
 ## The loop
 
-While the TUI is open it is the scheduling loop when it can be (ADR 0048 decision 13). With `runner.lock` it runs the same pass `radian arc run --watch` runs, on a background thread: 30 seconds after a pass that ends quiet, and as soon as one of your actions changed state. The pass makes the auto levels' transitions (it starts a task at `auto` `run` or `merge`, runs the gate, and merges at `merge`); it does not wait for a worker or a gate, and the frame never waits for it. The header shows `loop ● running (this window)`.
+While the TUI is open it is the scheduling loop when it can be. With `runner.lock` it runs the same pass `radian arc run --watch` runs, on a background thread: 30 seconds after a pass that ends quiet, and as soon as one of your actions changed state. The pass makes the auto levels' transitions (it starts a task at `auto` `run` or `merge`, runs the gate, and merges at `merge`); it does not wait for a worker or a gate, and the frame never waits for it. The header shows `loop ● running (this window)`.
 
 When another process holds `runner.lock` (another `radian arc run`, a `run --watch`, or another TUI) this TUI is a viewer: it schedules nothing, your actions still run, and the header shows `loop ● running (pid <n>)` with the pid the holder wrote in the lock. Each time the view re-reads the store (every 2 seconds) it tries the lock again; when the other loop exits, the TUI takes it and becomes the loop. When the TUI closes, nothing advances.
 
