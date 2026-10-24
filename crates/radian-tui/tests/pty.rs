@@ -15740,12 +15740,12 @@ async fn pty_docs_page_reads_end_to_end() {
         .find(|message| message["role"] == "system")
         .and_then(|message| message["content"].as_str())
         .unwrap_or_default();
+    let topics = system
+        .lines()
+        .find_map(|line| line.strip_prefix("Pages, each at radian://docs/<page>.md: "))
+        .unwrap_or_else(|| panic!("index in system: {system}"));
     assert!(
-        system.contains("radian://docs/"),
-        "index in system: {system}"
-    );
-    assert!(
-        system.contains("radian://docs/providers.md"),
+        topics.split(", ").any(|topic| topic == "providers"),
         "providers page indexed: {system}"
     );
     // The tool ran and its result holds the page text.
