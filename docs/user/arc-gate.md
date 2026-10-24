@@ -107,9 +107,16 @@ A line is an increment line when it is a new-side line of `git diff <previous sh
 A line that came in only with a merge of main is not in the task's own diff, so it drops out.
 
 arc, not the session, decides whether a blocking item is pre-existing.
-After a rework round's report is parsed, an item is moved to `suggestions` and marked `"pre_existing": true` unless its `file:line` is within 3 lines of an increment line in that file, or it is in the same file as and within 10 lines of a blocking item of the previous review, so an item that was not fixed stays blocking.
-An item with no `file` or no `line` is moved.
+After a rework round's report is parsed, an item is moved to `suggestions` and marked `"pre_existing": true` unless one of these holds:
+
+- its `file:line` is within 3 lines of an increment line in that file;
+- it is in the same file as and within 10 lines of a blocking item of the previous review, so an item that was not fixed stays blocking;
+- its `level` is `critical`: a `critical` item blocks in every round, wherever it is;
+- it has no `file` or no `line`: it stays in `blocking` at its level, because the review prompt asks for both fields and an omission is not evidence that the problem is old.
+
+A moved item keeps its `level` (`major` included), and a `major` item outside both windows is still moved, so the rework is not sent back for a problem it did not touch; `minor` items follow the same window rules.
 The stage passes when no blocking item is left, and the verdict records how many items arc moved as `review_pre_existing`.
+The follow-up task of a merged task carries a moved item at its level (see [The review's follow-up](#the-reviews-follow-up)).
 
 When a rework round's review still fails with blocking items and the plan's `auto` is not `off`, arc writes the next attempt's brief itself (see [A failed review](#a-failed-review)).
 
@@ -125,6 +132,7 @@ With `auto` `off`, the task stays in `review.rework_pending` and waits for you, 
 ### The review's follow-up
 
 When a task reaches `done.merged`, arc reads every `review` verdict of the task, oldest attempt first, and collects every `suggestions` item of every round; the items a rework round moved (marked `pre_existing`) are in `suggestions`.
+Every round is read, not only the newest: a round that failed can carry a demoted item, and a later round can pass with nothing to suggest.
 Nothing from `blocking` is collected: a merged task's blocking items were fixed or the review would not have passed, so a round that only had blocking items contributes nothing.
 
 Two items are the same when their `file`, `line` and `text` are equal after a leading tag that repeats the item's own level is removed and whitespace is collapsed; arc keeps the newest copy.
