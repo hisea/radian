@@ -253,8 +253,9 @@ fn add_task(
 fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
     let store = open()?;
     if json {
-        // `--json` follows the text filter for cancelled plans: `--all` adds them. A plan
-        // named with `--plan` is always shown. Scripts and the MCP `list` tool read it.
+        // `--json` follows the text filter for cancelled plans (by status or by their tasks):
+        // `--all` adds them. A plan named with `--plan` is always shown. Scripts and the MCP
+        // `list` tool read it.
         let value = list_json(&store, plan, all)?;
         return Ok(format!(
             "{}\n",
@@ -273,9 +274,9 @@ fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
 }
 
 /// The text `radian arc list` prints (ADR 0048 decision 1, `list`). Unless `all`, a task in
-/// `done.merged`, a plan whose tasks are all merged, and a `cancelled` plan are left out, and
-/// the last line counts what was left out. A plan with no tasks is shown too. Every other
-/// state, `failed.*` included, stays visible.
+/// `done.merged`, a finished plan, and a cancelled plan are left out, and the last line counts
+/// what was left out. A plan with no tasks is shown too. Every other state, `failed.*`
+/// included, stays visible.
 pub fn list_text(views: &[PlanView], all: bool) -> String {
     render(views, all, false)
 }
@@ -295,9 +296,9 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
     let mut hidden_cancelled = 0usize;
     let mut hidden_tasks = 0usize;
     for view in views {
-        let merged = view.tasks.iter().filter(|task| is_merged(task)).count();
+        let (merged, total) = view.progress();
         let finished = view.is_finished();
-        if !all && !named && view.plan.item.is_cancelled() {
+        if !all && !named && view.is_cancelled() {
             hidden_cancelled += 1;
             hidden_tasks += merged;
             continue;
@@ -314,7 +315,7 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
             view.plan.item.auto,
             view.plan.item.priority(),
             merged,
-            view.tasks.len(),
+            total,
             cost_text(view.total_cost_usd()),
             view.plan.item.title,
             changed_marker(view.plan.changed_outside_arc)
@@ -1008,7 +1009,8 @@ fn mcp() -> Result<u8, Error> {
 }
 
 /// `radian arc list --json`'s document, for the CLI and the MCP `list` tool. Unless `all`, a
-/// `cancelled` plan is left out; a plan named with `plan` is always included.
+/// cancelled plan is left out (by its `status` or by all its tasks being `failed.cancelled`);
+/// a plan named with `plan` is always included.
 pub fn list_json(store: &Store, plan: Option<&str>, all: bool) -> Result<serde_json::Value, Error> {
     let views = match plan {
         Some(id) => vec![store.plan_view(id)?],
@@ -1016,7 +1018,7 @@ pub fn list_json(store: &Store, plan: Option<&str>, all: bool) -> Result<serde_j
             // The same order and the same cancelled-plan filter the text form uses.
             let mut views = store.plans()?;
             if !all {
-                views.retain(|view| !view.plan.item.is_cancelled());
+                views.retain(|view| !view.is_cancelled());
             }
             views.sort_by(|one, other| super::model::claim_order(&one.plan.item, &other.plan.item));
             views

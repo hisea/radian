@@ -1,6 +1,6 @@
 # getrad.dev
 
-Static site, one file: `index.html` (English and Chinese in the same page, switched by the `EN / 中` button). No build step, no JavaScript dependencies. Fonts come from Google Fonts (Geist, JetBrains Mono, and Sora for the six letters of the wordmark).
+Static site: two pages, `index.html` (radian) and `arc.html` (arc), each in one file with English and Chinese in the same page, switched by the `EN / 中` button. `media/` holds the arc videos and their poster frames. No build step, no JavaScript dependencies. Fonts come from Google Fonts (Geist, JetBrains Mono, and Sora for the six letters of the wordmark).
 
 Preview: `python3 -m http.server -d site 8000`.
 
@@ -29,7 +29,7 @@ The two numbers are the theme's accent RGB; the script maps it to the page's `va
 Every push to `main` that changes `site/**`, `docs/user/**`, the generator
 (`crates/radian-tui/examples/site-docs.rs`, `crates/radian-tui/src/site_docs.rs`)
 or the workflow itself deploys; `workflow_dispatch` deploys on demand. The job
-copies `site/` (leaving out `site/tools/` and `site/README.md`) into `_site/`,
+copies `index.html`, `arc.html`, `favicon.svg`, `docs.css` and `media/` from `site/` into `_site/`,
 runs the generator into `_site/docs/`, writes `_site/CNAME` with `getrad.dev`,
 then configures and uploads the Pages artifact.
 
@@ -37,7 +37,8 @@ then configures and uploads the Pages artifact.
 
 ```sh
 cargo run -p radian-tui --example site-docs --locked -- /tmp/site
-cp site/index.html site/favicon.svg site/docs.css /tmp/site/
+cp site/index.html site/arc.html site/favicon.svg site/docs.css /tmp/site/
+cp -r site/media /tmp/site/media
 python3 -m http.server -d /tmp/site 8000
 ```
 

@@ -738,10 +738,10 @@ pub(crate) fn task_claim_order(store: &Store) -> Result<Vec<String>, Error> {
     Ok(ids)
 }
 
-/// Whether the task's plan is `cancelled`: the loop neither claims nor gates its tasks
-/// (ADR 0048 decisions 3 and 13).
+/// Whether the task's plan is `cancelled`, by its `status` or by its tasks: the loop neither
+/// claims nor gates its tasks (ADR 0048 decisions 3 and 13).
 fn plan_is_cancelled(store: &Store, plan: &str) -> Result<bool, Error> {
-    Ok(store.load_plan(plan)?.item.is_cancelled())
+    store.plan_is_cancelled(plan)
 }
 
 /// Every task in `review.rework_pending`, in claim order. A file that changed outside arc and
@@ -960,7 +960,7 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
     for view in plans_in_claim_order(store)? {
         let plan = &view.plan.item;
         // A cancelled plan waits on nothing: the loop never serves it again.
-        if plan.is_cancelled() {
+        if view.is_cancelled() {
             continue;
         }
         let open: Vec<&crate::store::Loaded<model::TaskFile>> = view

@@ -2812,6 +2812,19 @@ was restored from a copy under `.radian/` with `cp`.
 
 1/1 caught.
 
+## TK0080: the `active` view reads the shared finished rule (2026-10-24, branch `work/TK0080-finished-plan-one-rule`)
+
+`PlanFilter::Active` read `PlanView::is_finished`, so a plan with one merged task and one cancelled
+follow-up left the view once the store's rule said it was finished. The mutation gave `active` its
+own copy of the old rule. It was applied by hand to `crates/radian-tui/src/arc/mod.rs`, the named
+test was run with `cargo nextest run -p radian-tui --locked --profile sandbox -E 'binary(arc_tui)'`,
+and the file was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0080-M3 | `active` uses its own copy of the old rule (`!view.tasks.iter().all(is_merged)`) | ✅ 6 failed | `arc_tui::a_merged_and_cancelled_plan_is_done_with_a_cancelled_task_and_reads_1_of_1` (the finished plan is drawn in `active`) |
+
+1/1 caught.
 ## TK0085: the board's finished list follows up the TK0054 review (2026-10-24, branch `work/TK0085-tui-board-followups`)
 
 The TK0054 review found that a plan budget's pause left the plan's other tasks in the columns,

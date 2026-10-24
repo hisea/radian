@@ -253,7 +253,7 @@ wired yet; the startup names every ignored key (never a value).
 A secret **value** is refused: a bare string on `api_key`/`token`/… and a secret-looking string
 anywhere (the ADR 0008 §3.2 heuristic) both fail startup, and the message names the key path
 without echoing the value. `schema_version` is required; a newer one is read read-only with a
-warning, an older one is refused. See the root `README.md` for the example file.
+warning, an older one is refused. See `docs/internals.md` for the example file.
 
 ## Migrating a Pi configuration (`radian config import-pi`)
 

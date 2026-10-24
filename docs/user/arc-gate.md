@@ -127,6 +127,7 @@ When a rework round's review still fails with blocking items and the plan's `aut
 A review that failed with `review_blocking` returns the task to `todo.ready` with a brief arc writes, the way a conflict with main does, when the plan's `auto` is not `off`.
 The heading is `## Rework <n> (review)`, with the lead's `add_rework` numbering.
 The text says the review found these items, to fix them and nothing else, to append commits and not to rebase; it lists the blocking items, one per line, as `[level] path:line text`; and it names the review verdict to read for detail.
+The worker cannot read `runs/`, so the wrapper copies the verdict into the worker's worktree at `.radian/arc-verdicts/<task>/<attempt>/<file>` and puts that worktree-relative path in the brief; the task file keeps the absolute path. A verdict that is missing, is not a regular file, is larger than 1 MiB, or cannot be copied stays in the brief as it is, and the attempt record carries `verdict copy skipped: <path>: <reason>`, which [`radian arc show`](arc.md#radian-arc-show-id-json) prints as `attempt_note`.
 It counts as an automatic rework: it raises `auto_rework`, and `max_auto_rework` pauses the plan (see the [`limits.max_auto_rework` row](arc-files.md#configtoml)); the task then stays in `review.rework_pending`.
 With `auto` `off`, the task stays in `review.rework_pending` and waits for you, as before.
 `radian arc run` prints `<task> review blocking -> todo.ready (automatic rework)`.
@@ -149,6 +150,7 @@ When at least one item is left, and `[gate.review] propose_followups` is `true` 
 - its phase is `todo.proposed`, so the loop never claims it until you confirm it (see [`confirm`](arc.md#radian-arc-confirm-id)).
 
 Its brief is fixed: one line saying the items are from the review of `<task id>`, which is now merged, and that each item is to be fixed or left with a one-line reason in the final answer; then the items grouped by the round they came from, each group headed `From review <n> (attempt <n>):`, one item per line as `[level] path:line text`; then the path of every review verdict.
+The worker gets each verdict as a copy at `.radian/arc-verdicts/<task>/<attempt>/<file>` in its worktree, one copy for every task and attempt the brief names, and the task file keeps the absolute paths; the skip line is the same as for a review rework ([A failed review](#a-failed-review)).
 An item whose `text` starts with a tag that repeats its own level prints the level once, as in the rework reason above.
 
 A task gets at most one follow-up.
