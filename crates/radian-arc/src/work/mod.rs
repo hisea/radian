@@ -1312,8 +1312,19 @@ const WORKER_BRIEF_LIMIT: u64 = 32 * 1024;
 /// `.radian/arc/`, and the content reaches it on stdin.
 fn worker_brief(arc: &Path) -> (Option<String>, Option<String>) {
     let path = arc.join(crate::store::WORKER_BRIEF_FILE);
-    let len = match fs::metadata(&path) {
-        Ok(metadata) => metadata.len(),
+    // One handle for the checks and the read: `metadata()` on the handle describes the file
+    // the bytes come from, so a path swapped after the open cannot change what is read. The
+    // open is non-blocking on Unix, so a FIFO or a device at the path cannot make the wrapper
+    // wait for a writer before it has even started a worker.
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let file = match options.open(&path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (None, None),
         Err(error) => {
             return (
@@ -1325,16 +1336,8 @@ fn worker_brief(arc: &Path) -> (Option<String>, Option<String>) {
             );
         }
     };
-    if len > WORKER_BRIEF_LIMIT {
-        return (
-            None,
-            Some(skipped_brief(&format!(
-                "{len} bytes, the limit is {WORKER_BRIEF_LIMIT} bytes"
-            ))),
-        );
-    }
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
         Err(error) => {
             return (
                 None,
@@ -1345,6 +1348,46 @@ fn worker_brief(arc: &Path) -> (Option<String>, Option<String>) {
             );
         }
     };
+    // Only a regular file is read: a FIFO, a directory or a device is skipped with a note.
+    if !metadata.is_file() {
+        return (
+            None,
+            Some(skipped_brief(&format!(
+                "{} is not a regular file",
+                path.display()
+            ))),
+        );
+    }
+    let len = metadata.len();
+    if len > WORKER_BRIEF_LIMIT {
+        return (
+            None,
+            Some(skipped_brief(&format!(
+                "{len} bytes, the limit is {WORKER_BRIEF_LIMIT} bytes"
+            ))),
+        );
+    }
+    // The handle, not the path, is read, and at most one byte past the limit: a file that grew
+    // after the check above cannot make the wrapper read more than the limit.
+    let mut bytes = Vec::new();
+    if let Err(error) = (&file).take(WORKER_BRIEF_LIMIT + 1).read_to_end(&mut bytes) {
+        return (
+            None,
+            Some(skipped_brief(&format!(
+                "cannot read {}: {error}",
+                path.display()
+            ))),
+        );
+    }
+    if bytes.len() as u64 > WORKER_BRIEF_LIMIT {
+        return (
+            None,
+            Some(skipped_brief(&format!(
+                "{} bytes, the limit is {WORKER_BRIEF_LIMIT} bytes",
+                bytes.len()
+            ))),
+        );
+    }
     let Ok(text) = String::from_utf8(bytes) else {
         return (None, Some(skipped_brief("not UTF-8")));
     };
@@ -2148,6 +2191,30 @@ mod tests {
             "a file that is not UTF-8 is not appended"
         );
         assert_eq!(note.as_deref(), Some("worker-brief.md skipped: not UTF-8"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A FIFO at the path would block a plain open until a writer appears, and the wrapper
+    /// composes the brief before any child of its own exists, so no attempt limit can end the
+    /// wait: the handle is opened non-blocking, its type is checked, and the file is skipped
+    /// with a note (ADR 0048 decision 7).
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_brief_that_is_not_a_regular_file_is_skipped_with_a_note() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = crate::test_support::TempDir::named("radian-arc-brief-fifo");
+        let path = dir.join(crate::store::WORKER_BRIEF_FILE);
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL in a path");
+        // SAFETY: `name` is a NUL-terminated path this test owns and `mkfifo` only creates it.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo");
+        let (section, note) = worker_brief(&dir);
+        assert!(section.is_none(), "a FIFO is not appended");
+        let note = note.expect("a note");
+        assert!(
+            note.starts_with("worker-brief.md skipped: ")
+                && note.ends_with("is not a regular file"),
+            "{note}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
