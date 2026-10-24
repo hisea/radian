@@ -82,6 +82,13 @@ copy.
 | TK0036-M1 | run the `commands`/`review` pair one after the other again (`run_pair` calls the two stages instead of the two threads) | `review::the_commands_and_review_stages_start_before_either_ends` (the commands wait times out and fails the round) | ✅ failed |
 | TK0036-M2 | let a review failure decide the round when `commands` also failed (`finish_verification` swaps the two in its scan order) | `review::a_commands_failure_decides_the_round_when_the_review_fails_too` (the task returns to `todo.ready` with a review brief) | ✅ failed |
 | TK0036-M3 | forward the gate's stop to only the first running stage (`request_stop` signals one slot) | `run::a_signal_to_the_gate_stops_both_stages_of_the_pair` (one stage outlives the 3 s deadline) | ✅ failed |
+| TK0037-M1 | `start` refuses `todo.retry_wait` again (`attempt_ops::claim`'s guard goes back to `phase == "ready"`) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `attempt::start_refuses_a_retry_wait_task_when_every_slot_is_taken` (the second gets the wrong refusal, so its `limits.concurrency` assertion fails) | ✅ 2 failed |
+| TK0037-M2 | the scheduling loop ignores `retry_at` and claims a `todo.retry_wait` task (`run::start_ready` drops its phase check) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `run::a_future_retry_makes_run_exit_with_it_waiting` | ✅ 2 failed |
+
+TK0037-M1–M2 were run against `12da692f`, each applied to the committed file, with
+`cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` before the run
+(the sync tests refuse a binary older than its sources), restored from a copy under
+`.radian/tk0037/` with `cp`, and compared byte for byte with `cmp`.
 
 ## M6 and the inherited `GIT_CONFIG_COUNT`
 
