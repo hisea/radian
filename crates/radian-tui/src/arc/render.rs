@@ -1010,6 +1010,10 @@ struct DiffState<'a> {
     diff_scroll: usize,
 }
 
+/// The file list's rows when the diff area can spare them: the list never gets fewer than this
+/// while there are that many files (ADR 0048 decision 13).
+const MIN_FILE_ROWS: usize = 3;
+
 /// The task page's diff tab: the file list inside the frame, then the selected file's own open
 /// frame.
 fn draw_diff(
@@ -1019,22 +1023,35 @@ fn draw_diff(
     remaining: usize,
     theme: &Theme,
 ) {
-    // The source line of a running attempt's diff: the worker's worktree, not a commit range
-    // (ADR 0048 decision 13).
+    // The source line: a running attempt's worktree, and the fallback when the merge base of
+    // the remote main and the head could not be read (ADR 0048 decision 13).
     let live = diff
         .diff
         .as_ref()
         .is_some_and(|diff| diff.source == radian_arc::read::DiffSource::Worktree);
-    if live {
-        lines.push(rail(
-            theme,
-            Line::from(Span::styled("live · worktree", theme.hint)),
-        ));
+    let fallback = diff.diff.as_ref().is_some_and(|diff| diff.fallback);
+    let source = match (live, fallback) {
+        (true, true) => Some("live · worktree · no remote main"),
+        (true, false) => Some("live · worktree"),
+        (false, true) => Some("base..head · no remote main"),
+        (false, false) => None,
+    };
+    if let Some(text) = source {
+        lines.push(rail(theme, Line::from(Span::styled(text, theme.hint))));
     }
     // After the list the frame needs five rows: the frame's bottom, a blank, the diff frame's
-    // title, at least one body row and its bottom. The list is clipped to leave them.
-    let rows = remaining.saturating_sub(5 + usize::from(live)).max(1);
-    if !diff_file_list(lines, diff, width.saturating_sub(2), rows, theme, true) {
+    // title, at least one body row and its bottom. The list is capped at half of what is left,
+    // so the selected file's frame keeps the rest.
+    let available = remaining.saturating_sub(usize::from(source.is_some()));
+    if !diff_file_list(
+        lines,
+        diff,
+        width.saturating_sub(2),
+        available,
+        5,
+        theme,
+        true,
+    ) {
         return;
     }
     lines.push(frame_bottom(theme));
@@ -1042,11 +1059,17 @@ fn draw_diff(
 }
 
 /// The file list rows (or the one loading/error/empty line). Returns whether a diff follows.
+///
+/// `available` is the diff area left after the frame's first rows: the list takes at most half
+/// of it (rounded down, and at least [`MIN_FILE_ROWS`] while there are that many files), so the
+/// selected file's frame keeps the rest, less its own `reserve` rows and one body row. A list
+/// that shows only part of the files ends with `files a–b of n`.
 fn diff_file_list(
     lines: &mut Vec<Line<'static>>,
     diff: &DiffState,
     inner: usize,
-    rows: usize,
+    available: usize,
+    reserve: usize,
     theme: &Theme,
     framed: bool,
 ) -> bool {
@@ -1078,7 +1101,18 @@ fn diff_file_list(
         lines.push(row(Line::from(Span::styled("no change yet", theme.hint))));
         return false;
     }
-    let file_rows = task_diff.files.len().min(rows);
+    let rows = (available / 2)
+        .max(MIN_FILE_ROWS)
+        .min(available.saturating_sub(reserve))
+        .max(1);
+    let truncated = task_diff.files.len() > rows;
+    // A truncated list's last row names the files it shows, so the list itself never hides
+    // which part of the change is on screen.
+    let file_rows = if truncated {
+        rows.saturating_sub(1).max(1)
+    } else {
+        task_diff.files.len()
+    };
     let first = diff
         .file_sel
         .saturating_sub(file_rows.saturating_sub(1))
@@ -1114,6 +1148,17 @@ fn diff_file_list(
             spans.push(Span::styled(mark, theme.hint));
         }
         lines.push(row(Line::from(spans)));
+    }
+    if truncated && rows > 1 {
+        lines.push(row(Line::from(Span::styled(
+            format!(
+                "files {}–{} of {}",
+                first + 1,
+                first + file_rows,
+                task_diff.files.len()
+            ),
+            theme.hint,
+        ))));
     }
     true
 }
@@ -1274,7 +1319,8 @@ fn draw_merge(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
                 &mut lines,
                 &diff,
                 width.saturating_sub(2),
-                remaining.saturating_sub(4).max(1),
+                remaining,
+                4,
                 &theme,
                 false,
             );

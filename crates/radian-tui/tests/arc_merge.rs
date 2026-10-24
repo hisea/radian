@@ -433,6 +433,79 @@ fn every_stage_passes_with_its_commands_and_the_review_groups() {
 }
 
 #[test]
+fn the_merge_pages_file_list_takes_at_most_half_of_the_diff_area() {
+    use radian_arc::read::{DiffFile, DiffSource, TaskDiff};
+    let fixture = Fixture::new("list", &["commands", "human"]);
+    fixture.write(&mut fixture.commands(true, None));
+    fixture.write(&mut fixture.human(Some("auto")));
+    let mut app = fixture.app();
+    let files = (1..=40)
+        .map(|i| DiffFile {
+            path: format!("file-{i:02}.txt"),
+            added: 40,
+            removed: 0,
+            text: (1..=40)
+                .map(|line| format!("+file-{i:02}.txt line {line}\n"))
+                .collect(),
+            uncommitted: false,
+        })
+        .collect();
+    assert!(app.apply_diff(
+        &fixture.task,
+        1,
+        Ok(TaskDiff {
+            files,
+            source: DiffSource::Range,
+            fallback: false,
+        }),
+    ));
+    for _ in 0..39 {
+        app.on_key(&key(KeyCode::Char('n')));
+    }
+    assert_eq!(app.merge.as_ref().unwrap().file_sel, 39);
+
+    let text = screen(&mut app, 120, 44);
+    let lines: Vec<&str> = text.lines().collect();
+    let first = lines
+        .iter()
+        .position(|line| line.contains("file-") || line.contains("files "))
+        .expect("the list is drawn");
+    let title = lines
+        .iter()
+        .position(|line| line.contains("╭─ file-40.txt"))
+        .expect("the selected file's frame is drawn");
+    let bottom = lines[title..]
+        .iter()
+        .position(|line| line.contains("╰──"))
+        .map(|offset| title + offset)
+        .expect("the diff frame ends");
+    let diff_area = bottom - first + 1;
+    let list_rows = lines[first..title]
+        .iter()
+        .filter(|line| line.contains("file-") || line.contains("files "))
+        .count();
+    assert_eq!(
+        list_rows,
+        diff_area / 2,
+        "the list takes half the diff area, not all of it:\n{text}"
+    );
+    assert!(
+        list_rows * 2 <= diff_area,
+        "the list takes at most half: {list_rows} of {diff_area}\n{text}"
+    );
+    assert!(
+        bottom > title + 1,
+        "the diff frame keeps a body row:\n{text}"
+    );
+    // One of the list's rows is the label; the selected file is the last.
+    let shown = list_rows - 1;
+    assert!(
+        text.contains(&format!("files {}–40 of 40", 40 - shown + 1)),
+        "the list names the rows it shows:\n{text}"
+    );
+}
+
+#[test]
 fn a_failed_stage_shows_its_reason_and_the_commands_after_it_do_not_run() {
     let fixture = Fixture::new("failed", &["commands", "review", "human"]);
     let theme = radian_tui::theme::Theme::default();

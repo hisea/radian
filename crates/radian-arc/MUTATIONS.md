@@ -443,3 +443,28 @@ alone, and the file was restored from a copy under `.radian/mut-bak/`.
 | TK0066-M1 | `TaskFile::is_merged` always answers `false` | ✅ 1 failed | `list::the_default_hides_merged_tasks_and_finished_plans` (the finished plan and its merged tasks are printed) |
 
 1/1 caught.
+
+## TK0076: the diff is the task's own change from the merge base with main (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
+
+`read::task_diff` diffed the attempt's `base_sha..head_sha`, so a task branch that merged a
+newer main during reworks (every conflict rework does) listed main's merged changes as the
+task's — the review stage already used the merge base. `task_diff` now takes the merge base of
+the remote main and the attempt's head for an unmerged task, and the attempt's own head for an
+older attempt the owner selects; a running attempt's live worktree diff uses the merge base of
+the remote main and the worktree's HEAD. Without a remote main ref the range falls back to the
+recorded base and `TaskDiff::fallback` says so. The mutation was applied by hand to the working
+file, the named test was run alone with `cargo nextest run -p radian-arc --locked --profile
+sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian/backup/` with
+`cp`, then compared with `diff -q`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0076-M2 | `attempt_change` uses the attempt's recorded base again (`base_sha..head_sha`) | ✅ 1 failed | `read::the_diff_is_the_task_own_change_from_the_merge_base_with_main` (`left: ["x.rs", "y.rs"]`, `right: ["y.rs"]`) |
+| TK0076-M4 | an empty diff (`base_sha == head_sha`) returns `TaskDiff::default()`, dropping the fallback | ✅ 1 failed | `read::a_no_change_diff_without_a_remote_main_ref_keeps_the_fallback` (`diff.fallback` is false, so the page loses `base..head · no remote main`) |
+
+TK0076-M4 is the rework's check: the review found that a task with no commit of its own and no
+remote main ref lost the fallback flag, so the diff tab drew only `no change yet`. The mutation
+was applied to the working file, the test was run alone with the command above, and the file was
+restored from `.radian/backup2/read.rs` with `cp` and compared with `diff -q`.
+
+2/2 caught.
