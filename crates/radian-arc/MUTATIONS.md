@@ -329,3 +329,21 @@ comparison, so the first pass drops it and the test's record assertion fails (th
 would then start the same gate again). M2 replaces the fetch's clock with an unbounded
 `git::run`, so `start` never returns and the test's 40-second deadline panics. M3 is the old
 heartbeat loop; the mean gap over three beats is 414 ms, where a 1 s window needs 333 ms.
+
+## TK0061 (`confirm --dry-run`, and the `after` chain both ways)
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0061-M1 | the dry run takes the write path (`confirm_dry_run` calls `confirm_with(store, id, true)`) | `chain::dry_run_on_a_proposed_task_prints_the_chain_and_writes_nothing` (the `.radian/arc/` snapshot differs and the task is `todo.ready`); the plan and refusal tests fail too | ✅ failed |
+| TK0061-M2 | `waits_on` stops after the direct `after` ids (the forward walk no longer enqueues a visited task's own `after`) | `chain::show_prints_the_full_wait_chain_and_every_task_that_blocks_it` (`c` waits on `b` only) | ✅ failed |
+| TK0061-M3 | the cycle check is removed (`Chain::cycle` is always `None`) | `chain::an_adopted_cycle_is_printed_once_and_the_walk_returns` (no `cycle:` line; the test's 5 s bound returns first) | ✅ failed |
+| TK0061-M4 | `never_runs` ignores `failed.*` (the `TaskState::Failed` early return is dropped) | `chain::a_failed_task_in_the_chain_is_reported_as_never_running` (the failed task is not named) | ✅ failed |
+
+TK0061-M1–M4 were applied to the working files, restored from copies under `.radian/mut/`
+with `cp`, and compared byte for byte with `cmp`. M1 drives a `radian` binary, so it was run
+after `cargo build -p radian-tui --bin radian`; the test's own staleness guard refuses a
+binary older than its sources. M2–M4 were run against the store-level tests only, through
+`cargo nextest run -p radian-arc --test chain ... --profile sandbox <test name>`, so the
+stale binary did not mask the mutation. M3 fails in 0.35 s (the bound is not hit); a walk
+that follows the cycle again would hit the 5 s bound instead of hanging the suite.
+
