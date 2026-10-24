@@ -43,7 +43,7 @@ See `providers` for login and routing.
 |---|---|---|---|
 | `NO_COLOR` | any non-empty value turns it on; empty counts as unset | unset | A non-empty value forces the `mono` theme. Wins over the file and over `/theme`. |
 | `COLORTERM` | `truecolor` or `24bit` turns on truecolor; any other value stays in 256 colors | unset | Truecolor rendering switch. |
-| `RADIAN_KEYBOARD_ENHANCEMENT` | `0` or `false` never probes the terminal; `1` or `true` pushes the enhancement flags without asking | unset: ask the terminal | Terminal capability probing. Unset: radian asks the terminal (up to a 2 second wait on a terminal that never answers). Any other value counts as unset. |
+| `RADIAN_KEYBOARD_ENHANCEMENT` | `0` or `false` never probes the terminal, for the keyboard flags **or** the image protocol (images then draw as half blocks); `1` or `true` pushes the enhancement flags without asking, and still probes for images | unset: ask the terminal | Terminal capability probing. Unset: radian asks the terminal once, for both answers at the same time (up to a 2 second wait on a terminal that never answers). Any other value counts as unset. |
 
 ## Sandboxed children
 
