@@ -69,6 +69,10 @@ impl IntegrationRun<'_> {
     pub fn run(&self) -> Result<Verdict, GateError> {
         let _lock = DirLock::acquire(self.repository, INTEGRATION_LOCK)?;
         let started_at = now_utc();
+        // The fetch and the checkout prepare update the shared repository, so they take turns
+        // with every other stage preparation (ADR 0048 decision 10); the stage work after the
+        // prepare runs unlocked, next to another task's stage.
+        let prepare = DirLock::acquire(self.repository, PREPARE_LOCK)?;
         let main_branch = git::main_branch_of(self.remote, self.main_ref)?;
         // The work branch comes with the ordinary fetch; main needs its own refspec so a
         // clone whose fetch configuration leaves main out still reads the current main.
@@ -89,6 +93,7 @@ impl IntegrationRun<'_> {
         if remote_main == task_base {
             // Main has not moved: the merge result is the verified head itself.
             checkout.prepare(&head)?;
+            drop(prepare);
             candidate = Some(head.clone());
             let (records, outcome) = run_series(
                 &checkout.path(),
@@ -105,6 +110,7 @@ impl IntegrationRun<'_> {
         } else {
             // Main moved: merge head onto the current main, never the other way around.
             checkout.prepare(&remote_main)?;
+            drop(prepare);
             let outcome = merge_onto(&checkout, self.task, &head)?;
             conflict_paths = outcome.conflict_paths;
             candidate = outcome.candidate_sha;

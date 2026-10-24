@@ -1,6 +1,6 @@
-//! The temp-directory leak check (`docs/backlog/test-temp-leak.md` acceptance 3): run one
-//! test from each large temp-directory family in its own child process, then prove no new
-//! entry named with that child's pid is left under the system temp dir.
+//! The temp-directory leak check: a test removes every temp directory it creates when the
+//! test ends. Run one test from each large temp-directory family in its own child process,
+//! then prove no new entry named with that child's pid is left under the system temp dir.
 //!
 //! The entries are filtered by the child pid because nextest runs tests in parallel: another
 //! test's live directory must not fail this one. A family whose test binary is not built (a

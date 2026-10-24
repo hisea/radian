@@ -127,9 +127,9 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
     let task = store.load_task(task_id)?.item;
     let applied = run_claim(store, &claim, &task, &config)?;
     // A pushed attempt continues into the gate in the same process (ADR 0048 decision 6):
-    // one `start` takes the task from `todo.ready` to `review.awaiting_human` or
-    // `review.rework_pending`. A refused verification leaves the task in `review.verifying`
-    // and is reported after the attempt's own line.
+    // one `start` takes the task from `todo.ready` or `todo.retry_wait` to
+    // `review.awaiting_human` or `review.rework_pending`. A refused verification leaves the
+    // task in `review.verifying` and is reported after the attempt's own line.
     let verification = (applied.ignored.is_none()
         && applied.state == model::TaskState::Review.as_str()
         && applied.phase == "verifying")
@@ -417,7 +417,8 @@ pub fn cancel(store: &Store, task_id: &str) -> Result<Canceled, Error> {
 /// In this order: the plan's `auto` becomes `off`; every task in `todo`, `doing` or `review`
 /// is cancelled by the task form's rules; a task in `done` or `failed` is left alone; the
 /// plan's `status` becomes `cancelled`. A task left at `doing.reconciling` does not stop the
-/// plan from being cancelled.
+/// plan from being cancelled. Once the plan is `cancelled` nothing can be added to it, so one
+/// more walk ends any task that `add_task` added while the first walk ran.
 pub fn cancel_plan(store: &Store, plan_id: &str) -> Result<PlanCanceled, Error> {
     let loaded = store.load_plan(plan_id)?;
     if loaded.changed_outside_arc {
@@ -436,8 +437,38 @@ pub fn cancel_plan(store: &Store, plan_id: &str) -> Result<PlanCanceled, Error> 
     // One reconcile for the whole plan, then each task's cancel uses its current state.
     let _ = reconcile(store)?;
     let plan = store.load_plan(plan_id)?.item;
+    let mut tasks = cancel_plan_tasks(store, &plan.tasks)?;
+    store.change_plan(plan_id, |plan| {
+        if plan.is_cancelled() {
+            return Err(crate::store::cancelled_plan(&plan.id));
+        }
+        plan.status = "cancelled".to_owned();
+        plan.auto = "off".to_owned();
+        Ok(())
+    })?;
+    // `add_task` reads the plan under `state.lock`, so a task it added between the walk and
+    // this write is not in the snapshot above and would stay `todo.proposed` under a final
+    // plan. It cannot add one now: the plan is `cancelled`. The second walk ends the ones
+    // that made it in.
+    let added: Vec<String> = store
+        .load_plan(plan_id)?
+        .item
+        .tasks
+        .into_iter()
+        .filter(|id| !plan.tasks.contains(id))
+        .collect();
+    tasks.extend(cancel_plan_tasks(store, &added)?);
+    Ok(PlanCanceled {
+        plan: plan_id.to_owned(),
+        tasks,
+    })
+}
+
+/// Ends every task of `task_ids` that is still `todo`, `doing` or `review`, by the task form's
+/// rules, and returns the ones it changed.
+fn cancel_plan_tasks(store: &Store, task_ids: &[String]) -> Result<Vec<Canceled>, Error> {
     let mut tasks = Vec::new();
-    for task_id in &plan.tasks {
+    for task_id in task_ids {
         if !store.task_exists(task_id) {
             continue;
         }
@@ -460,46 +491,31 @@ pub fn cancel_plan(store: &Store, plan_id: &str) -> Result<PlanCanceled, Error> 
             Err(error) => return Err(error),
         }
     }
-    store.change_plan(plan_id, |plan| {
-        if plan.is_cancelled() {
-            return Err(crate::store::cancelled_plan(&plan.id));
-        }
-        plan.status = "cancelled".to_owned();
-        plan.auto = "off".to_owned();
-        Ok(())
-    })?;
-    Ok(PlanCanceled {
-        plan: plan_id.to_owned(),
-        tasks,
-    })
+    Ok(tasks)
 }
 
 /// One task's cancel, after the caller's reconcile: the task form of [`cancel_any`].
 fn cancel_task(store: &Store, task_id: &str) -> Result<Canceled, Error> {
+    cancel_task_once(store, task_id, true)
+}
+
+/// [`cancel_task`], with `again` naming whether a task the read found `todo` may be cancelled
+/// once more when the transaction that would write `failed.cancelled` finds it moved instead
+/// (a claim that took `state.lock` first left it `doing.starting`). The second pass cancels it
+/// through the state it moved to; a task that moves again is refused rather than raced.
+fn cancel_task_once(store: &Store, task_id: &str, again: bool) -> Result<Canceled, Error> {
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
     }
     let task = loaded.item;
     match task.state {
-        model::TaskState::Todo => {
-            store.change_task(task_id, |task| {
-                task.state = model::TaskState::Failed;
-                task.phase = "cancelled".to_owned();
-                task.retry_at = None;
-                Ok(())
-            })?;
-            Ok(Canceled {
-                task: task_id.to_owned(),
-                applied: None,
-                state: "failed".to_owned(),
-                phase: "cancelled".to_owned(),
-            })
-        }
+        model::TaskState::Todo => cancel_todo(store, task_id, again),
         model::TaskState::Doing if task.phase == "reconciling" => {
             // The owner resolves a reconciling task with the same process check: only the
             // process the record names is stopped.
-            stop_attempt_process(store, task_id, task.attempt)?;
+            let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
+            stop_attempt_process(store, task_id, task.attempt, grace)?;
             store.change_task(task_id, |task| {
                 if task.state == model::TaskState::Doing && task.phase == "reconciling" {
                     task.state = model::TaskState::Failed;
@@ -552,18 +568,57 @@ fn cancel_task(store: &Store, task_id: &str) -> Result<Canceled, Error> {
     }
 }
 
+/// The `todo` branch: the write happens under the transaction's lock and only while the task
+/// is still `todo`. A wrapper that was claimed in between took the attempt, so it must be
+/// signalled rather than written over; the task is then cancelled through its new state.
+fn cancel_todo(store: &Store, task_id: &str, again: bool) -> Result<Canceled, Error> {
+    let mut moved = false;
+    let written = store.change_task(task_id, |task| {
+        if task.state != model::TaskState::Todo {
+            moved = true;
+            return Err(Error::Refused(format!(
+                "task `{}` is `{}.{}`; it moved while it was being cancelled",
+                task.id,
+                task.state.as_str(),
+                task.phase
+            )));
+        }
+        task.state = model::TaskState::Failed;
+        task.phase = "cancelled".to_owned();
+        task.retry_at = None;
+        Ok(())
+    });
+    match written {
+        Ok(_) => Ok(Canceled {
+            task: task_id.to_owned(),
+            applied: None,
+            state: "failed".to_owned(),
+            phase: "cancelled".to_owned(),
+        }),
+        Err(_) if moved && again => cancel_task_once(store, task_id, false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Stops the process an attempt record names, the way the task form of `cancel` stops one:
-/// only the recorded pid and start time are signalled, SIGTERM, then SIGKILL after
-/// `[limits] cancel_grace_secs`. A record with no process, or one whose process is gone, does
-/// nothing.
-fn stop_attempt_process(store: &Store, task_id: &str, attempt: u32) -> Result<(), Error> {
+/// only the recorded pid and start time are signalled, SIGTERM, then SIGKILL after `grace`. A
+/// record with no process, or one whose process is gone, does nothing.
+///
+/// `grace` is the caller's: the task form passes `[limits] cancel_grace_secs`, and the pass
+/// that ends a cancelled plan's leftovers passes [`Duration::ZERO`], because the plan form
+/// already sent that wrapper its SIGTERM and killed it.
+fn stop_attempt_process(
+    store: &Store,
+    task_id: &str,
+    attempt: u32,
+    grace: Duration,
+) -> Result<(), Error> {
     let Some((pid, start)) = wrapper_process(store, task_id, attempt) else {
         return Ok(());
     };
     if !still_running(pid, start.as_deref()) {
         return Ok(());
     }
-    let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
     process::signal(pid, process::SIGTERM);
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline && still_running(pid, start.as_deref()) {
@@ -593,7 +648,9 @@ pub fn end_reconciling_of_cancelled_plans(store: &Store) -> Result<Vec<String>, 
         {
             continue;
         }
-        stop_attempt_process(store, &id, loaded.item.attempt)?;
+        // The plan form already signalled this wrapper: the pass checks the process and
+        // kills it if it is still there, but waits no second grace.
+        stop_attempt_process(store, &id, loaded.item.attempt, Duration::ZERO)?;
         let mut changed = false;
         store.change_task(&id, |task| {
             if task.state == model::TaskState::Doing && task.phase == "reconciling" {
@@ -697,4 +754,104 @@ pub fn lines(started: &Started) -> Vec<String> {
         lines.push(verified.line());
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::config;
+    use crate::test_support::TempDir;
+
+    /// A store over an empty repository: the layout's directories are created on the first
+    /// write, and the config carries the defaults.
+    fn store() -> (TempDir, Store) {
+        let dir = TempDir::named("radian-arc-attempt");
+        let store = Store::at(dir.path());
+        fs::create_dir_all(store.root()).expect("the arc directory");
+        fs::write(
+            store.root().join(crate::store::CONFIG_FILE),
+            config::default_text("main"),
+        )
+        .expect("config.toml");
+        (dir, store)
+    }
+
+    fn todo_task(store: &Store) -> String {
+        let plan = store
+            .add_plan("plan", "A plan", "the request\n")
+            .expect("a plan");
+        store
+            .add_task(
+                &plan,
+                "work",
+                "A task",
+                Vec::new(),
+                false,
+                Vec::new(),
+                "brief\n",
+            )
+            .expect("a task")
+    }
+
+    fn state(store: &Store, task: &str) -> (String, String) {
+        let task = store.load_task(task).expect("the task reads").item;
+        (task.state.as_str().to_owned(), task.phase)
+    }
+
+    /// The `todo` branch writes `failed.cancelled` under the transaction's lock and only while
+    /// the task is still `todo`. A claim that took the lock first leaves `doing.starting`: its
+    /// wrapper is already starting, so the cancel must signal it rather than write over it, and
+    /// the task ends where the `doing` path leaves it (`doing.reconciling` without a result).
+    ///
+    /// The task is moved before the branch runs, which is the state the transaction finds after
+    /// a claim wins the race.
+    #[test]
+    fn a_todo_cancel_that_finds_a_claim_cancels_the_attempt_instead() {
+        let (_dir, store) = store();
+        let task = todo_task(&store);
+        store
+            .change_task(&task, |task| {
+                task.state = model::TaskState::Doing;
+                task.phase = "starting".to_owned();
+                task.attempt = 1;
+                Ok(())
+            })
+            .expect("the claim");
+
+        let canceled = cancel_todo(&store, &task, true).expect("the moved task cancels");
+
+        assert_eq!(
+            (canceled.state.as_str(), canceled.phase.as_str()),
+            ("doing", "reconciling"),
+            "the cancel took the doing path, not the todo one"
+        );
+        assert_eq!(
+            state(&store, &task),
+            ("doing".to_owned(), "reconciling".to_owned()),
+            "the claimed attempt was not overwritten with failed.cancelled"
+        );
+        assert_eq!(
+            attempt_ops::read_signal(&store, &task, 1),
+            Some(Class::Cancel),
+            "the attempt's wrapper was signalled"
+        );
+    }
+
+    /// A task that is still `todo` under the lock goes to `failed.cancelled`, as before.
+    #[test]
+    fn a_todo_cancel_that_finds_the_task_still_todo_writes_failed_cancelled() {
+        let (_dir, store) = store();
+        let task = todo_task(&store);
+
+        let canceled = cancel_todo(&store, &task, true).expect("the todo task cancels");
+
+        assert_eq!(
+            (canceled.state.as_str(), canceled.phase.as_str()),
+            ("failed", "cancelled")
+        );
+        assert_eq!(
+            state(&store, &task),
+            ("failed".to_owned(), "cancelled".to_owned())
+        );
+    }
 }

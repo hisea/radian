@@ -4,8 +4,11 @@
 //! A stub `df` first on `PATH` returns the two outputs a test names, so the
 //! check never reads the real file system. Each expectation from the brief has
 //! a test: plenty free passes; low inodes or low space fail with the line; the
-//! macOS and GNU `df -i` shapes both parse; an inode count of `0` skips the
-//! inode check; each limit can be overridden and `0` turns a check off.
+//! macOS and GNU `df -i` shapes both parse, including the very large `ifree`
+//! APFS reports; an inode count of `0`, `-` or one too large for the shell skips
+//! the inode check; a negative free space fails the space check; each limit can
+//! be overridden and `0` turns a check off; a limit past the documented
+//! 18-digit bound is refused.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -119,6 +122,11 @@ fn check(df: &FakeDf, inodes: &str, space: &str, vars: &[(&str, &str)]) -> Run {
 const GNU_INODES: &str =
     "Filesystem Inodes IUsed IFree IUse% Mounted on\n/dev/sda1 1000000 1000 999000 1% /tmp";
 const MACOS_INODES: &str = "Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n/dev/disk3s5 971350180 740000000 196400000 80% 990 10 1% /System/Volumes/Data";
+/// APFS reports `ifree` as 2^63 - 1; BSD awk prints that sum as
+/// 9223372036854775808, one past bash's intmax, so it is no usable count.
+const MACOS_HUGE_INODES: &str = "Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n/dev/disk3s5 971350180 740000000 196400000 80% 471663 9223372036854775807 0% /System/Volumes/Data";
+/// Some macOS volumes report `-` instead of a free inode count.
+const MACOS_DASH_INODES: &str = "Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n/dev/disk3s5 971350180 740000000 196400000 80% 471663 - 0% /System/Volumes/Data";
 /// 4 GiB free.
 const PLENTY_SPACE: &str = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 100000000 1000 4194304 1% /tmp";
 /// 1 MiB free.
@@ -180,7 +188,8 @@ fn low_space_fails_with_the_line() {
 
 /// macOS `df -P -k -i` has no `Inodes` total column; its total is `iused +
 /// ifree`. GNU has `Inodes`. The same numbers through both shapes must fail
-/// with the same parsed values.
+/// with the same parsed values. A volume that reports no usable count (`-`, or
+/// the intmax-sized `ifree` APFS reports) skips the inode check quietly.
 #[test]
 fn macos_and_gnu_inode_output_both_parse() {
     let df = FakeDf::new("shapes");
@@ -193,6 +202,17 @@ fn macos_and_gnu_inode_output_both_parse() {
         "GNU's 999000 free passes: {}",
         gnu.stderr
     );
+
+    for (label, inodes) in [("huge", MACOS_HUGE_INODES), ("dash", MACOS_DASH_INODES)] {
+        let run = check(&df, inodes, PLENTY_SPACE, &[]);
+        assert_eq!(
+            run.code,
+            Some(0),
+            "{label}: no usable inode count skips the check: {}",
+            run.stderr
+        );
+        assert_eq!(run.stderr, "", "{label}: the skip is quiet");
+    }
 }
 
 /// A file system that reports no inode count keeps the space check and skips
@@ -313,6 +333,55 @@ fn a_non_numeric_limit_fails_the_check() {
         "{}",
         run.stderr
     );
+}
+
+/// GNU `df` prints a negative Available on ext4 when fewer bytes are free than
+/// the reserved-block count. That is a real value: the space check must fail on
+/// it, not skip with a "df failed" warning.
+#[test]
+fn a_negative_free_space_fails_the_space_check() {
+    let df = FakeDf::new("negative-space");
+    let negative = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 100000000 100000001 -5000000 101% /tmp";
+    let run = check(&df, GNU_INODES, negative, &[]);
+    assert_failed(
+        &run,
+        "has 999000 of 1000000 inodes free (limit 50000) and -4 GiB free (limit 2 GiB)",
+    );
+    assert!(
+        !run.stderr.contains("cannot read"),
+        "a negative Available is a real value: {}",
+        run.stderr
+    );
+}
+
+/// A limit above the documented 18-digit bound is refused: bash arithmetic
+/// would wrap it, and `gib_limit * 1024 * 1024` would overflow to a negative
+/// threshold that sails past the space check.
+#[test]
+fn a_limit_past_the_bound_fails_the_check() {
+    let df = FakeDf::new("limit-bound");
+    for name in [
+        "RADIAN_VERIFY_MIN_FREE_INODES",
+        "RADIAN_VERIFY_MIN_FREE_GIB",
+    ] {
+        let run = check(
+            &df,
+            GNU_INODES,
+            PLENTY_SPACE,
+            &[(name, "9999999999999999999")],
+        );
+        assert_eq!(run.code, Some(1), "{name}: stderr: {}", run.stderr);
+        assert!(
+            run.stderr.contains(name) && run.stderr.contains("999999999999999999"),
+            "{name} names the variable and the bound: {}",
+            run.stderr
+        );
+        assert!(
+            !run.stderr.contains("integer expression expected"),
+            "{name}: the check must not overflow: {}",
+            run.stderr
+        );
+    }
 }
 
 /// Both scripts run the check before any step: with low inodes the real

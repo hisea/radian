@@ -383,9 +383,12 @@ fn auto_merge_takes_all_three_to_done_merged_in_one_run() {
     assert_eq!(human.approver.as_deref(), Some("auto"));
 }
 
-/// A refused integration record is kept and reported without starting a second gate while
-/// its inputs stay the same; a moved main is a changed input and allows one new start.
-/// Mutation: clear the refused record again and the next pass starts the same gate again.
+/// A real integration gate refuses after the pass recorded the digest it started with: the
+/// refused record keeps that digest and the gate's `.i2` label, so a later pass for the same
+/// attempt and inputs reports it without starting another gate. A moved main is a changed
+/// input and allows one new start.
+/// Mutation: clear the refused record again and the next pass starts the same gate again;
+/// drop the copied digest or the `.iN` attempt prefix and it does too.
 #[test]
 fn a_refused_integration_is_not_restarted_until_its_inputs_change() {
     let repo = Repo::new("run-integration-refused");
@@ -395,34 +398,71 @@ fn a_refused_integration_is_not_restarted_until_its_inputs_change() {
     plan_ops::confirm(&store, &plan).expect("confirm");
     plan_ops::set_auto(&store, &plan, "merge").expect("auto merge");
     commands(&repo, "true");
-    publish_verifying(&repo, &store, &plan, &task);
+    let head = publish_verifying(&repo, &store, &plan, &task);
+    // A verdict for the attempt's own label makes the gate take the `.i2` label, the one a
+    // pass must accept as the same attempt.
+    let verdicts = repo.run_dir(&task, 1).join("verdicts");
+    fs::create_dir_all(&verdicts).expect("the verdict directory");
+    let mut verdict = Verdict::human(head, true, None);
+    verdict.stage = Stage::Integration;
+    verdict.base_sha = Some(repo.main_sha());
+    verdict
+        .write_new(&verdicts.join("integration.json"))
+        .expect("the integration verdict");
+    // The task integrates, but it has no `base_sha`: the gate refuses before any stage runs.
     store
         .change_task(&task, |task| {
             task.phase = "integrating".to_owned();
+            task.base_sha = None;
             Ok(())
         })
         .expect("the task integrates");
     let inputs = radian_arc::review::integration_inputs(&store, &task).expect("the inputs");
-    write_gate_record(
-        &repo,
-        &task,
-        serde_json::json!({
-            "kind": "integration",
-            "attempt": format!("{task}-1"),
-            "status": "refused",
-            "text": "the integration cannot run",
-            "inputs": inputs,
-        }),
-    );
 
-    // The first pass reports the refusal; the old code cleared the record and the second pass
-    // then started the same gate again.
+    // The first pass starts the gate; it refuses and leaves the pass's digest under its own
+    // `.i2` label.
+    let first = repo.radian(&["arc", "run"]);
+    assert_eq!(first.code, 0, "run: {}", first.stderr);
+    assert!(
+        first
+            .stdout
+            .contains(&format!("{task} integration started")),
+        "the gate did not start: {}",
+        first.stdout
+    );
+    wait_until(Duration::from_secs(60), "the gate's refusal", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "refused")
+    });
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(
+        record["attempt"],
+        serde_json::json!(format!("{task}-1.i2")),
+        "the gate did not run for the next label: {record}"
+    );
+    assert_eq!(
+        record["inputs"],
+        serde_json::json!(inputs),
+        "the refused record lost the pass's digest: {record}"
+    );
+    let text = record["text"].as_str().expect("the refusal text");
+    assert!(
+        text.contains("has no `base_sha`"),
+        "the gate refused for another reason: {text}"
+    );
+    // The gate process exits right after writing the record; let its lock go before the
+    // passes that must find it.
+    wait_until(Duration::from_secs(60), "the gate to exit", || {
+        !background::running(&store, &task)
+    });
+
+    // Later passes report the refusal; the old code cleared the record and each pass then
+    // started the same gate again.
     for pass in 1..=2 {
         let run = repo.radian(&["arc", "run"]);
         assert_eq!(run.code, 0, "pass {pass}: {}", run.stderr);
         assert!(
             run.stdout.contains(&format!(
-                "{task} integration cannot run: the integration cannot run"
+                "{task} integration cannot run: task `{task}` has no `base_sha`"
             )),
             "pass {pass} did not report the refusal: {}",
             run.stdout
@@ -440,8 +480,10 @@ fn a_refused_integration_is_not_restarted_until_its_inputs_change() {
     }
     assert!(!background::running(&store, &task));
 
-    // A moved main is a changed input: one new gate starts.
+    // A moved main is a changed input: one new gate starts, with a new digest.
     advance_main(&repo, "main-moved.txt", "moved\n");
+    let changed = radian_arc::review::integration_inputs(&store, &task).expect("the inputs");
+    assert_ne!(changed, inputs, "the moved main kept the digest");
     let run = repo.radian(&["arc", "run"]);
     assert_eq!(run.code, 0, "run: {}", run.stderr);
     assert!(
@@ -449,9 +491,10 @@ fn a_refused_integration_is_not_restarted_until_its_inputs_change() {
         "a changed main started no gate: {}",
         run.stdout
     );
-    // Let the gate end before the fixture is removed.
-    wait_until(Duration::from_secs(60), "the integration gate", || {
-        gate_record(&repo, &task).is_some_and(|record| record["status"] == "done")
+    // Let the new gate refuse before the fixture is removed.
+    wait_until(Duration::from_secs(60), "the new integration gate", || {
+        gate_record(&repo, &task)
+            .is_some_and(|record| record["status"] == "refused" && record["inputs"] == changed)
     });
 }
 
@@ -1570,6 +1613,210 @@ fn a_watch_pass_that_errors_prints_a_line_and_goes_on() {
     assert!(stdout.contains("boom"), "{stdout}");
 }
 
+// ---- a repeated --watch error stops the loop (ADR 0048 decision 13) ------------------
+
+/// The config line that makes every pass refuse the same way: an argument the wrapper owns.
+const BAD_EXEC_ARGS_A: &str = "exec_args = [\"--profile\", \"full\"]";
+/// A different permanent error: the `radian exec` parser rejects the line.
+const BAD_EXEC_ARGS_B: &str = "exec_args = [\"-m\", \"x\"]";
+
+/// Rewrites `[worker] exec_args`, asserting the current spelling is there.
+fn set_exec_args(repo: &Repo, from: &str, to: &str) {
+    tune(repo, from, to);
+}
+
+/// Whether `runner.lock` is free: the lock a watch loop holds is released on both exits.
+fn runner_lock_is_free(repo: &Repo) -> bool {
+    use fs2::FileExt;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(repo.arc().join("runner.lock"))
+        .expect("the lock file opens");
+    let free = file.try_lock_exclusive().is_ok();
+    let _ = file.unlock();
+    free
+}
+
+/// Three passes in a row with the same error stop `--watch`: one stop line, exit `1`, and the
+/// lock released. A gate the loop started is stopped the way a signal stops it, so a broken
+/// configuration does not leave a build running; a worker is not signalled (this test starts
+/// none). Mutation: drop the count and the loop runs until the test's deadline.
+#[test]
+fn three_identical_pass_errors_stop_watch_with_exit_one_and_release_the_lock() {
+    let repo = Repo::new("run-watch-repeat");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "watch-repeat");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    tune(&repo, "cancel_grace_secs = 10", "cancel_grace_secs = 1");
+    // A gate that holds its lock until stopped, started by a first, successful pass.
+    let wake = repo.root.join("gate.wake");
+    commands(
+        &repo,
+        &format!("while [ ! -f '{}' ]; do sleep 0.2; done", wake.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+    let first = repo.radian(&["arc", "run"]);
+    assert_eq!(first.code, 0, "run: {}", first.stderr);
+    wait_until(Duration::from_secs(30), "the gate's running record", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "running")
+    });
+    let gate = gate_record(&repo, &task).expect("the record")["pid"]
+        .as_u64()
+        .expect("the gate pid") as u32;
+    assert!(process_alive(gate), "the gate did not start");
+
+    // Every pass now refuses before it reaches the gate, with the same text.
+    set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
+    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "5"]);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if watch.try_wait().expect("try_wait").is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "three identical errors did not stop --watch"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = watch.wait_with_output().expect("the watch loop stops");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the repeated error did not exit 1: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "radian arc: the same error three passes in a row; stopping (fix it and start the \
+             loop again)"
+        ),
+        "the stop line is missing: {stdout}{stderr}"
+    );
+    assert_eq!(
+        stdout
+            .matches("worker.exec_args must not repeat `--profile`")
+            .count(),
+        2,
+        "the loop printed the third error instead of the stop line: {stdout}"
+    );
+
+    // The gate is stopped and its record says arc stopped it.
+    wait_until(Duration::from_secs(20), "the stopped gate to exit", || {
+        !process_alive(gate)
+    });
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["status"], "interrupted", "{record}");
+    // The lock is free: the stop released it the way a signal does.
+    assert!(
+        runner_lock_is_free(&repo),
+        "the repeated-error stop kept runner.lock"
+    );
+}
+
+/// Two identical errors then a pass that succeeds do not stop the loop: the success starts the
+/// count again. Mutation: never reset the count and this stops on the third pass.
+#[test]
+fn two_identical_errors_then_a_success_do_not_stop_watch() {
+    let repo = Repo::new("run-watch-reset");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "watch-reset");
+    add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
+
+    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "5"]);
+    // Pass 1 at once, pass 2 after 5 s. Fix the config before pass 3 at 10 s.
+    std::thread::sleep(Duration::from_secs(7));
+    assert!(
+        watch.try_wait().expect("try_wait").is_none(),
+        "two identical errors stopped --watch"
+    );
+    set_exec_args(&repo, BAD_EXEC_ARGS_A, "exec_args = []");
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        watch.try_wait().expect("try_wait").is_none(),
+        "the successful pass did not reset the count"
+    );
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.matches("worker.exec_args must not repeat").count(),
+        2,
+        "{stdout}"
+    );
+    assert!(!stdout.contains("three passes in a row"), "{stdout}");
+}
+
+/// Different errors do not accumulate: two in a row may be anything, the third must be the
+/// same text as the second. Mutation: count errors without comparing the text and the loop
+/// stops on three different ones.
+#[test]
+fn different_errors_do_not_stop_watch() {
+    let repo = Repo::new("run-watch-different");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "watch-different");
+    add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
+
+    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "5"]);
+    // Pass 1: A. Change to B before pass 2, then back to A before pass 3.
+    std::thread::sleep(Duration::from_secs(1));
+    set_exec_args(&repo, BAD_EXEC_ARGS_A, BAD_EXEC_ARGS_B);
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        watch.try_wait().expect("try_wait").is_none(),
+        "two different errors stopped --watch"
+    );
+    set_exec_args(&repo, BAD_EXEC_ARGS_B, BAD_EXEC_ARGS_A);
+    std::thread::sleep(Duration::from_secs(6));
+    assert!(
+        watch.try_wait().expect("try_wait").is_none(),
+        "three errors that are not all the same stopped --watch"
+    );
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the watch loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("worker.exec_args must not repeat"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("worker.exec_args is not a `radian exec` argument list"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("three passes in a row"), "{stdout}");
+}
+
 /// A refusal is reported once and keeps its record: later passes start no gate for the same
 /// attempt while the inputs are unchanged. Mutation: write `""` as the attempt of a refused
 /// record and every pass starts another gate.
@@ -2131,9 +2378,10 @@ fn stop_without_a_start_time_returns_as_soon_as_the_gate_is_gone() {
 // ---- the commands and review pair (ADR 0048 decision 10) ------------------------------
 
 /// A gate killed while only the review ran resumes with the commands verdict reused: the next
-/// pass starts a new gate, which runs the review and not the commands. Mutation: run the pair
-/// sequentially, or ignore the recorded commands verdict, and the command's counter has two
-/// lines.
+/// pass starts a new gate, which runs the review and not the commands. Mutation: ignore the
+/// recorded commands verdict, and the command's counter has two lines. A sequential pair still
+/// writes the commands verdict before the review starts, so this test passes under that
+/// mutation; `the_commands_and_review_stages_start_before_either_ends` catches it.
 #[test]
 fn a_gate_killed_during_the_review_resumes_with_the_commands_verdict_reused() {
     let repo = Repo::new("run-pair-resume");

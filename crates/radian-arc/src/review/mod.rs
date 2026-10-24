@@ -536,18 +536,52 @@ pub fn run_stages(
     let pair = pair_positions(plan);
     let mut index = 0;
     while index < plan.stages.len() {
-        let spec = plan.stages[index];
-        if spec.stage == Stage::Human {
-            index += 1;
-            continue;
-        }
         if let Some((commands_at, review_at)) = pair
             && index == commands_at
         {
             if !run_pair(store, plan, review_program, &mut reused)? {
                 return Ok(reused);
             }
+            // `review` already ran beside `commands`, so a stage listed between them runs
+            // now, once both have a verdict: the list's order is kept without a silent skip.
+            if !run_listed(
+                store,
+                plan,
+                commands_at + 1..review_at,
+                review_program,
+                &mut reused,
+            )? {
+                return Ok(reused);
+            }
             index = review_at + 1;
+            continue;
+        }
+        if !run_listed(
+            store,
+            plan,
+            std::iter::once(index),
+            review_program,
+            &mut reused,
+        )? {
+            return Ok(reused);
+        }
+        index += 1;
+    }
+    Ok(reused)
+}
+
+/// Runs the stages at `indices`, in that order, skipping `human`, reusing a verdict already
+/// written and stopping at the first failure. Returns whether every listed stage passed.
+fn run_listed(
+    store: &Store,
+    plan: &Verification,
+    indices: impl IntoIterator<Item = usize>,
+    review_program: Option<&Path>,
+    reused: &mut Vec<Stage>,
+) -> Result<bool, Error> {
+    for index in indices {
+        let spec = plan.stages[index];
+        if spec.stage == Stage::Human {
             continue;
         }
         let verdict = match recorded_verdict(store, plan, &spec)? {
@@ -558,16 +592,17 @@ pub fn run_stages(
             None => run_stage(store, plan, &spec, review_program)?,
         };
         if !verdict.is_pass() {
-            return Ok(reused);
+            return Ok(false);
         }
-        index += 1;
     }
-    Ok(reused)
+    Ok(true)
 }
 
-/// The `(commands, review)` positions when the plan lists both. `Profile::validate` refuses
-/// `review` before `commands`, so the two are in that order; an extra stage is only appended,
-/// so a pair with `review` first cannot arise from a valid task either.
+/// The `(commands, review)` positions when the plan lists both with `commands` first.
+///
+/// `Profile::validate` refuses `review` before `commands` within one profile, but a profile of
+/// only `review` plus a task `extra_stages` of `commands` is valid and lists the two in that
+/// order: `pair_positions` then returns `None` and they run sequentially in the listed order.
 fn pair_positions(plan: &Verification) -> Option<(usize, usize)> {
     let commands = plan
         .stages
@@ -765,6 +800,7 @@ fn run_stage(
 /// arc.
 pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verified, Error> {
     let task = &plan.task;
+    let mut failed = None;
     for spec in &plan.stages {
         if spec.stage == Stage::Human {
             continue;
@@ -789,8 +825,44 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
             return Err(Error::Refused(reason.text()));
         }
         if !verdict.is_pass() {
-            return failed_stage(store, task, &plan.label, &plan.head, &verdict, path);
+            failed = Some((verdict, path));
+            break;
         }
+    }
+
+    // The review stage's cost counts toward the task and plan budgets whenever it ran,
+    // whatever this round's outcome (ADR 0048 decision 12). A commands-only profile has no
+    // review verdict, so nothing extra is charged then.
+    let budget_paused = match review_cost(store, &task.id, &plan.label)? {
+        Some(cost) => crate::store::attempt_ops::charge_review_cost(store, &task.id, cost)?,
+        None => false,
+    };
+    if let Some((verdict, path)) = failed {
+        return failed_stage(
+            store,
+            task,
+            &plan.label,
+            &plan.head,
+            &verdict,
+            path,
+            budget_paused,
+        );
+    }
+    if budget_paused {
+        // The charge moved the task to `todo.paused_budget`; no approval is recorded for it.
+        clear_reason(store, &task.id, &plan.label);
+        return Ok(Verified {
+            task: task.id.clone(),
+            attempt_id: plan.label.clone(),
+            state: "todo",
+            phase: "paused_budget".to_owned(),
+            reason: None,
+            digest: None,
+            reused: Vec::new(),
+            conflict: None,
+            review: None,
+            paused: None,
+        });
     }
 
     let verdicts = task_verdicts(store, &task.id)?;
@@ -1148,6 +1220,19 @@ fn write_auto_reverify(
         .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
 }
 
+/// The summed cost of one attempt's `review` stage, in US dollars, when it wrote a verdict.
+/// `Some(0.0)` for a review that reported no cost; `None` when the attempt ran no review.
+fn review_cost(store: &Store, task: &str, label: &str) -> Result<Option<f64>, Error> {
+    let path = verdict_path(store.repo(), task, label, Stage::Review).map_err(gate_error)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let verdict = Verdict::read(&path).map_err(gate_error)?;
+    Ok(Some(
+        verdict.review_cost_micros.unwrap_or(0) as f64 / 1_000_000.0,
+    ))
+}
+
 fn failed_stage(
     store: &Store,
     task: &model::TaskFile,
@@ -1155,11 +1240,30 @@ fn failed_stage(
     head: &str,
     verdict: &Verdict,
     path: PathBuf,
+    budget_paused: bool,
 ) -> Result<Verified, Error> {
+    let mut text = failure_text(verdict);
+    // A review cost that used up the budget stops the task before any rework is considered:
+    // `charge_review_cost` already moved it to `todo.paused_budget` (ADR 0048 decision 12).
+    if budget_paused {
+        let reason = Reason::with_verdict("verify", verdict.stage, text, path.clone());
+        reason.record(store, &task.id, label);
+        return Ok(Verified {
+            task: task.id.clone(),
+            attempt_id: label.to_owned(),
+            state: "todo",
+            phase: "paused_budget".to_owned(),
+            reason: Some(reason),
+            digest: None,
+            reused: Vec::new(),
+            conflict: None,
+            review: None,
+            paused: None,
+        });
+    }
     // A conflict with main starts the next attempt mid-merge, so arc writes its brief itself
     // when the profile runs `merge-main` before an attempt (ADR 0048 decision 9).
     let conflict = conflict_auto_rework(store, task, verdict)?;
-    let mut text = failure_text(verdict);
     if let Some(stop) = conflict
         .as_ref()
         .and_then(|conflict| conflict.stop.as_ref())
@@ -2021,6 +2125,12 @@ fn finish_integration(
                 context.remote, context.main_branch
             )));
         }
+        Push::TimedOut(text) => {
+            // Where a rejected push leaves it: the pass goes on and the next pass integrates
+            // again.
+            back_to_integrating(store, task_id)?;
+            return Ok(Integration::Again(text));
+        }
     }
     let remote_main = ls_remote_branch(store.repo(), &context.remote, &context.main_branch)?;
     if remote_main.as_deref() != Some(candidate.as_str()) {
@@ -2644,6 +2754,18 @@ fn clear_reason(store: &Store, task: &str, label: &str) {
 
 /// Every verdict file of every attempt of `task`, in attempt order, with its path.
 fn task_verdict_files(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict)>, Error> {
+    task_verdict_files_except(store, task, None)
+}
+
+/// Every verdict file of every attempt of `task` except the attempt `except`, in attempt order,
+/// with its path. A stage that runs beside another one skips its own attempt's directory: the
+/// other stage may be writing a verdict there, and a read between `Verdict::write_new`'s
+/// create and its write would fail.
+fn task_verdict_files_except(
+    store: &Store,
+    task: &str,
+    except: Option<&str>,
+) -> Result<Vec<(PathBuf, Verdict)>, Error> {
     let attempts = store.root().join("runs").join(task).join("attempts");
     let mut verdicts = Vec::new();
     let Ok(entries) = fs::read_dir(&attempts) else {
@@ -2656,6 +2778,10 @@ fn task_verdict_files(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict
         .collect();
     dirs.sort();
     for dir in dirs {
+        if except.is_some_and(|label| dir.file_name().and_then(|name| name.to_str()) == Some(label))
+        {
+            continue;
+        }
         let verdict_dir = dir.join("verdicts");
         let Ok(entries) = fs::read_dir(&verdict_dir) else {
             continue;
@@ -2695,17 +2821,17 @@ pub fn latest_review_verdict(store: &Store, task: &str) -> Option<(PathBuf, Verd
 /// The task's newest `review` verdict from an attempt other than `label`, with its path: the
 /// candidate previous review of a rework round (ADR 0048 decision 10). A verdict with an
 /// empty `sha` is not one, and the stage ignores it when its `sha` is the commit under review.
+///
+/// The whole current attempt is skipped, not only its `review.json`: the review thread runs
+/// beside the commands thread, which may be between the create and the write of its
+/// `commands.json` (`Verdict::write_new`), and a read of that file would fail and lose the
+/// earlier review.
 #[must_use]
 pub fn previous_review(store: &Store, task: &str, label: &str) -> Option<(PathBuf, Verdict)> {
-    let current = verdict_path(store.repo(), task, label, Stage::Review).ok();
-    task_verdict_files(store, task)
+    task_verdict_files_except(store, task, Some(label))
         .ok()?
         .into_iter()
-        .rfind(|(path, verdict)| {
-            verdict.stage == Stage::Review
-                && !verdict.sha.is_empty()
-                && Some(path) != current.as_ref()
-        })
+        .rfind(|(_, verdict)| verdict.stage == Stage::Review && !verdict.sha.is_empty())
 }
 
 /// The digest of the verification set for `sha`: every counted verdict except the owner's
@@ -2741,8 +2867,23 @@ fn git(dir: &Path, args: &[&str]) -> Result<crate::git::GitOutput, Error> {
     crate::git::run(dir, args).map_err(|error| Error::Failed(error.to_string()))
 }
 
-fn git_ok(dir: &Path, args: &[&str]) -> Result<String, Error> {
-    let out = git(dir, args)?;
+/// Runs a git command that talks to a remote, bounded by `[limits]
+/// git_remote_timeout_secs` (ADR 0048 decision 7.8). A call that runs out is an ordinary
+/// failure of the step, with `git <subcommand> timed out after <n> s`.
+fn git_remote(dir: &Path, args: &[&str]) -> Result<crate::git::GitOutput, Error> {
+    match crate::git::run_remote(dir, args, None)
+        .map_err(|error| Error::Failed(error.to_string()))?
+    {
+        crate::git::RemoteRun::Done(output) => Ok(output),
+        crate::git::RemoteRun::TimedOut { limit } => {
+            Err(Error::Failed(crate::git::timeout_text(args, limit)))
+        }
+    }
+}
+
+/// [`git_remote`] for a call that must succeed.
+fn git_remote_ok(dir: &Path, args: &[&str]) -> Result<String, Error> {
+    let out = git_remote(dir, args)?;
     if !out.success() {
         return Err(Error::Failed(format!(
             "git {} failed: {}",
@@ -2755,7 +2896,7 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<String, Error> {
 
 /// The remote's `work/<task>` after a fetch, when it exists.
 fn remote_work_sha(repo: &Path, remote: &str, task: &str) -> Result<Option<String>, Error> {
-    git_ok(repo, &["fetch", remote])?;
+    git_remote_ok(repo, &["fetch", remote])?;
     remote_branch(repo, remote, &format!("work/{task}"))
 }
 
@@ -2773,7 +2914,7 @@ fn remote_branch(repo: &Path, remote: &str, branch: &str) -> Result<Option<Strin
 /// The remote's branch read over the wire (`git ls-remote`), when it exists.
 fn ls_remote_branch(repo: &Path, remote: &str, branch: &str) -> Result<Option<String>, Error> {
     let reference = format!("refs/heads/{branch}");
-    let out = git_ok(repo, &["ls-remote", remote, &reference])?;
+    let out = git_remote_ok(repo, &["ls-remote", remote, &reference])?;
     let sha = out.split_whitespace().next().unwrap_or_default();
     Ok((!sha.is_empty()).then(|| sha.to_owned()))
 }
@@ -2782,6 +2923,9 @@ enum Push {
     Pushed,
     /// The remote main moved under the candidate. The caller integrates again.
     Rejected(String),
+    /// The push ran past `[limits] git_remote_timeout_secs`; the caller leaves the task where
+    /// a rejected push leaves it and reports the line.
+    TimedOut(String),
 }
 
 fn push_candidate(
@@ -2792,7 +2936,13 @@ fn push_candidate(
 ) -> Result<Push, Error> {
     // Never `--force`: a main that moved must reject the push, not lose its commits.
     let refspec = format!("{candidate}:refs/heads/{main_branch}");
-    let out = git(repo, &["push", remote, &refspec])?;
+    let out = match crate::git::run_remote(repo, &["push", remote, &refspec], None) {
+        Ok(crate::git::RemoteRun::Done(out)) => out,
+        Ok(crate::git::RemoteRun::TimedOut { limit }) => {
+            return Ok(Push::TimedOut(crate::git::timeout_text(&["push"], limit)));
+        }
+        Err(error) => return Err(Error::Failed(error.to_string())),
+    };
     if out.success() {
         return Ok(Push::Pushed);
     }

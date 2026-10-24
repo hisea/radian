@@ -76,6 +76,17 @@ static LOG_WRITE_FAILED: AtomicBool = AtomicBool::new(false);
 /// Set by the SIGINT/SIGTERM handler a `watch` loop installs.
 static STOP: AtomicBool = AtomicBool::new(false);
 
+/// How many passes in a row may return the same error text before `watch` stops. A constant,
+/// not a configuration key: a permanent error (a `config.toml` that cannot be read, a
+/// directory that cannot be written) would otherwise print the same line unattended all
+/// night.
+pub const REPEATED_ERROR_LIMIT: u32 = 3;
+
+/// The one line the loop's last pass reports instead of the repeated error; the CLI prints it
+/// with its usual `radian arc: ` prefix and exits `1`.
+pub const REPEATED_ERROR_STOP: &str = "the same error three passes in a row; stopping (fix it \
+                                        and start the loop again)";
+
 /// What one `run` did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -146,9 +157,14 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
 /// again as unverified. The loop then prints the summary, releases the lock and returns
 /// [`Exit`](crate::store::Exit) `0` through the caller.
 ///
+/// Three passes in a row that return the same error text stop the loop
+/// ([`REPEATED_ERROR_LIMIT`]): the loop reports [`REPEATED_ERROR_STOP`] instead of the third
+/// error, stops the gates the way a signal does (workers are left alone) and returns an error,
+/// so the caller exits `1`. A pass that succeeds, or a different error, starts the count again.
+///
 /// # Errors
 ///
-/// The same as [`run`].
+/// The same as [`run`], and [`REPEATED_ERROR_STOP`] after three identical pass errors.
 pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> Result<(), Error> {
     let mut log = LoopLog::new(store);
     let lock = take_lock(store, &mut log)?;
@@ -159,17 +175,35 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
     STOP.store(false, Ordering::SeqCst);
     catch_stop_signals();
     let mut last: Option<String> = None;
+    // The error text of the pass before and how many passes in a row returned it.
+    let mut repeated: Option<(String, u32)> = None;
     loop {
         if stop_requested() {
             break;
         }
         let report = match run_quiet(store, &mut sink, Some(&STOP)) {
-            Ok(report) => report,
+            Ok(report) => {
+                // A pass that succeeds starts the repeated-error count again.
+                repeated = None;
+                report
+            }
             // One task's error does not end the loop: print it and run the next pass. The
             // lock and every state file stay as they are; a one-shot `run` still returns
-            // the error and exits non-zero.
+            // the error and exits non-zero. A permanent error would repeat forever, so the
+            // third pass in a row with the same text stops the loop instead (the lock is
+            // released when this returns, and the gates are stopped as on a signal).
             Err(error) => {
-                sink(&format!("radian arc: {}\n", error.message()));
+                let text = error.message();
+                let count = match &repeated {
+                    Some((last_text, count)) if *last_text == text => count + 1,
+                    _ => 1,
+                };
+                if count >= REPEATED_ERROR_LIMIT {
+                    stop_gates(store)?;
+                    return Err(Error::Failed(REPEATED_ERROR_STOP.to_owned()));
+                }
+                sink(&format!("radian arc: {text}\n"));
+                repeated = Some((text, count));
                 if stop_requested() || !wait_interval(interval_secs) {
                     break;
                 }
@@ -192,10 +226,9 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
     Ok(())
 }
 
-/// Stops the gates a loop leaves running when it stops: a short grace, then SIGKILL. Each
-/// gate arc stopped records `interrupted`, so the next loop starts it again and counts no
-/// death.
-pub fn stop_gates(store: &Store) -> Result<(), Error> {
+/// Stops the gates a watch loop leaves running: a short grace, then SIGKILL. Each gate arc
+/// stopped records `interrupted`, so the next loop starts it again and counts no death.
+fn stop_gates(store: &Store) -> Result<(), Error> {
     let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
     for id in store.task_ids()? {
         crate::gate::background::stop(store, &id, grace);
@@ -753,7 +786,8 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
             {
                 continue;
             }
-            match attempt_ops::claim(store, &task.item.id) {
+            match attempt_ops::claim_by(store, &task.item.id, attempt_ops::ClaimBy::SchedulingLoop)
+            {
                 Ok(claim) => {
                     slots -= 1;
                     claims.push((claim, task.item.clone()));
@@ -904,7 +938,7 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
         };
         lines.push(header);
         for task in open {
-            let reason = task_reason(store, plan, task)?;
+            let reason = waiting_reason(store, plan, &task.item)?;
             lines.push(format!(
                 "  {} {}.{}: {reason}",
                 task.item.id,
@@ -919,12 +953,14 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
     Ok(lines)
 }
 
-fn task_reason(
+/// Why `radian arc run` would not act on `task` now, in one line. `confirm --dry-run` uses
+/// the same words for a task it would make ready.
+pub fn waiting_reason(
     store: &Store,
     plan: &model::PlanFile,
-    task: &crate::store::Loaded<model::TaskFile>,
+    task: &model::TaskFile,
 ) -> Result<String, Error> {
-    let item = &task.item;
+    let item = task;
     let reason = match (item.state, item.phase.as_str()) {
         (TaskState::Todo, "ready") => {
             if plan.auto == "off" {

@@ -666,6 +666,39 @@ fn confirm_a_proposed_task_moves_it_to_ready_and_prints_the_phase() {
     assert!(again.err.contains("todo.ready"), "{again:?}");
 }
 
+/// The CLI declares `--dry-run`: it prints what the confirm would do, the chain and the queue
+/// place, and leaves the plan a draft.
+#[test]
+fn confirm_dry_run_prints_the_chain_without_writing() {
+    let scratch = fixture("confirm-dry");
+    init(&scratch);
+    let plan = add_plan(&scratch, "dry");
+    let task = add_task(&scratch, &plan, "work", "the brief\n");
+
+    let dry = run(&scratch, &["arc", "confirm", "--dry-run", &plan], "");
+    assert_eq!(dry.code, Some(0), "{dry:?}");
+    assert!(
+        dry.out.contains(&format!("would: {plan} confirmed")),
+        "{}",
+        dry.out
+    );
+    assert!(
+        dry.out.contains(&format!("{task} waits on: nothing")),
+        "{}",
+        dry.out
+    );
+    assert!(
+        dry.out
+            .contains(&format!("{task} queue: 1 of 1 todo.ready")),
+        "{}",
+        dry.out
+    );
+    let stored = radian_arc::store::Store::at(scratch.repo())
+        .load_plan(&plan)
+        .expect("the plan reads");
+    assert_eq!(stored.item.status, "draft", "the dry run wrote the plan");
+}
+
 #[test]
 fn auto_needs_a_confirmed_plan_and_a_level_from_the_set() {
     let scratch = fixture("auto");
@@ -824,7 +857,7 @@ fn list_hides_finished_work_unless_all_and_json_holds_it_here() {
     assert!(default.out.contains(&ready), "{}", default.out);
     assert!(
         default.out.contains(&format!(
-            "{mixed}  draft  auto: off  priority: P3  1/2 merged  a plan"
+            "{mixed}  draft  auto: off  priority: P3  1/2 merged  total_cost_usd: 0  a plan"
         )),
         "the shown plan counts what it hid: {}",
         default.out
@@ -877,7 +910,7 @@ fn list_hides_finished_work_unless_all_and_json_holds_it_here() {
     assert_eq!(one.code, Some(0), "{one:?}");
     assert!(
         one.out.contains(&format!(
-            "{finished}  draft  auto: off  priority: P3  2/2 merged  a plan"
+            "{finished}  draft  auto: off  priority: P3  2/2 merged  total_cost_usd: 0  a plan"
         )),
         "a finished plan named by --plan keeps its header: {}",
         one.out
@@ -1138,6 +1171,10 @@ fn arc_gate_without_arguments_exits_two_and_help_exits_zero() {
     let out = String::from_utf8_lossy(&help.stdout);
     assert!(out.contains("usage: arc-gate.sh"), "{out}");
     assert!(out.contains("quick") && out.contains("full"), "{out}");
+    assert!(
+        out.contains("RADIAN_VERIFY_MIN_FREE_INODES") && out.contains("RADIAN_VERIFY_MIN_FREE_GIB"),
+        "the help names the two temp file system limits: {out}"
+    );
 }
 
 /// `quick` runs nextest for the crates the checkout changed since its merge base
@@ -1186,6 +1223,11 @@ fn quick_tests_the_changed_crates_and_radian_tui() {
         .current_dir(&repo)
         .env("PATH", path)
         .env("CARGO_CALLS", &calls)
+        // This test is about which crates the gate selects, not about the temp
+        // file system: turn both limits off so the real `df` on the inherited
+        // TMPDIR (or a limit set in the developer's environment) cannot fail it.
+        .env("RADIAN_VERIFY_MIN_FREE_INODES", "0")
+        .env("RADIAN_VERIFY_MIN_FREE_GIB", "0")
         .output()
         .expect("the gate runs");
     assert!(
