@@ -25,8 +25,10 @@ use crate::store::config::ReworkSession;
 pub const ATTEMPT_FINISHED_FILE: &str = "attempt_finished.json";
 /// The wrapper's last-written end record, in the host-local attempt directory.
 pub const STATUS_FILE: &str = "status.json";
-/// The claim's host-local start record: the attempt id, token and `started_at`, the time a
-/// reconcile uses to judge a wrapper that has not written its first heartbeat yet.
+/// The claim's host-local start record: the attempt id, token, `started_at` and the session id
+/// the claim decided on. A reconcile uses `started_at` to judge a wrapper that has not written
+/// its first heartbeat yet; `show` and the arc TUI use `session_id` to open the worker's journal
+/// before the wrapper writes `identity.json` or `execution.json`.
 pub const START_FILE: &str = "start.json";
 /// Why the wrapper was signalled (`cancel`, `stall`, `wall_time`).
 pub const SIGNAL_FILE: &str = "signal.json";

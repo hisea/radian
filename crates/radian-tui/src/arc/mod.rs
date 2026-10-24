@@ -349,6 +349,10 @@ pub enum Freshness {
     Beating { age: u64 },
     /// The last beat is older than the attempt's stall window.
     Stalled { age: u64 },
+    /// The heartbeat file exists, but its time cannot be used: it does not parse, or it is in
+    /// the future. This is not the same as no beat yet: a reconcile may judge the attempt dead
+    /// from `start.json` while `starting` would suggest it has not begun.
+    Unreadable,
 }
 
 /// One row of a plan's task list, whether drawn as the tree or as the flat list.
@@ -2322,16 +2326,24 @@ fn freshness(store: &Store, task: &TaskFile, default_stall: u64) -> Option<Fresh
     if task.state != TaskState::Doing {
         return None;
     }
-    let Some(beat) = radian_arc::store::attempt_ops::read_heartbeat(store, &task.id, task.attempt)
-    else {
-        return Some(Freshness::Starting);
-    };
     let stall = task.stall_timeout_secs.unwrap_or(default_stall);
     let window = radian_arc::store::attempt_ops::liveness_window_secs(stall);
+    let Some(beat) = radian_arc::store::attempt_ops::read_heartbeat(store, &task.id, task.attempt)
+    else {
+        // A file that exists but holds no readable time is not the same as no beat yet: a
+        // reconcile may judge the attempt dead from `start.json`, so do not say `starting`.
+        let path = radian_arc::store::attempt_ops::attempt_dir(store, &task.id, task.attempt)
+            .join(radian_arc::store::attempt_ops::HEARTBEAT_FILE);
+        return Some(if path.exists() {
+            Freshness::Unreadable
+        } else {
+            Freshness::Starting
+        });
+    };
     match radian_arc::store::attempt_ops::utc_age_secs(&beat) {
         Some(age) if age > window => Some(Freshness::Stalled { age }),
         Some(age) => Some(Freshness::Beating { age }),
-        None => Some(Freshness::Starting),
+        None => Some(Freshness::Unreadable),
     }
 }
 
