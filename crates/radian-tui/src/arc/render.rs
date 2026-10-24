@@ -338,8 +338,10 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 Hint::new("L", "log", false),
                 Hint::secondary("g", "graph/list", false),
                 Hint::secondary("f", "filter", false),
-                Hint::secondary("o", "order", false),
                 Hint::secondary("tab", "pages", false),
+                // The `PLANS · by <order>` heading already names the order, so this hint goes
+                // last and is the first view key the row drops when it is tight.
+                Hint::secondary("o", "order", false),
                 Hint::essential("q", "quit", false),
             ]
         }
