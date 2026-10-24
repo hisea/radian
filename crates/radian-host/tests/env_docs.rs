@@ -101,6 +101,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "RADIAN_ARC_GATE_TEST_REVIEW_PROGRAM",
         "read in radian-arc/src/gate/background.rs: runs this program instead of `radian exec` for the review stage, so a test drives the background gate's `commands`/`review` pair without a model",
     ),
+    (
+        "RADIAN_ARC_TEST_PASS_INTERVAL_MS",
+        "read in radian-tui/src/arc/looping.rs: the arc TUI's pass interval in milliseconds, so a pty test does not wait 30 seconds per pass",
+    ),
 ];
 
 /// The headings whose tables list environment variables. Each heading is an anchor: a row
