@@ -10,6 +10,8 @@ This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the 
 
 `b` opens the board from any page; on the board it goes back to the plans page. Outside the task page `Tab` keeps its page meaning: on the plans page it opens the selected task's page, on the board the selected card's, and on the merge page it closes it. On the task page `Tab`/`Shift-Tab` cycle that page's own four tabs instead; `Esc` returns to the page the task page was opened from, and `b` opens the board from any page, the task page included.
 
+The theme is the radian TUI's, from the same config file: `tui.theme`, a theme file, `[tui.colors]`, `NO_COLOR` and truecolor detection apply here too ([themes](themes.md#choosing-a-theme)). It is read when the TUI opens, so a change made while it is open shows the next time you open it, and a theme or config problem is one line in the footer with the theme the load fell back to.
+
 ## The loop
 
 The TUI is never the scheduling loop: it holds no `runner.lock` and runs no pass. When it opens, it starts `radian arc run --watch` with the default interval when no loop holds the lock; `R` starts one the same way while none runs. The loop is a detached process in the repository root: it has its own session, its input and output go to `/dev/null`, and its lines go to [`loop.log`](arc-files.md). Starting a loop asks nothing: it is the default way arc runs.
