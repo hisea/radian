@@ -272,6 +272,57 @@ fn selection_and_search_never_see_the_image_rows() {
     }
 }
 
+/// ADR 0028 R10's fallback, with two images whose placeholders read the same: the broken one
+/// reserves no run, and the valid one still gets its run under **its own** placeholder row —
+/// the broken image must not steal it.
+#[test]
+fn a_broken_image_does_not_steal_a_valid_twins_run() {
+    let mut broken = image_part("shot.gif");
+    if let ContentPart::Image { data, .. } = &mut broken {
+        *data = "not base64 at all".to_owned();
+    }
+    // The annotations are identical, so both parts synthesize the same placeholder line.
+    let app = user_app(vec![
+        ContentPart::text("two shots"),
+        broken,
+        image_part("shot.gif"),
+    ]);
+    let entry = image_entry(&app);
+    assert_eq!(entry.images.len(), 2, "both parts name themselves");
+    assert!(!entry.images[0].decodable, "the first payload is broken");
+    assert!(entry.images[1].decodable, "the second payload decodes");
+    let all = modes(ToolFold::Expanded);
+    let lines = blocks::layout(entry, &[], all, 80);
+    let placeholder = entry.images[0].placeholder.clone();
+    let rows: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.text == placeholder)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(rows.len(), 2, "both placeholder rows draw: {lines:?}");
+    assert!(
+        lines[rows[0] + 1].image.is_none(),
+        "the broken image reserves no run: {lines:?}"
+    );
+    let run: Vec<&radian_tui::blocks::BodyLine> =
+        lines.iter().filter(|line| line.image.is_some()).collect();
+    assert_eq!(
+        run.len(),
+        usize::from(radian_tui::media::IMAGE_HEIGHT_ROWS),
+        "only the valid image has a run: {lines:?}"
+    );
+    assert!(
+        run.iter().all(|line| line.image == Some(1)),
+        "the run belongs to the valid image: {lines:?}"
+    );
+    assert_eq!(
+        lines[rows[1] + 1].image,
+        Some(1),
+        "the run starts under the second placeholder: {lines:?}"
+    );
+}
+
 /// ADR 0028 R10's fallback: a payload that does not decode draws only the placeholder row and
 /// produces no error block, and it reserves no rows — the placeholder is the whole story, with
 /// no blank hole where the image would have been. The cache remembers the failure instead of
@@ -315,9 +366,9 @@ fn a_broken_image_draws_only_its_placeholder() {
         texts
     );
 
-    let image = EntryImage::from_part(&part).expect("the placeholder still exists");
-    assert!(!image.decodable);
     let mut cache = ImageCache::default();
+    let image = EntryImage::from_part(&part, &mut cache).expect("the placeholder still exists");
+    assert!(!image.decodable);
     let picker = ratatui_image::picker::Picker::halfblocks();
     assert!(cache.protocol(&image, &picker).is_none());
     assert!(!cache.is_ready(&image));

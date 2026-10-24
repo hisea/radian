@@ -2914,3 +2914,16 @@ the named test was run alone, and the file was restored from a copy under `.radi
 | TK0079-M2 | `run --watch` is accepted again (the refusal arm matches `watch: false`) | ✅ 1 failed | `arc::run_watch_is_refused_and_names_arc_serve` (`run --watch` exits 0 with a one-pass summary instead of 2) |
 
 2/2 caught.
+
+## TK0014 rework 3: one decode per image and each image's own run (2026-10-24, branch `work/TK0014-image-render`)
+
+The review found that the ingest-time decode was repeated by the first frame, and that a broken
+image could take a valid twin's run. Each mutation was applied by hand, backed up under
+`.radian/bak/` and restored from that copy (never `git checkout`), and the named test ran alone.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0014-M7 | the entry's decode is thrown away, so the first frame decodes the payload again (`from_part` calls `decode` without `cache.remember`) | ✅ 1 failed | `an_image_decodes_once_and_a_failure_is_cached` (`the first frame reuses the entry's decode`: left 2, right 1) |
+| TK0014-M8 | `insert_user_images` advances the placeholder search only for a decodable image (the `search = end` line moves below the `decodable` check) | ✅ 1 failed | `a_broken_image_does_not_steal_a_valid_twins_run` (`the broken image reserves no run`) |
+
+2/2 caught.

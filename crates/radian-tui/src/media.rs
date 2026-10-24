@@ -2,10 +2,11 @@
 //! image occupies, and the decoded protocol state cached across frames.
 //!
 //! An image part's display facts (name, dimensions, size) live in its `annotations`, so the
-//! placeholder line needs no decode. A part whose payload does not decode carries no run at
-//! all: its entry reserves no rows, so the placeholder line is the whole of what it shows
-//! (ADR 0028 R10). The check happens once when the entry is built; a frame then decodes the
-//! image once into its protocol state and caches it.
+//! placeholder line needs no decode. The payload is decoded **once**, when the entry is built:
+//! a part whose payload does not decode carries no run at all (its entry reserves no rows, so
+//! the placeholder line is the whole of what it shows, ADR 0028 R10), and the decode itself is
+//! handed to the [`ImageCache`], which builds the protocol from it on the first frame instead
+//! of decoding the payload again.
 //!
 //! The layout and the drawing both read [`EntryImage::decodable`], so the counting, the
 //! drawing and the selection geometry cannot disagree about whether a run exists.
@@ -52,7 +53,10 @@ pub struct EntryImage {
 impl EntryImage {
     /// The image parts of a message, in order. A part without this pipeline's annotations is
     /// left out: it has no placeholder line to stand above the image (ADR 0028 R10).
-    pub fn from_part(part: &ContentPart) -> Option<Self> {
+    ///
+    /// The payload is decoded here, once, and the decoded image is kept in `cache` so the
+    /// first frame that draws it needs no second decode.
+    pub fn from_part(part: &ContentPart, cache: &mut ImageCache) -> Option<Self> {
         let ContentPart::Image {
             mime_type, data, ..
         } = part
@@ -75,11 +79,25 @@ impl EntryImage {
             width,
             height,
             placeholder,
-            // Checked once, here: the layout needs the answer before any frame draws, and a
-            // broken payload must not reserve rows (ADR 0028 R10).
+            // Filled in below, from the one decode this constructor runs.
             decodable: false,
         };
-        image.decodable = decode(&image).is_some();
+        // Checked once, here: the layout needs the answer before any frame draws, and a
+        // broken payload must not reserve rows (ADR 0028 R10). The decode is handed to the
+        // cache, so the frame that draws the image builds its protocol from this decode
+        // rather than decoding the payload a second time. A payload the cache has already
+        // seen (the same image in an earlier entry, or one already known to fail) is not
+        // decoded again.
+        let key = image.key();
+        image.decodable = match cache.known(key) {
+            Some(decodable) => decodable,
+            None => {
+                let decoded = decode(&image);
+                let decodable = decoded.is_some();
+                cache.remember(key, decoded);
+                decodable
+            }
+        };
         Some(image)
     }
 
@@ -95,9 +113,12 @@ impl EntryImage {
     }
 }
 
-/// The images of a message's parts, in order.
-pub fn images_of(parts: &[ContentPart]) -> Vec<EntryImage> {
-    parts.iter().filter_map(EntryImage::from_part).collect()
+/// The images of a message's parts, in order. The decodes go into `cache` (ADR 0028 R10).
+pub fn images_of(cache: &mut ImageCache, parts: &[ContentPart]) -> Vec<EntryImage> {
+    parts
+        .iter()
+        .filter_map(|part| EntryImage::from_part(part, cache))
+        .collect()
 }
 
 /// The byte ranges the placeholder rows occupy in a tool result's **selection text**: its own
@@ -151,8 +172,9 @@ pub fn image_columns(picker: &Picker, image: &EntryImage, max_columns: u16) -> u
 }
 
 /// Decoded image protocols, keyed by [`EntryImage::key`] (ADR 0028 R10: decode once per image,
-/// never on every frame). A failed decode is cached too, so a broken image is not retried each
-/// frame; the placeholder line is all the user sees then.
+/// never on every frame). An entry's decode waits here until the first frame builds the
+/// protocol from it; a failure is cached too, so a broken image is not retried each frame and
+/// the placeholder line is all the user sees.
 #[derive(Default)]
 pub struct ImageCache {
     entries: HashMap<u64, Cached>,
@@ -162,37 +184,91 @@ pub struct ImageCache {
 
 #[allow(clippy::large_enum_variant)]
 enum Cached {
+    /// The payload was decoded when the entry was built, waiting for the picker that turns it
+    /// into a protocol (ADR 0028 R10: the first frame reuses this decode).
+    Decoded(Box<image::DynamicImage>),
     Ready(Box<StatefulProtocol>),
     Failed,
 }
 
 impl ImageCache {
-    /// The protocol for `image`, decoding it on first use. `None` when the payload does not
-    /// decode; the caller draws nothing for that run (the placeholder row stays).
+    /// Keeps the entry's decode until the first frame asks for the protocol. A payload the
+    /// cache already holds (the same image in an earlier entry) keeps the entry it has, so
+    /// two entries of one image share one decode and one protocol.
+    fn remember(&mut self, key: u64, decoded: Option<image::DynamicImage>) {
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        let cached = match decoded {
+            Some(decoded) => Cached::Decoded(Box::new(decoded)),
+            None => Cached::Failed,
+        };
+        self.entries.insert(key, cached);
+        self.order.push_back(key);
+        self.evict();
+    }
+
+    /// The decode result already known for this payload: `Some(false)` is a failure.
+    fn known(&self, key: u64) -> Option<bool> {
+        self.entries
+            .get(&key)
+            .map(|cached| !matches!(cached, Cached::Failed))
+    }
+
+    /// Drops the oldest entries past [`IMAGE_CACHE_CAPACITY`]. A dropped image is decoded
+    /// again if it scrolls back into view; the layout keeps its row count either way.
+    fn evict(&mut self) {
+        while self.entries.len() > IMAGE_CACHE_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    /// The protocol for `image`, built from the decode the entry already did. `None` when the
+    /// payload does not decode; the caller draws nothing for that run (the placeholder row
+    /// stays).
     pub fn protocol(
         &mut self,
         image: &EntryImage,
         picker: &Picker,
     ) -> Option<&mut StatefulProtocol> {
         let key = image.key();
-        if let std::collections::hash_map::Entry::Vacant(slot) = self.entries.entry(key) {
-            // A payload that already failed its check at ingest is not decoded again; the
-            // placeholder line is all that shows (ADR 0028 R10).
-            let cached = match image.decodable.then(|| decode(image)).flatten() {
-                Some(decoded) => Cached::Ready(Box::new(picker.new_resize_protocol(decoded))),
-                None => Cached::Failed,
-            };
-            slot.insert(cached);
-            self.order.push_back(key);
-            while self.entries.len() > IMAGE_CACHE_CAPACITY {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.entries.remove(&oldest);
+        match self.entries.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                // The entry's own decode becomes the protocol on the first frame that draws it
+                // (ADR 0028 R10: one decode per image). The slot keeps its place in the
+                // eviction order.
+                if matches!(slot.get(), Cached::Decoded(_)) {
+                    let cached = std::mem::replace(slot.get_mut(), Cached::Failed);
+                    if let Cached::Decoded(decoded) = cached {
+                        slot.insert(Cached::Ready(Box::new(
+                            picker.new_resize_protocol(*decoded),
+                        )));
+                    }
                 }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                // Evicted since the entry was built (or an image built without a cache): the
+                // one decode the layout saw is repeated here, and the failure is remembered.
+                let cached = if image.decodable {
+                    match decode(image) {
+                        Some(decoded) => {
+                            Cached::Ready(Box::new(picker.new_resize_protocol(decoded)))
+                        }
+                        None => Cached::Failed,
+                    }
+                } else {
+                    Cached::Failed
+                };
+                slot.insert(cached);
+                self.order.push_back(key);
+                self.evict();
             }
         }
         match self.entries.get_mut(&key)? {
             Cached::Ready(protocol) => Some(protocol),
-            Cached::Failed => None,
+            Cached::Decoded(_) | Cached::Failed => None,
         }
     }
 
@@ -267,7 +343,8 @@ mod tests {
 
     #[test]
     fn an_image_part_becomes_the_placeholder_and_the_data() {
-        let entry_image = EntryImage::from_part(&image_part()).expect("an image part");
+        let mut cache = ImageCache::default();
+        let entry_image = EntryImage::from_part(&image_part(), &mut cache).expect("an image part");
         assert_eq!(entry_image.placeholder, "[image: shot.gif, 1×1, 1 KB]");
         assert_eq!((entry_image.width, entry_image.height), (1, 1));
         assert!(entry_image.decodable, "the payload decodes");
@@ -278,14 +355,15 @@ mod tests {
             annotations: None,
             meta: None,
         };
-        assert!(EntryImage::from_part(&foreign).is_none());
+        assert!(EntryImage::from_part(&foreign, &mut cache).is_none());
         // A part with the annotations but a payload that does not decode still names itself:
         // the placeholder stays and no run is reserved (ADR 0028 R10).
         let mut broken = image_part();
         if let ContentPart::Image { data, .. } = &mut broken {
             *data = "not base64 at all".to_owned();
         }
-        let broken = EntryImage::from_part(&broken).expect("the annotations are intact");
+        let broken =
+            EntryImage::from_part(&broken, &mut cache).expect("the annotations are intact");
         assert_eq!(broken.placeholder, "[image: shot.gif, 1×1, 1 KB]");
         assert!(!broken.decodable, "the check happens once at ingest");
     }
@@ -295,10 +373,16 @@ mod tests {
     #[test]
     fn an_image_decodes_once_and_a_failure_is_cached() {
         let picker = Picker::halfblocks();
-        let image = EntryImage::from_part(&image_part()).expect("an image part");
         let mut cache = ImageCache::default();
         let before = decodes();
+        let image = EntryImage::from_part(&image_part(), &mut cache).expect("an image part");
+        assert_eq!(decodes() - before, 1, "building the entry decodes once");
         assert!(cache.protocol(&image, &picker).is_some());
+        assert_eq!(
+            decodes() - before,
+            1,
+            "the first frame reuses the entry's decode"
+        );
         assert!(cache.protocol(&image, &picker).is_some());
         assert_eq!(
             decodes() - before,
@@ -327,7 +411,10 @@ mod tests {
         if let ContentPart::Image { data, .. } = &mut part {
             *data = "not base64 at all".to_owned();
         }
-        let known_bad = EntryImage::from_part(&part).expect("the annotations are intact");
+        let mut cache = ImageCache::default();
+        let known_bad =
+            EntryImage::from_part(&part, &mut cache).expect("the annotations are intact");
+        assert!(!known_bad.decodable);
         let before = decodes();
         assert!(cache.protocol(&known_bad, &picker).is_none());
         assert_eq!(decodes(), before, "an undecodable part is not retried");
@@ -338,7 +425,8 @@ mod tests {
     #[test]
     fn the_image_width_follows_the_aspect_ratio_and_the_column() {
         let picker = Picker::halfblocks(); // a 10×20 px cell
-        let image = EntryImage::from_part(&image_part()).expect("an image part");
+        let image = EntryImage::from_part(&image_part(), &mut ImageCache::default())
+            .expect("an image part");
         // A square image: 12 rows × 20 px = 240 px tall, so 240 px / 10 px = 24 columns.
         assert_eq!(image_columns(&picker, &image, 80), 24);
         // A column narrower than that wins.

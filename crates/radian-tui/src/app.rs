@@ -709,8 +709,9 @@ pub struct App {
     /// message after its text; Backspace on an empty input removes the newest.
     pub composer_images: Vec<radian_coding::LoadedImage>,
     /// The transcript's decoded image protocols (ADR 0028 R10), keyed by the image payload.
-    /// Decoded once and reused across frames; a failed decode is remembered, so a broken image
-    /// costs one attempt and then draws as its placeholder row only.
+    /// Each entry hands over its one decode; the first frame that draws it builds the protocol
+    /// from that, and a failed decode is remembered, so a broken image costs one attempt and
+    /// then draws as its placeholder row only.
     pub images: crate::media::ImageCache,
     pub quit: bool,
     /// `/new` was accepted: the loop leaves, the host ends this session and opens a fresh

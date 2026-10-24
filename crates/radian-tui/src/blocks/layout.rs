@@ -533,15 +533,18 @@ fn image_run(index: usize, end: usize) -> Vec<BodyLine> {
 fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry, text: &str) {
     let mut search = 0usize;
     for (index, image) in entry.images.iter().enumerate() {
-        if !image.decodable {
-            continue;
-        }
         let Some(found) = text[search..].find(&image.placeholder) else {
             continue;
         };
         let start = search + found;
         let end = start + image.placeholder.len();
+        // Advance past this image's row for **every** image, decodable or not: a broken image
+        // still names itself, and the next image's run must go under its own placeholder, not
+        // under the broken one (ADR 0028 R10).
         search = end;
+        if !image.decodable {
+            continue;
+        }
         let last = end.saturating_sub(1);
         let after = lines
             .iter()
