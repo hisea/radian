@@ -64,7 +64,7 @@ When a journal of that name already exists (a gate was started again for the sam
 
 `<repository>/.radian/arc/worker-brief.md` is the repository's standing worker instructions.
 It is optional.
-[`radian arc init`](arc.md#radian-arc-init---track) writes it with this default when the file does not exist, and never overwrites a file you edited:
+[`radian arc init`](arc.md#radian-arc-init-track) writes it with this default when the file does not exist, and never overwrites a file you edited:
 
 ```text
 Work only on the current branch.
@@ -79,7 +79,7 @@ That covers a first attempt, a rework (fresh or resume), and a follow-up task ar
 The wrapper reads the file when it composes an attempt's brief, so an edit takes effect at the next attempt; no restart is needed.
 A missing file and one that is empty after trimming change nothing.
 
-A file over 32 KiB (32,768 bytes), a file that is not UTF-8, and a read error are not appended: the attempt runs without the section, its record carries one line `worker-brief.md skipped: <reason>`, and [`radian arc show`](arc.md#radian-arc-show-id---json) prints it as `attempt_note`.
+A file over 32 KiB (32,768 bytes), a file that is not UTF-8, and a read error are not appended: the attempt runs without the section, its record carries one line `worker-brief.md skipped: <reason>`, and [`radian arc show`](arc.md#radian-arc-show-id-json) prints it as `attempt_note`.
 The worker never reads the file itself: its sandbox denies `.radian/arc/`, and the wrapper puts the content on the worker's stdin.
 
 ## Plan and task files
