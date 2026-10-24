@@ -171,7 +171,7 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
 ///
 /// # Errors
 ///
-/// The same as [`run`], and [`repeat_errors`] after three identical pass errors.
+/// The same as [`run`], and [`repeated_error_stop`] after three identical pass errors.
 pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> Result<(), Error> {
     let mut log = LoopLog::new(store);
     let lock = take_lock(store, &mut log)?;
