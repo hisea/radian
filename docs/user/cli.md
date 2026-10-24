@@ -141,7 +141,7 @@ A bare `radian arc` opens its TUI (plans, task and merge pages, with the owner's
 The subcommands are `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, `reset-budget`, and `mcp`; run `radian arc --help`.
 arc's exit codes are its own: `3` means the state does not allow the operation and `4`
 means a lock is held.
-See [`arc`](arc.md) for every subcommand, flag, and exit code, [`arc-gate`](arc-gate.md) for the gate and its failures, and [`arc-files`](arc-files.md) for every file field and configuration key.
+See [`arc`](arc.md) for every subcommand, flag, and exit code, [`arc-gate`](arc-gate.md) for the gate and its failures, [`arc-files`](arc-files.md) for every file field and configuration key, and [`arc-tui`](arc-tui.md) for the TUI and its owner's actions.
 
 ```sh
 radian arc init
