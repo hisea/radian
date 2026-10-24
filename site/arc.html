@@ -130,11 +130,36 @@ h2 + p { color: var(--muted); margin: 14px 0 0; max-width: 26em; }
 .install-notes li + li { margin-top: 4px; }
 .install-notes a { color: var(--accent); }
 
+/* flow */
+.wf { margin: 48px 0 0; }
+.flowwrap { overflow-x: auto; border: 1px solid var(--rule); }
+.flow { display: block; width: 100%; min-width: 820px; height: auto; font-family: var(--mono); background: var(--sheet); }
+.flow .c-grid { stroke: var(--grid); fill: none; }
+.flow .c-mask { fill: var(--sheet); stroke: none; }
+.flow .c-lane { fill: none; stroke: var(--rule); }
+.flow .c-backend { fill: color-mix(in srgb, var(--accent) 9%, var(--sheet)); stroke: var(--accent); }
+.flow .c-security { fill: color-mix(in srgb, var(--ink) 5%, var(--sheet)); stroke: var(--ink); }
+.flow .c-messagebus { fill: var(--sheet); stroke: var(--muted); }
+.flow .c-database { fill: color-mix(in srgb, var(--accent) 24%, var(--sheet)); stroke: var(--accent); }
+.flow .c-external { fill: none; stroke: var(--muted); stroke-dasharray: 3 3; }
+.flow .a-default { stroke: var(--muted); fill: none; }
+.flow .a-emphasis { stroke: var(--accent); fill: none; }
+.flow .a-security { stroke: var(--ink); fill: none; }
+.flow .a-dashed { stroke: var(--muted); stroke-dasharray: 4 3; fill: none; }
+.flow .m-default, .flow .m-dashed { fill: var(--muted); }
+.flow .m-emphasis { fill: var(--accent); }
+.flow .m-security { fill: var(--ink); }
+.flow .t-primary, .flow .t-messagebus, .flow .t-edge-security { fill: var(--ink); }
+.flow .t-muted, .flow .t-edge-dashed { fill: var(--muted); }
+.flow .t-backend, .flow .t-edge-emphasis { fill: var(--accent); }
+.flow .semantic-sigil { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.flow .s-backend, .flow .s-database { color: var(--accent); }
+.flow .s-security { color: var(--ink); }
+.flow .s-messagebus, .flow .s-external { color: var(--muted); }
+.flow .sigil-fill { fill: currentColor; stroke: none; }
+/* /flow */
 /* video */
 .vid { margin: 0; }
-.wf { margin-top: 48px; }
-.wf .video { display: block; }
-.wf img { display: block; width: 100%; height: auto; }
 .video { border: 1px solid var(--rule); background: #000; }
 .video video { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; }
 .vcap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 24px; margin-top: 12px; font: 400 11.5px var(--mono); color: var(--muted); }
@@ -237,10 +262,644 @@ footer a:hover { color: var(--ink); }
           </ul>
         </div>
       </div>
-      <figure class="vid wf">
-        <a class="video en" href="media/arc-workflow-en.webp" target="_blank" rel="noopener"><img src="media/arc-workflow-en.webp" alt="arc: one task from request to merge. You confirm a plan; the lead writes tasks; arc's state machine claims a task; a worker pushes a branch; the commands and review stages run on it; you merge or reject; a merged task can propose a follow-up." loading="lazy"></a>
-        <a class="video zh" href="media/arc-workflow-zh.webp" target="_blank" rel="noopener"><img src="media/arc-workflow-zh.webp" alt="arc：一个 task 从需求到合并。你确认计划，lead 写任务，arc 状态机领取任务，worker 推分支，commands 和 review 阶段检查，你合并或驳回，合并后可以提出后续任务。" loading="lazy"></a>
-        <figcaption class="vcap"><span><span class="en">fig. 2 · one task from request to merge, as this repository runs it (the gate shown is this repository's own: fmt, clippy, tests)</span><span class="zh">图 2 · 一个任务从需求到合并，按这个仓库自己的跑法（图里的门禁是本仓库自己的：fmt、clippy、测试）</span></span><span><span class="en">click to enlarge</span><span class="zh">点击放大</span></span></figcaption>
+      <figure class="wf">
+        <div class="flowwrap en"><!-- flow-en -->
+<svg class="flow" role="img" aria-label="arc: one task from request to merge" viewBox="0 0 1040 912">
+        <defs>
+          <marker id="arrowhead-en" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis-en" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security-en" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed-en" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid-en" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid-en)" />
+        <rect x="40" y="52" width="984" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="74" class="t-muted" font-size="10" font-weight="600">01 / You (owner)</text>
+        <rect x="40" y="178" width="984" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="200" class="t-muted" font-size="10" font-weight="600">02 / Lead (MCP)</text>
+        <rect x="40" y="304" width="984" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="326" class="t-muted" font-size="10" font-weight="600">03 / arc state machine</text>
+        <rect x="40" y="430" width="984" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="452" class="t-muted" font-size="10" font-weight="600">04 / Gate process</text>
+        <rect x="40" y="556" width="984" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="578" class="t-muted" font-size="10" font-weight="600">05 / worker</text>
+        <rect x="40" y="682" width="984" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="704" class="t-muted" font-size="10" font-weight="600">06 / Review session</text>
+        <path d="M 70 35 H 288" class="a-default phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="159" y="27" width="40" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="179" y="38.5" class="t-muted" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">Plan</text>
+        <path d="M 405.2 35 H 481.2" class="a-dashed phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="421.2" y="27" width="44" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="443.2" y="38.5" class="t-messagebus" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">Build</text>
+        <path d="M 577.2 35 H 653.2" class="a-emphasis phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="590.8000000000001" y="27" width="48.8" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="615.2" y="38.5" class="t-backend" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">Verify</text>
+        <path d="M 749.2 35 H 989.2" class="a-default phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="849.2" y="27" width="40" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="869.2" y="38.5" class="t-muted" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">Land</text>
+        <path d="M 243 406 L 243 616 Q 243 624 251 624 L 389.2 624" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-en)"/>
+        <path d="M 615.2 472 L 615.2 398" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security-en)"/>
+        <path d="M 250 146 L 250 338" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-en)"/>
+        <path d="M 951.2 346 L 951.2 154" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed-en)"/>
+        <path d="M 787.2 346 L 787.2 146" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead-en)"/>
+        <path d="M 951.2 472 L 951.2 398" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-en)"/>
+        <path d="M 833.2 120 L 872.2 120 Q 880.2 120 880.2 128 L 880.2 448 Q 880.2 456 888.2 456 L 919.2 456 Q 927.2 456 927.2 464 L 927.2 472" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-en)"/>
+        <path d="M 615.2 346 L 615.2 272" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed-en)"/>
+        <path d="M 168 239 L 176 239 Q 184 239 184 231 L 184 176 Q 184 168 192 168 L 218 168 Q 226 168 226 160 L 226 146" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead-en)"/>
+        <path d="M 497.2 624 L 607.2 624 Q 615.2 624 615.2 616 L 615.2 524" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-en)"/>
+        <path d="M 443.2 658 L 443.2 749 Q 443.2 757 451.2 757 L 539.2 757" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-en)"/>
+        <path d="M 741.2 120 L 709.2 120 Q 701.2 120 701.2 128 L 701.2 364 Q 701.2 372 693.2 372 L 685.2 372" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security-en)"/>
+        <path d="M 108 146 L 108 160 Q 108 168 100 168 L 40 168 Q 32 168 32 176 L 32 238 Q 32 246 40 246 L 48 246" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead-en)"/>
+        <path d="M 443.2 590 L 443.2 398" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security-en)"/>
+        <path d="M 373.2 372 L 312 372" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed-en)"/>
+        <path d="M 615.2 776 L 615.2 796 Q 615.2 804 607.2 804 L 180 804 Q 172 804 172 796 L 172 380 Q 172 372 180 372 L 188 372" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security-en)"/>
+        <path d="M 691.2 750 L 779.2 750 Q 787.2 750 787.2 742 L 787.2 398" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-en)"/>
+        <path d="M 567.2 246 L 559.2 246 Q 551.2 246 551.2 254 L 551.2 286 Q 551.2 294 543.2 294 L 282 294 Q 274 294 274 302 L 274 338" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed-en)"/>
+        <g id="node-req">
+          <rect x="62" y="94" width="92" height="52" rx="8" class="c-mask"/>
+          <rect x="62" y="94" width="92" height="52" rx="8" class="c-external" stroke-width="1.5"/>
+          <g class="semantic-sigil s-external" transform="translate(68 100) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text x="108" y="128.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Request</text>
+          <text x="108" y="141.9" class="t-muted" font-size="7" text-anchor="middle">or a decided backlog</text>
+        </g>
+        <g id="node-confirm">
+          <rect x="186" y="94" width="128" height="52" rx="8" class="c-mask"/>
+          <rect x="186" y="94" width="128" height="52" rx="8" class="c-security" stroke-width="1.5"/>
+          <g class="semantic-sigil s-security" transform="translate(192 100) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text x="250" y="126" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">confirm + auto</text>
+          <text x="250" y="138.3" class="t-muted" font-size="8" text-anchor="middle">off · run · merge · P0–P5</text>
+        </g>
+        <g id="node-human">
+          <rect x="741.2" y="94" width="92" height="52" rx="8" class="c-mask"/>
+          <rect x="741.2" y="94" width="92" height="52" rx="8" class="c-security" stroke-width="1.5"/>
+          <g class="semantic-sigil s-security" transform="translate(747.2 100) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text x="787.2" y="127" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">merge / reject</text>
+          <text x="787.2" y="140.4" class="t-muted" font-size="7" text-anchor="middle">auto when auto=merge</text>
+        </g>
+        <g id="node-followup">
+          <rect x="905.2" y="86" width="92" height="68" rx="8" class="c-mask"/>
+          <rect x="905.2" y="86" width="92" height="68" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(911.2 92) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="951.2" y="119" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">follow-up task</text>
+          <text x="951.2" y="133.3" class="t-muted" font-size="7.7" text-anchor="middle">review suggestions</text>
+        <text x="951.2" y="146.1" class="t-messagebus" font-size="7" text-anchor="middle">awaits confirm</text>
+        </g>
+        <g id="node-plan">
+          <rect x="48" y="212" width="120" height="68" rx="8" class="c-mask"/>
+          <rect x="48" y="212" width="120" height="68" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(54 218) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="108" y="245.4" class="t-primary" font-size="10.3" font-weight="600" text-anchor="middle">Write plan + tasks</text>
+          <text x="108" y="260.1" class="t-muted" font-size="8" text-anchor="middle">add_plan · add_task</text>
+        <text x="108" y="272.9" class="t-backend" font-size="7" text-anchor="middle">draft</text>
+        </g>
+        <g id="node-rework">
+          <rect x="567.2" y="220" width="96" height="52" rx="8" class="c-mask"/>
+          <rect x="567.2" y="220" width="96" height="52" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(573.2 226) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="615.2" y="254.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">add_rework</text>
+          <text x="615.2" y="267.8" class="t-muted" font-size="6.9" text-anchor="middle">reason → rework brief</text>
+        </g>
+        <g id="node-ready">
+          <rect x="188" y="338" width="124" height="68" rx="8" class="c-mask"/>
+          <rect x="188" y="338" width="124" height="68" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(194 344) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="250" y="372.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">todo.ready</text>
+          <text x="250" y="387.1" class="t-muted" font-size="8" text-anchor="middle">after merged · free slot</text>
+        <text x="250" y="399.9" class="t-messagebus" font-size="7" text-anchor="middle">P0 first</text>
+        </g>
+        <g id="node-retry">
+          <rect x="373.2" y="346" width="140" height="52" rx="8" class="c-mask"/>
+          <rect x="373.2" y="346" width="140" height="52" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(379.2 352) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="443.2" y="378" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">todo.retry_wait</text>
+          <text x="443.2" y="390.3" class="t-muted" font-size="8" text-anchor="middle">retryable failure · backoff</text>
+        </g>
+        <g id="node-pending">
+          <rect x="545.2" y="346" width="140" height="52" rx="8" class="c-mask"/>
+          <rect x="545.2" y="346" width="140" height="52" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(551.2 352) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="615.2" y="377.4" class="t-primary" font-size="10.4" font-weight="600" text-anchor="middle">review.rework_pending</text>
+          <text x="615.2" y="389.6" class="t-muted" font-size="8" text-anchor="middle">waits: lead or pause</text>
+        </g>
+        <g id="node-awaiting">
+          <rect x="717.2" y="346" width="140" height="52" rx="8" class="c-mask"/>
+          <rect x="717.2" y="346" width="140" height="52" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(723.2 352) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="787.2" y="377.4" class="t-primary" font-size="10.4" font-weight="600" text-anchor="middle">review.awaiting_human</text>
+          <text x="787.2" y="389.6" class="t-muted" font-size="8" text-anchor="middle">verdict bound to sha</text>
+        </g>
+        <g id="node-merged">
+          <rect x="889.2" y="346" width="124" height="52" rx="8" class="c-mask"/>
+          <rect x="889.2" y="346" width="124" height="52" rx="8" class="c-database" stroke-width="1.5"/>
+          <g class="semantic-sigil s-database" transform="translate(895.2 352) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text x="951.2" y="378" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">done.merged</text>
+          <text x="951.2" y="390.3" class="t-muted" font-size="8" text-anchor="middle">main fast-forward · push</text>
+        </g>
+        <g id="node-commands">
+          <rect x="553.2" y="472" width="124" height="52" rx="8" class="c-mask"/>
+          <rect x="553.2" y="472" width="124" height="52" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(559.2 478) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="608.8000000000001" y="493" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">commands</text>
+          <text x="615.2" y="510" class="t-muted" font-size="8" text-anchor="middle">fmt · clippy · LXC tests</text>
+        </g>
+        <g id="node-integration">
+          <rect x="887.2" y="472" width="128" height="52" rx="8" class="c-mask"/>
+          <rect x="887.2" y="472" width="128" height="52" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(893.2 478) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="951.2" y="504" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">integration</text>
+          <text x="951.2" y="516.3" class="t-muted" font-size="8" text-anchor="middle">branch+main · full Verify</text>
+        </g>
+        <g id="node-worker">
+          <rect x="389.2" y="590" width="108" height="68" rx="8" class="c-mask"/>
+          <rect x="389.2" y="590" width="108" height="68" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(395.2 596) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="443.2" y="624.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">radian arc work</text>
+          <text x="443.2" y="637.8" class="t-muted" font-size="6.9" text-anchor="middle">merge main → exec → push</text>
+        <text x="443.2" y="650.3" class="t-backend" font-size="7" text-anchor="middle">workspace sandbox</text>
+        </g>
+        <g id="node-review">
+          <rect x="539.2" y="724" width="152" height="52" rx="8" class="c-mask"/>
+          <rect x="539.2" y="724" width="152" height="52" rx="8" class="c-security" stroke-width="1.5"/>
+          <g class="semantic-sigil s-security" transform="translate(545.2 730) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text x="615.2" y="745" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">review</text>
+          <text x="615.2" y="762" class="t-muted" font-size="8" text-anchor="middle">read-only · medium, rework low</text>
+        </g>
+        <g>
+          <rect x="272.70000000000005" y="604" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="316.1" y="614" class="t-edge-emphasis" font-size="8" text-anchor="middle">claim an attempt</text>
+        </g>
+        <g>
+          <rect x="600.2" y="425" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="615.2" y="435" class="t-edge-security" font-size="8" text-anchor="middle">fail</text>
+        </g>
+        <g>
+          <rect x="223.4" y="232" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="250" y="242" class="t-edge-emphasis" font-size="8" text-anchor="middle">confirmed</text>
+        </g>
+        <g>
+          <rect x="919.8000000000001" y="240" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="951.2" y="250" class="t-edge-dashed" font-size="8" text-anchor="middle">suggestions</text>
+        </g>
+        <g>
+          <rect x="746.2" y="236" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="787.2" y="246" class="t-muted" font-size="8" text-anchor="middle">you / automatic</text>
+        </g>
+        <g>
+          <rect x="919.8000000000001" y="425" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="951.2" y="435" class="t-edge-emphasis" font-size="8" text-anchor="middle">pass · push</text>
+        </g>
+        <g>
+          <rect x="839.7" y="100" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="856.7" y="110" class="t-edge-emphasis" font-size="8" text-anchor="middle">merge</text>
+        </g>
+        <g>
+          <rect x="559.8000000000001" y="299" width="110.8" height="14" rx="3" class="c-mask"/>
+          <text x="615.2" y="309" class="t-edge-dashed" font-size="8" text-anchor="middle">lead reads the reason</text>
+        </g>
+        <g>
+          <rect x="188" y="148" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="205" y="158" class="t-muted" font-size="8" text-anchor="middle">draft</text>
+        </g>
+        <g>
+          <rect x="508.00000000000006" y="604" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="556.2" y="614" class="t-edge-emphasis" font-size="8" text-anchor="middle">push · in parallel</text>
+        </g>
+        <g>
+          <rect x="443.00000000000006" y="737" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="491.20000000000005" y="747" class="t-edge-emphasis" font-size="8" text-anchor="middle">push · in parallel</text>
+        </g>
+        <g>
+          <rect x="665" y="236" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="701.2" y="246" class="t-edge-security" font-size="8" text-anchor="middle">reject + note</text>
+        </g>
+        <g>
+          <rect x="38.6" y="148" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="70" y="158" class="t-muted" font-size="8" text-anchor="middle">to the lead</text>
+        </g>
+        <g>
+          <rect x="397.4" y="484" width="91.6" height="14" rx="3" class="c-mask"/>
+          <text x="443.2" y="494" class="t-edge-security" font-size="8" text-anchor="middle">retryable failure</text>
+        </g>
+        <g>
+          <rect x="316" y="352" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="342.6" y="362" class="t-edge-dashed" font-size="8" text-anchor="middle">time&#39;s up</text>
+        </g>
+        <g>
+          <rect x="323.8" y="784" width="139.6" height="14" rx="3" class="c-mask"/>
+          <text x="393.6" y="794" class="t-edge-security" font-size="8" text-anchor="middle">blocking → automatic rework</text>
+        </g>
+        <g>
+          <rect x="712.6" y="730" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="739.2" y="740" class="t-edge-emphasis" font-size="8" text-anchor="middle">both pass</text>
+        </g>
+        <g>
+          <rect x="376.40000000000003" y="274" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="412.6" y="284" class="t-edge-dashed" font-size="8" text-anchor="middle">back to ready</text>
+        </g>
+        <g>
+          <text x="20" y="812" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g>
+            <rect x="20" y="824" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
+            <text x="42" y="832" class="t-muted" font-size="7.5" font-weight="500">Agent logic</text>
+          </g>
+          <g>
+            <rect x="122" y="824" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
+            <text x="144" y="832" class="t-muted" font-size="7.5" font-weight="500">Policy</text>
+          </g>
+          <g>
+            <rect x="200" y="824" width="14" height="9" rx="2" class="c-messagebus" stroke-width="1"/>
+            <text x="222" y="832" class="t-muted" font-size="7.5" font-weight="500">Tool action</text>
+          </g>
+          <g>
+            <rect x="302" y="824" width="14" height="9" rx="2" class="c-database" stroke-width="1"/>
+            <text x="324" y="832" class="t-muted" font-size="7.5" font-weight="500">Context / trace</text>
+          </g>
+          <g>
+            <rect x="422" y="824" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
+            <text x="444" y="832" class="t-muted" font-size="7.5" font-weight="500">External system</text>
+          </g>
+        </g>
+      </svg>
+<!-- /flow-en --></div>
+        <div class="flowwrap zh"><!-- flow-zh -->
+<svg class="flow" role="img" aria-label="arc：一个 task 从需求到合并" viewBox="0 0 943 912">
+        <defs>
+          <marker id="arrowhead-zh" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis-zh" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security-zh" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed-zh" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid-zh" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid-zh)" />
+        <rect x="40" y="52" width="887" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="74" class="t-muted" font-size="10" font-weight="600">01 / 你（owner）</text>
+        <rect x="40" y="178" width="887" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="200" class="t-muted" font-size="10" font-weight="600">02 / lead（MCP）</text>
+        <rect x="40" y="304" width="887" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="326" class="t-muted" font-size="10" font-weight="600">03 / arc 状态机</text>
+        <rect x="40" y="430" width="887" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="452" class="t-muted" font-size="10" font-weight="600">04 / gate 进程</text>
+        <rect x="40" y="556" width="887" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="578" class="t-muted" font-size="10" font-weight="600">05 / worker</text>
+        <rect x="40" y="682" width="887" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="704" class="t-muted" font-size="10" font-weight="600">06 / review 会话</text>
+        <path d="M 56 35 H 274" class="a-default phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="145" y="27" width="40" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="165" y="38.5" class="t-muted" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">计划</text>
+        <path d="M 338.8 35 H 414.8" class="a-dashed phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="356.8" y="27" width="40" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="376.8" y="38.5" class="t-messagebus" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">执行</text>
+        <path d="M 488.79999999999995 35 H 564.8" class="a-emphasis phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="506.79999999999995" y="27" width="40" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="526.8" y="38.5" class="t-backend" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">验证</text>
+        <path d="M 660.8 35 H 884.8" class="a-default phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="752.8" y="27" width="40" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="772.8" y="38.5" class="t-muted" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">合并</text>
+        <path d="M 229 406 L 229 616 Q 229 624 237 624 L 304.8 624" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-zh)"/>
+        <path d="M 526.8 472 L 526.8 398" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security-zh)"/>
+        <path d="M 236 146 L 236 338" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-zh)"/>
+        <path d="M 846.8 346 L 846.8 154" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed-zh)"/>
+        <path d="M 698.8 346 L 698.8 146" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead-zh)"/>
+        <path d="M 846.8 472 L 846.8 398" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-zh)"/>
+        <path d="M 744.8 120 L 775.8 120 Q 783.8 120 783.8 128 L 783.8 448 Q 783.8 456 791.8 456 L 814.8 456 Q 822.8 456 822.8 464 L 822.8 472" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-zh)"/>
+        <path d="M 526.8 346 L 526.8 272" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed-zh)"/>
+        <path d="M 140 239 L 148 239 Q 156 239 156 231 L 156 176 Q 156 168 164 168 L 204 168 Q 212 168 212 160 L 212 146" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead-zh)"/>
+        <path d="M 448.8 624 L 518.8 624 Q 526.8 624 526.8 616 L 526.8 524" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-zh)"/>
+        <path d="M 376.8 658 L 376.8 749 Q 376.8 757 384.8 757 L 452.79999999999995 757" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-zh)"/>
+        <path d="M 652.8 120 L 632.8 120 Q 624.8 120 624.8 128 L 624.8 364 Q 624.8 372 616.8 372 L 596.8 372" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security-zh)"/>
+        <path d="M 94 146 L 94 160 Q 94 168 86 168 L 40 168 Q 32 168 32 176 L 32 238 Q 32 246 40 246 L 48 246" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead-zh)"/>
+        <path d="M 376.8 590 L 376.8 398" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security-zh)"/>
+        <path d="M 328.8 372 L 282 372" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed-zh)"/>
+        <path d="M 526.8 776 L 526.8 796 Q 526.8 804 518.8 804 L 182 804 Q 174 804 174 796 L 174 380 Q 174 372 182 372 L 190 372" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security-zh)"/>
+        <path d="M 600.8 750 L 690.8 750 Q 698.8 750 698.8 742 L 698.8 398" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis-zh)"/>
+        <path d="M 480.79999999999995 246 L 472.79999999999995 246 Q 464.79999999999995 246 464.79999999999995 254 L 464.79999999999995 286 Q 464.79999999999995 294 456.79999999999995 294 L 268 294 Q 260 294 260 302 L 260 338" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed-zh)"/>
+        <g id="node-req">
+          <rect x="48" y="94" width="92" height="52" rx="8" class="c-mask"/>
+          <rect x="48" y="94" width="92" height="52" rx="8" class="c-external" stroke-width="1.5"/>
+          <g class="semantic-sigil s-external" transform="translate(54 100) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text x="84.8" y="115" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">需求</text>
+          <text x="94" y="132" class="t-muted" font-size="8" text-anchor="middle">或已定的 backlog</text>
+        </g>
+        <g id="node-confirm">
+          <rect x="172" y="94" width="128" height="52" rx="8" class="c-mask"/>
+          <rect x="172" y="94" width="128" height="52" rx="8" class="c-security" stroke-width="1.5"/>
+          <g class="semantic-sigil s-security" transform="translate(178 100) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text x="236" y="126" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">confirm + auto</text>
+          <text x="236" y="138.3" class="t-muted" font-size="8" text-anchor="middle">off · run · merge · P0–P5</text>
+        </g>
+        <g id="node-human">
+          <rect x="652.8" y="94" width="92" height="52" rx="8" class="c-mask"/>
+          <rect x="652.8" y="94" width="92" height="52" rx="8" class="c-security" stroke-width="1.5"/>
+          <g class="semantic-sigil s-security" transform="translate(658.8 100) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text x="698.8" y="127" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">merge / reject</text>
+          <text x="698.8" y="140" class="t-muted" font-size="6.6" text-anchor="middle">auto=merge 时自动批准</text>
+        </g>
+        <g id="node-followup">
+          <rect x="800.8" y="86" width="92" height="68" rx="8" class="c-mask"/>
+          <rect x="800.8" y="86" width="92" height="68" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(806.8 92) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="846.8" y="119" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">follow-up task</text>
+          <text x="846.8" y="132" class="t-muted" font-size="6.6" text-anchor="middle">review 的 suggestions</text>
+        <text x="846.8" y="144.4" class="t-messagebus" font-size="7" text-anchor="middle">待 confirm</text>
+        </g>
+        <g id="node-plan">
+          <rect x="48" y="212" width="92" height="68" rx="8" class="c-mask"/>
+          <rect x="48" y="212" width="92" height="68" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(54 218) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="94" y="245" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">写 plan + task</text>
+          <text x="94" y="258.8" class="t-muted" font-size="7.3" text-anchor="middle">add_plan · add_task</text>
+        <text x="94" y="271.4" class="t-backend" font-size="7" text-anchor="middle">draft</text>
+        </g>
+        <g id="node-rework">
+          <rect x="480.79999999999995" y="220" width="92" height="52" rx="8" class="c-mask"/>
+          <rect x="480.79999999999995" y="220" width="92" height="52" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(486.79999999999995 226) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="526.8" y="254.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">add_rework</text>
+          <text x="526.8" y="267.5" class="t-muted" font-size="6.6" text-anchor="middle">读原因 · 写返工 brief</text>
+        </g>
+        <g id="node-ready">
+          <rect x="190" y="338" width="92" height="68" rx="8" class="c-mask"/>
+          <rect x="190" y="338" width="92" height="68" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(196 344) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="236" y="372.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">todo.ready</text>
+          <text x="236" y="385.5" class="t-muted" font-size="6.6" text-anchor="middle">after 已合并 · 有空位</text>
+        <text x="236" y="397.9" class="t-messagebus" font-size="7" text-anchor="middle">P0 先取</text>
+        </g>
+        <g id="node-retry">
+          <rect x="328.8" y="346" width="96" height="52" rx="8" class="c-mask"/>
+          <rect x="328.8" y="346" width="96" height="52" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(334.8 352) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="376.8" y="378.7" class="t-primary" font-size="9.7" font-weight="600" text-anchor="middle">todo.retry_wait</text>
+          <text x="376.8" y="392.9" class="t-muted" font-size="7.7" text-anchor="middle">可重试的失败 · 退避</text>
+        </g>
+        <g id="node-pending">
+          <rect x="456.79999999999995" y="346" width="140" height="52" rx="8" class="c-mask"/>
+          <rect x="456.79999999999995" y="346" width="140" height="52" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(462.79999999999995 352) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="526.8" y="377.4" class="t-primary" font-size="10.4" font-weight="600" text-anchor="middle">review.rework_pending</text>
+          <text x="526.8" y="389.6" class="t-muted" font-size="8" text-anchor="middle">等 lead · 或 plan 暂停</text>
+        </g>
+        <g id="node-awaiting">
+          <rect x="628.8" y="346" width="140" height="52" rx="8" class="c-mask"/>
+          <rect x="628.8" y="346" width="140" height="52" rx="8" class="c-messagebus" stroke-width="1.5"/>
+          <g class="semantic-sigil s-messagebus" transform="translate(634.8 352) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text x="698.8" y="377.4" class="t-primary" font-size="10.4" font-weight="600" text-anchor="middle">review.awaiting_human</text>
+          <text x="698.8" y="389.6" class="t-muted" font-size="8" text-anchor="middle">verdict 绑定 sha</text>
+        </g>
+        <g id="node-merged">
+          <rect x="800.8" y="346" width="92" height="52" rx="8" class="c-mask"/>
+          <rect x="800.8" y="346" width="92" height="52" rx="8" class="c-database" stroke-width="1.5"/>
+          <g class="semantic-sigil s-database" transform="translate(806.8 352) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text x="846.8" y="378" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">done.merged</text>
+          <text x="846.8" y="390.3" class="t-muted" font-size="8" text-anchor="middle">main 快进 · push</text>
+        </g>
+        <g id="node-commands">
+          <rect x="478.79999999999995" y="472" width="96" height="52" rx="8" class="c-mask"/>
+          <rect x="478.79999999999995" y="472" width="96" height="52" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(484.79999999999995 478) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="526.8" y="506.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">commands</text>
+          <text x="526.8" y="519.1" class="t-muted" font-size="6.3" text-anchor="middle">fmt · clippy · LXC 测试</text>
+        </g>
+        <g id="node-integration">
+          <rect x="774.8" y="472" width="144" height="52" rx="8" class="c-mask"/>
+          <rect x="774.8" y="472" width="144" height="52" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(780.8 478) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="840.5" y="493" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">integration</text>
+          <text x="846.8" y="510" class="t-muted" font-size="8" text-anchor="middle">分支+main 候选 · 全量 Verify</text>
+        </g>
+        <g id="node-worker">
+          <rect x="304.8" y="590" width="144" height="68" rx="8" class="c-mask"/>
+          <rect x="304.8" y="590" width="144" height="68" rx="8" class="c-backend" stroke-width="1.5"/>
+          <g class="semantic-sigil s-backend" transform="translate(310.8 596) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text x="376.8" y="624.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">radian arc work</text>
+          <text x="376.8" y="639.1" class="t-muted" font-size="8" text-anchor="middle">合 main → radian exec → push</text>
+        <text x="376.8" y="651.9" class="t-backend" font-size="7" text-anchor="middle">workspace 沙箱</text>
+        </g>
+        <g id="node-review">
+          <rect x="452.79999999999995" y="724" width="148" height="52" rx="8" class="c-mask"/>
+          <rect x="452.79999999999995" y="724" width="148" height="52" rx="8" class="c-security" stroke-width="1.5"/>
+          <g class="semantic-sigil s-security" transform="translate(458.79999999999995 730) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text x="526.8" y="745" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">review</text>
+          <text x="526.8" y="762" class="t-muted" font-size="8" text-anchor="middle">只读 · 首轮 medium / 返工 low</text>
+        </g>
+        <g>
+          <rect x="233.09999999999997" y="604" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="266.9" y="614" class="t-edge-emphasis" font-size="8" text-anchor="middle">领取 attempt</text>
+        </g>
+        <g>
+          <rect x="511.79999999999995" y="425" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="526.8" y="435" class="t-edge-security" font-size="8" text-anchor="middle">失败</text>
+        </g>
+        <g>
+          <rect x="209.4" y="232" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="236" y="242" class="t-edge-emphasis" font-size="8" text-anchor="middle">confirmed</text>
+        </g>
+        <g>
+          <rect x="815.4" y="240" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="846.8" y="250" class="t-edge-dashed" font-size="8" text-anchor="middle">suggestions</text>
+        </g>
+        <g>
+          <rect x="667.4" y="236" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="698.8" y="246" class="t-muted" font-size="8" text-anchor="middle">等你 / 自动</text>
+        </g>
+        <g>
+          <rect x="815.4" y="425" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="846.8" y="435" class="t-edge-emphasis" font-size="8" text-anchor="middle">通过 · push</text>
+        </g>
+        <g>
+          <rect x="747.3" y="100" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="764.3" y="110" class="t-edge-emphasis" font-size="8" text-anchor="middle">merge</text>
+        </g>
+        <g>
+          <rect x="495.4" y="299" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="526.8" y="309" class="t-edge-dashed" font-size="8" text-anchor="middle">lead 读原因</text>
+        </g>
+        <g>
+          <rect x="167" y="148" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="184" y="158" class="t-muted" font-size="8" text-anchor="middle">draft</text>
+        </g>
+        <g>
+          <rect x="456.4" y="604" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="487.79999999999995" y="614" class="t-edge-emphasis" font-size="8" text-anchor="middle">push · 同时</text>
+        </g>
+        <g>
+          <rect x="383.4" y="737" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="414.79999999999995" y="747" class="t-edge-emphasis" font-size="8" text-anchor="middle">push · 同时</text>
+        </g>
+        <g>
+          <rect x="588.5999999999999" y="236" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="624.8" y="246" class="t-edge-security" font-size="8" text-anchor="middle">reject + 评语</text>
+        </g>
+        <g>
+          <rect x="36.400000000000006" y="148" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="63" y="158" class="t-muted" font-size="8" text-anchor="middle">交给 lead</text>
+        </g>
+        <g>
+          <rect x="347.8" y="484" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="376.8" y="494" class="t-edge-security" font-size="8" text-anchor="middle">失败可重试</text>
+        </g>
+        <g>
+          <rect x="286" y="352" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="305.4" y="362" class="t-edge-dashed" font-size="8" text-anchor="middle">到时间</text>
+        </g>
+        <g>
+          <rect x="299.79999999999995" y="784" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="350.4" y="794" class="t-edge-security" font-size="8" text-anchor="middle">blocking → 自动返工</text>
+        </g>
+        <g>
+          <rect x="620.8" y="730" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="649.8" y="740" class="t-edge-emphasis" font-size="8" text-anchor="middle">两项都通过</text>
+        </g>
+        <g>
+          <rect x="333.4" y="274" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="362.4" y="284" class="t-edge-dashed" font-size="8" text-anchor="middle">回到 ready</text>
+        </g>
+        <g>
+          <text x="20" y="812" class="t-primary" font-size="12" font-weight="650">图例</text>
+          <g>
+            <rect x="20" y="824" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
+            <text x="42" y="832" class="t-muted" font-size="7.5" font-weight="500">Agent 逻辑</text>
+          </g>
+          <g>
+            <rect x="117" y="824" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
+            <text x="139" y="832" class="t-muted" font-size="7.5" font-weight="500">策略</text>
+          </g>
+          <g>
+            <rect x="186" y="824" width="14" height="9" rx="2" class="c-messagebus" stroke-width="1"/>
+            <text x="208" y="832" class="t-muted" font-size="7.5" font-weight="500">工具操作</text>
+          </g>
+          <g>
+            <rect x="274" y="824" width="14" height="9" rx="2" class="c-database" stroke-width="1"/>
+            <text x="296" y="832" class="t-muted" font-size="7.5" font-weight="500">上下文 / 追踪</text>
+          </g>
+          <g>
+            <rect x="385" y="824" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
+            <text x="407" y="832" class="t-muted" font-size="7.5" font-weight="500">外部系统</text>
+          </g>
+        </g>
+      </svg>
+<!-- /flow-zh --></div>
+        <figcaption class="vcap"><span><span class="en">fig. 2 · one task from request to merge, as this repository runs it (the gate shown is this repository's own: fmt, clippy, tests)</span><span class="zh">图 2 · 一个任务从需求到合并，按这个仓库自己的跑法（图里的门禁是本仓库自己的：fmt、clippy、测试）</span></span></figcaption>
       </figure>
     </section>
   </div>

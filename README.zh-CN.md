@@ -67,7 +67,10 @@ arc 是一个程序，不是模型：计划由一个 lead 会话来写，跑什�
 一个需求是这样走完的：
 
 <p align="center">
-  <img src=".github/readme/arc-workflow-zh.webp" alt="arc：一个任务从需求到合并" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/arc-flow-zh-dark.png">
+    <img src=".github/readme/arc-flow-zh-light.png" alt="arc：一个任务从需求到合并" width="820">
+  </picture>
   <br><sub>一个任务从需求到合并，按这个仓库自己的跑法：图里的门禁（fmt、clippy、测试）是本仓库自己的。</sub>
 </p>
 

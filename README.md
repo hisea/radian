@@ -67,7 +67,10 @@ arc is a program, not a model: a lead session writes the plan, and you decide wh
 How a request moves:
 
 <p align="center">
-  <img src=".github/readme/arc-workflow-en.webp" alt="arc: one task from request to merge" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/arc-flow-en-dark.png">
+    <img src=".github/readme/arc-flow-en-light.png" alt="arc: one task from request to merge" width="820">
+  </picture>
   <br><sub>One task from request to merge, as this repository runs it: the gate shown (fmt, clippy, tests) is this repository's own.</sub>
 </p>
 
