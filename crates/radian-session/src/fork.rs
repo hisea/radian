@@ -420,12 +420,8 @@ mod tests {
     use crate::reader::Session;
     use crate::runtime::TurnOutcome;
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("radian-fork-seam-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(label: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-fork-seam", label)
     }
 
     /// A parent with one complete turn (two messages) and the boundary seq.
