@@ -30,10 +30,19 @@ pub fn start_time(pid: u32) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// Whether `pid` is alive **and** is the process that started at `started_at`. A live pid
-/// with another start time is a different process that reused the number.
-pub fn same_process(pid: u32, started_at: &str) -> bool {
-    start_time(pid).is_some_and(|start| start == started_at.trim())
+/// Whether the process a record names is still the one to signal. A recorded start time is
+/// compared with `ps`, so a reused pid is never signalled. When `ps` cannot report the time
+/// at all (the `workspace` sandbox refuses it), the pid alone decides, as ADR 0048 decision 9
+/// says: a live pid without a comparable start time is signalled rather than assumed gone.
+#[must_use]
+pub fn still_the_process(pid: u32, started_at: Option<&str>) -> bool {
+    match started_at.filter(|start| !start.is_empty()) {
+        Some(start) => match start_time(pid) {
+            Some(actual) => actual == start.trim(),
+            None => alive(pid),
+        },
+        None => alive(pid),
+    }
 }
 
 /// Whether `pid` exists, whatever it is running. This is `kill(pid, 0)`: a signal probe,
@@ -74,18 +83,25 @@ mod tests {
     use super::*;
 
     /// A reused pid is not the process the attempt recorded: the start time is compared too.
-    /// Mutation: drop the start-time comparison (return `start_time(pid).is_some()`) and this
-    /// fails.
+    /// Mutation: drop the start-time comparison (`start_time(pid).is_some()`) and this fails
+    /// where `ps` can answer.
     #[test]
     fn a_reused_pid_with_another_start_time_is_not_the_same_process() {
         let me = std::process::id();
-        let mine = start_time(me).expect("the test process has a start time");
-        assert!(same_process(me, &mine));
-        assert!(
-            !same_process(me, "Thu Jan  1 00:00:00 1970"),
-            "a live pid with another start time is another process"
-        );
-        assert!(!same_process(0, &mine));
+        // Without a recorded start time, the pid alone is the identity.
+        assert!(still_the_process(me, None));
+        assert!(!still_the_process(0, None));
+        // `ps` is read only where it can answer. A host that refuses it (the `workspace`
+        // sandbox) falls back to the pid alone above; the comparison is checked where `ps`
+        // reports, and `attempt::a_reused_pid_with_another_start_time_is_not_signalled`
+        // checks it with a `ps` the test controls.
+        if let Some(mine) = start_time(me) {
+            assert!(still_the_process(me, Some(&mine)));
+            assert!(
+                !still_the_process(me, Some("Thu Jan  1 00:00:00 1970")),
+                "a live pid with another start time is another process"
+            );
+        }
         // `alive` is the probe used where `ps` is refused, and needs no start time.
         assert!(alive(me));
         assert!(!alive(0));
