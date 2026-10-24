@@ -26,12 +26,12 @@
 //!
 //! Waiting for a person, a future `retry_at`, a worker, or a gate does not keep it running:
 //! the loop ends at the first pass that changes nothing. A one-shot `run` therefore exits
-//! after starting work; `--watch` is how the loop keeps collecting it. A task of a plan at
-//! `auto` `off` is never started or merged by `run`; its verification still advances.
+//! after starting work; `radian arc serve` is how the loop keeps collecting it. A task of a
+//! plan at `auto` `off` is never started or merged by `run`; its verification still advances.
 //!
 //! Every transition line is written through the caller's sink and flushed when the loop makes
-//! it; the summary of what waits on whom prints when the pass ends. `watch` repeats a pass
-//! after `--interval` seconds until SIGINT or SIGTERM, holds `runner.lock` the whole time, and
+//! it; the summary of what waits on whom prints when the pass ends. `serve` repeats a pass
+//! after its interval seconds until SIGINT or SIGTERM, holds `runner.lock` the whole time, and
 //! prints the summary only when it changed.
 //!
 //! Every line a loop prints also goes to `.radian/arc/loop.log`, each prefixed with an RFC 3339
@@ -51,7 +51,7 @@ use crate::store::{Error, PlanView, Store, plan_ops};
 /// only keeps a store that something else keeps rewriting from looping forever.
 pub const MAX_PASSES: u32 = 1000;
 
-/// The default wait between passes of `run --watch`, and the closed range it may have.
+/// The default wait between passes of `serve`, and the closed range it may have.
 pub const DEFAULT_INTERVAL_SECS: u64 = 30;
 pub const MIN_INTERVAL_SECS: u64 = 5;
 pub const MAX_INTERVAL_SECS: u64 = 3600;
@@ -73,19 +73,26 @@ pub const LOOP_LOG_MAX_BYTES: u64 = 1024 * 1024;
 /// Set once when writing `loop.log` failed, so one process prints one line, not one per pass.
 static LOG_WRITE_FAILED: AtomicBool = AtomicBool::new(false);
 
-/// Set by the SIGINT/SIGTERM handler a `watch` loop installs.
+/// Set by the SIGINT/SIGTERM handler a `serve` loop installs.
 static STOP: AtomicBool = AtomicBool::new(false);
 
-/// How many passes in a row may return the same error text before `watch` stops. A constant,
+/// How many passes in a row may return the same error text before `serve` stops. A constant,
 /// not a configuration key: a permanent error (a `config.toml` that cannot be read, a
 /// directory that cannot be written) would otherwise print the same line unattended all
-/// night.
+/// night. [`repeated_error_stop`] spells the line from it; the user manual and ADR 0048 quote
+/// the value, so change them with it.
 pub const REPEATED_ERROR_LIMIT: u32 = 3;
 
 /// The one line the loop's last pass reports instead of the repeated error; the CLI prints it
-/// with its usual `radian arc: ` prefix and exits `1`.
-pub const REPEATED_ERROR_STOP: &str = "the same error three passes in a row; stopping (fix it \
-                                        and start the loop again)";
+/// with its usual `radian arc: ` prefix and exits `1`. The count is [`REPEATED_ERROR_LIMIT`],
+/// so the line cannot drift from the constant.
+#[must_use]
+pub fn repeated_error_stop() -> String {
+    format!(
+        "the same error {REPEATED_ERROR_LIMIT} passes in a row; stopping (fix it and start the \
+         loop again)"
+    )
+}
 
 /// What one `run` did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -158,14 +165,14 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
 /// [`Exit`](crate::store::Exit) `0` through the caller.
 ///
 /// Three passes in a row that return the same error text stop the loop
-/// ([`REPEATED_ERROR_LIMIT`]): the loop reports [`REPEATED_ERROR_STOP`] instead of the third
+/// ([`REPEATED_ERROR_LIMIT`]): the loop reports [`repeated_error_stop`] instead of the third
 /// error, stops the gates the way a signal does (workers are left alone) and returns an error,
 /// so the caller exits `1`. A pass that succeeds, or a different error, starts the count again.
 ///
 /// # Errors
 ///
-/// The same as [`run`], and [`REPEATED_ERROR_STOP`] after three identical pass errors.
-pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> Result<(), Error> {
+/// The same as [`run`], and [`repeat_errors`] after three identical pass errors.
+pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> Result<(), Error> {
     let mut log = LoopLog::new(store);
     let lock = take_lock(store, &mut log)?;
     let mut sink = |text: &str| {
@@ -199,8 +206,8 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
                     _ => 1,
                 };
                 if count >= REPEATED_ERROR_LIMIT {
-                    stop_gates(store)?;
-                    return Err(Error::Failed(REPEATED_ERROR_STOP.to_owned()));
+                    stop_gates(store);
+                    return Err(Error::Failed(repeated_error_stop()));
                 }
                 sink(&format!("radian arc: {text}\n"));
                 repeated = Some((text, count));
@@ -220,20 +227,31 @@ pub fn watch(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
         }
     }
     if stop_requested() {
-        stop_gates(store)?;
+        stop_gates(store);
     }
     drop(lock);
     Ok(())
 }
 
-/// Stops the gates a watch loop leaves running: a short grace, then SIGKILL. Each gate arc
+/// Stops the gates a serve loop leaves running: a short grace, then SIGKILL. Each gate arc
 /// stopped records `interrupted`, so the next loop starts it again and counts no death.
-fn stop_gates(store: &Store) -> Result<(), Error> {
-    let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
-    for id in store.task_ids()? {
+///
+/// Best effort: the repeated-error stop may be running because `config.toml` itself cannot be
+/// read, so an unreadable config falls back to the default grace and an unreadable task list
+/// stops nothing. The caller then reports the stop line, not the config error.
+fn stop_gates(store: &Store) {
+    let grace = Duration::from_secs(
+        store
+            .config()
+            .map(|config| config.limits.cancel_grace_secs)
+            .unwrap_or_else(|_| crate::store::config::Limits::default().cancel_grace_secs),
+    );
+    let Ok(ids) = store.task_ids() else {
+        return;
+    };
+    for id in ids {
         crate::gate::background::stop(store, &id, grace);
     }
-    Ok(())
 }
 
 /// The writer of `.radian/arc/loop.log`: every line a scheduling loop prints, prefixed with an
@@ -415,7 +433,7 @@ fn wait_interval(interval_secs: u64) -> bool {
 }
 
 /// One pass. `true` when it changed a stored file, so the loop takes another pass. `stop`
-/// (the `--watch` signal flag) keeps the pass from starting an attempt or a merge once it is
+/// (the `serve` signal flag) keeps the pass from starting an attempt or a merge once it is
 /// set; work already running when it was set still ends normally.
 fn one_pass(
     store: &Store,
@@ -588,13 +606,18 @@ fn advance_verification(
                         // A review rework already counted itself and may have paused the plan;
                         // every other failure to `rework_pending` counts here (ADR 0048
                         // decisions 9 and 12). A conflict that reached its own limit is never
-                        // an automatic rework: it does not pause the plan.
+                        // an automatic rework: it does not pause the plan. Neither does a
+                        // failed reverify attempt, whether the loop or the owner started it.
                         let paused = match &verified.paused {
                             Some(paused) => Some(paused.clone()),
                             None if verified.phase == "rework_pending"
                                 && verified.conflict.is_none() =>
                             {
-                                attempt_ops::record_auto_rework(store, task_id)?
+                                if attempt_ops::is_reverify_attempt(store, task_id)? {
+                                    None
+                                } else {
+                                    attempt_ops::record_auto_rework(store, task_id)?
+                                }
                             }
                             None => None,
                         };
@@ -715,10 +738,10 @@ pub(crate) fn task_claim_order(store: &Store) -> Result<Vec<String>, Error> {
     Ok(ids)
 }
 
-/// Whether the task's plan is `cancelled`: the loop neither claims nor gates its tasks
-/// (ADR 0048 decisions 3 and 13).
+/// Whether the task's plan is `cancelled`, by its `status` or by its tasks: the loop neither
+/// claims nor gates its tasks (ADR 0048 decisions 3 and 13).
 fn plan_is_cancelled(store: &Store, plan: &str) -> Result<bool, Error> {
-    Ok(store.load_plan(plan)?.item.is_cancelled())
+    store.plan_is_cancelled(plan)
 }
 
 /// Every task in `review.rework_pending`, in claim order. A file that changed outside arc and
@@ -804,7 +827,7 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
     }
     // A claim only starts the wrapper: the wrapper owns the attempt's limits from here, and
     // this pass does not wait for it (ADR 0048 decisions 7.8 and 13). A thread waits for the
-    // child so a long `--watch` collects no zombie; the thread dies with this process, and
+    // child so a long `serve` collects no zombie; the thread dies with this process, and
     // the worker keeps running either way.
     let config = store.config()?;
     for (claim, task) in &claims {
@@ -852,8 +875,12 @@ fn merge_auto(
                         transitions.note(note);
                     }
                     let after = store.load_task(&task.item.id)?.item;
+                    // A failed integration of a worker attempt counts; the same failure of a
+                    // reverify attempt does not (ADR 0048 decisions 9 and 12).
+                    let reverify = attempt_ops::is_reverify_attempt(store, &task.item.id)?;
                     if after.state == TaskState::Review
                         && after.phase == "rework_pending"
+                        && !reverify
                         && let Some(paused) = attempt_ops::record_auto_rework(store, &task.item.id)?
                     {
                         transitions.push(format!("{} paused: {}", paused.plan, paused.text));
@@ -933,7 +960,7 @@ fn waiting(store: &Store) -> Result<Vec<String>, Error> {
     for view in plans_in_claim_order(store)? {
         let plan = &view.plan.item;
         // A cancelled plan waits on nothing: the loop never serves it again.
-        if plan.is_cancelled() {
+        if view.is_cancelled() {
             continue;
         }
         let open: Vec<&crate::store::Loaded<model::TaskFile>> = view

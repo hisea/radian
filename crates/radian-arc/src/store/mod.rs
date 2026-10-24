@@ -233,13 +233,50 @@ impl PlanView {
             .sum()
     }
 
-    /// Whether the plan is finished: it is not cancelled and every task is `done.merged`. A
-    /// plan with no tasks is not finished. This is the test `radian arc list` leaves a plan
-    /// out by, and the arc TUI's `done` view shares it.
+    /// Whether the plan is finished (ADR 0048 decision 3): it has at least one task, every
+    /// task is `done.merged` or `failed.cancelled`, and at least one is `done.merged`. A plan
+    /// with no tasks is never finished. This is the one finished rule: `radian arc list` and
+    /// the arc TUI's `done` view share it, and the `✓` plan mark reads it.
     pub fn is_finished(&self) -> bool {
-        !self.plan.item.is_cancelled()
-            && !self.tasks.is_empty()
-            && self.tasks.iter().all(|task| task.item.is_merged())
+        !self.tasks.is_empty()
+            && self
+                .tasks
+                .iter()
+                .all(|task| task.item.is_merged() || task.item.is_cancelled())
+            && self
+                .tasks
+                .iter()
+                .any(|task| task.item.state == model::TaskState::Done)
+    }
+
+    /// Whether the plan's own tasks say it was cancelled: it has at least one task and every
+    /// task is `failed.cancelled`. The plan file's `status` is not rewritten.
+    pub fn is_cancelled_by_tasks(&self) -> bool {
+        !self.tasks.is_empty() && self.tasks.iter().all(|task| task.item.is_cancelled())
+    }
+
+    /// Whether the plan is cancelled: its stored `status` is `cancelled`, or its tasks are all
+    /// `failed.cancelled` ([`PlanView::is_cancelled_by_tasks`]). The one cancelled rule `list`,
+    /// its `--json` form, the arc TUI's views and the plan mark share.
+    pub fn is_cancelled(&self) -> bool {
+        self.plan.item.is_cancelled() || self.is_cancelled_by_tasks()
+    }
+
+    /// The plan's progress as `(merged, total)`: the tasks that are `done.merged`, and the
+    /// tasks that are not `failed.cancelled`. A cancelled task is not work left to do, so it
+    /// is not in the total; a plan whose tasks are all cancelled reads `0/0`.
+    pub fn progress(&self) -> (usize, usize) {
+        let merged = self
+            .tasks
+            .iter()
+            .filter(|task| task.item.is_merged())
+            .count();
+        let total = self
+            .tasks
+            .iter()
+            .filter(|task| !task.item.is_cancelled())
+            .count();
+        (merged, total)
     }
 }
 
@@ -570,6 +607,25 @@ impl Store {
         Ok(PlanView { plan, tasks })
     }
 
+    /// Whether the plan is cancelled ([`PlanView::is_cancelled`]): its stored `status` is
+    /// `cancelled`, or its tasks are all `failed.cancelled`. Every command that changes a plan
+    /// or one of its tasks asks this one question first, because a cancelled plan is final
+    /// (ADR 0048 decisions 3 and 9).
+    pub fn plan_is_cancelled(&self, id: &str) -> Result<bool, Error> {
+        Ok(self.plan_view(id)?.is_cancelled())
+    }
+
+    /// Refuses the plan when it is cancelled ([`Store::plan_is_cancelled`]), naming its
+    /// status: the refusal every command that would change a plan or one of its tasks makes
+    /// before it writes anything (ADR 0048 decisions 3 and 9).
+    pub fn refuse_cancelled(&self, id: &str) -> Result<(), Error> {
+        let view = self.plan_view(id)?;
+        if view.is_cancelled() {
+            return Err(cancelled_plan(&view.plan.item.id));
+        }
+        Ok(())
+    }
+
     /// `show <id>`: the plan or the task the id names. An id that names both is refused.
     pub fn show(&self, id: &str) -> Result<Item, Error> {
         check_id(id)?;
@@ -667,44 +723,24 @@ impl Store {
     ) -> Result<String, Error> {
         check_new(slug, title)?;
         check_id(plan_id)?;
-        for stage in &extra_stages {
-            if !STAGE_NAMES.contains(&stage.as_str()) {
-                return Err(Error::Usage(format!(
-                    "`{stage}` is not a gate stage; stages are {}",
-                    STAGE_NAMES.join(", ")
-                )));
-            }
-        }
+        check_stages(&extra_stages)?;
         let _lock = self.lock_state()?;
         let plan = self.load_plan(plan_id)?;
         require_unchanged(plan_id, plan.changed_outside_arc)?;
+        // The tasks decide too: a plan whose tasks are all `failed.cancelled` is cancelled, so
+        // a task added here would bring a final plan back to life (ADR 0048 decisions 3 and 9).
+        self.refuse_cancelled(plan_id)?;
         let proposed = if plan.item.status == "draft" {
             false
         } else if plan.item.status == "confirmed" && allow_confirmed {
             true
-        } else if plan.item.is_cancelled() {
-            return Err(cancelled_plan(plan_id));
         } else {
             return Err(Error::Refused(format!(
                 "plan `{plan_id}` is `{}`; a confirmed plan gets no new tasks",
                 plan.item.status
             )));
         };
-        for dependency in &after {
-            check_id(dependency)?;
-            let dependency_path = self.path(Kind::Task, dependency);
-            let allowed = if dependency_path.is_file() {
-                let task = self.load_task(dependency)?;
-                task.item.plan == plan_id || task.item.state == model::TaskState::Done
-            } else {
-                false
-            };
-            if !allowed {
-                return Err(Error::Refused(format!(
-                    "`{dependency}` is neither a task of plan `{plan_id}` nor a done task"
-                )));
-            }
-        }
+        check_after(self, plan_id, None, &after)?;
         let id = self.next_id(Kind::Task, slug)?;
         let mut task = model::TaskFile::new(
             id.clone(),
@@ -756,6 +792,12 @@ impl Store {
     }
 
     /// Runs one state change on a plan under `state.lock`.
+    ///
+    /// This writes a plan in any state. Every command that changes a plan uses
+    /// [`Store::change_open_plan`] instead, which refuses a cancelled plan first; this one is
+    /// left for the cancel itself, which writes the final status, for `pause`, which only sets
+    /// `auto` to `off` on a plan that may already be final, and for arc's own `auto` write when
+    /// a budget or the automatic rework limit pauses a plan.
     pub fn change_plan(
         &self,
         id: &str,
@@ -765,6 +807,28 @@ impl Store {
         let loaded = self.load_plan(id)?;
         require_unchanged(id, loaded.changed_outside_arc)?;
         let mut item = loaded.item;
+        change(&mut item)?;
+        let version = self.next_version(Kind::Plan, id);
+        self.write_item(Kind::Plan, id, &item.to_text(), version)?;
+        Ok(version)
+    }
+
+    /// [`Store::change_plan`] for a plan a command may change: a plan that is cancelled
+    /// ([`Store::plan_is_cancelled`], its stored `status` or its tasks) is refused under the
+    /// same lock, before `change` runs, because a cancelled plan is final (ADR 0048 decisions
+    /// 3 and 9).
+    pub fn change_open_plan(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut model::PlanFile) -> Result<(), Error>,
+    ) -> Result<u64, Error> {
+        let _lock = self.lock_state()?;
+        let view = self.plan_view(id)?;
+        require_unchanged(id, view.plan.changed_outside_arc)?;
+        if view.is_cancelled() {
+            return Err(cancelled_plan(&view.plan.item.id));
+        }
+        let mut item = view.plan.item;
         change(&mut item)?;
         let version = self.next_version(Kind::Plan, id);
         self.write_item(Kind::Plan, id, &item.to_text(), version)?;
@@ -1063,8 +1127,26 @@ fn check_new(slug: &str, title: &str) -> Result<(), Error> {
             model::SLUG_MAX_CHARS
         )));
     }
+    check_title(title)
+}
+
+/// The title rule `add_task` and `update_task` share (ADR 0048 decision 11).
+pub(crate) fn check_title(title: &str) -> Result<(), Error> {
     if title.trim().is_empty() {
         return Err(Error::Usage("the title is empty".to_owned()));
+    }
+    Ok(())
+}
+
+/// The `extra_stages` rule `add_task` and `update_task` share (ADR 0048 decision 11).
+pub(crate) fn check_stages(stages: &[String]) -> Result<(), Error> {
+    for stage in stages {
+        if !STAGE_NAMES.contains(&stage.as_str()) {
+            return Err(Error::Usage(format!(
+                "`{stage}` is not a gate stage; stages are {}",
+                STAGE_NAMES.join(", ")
+            )));
+        }
     }
     Ok(())
 }
@@ -1072,6 +1154,53 @@ fn check_new(slug: &str, title: &str) -> Result<(), Error> {
 fn require_unchanged(id: &str, changed: bool) -> Result<(), Error> {
     if changed {
         return Err(Error::ChangedOutsideArc(id.to_owned()));
+    }
+    Ok(())
+}
+
+/// The `after` rules `add_task` and `update_task` share (ADR 0048 decision 11): every id is
+/// well-formed and names a task of `plan_id` or a `done` task, a task never waits on itself,
+/// and the new list makes no `after` cycle.
+///
+/// `task_id` is the task whose list is being set; `None` for a task that does not exist yet,
+/// which can have no incoming edge and so cannot complete a cycle. The cycle test walks the
+/// list's tasks with [`chain::chain`], the one walk of the graph `show` and `confirm` report.
+pub(crate) fn check_after(
+    store: &Store,
+    plan_id: &str,
+    task_id: Option<&str>,
+    after: &[String],
+) -> Result<(), Error> {
+    for dependency in after {
+        check_id(dependency)?;
+        if task_id == Some(dependency.as_str()) {
+            return Err(Error::Refused(format!(
+                "`{dependency}` is the task itself; a task cannot wait on itself"
+            )));
+        }
+        let allowed = if store.path(Kind::Task, dependency).is_file() {
+            let task = store.load_task(dependency)?;
+            task.item.plan == plan_id || task.item.state == model::TaskState::Done
+        } else {
+            false
+        };
+        if !allowed {
+            return Err(Error::Refused(format!(
+                "`{dependency}` is neither a task of plan `{plan_id}` nor a done task"
+            )));
+        }
+    }
+    let Some(task_id) = task_id else {
+        return Ok(());
+    };
+    for dependency in after {
+        let chain = chain::chain(store, dependency)?;
+        if chain.waits_on.iter().any(|entry| entry.id == task_id) {
+            return Err(Error::Refused(format!(
+                "`{task_id}` cannot wait on `{dependency}`: `{dependency}` already waits on \
+                 `{task_id}`, so `after` would cycle"
+            )));
+        }
     }
     Ok(())
 }

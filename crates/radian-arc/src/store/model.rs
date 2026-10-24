@@ -222,7 +222,10 @@ pub struct PlanFile {
 }
 
 impl PlanFile {
-    /// Whether the plan is `cancelled`: a final state no owner or lead command changes.
+    /// Whether the stored `status` is `cancelled`: a final state no owner or lead command
+    /// changes. A plan is cancelled by its tasks too, when every task is `failed.cancelled`
+    /// ([`crate::store::PlanView::is_cancelled`]); commands ask that question through
+    /// [`crate::store::Store::plan_is_cancelled`], not this one.
     pub fn is_cancelled(&self) -> bool {
         self.status == "cancelled"
     }
@@ -359,8 +362,9 @@ pub struct TaskFile {
     /// How many reworks arc counted while the plan's `auto` level was not `off`
     /// (`[limits] max_auto_rework`).
     pub auto_rework: u32,
-    /// How many retries arc started since the task's last rework. `max_attempts` counts
-    /// this, not the attempt number; every rework sets it back to `0`.
+    /// How many retries arc started since the task's last lead or review rework. `max_attempts`
+    /// counts this, not the attempt number; a lead or review rework sets it back to `0`, and a
+    /// conflict rework keeps it.
     pub retry_count: u32,
     pub allow_noop: bool,
     /// Gate stages this brief adds to the profile's.
@@ -383,11 +387,17 @@ pub struct TaskFile {
 }
 
 impl TaskFile {
-    /// Whether the task is `done.merged`: the one state a finished plan is counted by and the
-    /// default `radian arc list` hides. The plan-finished rule and every per-task test read
-    /// this, so they cannot drift apart.
+    /// Whether the task is `done.merged`: the one state a finished plan counts as done and
+    /// the default `radian arc list` hides. The plan-finished rule and every per-task test
+    /// read this, so they cannot drift apart.
     pub fn is_merged(&self) -> bool {
         self.state == TaskState::Done && self.phase == "merged"
+    }
+
+    /// Whether the task is `failed.cancelled`: the owner ended it. It stays visible, and it is
+    /// not counted in its plan's progress.
+    pub fn is_cancelled(&self) -> bool {
+        self.state == TaskState::Failed && self.phase == "cancelled"
     }
 
     /// The task's running total: its stored `total_cost_usd`, or its `cost_usd` for a file

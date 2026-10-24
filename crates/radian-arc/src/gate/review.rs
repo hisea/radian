@@ -498,7 +498,7 @@ impl ReviewRun<'_> {
             let _ = stdin.write_all(prompt.as_bytes());
         }
         let deadline = (!self.timeout.is_zero()).then(|| Instant::now() + self.timeout);
-        // A stop from `--watch` reaches the session's group, not only the gate.
+        // A stop from `serve` reaches the session's group, not only the gate.
         #[cfg(unix)]
         let mut running = super::stage::Running::track(child.id());
         let (status, timed_out) = loop {

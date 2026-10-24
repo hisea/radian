@@ -471,7 +471,7 @@ pub fn start(store: &Store, task: &str, start: &Start) -> Result<Option<u32>, Er
     let pid = child.id();
     remember_pid(store, task, pid);
     // The parent's copy goes now; the child's keeps the lock. A thread waits for the child so
-    // a long `--watch` run does not collect zombies; the thread dies with this process, and
+    // a long `serve` run does not collect zombies; the thread dies with this process, and
     // the child keeps running either way.
     drop(file);
     std::thread::spawn(move || {
@@ -521,7 +521,7 @@ fn remember_pid(store: &Store, task: &str, pid: u32) {
 
 /// Signals the task's gate and gives it `grace` before SIGKILL, then records that arc stopped
 /// it (`interrupted`), so the next pass starts it again and counts no death (ADR 0048
-/// decision 10). A `--watch` loop calls this once it stops.
+/// decision 10). A `serve` loop calls this once it stops.
 ///
 /// A gate is stopped when its record says `running`, and also when the record still says
 /// `started` and the gate lock is held: a gate started just before the signal has not written
@@ -655,7 +655,7 @@ pub fn run(options: Options) -> i32 {
         eprintln!("radian arc gate: {}", error.message());
         return 1;
     }
-    // A `--watch` stop reaches this process; its stage child must get it too, or the child
+    // A `serve` stop reaches this process; its stage child must get it too, or the child
     // would keep writing in the checkout after the gate is gone.
     stage::install_handler();
     match run_inner(&options) {

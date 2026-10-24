@@ -2900,7 +2900,7 @@ fn a_gate_rerun_gets_a_fresh_review_session_and_keeps_the_first_journal() {
     fs::remove_file(&verdict_path).expect("the review verdict is removed");
     fixture.set_verifying(&head);
 
-    let second = FakeReview::new(
+    let second = FakeReview::with_session_echo(
         "review-rerun-second",
         &[review_message("second pass", &[], &[])],
         0,
@@ -2941,7 +2941,11 @@ fn a_gate_rerun_gets_a_fresh_review_session_and_keeps_the_first_journal() {
     );
     let verdict = fixture.verdict(&attempt, Stage::Review);
     assert_eq!(verdict.result, VerdictResult::Pass);
-    assert!(!verdict.review_session_ids.is_empty());
+    assert_eq!(
+        verdict.review_session_ids,
+        vec![format!("{attempt}-review-1-1")],
+        "the verdict names the session the re-run asked for"
+    );
     let _ = fs::remove_dir_all(session_dir.path());
 }
 
@@ -3648,6 +3652,81 @@ fn a_review_rework_at_the_auto_rework_limit_pauses_the_plan() {
     assert!(reason.contains("automatic reworks"), "{reason}");
 }
 
+/// A reverify attempt whose `review` stage fails at `max_auto_rework` does not count: the
+/// task stays in `review.rework_pending`, the plan's `auto` stays as it was, and no review
+/// rework is written (ADR 0048 decisions 9 and 12). Mutation: count it and the plan pauses at
+/// `off`.
+#[test]
+fn a_reverify_whose_review_fails_does_not_count_as_an_auto_rework() {
+    let fixture = Fixture::new("review-reverify-no-count");
+    fixture.add_review_stage();
+    fixture.set_auto("merge");
+    // The worker attempt fails its commands stage, so the task waits for a reverify.
+    fixture.commands(&["false"]);
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let unused = FakeReview::new(
+        "review-reverify-no-count-unused",
+        &[review_object_message("unused", &[], &[])],
+        0,
+    );
+    let first = fixture.verifying_with_review(&head, unused.program());
+    assert_eq!(first.phase, "rework_pending", "{first:?}");
+
+    // The task is at the limit the worker's own reworks would have reached, and the
+    // reverify's commands stage passes this time: only the review blocks.
+    fixture
+        .store
+        .change_task(&fixture.task, |task| {
+            task.auto_rework = 2;
+            Ok(())
+        })
+        .expect("the count");
+    fixture.tune("commands = [\"false\"]", "commands = [\"true\"]");
+    let fake = FakeReview::new(
+        "review-reverify-no-count-fake",
+        &[review_object_message(
+            "the change adds one.txt",
+            &[review_item("major", "one.txt", 1, "the line is wrong")],
+            &[],
+        )],
+        0,
+    );
+    let reverified = review::reverify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("reverify");
+    assert_eq!(reverified.attempt_id, format!("{}-2", fixture.task));
+    let verified = reverified.verification.expect("the verification ran");
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("review", "rework_pending"),
+        "{verified:?}"
+    );
+    assert!(verified.paused.is_none(), "{verified:?}");
+    assert!(
+        verified.review.is_none(),
+        "a review rework was written: {verified:?}"
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.auto_rework, 2, "the failed reverify counted");
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&stored.plan)
+            .expect("the plan")
+            .item
+            .auto,
+        "merge",
+        "the plan paused on the failed reverify"
+    );
+    assert!(
+        !stored.body.contains("## Rework"),
+        "a review rework was written: {}",
+        stored.body
+    );
+    assert_eq!(stored.attempt, 2);
+    let reason = review::rework_reason(&fixture.store, &stored).expect("a reason");
+    assert!(reason.contains("review: review_blocking"), "{reason}");
+}
+
 // ---- the review's follow-up task (ADR 0048 decision 10) ------------------------------
 
 /// A review verdict arc never writes itself: a pass whose report lists `blocking` items. A
@@ -3907,10 +3986,29 @@ fn a_followup_attempt_ends_its_brief_with_the_worker_brief() {
     }
     let output = child.wait_with_output().expect("wait for radian arc work");
     let captured = fs::read_to_string(&capture).expect("the worker read stdin");
+    // The verdict is a copy in the worktree, so the brief the worker reads names that copy
+    // (ADR 0048 decision 7).
+    let (verdict_path, _) =
+        review::latest_review_verdict(&fixture.store, &fixture.task).expect("the review verdict");
+    let copy = format!(
+        ".radian/arc-verdicts/{}/{}-1/review.json",
+        fixture.task, fixture.task
+    );
+    let expected = brief.replacen(&verdict_path.display().to_string(), &copy, 1);
     assert!(
-        captured.starts_with(brief.trim()),
+        captured.starts_with(expected.trim()),
         "the follow-up text comes first:\n{captured}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fixture
+            .repo
+            .repo
+            .join(".radian/arc/worktrees")
+            .join(&followup)
+            .join(&copy)
+            .is_file(),
+        "the verdict copy is in the worktree"
     );
     let footer = fs::read_to_string(fixture.store.root().join("worker-brief.md"))
         .expect("init wrote the default worker brief");

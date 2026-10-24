@@ -1303,7 +1303,9 @@ fn start_still_refuses_paused_budget_and_failed_tasks() {
     let repo = Repo::new("start-refused-states");
     Store::init(&repo.clone, false).expect("arc init");
     let store = Store::open(&repo.clone).expect("open");
-    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    // The second task keeps the plan out of the cancelled rule while the first one is
+    // `failed.cancelled`, so the refusal is the task's own state.
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work", "other"]);
     let task = &tasks[0];
     for (task_state, phase) in [
         (TaskState::Todo, "paused_budget"),
@@ -1901,6 +1903,83 @@ fn a_cancelled_plan_refuses_every_command_that_would_change_it() {
     assert!(update_plan.contains("cancelled"), "{update_plan}");
     let add_rework = call("add_rework", json!({"task": task, "brief": "again"}));
     assert!(add_rework.contains("cancelled"), "{add_rework}");
+}
+
+/// A plan whose tasks are all `failed.cancelled` is cancelled by its tasks (ADR 0048 decision
+/// 3), and it is final exactly as a plan whose `status` says so: `cancel`, `confirm` and its
+/// dry run, `auto`, `priority`, `reset-budget`, `start`, `add task`, and the MCP `add_task`,
+/// `update_plan` and `add_rework` tools refuse it. No task added later can make it active
+/// again, so its file's `status` is never rewritten either.
+#[test]
+fn a_plan_its_tasks_cancelled_refuses_every_command_that_would_change_it() {
+    let (_repo, store) = setup("cancel-by-tasks");
+    let plan = new_plan(&store, "plan");
+    let first = new_task(&store, &plan, "one", &[]);
+    let second = new_task(&store, &plan, "two", &[]);
+    for id in [&first, &second] {
+        attempt::cancel(&store, id).expect("each task cancels on its own");
+    }
+    assert!(
+        !plan_is(&store, &plan, "cancelled"),
+        "the plan's status is not rewritten"
+    );
+    assert!(
+        store
+            .plan_view(&plan)
+            .expect("the plan reads")
+            .is_cancelled_by_tasks(),
+        "the tasks cancel the plan"
+    );
+
+    let refusals = [
+        attempt::cancel_any(&store, &plan).expect_err("cancel"),
+        plan_ops::confirm(&store, &plan).expect_err("confirm"),
+        plan_ops::confirm_dry_run(&store, &plan).expect_err("confirm --dry-run"),
+        plan_ops::set_auto(&store, &plan, "run").expect_err("auto"),
+        plan_ops::set_priority(&store, &plan, "P1").expect_err("priority"),
+        store
+            .add_task(&plan, "new", "New", vec![], false, vec![], "brief")
+            .expect_err("add task"),
+        store
+            .add_task_proposed(&plan, "mcp", "M", vec![], false, vec![], "brief")
+            .expect_err("the lead's add task"),
+        attempt_ops::reset_budget(&store, &plan).expect_err("reset-budget"),
+        attempt::start(&store, &first).expect_err("start"),
+    ];
+    for error in refusals {
+        assert_eq!(error.exit(), Exit::State, "{}", error.message());
+        assert!(error.message().contains("cancelled"), "{}", error.message());
+    }
+
+    let server = radian_arc::mcp::ArcServer::new(store.clone());
+    let call = |name: &str, arguments: serde_json::Value| {
+        server
+            .dispatch(name, arguments.as_object().cloned())
+            .expect_err("the tool refuses")
+    };
+    let add_task = call(
+        "add_task",
+        json!({"plan": plan, "slug": "mcp", "title": "T", "brief": "b"}),
+    );
+    assert!(add_task.contains("cancelled"), "{add_task}");
+    let update_plan = call(
+        "update_plan",
+        json!({"plan": plan, "change_record": "a change"}),
+    );
+    assert!(update_plan.contains("cancelled"), "{update_plan}");
+    let add_rework = call("add_rework", json!({"task": second, "brief": "again"}));
+    assert!(add_rework.contains("cancelled"), "{add_rework}");
+
+    let view = store.plan_view(&plan).expect("the plan reads");
+    assert_eq!(view.tasks.len(), 2, "no task was added");
+    assert!(
+        view.is_cancelled(),
+        "the plan is still cancelled by its tasks"
+    );
+    assert!(
+        !plan_is(&store, &plan, "cancelled"),
+        "no command rewrote the status"
+    );
 }
 
 /// Reconcile after a restart: a live wrapper is left alone; a finished wrapper's result is

@@ -1153,16 +1153,28 @@ fn auto_reverify_cause(
 
 /// Whether a scheduling pass could still leave this `review.rework_pending` task by itself
 /// (ADR 0048 decision 9): the stored side of [`auto_reverify`] holds, `[limits]
-/// max_auto_reverify` is not `0`, and the task has not used its count.
+/// max_auto_reverify` is not `0`, the task has not used its count, and the
+/// `(head_sha, main the failing verdict recorded)` pair was not re-verified already.
 ///
 /// It does not ask the remote for main. The pass also needs main to have moved, and this answer
 /// is what the arc TUI's board reads for every card on each two-second refresh: a frame never
-/// runs git. A `false` therefore means that no automatic reverify is coming.
+/// runs git. A `false` therefore means that no automatic reverify is coming. A pair already in
+/// [`AUTO_REVERIFY_FILE`] was re-verified against the recorded main: only a move past it could
+/// make a pass act again, and the frame cannot see that.
 #[must_use]
 pub fn auto_reverify_pending(store: &Store, task_id: &str) -> bool {
-    let Ok(Some(_)) = auto_reverify_stored_cause(store, task_id) else {
+    let Ok(Some((task, recorded_main))) = auto_reverify_stored_cause(store, task_id) else {
         return false;
     };
+    let head = task.head_sha.clone().unwrap_or_default();
+    let record = read_auto_reverify(store, task_id);
+    if record
+        .reverified
+        .iter()
+        .any(|pair| pair.head_sha == head && pair.main_sha == recorded_main)
+    {
+        return false;
+    }
     let Ok(config) = store.config() else {
         return false;
     };
@@ -1170,7 +1182,6 @@ pub fn auto_reverify_pending(store: &Store, task_id: &str) -> bool {
     if max == 0 {
         return false;
     }
-    let record = read_auto_reverify(store, task_id);
     (record.reverified.len() as u64) < u64::from(max)
 }
 
@@ -1181,6 +1192,11 @@ pub fn auto_reverify_pending(store: &Store, task_id: &str) -> bool {
 fn recorded_failure_main(store: &Store, task: &model::TaskFile) -> Result<Option<String>, Error> {
     let label = attempt_label(task)?;
     let dir = attempt_dir(store.repo(), &task.id, &label).map_err(gate_error)?;
+    // The owner's reject note is a decision about the work, not a wrong gate (decision 11):
+    // no automatic reverify follows it, whatever the attempt's older records say.
+    if dir.join(REJECT_FILE).is_file() {
+        return Ok(None);
+    }
     let Ok(text) = fs::read_to_string(dir.join(REVIEW_FILE)) else {
         return Ok(None);
     };
@@ -1543,8 +1559,9 @@ fn conflict_rework_brief(conflict: &Conflict) -> String {
 /// the next attempt's brief, or pauses the plan at `max_auto_rework` and leaves the task in
 /// `review.rework_pending`.
 ///
-/// `None` when the verdict is not a review failure with blocking items, or the plan is at
-/// `auto` `off`: the caller then keeps the path to `review.rework_pending`.
+/// `None` when the verdict is not a review failure with blocking items, the plan is at
+/// `auto` `off`, or the attempt is a worker-less reverify (its failure never counts, decision
+/// 9): the caller then keeps the path to `review.rework_pending`.
 fn review_auto_rework(
     store: &Store,
     task: &model::TaskFile,
@@ -1562,6 +1579,12 @@ fn review_auto_rework(
     }
     let plan = store.load_plan(&task.plan)?;
     if plan.changed_outside_arc || plan.item.auto == "off" {
+        return Ok(None);
+    }
+    // A reverify attempt's gate does not count toward `auto_rework`, even when its `review`
+    // stage is the one that failed (ADR 0048 decisions 9 and 12): the task keeps the path to
+    // `review.rework_pending`, and no review rework is written.
+    if crate::store::attempt_ops::is_reverify_attempt(store, &task.id)? {
         return Ok(None);
     }
     // The count lives in `review.rework_pending`, where the pause rule and `show` read it

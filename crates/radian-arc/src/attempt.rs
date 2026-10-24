@@ -104,11 +104,9 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
     }
     let task = loaded.item;
     // A cancelled plan is final: none of its tasks starts or resumes verification (ADR 0048
-    // decisions 3 and 9).
-    let plan = store.load_plan(&task.plan)?;
-    if plan.item.is_cancelled() {
-        return Err(crate::store::cancelled_plan(&task.plan));
-    }
+    // decisions 3 and 9). The plan's tasks decide too, so a plan whose tasks are all
+    // `failed.cancelled` refuses its tasks the same way.
+    store.refuse_cancelled(&task.plan)?;
     if task.state == model::TaskState::Review && task.phase == "verifying" {
         return Ok(Started {
             reconciled: Vec::new(),
@@ -424,10 +422,11 @@ pub fn cancel_plan(store: &Store, plan_id: &str) -> Result<PlanCanceled, Error> 
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(plan_id.to_owned()));
     }
-    if loaded.item.is_cancelled() {
-        return Err(crate::store::cancelled_plan(plan_id));
-    }
+    // The plan form refuses a plan that is cancelled by its tasks as it refuses one whose
+    // `status` says so: nothing is left to cancel, and a cancelled plan is final.
+    store.refuse_cancelled(plan_id)?;
     store.change_plan(plan_id, |plan| {
+        // The stored status, re-read under the lock.
         if plan.is_cancelled() {
             return Err(crate::store::cancelled_plan(&plan.id));
         }
@@ -644,7 +643,7 @@ pub fn end_reconciling_of_cancelled_plans(store: &Store) -> Result<Vec<String>, 
         if loaded.changed_outside_arc
             || loaded.item.state != model::TaskState::Doing
             || loaded.item.phase != "reconciling"
-            || !store.load_plan(&loaded.item.plan)?.item.is_cancelled()
+            || !store.plan_is_cancelled(&loaded.item.plan)?
         {
             continue;
         }

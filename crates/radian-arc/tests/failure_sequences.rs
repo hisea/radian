@@ -458,6 +458,18 @@ fn move_main(repo: &Repo, current: &str, one: &str, other: &str) -> String {
     next.to_owned()
 }
 
+/// Puts the remote main back at `base`, where each sequence's own belief starts. Without this a
+/// sequence after one that moved main writes verdicts for a `main_sha` the remote does not have,
+/// which can start an unscripted automatic reverify.
+fn reset_main(repo: &Repo, base: &str) {
+    repo.git(&[
+        "push",
+        "--force",
+        "origin",
+        &format!("{base}:refs/heads/main"),
+    ]);
+}
+
 /// Applies one gate outcome (except a death) and returns the verification's state.
 fn apply_gate_outcome(
     store: &Store,
@@ -539,11 +551,13 @@ fn apply_gate_outcome(
     // remote a second time; `finish_verification` is the pass's own state move.
     clear_gate_record(store, task);
     let verified = review::finish_verification(store, &plan)?;
-    // `run.rs`'s hook: a verification that ended in `review.rework_pending` without a conflict
-    // counts one automatic rework (`review_auto_rework` already counted its own pause).
+    // `run.rs`'s hook: a verification of a worker attempt that ended in `review.rework_pending`
+    // without a conflict counts one automatic rework (`review_auto_rework` already counted its
+    // own pause); a failed reverify attempt does not count (ADR 0048 decisions 9 and 12).
     if verified.phase == "rework_pending"
         && verified.conflict.is_none()
         && verified.paused.is_none()
+        && !attempt_ops::is_reverify_attempt(store, task)?
     {
         attempt_ops::record_auto_rework(store, task)?;
     }
@@ -717,6 +731,7 @@ fn run_sequence(
     plan_ops::confirm(store, &plan).expect("confirm");
     plan_ops::set_auto(store, &plan, "run").expect("auto run");
     push_ref(repo, &format!("seq-{sequence}:refs/heads/work/{task}"));
+    reset_main(repo, base);
     let mut main = base.to_owned();
     let bound = limits.bound(script);
     let mut log = Vec::new();
@@ -863,12 +878,25 @@ fn describe(store: &Store, task: &str) -> String {
 /// The config the sequences run under: the `commands` and `review` stages, short limits, and
 /// `auto` `run` (the model never merges).
 fn configure(repo: &Repo) {
+    const DEFAULT_STAGES: &str = "stages = [{ stage = \"commands\", required = true }, \
+                                  { stage = \"human\", required = true }]";
     let path = repo.arc().join("config.toml");
     let text = fs::read_to_string(&path).expect("config.toml");
+    // Assert every template this function rewrites is still there: a silent miss would drop
+    // the `review` stage (and all its coverage) or leave a limit the bound is not written for.
+    for template in [
+        DEFAULT_STAGES,
+        "max_conflict_rework = 3",
+        "max_gate_deaths = 2",
+    ] {
+        assert!(
+            text.contains(template),
+            "config.toml no longer holds `{template}`:\n{text}"
+        );
+    }
     let text = text
         .replace(
-            "stages = [{ stage = \"commands\", required = true }, { stage = \"human\", \
-             required = true }]",
+            DEFAULT_STAGES,
             "stages = [{ stage = \"commands\", required = true }, { stage = \"review\", \
              required = true }, { stage = \"human\", required = true }]",
         )

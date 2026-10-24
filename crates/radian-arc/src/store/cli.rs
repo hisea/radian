@@ -28,6 +28,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "merge",
     "reject",
     "run",
+    "serve",
     "mcp",
 ];
 
@@ -85,9 +86,12 @@ pub enum Command {
     Merge { task: String },
     /// `radian arc reject <task> --note <text>`: send a task back to rework.
     Reject { task: String, note: String },
-    /// `radian arc run [--watch [--interval <seconds>]]`: one pass, or a loop that repeats a
-    /// pass until SIGINT or SIGTERM.
-    Run { watch: bool, interval: u64 },
+    /// `radian arc run`: one pass, then exit. A pass only schedules: a worker and a gate run
+    /// outside it and a later pass collects them.
+    Run,
+    /// `radian arc serve [--interval <seconds>]`: the scheduling loop, a pass repeated until
+    /// SIGINT or SIGTERM.
+    Serve { interval: u64 },
     /// `radian arc mcp`: the lead's MCP server on standard input and output.
     Mcp,
 }
@@ -118,7 +122,8 @@ pub fn run(command: &Command) -> u8 {
         Command::ResetBudget { id } => reset_budget(id),
         Command::Merge { task } => merge(task),
         Command::Reject { task, note } => reject(task, note),
-        Command::Run { watch, interval } => run_loop(*watch, *interval),
+        Command::Run => run_loop(),
+        Command::Serve { interval } => serve_loop(*interval),
         Command::Mcp => mcp(),
     };
     match result {
@@ -248,8 +253,9 @@ fn add_task(
 fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
     let store = open()?;
     if json {
-        // `--json` follows the text filter for cancelled plans: `--all` adds them. A plan
-        // named with `--plan` is always shown. Scripts and the MCP `list` tool read it.
+        // `--json` follows the text filter for cancelled plans (by status or by their tasks):
+        // `--all` adds them. A plan named with `--plan` is always shown. Scripts and the MCP
+        // `list` tool read it.
         let value = list_json(&store, plan, all)?;
         return Ok(format!(
             "{}\n",
@@ -268,9 +274,9 @@ fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
 }
 
 /// The text `radian arc list` prints (ADR 0048 decision 1, `list`). Unless `all`, a task in
-/// `done.merged`, a plan whose tasks are all merged, and a `cancelled` plan are left out, and
-/// the last line counts what was left out. A plan with no tasks is shown too. Every other
-/// state, `failed.*` included, stays visible.
+/// `done.merged`, a finished plan, and a cancelled plan are left out, and the last line counts
+/// what was left out. A plan with no tasks is shown too. Every other state, `failed.*`
+/// included, stays visible.
 pub fn list_text(views: &[PlanView], all: bool) -> String {
     render(views, all, false)
 }
@@ -290,9 +296,9 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
     let mut hidden_cancelled = 0usize;
     let mut hidden_tasks = 0usize;
     for view in views {
-        let merged = view.tasks.iter().filter(|task| is_merged(task)).count();
+        let (merged, total) = view.progress();
         let finished = view.is_finished();
-        if !all && !named && view.plan.item.is_cancelled() {
+        if !all && !named && view.is_cancelled() {
             hidden_cancelled += 1;
             hidden_tasks += merged;
             continue;
@@ -309,7 +315,7 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
             view.plan.item.auto,
             view.plan.item.priority(),
             merged,
-            view.tasks.len(),
+            total,
             cost_text(view.total_cost_usd()),
             view.plan.item.title,
             changed_marker(view.plan.changed_outside_arc)
@@ -950,39 +956,49 @@ fn reject(task: &str, note: &str) -> Result<u8, Error> {
     Ok(emit(format!("{}\n", rejected.line())))
 }
 
-/// `radian arc run`: the scheduling loop without a TUI. A pass makes every transition it can
-/// make now; without `--watch` it prints the summary and exits when nothing more can happen
-/// now. With `--watch` it repeats the pass every `interval` seconds until SIGINT or SIGTERM.
+/// `radian arc run`: one pass of the scheduling loop. A pass makes every transition it can
+/// make now, prints the summary, and exits when nothing more can happen now.
 ///
-/// A transition line is written and flushed when the loop makes it; the summary when a pass
-/// ends (only when it changed, with `--watch`). A closed stdout stops the printing and is a
-/// normal stop (exit `0`), as every other print-and-exit command of this binary treats it.
-fn run_loop(watch: bool, interval: u64) -> Result<u8, Error> {
+/// A transition line is written and flushed when the loop makes it; the summary when the pass
+/// ends. A closed stdout stops the printing and is a normal stop (exit `0`), as every other
+/// print-and-exit command of this binary treats it.
+fn run_loop() -> Result<u8, Error> {
     let store = open()?;
     let failed = std::cell::Cell::new(false);
-    if watch {
-        let mut emit = |text: &str| match radian_host::write_stdout(text) {
-            Ok(()) => {}
-            // The reader of a foreground loop is gone (`... | head`): stop now, as a closed
-            // pipe stops every other print-and-exit command with exit `0`.
-            Err(radian_host::StdoutError::BrokenPipe) => std::process::exit(Exit::Ok.code().into()),
-            Err(error) => {
-                eprintln!("radian arc: cannot write to stdout: {error}");
-                failed.set(true);
-            }
-        };
-        crate::run::watch(&store, interval, &mut emit)?;
+    let mut emit = |text: &str| {
+        if let Err(error) = radian_host::write_stdout(text)
+            && !matches!(error, radian_host::StdoutError::BrokenPipe)
+        {
+            eprintln!("radian arc: cannot write to stdout: {error}");
+            failed.set(true);
+        }
+    };
+    crate::run::run(&store, &mut emit)?;
+    Ok(if failed.get() {
+        Exit::Error.code()
     } else {
-        let mut emit = |text: &str| {
-            if let Err(error) = radian_host::write_stdout(text)
-                && !matches!(error, radian_host::StdoutError::BrokenPipe)
-            {
-                eprintln!("radian arc: cannot write to stdout: {error}");
-                failed.set(true);
-            }
-        };
-        crate::run::run(&store, &mut emit)?;
-    }
+        Exit::Ok.code()
+    })
+}
+
+/// `radian arc serve [--interval <seconds>]`: the scheduling loop, until SIGINT or SIGTERM
+/// (ADR 0048 §13). A transition line is written and flushed when the loop makes it; the
+/// summary only when it changed. A closed stdout stops the printing and is a normal stop
+/// (exit `0`), as every other print-and-exit command of this binary treats it.
+fn serve_loop(interval: u64) -> Result<u8, Error> {
+    let store = open()?;
+    let failed = std::cell::Cell::new(false);
+    let mut emit = |text: &str| match radian_host::write_stdout(text) {
+        Ok(()) => {}
+        // The reader of a foreground loop is gone (`... | head`): stop now, as a closed pipe
+        // stops every other print-and-exit command with exit `0`.
+        Err(radian_host::StdoutError::BrokenPipe) => std::process::exit(Exit::Ok.code().into()),
+        Err(error) => {
+            eprintln!("radian arc: cannot write to stdout: {error}");
+            failed.set(true);
+        }
+    };
+    crate::run::serve(&store, interval, &mut emit)?;
     Ok(if failed.get() {
         Exit::Error.code()
     } else {
@@ -999,7 +1015,8 @@ fn mcp() -> Result<u8, Error> {
 }
 
 /// `radian arc list --json`'s document, for the CLI and the MCP `list` tool. Unless `all`, a
-/// `cancelled` plan is left out; a plan named with `plan` is always included.
+/// cancelled plan is left out (by its `status` or by all its tasks being `failed.cancelled`);
+/// a plan named with `plan` is always included.
 pub fn list_json(store: &Store, plan: Option<&str>, all: bool) -> Result<serde_json::Value, Error> {
     let views = match plan {
         Some(id) => vec![store.plan_view(id)?],
@@ -1007,7 +1024,7 @@ pub fn list_json(store: &Store, plan: Option<&str>, all: bool) -> Result<serde_j
             // The same order and the same cancelled-plan filter the text form uses.
             let mut views = store.plans()?;
             if !all {
-                views.retain(|view| !view.plan.item.is_cancelled());
+                views.retain(|view| !view.is_cancelled());
             }
             views.sort_by(|one, other| super::model::claim_order(&one.plan.item, &other.plan.item));
             views
