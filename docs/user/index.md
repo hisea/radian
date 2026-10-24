@@ -19,7 +19,7 @@ Each line names one page and what it covers.
 ## Use
 
 - `commands`: every slash command and `!` shell escape in the full-screen interface.
-- `arc/index`: plan and task orchestration: every subcommand, the lead's MCP server, and the exit codes.
+- `arc/index`: plan and task orchestration: every subcommand and the exit codes.
 - `arc/gate`: the gate: verification stages, the review stage, failures, retries, the budget, and reconcile.
 - `arc/loop`: the scheduling loop: one pass, `loop.log`, `serve`, and its signals.
 - `arc/files`: the files arc keeps: `config.toml`, plan and task files, and the `.radian/arc/` layout.

@@ -6,6 +6,8 @@ description: The lead's MCP server: registering it, its tools and its tool error
 
 This page covers `radian arc mcp`; the `radian arc` commands are in [`arc`](index.md), the scheduling loop is in [`arc/loop`](loop.md), the gate and its failures are in [`arc/gate`](gate.md), and the files arc keeps are in [`arc/files`](files.md).
 
+## `radian arc mcp`
+
 `mcp` serves the lead's tools over standard input and output, and exits `0` when its client closes the connection.
 A client that closes before the handshake finishes exits `1` and says which handshake request was cut off.
 Like every subcommand except `init` it refuses without setup (exit `3`) and names `radian arc init`.

@@ -113,7 +113,7 @@ Lists plans in claim order — the order `radian arc run` serves them in: the hi
 Each plan's header line shows its id, `status`, `auto` level, `priority`, progress as `<merged>/<tasks> merged`, `total_cost_usd` (its tasks' totals sum) and title.
 The progress total leaves out `failed.cancelled` tasks: one merged task and one cancelled follow-up read `1/1`, an all-cancelled plan `0/0`.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
-A task's `cost_usd` is the budget counter (worker attempts and `review` stages, reset by `reset-budget`); `total_cost_usd` adds every review and never resets.
+A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage) and what `reset-budget` sets back to `0`; its `total_cost_usd` is the same spend and is never reset.
 
 By default finished work is left out, so you see the work in progress:
 
@@ -627,7 +627,7 @@ It exits `0` on success, `1` on an error, `2` for an empty note, `3` when the ta
 
 ## `radian arc mcp [--claude-experimental]`
 
-The lead's MCP server: registering it, its tools and its tool errors are in [`arc/mcp`](mcp.md).
+`radian arc mcp` is the stdio MCP server the lead writes plans and tasks through. Registering it, its tools and its tool errors are in [`arc/mcp`](mcp.md).
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|

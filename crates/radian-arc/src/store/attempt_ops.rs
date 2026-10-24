@@ -41,6 +41,11 @@ pub const REVERIFY_CLASS: &str = "reverify";
 pub const PAUSED_FILE: &str = "paused.json";
 /// The wrapper's heartbeat, in the host-local attempt directory (ADR 0048 decision 7.9).
 pub const HEARTBEAT_FILE: &str = "heartbeat.json";
+/// The attempt whose `review` stage cost arc has already added to the task's counters, and the
+/// counters that charge left behind, in the task's run directory. It is not part of the task
+/// file: it is bookkeeping that keeps the charge idempotent when a pass dies between the charge
+/// and the state move, like the conflict rework count.
+pub const REVIEW_COST_FILE: &str = "review_cost.json";
 
 /// The longest gap between two heartbeats: 15 seconds, or a third of the stall window when
 /// that is shorter.
@@ -1065,7 +1070,8 @@ impl BudgetCheck {
 
 /// Charges one attempt's `review` stage cost to the task and checks the budgets (ADR 0048
 /// decision 12). `cost_usd` is the summed `review_cost_micros` of the attempt's review verdict
-/// in US dollars; a review that reported no cost charges 0 and is still checked.
+/// in US dollars; a review that reported no cost charges 0 and is still checked. `attempt` is
+/// the attempt's label (`<task>-<n>`), the id its verdicts are written under.
 ///
 /// When the task's own limit (its `max_cost_usd`, else `[limits] max_cost_usd`) or the plan's
 /// `max_cost_usd` is reached, the task moves to `todo.paused_budget` in the same transaction,
@@ -1073,12 +1079,21 @@ impl BudgetCheck {
 /// `off`. Returns whether the task was paused.
 ///
 /// The charge is made only while the task is `review.verifying`: once the verdicts are
-/// applied the task has moved, so a second application charges nothing.
+/// applied the task has moved, so a second application charges nothing. The charge is
+/// recorded in `runs/<task>/review_cost.json` together with the counters it produced, before
+/// the task write, so a pass that dies in between is recovered rather than doubled: the next
+/// application sees whether the counters already carry the charge and adds it only when the
+/// task write did not land.
 ///
 /// # Errors
 ///
 /// The task file changed outside arc, or a file could not be read or written.
-pub fn charge_review_cost(store: &Store, task_id: &str, cost_usd: f64) -> Result<bool, Error> {
+pub fn charge_review_cost(
+    store: &Store,
+    task_id: &str,
+    attempt: &str,
+    cost_usd: f64,
+) -> Result<bool, Error> {
     let (paused, pause_plan) = {
         let _lock = store.lock_state()?;
         let loaded = store.load_task(task_id)?;
@@ -1087,37 +1102,28 @@ pub fn charge_review_cost(store: &Store, task_id: &str, cost_usd: f64) -> Result
         if task.state != TaskState::Review || task.phase != "verifying" {
             return Ok(false);
         }
-        task.add_cost(cost_usd);
-        let config = store.config()?;
-        let task_limit = task.max_cost_usd.or(config.limits.max_cost_usd);
-        let task_reached = task_limit.is_some_and(|limit| task.cost_usd.unwrap_or(0.0) >= limit);
-        // The plan budget counts every task of the plan; this task's new cost replaces the one
-        // on disk. A plan file or a sibling task that cannot be read counts as no cost, as the
-        // attempt-time check does.
-        let plan = store.load_plan(&task.plan)?.item;
-        let other_costs: f64 = plan
-            .tasks
-            .iter()
-            .filter(|id| id.as_str() != task_id)
-            .map(|id| {
-                store
-                    .load_task(id)
-                    .map(|task| task.item.cost_usd.unwrap_or(0.0))
-                    .unwrap_or(0.0)
-            })
-            .sum();
-        let plan_reached = plan
-            .max_cost_usd
-            .is_some_and(|limit| other_costs + task.cost_usd.unwrap_or(0.0) >= limit);
-        let paused = task_reached || plan_reached;
-        if paused {
-            task.state = TaskState::Todo;
-            task.phase = "paused_budget".to_owned();
-            task.retry_at = None;
+        let landed = read_review_cost(store, task_id).is_some_and(|record| {
+            record.attempt == attempt
+                && task.cost_usd == Some(record.cost_after)
+                && task.total_cost_usd == Some(record.total_after)
+        });
+        if landed {
+            // The task write already carries this attempt's charge; only the state move is
+            // left. The budgets are checked again so a charge whose task write landed without
+            // its pause (a review that reported no cost) still pauses here.
+            let (task_reached, plan_reached) = review_budget_reached(store, &task, task_id)?;
+            let paused = task_reached || plan_reached;
+            if paused {
+                pause_for_budget(&mut task);
+                let version = store.next_version(Kind::Task, task_id);
+                store.write_item(Kind::Task, task_id, &task.to_text(), version)?;
+            }
+            (paused, plan_reached)
+        } else {
+            // Either no record or one from a pass that died before the task write: charge,
+            // record the counters, then write the task.
+            apply_review_charge(store, &mut task, task_id, attempt, cost_usd)?
         }
-        let version = store.next_version(Kind::Task, task_id);
-        store.write_item(Kind::Task, task_id, &task.to_text(), version)?;
-        (paused, plan_reached)
     };
     if pause_plan {
         let plan_id = store.load_task(task_id)?.item.plan;
@@ -1127,6 +1133,129 @@ pub fn charge_review_cost(store: &Store, task_id: &str, cost_usd: f64) -> Result
         });
     }
     Ok(paused)
+}
+
+/// Adds `cost_usd` to the task's counters and writes the record and the task, in that order.
+/// The record holds the counters the charge produced, so a later application can tell whether
+/// the task write landed. Returns whether the task paused and whether the plan budget was
+/// reached.
+fn apply_review_charge(
+    store: &Store,
+    task: &mut model::TaskFile,
+    task_id: &str,
+    attempt: &str,
+    cost_usd: f64,
+) -> Result<(bool, bool), Error> {
+    task.add_cost(cost_usd);
+    let (task_reached, plan_reached) = review_budget_reached(store, task, task_id)?;
+    let paused = task_reached || plan_reached;
+    if paused {
+        pause_for_budget(task);
+    }
+    let record = ReviewCharge {
+        attempt: attempt.to_owned(),
+        cost_usd,
+        cost_after: task.cost_usd.unwrap_or(0.0),
+        total_after: task.total_cost_usd.unwrap_or(0.0),
+    };
+    // The record goes first, because a repeated application must never charge twice. A task
+    // write that fails removes the record again; a pass that dies before the write leaves a
+    // record whose counters the task does not carry, and the next application charges again.
+    write_review_cost(store, task_id, &record)?;
+    let version = store.next_version(Kind::Task, task_id);
+    if let Err(error) = store.write_item(Kind::Task, task_id, &task.to_text(), version) {
+        // The cost did not land: let the next application charge this attempt.
+        clear_review_cost(store, task_id);
+        return Err(error);
+    }
+    Ok((paused, plan_reached))
+}
+
+/// Whether the task's own budget (its `max_cost_usd`, else `[limits] max_cost_usd`) and the
+/// plan's budget are used up by the task's current counters. A plan file or a sibling task
+/// that cannot be read counts as no cost, as the attempt-time check does.
+fn review_budget_reached(
+    store: &Store,
+    task: &model::TaskFile,
+    task_id: &str,
+) -> Result<(bool, bool), Error> {
+    let config = store.config()?;
+    let task_limit = task.max_cost_usd.or(config.limits.max_cost_usd);
+    let task_reached = task_limit.is_some_and(|limit| task.cost_usd.unwrap_or(0.0) >= limit);
+    let plan = store.load_plan(&task.plan)?.item;
+    let other_costs: f64 = plan
+        .tasks
+        .iter()
+        .filter(|id| id.as_str() != task_id)
+        .map(|id| {
+            store
+                .load_task(id)
+                .map(|task| task.item.cost_usd.unwrap_or(0.0))
+                .unwrap_or(0.0)
+        })
+        .sum();
+    let plan_reached = plan
+        .max_cost_usd
+        .is_some_and(|limit| other_costs + task.cost_usd.unwrap_or(0.0) >= limit);
+    Ok((task_reached, plan_reached))
+}
+
+fn pause_for_budget(task: &mut model::TaskFile) {
+    task.state = TaskState::Todo;
+    task.phase = "paused_budget".to_owned();
+    task.retry_at = None;
+}
+
+fn review_cost_path(store: &Store, task: &str) -> PathBuf {
+    store.root().join("runs").join(task).join(REVIEW_COST_FILE)
+}
+
+/// One attempt's review charge and the task counters it left behind.
+struct ReviewCharge {
+    attempt: String,
+    cost_usd: f64,
+    cost_after: f64,
+    total_after: f64,
+}
+
+/// The attempt whose review cost arc charged and the counters that charge produced, when it
+/// recorded one.
+fn read_review_cost(store: &Store, task: &str) -> Option<ReviewCharge> {
+    let text = fs::read_to_string(review_cost_path(store, task)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    Some(ReviewCharge {
+        attempt: value.get("attempt").and_then(Value::as_str)?.to_owned(),
+        cost_usd: value.get("cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
+        cost_after: value.get("cost_after").and_then(Value::as_f64)?,
+        total_after: value.get("total_after").and_then(Value::as_f64)?,
+    })
+}
+
+fn write_review_cost(store: &Store, task: &str, record: &ReviewCharge) -> Result<(), Error> {
+    let path = review_cost_path(store, task);
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Failed(format!("{} has no directory", path.display())))?;
+    fs::create_dir_all(dir)
+        .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
+    let text = serde_json::to_string_pretty(&json!({
+        "attempt": record.attempt,
+        "cost_usd": record.cost_usd,
+        "cost_after": record.cost_after,
+        "total_after": record.total_after,
+    }))
+    .map_err(|error| Error::Failed(format!("cannot encode {}: {error}", path.display())))?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, format!("{text}\n"))
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", temporary.display())))?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
+}
+
+/// Forgets the recorded charge; the next application charges the attempt again. Used when the
+/// task write itself failed, so the record does not claim a charge that never landed.
+fn clear_review_cost(store: &Store, task: &str) {
+    let _ = fs::remove_file(review_cost_path(store, task));
 }
 
 // ---- retries and reset-budget --------------------------------------------------------
@@ -1176,6 +1305,14 @@ pub struct BudgetReset {
     pub tasks: Vec<String>,
 }
 
+/// `reset-budget`'s one write: the budget counter goes back to `0` and the total stays. An
+/// older file without `total_cost_usd` gets it materialized from its `cost_usd` first, so the
+/// total cannot fall back to the zeroed counter (ADR 0048 decision 12).
+fn reset_counted_cost(task: &mut model::TaskFile) {
+    task.total_cost_usd = Some(task.running_total());
+    task.cost_usd = Some(0.0);
+}
+
 /// `radian arc reset-budget <id>`: moves the paused task, or every paused task of the plan,
 /// back to `todo.ready`, and resets the counted cost to zero from now on.
 ///
@@ -1198,7 +1335,7 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
                 // The plan's counted cost is every task's, so every task resets even when
                 // only some of them are paused.
                 store.change_task(task_id, |task| {
-                    task.cost_usd = Some(0.0);
+                    reset_counted_cost(task);
                     if paused {
                         task.state = TaskState::Todo;
                         task.phase = "ready".to_owned();
@@ -1230,7 +1367,7 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
                 task.state = TaskState::Todo;
                 task.phase = "ready".to_owned();
                 task.retry_at = None;
-                task.cost_usd = Some(0.0);
+                reset_counted_cost(task);
                 Ok(())
             })?;
             Ok(BudgetReset {
