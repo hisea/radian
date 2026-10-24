@@ -601,4 +601,7 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 
 ## Not here yet
 
-The arc TUI. The gate stages `mutation`, `review` and `ci` are refused until they are built.
+The arc TUI lives in `radian-tui` (`src/arc/`, with its terminal loop in `src/cli/arc.rs`);
+this crate owns the read-only views it draws ([`read`](src/read.rs): the remote main, a
+task's attempts and verdicts, a task's diff). The gate stages `mutation`, `review` and `ci`
+are refused until they are built.

@@ -2425,3 +2425,16 @@ test-only read counter (`PATH_BYTES_READ`, also exposed under the `testing` feat
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | RW3-1 | the path read reads the whole file (`std::fs::read`) before the magic/size checks | ✅ 1 failed | `radian-coding image::tests::a_large_non_image_is_refused_from_its_head` (0 bytes through the bounded reader on a 2 GiB sparse file) |
+
+## TK0033: the conversation tab opens the selected attempt's journal (2026-10-23, branch `work/TK0033-tui-pages-continued`)
+
+The task page resolved the journal as `<session dir>/<task id>.jsonl` and never re-resolved
+it when `[`/`]` selected another attempt. It now reads the attempt's session id from
+`execution.json` (the task id when the attempt wrote none) and drops a view opened for
+another attempt. The mutation puts the task id back as the only lookup; it was applied to
+the committed file and restored with `git checkout --`, with `git status --short` empty
+afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0033-tui-pages-continued-M1 | the journal is looked up by the task id only, never by the attempt's `execution.json` session id | ✅ 1 failed | `the_conversation_tab_renders_the_selected_attempts_worker_journal` (a `fresh` attempt's `<task>-2.jsonl` is not found, so the screen says `no session journal yet`) |

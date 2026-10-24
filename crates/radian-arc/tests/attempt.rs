@@ -687,12 +687,19 @@ fn wait_for(path: &Path) -> Value {
     }
 }
 
+/// Waits until `path` exists **and has content**. The writer creates the file and then writes
+/// it, so existence alone can race a reader that parses the file.
 fn wait_for_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(60);
-    while !path.is_file() {
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && !text.trim().is_empty()
+        {
+            return;
+        }
         assert!(
             Instant::now() < deadline,
-            "{} never appeared",
+            "{} never appeared with content",
             path.display()
         );
         std::thread::sleep(Duration::from_millis(20));

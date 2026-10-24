@@ -212,6 +212,18 @@ just-started task alone: it survives the loop, finishes its 15 s test-only delay
 `done`. M60 is the item (d) mutation: with no start time it waits the full grace and then the
 kill window, so the test's 2 s bound fails at 15 s.
 
+## TK0033: a fast-forward merge shows the whole branch (2026-10-23, branch `work/TK0033-tui-pages-continued`)
+
+`read::task_diff` used `<candidate>^1..<candidate>` for every merged task. When the
+integration candidate is the task head (main had not moved), that range is only the branch's
+last commit; the fix uses the verdict's `base_sha..head_sha` then and keeps the first-parent
+diff for a merge candidate. The mutation deletes the fast-forward branch. It was applied to
+the committed file, restored with `git checkout --`, and `git status --short` was empty
+afterwards. The test lives in `radian-tui`, where the diff tab is drawn.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0033-tui-pages-continued-M2 | a merged task always diffs `<candidate>^1..<candidate>`, even when the candidate is the head | ✅ 1 failed | `radian-tui::arc_tui a_fast_forward_merged_task_shows_every_commit_of_its_branch` (`first.txt`, the branch's first commit, is missing from the file list) |
 ## TK0034 (cancel a plan)
 
 TK0034-M1–M3 were run against `de2a816f`, each applied to the committed file, restored

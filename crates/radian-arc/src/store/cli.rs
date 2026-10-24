@@ -32,8 +32,9 @@ pub const SUBCOMMANDS: &[&str] = &[
 ];
 
 /// The subcommands ADR 0048 names that this build does not have. Every subcommand exists now;
-/// the arc TUI (a bare `radian arc`) is what is still missing. `work` is not here: it exists
-/// as the hidden wrapper a scheduling loop runs, and a person does not run it.
+/// a bare `radian arc` opens the TUI, which lives in `radian-tui` and calls this module's
+/// subcommands. `work` is not here: it exists as the hidden wrapper a scheduling loop runs,
+/// and a person does not run it.
 pub const NOT_BUILT: &[&str] = &[];
 
 /// One `radian arc` invocation, without clap.
@@ -90,36 +91,34 @@ pub enum Command {
     Mcp,
 }
 
-/// Runs one invocation and returns the process exit code. `None` is a bare `radian arc`:
-/// the TUI does not exist yet, so it says so and lists the subcommands.
-pub fn run(command: Option<&Command>) -> u8 {
+/// Runs one invocation and returns the process exit code.
+pub fn run(command: &Command) -> u8 {
     let result = match command {
-        None => bare(),
-        Some(Command::Init { track }) => init(*track).map(emit),
-        Some(Command::AddPlan { slug, title }) => add_plan(slug, title).map(emit),
-        Some(Command::AddTask {
+        Command::Init { track } => init(*track).map(emit),
+        Command::AddPlan { slug, title } => add_plan(slug, title).map(emit),
+        Command::AddTask {
             plan,
             slug,
             title,
             after,
             allow_noop,
             stages,
-        }) => add_task(plan, slug, title, after, *allow_noop, stages).map(emit),
-        Some(Command::List { plan, all, json }) => list(plan.as_deref(), *all, *json).map(emit),
-        Some(Command::Show { id, json }) => show(id, *json).map(emit),
-        Some(Command::Adopt { id }) => adopt(id).map(emit),
-        Some(Command::Confirm { id }) => confirm(id).map(emit),
-        Some(Command::Auto { plan, level }) => set_auto(plan, level).map(emit),
-        Some(Command::Priority { plan, priority }) => set_priority(plan, priority).map(emit),
-        Some(Command::Pause { plan }) => pause(plan).map(emit),
-        Some(Command::Start { task }) => start(task),
-        Some(Command::Reverify { task }) => reverify(task),
-        Some(Command::Cancel { id }) => cancel(id),
-        Some(Command::ResetBudget { id }) => reset_budget(id),
-        Some(Command::Merge { task }) => merge(task),
-        Some(Command::Reject { task, note }) => reject(task, note),
-        Some(Command::Run { watch, interval }) => run_loop(*watch, *interval),
-        Some(Command::Mcp) => mcp(),
+        } => add_task(plan, slug, title, after, *allow_noop, stages).map(emit),
+        Command::List { plan, all, json } => list(plan.as_deref(), *all, *json).map(emit),
+        Command::Show { id, json } => show(id, *json).map(emit),
+        Command::Adopt { id } => adopt(id).map(emit),
+        Command::Confirm { id } => confirm(id).map(emit),
+        Command::Auto { plan, level } => set_auto(plan, level).map(emit),
+        Command::Priority { plan, priority } => set_priority(plan, priority).map(emit),
+        Command::Pause { plan } => pause(plan).map(emit),
+        Command::Start { task } => start(task),
+        Command::Reverify { task } => reverify(task),
+        Command::Cancel { id } => cancel(id),
+        Command::ResetBudget { id } => reset_budget(id),
+        Command::Merge { task } => merge(task),
+        Command::Reject { task, note } => reject(task, note),
+        Command::Run { watch, interval } => run_loop(*watch, *interval),
+        Command::Mcp => mcp(),
     };
     match result {
         Ok(code) => code,
@@ -149,33 +148,6 @@ fn cwd() -> Result<std::path::PathBuf, Error> {
 
 fn open() -> Result<Store, Error> {
     Store::open(&cwd()?)
-}
-
-/// A bare `radian arc`: without setup the refusal names `init`; with it, the TUI that does
-/// not exist yet is a usage-class refusal that lists the subcommands.
-fn bare() -> Result<u8, Error> {
-    let store = open()?;
-    let mut out = String::new();
-    out.push_str("the arc TUI is not built yet.\n");
-    out.push_str(&format!("subcommands: {}\n", SUBCOMMANDS.join(", ")));
-    out.push_str(&format!(
-        "in this build: `radian arc init`, `radian arc add plan|task`, `radian arc list`, \
-         `radian arc show`, `radian arc adopt`, `radian arc confirm`, `radian arc auto`, \
-         `radian arc priority`, `radian arc pause`, `radian arc start`, `radian arc reverify`, \
-         `radian arc cancel`, `radian arc reset-budget`, `radian arc merge`, `radian arc reject`, \
-         `radian arc run`, `radian arc mcp`\n{}",
-        arc_dir_line(&store)
-    ));
-    let code = emit(out);
-    Ok(if code == Exit::Ok.code() {
-        Exit::Usage.code()
-    } else {
-        code
-    })
-}
-
-fn arc_dir_line(store: &Store) -> String {
-    format!("arc directory: {}\n", store.root().display())
 }
 
 fn stdin_text() -> Result<String, Error> {
