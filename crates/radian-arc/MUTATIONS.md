@@ -514,6 +514,7 @@ TK0067-M2 is the check the TK0052 review asked for: it is the mutation that make
 count and the conflict run reset each other, so the model test's bound, not a per-attempt
 assertion, catches it. TK0052-M1 (dropping only the conflict reset on an attempt that never
 reached the gate) stays a valid mutation caught by the per-attempt assertion.
+
 ## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
 
 `TaskDiff::fallback` was a bool, so a remote main ref that exists but shares no ancestor with the
