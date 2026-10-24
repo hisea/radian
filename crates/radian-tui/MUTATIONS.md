@@ -2800,6 +2800,29 @@ was restored from a copy under `.radian/` with `cp`.
 
 1/1 caught.
 
+## TK0087: the arc TUI shares radian's theme (2026-10-24, branch `work/TK0087-tui-arc-shared-theme`)
+
+The arc TUI drew with `Theme::default()` and ignored `config.toml`. It now resolves its theme
+with the radian TUI's own `theme::load` call from the same config file
+(`radian_host::config::resolved_path` → the new `config::load_path`), applies `NO_COLOR` and
+truecolor detection, and shows the load's warnings, or the config reader's reason, as one footer
+result line when it opens. The rework made that footer line start with the loader's theme even
+when the config cannot be read (`NO_COLOR` and truecolor still decide it), and made a loop start
+that fails before the first frame add its line after the warning instead of replacing it. Each
+mutation was applied by hand to `src/arc/mod.rs` (M1–M4) or `src/cli/arc.rs` (M5), the
+`arc_theme` test binary was run with `cargo nextest run -p radian-tui --locked --profile sandbox
+-E 'binary(arc_theme)'` (M5 ran the pty test alone), and the file was restored from a copy
+under `.radian/` with `cp`, then compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0087-M1 | `with_theme` ignores its theme and builds the app with `Theme::default()` | ✅ 4 failed | `arc_theme::the_configured_theme_is_the_radian_tuis` (the app's theme is dark, not `Theme::builtin(Light, …)`); also `no_color_forces_mono`, `a_theme_file_name_resolves_through_the_themes_dir` and `tui_colors_reaches_the_plans_pages_running_mark` |
+| TK0087-M2 | `open_theme` passes `&[]` instead of `&config.tui.colors` | ✅ 1 failed | `arc_theme::tui_colors_reaches_the_plans_pages_running_mark` (`app.theme.plan_running.fg` stays the dark default) |
+| TK0087-M3 | `open_theme` drops `theme::load`'s warnings | ✅ 1 failed | `arc_theme::an_unknown_theme_opens_with_the_fallback_and_warns_in_the_footer` (no footer line names `future`) |
+| TK0087-M4 | `open_theme` returns `Theme::default()` on a config read error, bypassing `theme::load` | ✅ 1 failed | `arc_theme::an_unreadable_config_opens_with_the_loader_theme_and_names_the_reason_in_the_footer` (an unreadable config under `NO_COLOR` opens in colored dark, not `Theme::mono()`) |
+| TK0087-M5 | the open `starter.start()` failure calls `set_result` and replaces the open-time warning | ✅ 1 failed | `pty::pty_arc_keeps_the_theme_warning_when_a_loop_already_runs` (the footer shows only "a loop is already running") |
+
+5/5 caught.
 ## TK0080: the `active` view reads the shared finished rule (2026-10-24, branch `work/TK0080-finished-plan-one-rule`)
 
 `PlanFilter::Active` read `PlanView::is_finished`, so a plan with one merged task and one cancelled
