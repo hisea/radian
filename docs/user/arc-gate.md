@@ -165,7 +165,7 @@ With `merge-main` on, the next attempt starts mid-merge, so arc writes its brief
 The heading is `## Rework <n> (conflict with main)`, with the lead's `add_rework` numbering.
 The text names the main commit (short sha) and the stage, lists the conflicted paths, says the next attempt starts mid-merge, and asks the worker to resolve the conflict keeping both sides' intent, commit the merge, rebuild, run the touched tests, and change nothing else.
 Every other reason, and a conflict without `merge-main`, keeps `review.rework_pending`; a `reverify` conflict takes the automatic path above.
-It never raises `auto_rework`, never pauses the plan, and never sends the task to `failed.exhausted`: a conflict rework is not a retry, and it sets the task's `retry_count` back to `0`.
+It never raises `auto_rework`, never pauses the plan, and never sends the task to `failed.exhausted` by itself: a conflict rework is not a retry, but it keeps the task's `retry_count` instead of resetting it, so a worker that keeps failing behind repeated conflict reworks still uses up `max_attempts`.
 
 A run of conflicts is bounded by [`limits.max_conflict_rework`](arc-files.md#configtoml) (default `3`).
 It is how many conflict reworks arc writes in a row: while it has written fewer than the limit, the conflict gets the brief above; once it has written the limit, arc writes no brief and the task stays in `review.rework_pending`.
@@ -262,7 +262,8 @@ The class is recorded in `runs/<task>/attempts/<attempt id>/attempt_result.json`
 
 A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 10 seconds for the first retry, doubled for each later one, capped at 5 minutes.
 `max_attempts` (the task's, else [`limits.max_attempts`](arc-files.md#configtoml)) counts retries, not attempts: every retry raises the task's `retry_count`, and when the count has reached the limit the task goes to `failed.exhausted` instead.
-Every rework sets `retry_count` back to `0` (the lead's brief, arc's review rework, and the conflict rework), so the new instructions get their own retries.
+Every rework sets `retry_count` back to `0` (the lead's brief and arc's review rework), so the new instructions get their own retries.
+A conflict rework keeps the count: it continues the same line of work, and the failures between conflicts then use up `max_attempts` even while a conflict keeps returning the task to `todo.ready`.
 The attempt number is never compared with the limit; `show` prints `retry_count`.
 A `reverify` attempt is not a retry: it changes neither `retry_count` nor the limit.
 `todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; the scheduling loop and `start` do this before they claim.

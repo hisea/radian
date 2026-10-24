@@ -82,6 +82,9 @@ copy.
 | TK0036-M1 | run the `commands`/`review` pair one after the other again (`run_pair` calls the two stages instead of the two threads) | `review::the_commands_and_review_stages_start_before_either_ends` (the commands wait times out and fails the round) | ✅ failed |
 | TK0036-M2 | let a review failure decide the round when `commands` also failed (`finish_verification` swaps the two in its scan order) | `review::a_commands_failure_decides_the_round_when_the_review_fails_too` (the task returns to `todo.ready` with a review brief) | ✅ failed |
 | TK0036-M3 | forward the gate's stop to only the first running stage (`request_stop` signals one slot) | `run::a_signal_to_the_gate_stops_both_stages_of_the_pair` (one stage outlives the 3 s deadline) | ✅ failed |
+| TK0052-M1 | do not reset the conflict-rework run on an attempt that never reached the gate (`attempt_ops::apply`'s `reset_conflict_rework` dropped) | `failure_sequences::every_automatic_failure_sequence_ends_within_the_limits` (an attempt that never reached the gate left the conflict run at 1) | ✅ failed |
+| TK0052-M2 | `max_auto_rework` never pauses the plan (`record_auto_rework` uses `u32::MAX`) | `failure_sequences::every_automatic_failure_sequence_ends_within_the_limits` (`auto_rework 3 tripped max_auto_rework but the plan did not pause`) | ✅ failed |
+| TK0052-M3 | never stop `--watch` on a repeated error (the `REPEATED_ERROR_LIMIT` branch dropped) | `run::three_identical_pass_errors_stop_watch_with_exit_one_and_release_the_lock` (it waits the 30 s deadline) | ✅ failed |
 | TK0035-M1 | clear a refused integration record again (the old `_` arm) | `run::a_refused_integration_is_not_restarted_until_its_inputs_change` (the record is gone after the first pass) | ✅ failed |
 | TK0035-M2 | drop the wall-time bound on the worktree-setup fetch (call `git::run` without the clock) | `run::a_hanging_fetch_ends_the_attempt_at_the_wall_time` (40 s deadline: `start` never returned) | ✅ failed |
 | TK0035-M3 | sleep a whole `POLL` slice inside each heartbeat interval again | `work::a_one_second_stall_window_keeps_three_beats_inside_it` (mean gap 414 ms) | ✅ failed |
@@ -270,6 +273,17 @@ nothing. M3 leaves the stage that was not signalled alive past the test's 3 s de
 handler is the only SIGTERM source, because the wait loop now only escalates to SIGKILL after
 `cancel_grace_secs`.
 
+TK0052-M1–M3 were run against the task's branch, each from a copy under `.radian/mut/`,
+restored with `cp` and compared with `cmp`, with `cargo build -p radian-tui --bin radian`
+before the `run` test (it refuses a binary older than its sources). M1 is caught by the model
+test's rule that an attempt which never reached the gate ends the conflict run, not by a
+non-ending sequence: with the retry count now kept across a conflict rework, removing the
+conflict reset makes the conflicts accumulate and the task stop sooner. The model test did
+find a non-ending sequence before the fix this task landed: `Success`, `Conflict`,
+`ModelFail` repeated. The conflict rework set `retry_count` back to `0`, the failed attempt set
+the conflict run back to `0`, and neither limit was ever reached; the run passed 100 steps at
+attempt 51. A conflict rework now keeps the retry count, so `max_attempts` bounds the failures
+between conflicts (ADR 0048 decision 9).
 ## TK0051 (a critical review item always blocks; an unplaced item is not demoted)
 
 TK0051-M1–M4 were run against `a7833564`, each applied to the committed file, restored from a

@@ -18,7 +18,7 @@ A key you leave out takes its default.
 | `repository.remote` | string | `"origin"` | A remote name that exists in the repository | When arc reads the main branch or pushes a task branch. |
 | `repository.main_branch` | string | `"main"` (`init` writes what it found) | A branch name | When a task starts from main, and when main is checked before a merge. |
 | `limits.concurrency` | integer | `1` | 1 or more | When `radian arc run` starts tasks: how many attempts may be in flight at once. A running gate takes no slot. |
-| `limits.max_attempts` | integer | `3` | 1 or more | When a task fails and arc decides whether to retry: how many retries the task gets since its last rework. The count is the task's [`retry_count`](#task-fields); the attempt number is never compared with the limit. |
+| `limits.max_attempts` | integer | `3` | 1 or more | When a task fails and arc decides whether to retry: how many retries the task gets since its last lead or review rework. The count is the task's [`retry_count`](#task-fields); the attempt number is never compared with the limit, and a conflict rework keeps the count. |
 | `limits.stall_timeout_secs` | integer | `900` | seconds | When a worker prints no new line for that long. |
 | `limits.max_wall_time_secs` | integer | `7200` | seconds | As an absolute limit on one attempt, on top of the stall timeout. |
 | `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
@@ -107,7 +107,7 @@ A cancelled plan takes no change record: it is final.
 | `token` | string | no | the current attempt's random token; a result is applied only when it matches |
 | `cost_usd` | number | no | the task's counted cost in US dollars, summed over its attempts; `reset-budget` makes it `0` |
 | `auto_rework` | integer | no | `0` or more; how many reworks arc counted while the plan's `auto` was not `off`; `0` when absent |
-| `retry_count` | integer | no | `0` or more; how many retries arc started since the task's last rework; `0` when absent. A rework sets it back to `0`, and `max_attempts` counts it. |
+| `retry_count` | integer | no | `0` or more; how many retries arc started since the task's last lead or review rework; `0` when absent. The lead's brief and the review rework set it back to `0`; a conflict rework keeps it, and `max_attempts` counts it. |
 | `allow_noop` | boolean | yes | `true`, `false`; `false` when the task is new |
 | `extra_stages` | list of strings | yes | gate stages added to the profile (`[]` when there are none) |
 | `max_attempts` | integer | no | 1 or more; overrides `limits.max_attempts` for this task |
