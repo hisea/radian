@@ -936,12 +936,13 @@ fn write(dir: &Path, rel: &str, text: &str) {
     fs::write(path, text).unwrap();
 }
 
-/// A repository with one merged task and one unmerged task.
+/// A repository with one merged task, one fast-forwarded task and one unmerged task.
 struct GitFixture {
     scratch: Scratch,
     repo: PathBuf,
     store: Store,
     merged: String,
+    fast: String,
     unmerged: String,
 }
 
@@ -1026,6 +1027,38 @@ impl GitFixture {
             ],
         );
 
+        // A task merged by fast-forwarding main: its branch has two commits, and main had not
+        // moved since the branch's base. The first-parent diff of the head would show only
+        // the second commit.
+        let fast = add_task(
+            &store,
+            &plan,
+            "fast",
+            &[],
+            TaskState::Todo,
+            "ready",
+            0,
+            None,
+        );
+        git(
+            &repo,
+            &[
+                "checkout",
+                "-q",
+                "-B",
+                &format!("work/{fast}"),
+                &merge_commit,
+            ],
+        );
+        write(&repo, "first.txt", "the first commit\n");
+        git(&repo, &["add", "first.txt"]);
+        git(&repo, &["commit", "-q", "-m", "the first commit"]);
+        write(&repo, "second.txt", "the second commit\n");
+        git(&repo, &["add", "second.txt"]);
+        git(&repo, &["commit", "-q", "-m", "the second commit"]);
+        let fast_head = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "main"]);
+
         store
             .change_task(&merged, |task| {
                 task.state = TaskState::Done;
@@ -1046,6 +1079,16 @@ impl GitFixture {
                 Ok(())
             })
             .unwrap();
+        store
+            .change_task(&fast, |task| {
+                task.state = TaskState::Done;
+                task.phase = "merged".to_owned();
+                task.attempt = 1;
+                task.base_sha = Some(merge_commit.clone());
+                task.head_sha = Some(fast_head.clone());
+                Ok(())
+            })
+            .unwrap();
         let mut integration = Verdict::human(merged_head.clone(), true, None);
         integration.stage = Stage::Integration;
         integration.candidate_sha = Some(merge_commit.clone());
@@ -1054,12 +1097,22 @@ impl GitFixture {
         integration
             .write_new(&verdict_path(&repo, &merged, &label, Stage::Integration).unwrap())
             .unwrap();
+        // The fast-forward's candidate is the task head; main was moved to it.
+        let mut integration = Verdict::human(fast_head.clone(), true, None);
+        integration.stage = Stage::Integration;
+        integration.candidate_sha = Some(fast_head);
+        integration.base_sha = Some(merge_commit);
+        let label = format!("{fast}-1");
+        integration
+            .write_new(&verdict_path(&repo, &fast, &label, Stage::Integration).unwrap())
+            .unwrap();
 
         Self {
             scratch,
             repo,
             store,
             merged,
+            fast,
             unmerged,
         }
     }
@@ -1082,10 +1135,10 @@ impl GitFixture {
             .store
             .plan_view(&app.plans[app.plan_sel].plan.item.id)
             .unwrap();
-        let target = if name == "merged" {
-            &self.merged
-        } else {
-            &self.unmerged
+        let target = match name {
+            "merged" => &self.merged,
+            "fastforward" => &self.fast,
+            _ => &self.unmerged,
         };
         app.task_sel = view
             .tasks
@@ -1127,6 +1180,24 @@ fn a_merged_task_shows_the_merge_commits_first_parent_diff() {
     );
     // Mutation: use `main..head` for a merged task — after the merge that is main's own
     // addition (or nothing), so the list no longer holds `task.txt`.
+}
+
+#[test]
+fn a_fast_forward_merged_task_shows_every_commit_of_its_branch() {
+    let fixture = GitFixture::new();
+    let (mut app, task, _) = fixture.open_diff("fastforward");
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains(&task), "{text}");
+    assert!(
+        text.contains("first.txt"),
+        "the branch's first commit is part of the task's change:\n{text}"
+    );
+    assert!(
+        text.contains("second.txt"),
+        "the branch's last commit is part of it too:\n{text}"
+    );
+    // Mutation: use `<candidate>^1..<candidate>` when the candidate is the head — the first
+    // commit's file drops out of the list.
 }
 
 #[test]

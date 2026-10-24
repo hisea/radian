@@ -153,10 +153,12 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
 
 /// The change a task is responsible for.
 ///
-/// - A **merged** task: the first-parent diff of its merge commit, the integration verdict's
-///   `candidate_sha` (`<candidate>^1..<candidate>`). When the candidate was a fast-forward,
-///   that is the task's own commit against its parent. The task's file list is what the merge
-///   put on main, not what main has gained since.
+/// - A **merged** task: its passing integration verdict's candidate (ADR 0048 decision 10).
+///   A merge candidate's first-parent diff (`<candidate>^1..<candidate>`) is the change the
+///   merge put on main, not what main has gained since. When the candidate is the task head
+///   itself (main had not moved, so main was fast-forwarded to it), that range would be only
+///   the head's last commit: the task's own change is `base_sha..head_sha` instead, exactly
+///   the range the review prompt uses.
 /// - Any other task: `base_sha..head_sha` of the selected attempt, that attempt's own
 ///   `AttemptFinished` record when it has one, else the task's current fields.
 ///
@@ -169,7 +171,9 @@ pub fn task_diff(store: &Store, task: &str, attempt: Option<u32>) -> Result<Task
     let item = store.load_task(task)?.item;
     let range = match item.state {
         TaskState::Done => match merged_candidate(store, task)? {
-            Some(candidate) => Some((format!("{candidate}^1"), candidate)),
+            Some(verdict) => merged_range(&verdict).or_else(|| {
+                attempt_range(store, &item.id, attempt, &item.base_sha, &item.head_sha)
+            }),
             None => attempt_range(store, &item.id, attempt, &item.base_sha, &item.head_sha),
         },
         _ => attempt_range(store, &item.id, attempt, &item.base_sha, &item.head_sha),
@@ -206,15 +210,15 @@ fn attempt_range(
     (usable(&base) && usable(&head)).then_some((base, head))
 }
 
-/// The newest passing `integration` verdict's `candidate_sha`, across every attempt of the
-/// task. A merged task's merge commit is exactly this candidate (ADR 0048 decision 10).
-fn merged_candidate(store: &Store, task: &str) -> Result<Option<String>, Error> {
+/// The newest passing `integration` verdict, across every attempt of the task. A merged
+/// task's merge commit is exactly its `candidate_sha` (ADR 0048 decision 10).
+fn merged_candidate(store: &Store, task: &str) -> Result<Option<Verdict>, Error> {
     let root = store.root().join("runs").join(task).join("attempts");
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(_) => return Ok(None),
     };
-    let mut best: Option<(String, String)> = None;
+    let mut best: Option<(String, Verdict)> = None;
     for entry in entries.flatten() {
         let verdicts = entry.path().join("verdicts");
         let Ok(files) = std::fs::read_dir(&verdicts) else {
@@ -238,11 +242,29 @@ fn merged_candidate(store: &Store, task: &str) -> Result<Option<String>, Error> 
             }
             let ended = verdict.ended_at.clone();
             if best.as_ref().is_none_or(|(at, _)| *at <= ended) {
-                best = Some((ended, candidate));
+                best = Some((ended, verdict));
             }
         }
     }
-    Ok(best.map(|(_, candidate)| candidate))
+    Ok(best.map(|(_, verdict)| verdict))
+}
+
+/// The range of a merged task's own change, from its passing integration verdict.
+///
+/// A merge candidate's first-parent diff is the task's change against the main it was built
+/// on. A candidate that is the task head was a fast-forward of main: the branch may hold
+/// several commits, and only `base_sha..head_sha` covers all of them.
+fn merged_range(verdict: &Verdict) -> Option<(String, String)> {
+    let candidate = verdict
+        .candidate_sha
+        .clone()
+        .filter(|sha| !sha.is_empty())?;
+    if candidate == verdict.sha
+        && let Some(base) = verdict.base_sha.clone().filter(|sha| !sha.is_empty())
+    {
+        return Some((base, candidate));
+    }
+    Some((format!("{candidate}^1"), candidate))
 }
 
 /// Runs the two git commands of a diff: `--numstat -z` for the paths and counts, then one
