@@ -2639,3 +2639,21 @@ afterwards).
 | TK0070-M5 | `fit_hints` is bypassed, so the row clips instead of dropping a hint | ✅ 1 failed | `arc_tui::the_hints_keep_their_old_labels_and_drop_when_narrow` (at 120 columns the clipped row loses `q quit`) |
 
 5/5 caught.
+
+## TK0076: the diff tab's file list keeps room for the diff (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
+
+The file list took every row but five, so a task with many changed files left the selected
+file's frame one body row. The list now takes at most half of the diff area and ends with
+`files a–b of n` when it shows only part of the files; the task page and the merge page both
+call the one list function. Each mutation was applied by hand to the working file, the named
+tests were run with `cargo nextest run -p radian-tui --locked --profile sandbox --no-fail-fast`,
+and the file was restored from a copy under `.radian/backup/` with `cp`, then compared with
+`diff -q`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0076-M1 | the list takes `available - reserve` rows again (no half cap) | ✅ 2 failed | `arc_tui::the_file_list_takes_at_most_half_of_the_diff_area` (`left: 37`, `right: 21`), `arc_merge::the_merge_pages_file_list_takes_at_most_half_of_the_diff_area` (`left: 15`, `right: 9`) |
+| TK0076-M3 | the merge page keeps the old uncapped list (passes the old `remaining - 4` row count, doubled so the shared cap cannot bite) | ✅ 1 failed | `arc_merge::the_merge_pages_file_list_takes_at_most_half_of_the_diff_area` (`left: 15`, `right: 9`); the task page test still passed |
+
+2/2 caught. TK0076-M2 (the diff range) mutates `radian-arc` and is recorded in
+`crates/radian-arc/MUTATIONS.md`.

@@ -32,11 +32,12 @@ pub struct DiffFile {
 /// Where a task's diff comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiffSource {
-    /// A committed range (`base_sha..head_sha`, or a merged task's candidate).
+    /// A committed range (the merge base of the remote main and the attempt's head, or a
+    /// merged task's candidate).
     #[default]
     Range,
-    /// The running attempt's worktree against its `base_sha`, uncommitted files included
-    /// (ADR 0048 decision 13).
+    /// The running attempt's worktree against the merge base of the remote main and its HEAD,
+    /// uncommitted files included (ADR 0048 decision 13).
     Worktree,
 }
 
@@ -46,6 +47,9 @@ pub struct TaskDiff {
     pub files: Vec<DiffFile>,
     /// The range the files came from.
     pub source: DiffSource,
+    /// The merge base of the remote main and the head could not be read (there is no remote
+    /// main ref), so the range fell back to the recorded base; the page says so.
+    pub fallback: bool,
 }
 
 /// One stage's verdict in one attempt.
@@ -264,19 +268,23 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
 
 /// The change a task is responsible for.
 ///
-/// - A **running** task (`doing.running`): the worker's worktree against the attempt's
-///   `base_sha`, uncommitted and untracked files included, so the change is visible while the
-///   attempt runs (ADR 0048 decision 13). The attempt's base is the one the wrapper recorded in
-///   `attempts/<task>/base_sha`, else the task's `base_sha`; without a worktree or a base the
-///   committed range below is used.
+/// - A **running** task (`doing.running`): the worker's worktree against the merge base of
+///   the remote main and the worktree's HEAD, uncommitted and untracked files included, so the
+///   change is visible while the attempt runs (ADR 0048 decision 13). The attempt's recorded
+///   base (the one the wrapper wrote to `attempts/<task>/base_sha`, else the task's
+///   `base_sha`) is the fallback when there is no remote main ref; without a worktree or a base
+///   the committed range below is used.
 /// - A **merged** task: its passing integration verdict's candidate (ADR 0048 decision 10).
 ///   A merge candidate's first-parent diff (`<candidate>^1..<candidate>`) is the change the
 ///   merge put on main, not what main has gained since. When the candidate is the task head
 ///   itself (main had not moved, so main was fast-forwarded to it), that range would be only
-///   the head's last commit: the task's own change is `base_sha..head_sha` instead, exactly
-///   the range the review prompt uses.
-/// - Any other task: `base_sha..head_sha` of the selected attempt, that attempt's own
-///   `AttemptFinished` record when it has one, else the task's current fields.
+///   the head's last commit: the task's own change is `base_sha..head_sha` instead.
+/// - Any other task: the task's own change, from the merge base of the remote main and the
+///   attempt's head to that head — the range the review stage reads, so a branch that merged a
+///   newer main does not show main's merged changes. The head is the selected attempt's own
+///   `AttemptFinished` record when it has one, else the task's current fields. With no remote
+///   main ref the range is that attempt's recorded `base_sha..head_sha` and [`TaskDiff::fallback`]
+///   says so.
 ///
 /// The diff is empty when the task has no commit yet (no base or head, or both equal).
 ///
@@ -291,14 +299,17 @@ pub fn task_diff(store: &Store, task: &str, attempt: Option<u32>) -> Result<Task
     {
         return Ok(diff);
     }
-    let range = match item.state {
+    let (range, fallback) = match item.state {
+        // A merged task's merge commit is its change on main: the first-parent diff of the
+        // candidate (or the branch itself when main was fast-forwarded to it).
         TaskState::Done => match merged_candidate(store, task)? {
-            Some(verdict) => merged_range(&verdict).or_else(|| {
-                attempt_range(store, &item.id, attempt, &item.base_sha, &item.head_sha)
-            }),
-            None => attempt_range(store, &item.id, attempt, &item.base_sha, &item.head_sha),
+            Some(verdict) => match merged_range(&verdict) {
+                Some(range) => (Some(range), false),
+                None => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
+            },
+            None => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
         },
-        _ => attempt_range(store, &item.id, attempt, &item.base_sha, &item.head_sha),
+        _ => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
     };
     let Some((base, head)) = range else {
         return Ok(TaskDiff::default());
@@ -308,13 +319,35 @@ pub fn task_diff(store: &Store, task: &str, attempt: Option<u32>) -> Result<Task
     }
     diff_range(store.repo(), &base, &head).map(|mut diff| {
         diff.source = DiffSource::Range;
+        diff.fallback = fallback;
         diff
     })
 }
 
-/// The running attempt's change: the worker's worktree against the attempt's `base_sha`, with
-/// modified and untracked files included. `None` when the attempt has no worktree yet or no
-/// base to compare with.
+/// The range of one attempt's own change: from the merge base of the remote main and the
+/// attempt's head to that head, the range the review stage reads (ADR 0048 decision 10). The
+/// second value is `true` when the merge base could not be found and the attempt's recorded base
+/// was used instead.
+fn attempt_change(
+    store: &Store,
+    task: &str,
+    attempt: Option<u32>,
+    base: &Option<String>,
+    head: &Option<String>,
+) -> (Option<(String, String)>, bool) {
+    let Some((recorded_base, head)) = attempt_range(store, task, attempt, base, head) else {
+        return (None, false);
+    };
+    match remote_main_base(store, &head) {
+        Some(base) => (Some((base, head)), false),
+        None => (Some((recorded_base, head)), true),
+    }
+}
+
+/// The running attempt's change: the worker's worktree against the merge base of the remote main
+/// and the worktree's HEAD (the attempt's recorded base when there is no remote main ref), with
+/// modified and untracked files included. `None` when the attempt has no worktree yet or no base
+/// to compare with.
 fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>, Error> {
     let worktree = store.root().join("worktrees").join(&task.id);
     if !worktree.join(".git").exists() {
@@ -330,8 +363,19 @@ fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>
     .ok()
     .map(|text| text.trim().to_owned())
     .filter(|sha| !sha.is_empty());
-    let Some(base) = recorded.or_else(|| task.base_sha.clone().filter(|sha| !sha.is_empty()))
-    else {
+    let recorded = recorded.or_else(|| task.base_sha.clone().filter(|sha| !sha.is_empty()));
+    // The worktree's HEAD is the attempt's own head: when the branch merged a newer main, a
+    // diff from the recorded base would carry main's merged changes too. The range starts at
+    // the merge base, exactly as the committed range below does; without a remote main ref the
+    // recorded base is used and the source line says so.
+    let head = git_raw(&worktree, &["rev-parse", "HEAD"])
+        .map(|text| text.trim().to_owned())
+        .filter(|sha| !sha.is_empty());
+    let merge_base = head
+        .as_deref()
+        .and_then(|head| remote_main_base(store, head));
+    let fallback = merge_base.is_none();
+    let Some(base) = merge_base.or(recorded) else {
         return Ok(None);
     };
     let Some(numstat) = git_raw(&worktree, &["diff", "--numstat", "-z", &base]) else {
@@ -394,6 +438,7 @@ fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>
     Ok(Some(TaskDiff {
         files,
         source: DiffSource::Worktree,
+        fallback,
     }))
 }
 
@@ -571,6 +616,7 @@ fn diff_range(repo: &Path, base: &str, head: &str) -> Result<TaskDiff, Error> {
     Ok(TaskDiff {
         files,
         source: DiffSource::Range,
+        fallback: false,
     })
 }
 
