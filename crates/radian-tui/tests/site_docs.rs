@@ -53,11 +53,13 @@ fn every_link_resolves_to_a_page_and_heading() {
             let target = if path.is_empty() {
                 page
             } else {
-                let stem = path.strip_suffix(".html").unwrap_or_else(|| {
-                    panic!("{}: link `{href}` points outside the docs", page.name)
-                });
+                let stem = resolve_href(&page.stem, path)
+                    .and_then(|resolved| resolved.strip_suffix(".html").map(str::to_owned))
+                    .unwrap_or_else(|| {
+                        panic!("{}: link `{href}` points outside the docs", page.name)
+                    });
                 by_stem
-                    .get(stem)
+                    .get(stem.as_str())
                     .unwrap_or_else(|| panic!("{}: link `{href}` has no page", page.name))
             };
             if let Some(id) = fragment
@@ -94,11 +96,19 @@ fn the_sidebar_lists_exactly_the_docs_pages() {
             .split_once("</nav>")
             .expect("the sidebar ends")
             .0;
-        let listed: HashSet<&str> = hrefs(sidebar).into_iter().collect();
+        let listed: HashSet<String> = hrefs(sidebar)
+            .into_iter()
+            .map(|href| {
+                resolve_href(&page.stem, href).unwrap_or_else(|| {
+                    panic!("{}: sidebar link `{href}` leaves the site", page.name)
+                })
+            })
+            .collect();
         let expected_ref: HashSet<&str> = expected.iter().map(String::as_str).collect();
         // The sidebar holds pages only.
         assert_eq!(
-            listed, expected_ref,
+            listed,
+            expected_ref.iter().map(|href| (*href).to_owned()).collect(),
             "{} sidebar lists exactly the manual pages",
             page.name
         );
@@ -169,12 +179,130 @@ fn a_link_to_a_missing_page_fails_the_build() {
     );
 }
 
+/// An arc page renders at `arc/<page>.html` and reaches the site root's assets from its own
+/// directory.
+#[test]
+fn an_arc_page_renders_in_its_subdirectory() {
+    let site = site();
+    let index = site
+        .pages
+        .iter()
+        .position(|page| page.stem == "arc/gate")
+        .expect("arc/gate renders");
+    assert_eq!(
+        radian_tui::site_docs::output_path(&site.pages[index].stem),
+        "arc/gate.html"
+    );
+    let html = radian_tui::site_docs::page_html(&site, index);
+    assert!(
+        html.contains("<link rel=\"stylesheet\" href=\"../../docs.css\">"),
+        "an arc page's stylesheet link resolves from arc/: {html}"
+    );
+    assert!(
+        html.contains("href=\"../../favicon.svg\""),
+        "an arc page's icon link resolves from arc/: {html}"
+    );
+    // The root pages still reach the same assets one level up.
+    let root = site
+        .pages
+        .iter()
+        .position(|page| page.stem == "index")
+        .expect("index renders");
+    let root_html = radian_tui::site_docs::page_html(&site, root);
+    assert!(
+        root_html.contains("<link rel=\"stylesheet\" href=\"../docs.css\">"),
+        "a root page's asset link: {root_html}"
+    );
+}
+
+/// Page links are written relative to their source page, as GitHub renders them, and resolve
+/// in both directions across the `arc/` boundary.
+#[test]
+fn relative_page_links_resolve_from_the_source_directory() {
+    let pages = [
+        (
+            "arc/loop.md",
+            "# Loop\n\n## Deep\n\nSee [gate](gate.md#here), [config](../configuration.md#setup), and [home](../index.md).\n",
+        ),
+        ("arc/gate.md", "# Gate\n\n## Here\n"),
+        (
+            "configuration.md",
+            "# Config\n\n## Setup\n\nSee [the loop](arc/loop.md#deep).\n",
+        ),
+        ("index.md", "# Home\n"),
+    ];
+    let site = render_site(&pages).expect("relative links resolve");
+    let loop_page = site
+        .pages
+        .iter()
+        .find(|page| page.stem == "arc/loop")
+        .expect("the loop page renders");
+    assert!(
+        loop_page.body.contains("href=\"gate.html#here\""),
+        "a sibling link: {}",
+        loop_page.body
+    );
+    assert!(
+        loop_page
+            .body
+            .contains("href=\"../configuration.html#setup\""),
+        "a parent link: {}",
+        loop_page.body
+    );
+    assert!(
+        loop_page.body.contains("href=\"../index.html\""),
+        "a link to the landing page: {}",
+        loop_page.body
+    );
+    let config = site
+        .pages
+        .iter()
+        .find(|page| page.stem == "configuration")
+        .expect("the configuration page renders");
+    assert!(
+        config.body.contains("href=\"arc/loop.html#deep\""),
+        "a link into arc/: {}",
+        config.body
+    );
+}
+
+/// A link from an arc page to a missing sibling fails the build, not silently becomes a repo
+/// link.
+#[test]
+fn a_link_to_a_missing_sibling_from_an_arc_page_fails_the_build() {
+    let pages = [("arc/loop.md", "# Loop\n\nSee [gone](missing.md).\n")];
+    let error = render_site(&pages).expect_err("a missing sibling must fail");
+    assert_eq!(error.page, "arc/loop.md");
+    assert_eq!(error.link, "missing.md");
+}
+
 /// Mutation: a fragment without a heading fails the build too.
 #[test]
 fn a_link_to_a_missing_heading_fails_the_build() {
     let pages = [("a.md", "# A\n\n## Here\n\nSee [below](#gone).\n")];
     let error = render_site(&pages).expect_err("a link to #gone must fail");
     assert_eq!(error.link, "#gone");
+}
+
+/// Resolves an output-relative href from `page_stem` to a docs-root-relative path.
+fn resolve_href(page_stem: &str, path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = page_stem
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("")
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            rest => parts.push(rest),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 /// Every `href="…"` in a fragment of HTML.

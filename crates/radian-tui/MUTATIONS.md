@@ -2714,6 +2714,18 @@ the named test was run alone, and the file was restored to the same bytes.
 
 2/2 caught.
 
+## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
+
+`run --watch` became `radian arc serve`: the TUI's detached start runs `arc serve`, and the
+old form is refused with one exact line. Each mutation was applied by hand to the working file,
+the named test was run alone, and the file was restored from a copy under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0079-M1 | the TUI starts `arc run` instead of `arc serve` (`LOOP_ARGS` in `src/arc/looping.rs`) | ✅ 1 failed | `arc_loop::the_detached_start_runs_arc_serve` (`left: ["arc", "run"]`, `right: ["arc", "serve"]`) |
+| TK0079-M2 | `run --watch` is accepted again (the refusal arm matches `watch: false`) | ✅ 1 failed | `arc::run_watch_is_refused_and_names_arc_serve` (`run --watch` exits 0 with a one-pass summary instead of 2) |
+
+2/2 caught.
 ## TK0076: the diff tab's file list keeps room for the diff (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
 
 The file list took every row but five, so a task with many changed files left the selected
@@ -2755,7 +2767,7 @@ hand to `crates/radian-tui/src/arc/mod.rs`, the named test was run alone with
 The review of TK0019 found that `L` on the merge page opened the loop log under an open command
 log, so nothing appeared, and that the plans footer advertised neither `R` nor `L`. The command
 log now closes when `L` opens the loop log, the plans footer carries both hints, and the loop
-sections of `docs/user/arc-tui.md` and `docs/user/arc.md` now say that a start is followed
+sections of `docs/user/arc/tui.md` and `docs/user/arc/index.md` now say that a start is followed
 through its child's pid and that the pid appears only when the holder recorded one. Each mutation
 was applied by hand to the working file, the named test was run alone, and the file was restored
 afterwards.
@@ -2823,6 +2835,19 @@ under `.radian/` with `cp`, then compared with `cmp`.
 | TK0087-M5 | the open `starter.start()` failure calls `set_result` and replaces the open-time warning | ✅ 1 failed | `pty::pty_arc_keeps_the_theme_warning_when_a_loop_already_runs` (the footer shows only "a loop is already running") |
 
 5/5 caught.
+## TK0080: the `active` view reads the shared finished rule (2026-10-24, branch `work/TK0080-finished-plan-one-rule`)
+
+`PlanFilter::Active` read `PlanView::is_finished`, so a plan with one merged task and one cancelled
+follow-up left the view once the store's rule said it was finished. The mutation gave `active` its
+own copy of the old rule. It was applied by hand to `crates/radian-tui/src/arc/mod.rs`, the named
+test was run with `cargo nextest run -p radian-tui --locked --profile sandbox -E 'binary(arc_tui)'`,
+and the file was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0080-M3 | `active` uses its own copy of the old rule (`!view.tasks.iter().all(is_merged)`) | ✅ 6 failed | `arc_tui::a_merged_and_cancelled_plan_is_done_with_a_cancelled_task_and_reads_1_of_1` (the finished plan is drawn in `active`) |
+
+1/1 caught.
 ## TK0085: the board's finished list follows up the TK0054 review (2026-10-24, branch `work/TK0085-tui-board-followups`)
 
 The TK0054 review found that a plan budget's pause left the plan's other tasks in the columns,
@@ -2838,3 +2863,16 @@ restored from that copy (never `git checkout`), and the named test ran alone wit
 
 2/2 caught. TK0085-M1, -M2 and -M5 mutate `radian-arc` and are recorded in
 `crates/radian-arc/MUTATIONS.md`.
+
+## the docs site's `arc/` pages (2026-10-24, branch `work/TK0089-arc-docs-subdir`)
+
+Base: the branch's move commit. The mutation was applied by hand to
+`crates/radian-tui/src/site_docs.rs`, backed up under `.radian/site_docs.rs.bak` and restored
+from that copy (never `git checkout`); the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox -E 'test(relative_page_links_resolve_from_the_source_directory)' --no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0089-M2 | `resolve_link` resolves a page link from the site root (`join_docs_user("", path)`) instead of the source page's directory | ✅ 1 failed | `site_docs::relative_page_links_resolve_from_the_source_directory` (a sibling `gate.md` becomes a `blob/main` repo link) |
+
+1/1 caught.

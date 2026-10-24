@@ -416,6 +416,41 @@ fn a_bad_title_or_stage_is_refused_the_way_add_task_refuses_it() {
     );
 }
 
+/// The tool contract calls the original brief the text before the first `## Rework <n>`
+/// section. A heading that only starts `## Rework `, such as `## Rework notes`, is brief text,
+/// so a new brief replaces it.
+#[test]
+fn a_brief_heading_that_is_not_a_numbered_rework_is_replaced() {
+    let (_scratch, store, plan) = setup("rework-notes");
+    let task = add_task(&store, &plan, "work", &[]);
+    store
+        .change_task(&task, |task| {
+            task.body = "the original brief\n\n## Rework notes\n\nkeep both sides\n\n\
+                         ## Rework 1\n\nfirst rework\n"
+                .to_owned();
+            Ok(())
+        })
+        .expect("the test writes a notes heading above a rework");
+    let server = ArcServer::new(store.clone());
+
+    let updated = update_ok(&server, json!({"task": task, "brief": "a better brief"}));
+    let body = updated["body"].as_str().expect("a body");
+    assert!(!body.contains("the original brief"), "{body}");
+    assert!(!body.contains("## Rework notes"), "{body}");
+    assert!(!body.contains("keep both sides"), "{body}");
+    assert!(
+        body.starts_with("a better brief\n\n## Rework 1\n"),
+        "{body}"
+    );
+    assert_eq!(body.matches("## Rework").count(), 1, "{body}");
+    let changes_at = body.find("## Changes").expect("the changes heading");
+    assert!(
+        body.find("## Rework 1").expect("the rework heading") < changes_at,
+        "{body}"
+    );
+    assert!(body.trim_end().ends_with("update_task: brief"), "{body}");
+}
+
 #[test]
 fn a_rework_added_after_a_change_keeps_the_records_last() {
     let (_scratch, store, plan) = setup("late-rework");

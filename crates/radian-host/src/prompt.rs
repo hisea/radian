@@ -42,16 +42,21 @@ pub enum SandboxFacts {
     Inherited,
 }
 
-/// The bundled manual index, embedded in `<runtime>` (one line per page, byte-stable).
-/// Only read when the user asks about radian itself; read the relevant pages fully first.
+/// The bundled manual index, embedded in `<runtime>`: one compact line of page topics, so a
+/// new page costs a few tokens (byte-stable). Only read when the user asks about radian
+/// itself; read the relevant pages fully first.
 pub fn docs_index() -> String {
     let mut out = String::from(
         "Documentation: read it only when the user asks about radian itself. Read the relevant pages fully before answering.\n",
     );
-    for (name, _) in radian_coding::docs::DOCS {
-        let topic = name.strip_suffix(".md").unwrap_or(name);
-        out.push_str(&format!("- {topic}: radian://docs/{name}\n"));
+    out.push_str("Pages, each at radian://docs/<page>.md: ");
+    for (index, (name, _)) in radian_coding::docs::DOCS.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(name.strip_suffix(".md").unwrap_or(name));
     }
+    out.push('\n');
     out
 }
 
@@ -701,6 +706,10 @@ mod tests {
     fn the_docs_index_is_stable_small_and_in_runtime() {
         let first = docs_index();
         assert_eq!(first, docs_index(), "byte-stable");
+        assert!(
+            first.contains("arc/loop"),
+            "the arc pages are indexed by their path under docs/user/: {first}"
+        );
         // ADR 0015 rule: ascii bytes / 4 rounded up, plus one per non-ascii char.
         let ascii = first.bytes().filter(|b| *b < 128).count() as u64;
         let non_ascii = first.chars().filter(|c| !c.is_ascii()).count() as u64;
@@ -732,12 +741,13 @@ mod tests {
                 .unwrap();
         let session = tools.open_session().await.unwrap();
         let index = docs_index();
+        let topics = index
+            .lines()
+            .find_map(|line| line.strip_prefix("Pages, each at radian://docs/<page>.md: "))
+            .expect("the index carries the topic line");
         let mut count = 0;
-        for line in index.lines() {
-            let Some(path) = line.split_once("radian://docs/").map(|(_, rest)| rest) else {
-                continue;
-            };
-            let full = format!("radian://docs/{path}");
+        for topic in topics.split(", ") {
+            let full = format!("radian://docs/{topic}.md");
             let call = ToolCall {
                 id: "t".into(),
                 name: "read".into(),

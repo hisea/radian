@@ -1557,8 +1557,9 @@ fn conflict_rework_brief(conflict: &Conflict) -> String {
 /// the next attempt's brief, or pauses the plan at `max_auto_rework` and leaves the task in
 /// `review.rework_pending`.
 ///
-/// `None` when the verdict is not a review failure with blocking items, or the plan is at
-/// `auto` `off`: the caller then keeps the path to `review.rework_pending`.
+/// `None` when the verdict is not a review failure with blocking items, the plan is at
+/// `auto` `off`, or the attempt is a worker-less reverify (its failure never counts, decision
+/// 9): the caller then keeps the path to `review.rework_pending`.
 fn review_auto_rework(
     store: &Store,
     task: &model::TaskFile,
@@ -1576,6 +1577,12 @@ fn review_auto_rework(
     }
     let plan = store.load_plan(&task.plan)?;
     if plan.changed_outside_arc || plan.item.auto == "off" {
+        return Ok(None);
+    }
+    // A reverify attempt's gate does not count toward `auto_rework`, even when its `review`
+    // stage is the one that failed (ADR 0048 decisions 9 and 12): the task keeps the path to
+    // `review.rework_pending`, and no review rework is written.
+    if crate::store::attempt_ops::is_reverify_attempt(store, &task.id)? {
         return Ok(None);
     }
     // The count lives in `review.rework_pending`, where the pause rule and `show` read it

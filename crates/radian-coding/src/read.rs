@@ -281,6 +281,13 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
     if crate::docs::is_root(&path) {
         return run_docs_dir(limits, &path, limit, offset_given, max_bytes_given);
     }
+    // A bundled-manual directory (`radian://docs/arc` or `radian://docs/arc/`) reads its
+    // `index.md`; a page path passes through unchanged.
+    let path = if let Some(page) = crate::docs::dir_page(&path) {
+        format!("{}{page}", crate::docs::DOCS_PREFIX)
+    } else {
+        path
+    };
     if let Ok(dir) = root.open_dir(&path) {
         return crate::list::run_dir(limits, &path, &dir, limit, offset_given, max_bytes_given);
     }

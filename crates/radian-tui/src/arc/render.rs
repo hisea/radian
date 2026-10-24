@@ -307,7 +307,8 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
     }
     let hints: Vec<Hint> = match app.page {
         Page::Plans => {
-            let plan = app.selected_plan().map(|view| &view.plan.item);
+            let selected = app.selected_plan();
+            let plan = selected.map(|view| &view.plan.item);
             let draft = plan.is_some_and(|plan| plan.status == "draft");
             let confirmed = plan.is_some_and(|plan| plan.status == "confirmed");
             let auto_on = plan.is_some_and(|plan| plan.auto != "off");
@@ -320,7 +321,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 Focus::Plans => plan.is_some(),
                 Focus::Tasks => task.is_some(),
             };
-            let priority = plan.is_some_and(|plan| !plan.is_cancelled());
+            let priority = selected.is_some_and(|view| !view.is_cancelled());
             vec![
                 Hint::new("↑↓", "select", false),
                 Hint::new("enter", "open task", false),

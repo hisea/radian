@@ -455,6 +455,18 @@ alone, and the file was restored from a copy under `.radian/mut-bak/`.
 
 1/1 caught.
 
+## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
+
+`run --watch` became `radian arc serve`; `run` is one pass. The mutation was applied by hand to
+the working file, the named test was run alone, and the file was restored from a copy under
+`.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0079-M3 | `serve` drops the interval lower bound (`MIN_INTERVAL_SECS` becomes `0`) | ✅ 1 timed out | `radian-tui::arc a_serve_interval_outside_five_to_3600_is_a_usage_error` (`serve --interval 4` is accepted and runs the loop until nextest's timeout, instead of exiting 2) |
+
+1/1 caught.
+
 ## TK0076: the diff is the task's own change from the merge base with main (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
 
 `read::task_diff` diffed the attempt's `base_sha..head_sha`, so a task branch that merged a
@@ -549,6 +561,60 @@ sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian
 
 1/1 caught.
 
+## TK0091: the worker reads a brief's verdict from a copy in its worktree (2026-10-24, branch `work/TK0091-worker-verdict-copies`)
+
+ADR 0048 decision 7: when the wrapper composes an attempt's brief, it copies every file the
+text names under `<repository>/.radian/arc/runs/` into the worker's worktree at
+`.radian/arc-verdicts/<task>/<attempt>/<file>` and replaces the path in the text; a copy that
+cannot be made stays in the text with one `verdict copy skipped:` note. Each mutation was
+applied to the working file, `cargo build -p radian-tui --bin radian -p agent-extensions --bin
+mcp-fixture` ran before the test (the work tests refuse an older binary), the test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --no-fail-fast -E 'binary(work) and
+test(verdict)'`, and the file was restored from `.radian/mut/work_mod.rs` with `cp` and
+compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0091-M1 | the copy is made but the absolute path stays in the text (`Ok(_relative) => text.push_str(named)`) | `work::a_review_rework_reads_a_copy_of_its_verdict` (`!captured.contains(".radian/arc/runs/")`), `work::a_followup_brief_copies_two_verdicts_of_another_task` | ✅ 2 failed |
+| TK0091-M2 | the path is rewritten without copying (`copy_verdict` returns the relative path before its metadata and copy) | the same two, plus `work::a_missing_verdict_stays_in_the_brief_and_is_noted` (the missing file is rewritten and no note is recorded) and `work::a_verdict_copy_never_reaches_the_branch` (no copy in the worktree) | ✅ 4 failed |
+| TK0091-M3 | a skipped copy fails the attempt (`copy_notes.first()` returns `Err` before the worker starts) | `work::a_missing_verdict_stays_in_the_brief_and_is_noted` (the worker's stdin file is never written) | ✅ failed |
+## TK0080: one finished-plan rule, and cancelled tasks out of progress (2026-10-24, branch `work/TK0080-finished-plan-one-rule`)
+
+`PlanView::is_finished` counted only `done.merged`, so a plan with a merged task and a cancelled
+follow-up stayed in `list`'s default view; `progress` counted a cancelled task as work left to do.
+Both rules now live in `radian-arc`, next to each other, and `list`, `list --json`, the TUI's views
+and the plan mark read them. Each mutation was applied by hand to the working file, the named test
+was run with `cargo nextest run -p radian-arc --locked --profile sandbox -E 'binary(list)'`, and the
+file was restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0080-M1 | `is_finished` requires every task `done.merged` again (the `failed.cancelled` arm is dropped) | ✅ 1 failed | `list::a_merged_task_and_a_cancelled_follow_up_finish_the_plan_and_read_1_of_1` (the finished plan is printed by default) |
+| TK0080-M2 | `progress`'s total counts cancelled tasks (`self.tasks.len()`) | ✅ 2 failed | `list::a_merged_task_and_a_cancelled_follow_up_finish_the_plan_and_read_1_of_1` and `list::a_plan_whose_tasks_are_all_cancelled_is_cancelled_and_reads_0_of_0` (`1/2` and `0/2` instead of `1/1` and `0/0`) |
+| TK0080-M4 | a plan whose tasks are all cancelled is not cancelled (`is_cancelled` drops `is_cancelled_by_tasks`) | ✅ 1 failed | `list::a_plan_whose_tasks_are_all_cancelled_is_cancelled_and_reads_0_of_0` (the plan is shown by default instead of hidden) |
+
+3/3 caught.
+
+## TK0080 rework: a plan cancelled by its tasks is final (2026-10-24, branch `work/TK0080-finished-plan-one-rule`)
+
+A plan whose tasks are all `failed.cancelled` was cancelled for `list` and the TUI but not for the
+commands that change a plan: `add task`, `cancel`, `confirm`, `auto`, `priority`, `update_plan`,
+`reset-budget` and `add_rework` read the stored `status` only, so one new task brought the plan
+back to `active`. `Store::plan_is_cancelled` and `Store::refuse_cancelled` now carry the shared
+rule, and `Store::change_open_plan` refuses under `state.lock` before a plan write. Each mutation
+was applied by hand to the working file, the named test was run with `cargo nextest run -p
+radian-arc --locked --profile sandbox -E
+'test(a_plan_its_tasks_cancelled_refuses_every_command_that_would_change_it)'`, and the file was
+restored from a copy under `.radian/` with `cp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0080-M5 | `add_task_in` drops `Store::refuse_cancelled`, so a `draft` plan whose tasks are all cancelled takes a new task (the review's trigger) | ✅ 1 failed | `attempt::a_plan_its_tasks_cancelled_refuses_every_command_that_would_change_it` (`add task: "TK0003-new"`: the task was created) |
+| TK0080-M6 | `cancel_plan` checks the stored `status` only (`loaded.item.is_cancelled()`) | ✅ 1 failed | the same test (`cancel: Plan(PlanCanceled { plan: "PL0001-plan", tasks: [] })`: the final plan cancelled again) |
+| TK0080-M7 | `change_open_plan` checks the stored `status` only (`view.plan.item.is_cancelled()`) | ✅ 1 failed | the same test (`confirm: Plan("PL0001-plan")`: the draft plan confirmed) |
+| TK0080-M8 | the loop's `waiting` summary checks the stored `status` only (`plan.is_cancelled()`), so a plan cancelled by its tasks is listed as waiting | ✅ 1 failed | `run::a_pass_lists_a_plan_whose_tasks_are_all_cancelled_as_waiting_on_nothing` (the summary prints `PL0001-stopped (auto off)` and two `failed.cancelled` lines instead of `nothing waits`) |
+
+4/4 caught.
 ## TK0085: automatic reverify and finished times follow up the TK0054 review (2026-10-24, branch `work/TK0085-tui-board-followups`)
 
 The TK0054 review found that the board's `auto_reverify_pending` dropped the `(head, main)` pair
@@ -582,4 +648,93 @@ applied to `crates/radian-arc/src/store/plan_ops.rs` by hand, the named tests we
 | TK0081-M6 | `append_task_change` leaves a `## Changes` section that a rework follows in place (`move_changes_last` does nothing) | `update_task::an_update_repairs_records_a_later_rework_follows` (the new record lands inside the rework section), and `store::plan_ops::tests::an_update_moves_a_changes_section_a_rework_follows` | ✅ failed |
 
 2/2 caught.
+
+## TK0093: a failed reverify is not an automatic rework (2026-10-24, branch `work/TK0093-reverify-failure-not-counted`)
+
+`attempt_ops::is_reverify_attempt` reads the class of the current attempt's
+`attempt_result.json`, which a reverify claim writes before the gate runs, and both call sites in
+`run.rs` skip `record_auto_rework` for it (ADR 0048 decisions 9 and 12). Each mutation was
+applied by hand to `crates/radian-arc/src/store/attempt_ops.rs`, the binary was rebuilt with
+`cargo build -p radian-tui --bin radian`, the named test ran alone with
+`cargo nextest run -p radian-arc --locked --profile sandbox -E '<the test below>'`, and the file
+was restored from `.radian/attempt_ops.rs.bak` with `cp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0093-M1 | `is_reverify_attempt` returns `false` for every attempt, so a failed automatic reverify counts again | `run::a_failed_automatic_reverify_does_not_count_as_an_auto_rework` (`tests/run.rs:3458`: `auto_rework` is 2, not 1) | ✅ failed |
+| TK0093-M2 | `is_reverify_attempt` returns `true` for every attempt, so no failure ever counts and the plan never pauses | `run::max_auto_rework_pauses_the_plan_and_sets_auto_off` (`tests/run.rs:777`: the first attempt has `auto_rework` 0, not 1) | ✅ failed |
+
+2/2 caught.
+
+## TK0091 rework: a verdict copy follows no symbolic link (2026-10-24, branch `work/TK0091-worker-verdict-copies`)
+
+The review found that the copy followed a symbolic link in two places: the source opened with
+`fs::metadata`, which follows a link, and the destination used `create_dir_all` and `fs::copy`,
+which follow a link a worker can plant in its own worktree. `open_verdict` now walks the source
+path with `symlink_metadata` and opens the file with `O_NOFOLLOW`, and `write_verdict_copy`
+creates and writes every destination component without following one. Each mutation was
+applied to `crates/radian-arc/src/work/mod.rs` by hand, the named tests ran with `cargo
+nextest run -p radian-arc --locked --profile sandbox --no-fail-fast`, and the file was restored
+from `.radian/work-fixed.rs` with `cp` and compared with `diff`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0091-M4 | the source follows a symbolic link (`open_verdict` is `File::open(path)`) | `work::tests::a_verdict_copy_that_is_a_symlink_is_skipped` (the link is copied and the path is rewritten) | ✅ failed |
+| TK0091-M5 | the destination follows a symbolic link (`create_dir_all` then `fs::write(worktree.join(relative))`) | `work::tests::a_verdict_copy_never_follows_a_link_in_the_worktree` (the link's target is overwritten), and `work::a_verdict_copy_never_follows_a_link_the_worktree_already_has` (the earlier attempt's link is followed) | ✅ 2 failed |
+
+2/2 caught.
+
+## TK0091 rework 2: the verdict copy descends by handle (2026-10-24, branch `work/TK0091-worker-verdict-copies`)
+
+The review found that `write_verdict_copy` still checked each destination parent with
+`symlink_metadata` and then resolved the name again in `create_dir` and the file open, so a
+process left behind in the worktree could rename a checked directory and put a link in its place
+between the check and the use. `write_verdict_copy` now opens every destination directory once,
+with `O_DIRECTORY | O_NOFOLLOW`, and descends with `mkdirat`, `openat` and `fstatat` relative to
+the held parent handle; the copy file is opened on that handle with `O_CREAT | O_TRUNC |
+O_NOFOLLOW`. The source was already opened with `O_NOFOLLOW`. Each mutation was applied to
+`crates/radian-arc/src/work/mod.rs` by hand, the named tests ran with `cargo nextest run -p
+radian-arc --locked --profile sandbox --no-fail-fast`, and the file was restored from
+`.radian/work-fixed.rs` with `cp` and compared with `diff`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0091-M6 | the destination directory open follows a link (`O_NOFOLLOW` dropped from `open_dir_at`) | `work::tests::a_verdict_copy_never_follows_a_link_in_the_worktree` (the `.radian` link is followed and the copy lands outside), and `work::tests::a_verdict_copy_survives_a_directory_swapped_for_a_link` (the swapped link is followed) | ✅ 2 failed |
+| TK0091-M7 | the destination directory is opened by pathname (`fs::File::open(shown)` in `open_dir_at`) | the same two tests | ✅ 2 failed |
+| TK0091-M8 | the copy file is opened through a link (`O_NOFOLLOW` dropped from `write_file_at`) | `work::tests::a_verdict_copy_never_follows_a_link_in_the_worktree` (the link's target is truncated with the verdict bytes) | ✅ failed |
+
+3/3 caught.
+## TK0092: a brief heading that only starts like a rework is brief text (2026-10-24, branch `work/TK0092-mcp-update-task-followups`)
+
+The TK0081 review found that `set_brief` treated any line beginning `## Rework ` as a rework
+boundary, so an original brief with a heading such as `## Rework notes` was kept instead of
+replaced. `set_brief` now looks for the numbered heading the tool contract names,
+`## Rework <n>` (`rework_section_start`, which reads the number through `rework_number` and
+keeps `## Rework 2 (review)`). The mutation was applied to
+`crates/radian-arc/src/store/plan_ops.rs` by hand, the named tests were run with
+`cargo nextest run -p radian-arc --locked --profile sandbox --no-fail-fast`, the file was
+restored from `.radian/mut/plan_ops.rs` with `cp`, and `cmp` found it identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0092-M1 | `set_brief` looks for `REWORK_HEADING` with the generic `section_start`, so `## Rework notes` again ends the original brief | `update_task::a_brief_heading_that_is_not_a_numbered_rework_is_replaced` (`## Rework notes` and its text stay in the body), and `store::plan_ops::tests::a_heading_that_only_starts_like_a_rework_is_part_of_the_brief` | ✅ 2 failed |
+
+1/1 caught.
+
+## TK0093 rework 1: a reverify's failed review does not count (2026-10-24, branch `work/TK0093-reverify-failure-not-counted`)
+
+The review found that a reverify whose gate failed on its `review` stage still reached
+`review_auto_rework` and called `record_auto_rework`, so a task at `max_auto_rework` paused the
+plan on a failed reverify. `review_auto_rework` now returns `None` for an attempt
+`attempt_ops::is_reverify_attempt` marks as a worker-less reverify, before it moves the task or
+counts: the task keeps the path to `review.rework_pending` and no review rework is written. The
+mutation was applied by hand to `crates/radian-arc/src/review/mod.rs`, the named test ran alone
+with `cargo nextest run -p radian-arc --locked --profile sandbox -E '<the test below>'`, and the
+file was restored from `.radian/review-mod.rs.bak` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0093-M3 | `review_auto_rework` skips the reverify guard, so a reverify's failed `review` stage counts and pauses the plan | `review::a_reverify_whose_review_fails_does_not_count_as_an_auto_rework` (`tests/review.rs`: the pause reports count 3 at max 2, and a review rework is written) | ✅ failed |
+
+1/1 caught.
 

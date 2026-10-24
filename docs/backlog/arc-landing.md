@@ -63,4 +63,4 @@ after_merge = [
 - 第 1 条核对：`command` 输出的 sha 文件树与候选不同 → 不进 `done.merged`；squash 后文件树相同 → 通过。
 - 钩子：环境变量都到达、失败只记警告、合并结果不受影响、`after_fail` 与 `after_rework` 在对应转换后各跑一次。
 - 默认配置删掉 worktree 那行后，`done.merged` 不再删 worktree（不再有写死的删除）。
-- 手册 `docs/user/arc.md`：`[integration]` 与 `[hooks]` 每个键（类型、默认、全部取值、何时生效）、每个环境变量、merge 一节按新流程改写；配置 drift 测试看得到新键。
+- 手册 `docs/user/arc/index.md`：`[integration]` 与 `[hooks]` 每个键（类型、默认、全部取值、何时生效）、每个环境变量、merge 一节按新流程改写；配置 drift 测试看得到新键。

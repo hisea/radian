@@ -2,7 +2,7 @@
 //! 13).
 //!
 //! A stage's `sh -c` command and the `review` session each run in a process group of their
-//! own. When `--watch` stops it signals the gate, not those children; before this module the
+//! own. When `serve` stops it signals the gate, not those children; before this module the
 //! child kept running and could write in the stage's checkout after the gate (and its locks)
 //! were gone. The gate installs a SIGTERM handler here, every running stage registers the child
 //! it runs, and the handler forwards the stop to each child's whole group: SIGTERM at once,

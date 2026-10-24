@@ -591,6 +591,34 @@ fn a_run_pass_claims_and_gates_nothing_from_a_cancelled_plan() {
     );
 }
 
+/// A plan whose tasks are all `failed.cancelled` is cancelled by its tasks, so a pass lists
+/// it as waiting on nothing: a cancelled task is not work left to do.
+#[test]
+fn a_pass_lists_a_plan_whose_tasks_are_all_cancelled_as_waiting_on_nothing() {
+    let repo = Repo::new("run-tasks-cancelled");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "stopped");
+    let one = add_task(&store, &plan, "one", &[]);
+    let two = add_task(&store, &plan, "two", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    for task in [&one, &two] {
+        attempt::cancel(&store, task).expect("the task cancels on its own");
+    }
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert!(
+        run.stdout.contains("nothing waits"),
+        "a cancelled plan waits on nothing:\n{}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains(&plan),
+        "the cancelled plan is not in the summary:\n{}",
+        run.stdout
+    );
+}
+
 /// A plan cancel leaves a `doing` task whose wrapper never confirms its end at
 /// `doing.reconciling`. The plan is final, so the next pass ends the task at
 /// `failed.cancelled` instead of leaving it in `doing`, where it would hold a
@@ -1416,10 +1444,10 @@ fn a_gate_is_not_started_twice_while_it_runs() {
     );
 }
 
-/// SIGTERM to `--watch`: no new worker and no new gate starts; the running worker finishes
+/// SIGTERM to `serve`: no new worker and no new gate starts; the running worker finishes
 /// and the next `run` collects it (ADR 0048 decision 13).
 #[test]
-fn sigterm_to_watch_starts_no_new_work_and_the_next_run_collects_the_worker() {
+fn sigterm_to_serve_starts_no_new_work_and_the_next_run_collects_the_worker() {
     let repo = Repo::new("run-watch-stop");
     let store = setup(&repo);
     let plan = add_plan(&store, "stop");
@@ -1439,7 +1467,7 @@ fn sigterm_to_watch_starts_no_new_work_and_the_next_run_collects_the_worker() {
     ]);
     worker_args(&repo, mock.base_url());
 
-    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    let watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
     wait_for(&repo.attempt_dir(&a, 1).join("identity.json"));
     // While the loop waits out its interval, a new `review.verifying` task appears.
     publish_verifying(&repo, &store, &plan, &b);
@@ -1564,9 +1592,9 @@ fn a_gate_error_record_is_reported_as_an_error() {
     );
 }
 
-/// `--watch` prints a pass error as one line and runs the next pass instead of exiting.
+/// `serve` prints a pass error as one line and runs the next pass instead of exiting.
 #[test]
-fn a_watch_pass_that_errors_prints_a_line_and_goes_on() {
+fn a_serve_pass_that_errors_prints_a_line_and_goes_on() {
     let repo = Repo::new("run-watch-error");
     let store = setup(&repo);
     let plan = add_plan(&store, "watch-error");
@@ -1585,7 +1613,7 @@ fn a_watch_pass_that_errors_prints_a_line_and_goes_on() {
         }),
     );
 
-    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    let mut watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
     // The pass reads the record, reports it and clears it; the loop then waits its interval.
     wait_until(
         Duration::from_secs(30),
@@ -1594,7 +1622,7 @@ fn a_watch_pass_that_errors_prints_a_line_and_goes_on() {
     );
     assert!(
         watch.try_wait().expect("try_wait").is_none(),
-        "one pass error ended --watch"
+        "one pass error ended serve"
     );
     let sent = std::process::Command::new("kill")
         .args(["-TERM", &watch.id().to_string()])
@@ -1613,7 +1641,7 @@ fn a_watch_pass_that_errors_prints_a_line_and_goes_on() {
     assert!(stdout.contains("boom"), "{stdout}");
 }
 
-// ---- a repeated --watch error stops the loop (ADR 0048 decision 13) ------------------
+// ---- a repeated serve error stops the loop (ADR 0048 decision 13) --------------------
 
 /// The config line that makes every pass refuse the same way: an argument the wrapper owns.
 const BAD_EXEC_ARGS_A: &str = "exec_args = [\"--profile\", \"full\"]";
@@ -1655,12 +1683,12 @@ fn wait_for_loop_log(repo: &Repo, text: &str, count: usize) {
     });
 }
 
-/// Three passes in a row with the same error stop `--watch`: one stop line, exit `1`, and the
+/// Three passes in a row with the same error stop `serve`: one stop line, exit `1`, and the
 /// lock released. A gate the loop started is stopped the way a signal stops it, so a broken
 /// configuration does not leave a build running; a worker is not signalled (this test starts
 /// none). Mutation: drop the count and the loop runs until the test's deadline.
 #[test]
-fn three_identical_pass_errors_stop_watch_with_exit_one_and_release_the_lock() {
+fn three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock() {
     let repo = Repo::new("run-watch-repeat");
     let store = setup(&repo);
     let plan = add_plan(&store, "watch-repeat");
@@ -1686,7 +1714,7 @@ fn three_identical_pass_errors_stop_watch_with_exit_one_and_release_the_lock() {
 
     // Every pass now refuses before it reaches the gate, with the same text.
     set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
-    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "5"]);
+    let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if watch.try_wait().expect("try_wait").is_some() {
@@ -1694,7 +1722,7 @@ fn three_identical_pass_errors_stop_watch_with_exit_one_and_release_the_lock() {
         }
         assert!(
             Instant::now() < deadline,
-            "three identical errors did not stop --watch"
+            "three identical errors did not stop serve"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -1739,7 +1767,7 @@ fn three_identical_pass_errors_stop_watch_with_exit_one_and_release_the_lock() {
 /// of the stop line. The stop line is still printed, exit `1`, and the gate is stopped with the
 /// default grace (the configured one cannot be read).
 #[test]
-fn a_broken_config_stops_watch_with_the_stop_line_and_stops_its_gate() {
+fn a_broken_config_stops_serve_with_the_stop_line_and_stops_its_gate() {
     let repo = Repo::new("run-watch-broken-config");
     let store = setup(&repo);
     let plan = add_plan(&store, "watch-broken-config");
@@ -1765,7 +1793,7 @@ fn a_broken_config_stops_watch_with_the_stop_line_and_stops_its_gate() {
 
     // The config no longer parses once the loop is already running: the store opened while it
     // was valid, so every later pass fails before `stop_gates` reads the grace.
-    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "5"]);
+    let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
     wait_for_loop_log(&repo, "no transition", 1);
     tune(
         &repo,
@@ -1779,7 +1807,7 @@ fn a_broken_config_stops_watch_with_the_stop_line_and_stops_its_gate() {
         }
         assert!(
             Instant::now() < deadline,
-            "three identical config errors did not stop --watch"
+            "three identical config errors did not stop serve"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -1825,7 +1853,7 @@ fn a_broken_config_stops_watch_with_the_stop_line_and_stops_its_gate() {
 /// Two identical errors then a pass that succeeds do not stop the loop: the success starts the
 /// count again. Mutation: never reset the count and this stops on the third pass.
 #[test]
-fn two_identical_errors_then_a_success_do_not_stop_watch() {
+fn two_identical_errors_then_a_success_do_not_stop_serve() {
     let repo = Repo::new("run-watch-reset");
     let store = setup(&repo);
     let plan = add_plan(&store, "watch-reset");
@@ -1833,12 +1861,12 @@ fn two_identical_errors_then_a_success_do_not_stop_watch() {
     plan_ops::confirm(&store, &plan).expect("confirm");
     set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
 
-    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "5"]);
+    let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
     // Wait for the two error lines; then fix the config while the loop waits for pass 3.
     wait_for_loop_log(&repo, "worker.exec_args must not repeat", 2);
     assert!(
         watch.try_wait().expect("try_wait").is_none(),
-        "two identical errors stopped --watch"
+        "two identical errors stopped serve"
     );
     set_exec_args(&repo, BAD_EXEC_ARGS_A, "exec_args = []");
     // The first successful pass prints `no transition`; the errors before it did not stop it.
@@ -1872,7 +1900,7 @@ fn two_identical_errors_then_a_success_do_not_stop_watch() {
 /// same text as the second. Mutation: count errors without comparing the text and the loop
 /// stops on three different ones.
 #[test]
-fn different_errors_do_not_stop_watch() {
+fn different_errors_do_not_stop_serve() {
     let repo = Repo::new("run-watch-different");
     let store = setup(&repo);
     let plan = add_plan(&store, "watch-different");
@@ -1880,7 +1908,7 @@ fn different_errors_do_not_stop_watch() {
     plan_ops::confirm(&store, &plan).expect("confirm");
     set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
 
-    let mut watch = repo.spawn(&["arc", "run", "--watch", "--interval", "5"]);
+    let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
     // Wait for each error line before changing the config for the next pass, so a slow pass
     // cannot be mistaken for the one the test meant.
     wait_for_loop_log(&repo, "worker.exec_args must not repeat", 1);
@@ -1892,13 +1920,13 @@ fn different_errors_do_not_stop_watch() {
     );
     assert!(
         watch.try_wait().expect("try_wait").is_none(),
-        "two different errors stopped --watch"
+        "two different errors stopped serve"
     );
     set_exec_args(&repo, BAD_EXEC_ARGS_B, BAD_EXEC_ARGS_A);
     wait_for_loop_log(&repo, "worker.exec_args must not repeat", 2);
     assert!(
         watch.try_wait().expect("try_wait").is_none(),
-        "three errors that are not all the same stopped --watch"
+        "three errors that are not all the same stopped serve"
     );
     let sent = std::process::Command::new("kill")
         .args(["-TERM", &watch.id().to_string()])
@@ -2134,9 +2162,9 @@ fn a_changed_head_starts_a_gate_that_left_no_record_once_more() {
     );
 }
 
-/// Under `--watch`, a gate that left no record is not started again across intervals.
+/// Under `serve`, a gate that left no record is not started again across intervals.
 #[test]
-fn a_watch_pass_does_not_restart_a_gate_that_left_no_record() {
+fn a_serve_pass_does_not_restart_a_gate_that_left_no_record() {
     let repo = Repo::new("run-gate-no-record-watch");
     let store = setup(&repo);
     let plan = add_plan(&store, "no-record-watch");
@@ -2146,8 +2174,7 @@ fn a_watch_pass_does_not_restart_a_gate_that_left_no_record() {
     publish_verifying(&repo, &store, &plan, &task);
     let env = [(background::EXIT_WITHOUT_RECORD_ENV, "1".to_owned())];
 
-    let watch =
-        repo.spawn_in_own_group_with_env(&["arc", "run", "--watch", "--interval", "5"], &env);
+    let watch = repo.spawn_in_own_group_with_env(&["arc", "serve", "--interval", "5"], &env);
     wait_until(Duration::from_secs(60), "the no-record gate record", || {
         gate_record(&repo, &task).is_some_and(|record| record["status"] == "no_record")
     });
@@ -2332,7 +2359,7 @@ fn a_stopped_gate_is_interrupted_and_restarted_without_a_death() {
     );
     publish_verifying(&repo, &store, &plan, &task);
 
-    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    let watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
     wait_until(Duration::from_secs(30), "the gate's running record", || {
         gate_record(&repo, &task).is_some_and(|record| record["status"] == "running")
     });
@@ -2392,7 +2419,7 @@ fn a_stopped_gate_is_interrupted_and_restarted_without_a_death() {
 /// records `interrupted`. Mutation: stop only a `running` record, and the gate of a
 /// just-started task keeps running after the loop exits.
 #[test]
-fn sigterm_to_watch_stops_a_gate_that_has_not_written_running() {
+fn sigterm_to_serve_stops_a_gate_that_has_not_written_running() {
     let repo = Repo::new("run-stop-started");
     let store = setup(&repo);
     let plan = add_plan(&store, "stop-started");
@@ -2402,8 +2429,7 @@ fn sigterm_to_watch_stops_a_gate_that_has_not_written_running() {
     publish_verifying(&repo, &store, &plan, &task);
     let env = [(background::SLOW_START_ENV, "15000".to_owned())];
 
-    let watch =
-        repo.spawn_in_own_group_with_env(&["arc", "run", "--watch", "--interval", "30"], &env);
+    let watch = repo.spawn_in_own_group_with_env(&["arc", "serve", "--interval", "30"], &env);
     wait_until(
         Duration::from_secs(30),
         "the pass's started record with the gate's pid",
@@ -2596,8 +2622,7 @@ fn a_signal_to_the_gate_stops_both_stages_of_the_pair() {
         fake.program().to_string_lossy().into_owned(),
     )];
 
-    let watch =
-        repo.spawn_in_own_group_with_env(&["arc", "run", "--watch", "--interval", "30"], &env);
+    let watch = repo.spawn_in_own_group_with_env(&["arc", "serve", "--interval", "30"], &env);
     wait_for(&commands_pid_file);
     wait_until(Duration::from_secs(60), "the review session", || {
         fake.started(1).is_file()
@@ -2929,11 +2954,11 @@ fn a_wrapper_pushing_past_the_stall_window_is_not_judged_dead() {
     );
 }
 
-/// A `--watch` stop reaches the stage the gate runs, not only the gate: the long `commands`
+/// A `serve` stop reaches the stage the gate runs, not only the gate: the long `commands`
 /// child is gone when the loop returns. Mutation: signal only the gate pid and the `sleep`
 /// survives.
 #[test]
-fn sigterm_to_watch_kills_the_running_gate_stage() {
+fn sigterm_to_serve_kills_the_running_gate_stage() {
     let repo = Repo::new("run-stop-stage");
     let store = setup(&repo);
     let plan = add_plan(&store, "stop-stage");
@@ -2946,7 +2971,7 @@ fn sigterm_to_watch_kills_the_running_gate_stage() {
     );
     publish_verifying(&repo, &store, &plan, &task);
 
-    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    let watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
     wait_for(&pid_file);
     let pid: u32 = fs::read_to_string(&pid_file)
         .expect("stage.pid")
@@ -3137,7 +3162,7 @@ fn a_stage_child_does_not_keep_the_gate_lock() {
 /// leave the gate in the loop's group and the SIGINT reaches it directly (the group signal in
 /// the second test below no longer names a gate group).
 #[test]
-fn sigint_to_the_watch_group_leaves_the_worker_running() {
+fn sigint_to_the_serve_group_leaves_the_worker_running() {
     let repo = Repo::new("run-sigint-group");
     let store = setup(&repo);
     let plan = add_plan(&store, "sigint");
@@ -3175,7 +3200,7 @@ fn sigint_to_the_watch_group_leaves_the_worker_running() {
     ]);
     worker_args(&repo, mock.base_url());
 
-    let watch = repo.spawn_in_own_group(&["arc", "run", "--watch", "--interval", "30"]);
+    let watch = repo.spawn_in_own_group(&["arc", "serve", "--interval", "30"]);
     let identity_path = repo.attempt_dir(&a, 1).join("identity.json");
     wait_for(&identity_path);
     wait_for(&stage_pid_file);
@@ -3232,7 +3257,7 @@ fn sigint_to_a_gate_stops_its_stage() {
     );
     publish_verifying(&repo, &store, &plan, &task);
 
-    let watch = repo.spawn(&["arc", "run", "--watch", "--interval", "30"]);
+    let watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
     wait_for(&stage_pid_file);
     let stage: u32 = fs::read_to_string(&stage_pid_file)
         .expect("stage.pid")
@@ -3425,6 +3450,106 @@ fn a_command_failure_is_reverified_automatically_once_main_moves() {
         !repo.attempt_dir(&task, 2).join("identity.json").exists(),
         "the automatic reverify started a worker"
     );
+}
+
+/// A worker attempt whose `commands` stage failed at `max_auto_rework`, then an automatic
+/// reverify that fails again: the failed reverify is not an automatic rework, so the count
+/// and the plan's `auto` stay as they were (ADR 0048 decisions 9 and 12). Mutation: count the
+/// failed reverify and the plan pauses at `off`.
+#[test]
+fn a_failed_automatic_reverify_does_not_count_as_an_auto_rework() {
+    let repo = Repo::new("run-auto-reverify-no-count");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-no-count");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(&repo, "max_auto_rework = 2", "max_auto_rework = 1");
+    // The tree stays broken for the worker's gate and the reverify's gate alike.
+    commands(&repo, "false");
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "rework_pending"
+    });
+    let failed = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(failed.auto_rework, 1, "the worker's failure counts");
+    assert_eq!(plan_auto(&store, &plan), "run", "the limit is not passed");
+
+    advance_main(&repo, "main-move.txt", "moved\n");
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        attempt(&store, &task) == 2 && state(&store, &task).1 == "rework_pending"
+    });
+    assert!(run.contains("auto reverify"), "{run}");
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        stored.auto_rework, 1,
+        "the failed automatic reverify counted: {run}"
+    );
+    assert_eq!(
+        plan_auto(&store, &plan),
+        "run",
+        "the plan paused on the failed reverify: {run}"
+    );
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "rework_pending"),
+        "{run}"
+    );
+    assert_eq!(stored.attempt, 2, "{run}");
+}
+
+/// The same for the owner's `radian arc reverify`: its failure leaves `auto_rework` and the
+/// plan's `auto` alone (ADR 0048 decisions 9 and 12).
+#[test]
+fn a_failed_hand_reverify_does_not_count_as_an_auto_rework() {
+    let repo = Repo::new("run-hand-reverify-no-count");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "hand-no-count");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(&repo, "max_auto_rework = 2", "max_auto_rework = 1");
+    commands(&repo, "false");
+    let mock = Mock::start(vec![commit_reply("c1", "change.txt"), text_reply("done")]);
+    worker_args(&repo, mock.base_url());
+
+    run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &task).1 == "rework_pending"
+    });
+    let failed = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(failed.auto_rework, 1, "the worker's failure counts");
+
+    advance_main(&repo, "main-move.txt", "moved\n");
+    let reverified = repo.radian(&["arc", "reverify", &task]);
+    assert_eq!(reverified.code, 0, "reverify: {}", reverified.stderr);
+    assert!(
+        reverified
+            .stdout
+            .contains(&format!("{task}-2 reverify -> review.verifying")),
+        "{}",
+        reverified.stdout
+    );
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        stored.auto_rework, 1,
+        "the failed hand reverify counted: {}",
+        reverified.stdout
+    );
+    assert_eq!(
+        plan_auto(&store, &plan),
+        "run",
+        "the plan paused on the failed hand reverify: {}",
+        reverified.stdout
+    );
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "rework_pending"),
+        "{}",
+        reverified.stdout
+    );
+    assert_eq!(stored.attempt, 2, "{}", reverified.stdout);
 }
 
 /// While main stands still, the failure is not re-verified: nothing runs again.

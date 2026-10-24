@@ -168,7 +168,7 @@ A theme file sets them by these names; pi has no source role for them. Without
 truecolor each value becomes the nearest 256-color entry, like every role.
 
 Plan marks (the arc plans page draws one mark per plan; see
-[the arc TUI](arc-tui.md#the-plans-page) for the rule that picks it):
+[the arc TUI](arc/tui.md#the-plans-page) for the rule that picks it):
 
 | Role | What it paints | `dark` | `light` | `mono` |
 |---|---|---|---|---|
