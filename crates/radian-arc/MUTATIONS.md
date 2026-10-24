@@ -366,3 +366,20 @@ binary older than its sources. M2–M4 were run against the store-level tests on
 stale binary did not mask the mutation. M3 fails in 0.35 s (the bound is not hit); a walk
 that follows the cycle again would hit the 5 s bound instead of hanging the suite.
 
+## TK0039 (the cancel-plan review's follow-ups)
+
+The three races and edges the TK0034 review left: the `todo` branch of `cancel_task` writes
+under the transaction's lock and only while the task is still `todo`; the plan form walks the
+plan's tasks once more after its status becomes `cancelled`; and the pass that ends a
+cancelled plan's `doing.reconciling` task passes `Duration::ZERO` as the grace.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0039-M1 | the `todo` branch writes `failed.cancelled` without the transaction's re-check (the pre-TK0039 unconditional write) | `attempt::tests::a_todo_cancel_that_finds_a_claim_cancels_the_attempt_instead` (the claimed attempt is overwritten: `failed.cancelled`, where the doing path leaves `doing.reconciling`) | ✅ failed |
+| TK0039-M2 | the plan form's second walk is dropped (the `added` set and its `cancel_plan_tasks` call removed) | `attempt::a_task_added_while_the_plan_is_cancelled_is_cancelled_too` (the task is left `todo.proposed` under a `cancelled` plan) | ✅ failed |
+| TK0039-M3 | `end_reconciling_of_cancelled_plans` passes `[limits] cancel_grace_secs` again instead of `Duration::ZERO` | `attempt::a_pass_ends_a_reconciling_task_without_a_second_grace` (the pass takes the 5 s grace; the test's 2 s bound fails at 5.09 s) | ✅ failed |
+
+TK0039-M1–M3 were applied to the working file one at a time, run with `cargo test -p
+radian-arc` (`--lib attempt::tests` for M1, `--test attempt` for M2 and M3), restored from a
+copy under `.radian/tk0039/` with `cp`, and compared byte for byte with `cmp`.
+
