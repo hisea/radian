@@ -3470,4 +3470,8 @@ fn a_priority_change_takes_effect_on_the_next_pass_and_does_not_preempt() {
         "the lowered plan's second task must wait for a slot"
     );
     cancel(&repo, &other);
+    // Stop the first attempt's gate too: a live gate outlives the test and keeps recreating
+    // files under the scratch directory after the guard dropped, which is the one way a test
+    // temp directory can survive.
+    cancel(&repo, &one);
 }

@@ -7,6 +7,8 @@
 //! end-to-end half (the child's request carries the header; its journal and the parent's output
 //! do not) is `radian-exec`'s `the_parents_header_reaches_the_child_and_nothing_else_writes_it`.
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,14 +21,8 @@ use serde_json::{Value, json};
 
 const SECRET: &str = "argv-header-secret-7";
 
-fn scratch(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "radian-subagent-headers-{}-{label}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-subagent-headers-{label}"))
 }
 
 /// An executable stub that records its argv (one argument per line) and the child header
@@ -75,7 +71,7 @@ async fn the_header_value_reaches_the_child_through_the_environment_not_its_argv
             headers: vec![format!("X-Test={SECRET}")],
             ..SubagentParts::default()
         },
-        dir.clone(),
+        dir.to_path_buf(),
         "parent",
         workspace,
         None,

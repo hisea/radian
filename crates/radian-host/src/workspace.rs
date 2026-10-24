@@ -37,15 +37,8 @@ pub fn resolve_workspace(workspace: Option<&Path>) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    fn temp_dir(label: &str) -> PathBuf {
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "radian-host-workspace-{}-{label}-{n}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(label: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-host-workspace", label)
     }
 
     #[test]

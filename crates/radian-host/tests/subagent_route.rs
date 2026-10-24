@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+mod common;
+
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use radian_core::{InputSource, Message, NoopSink, TurnOptions};
 use radian_host::{
@@ -22,13 +24,11 @@ use radian_host::{
 use radian_permissions::{ApprovalPolicy, NoopAudit, Preset, Profile};
 use serde_json::{Value, json};
 
-fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("radian-subagent-route-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+fn scratch() -> common::TempDir {
+    let dir = common::TempDir::named("radian-subagent-route");
     // The session directory lives here, and the session warns when it is accessible to other
     // users; 0700 is what a real `~/.radian` has.
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&*dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     dir
 }
 
@@ -37,10 +37,10 @@ fn isolated_home() -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
         // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
-        let dir = PathBuf::from("/tmp")
-            .join(format!("radian-subagent-route-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::process_dir_at(
+            PathBuf::from("/tmp")
+                .join(format!("radian-subagent-route-home-{}", std::process::id())),
+        );
         let dir = std::fs::canonicalize(&dir).unwrap();
         // SAFETY: `get_or_init` runs this once, before any session is opened; this file has
         // exactly one test.
@@ -186,7 +186,7 @@ async fn the_child_runs_the_parents_live_model_route() {
     let session = open_session(
         SessionSetup {
             session_id: SessionId::new("route-test"),
-            session_dir: dir.clone(),
+            session_dir: dir.to_path_buf(),
             workspace: workspace.clone(),
             coding_root: None,
             model: model(&server.base_url, Arc::clone(&slot)),

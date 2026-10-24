@@ -767,21 +767,12 @@ pub fn parse_args(args: &[String]) -> Result<MemoryCommand, clap::Error> {
 mod tests {
     use super::*;
     use radian_memory::Source;
-    use std::path::PathBuf;
 
-    fn scratch(label: &str) -> PathBuf {
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "radian-memory-cmd-{}-{label}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(label: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-memory-cmd", label)
     }
 
-    fn service(label: &str) -> (PathBuf, MemoryService) {
+    fn service(label: &str) -> (crate::test_support::TempDir, MemoryService) {
         let dir = scratch(label);
         let ws = dir.join("ws");
         std::fs::create_dir_all(&ws).unwrap();

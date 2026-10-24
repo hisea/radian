@@ -1258,8 +1258,7 @@ mod tests {
         use radian_core::{JournalRecord, TranscriptJournal};
         use radian_session::{SessionCreatedData, SessionJournal};
 
-        let dir = std::env::temp_dir().join(format!("radian-baseline-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-baseline");
         let path = dir.join("s.jsonl");
         let journal = SessionJournal::create(
             &path,
@@ -1339,8 +1338,7 @@ mod tests {
         use radian_core::{JournalRecord, TranscriptJournal};
         use radian_session::{SessionCreatedData, SessionJournal};
 
-        let dir = std::env::temp_dir().join(format!("radian-prompt-total-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-prompt-total");
         let path = dir.join("s.jsonl");
         let journal = SessionJournal::create(
             &path,
@@ -1410,8 +1408,7 @@ mod tests {
         use radian_core::{JournalRecord, TranscriptJournal};
         use radian_session::{SessionCreatedData, SessionJournal};
 
-        let dir = std::env::temp_dir().join(format!("radian-prompt-cache-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-prompt-cache");
         let path = dir.join("s.jsonl");
         let journal = SessionJournal::create(
             &path,

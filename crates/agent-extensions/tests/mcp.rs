@@ -20,12 +20,44 @@ fn legacy(id: &str) -> McpServerConfig {
 }
 
 /// A fresh log file the fixture appends received methods to.
+///
+/// The directory is shared by every test binary process (nextest gives each test its own
+/// process) and removed when that process exits; a `Drop` guard cannot own a `'static`.
 fn log_file(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("agent-extensions-tests-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = log_dir();
     let path = dir.join(name);
     let _ = std::fs::remove_file(&path);
     path
+}
+
+fn log_dir() -> &'static PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("agent-extensions-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        EXIT_DIRS.lock().unwrap().push(dir.clone());
+        EXIT_HOOK.call_once(|| unsafe {
+            // SAFETY: the callback only touches this module's registry.
+            atexit(remove_exit_dirs);
+        });
+        dir
+    })
+}
+
+static EXIT_DIRS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static EXIT_HOOK: std::sync::Once = std::sync::Once::new();
+
+extern "C" fn remove_exit_dirs() {
+    if let Ok(dirs) = EXIT_DIRS.lock() {
+        for dir in dirs.iter().rev() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+unsafe extern "C" {
+    fn atexit(callback: extern "C" fn()) -> i32;
 }
 
 fn logged(path: &PathBuf) -> Vec<String> {

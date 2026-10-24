@@ -1,6 +1,8 @@
 //! The background-job notifier (ADR 0037 slices 3-4): the durable start/settle records, the
 //! busy/idle lane choice, the wake cap, and the crash-orphan scan.
 
+mod common;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,16 +17,8 @@ use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 use radian_session::{EventData, RuntimeEvent, Session, SessionCreatedData, SessionJournal};
 use serde_json::json;
 
-fn scratch(label: &str) -> PathBuf {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-job-notify-{}-{label}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-job-notify-{label}"))
 }
 
 fn journal(dir: &Path) -> Arc<SessionJournal> {

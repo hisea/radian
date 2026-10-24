@@ -79,6 +79,8 @@ mod read_roots;
 pub mod safe_fs;
 mod search;
 mod shell;
+#[cfg(test)]
+mod test_support;
 mod workspace;
 mod write;
 

@@ -9,7 +9,9 @@
 //! minus skills is the `system prompt` category: nothing new to split, so the
 //! sum cannot drift.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::sync::Arc;
 
 use radian_core::{NoopSink, TurnOptions};
@@ -20,15 +22,8 @@ use radian_host::{
 use radian_permissions::{NoopAudit, Preset, Profile};
 use serde_json::{Value, json};
 
-fn scratch(label: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: std::sync::atomic::AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let dir =
-        std::env::temp_dir().join(format!("radian-ctxgoal-{}-{label}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-ctxgoal-{label}"))
 }
 
 /// Opens with a paused goal already in the journal: `GoalSet` then

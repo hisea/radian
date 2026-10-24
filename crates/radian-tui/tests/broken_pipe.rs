@@ -4,19 +4,13 @@
 //! one stderr line. Each broken-pipe test below spawns the real binary with a stdout
 //! whose reader is already gone, so the first write fails deterministically.
 
-use std::path::PathBuf;
+mod common;
+
 use std::process::{Command, Stdio};
 
 /// A unique scratch directory for one test.
-fn scratch(name: &str) -> PathBuf {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-broken-pipe-{}-{name}-{n}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(name: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-broken-pipe-{name}"))
 }
 
 /// Stdout whose reader is already gone: the first write fails instead of blocking, with

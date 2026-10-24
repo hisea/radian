@@ -4,20 +4,17 @@
 //! `RADIAN_HOME` is process-wide, so this binary deliberately holds exactly one test: nothing
 //! else in it can race the environment.
 
+mod common;
+
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use radian_host::{
     Protocol, ProviderDecl, ProviderRef, ReasoningReplayOverride, descriptor,
     resolve_reasoning_replay, route_replays_reasoning,
 };
 
-fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "radian-host-reasoning-replay-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+fn scratch() -> common::TempDir {
+    let dir = common::TempDir::named("radian-host-reasoning-replay");
     std::fs::create_dir_all(dir.join("cache/catalog")).unwrap();
     dir
 }

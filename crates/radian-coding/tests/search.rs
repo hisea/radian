@@ -1434,9 +1434,9 @@ static MIXED_FIXTURE: OnceLock<MixedFixture> = OnceLock::new();
 
 fn mixed_fixture() -> &'static MixedFixture {
     MIXED_FIXTURE.get_or_init(|| {
-        let base =
-            std::env::temp_dir().join(format!("radian-search-multiroot-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        // The fixture is `'static` (a `OnceLock`), so it uses the process-exit cleanup: under
+        // nextest the test process ends with the test.
+        let base = common::process_dir("radian-search-multiroot");
         let cargo_home = base.join("cargo");
         let registry = cargo_home.join("registry/src");
         let dep = registry.join("dep-1.0.0/src/lib.rs");

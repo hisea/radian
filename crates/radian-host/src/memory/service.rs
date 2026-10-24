@@ -500,19 +500,11 @@ impl MemoryService {
 mod tests {
     use super::*;
 
-    fn scratch(label: &str) -> PathBuf {
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "radian-memory-svc-{}-{label}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(label: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::with_label("radian-memory-svc", label)
     }
 
-    fn service(label: &str) -> (PathBuf, PathBuf, MemoryService) {
+    fn service(label: &str) -> (crate::test_support::TempDir, PathBuf, MemoryService) {
         let dir = scratch(label);
         let ws = dir.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -524,7 +516,7 @@ mod tests {
     /// `/tmp/…/<label>/ws` with a `.git` **directory**, which is what makes the workspace's
     /// identity key come from a repository (`identity::project_identity_key`), without running
     /// `git`.
-    fn git_service(label: &str) -> (PathBuf, PathBuf, MemoryService) {
+    fn git_service(label: &str) -> (crate::test_support::TempDir, PathBuf, MemoryService) {
         let dir = scratch(label);
         let ws = dir.join("ws");
         std::fs::create_dir_all(ws.join(".git")).unwrap();

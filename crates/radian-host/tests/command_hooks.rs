@@ -5,6 +5,8 @@
 //! `open_session` uses — with stub role/memory/skills/facts layers, so a reorder inside it
 //! fails here (the unit tests in `hooks.rs` cover each hook behavior on its own).
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -19,17 +21,8 @@ use radian_permissions::{
 use radian_session::{SessionCreatedData, SessionJournal};
 use serde_json::json;
 
-fn scratch(label: &str) -> std::path::PathBuf {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let n = N.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "radian-command-hooks-{}-{label}-{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    let ws = dir.join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    std::fs::canonicalize(&ws).unwrap()
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::canonical(&format!("radian-command-hooks-{label}"))
 }
 
 /// A counting approver: every `ask` gets the scripted answer.
@@ -104,10 +97,9 @@ fn production_chain(
     permissions: Arc<PermissionHooks>,
     commands: Arc<CommandHooks>,
 ) -> impl Hooks {
-    let dir = ws.parent().unwrap().to_path_buf();
     let journal = Arc::new(
         SessionJournal::create(
-            dir.join("s.jsonl"),
+            ws.join("journal.jsonl"),
             "sid",
             SessionCreatedData::new("/work/example", json!({"provider": "example"})),
         )
@@ -134,8 +126,7 @@ fn production_chain(
 #[tokio::test]
 async fn permissions_deny_short_circuits_before_command_hooks_run() {
     let ws = scratch("deny-first");
-    let dir = ws.parent().unwrap().to_path_buf();
-    let marker = dir.join("hook-ran");
+    let marker = ws.join("hook-ran");
     let profile = Profile::custom(
         Preset::WorkspaceWrite,
         ApprovalPolicy::OnAsk,
@@ -150,7 +141,7 @@ async fn permissions_deny_short_circuits_before_command_hooks_run() {
     let permissions = Arc::new(PermissionHooks::new(profile, None, Arc::new(NoopAudit)));
     permissions.set_turn_source(Some(InputSource::User));
     let commands = command_hooks(
-        &dir,
+        &ws,
         &ws,
         vec![radian_host::config::HookMatcher {
             matcher: Some("shell".into()),
@@ -179,7 +170,6 @@ async fn permissions_deny_short_circuits_before_command_hooks_run() {
 #[tokio::test]
 async fn allow_output_does_not_bypass_the_permission_rules() {
     let ws = scratch("allow-refused");
-    let dir = ws.parent().unwrap().to_path_buf();
     // No rules: every call asks (the conservative default).
     let profile = Profile::custom(
         Preset::WorkspaceWrite,
@@ -197,7 +187,7 @@ async fn allow_output_does_not_bypass_the_permission_rules() {
     permissions.set_turn_source(Some(InputSource::User));
     let script = r#"printf '%s' '{"hookSpecificOutput":{"permissionDecision":"allow"}}'"#;
     let commands = command_hooks(
-        &dir,
+        &ws,
         &ws,
         vec![radian_host::config::HookMatcher {
             matcher: Some("shell".into()),

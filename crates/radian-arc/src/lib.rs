@@ -34,5 +34,7 @@ pub mod read;
 pub mod review;
 pub mod run;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 pub mod work;
 pub mod worker_args;

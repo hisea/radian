@@ -907,7 +907,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     /// A short `/tmp` socket path (the AF_UNIX limit) and its listener.
-    fn listener(label: &str) -> (PathBuf, UnixListener) {
+    fn listener(label: &str) -> (crate::test_support::TempPath, UnixListener) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
@@ -915,8 +915,8 @@ mod tests {
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).expect("bind");
+        let path = crate::test_support::TempPath::new(path);
+        let listener = UnixListener::bind(path.path()).expect("bind");
         (path, listener)
     }
 
@@ -966,7 +966,7 @@ mod tests {
         let (socket, listener) = listener("send");
         let env = HerdrEnv {
             pane_id: "w1:p1".into(),
-            socket: socket.clone(),
+            socket: socket.path().to_path_buf(),
         };
         let reporter = Reporter::with_timeouts(env, TEST_TIMEOUT, TEST_TIMEOUT);
         reporter.report(&Report::new(State::Working), 7);
@@ -991,7 +991,7 @@ mod tests {
         let (socket, listener) = listener("silent");
         let env = HerdrEnv {
             pane_id: "w1:p1".into(),
-            socket: socket.clone(),
+            socket: socket.path().to_path_buf(),
         };
         let reporter = Reporter::spawn(env);
         let start = std::time::Instant::now();
@@ -1013,7 +1013,7 @@ mod tests {
         let (socket, listener) = listener("latest");
         let env = HerdrEnv {
             pane_id: "w1:p1".into(),
-            socket: socket.clone(),
+            socket: socket.path().to_path_buf(),
         };
         let reporter = Reporter::with_timeouts(env, TEST_TIMEOUT, TEST_TIMEOUT);
         // The first report connects; the listener accepts but holds the reply.
@@ -1227,7 +1227,7 @@ mod tests {
         let (socket, listener) = listener("kinds");
         let env = HerdrEnv {
             pane_id: "w1:p1".into(),
-            socket: socket.clone(),
+            socket: socket.path().to_path_buf(),
         };
         let reporter = Reporter::with_timeouts(env, TEST_TIMEOUT, TEST_TIMEOUT);
         reporter.report(&Report::new(State::Idle), 1);
@@ -1265,7 +1265,7 @@ mod tests {
         let (socket, listener) = listener("meta-latest");
         let env = HerdrEnv {
             pane_id: "w1:p1".into(),
-            socket: socket.clone(),
+            socket: socket.path().to_path_buf(),
         };
         let reporter = Reporter::with_timeouts(env, TEST_TIMEOUT, TEST_TIMEOUT);
         reporter.report(&Report::new(State::Idle), 1);

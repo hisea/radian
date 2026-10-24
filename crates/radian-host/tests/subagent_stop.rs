@@ -11,6 +11,8 @@
 //! asserted before anything is stopped, so a grandchild that never escaped proves nothing. The
 //! mutation (straight `kill_session`, no SIGTERM) leaves the grandchild alive in both tests.
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,14 +24,8 @@ use radian_permissions::{ApprovalPolicy, NoopAudit, Profile};
 use radian_sandbox::SandboxSlot;
 use serde_json::{Value, json};
 
-fn scratch(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "radian-subagent-stop-{}-{label}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(label: &str) -> common::TempDir {
+    common::TempDir::named(&format!("radian-subagent-stop-{label}"))
 }
 
 /// `perl`, resolved once from PATH (the same rule `radian-coding`'s `job_session_kill` uses): the
@@ -120,7 +116,7 @@ async fn gone_within(what: &str, pid: u32) {
 
 /// The session and the tool session the two tests share.
 struct Fixture {
-    dir: PathBuf,
+    dir: common::TempDir,
     /// The stub child's own pid (the leader of the session the tool kills).
     leader: PathBuf,
     /// The grandchild's pid — the process that leaves the session.
@@ -147,7 +143,7 @@ async fn fixture(label: &str) -> Fixture {
             executable: Some(child),
             ..SubagentParts::default()
         },
-        dir.clone(),
+        dir.to_path_buf(),
         "parent",
         workspace,
         None,

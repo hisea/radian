@@ -29,6 +29,8 @@ mod seatbelt;
 #[cfg(target_os = "linux")]
 mod seccomp;
 mod slot;
+#[cfg(test)]
+mod test_support;
 
 #[cfg(feature = "testing")]
 pub mod harness;
