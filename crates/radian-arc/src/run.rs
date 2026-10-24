@@ -666,7 +666,8 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
             {
                 continue;
             }
-            match attempt_ops::claim(store, &task.item.id) {
+            match attempt_ops::claim_by(store, &task.item.id, attempt_ops::ClaimBy::SchedulingLoop)
+            {
                 Ok(claim) => {
                     slots -= 1;
                     claims.push((claim, task.item.clone()));

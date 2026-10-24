@@ -43,6 +43,13 @@ full   scripts/verify.sh (the full Verify of AGENTS.md). With ARC_GATE_HOST
        The host receives HEAD as a git bundle, takes a blocking lock on
        ~/.arc-gate.lock, checks HEAD out detached inside ARC_GATE_TREE, and
        runs that checkout's scripts/verify.sh.
+
+Before the first step, quick, and full when it runs here, check the temp file
+system: fewer than RADIAN_VERIFY_MIN_FREE_INODES inodes (default 50000) or
+fewer than RADIAN_VERIFY_MIN_FREE_GIB GiB (default 2) free fails the gate; 0
+turns a check off. With ARC_GATE_HOST set, full checks nothing here: the
+remote verify.sh checks the host's temp file system in the host's environment.
+See docs/user/arc-gate.md.
 EOF
 }
 
@@ -178,9 +185,15 @@ quote() {
 
 full() {
     enter_root
-    radian_check_temp_fs "$PROG" || exit 1
 
     if [ -z "${ARC_GATE_HOST:-}" ]; then
+        # Before any step: a temp file system out of inodes or space fails a
+        # thousand unrelated tests in milliseconds. With ARC_GATE_HOST set the
+        # steps run on the host, whose verify.sh checks its own temp file
+        # system in its own environment, so checking here would fail a gate
+        # over a laptop the gate never uses.
+        radian_check_temp_fs "$PROG" || exit 1
+
         # The trusted copy: the verify.sh next to this script, run on the
         # checkout the gate is verifying.
         LOG_DIR="$ROOT/.radian/verify-full"

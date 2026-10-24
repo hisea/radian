@@ -127,9 +127,9 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
     let task = store.load_task(task_id)?.item;
     let applied = run_claim(store, &claim, &task, &config)?;
     // A pushed attempt continues into the gate in the same process (ADR 0048 decision 6):
-    // one `start` takes the task from `todo.ready` to `review.awaiting_human` or
-    // `review.rework_pending`. A refused verification leaves the task in `review.verifying`
-    // and is reported after the attempt's own line.
+    // one `start` takes the task from `todo.ready` or `todo.retry_wait` to
+    // `review.awaiting_human` or `review.rework_pending`. A refused verification leaves the
+    // task in `review.verifying` and is reported after the attempt's own line.
     let verification = (applied.ignored.is_none()
         && applied.state == model::TaskState::Review.as_str()
         && applied.phase == "verifying")

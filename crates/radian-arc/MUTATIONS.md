@@ -93,6 +93,12 @@ copy.
 | TK0044-M3 | skip the owned-flag check for `gate.review.first.exec_args` | `review::a_first_exec_arg_the_review_stage_owns_is_refused` (the session runs and the stage passes) | ✅ failed |
 | TK0037-M1 | `start` refuses `todo.retry_wait` again (`attempt_ops::claim`'s guard goes back to `phase == "ready"`) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `attempt::start_refuses_a_retry_wait_task_when_every_slot_is_taken` (the second gets the wrong refusal, so its `limits.concurrency` assertion fails) | ✅ 2 failed |
 | TK0037-M2 | the scheduling loop ignores `retry_at` and claims a `todo.retry_wait` task (`run::start_ready` drops its phase check) | `attempt::start_claims_a_retry_wait_task_without_waiting_for_retry_at`, `run::a_future_retry_makes_run_exit_with_it_waiting` | ✅ 2 failed |
+| TK0060-M1 | the scheduling claim accepts `todo.retry_wait` (`ClaimBy::SchedulingLoop` uses the owner's phase set) | `attempt::a_scheduling_claim_refuses_a_task_that_began_backing_off` (the claim succeeds and takes attempt 1) | ✅ failed |
+
+TK0060-M1 was run on this branch from a copy under `.radian/tk0060/`, restored with `cp` and
+compared with `cmp`. `TK0037-M2`'s phase check has since moved into `attempt_ops::claim_by`, so
+dropping `run::start_ready`'s filter alone no longer changes behavior; `TK0060-M1` mutates the
+guard instead.
 
 TK0037-M1–M2 were run against `12da692f`, each applied to the committed file, with
 `cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` before the run
