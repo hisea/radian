@@ -103,7 +103,7 @@ outside change to a field only arc or the owner may set.
 
 `init` creates the layout, writes `config.toml` once, appends the local exclude lines to
 `.git/info/exclude` once, and runs its requirement checks. A bare `radian arc` refuses without
-setup, naming `radian arc init`; with setup, this build has no TUI and says so.
+setup, naming `radian arc init`; with setup it opens the TUI that lives in `radian-tui`.
 
 ## Attempts
 
@@ -208,6 +208,11 @@ or SIGTERM; it holds `runner.lock` for the whole loop, prints the summary only w
 prints a pass error as one `radian arc: <message>` line and runs the next pass, starts no new
 worker or gate once the signal arrived, leaves a running worker alone, and signals a running
 gate (`gate::background::stop`) before it returns.
+
+`run::pass` is the same pass-to-quiet for a caller that holds `runner.lock` itself: the arc TUI
+runs it on a background thread when it takes the lock, and `run::stop_gates` is what both loops
+call once they stop. `Store::try_runner_lock` writes the holder's pid into `runner.lock` (the
+flock is the lock) so a viewer's header can name the loop it is watching.
 
 ## Gate checkout
 
