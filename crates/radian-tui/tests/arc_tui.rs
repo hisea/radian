@@ -18,7 +18,7 @@ use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
 use radian_tui::arc::render;
-use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter, actions};
+use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter, TaskTab, actions};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1179,6 +1179,7 @@ fn the_task_page_has_the_frame_the_tabs_and_the_attempt_selector() {
             fixture.plan
         ),
         "the e task",
+        "brief",
         "conversation",
         "diff",
         "attempts",
@@ -1187,14 +1188,191 @@ fn the_task_page_has_the_frame_the_tabs_and_the_attempt_selector() {
     ] {
         assert!(text.contains(needle), "missing `{needle}`:\n{text}");
     }
-    // Tab goes back to the plans page; Tab again reopens the task page.
-    assert_eq!(app.on_key(&key(KeyCode::Tab)), ArcKey::Redraw);
+    // Esc goes back to the plans page; Tab on it reopens the task page.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
     assert_eq!(app.page, radian_tui::arc::Page::Plans);
     assert!(screen(&mut app, 120, 30).contains("PLANS"));
     app.on_key(&key(KeyCode::Tab));
     assert!(screen(&mut app, 120, 30).contains("conversation"));
     // `q` leaves from either page.
     assert_eq!(app.on_key(&key(KeyCode::Char('q'))), ArcKey::Quit);
+}
+
+/// The open task page's tab.
+fn tab(app: &ArcApp) -> TaskTab {
+    app.task.as_ref().expect("the task page is open").tab
+}
+
+#[test]
+fn the_task_tabs_cycle_in_order_in_both_directions() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    assert_eq!(
+        tab(&app),
+        TaskTab::Brief,
+        "a task without an attempt opens here"
+    );
+    let text = screen(&mut app, 120, 30);
+    assert!(
+        text.contains("brief  ·  conversation  ·  diff  ·  attempts"),
+        "the tabs are drawn in cycle order:\n{text}"
+    );
+    for expected in [
+        TaskTab::Conversation,
+        TaskTab::Diff,
+        TaskTab::Attempts,
+        TaskTab::Brief,
+    ] {
+        assert_eq!(app.on_key(&key(KeyCode::Tab)), ArcKey::Redraw);
+        assert_eq!(tab(&app), expected, "`Tab` cycles forward");
+    }
+    let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+    for expected in [
+        TaskTab::Attempts,
+        TaskTab::Diff,
+        TaskTab::Conversation,
+        TaskTab::Brief,
+    ] {
+        assert_eq!(app.on_key(&back), ArcKey::Redraw);
+        assert_eq!(tab(&app), expected, "`Shift-Tab` cycles back");
+    }
+    // A terminal that sends `Tab` with the shift modifier cycles back too.
+    let shifted = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+    assert_eq!(app.on_key(&shifted), ArcKey::Redraw);
+    assert_eq!(tab(&app), TaskTab::Attempts);
+}
+
+#[test]
+fn a_task_page_opens_on_the_brief_until_the_task_has_an_attempt() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    assert_eq!(
+        tab(&app),
+        TaskTab::Brief,
+        "an `attempt: 0` task opens on its brief"
+    );
+    app.close_task();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    assert_eq!(
+        tab(&app),
+        TaskTab::Conversation,
+        "a task with an attempt opens on its conversation"
+    );
+}
+
+#[test]
+fn the_brief_tab_shows_the_task_body_and_no_frontmatter() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("the brief"), "the body is drawn:\n{text}");
+    for key in [
+        "schema_version",
+        "allow_noop",
+        "extra_stages",
+        "cost_usd",
+        "head_sha",
+    ] {
+        assert!(
+            !text.contains(key),
+            "the frontmatter key `{key}` is drawn:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn a_brief_shows_its_rework_sections() {
+    let fixture = Fixture::new();
+    let id = fixture.id("e").to_owned();
+    fixture
+        .store
+        .change_task(&id, |task| {
+            task.body.push_str("\n## Rework 1\n\ntighten the tests\n");
+            Ok(())
+        })
+        .unwrap();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    // A task with an attempt opens on the conversation; the brief is the tab before it.
+    app.on_key(&key(KeyCode::Char('h')));
+    assert_eq!(tab(&app), TaskTab::Brief);
+    let text = screen(&mut app, 120, 40);
+    assert!(text.contains("the brief"), "{text}");
+    assert!(
+        text.contains("Rework 1"),
+        "the rework heading is drawn:\n{text}"
+    );
+    assert!(text.contains("tighten the tests"), "{text}");
+}
+
+#[test]
+fn a_rework_added_later_shows_at_the_next_refresh() {
+    let fixture = Fixture::new();
+    let id = fixture.id("e").to_owned();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('h')));
+    let text = screen(&mut app, 120, 40);
+    assert!(!text.contains("Rework"), "{text}");
+
+    radian_arc::store::plan_ops::add_rework(&fixture.store, &id, "closed the gap").unwrap();
+    app.refresh();
+    assert_eq!(
+        tab(&app),
+        TaskTab::Brief,
+        "a tab the owner picked stays picked"
+    );
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("Rework 3"),
+        "the next refresh shows the appended section (the task is at attempt 2):\n{text}"
+    );
+    assert!(text.contains("closed the gap"), "{text}");
+}
+
+#[test]
+fn a_brief_heading_is_drawn_in_the_transcript_heading_role() {
+    let fixture = Fixture::new();
+    let id = fixture.id("d").to_owned();
+    fixture
+        .store
+        .change_task(&id, |task| {
+            task.body = "## The ask\n\nthe explanation\n".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    let theme = app.theme.clone();
+    let terminal = render(&mut app, 120, 30);
+    let text = rows(&terminal).join("\n");
+    assert!(text.contains("The ask"), "{text}");
+    assert!(!text.contains("##"), "no `#` is drawn:\n{text}");
+    let (row, column) = fg_of(&terminal, "The ask");
+    assert_eq!(
+        fg(&terminal, row, column),
+        theme.md_heading.fg,
+        "the heading role's color"
+    );
+    let cell = terminal
+        .backend()
+        .buffer()
+        .cell((column, row))
+        .expect("the heading's first cell");
+    assert!(
+        cell.modifier.contains(ratatui::style::Modifier::BOLD),
+        "the heading role is bold: {cell:?}"
+    );
 }
 
 /// The run directories of `task`: one verdict file per stage of each attempt.
@@ -1324,6 +1502,135 @@ fn the_conversation_tab_renders_the_selected_attempts_worker_journal() {
     );
 }
 
+/// A `doing.running` task has no `execution.json` yet: the claim's `start.json` names the
+/// session, so the Conversation tab opens `<task>-<attempt>.jsonl` and follows it while the
+/// worker appends. Mutation: the tab falls back to the task id even when a session id is known.
+#[test]
+fn the_conversation_tab_follows_a_running_attempts_journal() {
+    let fixture = Fixture::new();
+    let task = fixture.id("g").to_owned();
+    let sessions = fixture.scratch.path("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = format!("{task}-1");
+    write_start(&fixture, &task, 1, &session);
+    write_journal(&sessions, &session, "the running worker", "is writing");
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), Some(sessions.clone()));
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("g");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('f')));
+    app.apply_pending_scroll();
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("the running worker"), "{text}");
+    assert!(text.contains("is writing"), "{text}");
+    assert!(!text.contains("no session journal yet"), "{text}");
+
+    // The worker writes another line; the refresh polls the same journal and the followed
+    // view shows it.
+    append_journal(&sessions, &session, "and one more line");
+    app.refresh();
+    app.apply_pending_scroll();
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("and one more line"), "{text}");
+}
+
+/// The task frame's state alone does not say whether a `doing` worker is alive (ADR 0048
+/// decisions 7.9 and 9): the row adds the heartbeat's age, `stalled?` past the stall window,
+/// `starting` before the first beat, and `loop stopped` when nothing holds `runner.lock`.
+#[test]
+fn a_doing_tasks_row_reports_its_worker_heartbeat_and_a_stopped_loop() {
+    let scratch = Scratch::new("freshness");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "live", "the live plan");
+    let fresh = add_task(
+        &store,
+        &plan,
+        "fresh",
+        &[],
+        TaskState::Doing,
+        "running",
+        1,
+        None,
+    );
+    let old = add_task(
+        &store,
+        &plan,
+        "old",
+        &[],
+        TaskState::Doing,
+        "running",
+        2,
+        None,
+    );
+    add_task(
+        &store,
+        &plan,
+        "none",
+        &[],
+        TaskState::Doing,
+        "running",
+        1,
+        None,
+    );
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    // A beat from just now, and one far past the default 900-second stall window.
+    write_heartbeat(&store, &fresh, 1, &radian_arc::store::plan_ops::utc_now());
+    write_heartbeat(&store, &old, 2, "2000-01-01T00:00:00Z");
+
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == plan)
+        .unwrap();
+    let theme = app.theme.clone();
+    let terminal = render(&mut app, 160, 30);
+    let text = rows(&terminal).join("\n");
+    assert!(
+        text.contains("heartbeat 0s ago") || text.contains("heartbeat 1s ago"),
+        "a fresh beat shows its age:\n{text}"
+    );
+    assert!(text.contains("starting"), "no beat yet:\n{text}");
+    assert!(text.contains("stalled?"), "an old beat:\n{text}");
+    assert_eq!(
+        text.matches("loop stopped").count(),
+        3,
+        "every doing row names the stopped loop:\n{text}"
+    );
+    // The stale beat takes the warning style.
+    let (row, column) = fg_of(&terminal, "stalled?");
+    assert_eq!(fg(&terminal, row, column), theme.status_warn.fg);
+
+    // A held `runner.lock` is a loop that can advance the state: no row says it stopped.
+    let lock_path = app.store.root().join(radian_arc::store::RUNNER_LOCK);
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    {
+        use fs2::FileExt;
+        lock.lock_exclusive().unwrap();
+    }
+    app.refresh();
+    let text = screen(&mut app, 160, 30);
+    assert!(!text.contains("loop stopped"), "{text}");
+    {
+        fs2::FileExt::unlock(&lock).unwrap();
+    }
+}
+
 /// The attempt's `execution.json`, where the wrapper records the worker's session id.
 fn write_execution(fixture: &Fixture, task: &str, attempt: u32, session: &str) {
     let dir = radian_arc::store::attempt_ops::run_dir(&fixture.store, task, attempt);
@@ -1333,6 +1640,50 @@ fn write_execution(fixture: &Fixture, task: &str, attempt: u32, session: &str) {
         json!({ "session_id": session }).to_string(),
     )
     .unwrap();
+}
+
+/// The claim's `start.json`, which names the session before the wrapper writes its own
+/// records.
+fn write_start(fixture: &Fixture, task: &str, attempt: u32, session: &str) {
+    let dir = radian_arc::store::attempt_ops::attempt_dir(&fixture.store, task, attempt);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(radian_arc::store::attempt_ops::START_FILE),
+        json!({ "session_id": session }).to_string(),
+    )
+    .unwrap();
+}
+
+/// The wrapper's heartbeat, with the given last beat.
+fn write_heartbeat(store: &Store, task: &str, attempt: u32, last_beat: &str) {
+    let dir = radian_arc::store::attempt_ops::attempt_dir(store, task, attempt);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(radian_arc::store::attempt_ops::HEARTBEAT_FILE),
+        json!({ "last_beat": last_beat }).to_string(),
+    )
+    .unwrap();
+}
+
+/// Appends one assistant line to an existing worker journal (the worker still writing).
+fn append_journal(dir: &Path, id: &str, assistant: &str) {
+    use radian_core::TranscriptJournal;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let path = dir.join(format!("{id}.jsonl"));
+    runtime.block_on(async {
+        let journal = radian_session::SessionJournal::resume(&path, id)
+            .expect("the journal resumes for the next line");
+        journal
+            .append(radian_core::JournalRecord::Message {
+                index: 2,
+                message: radian_core::Message::assistant(assistant),
+            })
+            .await
+            .unwrap();
+    });
 }
 
 /// A worker journal: one user message and one assistant reply.

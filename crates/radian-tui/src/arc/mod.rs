@@ -126,9 +126,11 @@ pub enum Focus {
     Tasks,
 }
 
-/// The task page's tabs.
+/// The task page's tabs, in cycle order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskTab {
+    /// The task file's body (the brief), Markdown as the store loads it.
+    Brief,
     Conversation,
     Diff,
     Attempts,
@@ -137,6 +139,7 @@ pub enum TaskTab {
 impl TaskTab {
     pub fn name(self) -> &'static str {
         match self {
+            TaskTab::Brief => "brief",
             TaskTab::Conversation => "conversation",
             TaskTab::Diff => "diff",
             TaskTab::Attempts => "attempts",
@@ -145,15 +148,17 @@ impl TaskTab {
 
     fn next(self) -> Self {
         match self {
+            TaskTab::Brief => TaskTab::Conversation,
             TaskTab::Conversation => TaskTab::Diff,
             TaskTab::Diff => TaskTab::Attempts,
-            TaskTab::Attempts => TaskTab::Conversation,
+            TaskTab::Attempts => TaskTab::Brief,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            TaskTab::Conversation => TaskTab::Attempts,
+            TaskTab::Brief => TaskTab::Attempts,
+            TaskTab::Conversation => TaskTab::Brief,
             TaskTab::Diff => TaskTab::Conversation,
             TaskTab::Attempts => TaskTab::Diff,
         }
@@ -225,6 +230,17 @@ pub fn task_mark(state: TaskState, phase: &str) -> Mark {
     }
 }
 
+/// How alive a `doing` task's worker looks (ADR 0048 decisions 7.9 and 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// The wrapper has written no heartbeat yet.
+    Starting,
+    /// The last beat was `age` seconds ago, inside the attempt's stall window.
+    Beating { age: u64 },
+    /// The last beat is older than the attempt's stall window.
+    Stalled { age: u64 },
+}
+
 /// One row of a plan's task list, whether drawn as the tree or as the flat list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskRow {
@@ -233,6 +249,8 @@ pub struct TaskRow {
     pub attempt: u32,
     pub cost: Option<f64>,
     pub mark: Mark,
+    /// For a `doing` task: whether its worker is alive, from the wrapper's heartbeat.
+    pub freshness: Option<Freshness>,
     /// The tree connector (`""` for a root, `"├─"`, `"└─"`, or a deeper prefix).
     pub connector: String,
     /// The other parents in this plan (`also after …`).
@@ -265,6 +283,14 @@ pub struct TaskPage {
     pub cost: Option<f64>,
     pub plan: String,
     pub tab: TaskTab,
+    /// The task file's body: the brief, rework sections included, without the hand-off a
+    /// fresh attempt's stdin adds.
+    pub brief: String,
+    /// The first line of the brief the tab draws. The window is clamped in the frame, where
+    /// the wrapped line count is known.
+    pub brief_scroll: usize,
+    /// The runner pins the brief to its end (`f`) at the next frame.
+    pub brief_follow: bool,
     /// The selected attempt (the latest until the user switches, then the choice sticks
     /// until the task gains a newer attempt).
     pub attempt: Option<u32>,
@@ -305,7 +331,17 @@ impl TaskPage {
             phase: format!("{}.{}", task.state.as_str(), task.phase),
             cost: task.cost_usd,
             plan: task.plan.clone(),
-            tab: TaskTab::Conversation,
+            // A task that has not run opens on its brief; the owner reads why it exists
+            // before its (empty) conversation. A task with an attempt opens on the
+            // conversation, as it always has.
+            tab: if task.attempt == 0 {
+                TaskTab::Brief
+            } else {
+                TaskTab::Conversation
+            },
+            brief: task.body.clone(),
+            brief_scroll: 0,
+            brief_follow: false,
             attempt,
             latest,
             attempt_top: 0,
@@ -386,6 +422,9 @@ pub const LOG_BYTES: u64 = 512 * 1024;
 
 /// Reads the last [`LOG_BYTES`] of `path` as text, dropping the line the cut may have split.
 ///
+/// A cut that lands exactly on a line start keeps that first line whole: only a cut inside a
+/// line drops through the newline that ends it.
+///
 /// # Errors
 ///
 /// The file cannot be opened, seeked or read.
@@ -394,6 +433,17 @@ pub fn read_log_tail(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let len = file.metadata().map_err(|error| error.to_string())?.len();
     let cut = len.saturating_sub(LOG_BYTES);
+    // The byte before the cut says whether the cut split a line or landed on its start.
+    let at_line_start = if cut > 0 {
+        file.seek(SeekFrom::Start(cut - 1))
+            .map_err(|error| error.to_string())?;
+        let mut previous = [0u8; 1];
+        file.read_exact(&mut previous)
+            .map_err(|error| error.to_string())?;
+        previous[0] == b'\n'
+    } else {
+        false
+    };
     if cut > 0 {
         file.seek(SeekFrom::Start(cut))
             .map_err(|error| error.to_string())?;
@@ -402,7 +452,7 @@ pub fn read_log_tail(path: &Path) -> Result<String, String> {
     file.read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    if cut == 0 {
+    if cut == 0 || at_line_start {
         return Ok(text);
     }
     // The first line of a tail starts mid-line; the next newline ends it.
@@ -595,6 +645,8 @@ pub struct ArcApp {
     pub result: Option<ResultLine>,
     /// The command log the runner should read, off the UI thread.
     log_request: Option<LogRequest>,
+    /// The log the runner is reading: one at a time, and a reply for anything else is stale.
+    log_pending: Option<LogRequest>,
     /// The confirmation or reject float, which takes the keys until it closes.
     pub float: Option<Float>,
     pub main_sha: Option<String>,
@@ -638,6 +690,7 @@ impl ArcApp {
             pending: None,
             result: None,
             log_request: None,
+            log_pending: None,
             float: None,
             main_sha: None,
             loop_running: false,
@@ -713,6 +766,7 @@ impl ArcApp {
             page.phase = format!("{}.{}", task.state.as_str(), task.phase);
             page.cost = task.cost_usd;
             page.plan = task.plan.clone();
+            page.brief = task.body.clone();
             page.head = task.head_sha.clone();
             page.latest = attempts.last().map(|attempt| attempt.attempt);
             page.attempts = attempts;
@@ -741,20 +795,23 @@ impl ArcApp {
 
     /// Opens, or polls, the selected attempt's worker journal.
     ///
-    /// The file is named by the session id the attempt recorded in its `execution.json`
-    /// (ADR 0048 decision 4); an attempt without a record has the task id. A view opened for
-    /// another attempt is dropped, so `[`/`]` never keeps showing the previous conversation.
+    /// The file is named by the attempt's session id (ADR 0048 decision 4): the wrapper's
+    /// `execution.json` or `identity.json`, else the claim's `start.json`. Only an attempt that
+    /// names none (an older attempt, or a worker-less `reverify`) falls back to the task id. A
+    /// view opened for another attempt is dropped, so `[`/`]` never keeps showing the previous
+    /// conversation.
     pub fn refresh_journal(&mut self) {
         let Some(page) = self.task.as_ref() else {
             return;
         };
         let id = page.id.clone();
         let attempt = page.attempt;
-        let session = attempt
-            .and_then(|attempt| {
-                radian_arc::store::attempt_ops::attempt_session_id(&self.store, &id, attempt)
-            })
-            .unwrap_or_else(|| id.clone());
+        let session = match attempt.and_then(|attempt| {
+            radian_arc::store::attempt_ops::attempt_session_id(&self.store, &id, attempt)
+        }) {
+            Some(session) => session,
+            None => id.clone(),
+        };
         let Some(page) = self.task.as_mut() else {
             return;
         };
@@ -859,12 +916,27 @@ impl ArcApp {
             .collect()
     }
 
-    /// One plan's tasks: the dependency tree, or the flat list with `after`.
+    /// One plan's tasks: the dependency tree, or the flat list with `after`. A `doing` task's
+    /// row carries its worker's freshness (ADR 0048 decisions 7.9 and 9): the frame's state
+    /// alone cannot say whether the attempt is alive.
     pub fn task_rows(&self, view: &PlanView) -> Vec<TaskRow> {
-        if self.flat {
-            return flat_rows(view);
+        let mut rows = if self.flat {
+            flat_rows(view)
+        } else {
+            tree_rows(view)
+        };
+        let default_stall = self
+            .store
+            .config()
+            .map(|config| config.limits.stall_timeout_secs)
+            .unwrap_or(0);
+        for row in &mut rows {
+            let Some(task) = view.tasks.iter().find(|task| task.item.id == row.id) else {
+                continue;
+            };
+            row.freshness = freshness(&self.store, &task.item, default_stall);
         }
-        tree_rows(view)
+        rows
     }
 
     /// The plans the board shows: the plan `p` pinned, else the plans page's current view, in
@@ -1062,14 +1134,22 @@ impl ArcApp {
         self.action.take()
     }
 
-    /// The runner takes the command log it should read on a worker thread, if any.
+    /// The runner takes the command log it should read on a worker thread, if any. The request
+    /// stays pending until the runner applies its reply, so a second read cannot start meanwhile.
     pub fn take_log_request(&mut self) -> Option<LogRequest> {
-        self.log_request.take()
+        let request = self.log_request.take()?;
+        self.log_pending = Some(request.clone());
+        Some(request)
     }
 
     /// Records the log a worker read for `request`: the float opens on the merge page that
-    /// asked for it, and a reply for another task is dropped.
+    /// asked for it, and a reply for anything but the pending request is dropped (a reply that
+    /// arrives out of order must not open an earlier command's log).
     pub fn apply_log(&mut self, request: &LogRequest, result: Result<String, String>) -> bool {
+        if self.log_pending.as_ref() != Some(request) {
+            return false;
+        }
+        self.log_pending = None;
         let Some(page) = &mut self.merge else {
             return false;
         };
@@ -1739,8 +1819,21 @@ impl ArcApp {
             return ArcKey::Ignored;
         };
         match key.code {
-            KeyCode::Esc | KeyCode::Tab => {
+            KeyCode::Esc => {
                 self.close_task();
+                ArcKey::Redraw
+            }
+            // The tabs cycle both ways; `Tab` no longer leaves the page (`Esc` does).
+            KeyCode::BackTab => {
+                page.tab = page.tab.previous();
+                ArcKey::Redraw
+            }
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                page.tab = page.tab.previous();
+                ArcKey::Redraw
+            }
+            KeyCode::Tab => {
+                page.tab = page.tab.next();
                 ArcKey::Redraw
             }
             KeyCode::Char('m') => {
@@ -1766,6 +1859,11 @@ impl ArcApp {
                 ArcKey::Redraw
             }
             KeyCode::Char('j') | KeyCode::Down => match page.tab {
+                TaskTab::Brief => {
+                    page.brief_follow = false;
+                    page.brief_scroll = page.brief_scroll.saturating_add(1);
+                    ArcKey::Redraw
+                }
                 TaskTab::Diff => {
                     let end = page.diff_body_len().saturating_sub(1);
                     page.diff_scroll = page.diff_scroll.saturating_add(1).min(end);
@@ -1778,6 +1876,11 @@ impl ArcApp {
                 TaskTab::Attempts => ArcKey::Ignored,
             },
             KeyCode::Char('k') | KeyCode::Up => match page.tab {
+                TaskTab::Brief => {
+                    page.brief_follow = false;
+                    page.brief_scroll = page.brief_scroll.saturating_sub(1);
+                    ArcKey::Redraw
+                }
                 TaskTab::Diff => {
                     page.diff_scroll = page.diff_scroll.saturating_sub(1);
                     ArcKey::Redraw
@@ -1790,6 +1893,9 @@ impl ArcApp {
             },
             KeyCode::Char('f') => {
                 match page.tab {
+                    // The frame clamps the brief to its last page and clears the follow, so a
+                    // later `k` moves up from the real end.
+                    TaskTab::Brief => page.brief_follow = true,
                     // Follow the end means the last body row is the first visible one; it is
                     // stored, so `k` moves up from there instead of from a sentinel.
                     TaskTab::Diff => page.diff_scroll = page.diff_body_len().saturating_sub(1),
@@ -2003,6 +2109,11 @@ impl ArcApp {
 
     /// Queues the selected command's log for the runner to read on a worker thread.
     fn open_log(&mut self) {
+        // One read at a time: the pending reply opens its float, and a second Enter must not
+        // queue a read whose reply could land first.
+        if self.log_pending.is_some() {
+            return;
+        }
         let selected = self
             .merge
             .as_ref()
@@ -2231,10 +2342,31 @@ fn row(task: &TaskFile, connector: String, also_after: Vec<String>, waits: Vec<S
         attempt: task.attempt,
         cost: task.cost_usd,
         mark: task_mark(task.state, &task.phase),
+        freshness: None,
         connector,
         also_after,
         waits,
         after: Vec::new(),
+    }
+}
+
+/// Whether a `doing` task's worker is alive, from the wrapper's heartbeat and the attempt's
+/// stall window (ADR 0048 decisions 7.9 and 9). `None` for a task that is not `doing`: only a
+/// running attempt has a heartbeat to read.
+fn freshness(store: &Store, task: &TaskFile, default_stall: u64) -> Option<Freshness> {
+    if task.state != TaskState::Doing {
+        return None;
+    }
+    let Some(beat) = radian_arc::store::attempt_ops::read_heartbeat(store, &task.id, task.attempt)
+    else {
+        return Some(Freshness::Starting);
+    };
+    let stall = task.stall_timeout_secs.unwrap_or(default_stall);
+    let window = radian_arc::store::attempt_ops::liveness_window_secs(stall);
+    match radian_arc::store::attempt_ops::utc_age_secs(&beat) {
+        Some(age) if age > window => Some(Freshness::Stalled { age }),
+        Some(age) => Some(Freshness::Beating { age }),
+        None => Some(Freshness::Starting),
     }
 }
 

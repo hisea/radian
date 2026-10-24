@@ -2,9 +2,10 @@
 //! plans page, the task page and the key hints.
 //!
 //! The plans page is two columns: the plan list (fixed width) and the selected plan in an open
-//! frame. The task page is one open frame; the conversation tab puts the attach renderer
-//! inside it, the diff tab adds a second open frame for the selected file, and the attempts
-//! tab lists each attempt's verdicts.
+//! frame. The task page is one open frame; the brief tab draws the task file's body through the
+//! transcript's Markdown renderer, the conversation tab puts the attach renderer inside it, the
+//! diff tab adds a second open frame for the selected file, and the attempts tab lists each
+//! attempt's verdicts.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -276,6 +277,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 ("[ ]", "attempt", false),
                 ("n/p", "file", false),
                 ("h/l", "tab", false),
+                ("tab", "tabs", false),
                 ("m", "merge page", !applies),
                 ("esc", "back", false),
                 ("q", "quit", false),
@@ -483,7 +485,7 @@ fn plan_frame_lines(
         .flatten();
     for task in row.tasks.iter().skip(top).take(visible) {
         let cursor = selected == Some(task.id.as_str());
-        let line = task_row_line(task, id_width, phase_width, cursor, theme);
+        let line = task_row_line(task, id_width, phase_width, cursor, app.loop_running, theme);
         out.push(rail(theme, line));
     }
     out.push(frame_bottom(theme));
@@ -520,12 +522,13 @@ fn task_columns(tasks: &[TaskRow], content: usize) -> (usize, usize) {
 }
 
 /// One task row inside the plan frame: connector, mark, id, `state.phase`, `#attempt`, cost,
-/// and `waits`/`also after` when they apply.
+/// the worker's freshness for a `doing` task, and `waits`/`also after` when they apply.
 fn task_row_line(
     task: &TaskRow,
     id_width: usize,
     phase_width: usize,
     cursor: bool,
+    loop_running: bool,
     theme: &Theme,
 ) -> Line<'static> {
     let mut spans = Vec::new();
@@ -558,11 +561,45 @@ fn task_row_line(
         format!(" {}", format_cost(task.cost)),
         theme.tier,
     ));
+    if let Some(freshness) = task.freshness {
+        let (text, style) = freshness_text(freshness, theme);
+        spans.push(Span::styled(format!("  {text}"), style));
+        if !loop_running {
+            // A stored `doing` state is not live progress when nothing schedules.
+            spans.push(Span::styled("  loop stopped", theme.hint));
+        }
+    }
     let extra = extra_text(task);
     if !extra.is_empty() {
         spans.push(Span::styled(format!("  {extra}"), theme.hint));
     }
     Line::from(spans)
+}
+
+/// The heartbeat line of a `doing` task: `heartbeat 12s ago`, in the warning style with
+/// `stalled?` once the beat is older than the stall window, or `starting` before the first one.
+fn freshness_text(freshness: Freshness, theme: &Theme) -> (String, Style) {
+    match freshness {
+        Freshness::Starting => ("starting".to_owned(), theme.hint),
+        Freshness::Beating { age } => (format!("heartbeat {} ago", age_text(age)), theme.hint),
+        Freshness::Stalled { age } => (
+            format!("heartbeat {} ago stalled?", age_text(age)),
+            theme.status_warn,
+        ),
+    }
+}
+
+/// A heartbeat's age: `12s`, `5m54s`, `3h07m`, or `12d` from one day up.
+fn age_text(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else if secs < 86_400 {
+        format!("{}h{:02}m", secs / 3_600, (secs % 3_600) / 60)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
 }
 
 fn extra_text(task: &TaskRow) -> String {
@@ -614,6 +651,15 @@ fn draw_task(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
         (page.tab, lines)
     };
     match tab {
+        TaskTab::Brief => {
+            let height = area.height as usize;
+            // The frame's first rows and its bottom leave the body this many rows.
+            let body_height = height.saturating_sub(lines.len() + 1);
+            let Some(page) = app.task.as_mut() else {
+                return;
+            };
+            draw_brief(&mut lines, page, width as usize, body_height, &theme);
+        }
         TaskTab::Conversation => {
             draw_conversation(frame, area, app, lines);
             return;
@@ -666,6 +712,43 @@ fn draw_task(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
         }
     }
     draw_lines(frame, area, lines);
+}
+
+/// The brief tab: the task file's body, markdown through the transcript's own renderer, one
+/// frame rail per row. The body is loaded from the store with the task (never rebuilt here),
+/// so it is the brief and its rework sections, not an attempt's hand-off.
+fn draw_brief(
+    lines: &mut Vec<Line<'static>>,
+    page: &mut TaskPage,
+    width: usize,
+    height: usize,
+    theme: &Theme,
+) {
+    if height == 0 {
+        return;
+    }
+    // The rail takes the first two columns of the frame's inner width; the transcript's own
+    // assistant marker takes two more.
+    let inner = width.saturating_sub(2);
+    let entry = crate::app::Entry::new(crate::app::EntryKind::Assistant, page.brief.clone());
+    let rendered = crate::render::transcript_lines(
+        std::slice::from_ref(&entry),
+        crate::tools::DisplayModes::default(),
+        inner,
+        theme,
+    );
+    // The last page is where the frame clamps: `f` goes there, and a `k` after it moves up
+    // from the real end rather than from a sentinel.
+    let last = rendered.len().saturating_sub(height);
+    if page.brief_follow {
+        page.brief_scroll = last;
+        page.brief_follow = false;
+    } else {
+        page.brief_scroll = page.brief_scroll.min(last);
+    }
+    for line in rendered.into_iter().skip(page.brief_scroll).take(height) {
+        lines.push(rail(theme, line));
+    }
 }
 
 /// The conversation tab: the frame's first rows, then the attach renderer's transcript, then
@@ -731,12 +814,17 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut ArcApp, lines: Vec
     );
 }
 
-/// The tab row: the three tabs on the left, the attempt selector on the right.
+/// The tab row: the four tabs on the left, the attempt selector on the right.
 fn tab_row(page: &TaskPage, width: usize, theme: &Theme) -> Line<'static> {
     let mut left = Vec::new();
-    for (index, tab) in [TaskTab::Conversation, TaskTab::Diff, TaskTab::Attempts]
-        .into_iter()
-        .enumerate()
+    for (index, tab) in [
+        TaskTab::Brief,
+        TaskTab::Conversation,
+        TaskTab::Diff,
+        TaskTab::Attempts,
+    ]
+    .into_iter()
+    .enumerate()
     {
         if index > 0 {
             left.push(Span::styled("  ·  ", theme.hint));

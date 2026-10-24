@@ -1526,6 +1526,56 @@ fn enter_on_a_command_row_opens_its_log_in_a_scrollable_frame() {
 }
 
 #[test]
+fn one_log_is_in_flight_and_a_stale_reply_is_dropped() {
+    let fixture = Fixture::new("log-pending", &["commands", "human"]);
+    fs::write(fixture.repo.join("fmt.log"), "fmt output\n").unwrap();
+    fs::write(fixture.repo.join("clippy.log"), "clippy output\n").unwrap();
+    fs::write(fixture.repo.join("test.log"), "test output\n").unwrap();
+    fixture.write(&mut fixture.commands(true, None));
+    let mut app = fixture.app();
+    app.on_key(&key(KeyCode::Enter));
+    let first = app.take_log_request().expect("the first log is queued");
+    assert_eq!(first.path, fixture.repo.join("fmt.log"));
+    // A second Enter while the read is in flight queues nothing.
+    app.on_key(&key(KeyCode::Down));
+    app.on_key(&key(KeyCode::Enter));
+    assert!(
+        app.take_log_request().is_none(),
+        "a second read starts while one is in flight"
+    );
+    // A reply for a log nobody is waiting for opens nothing.
+    let stale = radian_tui::arc::LogRequest {
+        task: first.task.clone(),
+        title: "cargo nextest run --workspace".to_owned(),
+        path: fixture.repo.join("test.log"),
+    };
+    assert!(!app.apply_log(&stale, Ok("test output\n".to_owned())));
+    assert!(
+        app.merge.as_ref().unwrap().log.is_none(),
+        "a stale reply opens nothing"
+    );
+    // The pending reply opens its float, titled with the command it belongs to.
+    let text = radian_tui::arc::read_log_tail(&first.path).expect("the log reads");
+    assert!(app.apply_log(&first, Ok(text)));
+    let log = app
+        .merge
+        .as_ref()
+        .unwrap()
+        .log
+        .as_ref()
+        .expect("the pending log opens");
+    assert_eq!(log.title, "cargo fmt --all -- --check");
+    // The reply clears the guard, so the next Enter queues another read.
+    app.on_key(&key(KeyCode::Esc));
+    app.on_key(&key(KeyCode::Down));
+    app.on_key(&key(KeyCode::Enter));
+    assert!(
+        app.take_log_request().is_some(),
+        "the reply clears the in-flight guard"
+    );
+}
+
+#[test]
 fn a_log_is_read_from_its_end_so_a_giant_one_is_bounded() {
     let scratch = Scratch::new("log-tail");
     let path = scratch.path("big.log");
@@ -1552,6 +1602,31 @@ fn a_log_is_read_from_its_end_so_a_giant_one_is_bounded() {
         radian_tui::arc::LogView::new("big", &tail).lines.len(),
         radian_tui::arc::LOG_LINES,
         "the float keeps only its last lines"
+    );
+}
+
+#[test]
+fn a_log_cut_exactly_on_a_line_start_keeps_that_whole_line() {
+    let scratch = Scratch::new("log-line-start");
+    let path = scratch.path("lines.log");
+    // Every line is exactly 64 bytes, so the file is `head line\n` plus exactly `LOG_BYTES`:
+    // the cut (`len - LOG_BYTES`) lands on the newline and the first tail line is whole.
+    let mut tail = String::new();
+    let mut n = 0;
+    while (tail.len() as u64) < radian_tui::arc::LOG_BYTES {
+        n += 1;
+        let label = format!("{n}:");
+        tail.push_str(&label);
+        tail.push_str(&"x".repeat(64 - label.len() - 1));
+        tail.push('\n');
+    }
+    fs::write(&path, format!("head line\n{tail}")).unwrap();
+    let text = radian_tui::arc::read_log_tail(&path).expect("the tail reads");
+    assert_eq!(text, tail, "a cut on a line start keeps that line");
+    assert!(
+        text.starts_with("1:"),
+        "the first whole line of the tail is kept: {:?}",
+        &text[..8]
     );
 }
 

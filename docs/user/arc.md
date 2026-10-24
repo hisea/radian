@@ -159,7 +159,7 @@ The id names one plan or task. An id that names both a plan and a task is refuse
 | `--json` | — | Print one JSON object instead of fields. |
 
 The object holds the same keys as in `list --json`, plus `body`, `session_id`, `rework_reason`, and the newest review verdict's `review`, `review_verdict`, `review_session_ids`, `review_cost_micros` and `review_settings`.
-An unset field is `null`; `session_id` is the current attempt's worker session id from its `execution.json`, and `null` when that attempt's wrapper wrote no record; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a gate that died after it started, a reject note, the automatic rework limit that paused the plan, a conflict that reached `limits.max_conflict_rework`, or an automatic reverify count that is used up).
+An unset field is `null`; `session_id` is the current attempt's worker session id, from its `execution.json`, else its `identity.json`, else the claim's `start.json`, and `null` only when none of them names one; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a gate that died after it started, a reject note, the automatic rework limit that paused the plan, a conflict that reached `limits.max_conflict_rework`, or an automatic reverify count that is used up).
 `review` is `{"summary", "blocking", "suggestions", "verified"}` from the newest `review` verdict, or `null`; each item of `blocking` and `suggestions` is an object with `text` and, when it has them, `level`, `file`, `line` and `pre_existing` (see [the review stage](arc-gate.md#the-gate-run)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none); `review_settings` is `{"round", "exec_args", "timeout_secs", "timeout"}` (the round `first` or `rework`, the config key the session's arguments came from, its wall-time limit in seconds and the key that limit came from), or `null`.
 For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_blocking`, `review_suggestions`, `review_verified`, `review_session_ids`, `review_cost_micros`, and `review_round`, `review_exec_args`, `review_timeout_secs` and `review_timeout`.
 The text form prints `session_id` after `attempt_id`.
@@ -372,7 +372,7 @@ arc then runs the hidden `radian arc work` wrapper as a child, with the brief on
 
 The worker runs in a session of its own: with [`worker.rework_session`](arc-files.md#configtoml) at `fresh`, which is the default, each attempt gets the session `<task>-<attempt>`.
 With `resume` the task has one session instead, the task id, and every attempt after the first continues it.
-The attempt's session id is in its `execution.json`, and `show` prints it as `session_id`.
+The claim records the attempt's session id in its `start.json` before the worker starts, and the wrapper records the same id in its `identity.json` and `execution.json`; `show` prints it as `session_id` from the first of those records that names one, so a running attempt's session is known from the claim on.
 A fresh attempt after the first cannot see the earlier conversation, so its stdin opens with a hand-off section, `## Where the previous attempt left off`: the newest earlier attempt's final report (cut at 8,000 characters, with a note when it is cut; a `reverify` attempt runs no worker and writes none, so the section walks back to the attempt before it and names it), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote main and the branch tip.
 The section says the full history is on the branch and to read the files rather than assume.
 The brief follows it, and a `merge-main` conflict section still comes first.
@@ -713,7 +713,7 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
-A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md). The plans page's `x` cancels the selected task or plan, `c` confirms a draft plan or a proposed task (depending on the focused column), and `+`/`-` move the selected plan's priority; the page draws `P<n>` with the plan's id and in the frame label.
+A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md). The task page's tabs are `brief · conversation · diff · attempts`, and it opens on `brief` for a task that has not run. The plans page's `x` cancels the selected task or plan, `c` confirms a draft plan or a proposed task (depending on the focused column), and `+`/`-` move the selected plan's priority; the page draws `P<n>` with the plan's id and in the frame label.
 
 ## Not built yet
 
