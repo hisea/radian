@@ -284,11 +284,11 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
         Page::Board => {
             if app.board.finished {
                 vec![
-                    ("j/k", "scroll", false),
-                    ("enter", "task", app.board.selected_done().is_none()),
-                    ("d", "columns", false),
-                    ("esc", "columns", false),
-                    ("q", "quit", false),
+                    Hint::new("j/k", "scroll", false),
+                    Hint::new("enter", "task", app.board.selected_done().is_none()),
+                    Hint::new("d", "columns", false),
+                    Hint::new("esc", "columns", false),
+                    Hint::essential("q", "quit", false),
                 ]
             } else {
                 let card = app.board.selected();
@@ -315,19 +315,19 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 });
                 let review = task.is_some_and(|task| ArcApp::merge_page_applies(&task.item));
                 vec![
-                    ("h/l", "column", false),
-                    ("j/k", "card", card.is_none()),
-                    ("enter", "task", card.is_none()),
-                    ("s", "start", !can_start),
-                    ("c", "confirm", !proposed),
-                    ("x", "cancel", card.is_none()),
-                    ("a", "auto", !confirmed),
-                    ("+/-", "priority", card.is_none()),
-                    ("M", "merge page", !review),
-                    ("p", "plan", card.is_none()),
-                    ("d", "finished", false),
-                    ("b", "plans", false),
-                    ("q", "quit", false),
+                    Hint::new("h/l", "column", false),
+                    Hint::new("j/k", "card", card.is_none()),
+                    Hint::new("enter", "task", card.is_none()),
+                    Hint::new("s", "start", !can_start),
+                    Hint::new("c", "confirm", !proposed),
+                    Hint::new("x", "cancel", card.is_none()),
+                    Hint::new("a", "auto", !confirmed),
+                    Hint::new("+/-", "priority", card.is_none()),
+                    Hint::new("M", "merge page", !review),
+                    Hint::new("p", "plan", card.is_none()),
+                    Hint::new("d", "finished", false),
+                    Hint::secondary("b", "plans", false),
+                    Hint::essential("q", "quit", false),
                 ]
             }
         }
