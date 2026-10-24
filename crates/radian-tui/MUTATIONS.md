@@ -2745,3 +2745,20 @@ afterwards.
 | TK0077-M4 | `L` closes the command log but leaves its in-flight read pending | ✅ 1 failed | `arc_merge::l_closes_the_command_log_and_opens_the_loop_log` (the late reply opens the command log again) |
 
 4/4 caught.
+
+## TK0086: the board's columns get open frames (2026-10-24, branch `work/TK0086-tui-board-column-frames`)
+
+The board drew its columns as bare text. Each column is now one open frame (the plans page's
+`frame_top`/`rail`/`frame_bottom`), cards are separated by one `┄` divider inside it, the
+selected card's `❯` sits in the marker column left of the rail, and the medium and narrow
+layouts frame every group. Each mutation was applied by hand to `board.rs`, the named test was
+run alone with `cargo nextest run -p radian-tui --locked --profile sandbox`, and the file was
+restored from a copy under `.radian/backup/` with `cp`, then compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0086-M1 | a divider follows the last card as well (`group_lines` pushes one before `frame_bottom`) | ✅ 1 failed | `arc_board::a_divider_sits_between_two_cards_and_never_after_the_last` (the divider rows are `[first+3, second+3, third+3]`) |
+| TK0086-M2 | the cursor is drawn inside the rail (`  │ ❯ ` instead of `❯ │ `) | ✅ 1 failed | `arc_board::the_cursor_sits_left_of_the_rail_on_the_selected_cards_first_line` (`left: ' '`, `right: '❯'` at column 1) |
+| TK0086-M3 | a pane's second group loses its own top and bottom, so two groups sit in one frame | ✅ 1 failed | `arc_board::a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups` (`no row contains DOING`: the pane's second frame heading is gone) |
+
+3/3 caught.

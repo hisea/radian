@@ -1856,7 +1856,7 @@ fn diff_code(line: &str) -> &str {
 
 // ---- small helpers -------------------------------------------------------------------
 
-fn frame_top(width: usize, label: &str, theme: &Theme) -> Line<'static> {
+pub(super) fn frame_top(width: usize, label: &str, theme: &Theme) -> Line<'static> {
     frame_top_spans(
         width,
         vec![Span::styled(label.to_owned(), theme.frame)],
@@ -1931,12 +1931,22 @@ fn priority_style(theme: &Theme, priority: &str) -> Style {
     }
 }
 
-fn frame_bottom(theme: &Theme) -> Line<'static> {
+pub(super) fn frame_bottom(theme: &Theme) -> Line<'static> {
     Line::from(vec![Span::raw("  "), Span::styled("╰──", theme.frame)])
 }
 
 fn rail(theme: &Theme, line: Line<'static>) -> Line<'static> {
-    let mut spans = vec![Span::raw("  "), Span::styled("│ ", theme.frame)];
+    rail_with(theme, Span::raw("  "), line)
+}
+
+/// [`rail`] with the marker column under the caller's control: the board puts its `❯` cursor
+/// there, left of the rail, on the selected card's first line (ADR 0035, ADR 0048 §1).
+pub(super) fn rail_with(
+    theme: &Theme,
+    marker: Span<'static>,
+    line: Line<'static>,
+) -> Line<'static> {
+    let mut spans = vec![marker, Span::styled("│ ", theme.frame)];
     spans.extend(line.spans);
     Line::from(spans)
 }
