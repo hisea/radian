@@ -6,6 +6,8 @@
 //! `RADIAN_HOME` is process-wide, so this binary deliberately holds exactly one test (the same
 //! rule `tests/chatgpt_switch.rs` and `tests/switch_reasoning_replay.rs` follow).
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -22,11 +24,7 @@ use serde_json::Value;
 fn isolated_home(base_url: &str) -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "radian-responses-api-key-route-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = common::process_dir("radian-responses-api-key-route");
         let credentials = dir.join("credentials");
         std::fs::create_dir_all(&credentials).unwrap();
         #[cfg(unix)]

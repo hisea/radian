@@ -23,6 +23,11 @@ impl TempDir {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir =
             std::env::temp_dir().join(format!("radian-arc-{}-{label}-{n}", std::process::id()));
+        Self::at(dir)
+    }
+
+    /// Wraps an already-chosen path and creates it.
+    pub fn at(dir: PathBuf) -> Self {
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -32,9 +37,27 @@ impl TempDir {
     }
 }
 
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        // A wrapper or worker child can still have a directory here as its cwd when the test
+        // ends; on macOS `rmdir` then fails with `EBUSY` even after every file is gone. Retry
+        // briefly so the directory disappears once that child exits, instead of leaking empty
+        // directories on every run.
+        for _ in 0..100 {
+            match std::fs::remove_dir_all(&self.0) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
     }
 }
 
@@ -188,14 +211,12 @@ fn run(dir: Option<&Path>, args: &[&str]) -> String {
 /// A unique scratch directory under `$TMPDIR` — the `workspace` sandbox sets it to its own
 /// writable temp directory, the only place a sandboxed test may create files. Its length does
 /// not matter for the process control socket, because every scratch home turns that off (see
-/// [`SCRATCH_HOME_CONFIG`]).
-pub fn scratch(prefix: &str) -> PathBuf {
+/// [`SCRATCH_HOME_CONFIG`]). Removed when the guard drops.
+pub fn scratch(prefix: &str) -> TempDir {
     static DIRS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = DIRS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let name = format!("radian-arc-work-{prefix}-{}-{n}", std::process::id());
-    let dir = std::env::temp_dir().join(name);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    TempDir::at(std::env::temp_dir().join(name))
 }
 
 /// The `config/config.toml` every scratch home gets before any process runs in it: the
@@ -385,6 +406,8 @@ pub struct Repo {
     pub remote: String,
     /// The main branch the wrapper starts from (`--main-branch`).
     pub main_branch: String,
+    /// Owns `root` and removes the whole scratch tree on drop, including on a panic.
+    _dir: TempDir,
 }
 
 impl Repo {
@@ -395,7 +418,8 @@ impl Repo {
     /// A repository whose remote and main branch are not the defaults, so a hardcoded
     /// `origin`/`main` fails to find anything.
     pub fn with(prefix: &str, remote: &str, main_branch: &str) -> Self {
-        let root = scratch(prefix);
+        let dir = scratch(prefix);
+        let root = dir.path().to_path_buf();
         let home = root.join("home");
         let sessions = root.join("sessions");
         std::fs::create_dir_all(&home).unwrap();
@@ -418,6 +442,7 @@ impl Repo {
             clone,
             remote: remote.to_owned(),
             main_branch: main_branch.to_owned(),
+            _dir: dir,
         };
         repo.git_in(
             &repo.root,
@@ -876,6 +901,113 @@ impl FakeReview {
         )
         .expect("the fake sleep");
     }
+}
+
+/// A remote that speaks the git protocol through an `ext::` script: the service named by
+/// `hang` (`upload` for the fetch, `receive` for the push, or `both`) records its own pid and
+/// its child's, then sleeps; the other service serves the bare `origin` normally. A test uses
+/// it to make one remote call wait past `[limits] git_remote_timeout_secs` while the others
+/// still work (ADR 0048 decision 7.8).
+pub struct HangRemote {
+    dir: PathBuf,
+}
+
+impl HangRemote {
+    /// Rewires `repo`'s `origin` to the hanging remote. `hang` is `upload`, `receive` or
+    /// `both`.
+    pub fn install(repo: &TestRepo, label: &str, hang: &str) -> Self {
+        let dir = repo.repo.with_file_name(format!("hang-{label}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("ext.sh");
+        let origin = path(&repo.origin);
+        let text = format!(
+            "#!/bin/sh\n\
+             ROOT=\"{root}\"\n\
+             hang() {{\n\
+               echo $$ > \"$ROOT/server.pid\"\n\
+               sleep 300 &\n\
+               echo $! > \"$ROOT/child.pid\"\n\
+               wait\n\
+             }}\n\
+             case \"$GIT_EXT_SERVICE\" in\n\
+               git-upload-pack)\n\
+                 if [ \"{hang}\" = both ] || [ \"{hang}\" = upload ]; then hang; \
+                 else exec git upload-pack \"{origin}\"; fi ;;\n\
+               git-receive-pack)\n\
+                 if [ \"{hang}\" = both ] || [ \"{hang}\" = receive ]; then hang; \
+                 else exec git receive-pack \"{origin}\"; fi ;;\n\
+               *) exit 1 ;;\n\
+             esac\n",
+            root = dir.display(),
+            origin = origin,
+            hang = hang,
+        );
+        std::fs::write(&script, text).expect("the hanging remote script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&script)
+                .expect("the script")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).expect("make it executable");
+        }
+        repo.git(&["config", "protocol.ext.allow", "always"]);
+        repo.git(&[
+            "remote",
+            "set-url",
+            "origin",
+            &format!("ext::{}", script.display()),
+        ]);
+        Self { dir }
+    }
+
+    /// The pid of the child the hanging service spawned, once it has written it.
+    pub fn child_pid(&self) -> u32 {
+        self.pid("child.pid")
+    }
+
+    /// The pid of the hanging service itself.
+    pub fn server_pid(&self) -> u32 {
+        self.pid("server.pid")
+    }
+
+    fn pid(&self, name: &str) -> u32 {
+        let path = self.dir.join(name);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(pid) = text.trim().parse()
+            {
+                return pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hanging remote never wrote {}: it did not run",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Asserts that `pid` is gone, so the timeout killed the whole process group and not only
+    /// the git process.
+    pub fn assert_gone(&self, pid: u32, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if !alive(pid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("{what} ({pid}) is still alive; the timeout did not kill its process group");
+    }
+}
+
+/// Whether `pid` exists: `kill(pid, 0)`, never the `kill` program.
+pub fn alive(pid: u32) -> bool {
+    // SAFETY: `kill(2)` with a positive pid and signal 0 reads no memory.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 /// A session's final message with one fenced report.

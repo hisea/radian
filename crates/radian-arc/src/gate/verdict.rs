@@ -127,10 +127,34 @@ impl ReviewItem {
             pre_existing,
         })
     }
+
+    /// The item's `text` without a leading tag that repeats the item's own level: `[major]`,
+    /// `[MAJOR]` and `[ major ]` all count, and the spaces after the tag go too. A text that
+    /// starts with another tag, or an item with no level, keeps its text unchanged.
+    #[must_use]
+    pub fn text_without_level_tag(&self) -> &str {
+        let Some(level) = self.level.as_deref() else {
+            return &self.text;
+        };
+        let trimmed = self.text.trim_start();
+        let Some(rest) = trimmed.strip_prefix('[') else {
+            return &self.text;
+        };
+        let Some((tag, after)) = rest.split_once(']') else {
+            return &self.text;
+        };
+        if tag.trim().eq_ignore_ascii_case(level) {
+            after.trim_start()
+        } else {
+            &self.text
+        }
+    }
 }
 
 /// `[level] path:line text`, leaving out the parts the item does not have. A line without a
-/// file names no place, so only a file carries a location.
+/// file names no place, so only a file carries a location. A `text` that starts with a tag
+/// that repeats the item's own level loses that tag, so the level prints once; a text that
+/// starts with another tag keeps it. The verdict on disk is never rewritten.
 impl std::fmt::Display for ReviewItem {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(level) = &self.level {
@@ -143,7 +167,7 @@ impl std::fmt::Display for ReviewItem {
             }
             formatter.write_str(" ")?;
         }
-        formatter.write_str(&self.text)
+        formatter.write_str(self.text_without_level_tag())
     }
 }
 

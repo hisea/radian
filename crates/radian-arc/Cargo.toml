@@ -53,3 +53,5 @@ tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util"] 
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 # The tests drive the asynchronous MCP server and the mock model's tokio tasks.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# `kill(pid, 0)`: whether a hung remote's child is gone after a timeout killed its group.
+libc = "0.2"

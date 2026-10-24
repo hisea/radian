@@ -151,11 +151,8 @@ pub fn warn_if_wide(path: &Path) {
 mod tests {
     use super::*;
 
-    fn scratch(label: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("radian-session-fs-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    fn scratch(label: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::uncreated("radian-session-fs", label)
     }
 
     #[cfg(unix)]

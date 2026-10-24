@@ -12,16 +12,16 @@
 //! else in it can race the environment.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+mod common;
 
 use radian_host::{ProviderDecl, ReasoningReplayOverride, RouteContext, route_replays_reasoning};
 
 /// A private `RADIAN_HOME` for this test binary: the catalog cache and the credential store
 /// live under it, so the real `~/.radian` is never read or written.
-fn scratch() -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("radian-host-switch-replay-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn scratch() -> common::TempDir {
+    let dir = common::TempDir::named("radian-host-switch-replay");
     std::fs::create_dir_all(dir.join("cache/catalog")).unwrap();
     std::fs::create_dir_all(dir.join("credentials")).unwrap();
     #[cfg(unix)]

@@ -9,13 +9,13 @@ It keeps a plan and its tasks as files in the repository, runs each task as a se
 
 This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `priority`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, and `run`.
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and `run`.
-`radian arc run` is the scheduling loop, and a bare `radian arc` opens the read-only TUI (see [The arc TUI](#the-arc-tui)).
+`radian arc run` is the scheduling loop, and a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc-tui`](arc-tui.md)).
 
-This page holds the `radian arc` commands; the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
+This page holds the `radian arc` commands; the gate and its failures are in [`arc-gate`](arc-gate.md), the TUI in [`arc-tui`](arc-tui.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 ## `radian arc`
 
-`radian arc` with no subcommand opens the read-only TUI; its pages and keys are in [The arc TUI](#the-arc-tui).
+`radian arc` with no subcommand opens the TUI; its pages and keys are in [`arc-tui`](arc-tui.md).
 Without setup, `radian arc` and every subcommand except `init` refuse with a line that names `radian arc init` and exit `3`; without a terminal, `radian arc` exits `2`.
 
 ## `radian arc init [--track]`
@@ -165,6 +165,27 @@ For a task with a review verdict, the text form also prints `review_verdict`, `r
 The text form prints `session_id` after `attempt_id`.
 An id that names nothing exits `1`.
 
+### The `after` chain
+
+A task's `after` lists the tasks that must be merged before it is claimed (see [Plan and task files](arc-files.md#plan-and-task-files)).
+`show <task>` prints two more fields after `after`:
+
+- `waits_on`: every task in the `after` chain, transitively, nearest first, each as `<id> <state>.<phase>`; `-` when it waits on nothing.
+- `blocks`: every other task whose `after` chain contains this task, transitively, nearest first, in the same form; `-` when no task waits on it.
+
+The walk is breadth-first over `after` and visits each task once.
+An id that names no task is printed as `<id> missing`; only a hand-edited file that was adopted can hold one, because `add task` and the MCP `add_task` tool refuse an `after` id that names no task.
+
+A task in `waits_on` that can never become `done.merged` stops the chain for good.
+That is a `failed.*` task, a task whose plan is `cancelled` and that is not merged, or an id that names no task.
+`show` prints the first such task as `never_runs: <id> <state>.<phase>` (or `never_runs: <id> missing`).
+An `after` cycle, possible only through an adopted hand edit, is printed once as `cycle: <id> -> … -> <id>`, and the walk stops there instead of looping.
+A plan's `show` has none of these fields.
+
+The JSON object of a task holds `waits_on` and `blocks` too: arrays of `{"id": string, "state": string|null, "phase": string|null}`, nearest first, with `null` state and phase for an id that names no task.
+It also holds `never_runs` (that object, or `null`) and `cycle` (an array of ids that starts and ends with the same id, or `null`).
+The MCP `show` tool returns the same object.
+
 ## `radian arc adopt <ID>`
 
 Every file arc writes is recorded with a content hash in the ledger.
@@ -207,6 +228,37 @@ A task confirm refuses with exit `3` for a task in any state other than `todo.pr
 A refusal writes nothing.
 
 It prints `<plan> confirmed` or `<task> todo.ready`.
+
+### Trying it first: `--dry-run`
+
+| Flag | Value | What it does |
+|---|---|---|
+| `--dry-run` | — | Run every check the confirm runs, print what it would do, and write nothing. |
+
+`radian arc confirm <ID> --dry-run` runs every check the real `confirm` runs, in the same order, and refuses exactly as `confirm` would: the same message and the same exit code.
+It writes nothing: no plan or task file and no ledger entry.
+It checks `state.lock` only to find out whether another process holds it, and releases it; it does not create the lock file when it is missing, so no lock is left behind.
+
+On success it prints these lines and exits `0`:
+
+- first, the line the real confirm would print, prefixed `would: `: `would: TK0002-two todo.ready` or `would: PL0001-first confirmed`;
+- one `<id> waits on: <chain>` line per task the confirm would make `todo.ready` — the task itself, or a plan's `todo.ready` tasks in the plan's order — with the same entries as `show`'s [`waits_on`](#the-after-chain), or `<id> waits on: nothing`;
+- a `never runs: <id> <state>.<phase>` line for each such task whose chain cannot finish (the same test as `show`'s `never_runs`), and a `cycle: <id> -> … -> <id>` line for a cycle;
+- one `<id> queue: <n> of <m> todo.ready` line per such task: its place among every `todo.ready` task plus itself, in claim order (the plan's `priority`, the plan id, the task's order in the plan).
+
+When the next pass would not claim the task, the queue line ends with the reason in parentheses, in the words `radian arc run`'s summary uses: `(waiting for <id> to merge)`, or ``(waiting for you to start it (`auto` is `off`))``.
+The place is where the task would stand at that moment, not a promise: another task may be claimed or merged before it.
+
+```text
+would: TK0002-two todo.ready
+TK0002-two waits on: TK0001-one todo.ready
+TK0002-two queue: 2 of 2 todo.ready (waiting for TK0001-one to merge)
+```
+
+`--dry-run` exits `1` for an id that names nothing, `2` for a malformed id, `3` for a state that does not allow the confirm (an empty plan, an already confirmed plan, a task that is not `todo.proposed`, a file changed outside arc, a cancelled plan, a rejected worker line), and `4` when another process holds `state.lock`.
+
+A real `confirm` prints the same `never runs:` and `cycle:` lines on stderr after its line when they apply.
+They are warnings: the confirm still happens and still exits `0`.
 
 ## `radian arc auto <PLAN> <LEVEL>`
 
@@ -306,9 +358,11 @@ A line `radian exec` would reject, or one that repeats an argument the wrapper s
 
 Before it claims anything it reconciles every task in `doing` (see [Reconcile](arc-gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 
+`start` also claims the task you name when it is `todo.retry_wait`, even while its `retry_at` is still in the future: your `start` is a run-now, and the backoff exists for the scheduling loop. The claim is the same transaction as a `todo.ready` one, with the same concurrency check and the same printed line, and it clears `retry_at`.
+
 A claim is refused with exit `3` and changes nothing when:
 
-- the task is not `todo.ready`; a `todo.proposed` task names its phase and waits for `radian arc confirm`;
+- the task is not `todo.ready` or `todo.retry_wait`; a `todo.proposed` task names its phase and waits for `radian arc confirm`, and `todo.paused_budget` and every `failed.*` phase are refused;
 - its plan is not `confirmed`; a `cancelled` plan is refused, naming its status;
 - an `after` task is not `done`;
 - `[limits] concurrency` tasks are already in `doing`.
@@ -331,6 +385,7 @@ The wrapper enforces the attempt's limits itself, so they hold even after the pr
 
 - no new line in `runs/<task>/attempts/<attempt id>/result.jsonl` for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the worker's process group;
 - `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the wrapper started does the same; this clock also bounds the wrapper's own git steps, so a fetch or a push still running at the limit is stopped the same way.
+- a fetch, a push or an `ls-remote` is also bounded by [`limits.git_remote_timeout_secs`](arc-files.md#configtoml); whichever of it and the attempt's remaining wall time is shorter applies, and the call, with everything it started, is killed when it runs out.
 - after `[limits] cancel_grace_secs` the worker gets SIGKILL.
 
 A limit of `0` means no limit for that timer.
@@ -349,7 +404,7 @@ For example `TK0001-work-1 completed -> review.verifying`.
 A result whose token is not the task's current attempt prints `<attempt id> ignored: <why>` and changes nothing.
 Before its own line, `start` prints `reconciled: <line>` for each task the reconcile step changed.
 
-A pushed `completed` attempt continues into the gate in the same process, so one `start` takes a task from `todo.ready` to `review.awaiting_human` or `review.rework_pending`.
+A pushed `completed` attempt continues into the gate in the same process, so one `start` takes a task from `todo.ready` (or `todo.retry_wait`) to `review.awaiting_human` or `review.rework_pending`.
 The verification prints its own line:
 
 ```text
@@ -584,7 +639,7 @@ So the higher priority's task is verified, claimed, merged, and queued for a sta
 `priority` only decides which plan gets a free concurrency slot: a running attempt is never preempted, so a changed priority takes effect at the next free slot.
 
 The long work runs outside the pass: a worker is a separate `radian arc work` process with its own limits and record, and a gate is a separate process with its own record.
-A stage this build does not run, or a branch that moved, is reported in the summary; the gate's refusal is recorded, and `run` starts no new gate for that attempt until the inputs change (the branch comes back, `config.toml` changes, or `start`/`reverify` claims a new attempt).
+A stage this build does not run, or a branch that moved, is reported in the summary; the gate's refusal is recorded, and `run` starts no new gate for that attempt until the inputs change (for verification the branch comes back; for integration a new `head_sha`, a new main or a changed `config.toml`; or `start`/`reverify` claims a new attempt).
 A gate whose process exited without writing any record is reported as `<task> verify cannot run: its gate exited without a record` (or `<task> integration cannot run: …`), recorded for that attempt; no new gate starts while its inputs stay the same, and `show` prints the same text as the `rework_reason` (see [the gate run](arc-gate.md#the-gate-run)).
 A gate that wrote `running` and then died is restarted, and the death is counted: after [`limits.max_gate_deaths`](arc-files.md#configtoml) deaths for the same attempt and inputs the record becomes `died`, the summary prints `<task> verify cannot run: its gate died after it started`, `show` prints the same text as the `rework_reason`, and no gate starts while the inputs stay the same. A gate the loop stopped itself is `interrupted` instead, and the next loop starts it again without counting.
 The next pass applies a wrapper's early failure (a refused argument, a held worktree lock) the same way, so its concurrency slot is free at once (see [Reconcile](arc-gate.md#reconcile)).
@@ -620,6 +675,11 @@ With `--watch`, the summary is printed only when it differs from the summary the
 
 A pass that returns an error prints one `radian arc: <message>` line and the loop waits its interval and runs the next pass; the lock and every state file stay as they are.
 A one-shot `run` prints the same line and exits `1` instead.
+
+A repeated error stops the loop: when three passes in a row return the same error text, it prints one line, `radian arc: the same error three passes in a row; stopping (fix it and start the loop again)`, stops the gates the way a stop signal does (see below; workers are left alone), releases `runner.lock`, and exits `1`.
+A pass that succeeds, or a different error, starts the count again.
+A one-shot `run` is unchanged.
+The number three is a constant, not a configuration key.
 
 On SIGINT or SIGTERM the loop starts no new worker and no new gate.
 A Ctrl-C in the terminal reaches the loop only: each worker and each gate runs in its own process group, and both treat SIGINT exactly as SIGTERM.
@@ -681,7 +741,7 @@ Every tool is one of the store's transactions: a plan or task file that changed 
 | `update_plan` | `plan` (string, required), `title` (string, optional), `request` (string, optional), `change_record` (string, optional) | the plan, as `radian arc show <plan> --json` |
 | `add_rework` | `task` (string, required), `brief` (string, required) | the task, as `radian arc show <task> --json` |
 | `list` | `plan` (string, optional: only this plan) | the JSON array `radian arc list --json` prints |
-| `show` | `id` (string, required) | the JSON object `radian arc show --json` prints |
+| `show` | `id` (string, required) | the JSON object `radian arc show --json` prints, a task's `waits_on`, `blocks`, `never_runs` and `cycle` included |
 
 There is no tool to confirm a plan or a task, start a task, merge, reject, change `auto`, or approve: those are yours (see `confirm`, `auto`, and `pause` above).
 
@@ -726,20 +786,13 @@ Every subcommand of this page uses these codes.
 Code `2` covers a bad flag or an argument value outside a closed set; a slug, an id, or a stage name that the rules refuse is also `2`.
 A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
-## The arc TUI
+## The TUI
 
-`radian arc` opens a read-only view of plans, tasks, verdicts and journals; it writes no arc state and probes `runner.lock` (never creating it) for `● running` / `◻ stopped`. Header: `arc`, tabs `plans · task · merge` (`merge` disabled), `main <sha>` and loop state.
-
-Plan marks: `✓` (merged, green), `●` (confirmed, accent), `◻` (draft, weak), `×` (cancelled, red), then id and `auto <level> · <merged>/<total> · <cost>` (`draft · ` or `cancelled · ` first; `—` when no cost). Frame: `<id> <status> · auto <level> · <n>/<m> merged · <cost>`, then title, tasks: a task after a plan task sits under its first parent (`├─`/`└─`), other parents are `also after <ids>`, roots in plan order, each task once. A row: mark, id, `state.phase` (mark's color), `#attempt`, cost, and `waits <ids>` for an unmerged-parent todo. Marks: `✓` done.merged green, `×` failed red, `●` doing/verifying accent, `!` awaiting_human/rework_pending accent bold (you or the lead acts), `◻` todo weak. Keys: `↑`/`↓` move in the focused column (the plan list, or the task list after `→`), `→`/`←` focus the task list/plan list, `Tab`/`Enter` open the task page (`Tab` on it goes back), `g` toggles the flat list (`after <ids>`), `Esc`/`q`/`Ctrl-C` quit. A list longer than its area scrolls so the selected row stays visible: it moves only when the selection leaves the top or the bottom.
-
-Task frame: `<id> <state.phase> · attempt <N> · <cost> · plan <id>`, the title, `conversation · diff · attempts` and `attempt 1 2 3` (latest by default; `[`/`]` switch). Conversation: the selected attempt's worker journal through the attach view — the session id in its `execution.json`, or the task id when it wrote none (see [worker sessions](arc-gate.md#failures-retries-and-the-budget)), names `~/.radian/sessions/<session id>.jsonl` (one weak line if none); `j`/`k` scroll, `f` follows. Diff: the merge commit's first-parent diff when merged, else the task's `base_sha..head_sha` (a merge that fast-forwarded main shows the whole branch, not only its last commit); files show `+N`/`-N`, the selected file's diff is a frame titled with its path, `n`/`p` file, `j`/`k` scroll, `f` end. Attempts: each attempt's verdicts (`✓ commands`, `× integration (conflict)`). `h`/`l` (or `←`/`→`) change tab, `[`/`]` attempt, `Tab`/`Esc` back, `q`/`Ctrl-C` quit.
-
-Re-reads the store every 2 s; git runs in worker threads, a frame never waits (`loading…`).
+A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md). The plans page's `x` cancels the selected task or plan, `c` confirms a draft plan or a proposed task (depending on the focused column), and `+`/`-` move the selected plan's priority; the page draws `P<n>` with the plan's id and in the frame label.
 
 ## Not built yet
 
 The gate stages `mutation` and `ci` are not built: verification refuses a profile or task that lists one, and the task stays in `review.verifying`.
-The arc TUI's `merge` page and the owner's actions are not built; the TUI is not a scheduling loop (only `radian arc run` schedules) and holds no `runner.lock`.
 
 ## See also
 

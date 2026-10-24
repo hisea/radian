@@ -13,7 +13,6 @@
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -119,16 +118,18 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
     }
     let reconciled = reconcile(store)?;
     // The loop releases a due retry on every pass; `start` is the owner's one task, so it
-    // does the same before it claims.
+    // does the same before it claims. A target whose `retry_at` is still in the future is
+    // claimed anyway: the claim accepts `todo.retry_wait`, and the backoff exists for the
+    // scheduling loop (ADR 0048 decision 9).
     attempt_ops::release_retries(store, &crate::store::plan_ops::utc_now())?;
     let config = store.config()?;
     let claim = attempt_ops::claim(store, task_id)?;
     let task = store.load_task(task_id)?.item;
     let applied = run_claim(store, &claim, &task, &config)?;
     // A pushed attempt continues into the gate in the same process (ADR 0048 decision 6):
-    // one `start` takes the task from `todo.ready` to `review.awaiting_human` or
-    // `review.rework_pending`. A refused verification leaves the task in `review.verifying`
-    // and is reported after the attempt's own line.
+    // one `start` takes the task from `todo.ready` or `todo.retry_wait` to
+    // `review.awaiting_human` or `review.rework_pending`. A refused verification leaves the
+    // task in `review.verifying` and is reported after the attempt's own line.
     let verification = (applied.ignored.is_none()
         && applied.state == model::TaskState::Review.as_str()
         && applied.phase == "verifying")
@@ -157,10 +158,9 @@ pub fn run_claim(
     apply_finished(store, claim, status.code())
 }
 
-/// One wrapper child this process started, and its attempt's run directory.
+/// One wrapper child this process started.
 pub struct Spawned {
     pub child: Child,
-    pub run_dir: PathBuf,
 }
 
 /// Starts the wrapper for one claim, hands it the brief, moves the task to `doing.running`
@@ -256,7 +256,7 @@ pub fn spawn_claim(
         let _ = child.wait();
         return Err(error);
     }
-    Ok(Spawned { child, run_dir })
+    Ok(Spawned { child })
 }
 
 /// Reads what a finished wrapper left and applies it in one transaction (decision 9).

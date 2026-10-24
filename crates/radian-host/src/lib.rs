@@ -54,6 +54,8 @@ pub mod sessions;
 pub mod skills;
 pub mod startup;
 pub mod subagent;
+#[cfg(test)]
+mod test_support;
 mod tools;
 pub mod trust;
 pub mod usage;

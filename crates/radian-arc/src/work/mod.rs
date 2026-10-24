@@ -207,7 +207,8 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
     // worktree and its fetch, the model, the delivery checks and the push (ADR 0048
     // decisions 7.8 and 9). Every wrapper git command gets the time that is left.
     let started = Instant::now();
-    let repo = repo_root()?;
+    let wall = Duration::from_secs(o.max_wall_time_secs);
+    let repo = repo_root(started, wall)?;
     let arc = repo.join(".radian").join("arc");
     let worktree = arc.join("worktrees").join(&o.task);
     let branch = format!("work/{}", o.task);
@@ -235,7 +236,7 @@ fn run_inner(o: &Options) -> Result<i32, Failure> {
         runs,
         attempt_dir,
         wrapper_pid,
-        clock: Clock::new(started, Duration::from_secs(o.max_wall_time_secs), signal),
+        clock: Clock::new(started, wall, signal),
     };
     // From here on every failure writes the attempt's finish record before the wrapper exits:
     // the next pass applies it and frees the attempt's `[limits] concurrency` slot at once
@@ -366,7 +367,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
 
     let result_path = s.runs.join("result.jsonl");
     let stderr_path = s.runs.join("stderr.log");
-    let brief = read_stdin()?;
+    let brief = read_stdin(&s.clock)?;
     let base_sha = base_sha(&s.repo, &s.arc, o, &s.branch, created, &s.clock)?;
     // The moved-ref guard: a later attempt may only run when `work/<task>` still points at
     // the tip the previous attempt ended on. Another worker can move the ref from inside its
@@ -655,7 +656,11 @@ impl Heartbeat {
                     if flag.load(Ordering::SeqCst) {
                         return;
                     }
-                    std::thread::sleep(POLL);
+                    // Sleep only what is left of the interval: a fixed poll slice would
+                    // stretch a 333 ms interval to 400 ms, and three beats would no longer
+                    // fit in a 1 s stall window.
+                    let now = Instant::now();
+                    std::thread::sleep(deadline.saturating_duration_since(now).min(POLL));
                 }
                 if flag.load(Ordering::SeqCst) {
                     return;
@@ -864,14 +869,27 @@ fn validate_rest(o: &Options) -> Result<(), Failure> {
 
 /// The repository root, found from the current directory. The wrapper runs from the main
 /// checkout: a linked worktree's `.git` is a file, and its worktrees are not the place to
-/// create another one.
-fn repo_root() -> Result<PathBuf, Failure> {
+/// create another one. The attempt's wall clock already covers this local `rev-parse`, so a
+/// command that hangs is killed at the deadline like every other wrapper git command; the
+/// attempt's own records cannot be written before the root is known.
+fn repo_root(started: Instant, wall: Duration) -> Result<PathBuf, Failure> {
     let cwd = std::env::current_dir()
         .map_err(|error| Failure::error(format!("cannot read the current directory: {error}")))?;
-    // Local `rev-parse`, before the attempt's clock exists; it names no remote and cannot
-    // wait on one.
-    let out = crate::git::run(&cwd, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| Failure::error(format!("{} is not inside a git repository", cwd.display())))?;
+    let remaining = (!wall.is_zero()).then(|| wall.saturating_sub(started.elapsed()));
+    if remaining.is_some_and(|remaining| remaining.is_zero()) {
+        return Err(Failure::wall());
+    }
+    let out = match crate::git::run_with_timeout(&cwd, &["rev-parse", "--show-toplevel"], remaining)
+    {
+        Ok(crate::git::TimedRun::Done(out)) => out,
+        Ok(crate::git::TimedRun::TimedOut) => return Err(Failure::wall()),
+        Err(_) => {
+            return Err(Failure::error(format!(
+                "{} is not inside a git repository",
+                cwd.display()
+            )));
+        }
+    };
     if !out.status.success() {
         return Err(Failure::error(format!(
             "{} is not inside a git repository",
@@ -914,19 +932,33 @@ fn ensure_worktree(
     // `git worktree add` at the same time: git writes the branch's configuration, and two
     // writers collide on `.git/config.lock` and make the second attempt fail. The
     // `worktrees/` directory's own flock makes creation (and the fetch behind it) one at a
-    // time; the guard lives until this function returns, before the worker starts.
+    // time; the guard lives until this function returns, before the worker starts. A wait
+    // that outlives the attempt's wall clock is a wall-time failure, like a git command.
     let _setup = File::open(parent).map_err(|error| {
         Failure::error(format!(
             "cannot open {} for the setup lock: {error}",
             parent.display()
         ))
     })?;
-    _setup.lock_exclusive().map_err(|error| {
-        Failure::error(format!(
-            "cannot lock {} for the setup: {error}",
-            parent.display()
-        ))
-    })?;
+    loop {
+        match _setup.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if clock.expired() {
+                    clock.mark()?;
+                    return Err(Failure::wall());
+                }
+                let wait = clock.remaining().map_or(POLL, |left| left.min(POLL));
+                std::thread::sleep(wait);
+            }
+            Err(error) => {
+                return Err(Failure::error(format!(
+                    "cannot lock {} for the setup: {error}",
+                    parent.display()
+                )));
+            }
+        }
+    }
     if worktree.join(".git").exists() {
         let top = match git(worktree, &["rev-parse", "--show-toplevel"], clock) {
             Ok(top) => top,
@@ -988,7 +1020,7 @@ fn ensure_worktree(
         // with a different fetch configuration cannot leave it stale.
         let start = format!("{remote}/{main_branch}");
         let refspec = format!("+refs/heads/{main_branch}:refs/remotes/{start}");
-        match git(repo, &["fetch", remote, &refspec], clock) {
+        match git_remote(repo, &["fetch", remote, &refspec], clock) {
             Ok(_) => {}
             Err(failure) if failure.wall => return Err(failure),
             Err(failure) => {
@@ -1155,7 +1187,7 @@ fn merge_main(
     let main_ref = format!("refs/remotes/{}/{}", o.remote, o.main_branch);
     let short_ref = format!("{}/{}", o.remote, o.main_branch);
     let refspec = format!("+refs/heads/{0}:{1}", o.main_branch, main_ref);
-    match git(repo, &["fetch", &o.remote, &refspec], clock) {
+    match git_remote(repo, &["fetch", &o.remote, &refspec], clock) {
         Ok(_) => {}
         Err(failure) if failure.wall => return Err(failure),
         Err(failure) => {
@@ -1728,7 +1760,7 @@ fn dirty_paths(worktree: &Path, clock: &Clock) -> Result<Vec<String>, Failure> {
 
 fn push(repo: &Path, remote: &str, branch: &str, clock: &Clock) -> Result<(), Failure> {
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    let out = git_raw(repo, &["push", remote, &refspec], clock)?;
+    let out = git_remote_raw(repo, &["push", remote, &refspec], clock)?;
     if !out.status.success() {
         return Err(Failure::error(format!(
             "push failed: {}",
@@ -1745,7 +1777,7 @@ fn remote_sha_of(
     clock: &Clock,
 ) -> Result<String, Failure> {
     let reference = format!("refs/heads/{branch}");
-    let out = git_raw(repo, &["ls-remote", remote, &reference], clock)?;
+    let out = git_remote_raw(repo, &["ls-remote", remote, &reference], clock)?;
     if !out.status.success() {
         return Err(Failure::error(format!(
             "ls-remote failed: {}",
@@ -1810,6 +1842,53 @@ fn git(cwd: &Path, args: &[&str], clock: &Clock) -> Result<String, Failure> {
     Ok(out.stdout)
 }
 
+/// A git command of the wrapper that talks to a remote (`fetch`, `push`, `ls-remote`): the
+/// shorter of the attempt's remaining wall time and `[limits] git_remote_timeout_secs` bounds
+/// it (ADR 0048 decision 7.8). A limit that runs out kills the command's process group; when
+/// the wall clock is the shorter limit it is the attempt's `wall_time` failure, and otherwise
+/// the call fails with `git <subcommand> timed out after <n> s`.
+fn git_remote_raw(cwd: &Path, args: &[&str], clock: &Clock) -> Result<GitOutput, Failure> {
+    if clock.expired() {
+        clock.mark()?;
+        return Err(Failure::wall());
+    }
+    let key = crate::git::remote_timeout(cwd);
+    let (limit, wall_wins) = remote_limit(key, clock.remaining());
+    match crate::git::run_with_timeout(cwd, args, Some(limit)) {
+        Ok(crate::git::TimedRun::Done(output)) => Ok(output),
+        Ok(crate::git::TimedRun::TimedOut) if wall_wins => {
+            clock.mark()?;
+            Err(Failure::wall())
+        }
+        Ok(crate::git::TimedRun::TimedOut) => {
+            Err(Failure::error(crate::git::timeout_text(args, limit)))
+        }
+        Err(error) => Err(Failure::error(error.to_string())),
+    }
+}
+
+/// The limit of one remote call of the wrapper: the shorter of the attempt's remaining wall
+/// time and `[limits] git_remote_timeout_secs` (ADR 0048 decision 7.8). `true` when the wall
+/// clock is the shorter one, so the failure is the attempt's `wall_time` and not the call's.
+fn remote_limit(key: Duration, remaining: Option<Duration>) -> (Duration, bool) {
+    match remaining {
+        Some(remaining) => (remaining.min(key), remaining <= key),
+        None => (key, false),
+    }
+}
+
+fn git_remote(cwd: &Path, args: &[&str], clock: &Clock) -> Result<String, Failure> {
+    let out = git_remote_raw(cwd, args, clock)?;
+    if !out.status.success() {
+        return Err(Failure::error(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            out.stderr.trim()
+        )));
+    }
+    Ok(out.stdout)
+}
+
 fn same_path(a: &Path, b: &Path) -> bool {
     let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical(a) == canonical(b)
@@ -1845,7 +1924,35 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn read_stdin() -> Result<String, Failure> {
+fn read_stdin(clock: &Clock) -> Result<String, Failure> {
+    if clock.expired() {
+        clock.mark()?;
+        return Err(Failure::wall());
+    }
+    // A read on stdin that never sees EOF would outlive the attempt's wall time. The reader
+    // thread stays blocked if the deadline passes, which does not keep the process alive; the
+    // caller gets the wall-time failure and writes the attempt's records.
+    let Some(remaining) = clock.remaining() else {
+        return read_stdin_blocking();
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(read_stdin_blocking().map_err(|failure| failure.message));
+    });
+    match receiver.recv_timeout(remaining) {
+        Ok(Ok(brief)) => Ok(brief),
+        Ok(Err(message)) => Err(Failure::error(message)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            clock.mark()?;
+            Err(Failure::wall())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(Failure::error(
+            "cannot read the brief from stdin: the reader ended",
+        )),
+    }
+}
+
+fn read_stdin_blocking() -> Result<String, Failure> {
     let mut brief = String::new();
     std::io::stdin()
         .read_to_string(&mut brief)
@@ -1957,8 +2064,8 @@ mod tests {
     /// fail every remaining attempt with `no session`.
     #[test]
     fn a_session_exists_only_when_its_file_is_in_the_worker_session_dir() {
-        let dir = std::env::temp_dir().join(format!("radian-arc-session-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("session dir");
+        let dir = crate::test_support::TempDir::named("radian-arc-session");
+        fs::create_dir_all(&*dir).expect("session dir");
         let path = dir.to_str().expect("utf-8 path");
         let args = strings(&["--model", "m", "--session-dir", path]);
         assert!(!session_exists("TK0001-task", &args), "no file yet");
@@ -1971,6 +2078,28 @@ mod tests {
         let equals = strings(&[&format!("--session-dir={path}")]);
         assert!(session_exists("TK0001-task", &equals));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The wrapper bounds a remote call by the shorter of the attempt's remaining wall time
+    /// and the key, and a wall win is the attempt's `wall_time`, not the call's own failure.
+    /// Mutation: always take the key and the attempt's wall-clock failure never fires.
+    #[test]
+    fn a_remote_call_takes_the_shorter_of_the_wall_clock_and_the_key() {
+        let key = Duration::from_secs(300);
+        assert_eq!(
+            remote_limit(key, Some(Duration::from_secs(5))),
+            (Duration::from_secs(5), true)
+        );
+        assert_eq!(
+            remote_limit(key, Some(Duration::from_secs(900))),
+            (key, false)
+        );
+        assert_eq!(remote_limit(key, None), (key, false));
+        assert_eq!(
+            remote_limit(key, Some(key)),
+            (key, true),
+            "the wall clock wins a tie"
+        );
     }
 
     #[test]

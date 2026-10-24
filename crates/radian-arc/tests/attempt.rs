@@ -129,9 +129,9 @@ fn utc_seconds(text: &str) -> i64 {
 
 // ---- claim ----------------------------------------------------------------------------
 
-/// Decision 6: a task starts only from `todo.ready`, only under a confirmed plan, only when
-/// every `after` task is `done`, and only when a concurrency slot is free. Each refusal is
-/// exit 3 and writes nothing.
+/// Decision 6: a task starts only from `todo.ready` or the owner's `start` from
+/// `todo.retry_wait`, only under a confirmed plan, only when every `after` task is `done`, and
+/// only when a concurrency slot is free. Each refusal is exit 3 and writes nothing.
 #[test]
 fn claim_refusals_are_exit_three_and_write_nothing() {
     let (_repo, store) = setup("claim");
@@ -945,6 +945,195 @@ fn start_applies_a_delivery_failure_as_rework_pending() {
     );
     let record = attempt_result(&store, task, 1);
     assert_eq!(record["class"], json!("verification"));
+}
+
+/// The owner's `start` claims a `todo.retry_wait` task at once, without waiting for its
+/// `retry_at`; the scheduling loop leaves the same task alone until the time has passed
+/// (ADR 0048 decision 9). The printed lines are the ones a `todo.ready` start prints.
+#[test]
+fn start_claims_a_retry_wait_task_without_waiting_for_retry_at() {
+    let repo = Repo::new("start-retry-wait");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    let (plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    let task = &tasks[0];
+    let retry_at = "2099-01-01T00:00:00Z";
+    store
+        .change_task(task, |task| {
+            task.state = TaskState::Todo;
+            task.phase = "retry_wait".to_owned();
+            task.retry_at = Some(retry_at.to_owned());
+            Ok(())
+        })
+        .expect("the task waits for a retry");
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo change > change.txt && git add change.txt && git commit -m change",
+        ),
+        text_reply("done"),
+    ]);
+    write_worker_args(&repo, mock.base_url());
+
+    // The loop respects the backoff: a one-shot `run` does not claim the task.
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run failed: {}", run.stderr);
+    assert_eq!(
+        state(&store, task),
+        ("todo".into(), "retry_wait".into()),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        store.load_task(task).unwrap().item.retry_at.as_deref(),
+        Some(retry_at)
+    );
+    assert!(
+        !repo.run_dir(task, 1).exists(),
+        "run claimed a task that waits for its retry: {}",
+        run.stdout
+    );
+
+    // The owner's `start` is a run-now: it claims the same task at once.
+    let started = repo.radian(&["arc", "start", task]);
+    assert_eq!(started.code, 0, "start failed: {}", started.stderr);
+    assert!(
+        started.stdout.contains("completed -> review.verifying"),
+        "{}",
+        started.stdout
+    );
+    assert!(
+        started.stdout.contains("verify -> review.awaiting_human"),
+        "{}",
+        started.stdout
+    );
+    let stored = store.load_task(task).expect("the task reads").item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "awaiting_human")
+    );
+    assert_eq!(stored.attempt, 1, "the retry_wait task was claimed");
+    assert_eq!(stored.retry_at, None, "the claim clears the retry time");
+}
+
+/// The claim keeps its concurrency check: with every slot taken, `start` refuses a
+/// `todo.retry_wait` task with exit 3 and leaves it unchanged.
+#[test]
+fn start_refuses_a_retry_wait_task_when_every_slot_is_taken() {
+    let repo = Repo::new("start-retry-wait-full");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["busy", "work"]);
+    let busy = &tasks[0];
+    let task = &tasks[1];
+    // The busy task holds the one concurrency slot. Its attempt stays 0, so reconcile
+    // skips it instead of applying a result.
+    store
+        .change_task(busy, |task| {
+            task.state = TaskState::Doing;
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("the slot is taken");
+    store
+        .change_task(task, |task| {
+            task.state = TaskState::Todo;
+            task.phase = "retry_wait".to_owned();
+            task.retry_at = Some("2099-01-01T00:00:00Z".to_owned());
+            Ok(())
+        })
+        .expect("the task waits for a retry");
+
+    let run = repo.radian(&["arc", "start", task]);
+    assert_eq!(run.code, 3, "start: {}", run.stderr);
+    assert!(
+        run.stderr.contains("limits.concurrency"),
+        "the refusal names the limit: {}",
+        run.stderr
+    );
+    let stored = store.load_task(task).expect("the task reads").item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "retry_wait")
+    );
+    assert_eq!(stored.attempt, 0, "nothing was claimed");
+    assert_eq!(stored.retry_at.as_deref(), Some("2099-01-01T00:00:00Z"));
+}
+
+/// A scheduling pass never claims a task that is backing off, even when its snapshot said the
+/// task was ready: `claim_by` re-reads the phase under the lock. The owner's `claim` still
+/// accepts the same task at once. Mutation: let `ClaimBy::SchedulingLoop` accept `retry_wait`
+/// and the scheduling claim succeeds.
+#[test]
+fn a_scheduling_claim_refuses_a_task_that_began_backing_off() {
+    let (_repo, store) = setup("scheduling-retry-wait");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    store
+        .change_task(task, |task| {
+            task.phase = "retry_wait".to_owned();
+            task.retry_at = Some("2099-01-01T00:00:00Z".to_owned());
+            Ok(())
+        })
+        .expect("the task waits for a retry");
+
+    let refusal = attempt_ops::claim_by(&store, task, attempt_ops::ClaimBy::SchedulingLoop)
+        .expect_err("the loop leaves a backing-off task alone");
+    assert_eq!(refusal.exit(), Exit::State, "{refusal:?}");
+    assert!(refusal.message().contains("scheduling loop"), "{refusal:?}");
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+    assert_eq!(store.load_task(task).unwrap().item.attempt, 0);
+
+    let claim = attempt_ops::claim(&store, task).expect("the owner claims it at once");
+    assert_eq!(claim.attempt, 1);
+}
+
+/// `start` still refuses `todo.paused_budget` and every `failed.*` phase: the retry-wait
+/// claim is the only addition (ADR 0048 decision 9).
+#[test]
+fn start_still_refuses_paused_budget_and_failed_tasks() {
+    let repo = Repo::new("start-refused-states");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    for (task_state, phase) in [
+        (TaskState::Todo, "paused_budget"),
+        (TaskState::Failed, "exhausted"),
+        (TaskState::Failed, "cancelled"),
+        (TaskState::Failed, "irrecoverable"),
+    ] {
+        store
+            .change_task(task, |task| {
+                task.state = task_state;
+                task.phase = phase.to_owned();
+                task.retry_at = None;
+                Ok(())
+            })
+            .expect("the task is set");
+        let run = repo.radian(&["arc", "start", task]);
+        assert_eq!(
+            run.code,
+            3,
+            "{}.{phase}: start did not refuse: {}",
+            task_state.as_str(),
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("only a `todo.ready`") && run.stderr.contains("`todo.retry_wait`"),
+            "{}.{phase}: {}",
+            task_state.as_str(),
+            run.stderr
+        );
+        let stored = store.load_task(task).expect("the task reads").item;
+        assert_eq!(
+            (stored.state, stored.phase.as_str()),
+            (task_state, phase),
+            "the refused start changed the state"
+        );
+        assert_eq!(stored.attempt, 0);
+    }
 }
 
 /// No new line on the jsonl stream for `stall_timeout_secs` sends SIGTERM; the wrapper still

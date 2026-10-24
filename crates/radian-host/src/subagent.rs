@@ -697,9 +697,7 @@ mod tests {
     /// skipped, and usage records are summed field by field.
     #[test]
     fn the_report_is_the_last_assistant_text_and_the_summed_usage() {
-        let dir =
-            std::env::temp_dir().join(format!("radian-subagent-report-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-subagent-report");
         let path = dir.join("c.jsonl");
         let lines = [
             json!({"event": "SessionCreated", "data": {}}).to_string(),
@@ -725,9 +723,7 @@ mod tests {
     /// that asked for it.
     #[test]
     fn denied_calls_are_named_by_tool() {
-        let dir =
-            std::env::temp_dir().join(format!("radian-subagent-denied-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-subagent-denied");
         let path = dir.join("d.jsonl");
         let lines = [
             json!({"event": "MessageAppended", "data": {"message": {"assistant": {"content": [], "tool_calls": [{"id": "call-1", "name": "shell", "arguments": {}}]}}}}).to_string(),

@@ -733,10 +733,7 @@ mod tests {
     /// host.
     #[test]
     fn the_git_contributor_never_runs_a_repository_filter() {
-        let dir =
-            std::env::temp_dir().join(format!("radian-contrib-gitfilter-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::named("radian-contrib-gitfilter");
         let run = |args: &[&str]| {
             assert!(
                 Command::new("git")
@@ -756,10 +753,7 @@ mod tests {
         run(&["add", "tracked.txt"]);
         run(&["commit", "-q", "-m", "init"]);
 
-        let marker = std::env::temp_dir().join(format!(
-            "radian-contrib-gitfilter-marker-{}",
-            std::process::id()
-        ));
+        let marker = dir.join("gitfilter-marker");
         let _ = std::fs::remove_file(&marker);
         let script = dir.join("evil-clean.sh");
         std::fs::write(
@@ -778,7 +772,7 @@ mod tests {
         // clean filter).
         std::fs::write(dir.join("tracked.txt"), "two\n").unwrap();
 
-        let facts = GitContributor::new(dir.clone()).read();
+        let facts = GitContributor::new(dir.to_path_buf()).read();
         assert_eq!(facts.branch.as_deref(), Some("feature"));
         assert!(
             !marker.exists(),

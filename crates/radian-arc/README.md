@@ -115,9 +115,10 @@ parse or that repeats an argument the wrapper sets (`worker_args::OWNED_EXEC_ARG
 the manual's drift test reads). Nothing is claimed, started or written by the check.
 
 `start` reconciles `doing`, releases a due retry, and claims the
-task in one transaction (`todo.ready` → `doing.starting`, `attempt` + 1, `<task>-<n>`, a
-random token). A claim is refused (exit 3) when the task is not ready, its plan is not
-confirmed, an `after` task is not done, or `[limits] concurrency` tasks are already in
+task in one transaction (`todo.ready` or `todo.retry_wait` → `doing.starting`, `attempt` + 1,
+`<task>-<n>`, a random token); a `todo.retry_wait` task is claimed without waiting for
+`retry_at`. A claim is refused (exit 3) when the task is in any other state or phase, its plan
+is not confirmed, an `after` task is not done, or `[limits] concurrency` tasks are already in
 `doing`. A task already in `review.verifying` resumes verification instead of being claimed.
 
 It then runs the current executable as `arc work --task … --attempt … --token … --session …
@@ -501,7 +502,9 @@ is a first review. A rework round's prompt holds the previous blocking items, th
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
 `git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
 `suggestions` with `pre_existing` unless its `file:line` is within 3 lines of an increment
-line or within 10 lines of a previous blocking item in the same file (`ReworkRound`).
+line or within 10 lines of a previous blocking item in the same file (`ReworkRound`). A
+`critical` item and an item without a `file` or a `line` are never moved; a moved item keeps
+its `level`, and a `major` item outside both windows is still moved.
 
 Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
 such a failure, with reason `conflict` and the paths. `review::conflict_auto_rework` writes
@@ -548,11 +551,18 @@ force. A main that moved after integration, or a rejected push, makes it integra
 success the task is `done.merged` and its worktree is removed; the branch stays.
 
 `finish_integration` then asks `review::propose_followup` for the task's review follow-up
-(ADR 0048 decision 10): the items of the task's newest `review` verdict's `suggestions` (the
-moved `pre_existing` items among them), never a `blocking` item, become one `todo.proposed`
-task of the same plan, `after` the merged task, when `[gate.review] propose_followups` is
-true and the plan does not already hold it. A failure to add it is a warning after the merge,
-not a failed merge.
+(ADR 0048 decision 10): it reads every `review` verdict of the task, oldest attempt first, and
+collects every round's `suggestions` (the moved `pre_existing` items among them), never a
+`blocking` item, so a round that only had blocking items contributes nothing. Repeats are
+dropped: two items are the same when their `file`, `line` and `text` match after a leading tag
+that repeats the item's own level is removed and whitespace is collapsed, and the newest copy
+is kept. The rest become one `todo.proposed` task of the same plan, `after` the merged task,
+when `[gate.review] propose_followups` is true and the plan does not already hold it; its brief
+groups the items by the round they came from (`From review <n> (attempt <n>):`) and names the
+path of every review verdict. A task
+that is itself a review follow-up gets none of its own; its review's unfixed items stay in its
+verdict and in the task's final report. A failure to add the follow-up is a warning after the
+merge, not a failed merge.
 
 `merge_step` reads `runs/<task>/gate.json` for a finished integration, and a
 `review.ready_to_merge` task finishes the newest passing integration verdict for its head.
@@ -581,9 +591,18 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   uncommitted files is left in place and reported as a warning, never forced away.
 - The follow-up's slug is `<merged task slug>-followups` cut from the end to
   `SLUG_MAX_CHARS`, then a trailing `-` from the cut is removed so it stays a valid slug. A
-  plan that already holds the follow-up (the same title and `after`) gets no second one.
+  plan that already holds the follow-up (the same title and `after`) gets no second one. A
+  follow-up task gets none of its own: its title and single `after` entry are the ones arc
+  gives a follow-up, the same test `has_followup` uses, so the chain stops after one level.
 - `confirm` of a task checks `worker_args` first, as `confirm` of a plan does, so a broken
   worker line leaves the task `todo.proposed` instead of making it runnable.
+- `store::chain` is the one walk of a task's `after` graph: `show`, `show --json`, `confirm`,
+  its `--dry-run` and the MCP `show` tool use it. It returns `waits_on` and `blocks` (breadth
+  first, nearest first, each task once), the first entry that can never reach `done.merged`
+  (a `failed.*` task, a task of a `cancelled` plan, or an id that names no file), and one
+  `after` cycle. `queue_position` is the task's place among the `todo.ready` tasks. The dry
+  run calls `plan_ops::confirm_dry_run`, which shares `confirm_with`'s checks and writes
+  nothing; it checks the lock with `Store::check_state_lock`, which never creates the file.
 - The remote is always a parameter, never the literal `origin`: the caller passes
   `[repository] remote`.
 - A checkout that exists and is not a linked worktree is an error, unless it is an empty
@@ -614,5 +633,6 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 
 The arc TUI lives in `radian-tui` (`src/arc/`, with its terminal loop in `src/cli/arc.rs`);
 this crate owns the read-only views it draws ([`read`](src/read.rs): the remote main, a
-task's attempts and verdicts, a task's diff). The gate stages `mutation` and `ci` are
-refused until they are built.
+task's attempts and verdicts, a task's diff, and the merge page's stage rows, review and
+commits). The owner's keys there are the same library calls as the CLI's subcommands. The
+gate stages `mutation` and `ci` are refused until they are built.

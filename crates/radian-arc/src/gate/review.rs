@@ -15,8 +15,9 @@
 //! decision 10): its prompt holds the brief, the previous review's blocking items, the commit
 //! list `<previous sha>..<sha>` and the increment, the lines the rework itself added or changed
 //! ([`build_rework_prompt`]). After its report is parsed, arc moves a blocking item the rework
-//! did not touch to `suggestions` and marks it `pre_existing` ([`ReworkRound`]); the stage then
-//! passes when no blocking item is left.
+//! did not touch to `suggestions` and marks it `pre_existing` ([`ReworkRound`]), except a
+//! `critical` item and an item without a `file` or a `line`, which keep blocking; the stage
+//! then passes when no blocking item is left.
 //!
 //! The session ends with one fenced `json` block ([`ReviewReport`]). arc parses the last such
 //! block. An empty `blocking` list passes the stage; any item fails it with reason
@@ -58,6 +59,10 @@ pub const REVIEW_TOOLS: &str = "read,grep,glob";
 /// output is unusable (ADR 0048 decision 10).
 pub const REVIEW_RUNS: u32 = 2;
 
+/// The item level whose item always blocks a rework round, wherever it is (ADR 0048 decision
+/// 10): the window rules never move it.
+const CRITICAL: &str = "critical";
+
 /// A rework round: how far a blocking item may sit from an increment line and still block
 /// (ADR 0048 decision 10, rule (a)).
 pub const PRE_EXISTING_WINDOW: u32 = 3;
@@ -86,13 +91,22 @@ struct ReworkRound {
 }
 
 impl ReworkRound {
-    /// Whether a blocking item stays blocking: its `file:line` is within
+    /// Whether a blocking item stays blocking (ADR 0048 decision 10, the rework round's
+    /// exceptions): a `critical` item always does, wherever it is; an item without a `file`
+    /// or a `line` does too, at its level; any other item does when its `file:line` is within
     /// [`PRE_EXISTING_WINDOW`] lines of an increment line, or it is in the same file as and
-    /// within [`PREVIOUS_ITEM_WINDOW`] lines of a blocking item of the previous review. An
-    /// item without a `file` and a `line` names no place, so it is pre-existing.
+    /// within [`PREVIOUS_ITEM_WINDOW`] lines of a blocking item of the previous review.
     fn keeps(&self, item: &ReviewItem) -> bool {
+        // A critical item blocks in every round, wherever it is: the position of a line does
+        // not prove that a problem is harmless or old.
+        if item.level.as_deref() == Some(CRITICAL) {
+            return true;
+        }
+        // An item without a place is not demoted: the review prompt asks for `file` and
+        // `line`, so a missing one is the session's omission, not evidence that the problem
+        // is old.
         let (Some(file), Some(line)) = (&item.file, item.line) else {
-            return false;
+            return true;
         };
         let near_increment = self
             .increment
@@ -107,8 +121,9 @@ impl ReworkRound {
         near_increment || near_previous
     }
 
-    /// Moves every blocking item the rework did not touch to `suggestions` and marks it
-    /// `pre_existing`, and returns how many it moved.
+    /// Moves every blocking item [`ReworkRound::keeps`] does not keep to `suggestions`, marks
+    /// it `pre_existing`, and returns how many it moved. A moved item keeps its `level`, so
+    /// the follow-up task carries it at that level.
     fn mark_pre_existing(&self, report: &mut ReviewReport) -> u32 {
         let mut kept = Vec::new();
         let mut moved = 0;
@@ -236,9 +251,9 @@ impl ReviewRun<'_> {
                 self.prompt(&checkout.path(), &candidate.sha, &candidate.main_sha)?;
             let mut unusable = Unusable::Output;
             for run in 1..=REVIEW_RUNS {
-                let session_id = format!("{}-review-{run}", self.attempt);
+                let (session_id, log_name) = self.session_for(run);
                 let ran =
-                    self.run_session(&checkout.path(), &session_id, &prompt, &log_dir, run)?;
+                    self.run_session(&checkout.path(), &session_id, &log_name, &prompt, &log_dir)?;
                 sessions.push(
                     ran.result
                         .as_ref()
@@ -388,17 +403,40 @@ impl ReviewRun<'_> {
         Ok((prompt, round))
     }
 
+    /// The session id and log name of `run` (ADR 0048 decision 10). A gate is started again
+    /// for the same attempt after it died, so a journal this attempt's earlier review left is
+    /// never reused: the stage takes `<attempt>-review-<run>-<k>` and the log
+    /// `review-<run>-<k>` for the smallest free `k`.
+    fn session_for(&self, run: u32) -> (String, String) {
+        let base_session = format!("{}-review-{run}", self.attempt);
+        let base_log = format!("review-{run}");
+        let Some(dir) = review_session_dir(self.exec_args) else {
+            return (base_session, base_log);
+        };
+        if !dir.join(format!("{base_session}.jsonl")).exists() {
+            return (base_session, base_log);
+        }
+        let mut k = 1u32;
+        loop {
+            let session = format!("{base_session}-{k}");
+            if !dir.join(format!("{session}.jsonl")).exists() {
+                return (session, format!("{base_log}-{k}"));
+            }
+            k = k.saturating_add(1);
+        }
+    }
+
     /// Runs one session and reads the last `Result` line of its jsonl stream.
     fn run_session(
         &self,
         checkout: &Path,
         session_id: &str,
+        log_name: &str,
         prompt: &str,
         log_dir: &Path,
-        run: u32,
     ) -> Result<Ran, GateError> {
-        let output_path = log_dir.join(format!("review-{run}.jsonl"));
-        let stderr_path = log_dir.join(format!("review-{run}.stderr.log"));
+        let output_path = log_dir.join(format!("{log_name}.jsonl"));
+        let stderr_path = log_dir.join(format!("{log_name}.stderr.log"));
         let output = File::create(&output_path).map_err(|source| GateError::Io {
             path: output_path.clone(),
             source,
@@ -495,6 +533,23 @@ impl ReviewRun<'_> {
             result: last_result(&output_path),
         })
     }
+}
+
+/// The directory the review sessions' journals live in: a `--session-dir` in
+/// `[gate.review] exec_args`, else `RADIAN_SESSION_DIR`, else the user's data directory. The
+/// session id of a review run is chosen against this directory, so a re-run never reuses a
+/// journal (ADR 0048 decision 10).
+fn review_session_dir(exec_args: &[String]) -> Option<PathBuf> {
+    let mut flag = None;
+    let mut args = exec_args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--session-dir" {
+            flag = args.next().map(PathBuf::from);
+        } else if let Some(dir) = arg.strip_prefix("--session-dir=") {
+            flag = Some(PathBuf::from(dir));
+        }
+    }
+    radian_host::session_dir(flag.as_deref()).ok()
 }
 
 /// What one session produced.
@@ -1133,7 +1188,9 @@ mod tests {
     }
 
     /// Rules (a) and (b): a blocking item near an increment line or near an earlier blocking
-    /// item stays blocking; anything else is moved to `suggestions` with `pre_existing`.
+    /// item stays blocking; an item far from both is moved to `suggestions` with `pre_existing`;
+    /// an item without a place stays blocking at its level. Mutation: demote an unplaced item
+    /// again → the `vague` item moves.
     #[test]
     fn a_pre_existing_item_is_moved_and_marked() {
         let round = ReworkRound {
@@ -1162,27 +1219,136 @@ mod tests {
                 ),
                 // Neither: another file, another line.
                 item(Some("minor"), Some("src/old.rs"), Some(80), "untouched"),
-                // No place at all.
+                // No place at all: the session's omission, not evidence that it is old.
                 ReviewItem::text("vague"),
             ],
             suggestions: Vec::new(),
             verified: Vec::new(),
         };
-        assert_eq!(round.mark_pre_existing(&mut report), 2);
+        assert_eq!(round.mark_pre_existing(&mut report), 1);
         let texts: Vec<&str> = report
             .blocking
             .iter()
             .map(|item| item.text.as_str())
             .collect();
-        assert_eq!(texts, vec!["near the rework", "the same problem"]);
-        assert_eq!(report.suggestions.len(), 2);
+        assert_eq!(texts, vec!["near the rework", "the same problem", "vague"]);
+        assert_eq!(report.suggestions.len(), 1);
         assert!(
             report.suggestions.iter().all(|item| item.pre_existing),
             "{:?}",
             report.suggestions
         );
         assert_eq!(report.suggestions[0].level.as_deref(), Some("minor"));
-        assert_eq!(report.suggestions[1].level, None);
+    }
+
+    /// A `critical` item blocks in every round, wherever it is: far from the increment and far
+    /// from every previous item. Mutation: let the window rule move it → this test sees it in
+    /// `suggestions`.
+    #[test]
+    fn a_critical_item_blocks_wherever_it_is() {
+        let round = ReworkRound {
+            previous: PreviousReview {
+                sha: "prev".to_owned(),
+                blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
+            },
+            increment: [(String::from("src/new.rs"), 10)].into_iter().collect(),
+        };
+        let mut report = ReviewReport {
+            summary: "s".to_owned(),
+            blocking: vec![
+                item(
+                    Some("critical"),
+                    Some("src/far.rs"),
+                    Some(900),
+                    "a permission bypass",
+                ),
+                item(
+                    Some("critical"),
+                    Some("src/old.rs"),
+                    Some(400),
+                    "a critical problem far from the previous one",
+                ),
+            ],
+            suggestions: Vec::new(),
+            verified: Vec::new(),
+        };
+        assert_eq!(round.mark_pre_existing(&mut report), 0);
+        let texts: Vec<&str> = report
+            .blocking
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "a permission bypass",
+                "a critical problem far from the previous one"
+            ]
+        );
+        assert!(report.suggestions.is_empty(), "{:?}", report.suggestions);
+    }
+
+    /// An item without a place is not demoted: it stays in `blocking` at its level. Mutation:
+    /// demote it again → this test sees all three in `suggestions`.
+    #[test]
+    fn an_item_without_a_place_stays_blocking_at_its_level() {
+        let round = ReworkRound {
+            previous: PreviousReview {
+                sha: "prev".to_owned(),
+                blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
+            },
+            increment: [(String::from("src/new.rs"), 10)].into_iter().collect(),
+        };
+        let mut report = ReviewReport {
+            summary: "s".to_owned(),
+            blocking: vec![
+                item(Some("major"), None, None, "a major item with no place"),
+                item(
+                    Some("critical"),
+                    Some("src/far.rs"),
+                    None,
+                    "a critical item with no line",
+                ),
+                item(None, None, Some(4), "an ungraded item with only a line"),
+            ],
+            suggestions: Vec::new(),
+            verified: Vec::new(),
+        };
+        assert_eq!(round.mark_pre_existing(&mut report), 0);
+        assert_eq!(report.blocking.len(), 3, "{:?}", report.blocking);
+        assert_eq!(report.blocking[0].level.as_deref(), Some("major"));
+        assert_eq!(report.blocking[1].level.as_deref(), Some("critical"));
+        assert_eq!(report.blocking[2].level, None);
+        assert!(report.suggestions.is_empty(), "{:?}", report.suggestions);
+    }
+
+    /// A `major` item outside both windows is still moved to `suggestions` with `pre_existing`,
+    /// and keeps its `level` so the follow-up carries it; `minor` items keep the same rule.
+    /// Mutation: drop the level of a moved item → this test loses `major`.
+    #[test]
+    fn a_major_item_outside_the_windows_is_moved_and_keeps_its_level() {
+        let round = ReworkRound {
+            previous: PreviousReview {
+                sha: "prev".to_owned(),
+                blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
+            },
+            increment: [(String::from("src/new.rs"), 10)].into_iter().collect(),
+        };
+        let mut report = ReviewReport {
+            summary: "s".to_owned(),
+            blocking: vec![
+                // Another file, and 40 lines from the previous item.
+                item(Some("major"), Some("src/old.rs"), Some(80), "untouched"),
+                item(Some("minor"), Some("src/other.rs"), Some(5), "a nit"),
+            ],
+            suggestions: Vec::new(),
+            verified: Vec::new(),
+        };
+        assert_eq!(round.mark_pre_existing(&mut report), 2);
+        assert!(report.blocking.is_empty(), "{:?}", report.blocking);
+        assert_eq!(report.suggestions[0].level.as_deref(), Some("major"));
+        assert!(report.suggestions[0].pre_existing);
+        assert_eq!(report.suggestions[1].level.as_deref(), Some("minor"));
     }
 
     /// The stage's own arguments are refused by name: an `exec_args` entry may not unmount
@@ -1269,5 +1435,65 @@ mod tests {
             );
         }
         assert!(!prompt.contains("## The diff"), "{prompt}");
+    }
+
+    fn run_for<'a>(attempt: &'a str, exec_args: &'a [String]) -> ReviewRun<'a> {
+        ReviewRun {
+            repository: Path::new("."),
+            remote: "origin",
+            task: "TK0001-a",
+            attempt,
+            sha: "sha",
+            brief: "the brief",
+            main_ref: "refs/remotes/origin/main",
+            exec_args,
+            concurrency: 1,
+            settings: ReviewSettings {
+                round: "first".to_owned(),
+                exec_args: "gate.review.exec_args".to_owned(),
+                timeout_secs: 0,
+                timeout: "gate.review.timeout_secs".to_owned(),
+            },
+            prompt_file: None,
+            previous: None,
+            timeout: Duration::ZERO,
+            program: None,
+        }
+    }
+
+    /// A gate started again for the same attempt does not reuse a review session id whose
+    /// journal exists: it takes the smallest free `-<k>`, and the log name follows it.
+    /// Mutation: return the base id unconditionally and the second run cannot start.
+    #[test]
+    fn a_review_rerun_takes_the_next_free_session_and_log_name() {
+        let dir =
+            std::env::temp_dir().join(format!("radian-arc-review-sessions-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let args = vec![
+            "--session-dir".to_owned(),
+            dir.to_str().expect("a utf-8 path").to_owned(),
+        ];
+        let run = run_for("TK0001-1", &args);
+        assert_eq!(
+            run.session_for(1),
+            ("TK0001-1-review-1".to_owned(), "review-1".to_owned())
+        );
+        fs::write(dir.join("TK0001-1-review-1.jsonl"), "").unwrap();
+        assert_eq!(
+            run.session_for(1),
+            ("TK0001-1-review-1-1".to_owned(), "review-1-1".to_owned())
+        );
+        fs::write(dir.join("TK0001-1-review-1-1.jsonl"), "").unwrap();
+        assert_eq!(
+            run.session_for(1),
+            ("TK0001-1-review-1-2".to_owned(), "review-1-2".to_owned())
+        );
+        assert_eq!(
+            run.session_for(2),
+            ("TK0001-1-review-2".to_owned(), "review-2".to_owned()),
+            "the second run of the stage keeps its own base"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
