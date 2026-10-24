@@ -1135,6 +1135,51 @@ fn enter_on_a_command_row_opens_its_log_in_a_scrollable_frame() {
 }
 
 #[test]
+fn a_candidate_that_differs_is_named_over_main() {
+    let fixture = Fixture::new("candidate", &["commands", "human"]);
+    let mut verdict = fixture.commands(true, None);
+    verdict.main_sha = Some(fixture.base.clone());
+    verdict.candidate_sha = Some("f".repeat(40));
+    fixture.write(&mut verdict);
+    let mut app = fixture.app();
+    let text = screen(&mut app, 140, 40);
+    let candidate_sha = "f".repeat(40);
+    let candidate = short(&candidate_sha);
+    let main = short(&fixture.base);
+    assert!(
+        text.contains(&format!("→ candidate {candidate} over main {main}")),
+        "the candidate and the main it merged are named:\n{text}"
+    );
+}
+
+#[test]
+fn the_running_gates_stage_is_a_running_mark() {
+    let fixture = Fixture::new("running", &["commands", "human"]);
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), None);
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    let view = app.selected_plan().unwrap();
+    app.task_sel = app
+        .task_rows(view)
+        .iter()
+        .position(|row| row.id == fixture.task)
+        .unwrap();
+    app.open_task();
+    assert!(app.open_merge());
+    let view = read::merge_view(&fixture.store, &fixture.task, true).unwrap();
+    app.apply_merge(&fixture.task, Ok(view));
+    let text = screen(&mut app, 120, 40);
+    assert!(text.contains("● commands"), "{text}");
+    assert!(
+        text.contains("◻ human       not run yet"),
+        "the owner's stage never runs in a gate:\n{text}"
+    );
+}
+
+#[test]
 fn m_on_the_task_page_opens_the_merge_page() {
     let fixture = Fixture::new("m-key", &["commands", "human"]);
     let mut app = ArcApp::with_session_dir(fixture.store.clone(), None);
