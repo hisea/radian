@@ -4,10 +4,10 @@
 //!
 //! This module is the state and the frame; [`crate::cli::arc`] owns the terminal and the
 //! input loop, as `cli/attach.rs` does for the attach view. Data comes only from
-//! `radian_arc`'s read side (`radian_arc::read`) and the store's own loaders; nothing here
-//! writes a file, holds a lock, or starts a process. An owner's action is queued here and
-//! executed by the runner through [`actions`], in this process, with the library calls the
-//! CLI makes. `runner.lock` is **probed** (taken and released at once) so the header can say
+//! `radian_arc`'s read side (`radian_arc::read`), the store's own loaders and a command's log
+//! (queued here, read by the runner on a worker thread); nothing here writes a file, holds a
+//! lock, or starts a process. An owner's action is queued here and executed by the runner
+//! through [`actions`], in this process, with the library calls the CLI makes. `runner.lock` is **probed** (taken and released at once) so the header can say
 //! whether another process is the scheduling loop; a missing lock file is never created.
 //!
 //! The layout follows ADR 0035: columns 1-2 are the marker column, text starts at column 3,
@@ -17,7 +17,7 @@
 pub mod actions;
 pub mod render;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use radian_arc::read::{AttemptView, CommandView, MergeView, TaskDiff};
@@ -302,6 +302,49 @@ impl TaskPage {
     }
 }
 
+/// A command's log the runner should read on a worker thread: a log can be a whole test
+/// run, and a frame never waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogRequest {
+    /// The merge page's task.
+    pub task: String,
+    /// The command line, as the float's title.
+    pub title: String,
+    pub path: PathBuf,
+}
+
+/// The most bytes of a command's log the TUI reads: its tail, which is where a failure is.
+/// Bounded so a log that is one giant file never loads whole into memory.
+pub const LOG_BYTES: u64 = 512 * 1024;
+
+/// Reads the last [`LOG_BYTES`] of `path` as text, dropping the line the cut may have split.
+///
+/// # Errors
+///
+/// The file cannot be opened, seeked or read.
+pub fn read_log_tail(path: &Path) -> Result<String, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let len = file.metadata().map_err(|error| error.to_string())?.len();
+    let cut = len.saturating_sub(LOG_BYTES);
+    if cut > 0 {
+        file.seek(SeekFrom::Start(cut))
+            .map_err(|error| error.to_string())?;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    if cut == 0 {
+        return Ok(text);
+    }
+    // The first line of a tail starts mid-line; the next newline ends it.
+    match text.find('\n') {
+        Some(newline) => Ok(text[newline + 1..].to_owned()),
+        None => Ok(text),
+    }
+}
+
 /// One command's log in the merge page's scrollable float.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogView {
@@ -469,6 +512,8 @@ pub struct ArcApp {
     pub pending: Option<Pending>,
     /// The last action's line, shown until the next key.
     pub result: Option<ResultLine>,
+    /// The command log the runner should read, off the UI thread.
+    log_request: Option<LogRequest>,
     /// The confirmation or reject float, which takes the keys until it closes.
     pub float: Option<Float>,
     pub main_sha: Option<String>,
@@ -505,6 +550,7 @@ impl ArcApp {
             action: None,
             pending: None,
             result: None,
+            log_request: None,
             float: None,
             main_sha: None,
             loop_running: false,
@@ -843,6 +889,35 @@ impl ArcApp {
         self.action.take()
     }
 
+    /// The runner takes the command log it should read on a worker thread, if any.
+    pub fn take_log_request(&mut self) -> Option<LogRequest> {
+        self.log_request.take()
+    }
+
+    /// Records the log a worker read for `request`: the float opens on the merge page that
+    /// asked for it, and a reply for another task is dropped.
+    pub fn apply_log(&mut self, request: &LogRequest, result: Result<String, String>) -> bool {
+        let Some(page) = &mut self.merge else {
+            return false;
+        };
+        if page.id != request.task {
+            return false;
+        }
+        match result {
+            Ok(text) => {
+                page.log = Some(LogView::new(request.title.clone(), &text));
+                true
+            }
+            Err(error) => {
+                self.result = Some(ResultLine {
+                    text: format!("cannot read {}: {error}", request.path.display()),
+                    failed: true,
+                });
+                true
+            }
+        }
+    }
+
     /// Records an action's result: the spinner stops and the line stays until the next key.
     pub fn finish_action(&mut self, outcome: actions::Outcome) {
         self.pending = None;
@@ -1047,10 +1122,18 @@ impl ArcApp {
     /// One key press.
     pub fn on_key(&mut self, key: &KeyEvent) -> ArcKey {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Char('q') if !ctrl => return ArcKey::Quit,
-            KeyCode::Char('c') if ctrl => return ArcKey::Quit,
-            _ => {}
+        // Ctrl-C always leaves, whatever is on top.
+        if key.code == KeyCode::Char('c') && ctrl {
+            return ArcKey::Quit;
+        }
+        // An open float takes every key first (ADR 0035: floats only): the reject note may
+        // hold a `q` without leaving the TUI.
+        if self.float.is_some() {
+            self.result = None;
+            return self.on_float_key(key);
+        }
+        if key.code == KeyCode::Char('q') && !ctrl {
+            return ArcKey::Quit;
         }
         // An action in flight takes no page key: its result lands on the footer when it ends.
         if self.pending.is_some() {
@@ -1058,9 +1141,6 @@ impl ArcApp {
         }
         // The next key clears the last action's line (ADR 0048 §11).
         self.result = None;
-        if self.float.is_some() {
-            return self.on_float_key(key);
-        }
         match self.page {
             Page::Plans => self.on_plans_key(key),
             Page::Task => self.on_task_key(key),
@@ -1477,36 +1557,27 @@ impl ArcApp {
         ArcKey::Redraw
     }
 
-    /// Opens the selected command's log in a scrollable float.
+    /// Queues the selected command's log for the runner to read on a worker thread.
     fn open_log(&mut self) {
         let selected = self
             .merge
             .as_ref()
             .and_then(|page| page.selected_command())
             .map(|command| (command.line.clone(), command.log.clone()));
-        let Some((line, log)) = selected else {
+        let Some((title, log)) = selected else {
             return;
         };
         let Some(path) = log else {
             self.result = Some(ResultLine {
-                text: format!("no log for `{line}`"),
+                text: format!("no log for `{title}`"),
                 failed: false,
             });
             return;
         };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                if let Some(page) = &mut self.merge {
-                    page.log = Some(LogView::new(line, &text));
-                }
-            }
-            Err(error) => {
-                self.result = Some(ResultLine {
-                    text: format!("cannot read {}: {error}", path.display()),
-                    failed: true,
-                });
-            }
-        }
+        let Some(task) = self.merge.as_ref().map(|page| page.id.clone()) else {
+            return;
+        };
+        self.log_request = Some(LogRequest { task, title, path });
     }
 }
 

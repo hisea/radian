@@ -461,6 +461,11 @@ fn a_moved_branch_turns_every_mark_weak_and_says_the_task_is_back_in_verificatio
     let fixture = Fixture::new("moved", &["commands", "review", "human"]);
     fixture.verify_sha(&fixture.base);
     fixture.write(&mut fixture.commands(true, None));
+    fixture.write(&mut fixture.review(report(
+        vec![item("critical", "src/a.rs", 7, "the lock is dropped early")],
+        vec![item("minor", "src/b.rs", 2, "name it better")],
+        vec!["the exit codes"],
+    )));
     fixture.write(&mut fixture.human(Some("auto")));
     let mut app = fixture.app();
     let text = screen(&mut app, 120, 44);
@@ -484,6 +489,49 @@ fn a_moved_branch_turns_every_mark_weak_and_says_the_task_is_back_in_verificatio
             "`{passed}` survived the move:\n{text}"
         );
     }
+    // No verdict detail survives either: no command rows, duration, approver, or groups.
+    for detail in [
+        "cargo fmt",
+        "cargo nextest",
+        "5m54s",
+        "approver auto",
+        "the lock is dropped early",
+        "the exit codes",
+    ] {
+        assert!(
+            !text.contains(detail),
+            "`{detail}` survived the move:\n{text}"
+        );
+    }
+    assert!(
+        text.contains("no review for this commit: the branch moved"),
+        "{text}"
+    );
+    assert!(text.contains("not run yet"), "{text}");
+}
+
+#[test]
+fn a_task_whose_extra_stages_list_review_shows_its_review_and_summary() {
+    let fixture = Fixture::new("extra-review", &["commands", "human"]);
+    fixture
+        .store
+        .change_task(&fixture.task, |task| {
+            task.extra_stages = vec!["review".to_owned()];
+            Ok(())
+        })
+        .unwrap();
+    fixture.write(&mut fixture.commands(true, None));
+    fixture.write(&mut fixture.review(report(Vec::new(), Vec::new(), vec!["the extra stage"])));
+    let mut app = fixture.app();
+    let text = screen(&mut app, 120, 44);
+    assert!(text.contains("✓ review"), "{text}");
+    assert!(!text.contains("◻ review"), "{text}");
+    assert!(
+        text.contains("Adds the reverify command"),
+        "the summary is drawn:\n{text}"
+    );
+    assert!(text.contains("✓ the extra stage"), "{text}");
+    assert!(!text.contains("no review stage in this profile"), "{text}");
 }
 
 #[test]
@@ -1086,7 +1134,14 @@ fn enter_on_a_command_row_opens_its_log_and_esc_closes_it() {
     // The first command row is selected; Down moves to the second.
     app.on_key(&key(KeyCode::Down));
     assert_eq!(app.merge.as_ref().unwrap().command_sel, 1);
+    // The read is queued for a worker thread: the frame never waits on the log.
     app.on_key(&key(KeyCode::Enter));
+    let request = app
+        .take_log_request()
+        .expect("the log is read off the UI thread");
+    assert_eq!(request.path, fixture.repo.join("clippy.log"));
+    let text = radian_tui::arc::read_log_tail(&request.path).expect("the log reads");
+    assert!(app.apply_log(&request, Ok(text)));
     let text = screen(&mut app, 120, 40);
     assert!(
         text.contains("clippy output"),
@@ -1112,6 +1167,9 @@ fn enter_on_a_command_row_opens_its_log_in_a_scrollable_frame() {
     fixture.write(&mut fixture.commands(true, None));
     let mut app = fixture.app();
     app.on_key(&key(KeyCode::Enter));
+    let request = app.take_log_request().expect("the log request");
+    let text = radian_tui::arc::read_log_tail(&request.path).expect("the log reads");
+    assert!(app.apply_log(&request, Ok(text)));
     let log = app
         .merge
         .as_ref()
@@ -1132,6 +1190,56 @@ fn enter_on_a_command_row_opens_its_log_in_a_scrollable_frame() {
     );
     app.on_key(&key(KeyCode::Esc));
     assert!(app.merge.as_ref().unwrap().log.is_none());
+}
+
+#[test]
+fn a_log_is_read_from_its_end_so_a_giant_one_is_bounded() {
+    let scratch = Scratch::new("log-tail");
+    let path = scratch.path("big.log");
+    let mut text = String::new();
+    let mut n = 0;
+    while (text.len() as u64) < radian_tui::arc::LOG_BYTES * 2 {
+        n += 1;
+        text.push_str(&format!("line {n}: the gate printed this\n"));
+    }
+    fs::write(&path, &text).unwrap();
+    let tail = radian_tui::arc::read_log_tail(&path).expect("the tail reads");
+    assert!(
+        tail.len() as u64 <= radian_tui::arc::LOG_BYTES,
+        "the tail is bounded: {} bytes",
+        tail.len()
+    );
+    assert!(
+        tail.starts_with("line "),
+        "the cut line is dropped: {:?}",
+        &tail[..20.min(tail.len())]
+    );
+    assert!(tail.ends_with(&format!("line {n}: the gate printed this\n")));
+    assert_eq!(
+        radian_tui::arc::LogView::new("big", &tail).lines.len(),
+        radian_tui::arc::LOG_LINES,
+        "the float keeps only its last lines"
+    );
+}
+
+#[test]
+fn a_q_in_the_reject_note_is_typed_and_does_not_quit() {
+    let fixture = Fixture::new("q-note", &["commands", "human"]);
+    fixture.write(&mut fixture.commands(true, None));
+    let mut app = fixture.app();
+    app.on_key(&key(KeyCode::Char('r')));
+    for ch in "fix quickly".chars() {
+        assert_eq!(app.on_key(&key(KeyCode::Char(ch))), ArcKey::Redraw);
+    }
+    assert_eq!(
+        app.float,
+        Some(radian_tui::arc::Float::Reject {
+            note: "fix quickly".to_owned()
+        })
+    );
+    // Esc cancels the note without leaving the TUI.
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert!(app.float.is_none());
 }
 
 #[test]

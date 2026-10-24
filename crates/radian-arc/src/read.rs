@@ -127,7 +127,7 @@ pub struct MergeView {
     pub moved: bool,
     /// One row per stage, in the fixed order.
     pub stages: Vec<StageView>,
-    /// Whether the selected profile lists the `review` stage.
+    /// Whether the profile or the task's `extra_stages` list the `review` stage.
     pub review_stage: bool,
     /// The review verdict's findings, when the stage ran and reported.
     pub review: Option<ReviewSummaryView>,
@@ -445,12 +445,13 @@ const MERGE_STAGES: [Stage; 6] = [
 
 /// Everything the merge page draws for `task` (ADR 0048 §6 and §10).
 ///
-/// The rows are the profile's stages in the fixed order, plus `integration`, which always
-/// runs at merge. A stage a profile does not list is `NotInProfile`; one it lists with no
-/// verdict for the task's commit is `NotRun`, except the stage a running gate is on, which is
-/// `Running` (`gate_running` is the caller's lock probe); `human` never runs in a gate, so it
-/// stays `NotRun` until the owner approves. `head_sha` no longer `verified_sha` sets
-/// [`MergeView::moved`]: a verdict counts only for its sha, so every mark is weak then.
+/// The rows are the profile's stages and the task's `extra_stages` in the fixed order, plus
+/// `integration`, which always runs at merge. A stage neither lists is `NotInProfile`; one
+/// that lists it with no verdict for the task's commit is `NotRun`, except the stage a
+/// running gate is on, which is `Running` (`gate_running` is the caller's lock probe);
+/// `human` never runs in a gate, so it stays `NotRun` until the owner approves. `head_sha` no
+/// longer `verified_sha` sets [`MergeView::moved`]: a verdict counts only for its sha, so
+/// every mark is weak, no row keeps its details and the review's findings are not shown.
 ///
 /// The review's findings are the newest `review` verdict for the task's commit. The commits
 /// are the task's own change: merged, `base_sha..head_sha`; otherwise the merge base of the
@@ -473,18 +474,26 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
 
     let config = store.config()?;
     let profile = config.gate.selected_profile().cloned();
+    // The effective stages are the profile's plus the task's `extra_stages` (every name was
+    // checked when the task file was read).
+    let extra: Vec<Stage> = item
+        .extra_stages
+        .iter()
+        .filter_map(|name| {
+            crate::gate::LISTED_STAGES
+                .iter()
+                .copied()
+                .find(|stage| stage.as_str() == name)
+        })
+        .collect();
     let in_profile = |stage: Stage| {
         stage == Stage::Integration
+            || extra.contains(&stage)
             || profile
                 .as_ref()
                 .is_some_and(|profile| profile.stages.iter().any(|spec| spec.stage == stage))
     };
-    let review_stage = profile.as_ref().is_some_and(|profile| {
-        profile
-            .stages
-            .iter()
-            .any(|spec| spec.stage == Stage::Review)
-    });
+    let review_stage = in_profile(Stage::Review);
 
     let mut stages = Vec::new();
     let mut stopped = false;
@@ -507,7 +516,7 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
         }
         let verdict = stage_verdict(&verdicts, &label, stage, target.as_deref());
         let mark = match &verdict {
-            Some(verdict) if moved => {
+            Some(_) if moved => {
                 stopped = true;
                 StageMark::NotRun
             }
@@ -521,7 +530,12 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
                     StageMark::Failed
                 }
             }
-            None if !stopped && gate_running && !running_marked && stage != Stage::Human => {
+            None if !moved
+                && !stopped
+                && gate_running
+                && !running_marked
+                && stage != Stage::Human =>
+            {
                 running_marked = true;
                 stopped = true;
                 StageMark::Running
@@ -531,11 +545,14 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
                 StageMark::NotRun
             }
         };
-        stages.push(stage_view(stage, mark, verdict, moved));
+        // A verdict counts only for its sha: after a move no row keeps its details.
+        let verdict = if moved { None } else { verdict };
+        stages.push(stage_view(stage, mark, verdict));
     }
 
-    // The review's findings are part of the merge page only when the profile has the stage.
-    let review = if review_stage {
+    // The review's findings are part of the merge page only when the profile has the stage,
+    // and only for the verified commit: a moved branch's review is not this commit's.
+    let review = if review_stage && !moved {
         verdicts
             .iter()
             .filter(|(_, verdict)| verdict.stage == Stage::Review)
@@ -575,8 +592,9 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
     })
 }
 
-/// One stage row from its verdict (already filtered to the task's commit).
-fn stage_view(stage: Stage, mark: StageMark, verdict: Option<&Verdict>, moved: bool) -> StageView {
+/// One stage row from its verdict (already filtered to the task's commit and, after a move,
+/// dropped so no detail survives).
+fn stage_view(stage: Stage, mark: StageMark, verdict: Option<&Verdict>) -> StageView {
     let Some(verdict) = verdict else {
         return StageView {
             stage: stage.as_str(),
@@ -591,7 +609,7 @@ fn stage_view(stage: Stage, mark: StageMark, verdict: Option<&Verdict>, moved: b
             approver: None,
         };
     };
-    let on = (stage != Stage::Human && !moved).then(|| short(&verdict.sha));
+    let on = (stage != Stage::Human).then(|| short(&verdict.sha));
     let candidate = verdict
         .candidate_sha
         .as_deref()

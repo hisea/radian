@@ -2,7 +2,8 @@
 //!
 //! The view is read-only. This loop enters the terminal, draws one frame, reads one key at a
 //! time, re-reads the store every [`ARC_REFRESH`] seconds, and runs git (the remote main and a
-//! task's diff) on worker threads so a frame never waits on it. It holds no `runner.lock`:
+//! task's diff), the merge page's data, a command's log and the owner's actions on worker
+//! threads so a frame never waits on any of them. It holds no `runner.lock`:
 //! the header only reports whether another process does. `q` (or Ctrl-C) leaves through the
 //! same clean-exit path as `attach`.
 
@@ -38,6 +39,11 @@ enum GitReply {
     },
     /// An owner action's line.
     Action(actions::Outcome),
+    /// A command's log, read on a worker thread.
+    Log {
+        request: radian_tui::arc::LogRequest,
+        result: Result<String, String>,
+    },
 }
 
 /// `radian arc`: open the arc TUI. Without setup the refusal is one line on the normal screen
@@ -108,6 +114,11 @@ pub(super) fn run_arc() -> ExitCode {
                     app.finish_action(outcome);
                     dirty = true;
                 }
+                GitReply::Log { request, result } => {
+                    if app.apply_log(&request, result) {
+                        dirty = true;
+                    }
+                }
             }
         }
         app.apply_pending_scroll();
@@ -133,6 +144,16 @@ pub(super) fn run_arc() -> ExitCode {
             std::thread::spawn(move || {
                 let outcome = actions::run(&action, &store, &actions::Library);
                 let _ = tx.send(GitReply::Action(outcome));
+            });
+            dirty = true;
+        }
+        // A command's log is read on a worker thread, from its end and bounded: a big log
+        // never blocks the frame or loads whole into memory.
+        if let Some(request) = app.take_log_request() {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let result = radian_tui::arc::read_log_tail(&request.path);
+                let _ = tx.send(GitReply::Log { request, result });
             });
             dirty = true;
         }

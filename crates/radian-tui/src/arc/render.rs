@@ -1068,7 +1068,16 @@ fn summary_lines(
 ) {
     let inner = width.saturating_sub(4);
     lines.push(frame_top(width, "summary", theme));
-    if !view.review_stage {
+    if view.moved {
+        // A verdict counts only for its sha (ADR 0048 §6): the review is for the old commit.
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled(
+                "no review for this commit: the branch moved",
+                theme.hint,
+            )),
+        ));
+    } else if !view.review_stage {
         lines.push(rail(
             theme,
             Line::from(Span::styled("no review stage in this profile", theme.hint)),
