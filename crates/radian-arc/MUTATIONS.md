@@ -505,6 +505,16 @@ binary was rebuilt before M3, which runs it.
 | TK0072-M2 | the review charge ignores the attempt it recorded (`if false` in place of the `review_cost.json` check) | `review::a_repeated_review_cost_charge_adds_once` (the counter and total are `1.5`: the same review is charged twice) | ✅ failed |
 | TK0072-M3 | the text `show` prints a task's costs with raw `f64` Display (`optional_number` in place of `optional_cost`) | `review::a_tasks_text_cost_is_rounded_like_a_plans` (`cost_usd: 2.0069999999999997` instead of `2.007`) | ✅ failed |
 | TK0072-M4 | a review charge that reaches the plan budget does not switch the plan off (the `store.change_plan` call dropped) | `review::a_review_cost_that_reaches_the_plan_budget_pauses_the_plan` ("a plan budget switches the plan off") | ✅ failed |
+
+TK0072-M5 was run against `a523c3e3` after M1–M4, applied to the committed file, run with
+`cargo nextest run -p radian-arc --locked --profile sandbox --no-fail-fast -E '<the test below>'`,
+and restored from a copy under `.radian/mut/` with `cp`; the restored file was compared byte for
+byte with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0072-M5 | the charge trusts the recorded attempt alone and does not compare the task's counters (the `cost_usd`/`total_cost_usd` checks dropped from `landed`) | `review::a_review_charge_whose_task_write_did_not_land_is_charged_again` (the counters stay at `1.0`: the review a died pass recorded is never added) | ✅ failed |
+
 ## TK0084: the diff's source line names which merge base is missing (2026-10-24, branch `work/TK0084-tui-diff-list-half-and-own-change-followups`)
 
 `TaskDiff::fallback` was a bool, so a remote main ref that exists but shares no ancestor with the
