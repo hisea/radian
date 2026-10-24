@@ -4,7 +4,7 @@ description: The arc TUI: the plans, task and merge pages, every mark and key, a
 
 # arc: the TUI
 
-This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
+This page covers the TUI; the `radian arc` commands are in [`arc`](arc.md), the scheduling loop is in [`arc-loop`](arc-loop.md), the gate and its failures are in [`arc-gate`](arc-gate.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 `radian arc` opens a view of plans, tasks, verdicts, journals and merges; the pages themselves read the store, and the owner's keys run the same `radian-arc` library calls the CLI does (see [the owner's actions](#the-owners-actions)). It probes `runner.lock` (take and release at once, never creating it) and never holds it. Header: `arc`, tabs `plans · board · task · merge` (`merge` for a task in `review.*` or `done`), then on the plans page the view and the plans it hides (`active · 14 hidden`; a zero count is omitted), on the board page its scope (`all plans` or the plan id, and `finished` while the list is open), `main <sha>` and the loop state.
 

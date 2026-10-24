@@ -4,12 +4,12 @@ description: The arc gate: verification stages, the review stage, failures, retr
 
 # arc: the gate
 
-This page covers the gate run and its failures; the commands are in [`arc`](arc.md), and the files arc keeps are in [`arc-files`](arc-files.md).
+This page covers the gate run and its failures; the commands are in [`arc`](arc.md), the scheduling loop is in [`arc-loop`](arc-loop.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 ## The gate run
 
 A task in `review.verifying` is checked against `verified_sha`, which is the pushed `head_sha` of the task's current attempt.
-`start` runs the gate in the same process after a pushed attempt, and `radian arc run` starts it as a background process: a pass starts the gate and returns, and a later pass reads its verdicts and moves the task ([`run`](arc.md#radian-arc-run)).
+`start` runs the gate in the same process after a pushed attempt, and `radian arc run` starts it as a background process: a pass starts the gate and returns, and a later pass reads its verdicts and moves the task ([`run`](arc-loop.md#radian-arc-run)).
 A gate writes its verdict files and one record, `runs/<task>/gate.json`; it never changes the task's state itself.
 
 - arc fetches `[repository] remote` first.
@@ -180,7 +180,7 @@ An attempt that does not end in a conflict sets the run back to `0`, and so does
 ### A command failure and a moved main
 
 A `commands` stage, or an integration key command, can fail because of the tree rather than the task: a flaky test, or a main that is broken itself.
-When the remote main is no longer the main the failing verdict recorded, `radian arc run` re-verifies the task by itself, the way `radian arc reverify` does: it claims a new attempt without a worker and starts its gate in the background ([`run`](arc.md#radian-arc-run)).
+When the remote main is no longer the main the failing verdict recorded, `radian arc run` re-verifies the task by itself, the way `radian arc reverify` does: it claims a new attempt without a worker and starts its gate in the background ([`run`](arc-loop.md#radian-arc-run)).
 
 It applies only when all of these hold:
 

@@ -4,7 +4,7 @@ description: The files arc keeps: config.toml, plan and task files, and the .rad
 
 # arc: the files
 
-This page covers the files arc keeps; the commands are in [`arc`](arc.md), and the gate and its failures are in [`arc-gate`](arc-gate.md).
+This page covers the files arc keeps; the commands are in [`arc`](arc.md), the scheduling loop is in [`arc-loop`](arc-loop.md), and the gate and its failures are in [`arc-gate`](arc-gate.md).
 
 ## `config.toml`
 

@@ -2174,7 +2174,7 @@ mod tests {
             }
             for sub in command.get_subcommands() {
                 // `radian arc` has its own page: its values and defaults are checked
-                // against `arc.md` (see `every_arc_option_and_value_appears_in_arc_md`).
+                // against the arc pages (see `every_arc_option_and_value_appears_in_the_arc_manual`).
                 if sub.get_name() == "arc" {
                     continue;
                 }
@@ -2259,9 +2259,10 @@ mod tests {
 
     // ---- the arc manual --------------------------------------------------------------
     //
-    // The arc manual is four pages: `arc.md` (the commands), `arc-gate.md` (the gate and
-    // failures), `arc-mcp.md` (the lead's MCP server) and `arc-files.md` (the config, the plan
-    // and task files, the layout).
+    // The arc manual is five pages: `arc.md` (the commands), `arc-loop.md` (the scheduling
+    // loop, its pass and `loop.log`), `arc-gate.md` (the gate and failures), `arc-mcp.md`
+    // (the lead's MCP server) and `arc-files.md` (the config, the plan and task files, the
+    // layout).
     // Every check locates its table by the heading it sits under and the page that holds
     // it. The heading is the anchor: `arc_tables(doc, "arc.md", "## `radian arc show")` is
     // the only way a check reads rows, so an unrelated table elsewhere on any page can
@@ -2357,6 +2358,11 @@ mod tests {
     /// `docs/user/arc.md`, the page the `radian arc` commands are checked against.
     fn arc_md() -> String {
         arc_page("arc.md")
+    }
+
+    /// `docs/user/arc-loop.md`, the page the scheduling loop and its log are checked against.
+    fn arc_loop_md() -> String {
+        arc_page("arc-loop.md")
     }
 
     /// `docs/user/arc-gate.md`, the page the gate and failure sections are checked against.
@@ -2531,16 +2537,25 @@ mod tests {
     }
 
     /// Every option of `radian arc`, with every allowed value and default the parser
-    /// declares, appears in the tables under that command's own heading. Every positional
+    /// declares, appears in the tables under that command's own heading, on the arc page
+    /// that holds it (`arc.md`, or `arc-loop.md` for `run` and `serve`). Every positional
     /// the parser takes is a `<NAME>` row there, and every `<NAME>` row names a positional
     /// the parser takes (the reverse). A table elsewhere on the page is never read.
     #[test]
-    fn every_arc_option_and_value_appears_in_arc_md() {
-        let doc = arc_md();
+    fn every_arc_option_and_value_appears_in_the_arc_manual() {
+        // `arc-loop.md` first: the overview page may name a command and link to its full
+        // section, and the table lives with the section.
+        let pages = [("arc-loop.md", arc_loop_md()), ("arc.md", arc_md())];
         let commands = collect_arc_commands();
         assert!(!commands.is_empty(), "the arc subcommand has commands");
         for command in &commands {
-            let tables = arc_tables(&doc, "arc.md", &command.heading);
+            let (page, doc) = pages
+                .iter()
+                .find(|(_, doc)| doc.contains(&command.heading))
+                .unwrap_or_else(|| {
+                    panic!("{} is missing from arc.md and arc-loop.md", command.heading)
+                });
+            let tables = arc_tables(doc, page, &command.heading);
             for option in &command.options {
                 let rows = rows_with_flag(&tables, &option.flag);
                 if rows.is_empty() {
@@ -2549,7 +2564,7 @@ mod tests {
                     // documentation.
                     assert!(
                         doc.contains(&option.flag),
-                        "{} is missing from arc.md",
+                        "{} is missing from {page}",
                         option.flag
                     );
                     continue;
