@@ -2930,3 +2930,19 @@ the named file, backed up under `.radian/mut/` and restored from that copy (neve
 | TK0083-M4 | `draw_conversation` draws no rail on the transcript's rows (`arc/render.rs`) | ✅ 1 failed | `arc_tui::the_conversation_tab_rails_every_transcript_row` (row 6 has a space where the rail belongs) |
 
 4/4 caught.
+
+## TK0094: a space always separates a task row's id from `state.phase` (2026-10-24, branch `work/TK0094-tui-task-row-id-gap`)
+
+`task_columns` and `task_row_line` count the one space before `state.phase` as the id block's
+last cell, so the widest id and every id cut with `…` leave that gap, on every connector depth
+and at every width; a narrow page cuts the id one cell earlier to hold it. The mutation was
+applied by hand to `crates/radian-tui/src/arc/render.rs`, backed up under `.radian/mut/` and
+restored from that copy (never `git checkout`); the tests ran with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_tui -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0094-M1 | the id block drops its trailing space again (the old `id_max`, `min_id` and `fit` widths: the widest id fills the block and its phase follows with no gap) | ✅ 3 failed | `arc_tui::a_task_whose_id_fills_the_block_keeps_a_space_before_its_phase` (the id runs into `todo.ready`); `arc_tui::a_cut_id_is_followed_by_a_space_before_its_phase` and `arc_tui::a_narrow_page_keeps_the_gap_and_one_phase_column` (the cell before the phase is `…`) |
+
+1/1 caught.
+

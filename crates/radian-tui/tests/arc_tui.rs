@@ -3224,6 +3224,198 @@ fn the_graph_task_list_aligns_columns_at_every_depth() {
     );
 }
 
+/// The id block keeps one cell for the gap before `state.phase`: a row whose id fills the block
+/// (here its 34-cell cap) still draws a space between the id and the phase.
+#[test]
+fn a_task_whose_id_fills_the_block_keeps_a_space_before_its_phase() {
+    let scratch = Scratch::new("id-gap-fills");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "fills", "the fills plan");
+    // `TK0001-` (7 cells) plus this 24-character slug is a 31-cell id, and the block is
+    // 31 + the mark's 2 cells + the gap = 34, its cap: the id fills every cell before the gap.
+    let task = add_task(
+        &store,
+        &plan,
+        "a-long-id-fills-the-rows",
+        &[],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
+    assert_eq!(
+        task.chars().count(),
+        31,
+        "the id fills the block's id cells"
+    );
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    let terminal = render(&mut app, 140, 30);
+    let text = rows(&terminal).join("\n");
+    assert!(
+        text.contains(&format!("{task} todo.ready")),
+        "a space separates the id from its phase:\n{text}"
+    );
+    assert!(
+        !text.contains(&format!("{task}todo.ready")),
+        "the id does not run into the phase:\n{text}"
+    );
+}
+
+/// A deep row's connector leaves its id less room, so it is cut with `…`, and the gap before
+/// the phase follows the `…`.
+#[test]
+fn a_cut_id_is_followed_by_a_space_before_its_phase() {
+    let scratch = Scratch::new("id-gap-cut");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "chain", "the chain plan");
+    let mut after: Vec<String> = Vec::new();
+    let mut three = String::new();
+    for slug in [
+        "root-task-with-a-long-name",
+        "one-task-with-a-long-name",
+        "two-task-with-a-long-name",
+        "three-task-with-a-long-name",
+    ] {
+        let parents: Vec<&str> = after.iter().map(String::as_str).collect();
+        let id = add_task(
+            &store,
+            &plan,
+            slug,
+            &parents,
+            TaskState::Todo,
+            "ready",
+            0,
+            None,
+        );
+        if slug.starts_with("three") {
+            three = id.clone();
+        }
+        after = vec![id];
+    }
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    // The right column is narrow here, so the depth-3 row's connector cuts its id.
+    let terminal = render(&mut app, 80, 30);
+    let rows = rows(&terminal);
+    assert!(three.starts_with("TK"));
+    // The row is found by its id's `TK<number>-` prefix: the connector cut the rest.
+    let number = &three[..7];
+    let row = rows
+        .iter()
+        .find(|row| row.contains(number))
+        .unwrap_or_else(|| panic!("the depth-3 row is drawn:\n{}", rows.join("\n")));
+    assert!(
+        row.contains('└') || row.contains('─'),
+        "the row is deep enough to draw a connector:\n{row}"
+    );
+    assert!(
+        row.contains("… todo.ready"),
+        "a space follows the cut id:\n{row}\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        !row.contains("…todo.ready"),
+        "the cut id does not run into the phase:\n{row}"
+    );
+}
+
+/// At a width that cuts the id block, the gap survives on every row and every row's phase
+/// still starts at the same column, whatever the row's depth or id length.
+#[test]
+fn a_narrow_page_keeps_the_gap_and_one_phase_column() {
+    let scratch = Scratch::new("id-gap-narrow");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "narrow", "the narrow plan");
+    let short = add_task(&store, &plan, "s", &[], TaskState::Todo, "ready", 0, None);
+    let _long = add_task(
+        &store,
+        &plan,
+        "a-very-long-root-task-name-here",
+        &[],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
+    let _child = add_task(
+        &store,
+        &plan,
+        "a-very-long-child-task-name-here",
+        &[&short],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    // 100 cells: enough for the gap and the phase, too little for the longest id, so the id
+    // block stays at its cap and the long ids are cut.
+    let terminal = render(&mut app, 100, 30);
+    let rows = rows(&terminal);
+    let phase_rows: Vec<&String> = rows
+        .iter()
+        .filter(|row| row.contains("todo.ready"))
+        .collect();
+    assert_eq!(
+        phase_rows.len(),
+        3,
+        "three task rows are drawn:\n{}",
+        rows.join("\n")
+    );
+    let column_of = |row: &str| {
+        let byte = row.find("todo.ready").expect("the phase is drawn");
+        row[..byte].chars().count()
+    };
+    for row in &phase_rows {
+        assert_eq!(
+            column_of(row),
+            column_of(phase_rows[0]),
+            "the phase column holds at every depth:\n{}",
+            rows.join("\n")
+        );
+        let chars: Vec<char> = row.chars().collect();
+        assert_eq!(
+            chars[column_of(row) - 1],
+            ' ',
+            "a space separates the id (or its `…`) from the phase:\n{row}"
+        );
+    }
+    assert!(
+        phase_rows.iter().any(|row| row.contains("… todo.ready")),
+        "the longest id is cut at this width:\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(
+        phase_rows
+            .iter()
+            .filter(|row| row.contains("… todo.ready"))
+            .count(),
+        2,
+        "both long ids are cut here:\n{}",
+        rows.join("\n")
+    );
+}
+
 /// A theme file that sets `plan_running` recolors that mark only, in the rendered page.
 #[test]
 fn a_theme_file_recolors_only_the_plan_mark_it_names() {
