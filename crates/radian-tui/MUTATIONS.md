@@ -2714,18 +2714,6 @@ the named test was run alone, and the file was restored to the same bytes.
 
 2/2 caught.
 
-## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
-
-`run --watch` became `radian arc serve`: the TUI's detached start runs `arc serve`, and the
-old form is refused with one exact line. Each mutation was applied by hand to the working file,
-the named test was run alone, and the file was restored from a copy under `.radian/`.
-
-| # | Mutation | Result | Test that caught it |
-|---|---|---|---|
-| TK0079-M1 | the TUI starts `arc run` instead of `arc serve` (`LOOP_ARGS` in `src/arc/looping.rs`) | ✅ 1 failed | `arc_loop::the_detached_start_runs_arc_serve` (`left: ["arc", "run"]`, `right: ["arc", "serve"]`) |
-| TK0079-M2 | `run --watch` is accepted again (the refusal arm matches `watch: false`) | ✅ 1 failed | `arc::run_watch_is_refused_and_names_arc_serve` (`run --watch` exits 0 with a one-pass summary instead of 2) |
-
-2/2 caught.
 ## TK0076: the diff tab's file list keeps room for the diff (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
 
 The file list took every row but five, so a task with many changed files left the selected
@@ -2853,3 +2841,16 @@ from that copy (never `git checkout`); the named test ran alone with
 | TK0089-M2 | `resolve_link` resolves a page link from the site root (`join_docs_user("", path)`) instead of the source page's directory | ✅ 1 failed | `site_docs::relative_page_links_resolve_from_the_source_directory` (a sibling `gate.md` becomes a `blob/main` repo link) |
 
 1/1 caught.
+
+## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
+
+`run --watch` became `radian arc serve`: the TUI's detached start runs `arc serve`, and the
+old form is refused with one exact line. Each mutation was applied by hand to the working file,
+the named test was run alone, and the file was restored from a copy under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0079-M1 | the TUI starts `arc run` instead of `arc serve` (`LOOP_ARGS` in `src/arc/looping.rs`) | ✅ 1 failed | `arc_loop::the_detached_start_runs_arc_serve` (`left: ["arc", "run"]`, `right: ["arc", "serve"]`) |
+| TK0079-M2 | `run --watch` is accepted again (the refusal arm matches `watch: false`) | ✅ 1 failed | `arc::run_watch_is_refused_and_names_arc_serve` (`run --watch` exits 0 with a one-pass summary instead of 2) |
+
+2/2 caught.
