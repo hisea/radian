@@ -2425,3 +2425,32 @@ test-only read counter (`PATH_BYTES_READ`, also exposed under the `testing` feat
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | RW3-1 | the path read reads the whole file (`std::fs::read`) before the magic/size checks | ✅ 1 failed | `radian-coding image::tests::a_large_non_image_is_refused_from_its_head` (0 bytes through the bounded reader on a 2 GiB sparse file) |
+
+## TK0033: the conversation tab opens the selected attempt's journal (2026-10-23, branch `work/TK0033-tui-pages-continued`)
+
+The task page resolved the journal as `<session dir>/<task id>.jsonl` and never re-resolved
+it when `[`/`]` selected another attempt. It now reads the attempt's session id from
+`execution.json` (the task id when the attempt wrote none) and drops a view opened for
+another attempt. The mutation puts the task id back as the only lookup; it was applied to
+the committed file and restored with `git checkout --`, with `git status --short` empty
+afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0033-tui-pages-continued-M1 | the journal is looked up by the task id only, never by the attempt's `execution.json` session id | ✅ 1 failed | `the_conversation_tab_renders_the_selected_attempts_worker_journal` (the lookup finds attempt 1's `<task>.jsonl` instead of attempt 2's `<task>-2.jsonl`, so the screen shows `the first attempt` and the assertion on `the worker said hello` fails) |
+
+## TK0040: every TUI list keeps the selected row visible (2026-10-23, branch `work/TK0040-tui-pages-continued-followups`)
+
+The plans page drew the first rows of the plan list and of the selected plan's task list and let
+the rest fall off the bottom, so `↓` could select a row that was never drawn; the attempts tab
+did the same. The lists now keep the selection in view (`scroll_top`, and the attempts tab's own
+window). A cancelled plan also takes the failure mark and the `cancelled · ` prefix instead of
+`●`. Each mutation was applied to the committed file and restored with `git checkout --`;
+`git status --short` was empty afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0040-M1 | the plan list always starts at the first plan (`plan_top = 0`) | ✅ 1 failed | `the_plan_list_scrolls_to_keep_the_selected_plan_visible` (`PL0001-plan-01` is still drawn while `PL0012-plan-12` is selected) |
+| TK0040-M2 | the task list always starts at the first task (`task_top = 0`) | ✅ 1 failed | `the_task_list_scrolls_to_keep_the_selected_task_visible` (the selected `TK0011-h` is below the frame) |
+| TK0040-M3 | the attempts list always starts at the first attempt (`first = 0`) | ✅ 1 failed | `the_attempts_list_scrolls_to_keep_the_selected_attempt_visible` (with attempt 10 selected it draws attempts 1 to 3) |
+| TK0040-M4 | a cancelled plan takes `Mark::Active` (`●`), as before | ✅ 1 failed | `a_cancelled_plan_is_marked_and_named_cancelled` (`mark_cell` panics: `×` is not before `PL0002-images`) |

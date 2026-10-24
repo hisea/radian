@@ -24,6 +24,7 @@ set -uo pipefail
 
 PROG="arc-gate.sh"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+. "$SCRIPT_DIR/temp-check.sh"
 
 usage() {
     cat <<EOF
@@ -93,6 +94,9 @@ report_failures() {
 
 quick() {
     enter_root
+    # Before any step: a temp file system out of inodes or space fails a
+    # thousand unrelated tests in milliseconds, so fail once, here.
+    radian_check_temp_fs "$PROG" || exit 1
     CRATES="$(changed_crates)" || exit 1
     case " $(printf '%s' "$CRATES" | tr '\n' ' ') " in
         *" radian-tui "*) ;;
@@ -174,6 +178,7 @@ quote() {
 
 full() {
     enter_root
+    radian_check_temp_fs "$PROG" || exit 1
 
     if [ -z "${ARC_GATE_HOST:-}" ]; then
         # The trusted copy: the verify.sh next to this script, run on the

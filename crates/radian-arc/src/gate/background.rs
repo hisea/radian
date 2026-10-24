@@ -764,7 +764,12 @@ fn run_inner(options: &Options) -> Result<(), Error> {
         match crate::review::plan_verification(&store, &task.id) {
             Ok(plan) => {
                 inputs = plan.inputs.clone();
-                crate::review::run_stages(&store, &plan, None).map(|_| plan.label.clone())
+                // Test-only (see `crate::review::REVIEW_PROGRAM_ENV`): the fake review program a
+                // test leaves for the gate, in place of `radian exec`.
+                let review_program =
+                    std::env::var_os(crate::review::REVIEW_PROGRAM_ENV).map(PathBuf::from);
+                crate::review::run_stages(&store, &plan, review_program.as_deref())
+                    .map(|_| plan.label.clone())
             }
             // A planning refusal has no inputs: the pass re-plans and, if it now succeeds,
             // knows the inputs changed.

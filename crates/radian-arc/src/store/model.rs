@@ -14,8 +14,9 @@ use super::frontmatter::{self, Value};
 /// The plan and task file schema version this build writes and accepts.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// A plan's `status`: `done` is derived from the tasks, never stored.
-pub const PLAN_STATUSES: &[&str] = &["draft", "confirmed"];
+/// A plan's `status`: `done` is derived from the tasks, never stored. A `cancelled` plan is
+/// final (ADR 0048 decisions 3 and 9).
+pub const PLAN_STATUSES: &[&str] = &["draft", "confirmed", "cancelled"];
 
 /// A plan's `auto` level. Only a `confirmed` plan may be other than `off`.
 pub const AUTO_LEVELS: &[&str] = &["off", "run", "merge"];
@@ -221,6 +222,11 @@ pub struct PlanFile {
 }
 
 impl PlanFile {
+    /// Whether the plan is `cancelled`: a final state no owner or lead command changes.
+    pub fn is_cancelled(&self) -> bool {
+        self.status == "cancelled"
+    }
+
     /// A new `draft` plan with no tasks, holding `request` as its text.
     pub fn new(id: String, title: String, request: &str) -> Self {
         Self {

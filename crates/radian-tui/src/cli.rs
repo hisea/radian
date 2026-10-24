@@ -32,6 +32,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::terminal;
 
+mod arc;
 mod attach;
 mod herdr;
 mod loop_context;
@@ -45,6 +46,7 @@ mod session;
 mod tty;
 mod ui;
 
+use arc::run_arc as run_arc_tui;
 use attach::run_attach;
 use herdr::{HerdrReporter, herdr_reporter};
 use loop_context::LoopContext;
@@ -359,8 +361,7 @@ enum RadianCommand {
     },
 
     /// The plan and task orchestrator: set arc up, and read and write plans and tasks.
-    /// A bare `radian arc` would open the arc interface, which this build does not have
-    /// yet.
+    /// A bare `radian arc` opens the read-only arc TUI; `radian arc <verb>` runs the CLI.
     Arc {
         #[command(subcommand)]
         command: Option<ArcCommand>,
@@ -473,15 +474,18 @@ enum ArcCommand {
         command: ArcAddCommand,
     },
 
-    /// List plans, each with its tasks in order. Merged history is hidden unless `--all`.
+    /// List plans, each with its tasks in order. Merged history and cancelled plans are
+    /// hidden unless `--all`.
     List {
         /// Only this plan's id: a 1 to 4 letter prefix, four digits, a dash and a slug.
         #[arg(long, value_name = "ID")]
         plan: Option<String>,
-        /// Show every plan and every task, including finished plans and merged tasks.
+        /// Show every plan and every task, including finished and cancelled plans and merged
+        /// tasks.
         #[arg(long)]
         all: bool,
-        /// Print JSON. It always holds every plan and task.
+        /// Print JSON. Without `--all` it follows the same filter: a cancelled plan is left
+        /// out.
         #[arg(long)]
         json: bool,
     },
@@ -635,11 +639,11 @@ enum ArcCommand {
         task: String,
     },
 
-    /// Stop a task: a `todo` task ends, a `doing` task's wrapper is signalled.
+    /// Stop a task, or end every open task of a plan and the plan itself.
     Cancel {
-        /// The task id.
-        #[arg(value_name = "TASK")]
-        task: String,
+        /// The task id, or the plan id.
+        #[arg(value_name = "ID")]
+        id: String,
     },
 
     /// Move a budget-paused task, or every paused task of a plan, back to `todo.ready`.
@@ -739,7 +743,8 @@ enum ArcAddCommand {
 }
 
 impl ArcCommand {
-    /// The store operation, for every subcommand except the internal worker wrapper.
+    /// The store operation, for every subcommand except the internal commands a person does
+    /// not run (`work` and `gate`).
     fn into_store_command(self) -> Option<radian_arc::store::cli::Command> {
         use radian_arc::store::cli::Command as ArcRun;
         Some(match self {
@@ -774,7 +779,7 @@ impl ArcCommand {
             ArcCommand::Pause { plan } => ArcRun::Pause { plan },
             ArcCommand::Start { task } => ArcRun::Start { task },
             ArcCommand::Reverify { task } => ArcRun::Reverify { task },
-            ArcCommand::Cancel { task } => ArcRun::Cancel { task },
+            ArcCommand::Cancel { id } => ArcRun::Cancel { id },
             ArcCommand::ResetBudget { id } => ArcRun::ResetBudget { id },
             ArcCommand::Merge { task } => ArcRun::Merge { task },
             ArcCommand::Reject { task, note } => ArcRun::Reject { task, note },
@@ -835,12 +840,15 @@ fn run_arc(command: Option<ArcCommand>) -> ExitCode {
             ) as u8)
         }
         Some(command) => {
-            let command = command.into_store_command();
-            ExitCode::from(radian_arc::store::cli::run(command.as_ref()))
+            // `work` returned `None` above: every remaining subcommand has a store operation.
+            let command = command
+                .into_store_command()
+                .expect("`work` and `gate` are dispatched above");
+            ExitCode::from(radian_arc::store::cli::run(&command))
         }
-        // A bare `radian arc`: without setup it refuses and names `radian arc init`; with
-        // setup, the TUI it would open does not exist in this build.
-        None => ExitCode::from(radian_arc::store::cli::run(None)),
+        // A bare `radian arc` opens the TUI (ADR 0048 §1). Without setup the one-line refusal
+        // names `radian arc init` before the terminal is entered.
+        None => run_arc_tui(),
     }
 }
 

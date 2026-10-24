@@ -1,6 +1,6 @@
-//! `radian arc list`'s text: the default hides every `done.merged` task and every finished
-//! plan and counts what it left out, `--all` prints everything, and the JSON is never
-//! filtered.
+//! `radian arc list`'s text: the default hides every `done.merged` task, every finished plan
+//! and every cancelled plan, and counts what it left out; `--all` prints everything. The JSON
+//! follows the same cancelled-plan filter and never hides a merged task.
 //!
 //! Every test builds a throwaway repository with a throwaway bare `origin` under the system
 //! temp directory, and removes it at the end.
@@ -335,11 +335,52 @@ fn an_empty_store_says_there_are_no_plans() {
     assert_eq!(list_text(&views, true), "no plans\n");
 }
 
-/// The JSON is never filtered: it holds every plan and every task, the merged ones included.
+/// The JSON follows the text filter for a cancelled plan: it is hidden without `--all` and
+/// present with it; `--plan` and `show` still read the plan and its tasks.
+#[test]
+fn a_cancelled_plan_is_hidden_until_all_in_text_and_json() {
+    let scratch = fixture("cancelled");
+    let store = initialized(&scratch);
+    let plan = store
+        .add_plan("cancelled", "Cancelled plan", "request")
+        .unwrap();
+    let task = store
+        .add_task(&plan, "one", "One", vec![], false, vec![], "brief")
+        .unwrap();
+    radian_arc::attempt::cancel_any(&store, &plan).expect("the plan cancels");
+
+    let views = store.plans().expect("the plans read");
+    let text = list_text(&views, false);
+    assert!(!text.contains(&plan), "the plan is hidden: {text}");
+    assert_eq!(text, "1 cancelled plan hidden (--all to show)\n");
+    let all = list_text(&views, true);
+    assert!(all.contains(&plan), "`--all` shows it: {all}");
+    assert!(all.contains(&task), "`--all` shows its tasks: {all}");
+    assert!(!all.contains("hidden"), "{all}");
+
+    let hidden = list_json(&store, None, false).expect("the JSON builds");
+    assert_eq!(hidden.as_array().map(Vec::len), Some(0), "{hidden}");
+    let shown = list_json(&store, None, true).expect("the JSON builds");
+    assert_eq!(shown.as_array().map(Vec::len), Some(1), "{shown}");
+    assert_eq!(shown[0]["status"], "cancelled");
+    assert_eq!(shown[0]["tasks"][0]["state"], "failed");
+    assert_eq!(shown[0]["tasks"][0]["phase"], "cancelled");
+
+    let named = list_plan_text(&store.plan_view(&plan).expect("the plan reads"), false);
+    assert!(named.contains(&plan), "`--plan` names it: {named}");
+    assert!(
+        store.show(&plan).is_ok(),
+        "`show` still reads a cancelled plan"
+    );
+    assert!(store.show(&task).is_ok(), "`show` still reads its tasks");
+}
+
+/// The JSON holds every plan and every task when no plan is cancelled: the merged ones
+/// included.
 #[test]
 fn the_json_holds_every_plan_and_every_task() {
     let (_scratch, fixture) = three_plans("json");
-    let value = list_json(&fixture.store, None).expect("the JSON builds");
+    let value = list_json(&fixture.store, None, false).expect("the JSON builds");
 
     let plans = value.as_array().expect("an array of plans");
     assert_eq!(plans.len(), 3, "every plan is in the JSON: {value}");

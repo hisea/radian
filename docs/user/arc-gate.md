@@ -17,6 +17,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   When it differs, arc records the reason in the attempt's `review.json` and the task stays in `review.verifying`; `show` prints the reason.
 - The stages are the configured profile's (`gate.profile`, then `gate.profiles.<name>.stages`), in order, plus the task's `extra_stages`.
   `human` is your approval and does not run here.
+  When the profile lists both `commands` and `review`, those two start at the same time; every other stage keeps its order.
 - Every stage runs against the verification candidate, in its own checkout under `.radian/arc/gates/<stage>/`.
   The candidate is `verified_sha` when the remote main is an ancestor of it; otherwise it is a merge commit of `verified_sha` onto the remote main, built in that checkout and never pushed.
   The merge uses arc's own commit identity, so the same inputs build the same tree.
@@ -26,7 +27,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 - A merge conflict is a failed stage: the verdict's reason is `conflict`, its `conflict_paths` lists the paths, the task goes to `review.rework_pending`, and `show` prints `conflict: <paths>`.
   Nothing is pushed.
 - `review` is a read-only radian session, not the worker session.
-  It runs after `commands` passes and before `human`; a profile that lists both must list `commands` first.
+  It runs at the same time as `commands` when the profile lists both and before `human`; a profile that lists both must list `commands` first.
   For each run it starts one `radian exec` in its own checkout, `.radian/arc/gates/review/`, on the candidate, with the candidate as the workspace and only the `read`, `grep` and `glob` tools mounted: no shell tool, no write tool, and no MCP server.
   Its model route is `[gate.review] exec_args`, and `[gate.review] timeout_secs` limits one session.
   The prompt is built in: the task's brief, the commit list and the diff from the merge base of the remote main and `verified_sha` to `verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
@@ -44,12 +45,18 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
   The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros` and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
 - `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), and `review_timeout` (the last run hit `[gate.review] timeout_secs`).
+- When the profile lists both `commands` and `review`, the round's outcome follows the profile order.
+  A `commands` failure decides it with the commands reason, even when the review passed or failed too: the review verdict is still written, its cost counts, `show` lists its items, and arc writes no automatic review rework for that round.
+  When `commands` passes and `review` fails, the review path runs (see [A failed review](#a-failed-review)).
+  Both verdicts are written when each stage ends, and a verdict already written is reused: a gate that died while the pair ran resumes only the stage without a verdict.
+  The gate waits for both stages to end before it decides; a failing stage does not kill the other, and the review is bounded by `[gate.review] timeout_secs`.
+  A stop signal to the gate reaches both running stages.
 - This build runs `commands` and `review`.
   A profile or a task that lists `mutation` or `ci` is refused with `stage <name> is not built yet`; the task stays in `review.verifying` and `show` prints that reason.
   `init`'s default profile lists only `commands` and `human`.
 - A verdict is `runs/<task>/attempts/<attempt id>/verdicts/<stage>.json`; a command's log is `runs/<task>/attempts/<attempt id>/logs/<stage>-<n>.log`.
   A verdict is written once and never changed.
-  A verdict that already exists for this attempt and stage is reused instead of rerun, so a crash between stages resumes where it stopped.
+  A verdict that already exists for this attempt and stage is reused instead of rerun, so a crash between stages resumes where it stopped; when the `commands`/`review` pair was interrupted, only the stage without a verdict runs again.
 - One gate runs per task at a time.
   The gate process holds `gates/<task>.gate.lock` from the moment a pass starts it, so the pass that follows starts no second gate for the same commit.
   A signalled or killed gate releases the lock; the next pass starts it again, and the verdicts already written are reused.
@@ -187,12 +194,22 @@ commands = [
 | `scripts/arc-gate.sh quick` | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the two binary builds, then `cargo nextest run --locked --no-fail-fast` for every crate under `crates/` that the checkout changed since its merge base with `origin/main`, plus `radian-tui` always. It stops at the first failing step. |
 | `scripts/arc-gate.sh full` | `scripts/verify.sh`, here or on `ARC_GATE_HOST` when that is set. It prints the step lines and the names of failing tests, and exits with the verify exit code. |
 
+Before their first step, `verify.sh` and `arc-gate.sh` (`quick` and `full` both) check the file system that holds `${TMPDIR:-/tmp}` with `df`: the free inodes and the free space. When fewer than 50,000 inodes or fewer than 2 GiB are free, they fail at once, before building anything, with exit code `1` and one line on stderr that names the path, the free and total inodes, the free space and the two limits, for example:
+
+```
+verify: /tmp has 0 of 1048576 inodes free (limit 50000) and 45 GiB free (limit 2 GiB); remove leaked test directories first
+```
+
+The check deletes nothing. A file system that reports no inode count (some macOS volumes report none) skips the inode check and keeps the space check; a `df` that cannot read the file system skips that check with a warning. The two limits are the two variables below. For arc the failure is an ordinary failed command (`command_failed`), not a new failure class.
+
 With `ARC_GATE_HOST` set, `full` ships `HEAD` as a git bundle (`HEAD --not origin/main`; no bundle when `HEAD` is already in `origin/main`). On that host it takes a blocking lock on `~/.arc-gate.lock`, fetches the bundle, checks out exactly that commit detached inside `ARC_GATE_TREE`, and runs that checkout's `scripts/verify.sh`.
 
 | Environment variable | Type | Default | What it does |
 |---|---|---|---|
 | `ARC_GATE_HOST` | string | unset: `full` runs in this checkout | The ssh host that runs the full gate. |
 | `ARC_GATE_TREE` | string | unset | Required when `ARC_GATE_HOST` is set: the gate checkout on that host, as a path relative to the remote home directory. |
+| `RADIAN_VERIFY_MIN_FREE_INODES` | integer | `50000` | A whole number, `0` or more; `0` turns the inode check off. The fewest free inodes on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script. Any other value (not all digits) fails the check with a message naming the variable. |
+| `RADIAN_VERIFY_MIN_FREE_GIB` | integer | `2` | A whole number, `0` or more; `0` turns the space check off. The fewest free GiB on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script. Any other value (not all digits) fails the check with a message naming the variable. |
 
 Neither script sets `CARGO_TARGET_DIR`: a build cache is the caller's setting.
 
@@ -266,3 +283,4 @@ Before `start` or `cancel` acts, and after a restart, it reconciles every task i
 Reconcile never starts a task again.
 It reads no process list; `ps` is refused inside the `workspace` sandbox and is never needed here.
 `doing.reconciling` is left for you to resolve; `radian arc cancel` moves it to `failed.cancelled` after the same process check.
+The one exception is a task of a `cancelled` plan: the plan is final, so the next `radian arc run` pass ends it at `failed.cancelled` after that same process check, and it stops counting against `[limits] concurrency`.

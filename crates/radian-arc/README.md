@@ -173,7 +173,9 @@ instructions get their own retries; a `reverify` attempt is not a retry and chan
 `run::run` takes `runner.lock` without waiting (a held lock is exit 4). One pass repeats until
 a pass changes nothing, in this order:
 
-1. `attempt::reconcile` for every task in `doing`;
+1. `attempt::reconcile` for every task in `doing`, then
+   `attempt::end_reconciling_of_cancelled_plans`, which ends a `doing.reconciling` task of a
+   `cancelled` plan at `failed.cancelled` (the plan is final; nothing else would end it);
 2. `attempt_ops::release_retries` for every due `todo.retry_wait`;
 3. for every task in `review.verifying` (every plan; a plan at `auto` `off` is verified too):
    apply the record a background gate left, or start the gate with `gate::background::start`;
@@ -599,4 +601,7 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 
 ## Not here yet
 
-The arc TUI. The gate stages `mutation`, `review` and `ci` are refused until they are built.
+The arc TUI lives in `radian-tui` (`src/arc/`, with its terminal loop in `src/cli/arc.rs`);
+this crate owns the read-only views it draws ([`read`](src/read.rs): the remote main, a
+task's attempts and verdicts, a task's diff). The gate stages `mutation` and `ci` are
+refused until they are built.

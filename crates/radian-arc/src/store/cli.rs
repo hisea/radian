@@ -32,8 +32,9 @@ pub const SUBCOMMANDS: &[&str] = &[
 ];
 
 /// The subcommands ADR 0048 names that this build does not have. Every subcommand exists now;
-/// the arc TUI (a bare `radian arc`) is what is still missing. `work` is not here: it exists
-/// as the hidden wrapper a scheduling loop runs, and a person does not run it.
+/// a bare `radian arc` opens the TUI, which lives in `radian-tui` and calls this module's
+/// subcommands. `work` is not here: it exists as the hidden wrapper a scheduling loop runs,
+/// and a person does not run it.
 pub const NOT_BUILT: &[&str] = &[];
 
 /// One `radian arc` invocation, without clap.
@@ -75,8 +76,8 @@ pub enum Command {
     Start { task: String },
     /// `radian arc reverify <task>`: re-run the gate for the same commit without a worker.
     Reverify { task: String },
-    /// `radian arc cancel <task>`.
-    Cancel { task: String },
+    /// `radian arc cancel <id>`: a task, or every open task of a plan.
+    Cancel { id: String },
     /// `radian arc reset-budget <id>`: a task or a plan.
     ResetBudget { id: String },
     /// `radian arc merge <task>`: the owner's approval and the merge into main.
@@ -90,36 +91,34 @@ pub enum Command {
     Mcp,
 }
 
-/// Runs one invocation and returns the process exit code. `None` is a bare `radian arc`:
-/// the TUI does not exist yet, so it says so and lists the subcommands.
-pub fn run(command: Option<&Command>) -> u8 {
+/// Runs one invocation and returns the process exit code.
+pub fn run(command: &Command) -> u8 {
     let result = match command {
-        None => bare(),
-        Some(Command::Init { track }) => init(*track).map(emit),
-        Some(Command::AddPlan { slug, title }) => add_plan(slug, title).map(emit),
-        Some(Command::AddTask {
+        Command::Init { track } => init(*track).map(emit),
+        Command::AddPlan { slug, title } => add_plan(slug, title).map(emit),
+        Command::AddTask {
             plan,
             slug,
             title,
             after,
             allow_noop,
             stages,
-        }) => add_task(plan, slug, title, after, *allow_noop, stages).map(emit),
-        Some(Command::List { plan, all, json }) => list(plan.as_deref(), *all, *json).map(emit),
-        Some(Command::Show { id, json }) => show(id, *json).map(emit),
-        Some(Command::Adopt { id }) => adopt(id).map(emit),
-        Some(Command::Confirm { id }) => confirm(id).map(emit),
-        Some(Command::Auto { plan, level }) => set_auto(plan, level).map(emit),
-        Some(Command::Priority { plan, priority }) => set_priority(plan, priority).map(emit),
-        Some(Command::Pause { plan }) => pause(plan).map(emit),
-        Some(Command::Start { task }) => start(task),
-        Some(Command::Reverify { task }) => reverify(task),
-        Some(Command::Cancel { task }) => cancel(task),
-        Some(Command::ResetBudget { id }) => reset_budget(id),
-        Some(Command::Merge { task }) => merge(task),
-        Some(Command::Reject { task, note }) => reject(task, note),
-        Some(Command::Run { watch, interval }) => run_loop(*watch, *interval),
-        Some(Command::Mcp) => mcp(),
+        } => add_task(plan, slug, title, after, *allow_noop, stages).map(emit),
+        Command::List { plan, all, json } => list(plan.as_deref(), *all, *json).map(emit),
+        Command::Show { id, json } => show(id, *json).map(emit),
+        Command::Adopt { id } => adopt(id).map(emit),
+        Command::Confirm { id } => confirm(id).map(emit),
+        Command::Auto { plan, level } => set_auto(plan, level).map(emit),
+        Command::Priority { plan, priority } => set_priority(plan, priority).map(emit),
+        Command::Pause { plan } => pause(plan).map(emit),
+        Command::Start { task } => start(task),
+        Command::Reverify { task } => reverify(task),
+        Command::Cancel { id } => cancel(id),
+        Command::ResetBudget { id } => reset_budget(id),
+        Command::Merge { task } => merge(task),
+        Command::Reject { task, note } => reject(task, note),
+        Command::Run { watch, interval } => run_loop(*watch, *interval),
+        Command::Mcp => mcp(),
     };
     match result {
         Ok(code) => code,
@@ -149,33 +148,6 @@ fn cwd() -> Result<std::path::PathBuf, Error> {
 
 fn open() -> Result<Store, Error> {
     Store::open(&cwd()?)
-}
-
-/// A bare `radian arc`: without setup the refusal names `init`; with it, the TUI that does
-/// not exist yet is a usage-class refusal that lists the subcommands.
-fn bare() -> Result<u8, Error> {
-    let store = open()?;
-    let mut out = String::new();
-    out.push_str("the arc TUI is not built yet.\n");
-    out.push_str(&format!("subcommands: {}\n", SUBCOMMANDS.join(", ")));
-    out.push_str(&format!(
-        "in this build: `radian arc init`, `radian arc add plan|task`, `radian arc list`, \
-         `radian arc show`, `radian arc adopt`, `radian arc confirm`, `radian arc auto`, \
-         `radian arc priority`, `radian arc pause`, `radian arc start`, `radian arc reverify`, \
-         `radian arc cancel`, `radian arc reset-budget`, `radian arc merge`, `radian arc reject`, \
-         `radian arc run`, `radian arc mcp`\n{}",
-        arc_dir_line(&store)
-    ));
-    let code = emit(out);
-    Ok(if code == Exit::Ok.code() {
-        Exit::Usage.code()
-    } else {
-        code
-    })
-}
-
-fn arc_dir_line(store: &Store) -> String {
-    format!("arc directory: {}\n", store.root().display())
 }
 
 fn stdin_text() -> Result<String, Error> {
@@ -266,9 +238,9 @@ fn add_task(
 fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
     let store = open()?;
     if json {
-        // `--json` always holds every plan and every task, so `--all` changes nothing here:
-        // scripts and the MCP `list` tool read it.
-        let value = list_json(&store, plan)?;
+        // `--json` follows the text filter for cancelled plans: `--all` adds them. A plan
+        // named with `--plan` is always shown. Scripts and the MCP `list` tool read it.
+        let value = list_json(&store, plan, all)?;
         return Ok(format!(
             "{}\n",
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_owned())
@@ -286,9 +258,9 @@ fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
 }
 
 /// The text `radian arc list` prints (ADR 0048 decision 1, `list`). Unless `all`, a task in
-/// `done.merged` and a plan whose tasks are all merged are left out, and the last line counts
-/// what was left out. A plan with no tasks is shown too. Every other state, `failed.*`
-/// included, stays visible.
+/// `done.merged`, a plan whose tasks are all merged, and a `cancelled` plan are left out, and
+/// the last line counts what was left out. A plan with no tasks is shown too. Every other
+/// state, `failed.*` included, stays visible.
 pub fn list_text(views: &[PlanView], all: bool) -> String {
     render(views, all, false)
 }
@@ -300,14 +272,21 @@ pub fn list_plan_text(view: &PlanView, all: bool) -> String {
     render(std::slice::from_ref(view), all, true)
 }
 
-/// `named` keeps a finished plan's header line: `--plan` asked for that plan by name.
+/// `named` keeps a finished or cancelled plan's header line: `--plan` asked for that plan by
+/// name.
 fn render(views: &[PlanView], all: bool, named: bool) -> String {
     let mut out = String::new();
     let mut hidden_plans = 0usize;
+    let mut hidden_cancelled = 0usize;
     let mut hidden_tasks = 0usize;
     for view in views {
         let merged = view.tasks.iter().filter(|task| is_merged(task)).count();
         let finished = !view.tasks.is_empty() && merged == view.tasks.len();
+        if !all && !named && view.plan.item.is_cancelled() {
+            hidden_cancelled += 1;
+            hidden_tasks += merged;
+            continue;
+        }
         if finished && !all && !named {
             hidden_plans += 1;
             hidden_tasks += merged;
@@ -347,8 +326,8 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
             ));
         }
     }
-    if hidden_plans > 0 || hidden_tasks > 0 {
-        out.push_str(&hidden_line(hidden_plans, hidden_tasks));
+    if hidden_plans > 0 || hidden_cancelled > 0 || hidden_tasks > 0 {
+        out.push_str(&hidden_line(hidden_plans, hidden_cancelled, hidden_tasks));
     }
     if out.is_empty() {
         out.push_str("no plans\n");
@@ -363,7 +342,7 @@ fn is_merged(task: &Loaded<crate::store::model::TaskFile>) -> bool {
 
 /// The line that ends a filtered `list`: how many plans and tasks were left out. A zero part
 /// is omitted, and a count of one is singular.
-fn hidden_line(plans: usize, tasks: usize) -> String {
+fn hidden_line(plans: usize, cancelled: usize, tasks: usize) -> String {
     let plural = |n: usize, one: &str, many: &str| {
         if n == 1 {
             one.to_owned()
@@ -378,13 +357,25 @@ fn hidden_line(plans: usize, tasks: usize) -> String {
             plural(plans, "finished plan", "finished plans")
         ));
     }
+    if cancelled > 0 {
+        parts.push(format!(
+            "{cancelled} {}",
+            plural(cancelled, "cancelled plan", "cancelled plans")
+        ));
+    }
     if tasks > 0 {
         parts.push(format!(
             "{tasks} {}",
             plural(tasks, "merged task", "merged tasks")
         ));
     }
-    format!("{} hidden (--all to show)\n", parts.join(" and "))
+    let list = if parts.len() <= 1 {
+        parts.join("")
+    } else {
+        let last = parts.pop().unwrap_or_default();
+        format!("{} and {last}", parts.join(", "))
+    };
+    format!("{list} hidden (--all to show)\n")
 }
 
 fn changed_marker(changed: bool) -> &'static str {
@@ -748,11 +739,11 @@ fn reverify(task: &str) -> Result<u8, Error> {
     Ok(Exit::Ok.code())
 }
 
-/// `radian arc cancel <task>`: stop a task, or end a todo one.
-fn cancel(task: &str) -> Result<u8, Error> {
+/// `radian arc cancel <id>`: stop a task, or end every open task of a plan and the plan.
+fn cancel(id: &str) -> Result<u8, Error> {
     let store = open()?;
-    let canceled = crate::attempt::cancel(&store, task)?;
-    Ok(emit(format!("{}\n", canceled.line(task))))
+    let canceled = crate::attempt::cancel_any(&store, id)?;
+    Ok(emit(format!("{}\n", canceled.lines().join("\n"))))
 }
 
 /// `radian arc reset-budget <id>`: a paused task, or every paused task of a plan, back to
@@ -830,13 +821,17 @@ fn mcp() -> Result<u8, Error> {
     Ok(Exit::Ok.code())
 }
 
-/// `radian arc list --json`'s document, for the CLI and the MCP `list` tool.
-pub fn list_json(store: &Store, plan: Option<&str>) -> Result<serde_json::Value, Error> {
+/// `radian arc list --json`'s document, for the CLI and the MCP `list` tool. Unless `all`, a
+/// `cancelled` plan is left out; a plan named with `plan` is always included.
+pub fn list_json(store: &Store, plan: Option<&str>, all: bool) -> Result<serde_json::Value, Error> {
     let views = match plan {
         Some(id) => vec![store.plan_view(id)?],
         None => {
-            // The same order the text form prints and the loop claims in.
+            // The same order and the same cancelled-plan filter the text form uses.
             let mut views = store.plans()?;
+            if !all {
+                views.retain(|view| !view.plan.item.is_cancelled());
+            }
             views.sort_by(|one, other| super::model::claim_order(&one.plan.item, &other.plan.item));
             views
         }
@@ -922,7 +917,7 @@ mod tests {
 
     #[test]
     fn every_plan_value_set_has_the_expected_members() {
-        assert_eq!(PLAN_STATUSES, &["draft", "confirmed"]);
+        assert_eq!(PLAN_STATUSES, &["draft", "confirmed", "cancelled"]);
         assert_eq!(AUTO_LEVELS, &["off", "run", "merge"]);
         assert_eq!(PLAN_PRIORITIES, &["P0", "P1", "P2", "P3", "P4", "P5"]);
     }

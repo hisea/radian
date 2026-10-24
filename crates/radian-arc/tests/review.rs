@@ -1741,95 +1741,6 @@ fn show_json_carries_the_rework_reason() {
 
 // ---- the review stage (ADR 0048 decision 10) -----------------------------------------
 
-/// A fake `radian exec` for the review stage. It records its argv and prompt per run and
-/// prints one `Result` line whose `text` is the run's chosen message.
-struct FakeReview {
-    dir: TempDir,
-    program: PathBuf,
-}
-
-impl FakeReview {
-    /// `messages[n]` is run `n`'s final text; a missing entry repeats the last message.
-    fn new(label: &str, messages: &[String], sleep_secs: u32) -> Self {
-        let dir = TempDir::new(label);
-        for (index, message) in messages.iter().enumerate() {
-            fs::write(
-                dir.path().join(format!("text-{}", index + 1)),
-                serde_json::to_string(message).expect("a JSON string"),
-            )
-            .expect("the fake message");
-        }
-        let last = messages.len().max(1);
-        let program = dir.path().join("fake-radian-exec");
-        let script = format!(
-            "#!/bin/sh\n\
-             d=\"{dir}\"\n\
-             n=$(cat \"$d/count\" 2>/dev/null || printf '0')\n\
-             n=$((n+1))\n\
-             printf '%s\\n' \"$n\" > \"$d/count\"\n\
-             printf '%s\\n' \"$@\" > \"$d/argv-$n\"\n\
-             cat > \"$d/prompt-$n\"\n\
-             sleep {sleep_secs}\n\
-             if [ ! -f \"$d/text-$n\" ]; then n={last}; fi\n\
-             printf '{{\"type\":\"Result\",\"session_id\":\"fake-review-%s\",\"outcome\":\"completed\",\"cost\":{{\"micros\":2000}},\"text\":' \"$n\"\n\
-             cat \"$d/text-$n\"\n\
-             printf '}}\\n'\n",
-            dir = dir.path().display(),
-            sleep_secs = sleep_secs,
-            last = last,
-        );
-        fs::write(&program, script).expect("the fake program");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&program)
-                .expect("the fake program")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&program, permissions).expect("make it executable");
-        }
-        Self { dir, program }
-    }
-
-    fn program(&self) -> &Path {
-        &self.program
-    }
-
-    fn count(&self) -> u32 {
-        fs::read_to_string(self.dir.path().join("count"))
-            .ok()
-            .and_then(|text| text.trim().parse().ok())
-            .unwrap_or(0)
-    }
-
-    fn argv(&self, run: u32) -> Vec<String> {
-        fs::read_to_string(self.dir.path().join(format!("argv-{run}")))
-            .expect("the fake recorded its argv")
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
-
-    fn prompt(&self, run: u32) -> String {
-        fs::read_to_string(self.dir.path().join(format!("prompt-{run}")))
-            .expect("the fake recorded its prompt")
-    }
-}
-
-/// A session's final message with one fenced report.
-fn review_message(summary: &str, blocking: &[&str], suggestions: &[&str]) -> String {
-    let value = serde_json::json!({
-        "summary": summary,
-        "blocking": blocking,
-        "suggestions": suggestions,
-        "verified": ["the diff reads correctly"],
-    });
-    format!(
-        "Here is my review.\n\n```json\n{}\n```\n",
-        serde_json::to_string_pretty(&value).expect("the report serializes")
-    )
-}
-
 /// One review item in the object form.
 fn review_item(level: &str, file: &str, line: u32, text: &str) -> Value {
     serde_json::json!({"level": level, "file": file, "line": line, "text": text})
@@ -2062,35 +1973,186 @@ fn an_unusable_output_runs_the_session_once_more() {
     assert_eq!(fake.count(), 2);
 }
 
-/// A `commands` failure stops the gate: `review` never runs on that candidate.
-/// Mutation: run review even when `commands` failed → this test sees a review verdict and a
-/// fake run.
+/// The two stages start together: each program waits for the other's start marker, so neither
+/// can finish before the other has started. Mutation: run them one after the other and the
+/// `commands` wait times out, fails, and the review never meets its side.
 #[test]
-fn a_failed_commands_stage_never_runs_review() {
-    let fixture = Fixture::new("review-after-commands");
+fn the_commands_and_review_stages_start_before_either_ends() {
+    let fixture = Fixture::new("review-parallel-start");
+    fixture.add_review_stage();
+    let dir = TempDir::new("review-parallel-start-marks");
+    let commands_started = dir.path().join("commands.started");
+    let fake = FakeReview::with_barrier(
+        "review-parallel-start-fake",
+        &[review_message("both ran", &[], &[])],
+        0,
+        Some((&commands_started, 5)),
+    );
+    let review_started = fake.started(1);
+    let script = format!(
+        "touch '{commands}'; i=0; while [ ! -f '{review}' ] && [ $i -lt 100 ]; do \
+         i=$((i+1)); sleep 0.05; done; test -f '{review}'",
+        commands = commands_started.display(),
+        review = review_started.display(),
+    );
+    fixture.commands(&[script.as_str()]);
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    assert!(
+        fixture
+            .verdict(&fixture.attempt_label(), Stage::Commands)
+            .is_pass()
+    );
+    assert!(
+        fixture
+            .verdict(&fixture.attempt_label(), Stage::Review)
+            .is_pass()
+    );
+    assert_eq!(fake.count(), 1, "the review session ran once");
+}
+
+/// A `commands` failure decides the round, but the review still ran and wrote its verdict: the
+/// cost counts and `show` can list its items. Mutation: stop at the commands verdict and the
+/// review verdict is missing.
+#[test]
+fn a_commands_failure_decides_the_round_and_the_review_verdict_is_recorded() {
+    let fixture = Fixture::new("review-commands-fail");
     fixture.add_review_stage();
     fixture.commands(&["false"]);
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
     let fake = FakeReview::new(
-        "review-after-commands-fake",
-        &[review_message("must not run", &[], &[])],
+        "review-commands-fail-fake",
+        &[review_message("the change is fine", &[], &[])],
         0,
     );
 
     let verified = fixture.verifying_with_review(&head, fake.program());
-    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
-    let commands = fixture.verdict(&fixture.attempt_label(), Stage::Commands);
-    assert_eq!(commands.reason.as_deref(), Some("command_failed"));
-    let review_path = fixture
-        .store
-        .root()
-        .join("runs")
-        .join(&fixture.task)
-        .join("attempts")
-        .join(fixture.attempt_label())
-        .join("verdicts/review.json");
-    assert!(!review_path.exists(), "a review verdict was written");
-    assert_eq!(fake.count(), 0, "the review session ran");
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("review", "rework_pending"),
+        "{verified:?}"
+    );
+    let reason = verified.reason.clone().expect("a reason");
+    assert_eq!(reason.stage, Some(Stage::Commands));
+    assert_eq!(reason.reason, "command_failed");
+    assert!(
+        verified.review.is_none(),
+        "a commands failure writes no review rework"
+    );
+    let review = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert!(review.is_pass(), "{:?}", review.reason);
+    assert_eq!(
+        review.review.as_ref().map(|report| report.summary.as_str()),
+        Some("the change is fine")
+    );
+    assert!(
+        !fixture
+            .verdict(&fixture.attempt_label(), Stage::Commands)
+            .is_pass()
+    );
+    assert_eq!(fake.count(), 1, "the review session ran");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    let shown = review::rework_reason(&fixture.store, &stored).expect("a reason");
+    assert!(shown.contains("commands: command_failed"), "{shown}");
+    assert!(!stored.body.contains("(review)"), "{}", stored.body);
+}
+
+/// `commands` passes and the review fails: today's path, the automatic review rework.
+#[test]
+fn a_review_failure_after_a_passing_commands_stage_writes_the_automatic_rework() {
+    let fixture = Fixture::new("review-after-commands-pass");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    fixture.set_auto("run");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "review-after-commands-pass-fake",
+        &[review_message(
+            "the change needs a test",
+            &["add a test"],
+            &[],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("todo", "ready"),
+        "{verified:?}"
+    );
+    let rework = verified.review.clone().expect("the review rework");
+    assert_eq!(rework.items, vec![ReviewItem::text("add a test")]);
+    assert!(
+        fixture
+            .verdict(&fixture.attempt_label(), Stage::Commands)
+            .is_pass()
+    );
+    let review = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert!(!review.is_pass());
+    assert_eq!(review.reason.as_deref(), Some("review_blocking"));
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        stored.body.contains("## Rework 2 (review)"),
+        "{}",
+        stored.body
+    );
+    assert_eq!(stored.auto_rework, 1, "the rework is automatic");
+}
+
+/// Both fail: the round follows the profile order, so `commands` decides; the review verdict is
+/// recorded but no automatic review rework is written. Mutation: let the review failure decide
+/// and the task returns to `todo.ready` with a review brief.
+#[test]
+fn a_commands_failure_decides_the_round_when_the_review_fails_too() {
+    let fixture = Fixture::new("review-both-fail");
+    fixture.add_review_stage();
+    fixture.commands(&["false"]);
+    fixture.set_auto("run");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "review-both-fail-fake",
+        &[review_message(
+            "the change needs a test",
+            &["add a test"],
+            &[],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("review", "rework_pending"),
+        "{verified:?}"
+    );
+    let reason = verified.reason.clone().expect("a reason");
+    assert_eq!(reason.stage, Some(Stage::Commands));
+    assert_eq!(reason.reason, "command_failed");
+    assert!(
+        verified.review.is_none(),
+        "a commands failure writes no review rework"
+    );
+    let review = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert!(!review.is_pass());
+    assert_eq!(review.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(
+        review.review.as_ref().map(|report| report.blocking.len()),
+        Some(1),
+        "the review verdict keeps its items for `show`"
+    );
+    assert_eq!(fake.count(), 1);
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        !stored.body.contains("## Rework"),
+        "a review rework was written: {}",
+        stored.body
+    );
+    assert_eq!(stored.auto_rework, 0);
+    let shown = review::rework_reason(&fixture.store, &stored).expect("a reason");
+    assert!(shown.contains("commands: command_failed"), "{shown}");
 }
 
 /// A review verdict is part of the digest: a new review of the same sha changes it.

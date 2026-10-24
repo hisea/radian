@@ -15,6 +15,8 @@ set -uo pipefail
 
 PROG="verify.sh"
 LOG_DIR=".radian/verify"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+. "$SCRIPT_DIR/temp-check.sh"
 
 usage() {
     cat <<EOF
@@ -58,6 +60,11 @@ done
 if ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     cd "$ROOT" || exit 1
 fi
+
+# Before any step: a temp file system out of inodes or space fails a thousand
+# unrelated tests in milliseconds, so fail once, here, with the reason.
+radian_check_temp_fs verify || exit 1
+
 mkdir -p "$LOG_DIR" || exit 1
 
 STEP=0
