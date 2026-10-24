@@ -4,6 +4,9 @@
 //! control, like the escape matrix.
 #![cfg(target_os = "linux")]
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -182,9 +185,9 @@ int main(void) {
     let Some((_dir, sandbox, control)) = rig("foreign-arch") else {
         return;
     };
-    let dir = TempDir::new("cc");
-    let src = dir.path().join("arch_probe.c");
-    let bin = dir.path().join("arch_probe");
+    let dir = test_support::TempDir::named("radian-seccomp-cc");
+    let src = dir.join("arch_probe.c");
+    let bin = dir.join("arch_probe");
     std::fs::write(&src, HELPER).unwrap();
     let built = std::process::Command::new("cc")
         .args(["-O2", "-o"])
@@ -194,7 +197,6 @@ int main(void) {
     let built = match built {
         Ok(out) if out.status.success() && bin.exists() => bin,
         _ => {
-            let _ = std::fs::remove_dir_all(&dir);
             println!("radian-test: skipped foreign-arch: no working host cc");
             return;
         }
@@ -203,7 +205,6 @@ int main(void) {
     // writable under the sandbox; the binary itself lives outside).
     let ws_bin = sandbox.policy().workspace.join("arch_probe");
     std::fs::copy(&built, &ws_bin).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     let run = |sandbox: &Sandbox| {
         sandbox
             .command(ws_bin.to_str().unwrap(), std::iter::empty::<&str>())
