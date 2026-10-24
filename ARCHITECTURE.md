@@ -315,7 +315,7 @@ workspace/
     radian-exec/           # 独立的命令行客户端（可选客户端，不是 Runtime 的必需部分）
 ```
 
-> 实现后的 workspace 比这份 MVP 规划更大（`radian-*` 各层、第二个 provider adapter、`agent-provider-contract` 契约套件与 `radian-memory`）；以根 `README.md` 的 crate 表为准。
+> 实现后的 workspace 比这份 MVP 规划更大（`radian-*` 各层、第二个 provider adapter、`agent-provider-contract` 契约套件与 `radian-memory`）；以 `docs/internals.md` 的 crate 表为准。
 
 依赖方向 `agent-extensions → radian-core`。`radian-core` 的 JSON Schema preflight 使用 validator（候选 `jsonschema` 必须 `default-features = false`，禁用 HTTP/file resolver；MVP 拒绝外部 `$ref`，只验证内嵌或显式内存 registry 中的 schema），避免 Core 产生网络/文件 I/O。当前 `jsonschema` 文档说明默认会解析 HTTP 和文件引用，关闭全部默认 feature 可禁用解析器。([external references](https://docs.rs/jsonschema/latest/jsonschema/#external-references)) Core 是 async API，MVP 可明确选 Tokio；取消句柄和 `select!` 属于 async loop。`agent-extensions` 使用官方 `rmcp` child-process/stdio transport，并在 runtime-independent supervisor 中管理子进程生命周期；稳定 alias 使用小型 SHA-256 依赖（如 `sha2`）。Cargo.lock 锁定的版本必须通过 MCP lifecycle、MRTR 和 unsupported-request 测试。
 
