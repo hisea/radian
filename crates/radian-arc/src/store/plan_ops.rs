@@ -523,12 +523,17 @@ fn append_rework(body: &mut String, number: u32, brief: &str, heading_suffix: &s
 
 /// Replaces the original brief of a task body and keeps every rework section and the change
 /// records below it (ADR 0048 decision 11). The original brief is the text before the first
-/// `## Rework <n>` section, or before `## Changes` when the task has no rework yet.
+/// `## Rework <n>` section, or before `## Changes` when the task has no rework yet. A line that
+/// begins `## Rework ` but carries no number, such as `## Rework notes`, is part of the brief,
+/// not a rework section.
 fn set_brief(body: &mut String, brief: &str) {
-    let kept_at = [REWORK_HEADING, TASK_CHANGES_HEADING]
-        .iter()
-        .filter_map(|heading| section_start(body, heading))
-        .min();
+    let kept_at = [
+        rework_section_start(body),
+        section_start(body, TASK_CHANGES_HEADING),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
     let kept = kept_at.map(|at| body[at..].to_owned()).unwrap_or_default();
     let mut new = model::brief_body(brief);
     if !kept.is_empty() {
@@ -599,14 +604,40 @@ fn move_changes_last(body: &mut String) {
 
 /// The byte offset of the first line that is `heading` or starts with `heading` and a space.
 fn section_start(body: &str, heading: &str) -> Option<usize> {
-    let mut offset = 0;
-    for line in body.split_inclusive('\n') {
-        let text = line.trim_end_matches(['\n', '\r']);
-        let found = text == heading
+    line_start(body, |text| {
+        text == heading
             || text
                 .strip_prefix(heading)
-                .is_some_and(|rest| rest.starts_with(' '));
-        if found {
+                .is_some_and(|rest| rest.starts_with(' '))
+    })
+}
+
+/// The byte offset of the first numbered rework heading, `## Rework <n>` (with an optional
+/// suffix such as ` (review)`), or `None` when the body has none.
+fn rework_section_start(body: &str) -> Option<usize> {
+    line_start(body, |text| rework_number(text).is_some())
+}
+
+/// The number in a `## Rework <n>` heading line, or `None` when the line is not one. The number
+/// is the run of digits after the heading and its space; anything after it must start with a
+/// space (the suffix [`append_rework`] may add) or be the line's end.
+fn rework_number(line: &str) -> Option<u32> {
+    let rest = line.strip_prefix(REWORK_HEADING)?.strip_prefix(' ')?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let (digits, after) = rest.split_at(end);
+    if digits.is_empty() || !(after.is_empty() || after.starts_with(' ')) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The byte offset of the first line whose text, without its line ending, `matches`.
+fn line_start(body: &str, matches: impl Fn(&str) -> bool) -> Option<usize> {
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        if matches(line.trim_end_matches(['\n', '\r'])) {
             return Some(offset);
         }
         offset += line.len();
@@ -737,6 +768,33 @@ mod tests {
             "the brief\n\n## Rework 1\n\ndo it again\n\n## Changes\n\
              - 2026-01-02T03:04:05Z update_task: title\n\
              - 2026-01-03T00:00:00Z update_task: after\n"
+        );
+    }
+
+    /// Only a numbered heading, `## Rework <n>`, starts a rework section. An original brief
+    /// that carries a heading such as `## Rework notes` is brief text, so a new brief replaces
+    /// it (the tool contract's grammar).
+    #[test]
+    fn a_heading_that_only_starts_like_a_rework_is_part_of_the_brief() {
+        let mut body = model::brief_body("the brief\n\n## Rework notes\n\nboth sides stay");
+        set_brief(&mut body, "a better brief");
+        assert_eq!(body, "a better brief\n");
+
+        let mut bare = model::brief_body("the brief\n\n## Rework\n\nno number");
+        set_brief(&mut bare, "a better brief");
+        assert_eq!(bare, "a better brief\n");
+    }
+
+    /// The numbered heading, with or without the suffix arc writes after its number, is where
+    /// the original brief ends.
+    #[test]
+    fn a_numbered_rework_heading_is_where_the_brief_ends() {
+        let mut body = model::brief_body("the brief");
+        append_rework(&mut body, 2, "do it again", REVIEW_REWORK_SUFFIX);
+        set_brief(&mut body, "a better brief");
+        assert_eq!(
+            body,
+            "a better brief\n\n## Rework 2 (review)\n\ndo it again\n"
         );
     }
 
