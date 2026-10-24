@@ -40,6 +40,10 @@ pub enum LoginStep {
     CustomBaseUrl,
     /// The key. Masked on screen; typed or pasted alike.
     KeyInput,
+    /// The entry already has a key: replace it, or add another (ADR 0026 D3).
+    ReplaceOrAdd { cursor: usize },
+    /// The new key's name for `a` (empty is allowed; an unnamed key shows masked).
+    AddName,
     /// The verification request is in flight (D3). `Esc` still cancels.
     Verifying,
     /// The verification failed; `y` saves anyway, `n`/`Esc` cancels.
@@ -76,6 +80,12 @@ pub struct LoginWizard {
     pub base_url: String,
     /// The key. Never rendered (the `Debug` impl lies on purpose).
     pub key: String,
+    /// The name of a key to **add** to an entry that already has one (the `a` choice).
+    /// `None` before the choice is made.
+    pub add_name: String,
+    /// Whether the entry already had a key when the verification answered (D3's
+    /// replace-or-add choice).
+    pub existing: bool,
     /// A step-local error line (a bad name, a bad URL); cleared on the next edit.
     pub error: Option<String>,
 }
@@ -89,6 +99,8 @@ impl std::fmt::Debug for LoginWizard {
             .field("protocol", &self.protocol)
             .field("base_url", &self.base_url)
             .field("key", &"<redacted>")
+            .field("add_name", &self.add_name)
+            .field("existing", &self.existing)
             .field("error", &self.error)
             .finish()
     }
@@ -104,6 +116,8 @@ impl LoginWizard {
             protocol: 0,
             base_url: String::new(),
             key: String::new(),
+            add_name: String::new(),
+            existing: false,
             error: None,
         }
     }
@@ -304,20 +318,57 @@ impl LoginWizard {
                 _ => {}
             },
             LoginStep::Verifying => {} // only Esc (handled above)
+            LoginStep::ReplaceOrAdd { cursor } => match key {
+                LoginKey::Up => *cursor = cursor.saturating_sub(1),
+                LoginKey::Down => *cursor = (*cursor + 1).min(1),
+                LoginKey::Char('r') | LoginKey::Char('R') => return self.save(None),
+                LoginKey::Char('a') | LoginKey::Char('A') => {
+                    self.step = LoginStep::AddName;
+                }
+                LoginKey::Enter => {
+                    if *cursor == 0 {
+                        return self.save(None);
+                    }
+                    self.step = LoginStep::AddName;
+                }
+                _ => {}
+            },
+            LoginStep::AddName => match key {
+                LoginKey::Char(c) => self.add_name.push(c),
+                LoginKey::Backspace => {
+                    self.add_name.pop();
+                }
+                LoginKey::Paste(text) => self.add_name.push_str(&text),
+                LoginKey::Enter => {
+                    return self.save(Some(self.add_name.trim().to_owned()));
+                }
+                _ => {}
+            },
             LoginStep::OAuthBrowserWaiting { .. } => {} // only Esc (handled above)
-            LoginStep::OAuthDeviceWaiting { .. } => {} // only Esc (handled above)
+            LoginStep::OAuthDeviceWaiting { .. } => {}  // only Esc (handled above)
             LoginStep::VerifyFailed { .. } => match key {
                 LoginKey::Char('y') | LoginKey::Char('Y') => {
-                    return LoginOutcome::Save {
-                        name: self.provider_name().to_owned(),
-                        key: self.key.clone(),
-                        env: self.env(),
-                    };
+                    if self.existing {
+                        self.step = LoginStep::ReplaceOrAdd { cursor: 0 };
+                        return LoginOutcome::Stay;
+                    }
+                    return self.save(None);
                 }
                 _ => return LoginOutcome::Cancel,
             },
         }
         LoginOutcome::Stay
+    }
+
+    /// The saved record: the provider and its key, with `add` naming the new key when this is
+    /// an append to an entry that already had one.
+    fn save(&self, add: Option<String>) -> LoginOutcome {
+        LoginOutcome::Save {
+            name: self.provider_name().to_owned(),
+            key: self.key.clone(),
+            env: self.env(),
+            add,
+        }
     }
 
     /// The endpoint the verification request goes to: the custom base URL, or the built-in
@@ -331,17 +382,26 @@ impl LoginWizard {
         }
     }
 
-    /// The verification finished. `Ok` goes straight to saving; `Err` asks.
-    pub fn verified(&mut self, result: &Result<(), String>) -> Option<LoginOutcome> {
+    /// The verification finished. `Ok` goes straight to saving, unless the entry already had
+    /// a key: then replace-or-add is asked first (ADR 0026 D3). `Err` asks save-or-cancel.
+    pub fn verified(
+        &mut self,
+        result: &Result<(), String>,
+        existing: bool,
+    ) -> Option<LoginOutcome> {
         let LoginStep::Verifying = self.step else {
             return None; // a late answer for a wizard that moved on
         };
+        self.existing = existing;
         match result {
-            Ok(()) => Some(LoginOutcome::Save {
-                name: self.provider_name().to_owned(),
-                key: self.key.clone(),
-                env: self.env(),
-            }),
+            Ok(()) => {
+                if existing {
+                    self.step = LoginStep::ReplaceOrAdd { cursor: 0 };
+                    None
+                } else {
+                    Some(self.save(None))
+                }
+            }
             Err(reason) => {
                 self.step = LoginStep::VerifyFailed {
                     reason: reason.clone(),
@@ -393,11 +453,14 @@ pub enum LoginOutcome {
         base_url: String,
         key: String,
     },
-    /// Write the `auth.json` entry (after a passing verification, or "save anyway").
+    /// Write the `auth.json` entry (after a passing verification, or "save anyway"). `add`
+    /// names a key to append to an entry that already has one; `None` replaces the entry's
+    /// first key.
     Save {
         name: String,
         key: String,
         env: Vec<(String, String)>,
+        add: Option<String>,
     },
     /// Close without saving.
     Cancel,
@@ -522,11 +585,12 @@ mod tests {
         );
         // The 200 → save.
         assert_eq!(
-            wizard.verified(&Ok(())).expect("save after verify"),
+            wizard.verified(&Ok(()), false).expect("save after verify"),
             LoginOutcome::Save {
                 name: "anthropic".to_owned(),
                 key: "sk-ant-1".to_owned(),
                 env: Vec::new(),
+                add: None,
             }
         );
     }
@@ -584,7 +648,7 @@ mod tests {
         );
         // The saved record carries the endpoint and protocol in `env` (D10).
         assert_eq!(
-            wizard.verified(&Ok(())).expect("save after verify"),
+            wizard.verified(&Ok(()), false).expect("save after verify"),
             LoginOutcome::Save {
                 name: "corp".to_owned(),
                 key: "sk-relay-222".to_owned(),
@@ -595,6 +659,7 @@ mod tests {
                     ),
                     ("RADIAN_KIND".to_owned(), "anthropic".to_owned()),
                 ],
+                add: None,
             }
         );
     }
@@ -605,7 +670,11 @@ mod tests {
         type_string(&mut wizard, "sk-oai");
         let outcome = wizard.on_key(LoginKey::Enter);
         assert!(matches!(outcome, LoginOutcome::Verify { .. }));
-        assert!(wizard.verified(&Err("401 rejected".to_owned())).is_none());
+        assert!(
+            wizard
+                .verified(&Err("401 rejected".to_owned()), false)
+                .is_none()
+        );
         assert!(matches!(wizard.step, LoginStep::VerifyFailed { .. }));
         // `y` saves anyway.
         assert!(matches!(
@@ -619,8 +688,70 @@ mod tests {
             wizard.on_key(LoginKey::Enter),
             LoginOutcome::Verify { .. }
         ));
-        assert!(wizard.verified(&Err("no".to_owned())).is_none());
+        assert!(wizard.verified(&Err("no".to_owned()), false).is_none());
         assert_eq!(wizard.on_key(LoginKey::Char('n')), LoginOutcome::Cancel);
+    }
+
+    /// ADR 0026 D3: an entry that already has a key offers replace-or-add; `a` asks a name and
+    /// appends, `r` replaces. A failed verification answers the same question before saving.
+    #[test]
+    fn an_existing_key_offers_replace_or_add() {
+        let mut wizard = LoginWizard::for_provider("opencode-go");
+        type_string(&mut wizard, "sk-second");
+        assert!(matches!(
+            wizard.on_key(LoginKey::Enter),
+            LoginOutcome::Verify { .. }
+        ));
+        // The verification passed and the entry already had a key: no save yet.
+        assert!(wizard.verified(&Ok(()), true).is_none());
+        assert!(matches!(wizard.step, LoginStep::ReplaceOrAdd { cursor: 0 }));
+        // `a` asks the name; Enter saves the append, an empty name allowed.
+        assert_eq!(wizard.on_key(LoginKey::Char('a')), LoginOutcome::Stay);
+        assert!(matches!(wizard.step, LoginStep::AddName));
+        type_string(&mut wizard, "team");
+        assert_eq!(
+            wizard.on_key(LoginKey::Enter),
+            LoginOutcome::Save {
+                name: "opencode-go".to_owned(),
+                key: "sk-second".to_owned(),
+                env: Vec::new(),
+                add: Some("team".to_owned()),
+            }
+        );
+        // An empty name still appends (the item is then shown masked).
+        let mut wizard = LoginWizard::for_provider("openai");
+        type_string(&mut wizard, "sk-next");
+        wizard.on_key(LoginKey::Enter);
+        wizard.verified(&Ok(()), true);
+        wizard.on_key(LoginKey::Char('a'));
+        assert_eq!(
+            wizard.on_key(LoginKey::Enter),
+            LoginOutcome::Save {
+                name: "openai".to_owned(),
+                key: "sk-next".to_owned(),
+                env: Vec::new(),
+                add: Some(String::new()),
+            }
+        );
+        // `r` replaces the first key.
+        let mut wizard = LoginWizard::for_provider("openai");
+        type_string(&mut wizard, "sk-replacement");
+        wizard.on_key(LoginKey::Enter);
+        wizard.verified(&Ok(()), true);
+        assert!(matches!(
+            wizard.on_key(LoginKey::Char('r')),
+            LoginOutcome::Save { add: None, .. }
+        ));
+        // A failed verification's `y` also offers the choice when a key existed.
+        let mut wizard = LoginWizard::for_provider("openai");
+        type_string(&mut wizard, "sk-third");
+        wizard.on_key(LoginKey::Enter);
+        assert!(wizard.verified(&Err("401".to_owned()), true).is_none());
+        assert!(matches!(
+            wizard.on_key(LoginKey::Char('y')),
+            LoginOutcome::Stay
+        ));
+        assert!(matches!(wizard.step, LoginStep::ReplaceOrAdd { cursor: 0 }));
     }
 
     #[test]
@@ -631,6 +762,8 @@ mod tests {
             LoginStep::CustomProtocol { cursor: 0 },
             LoginStep::CustomBaseUrl,
             LoginStep::KeyInput,
+            LoginStep::ReplaceOrAdd { cursor: 0 },
+            LoginStep::AddName,
             LoginStep::Verifying,
             LoginStep::OAuthBrowserWaiting { url: None },
             LoginStep::OAuthDeviceWaiting {
@@ -647,7 +780,7 @@ mod tests {
         }
         // A verification result for a wizard that is not waiting is dropped.
         let mut wizard = LoginWizard::for_provider(CUSTOM);
-        assert!(wizard.verified(&Ok(())).is_none());
+        assert!(wizard.verified(&Ok(()), false).is_none());
     }
 
     #[test]

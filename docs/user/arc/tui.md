@@ -20,7 +20,7 @@ The header reads the probe: `loop ● running (pid <n>)` while any loop holds th
 
 ## The ticker and the log
 
-`loop.log` is the loop's own output, one line per printed line with an RFC 3339 UTC timestamp. The newest transition line the file gained since the TUI opened is the one-line ticker above the footer's key hints. `L` opens a view of the last 500 lines over the page and closes it again; `j`/`k` (or `↑`/`↓`) scroll it, `f` goes to its end, and `Esc` closes it (see [Leaving and going back](#leaving-and-going-back)). The view follows new lines while it is scrolled to the bottom. A repository with no `loop.log` shows `no loop log yet`.
+`loop.log` is the loop's own output, one line per printed line with an RFC 3339 UTC timestamp. The newest transition line the file gained since the TUI opened is the one-line ticker above the footer's key hints. `L` opens a view of the last 500 lines over the page, filling the body below the header and closing it again; it shows the last lines that fit, the newest at the bottom, and `j`/`k` (or `↑`/`↓`) scroll it, `f` goes to its end, and `Esc` closes it (see [Leaving and going back](#leaving-and-going-back)). The view follows new lines while it is scrolled to the bottom. A repository with no `loop.log` shows `no loop log yet`.
 
 ## The plans page
 

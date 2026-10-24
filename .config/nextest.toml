@@ -41,7 +41,7 @@ test-group = "pty"
 # here no longer names a test. One comment block per cause group, in the order the
 # filter lists the groups (blank lines in the expression separate them):
 #
-# 1. Scratch trees under `/tmp` (231 names). The sandbox only writes inside the
+# 1. Scratch trees under `/tmp` (232 names). The sandbox only writes inside the
 #    workspace, so `create_dir_all("/tmp/…")` is denied with EPERM. The exec and
 #    control suites use `/tmp` on purpose: `$TMPDIR` sits inside the workspace and
 #    its long path breaks the Unix sockets they open (groups 4 and 5).
@@ -90,6 +90,7 @@ not (
   | test(=a_header_value_never_leaks_into_errors)
   | test(=a_header_without_an_equals_sign_is_a_usage_error_that_does_not_echo_it)
   | test(=a_headless_exec_mounts_no_orchestration_tools)
+  | test(=a_key_switch_notice_goes_to_stderr_in_jsonl_mode)
   | test(=a_killed_session_resumes_without_replaying_the_tool)
   | test(=a_level_budget_clamps_to_max_tokens)
   | test(=a_local_base_url_needs_no_key_and_sends_no_authorization)

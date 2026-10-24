@@ -206,9 +206,11 @@ fn after_retries(error: ModelError, retries: u32) -> ModelError {
         ModelError::Unavailable {
             message,
             retry_after,
+            status,
         } => ModelError::Unavailable {
             message: format!("{message} (after {retries} {noun})"),
             retry_after,
+            status,
         },
         ModelError::Transport(message) => {
             ModelError::Transport(format!("{message} (after {retries} {noun})"))

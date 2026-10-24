@@ -137,6 +137,7 @@ impl Model for ScriptedModel {
             Some(Reply::Unavailable(message, retry_after)) => Err(ModelError::Unavailable {
                 message,
                 retry_after,
+                status: None,
             }),
             Some(Reply::Protocol(message)) => Err(ModelError::Protocol(message)),
             None => Err(ModelError::Protocol("script exhausted".into())),
