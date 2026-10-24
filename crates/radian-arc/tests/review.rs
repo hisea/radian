@@ -2676,6 +2676,72 @@ fn a_blocking_item_near_an_unfixed_previous_item_still_blocks() {
     );
 }
 
+/// The hole an external review found (2026-10-24): the first review misses a `critical`
+/// problem in a file the rework does not touch; the rework changes another file, and the
+/// second review finds the problem far from the increment and far from the previous item. A
+/// `critical` item blocks in every round. Mutation: let the window rule move it → the stage
+/// passes and the task reaches `awaiting_human`.
+#[test]
+fn a_critical_item_far_from_the_rework_and_the_previous_items_still_blocks() {
+    let fixture = Fixture::new("review-critical-far");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "review-critical-far-first",
+        &[review_object_message(
+            "the change adds old.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // The rework adds another file and leaves old.txt alone; the review now finds a critical
+    // problem 29 lines from its previous item.
+    fixture.rework(&first, "new.txt", "new\n");
+    let fake = FakeReview::new(
+        "review-critical-far-second",
+        &[review_object_message(
+            "the rework adds new.txt",
+            &[review_item(
+                "critical",
+                "old.txt",
+                30,
+                "a permission bypass",
+            )],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.review_pre_existing, Some(0));
+    assert_eq!(
+        verdict.review.expect("a report").blocking,
+        vec![ReviewItem {
+            level: Some("critical".to_owned()),
+            file: Some("old.txt".to_owned()),
+            line: Some(30),
+            text: "a permission bypass".to_owned(),
+            pre_existing: false,
+        }]
+    );
+}
+
 /// A main change merged in between is not part of the increment: the task's own diff leaves it
 /// out, so a blocking item on it is pre-existing. Mutation: use `previous..sha` alone as the
 /// increment → the stage blocks on main's file.
@@ -3150,6 +3216,80 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
     assert!(
         task.body.contains(&verdict_path.display().to_string()),
         "the verdict path is in the brief: {}",
+        task.body
+    );
+}
+
+/// A demoted `major` item keeps its level: a rework round moves it to `suggestions` with
+/// `pre_existing`, the stage passes, and the merged task's follow-up brief lists it as
+/// `[major] ...`. Mutation: drop the level of a moved item → the brief loses `[major]`.
+#[test]
+fn a_demoted_major_item_reaches_the_followup_at_its_level() {
+    let fixture = Fixture::new("followup-pre-existing-major");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "followup-pre-existing-major-first",
+        &[review_object_message(
+            "the change adds old.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // The rework changes another file; the second review's `major` item is 29 lines from the
+    // previous one, so the window rule moves it as pre-existing.
+    fixture.rework(&first, "new.txt", "new\n");
+    let fake = FakeReview::new(
+        "followup-pre-existing-major-second",
+        &[review_object_message(
+            "the rework adds new.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                30,
+                "this line is still wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.review_pre_existing, Some(1));
+    assert_eq!(
+        verdict.review.expect("a report").suggestions,
+        vec![ReviewItem {
+            level: Some("major".to_owned()),
+            file: Some("old.txt".to_owned()),
+            line: Some(30),
+            text: "this line is still wrong".to_owned(),
+            pre_existing: true,
+        }]
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
+    let followup = merged.followup.expect("a follow-up task").task;
+    let task = fixture.store.load_task(&followup).expect("the task").item;
+    assert!(
+        task.body
+            .contains("[major] old.txt:30 this line is still wrong"),
+        "the demoted item lost its level: {}",
         task.body
     );
 }
