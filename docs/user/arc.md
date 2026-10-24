@@ -11,7 +11,7 @@ This build has the storage layer, the subcommands that read and write it: `init`
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and `run`.
 `radian arc run` is the scheduling loop, and a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc-tui`](arc-tui.md)).
 
-This page holds the `radian arc` commands; the gate and its failures are in [`arc-gate`](arc-gate.md), the TUI in [`arc-tui`](arc-tui.md), and the files arc keeps are in [`arc-files`](arc-files.md).
+This page holds the `radian arc` commands; the gate and its failures are in [`arc-gate`](arc-gate.md), the lead's MCP server in [`arc-mcp`](arc-mcp.md), the TUI in [`arc-tui`](arc-tui.md), and the files arc keeps are in [`arc-files`](arc-files.md).
 
 ## `radian arc`
 
@@ -109,8 +109,9 @@ An `--after` id must name a task of the same plan or a task whose state is `done
 
 Lists plans, each with its tasks in the plan's order.
 Plans print in claim order, the order `radian arc run` serves them in: the higher `priority` first (`P0` before `P1`), then the plan id from small to large.
-Each plan's header line shows its id, its `status`, its `auto` level, its `priority`, its progress as `<merged>/<tasks> merged`, and its title.
+Each plan's header line shows its id, its `status`, its `auto` level, its `priority`, its progress as `<merged>/<tasks> merged`, its `total_cost_usd` (the sum of its tasks' totals), and its title.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
+A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage, reset by `reset-budget`); its `total_cost_usd` also includes every review and is never reset.
 
 By default the finished work is left out, so the work in progress is what you see:
 
@@ -137,12 +138,14 @@ When everything is hidden, that line is the whole output. Nothing hidden means n
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
-The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `changed_outside_arc`, and `tasks`.
-Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
+The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `changed_outside_arc`, and `tasks`.
+Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
 
 ## `radian arc show <ID> [--json]`
 
 Prints one plan or task: every field, whether it changed outside arc, then its body.
+
+A plan prints `cost_usd` and `total_cost_usd` beside its other fields: the first is the sum of its tasks' `cost_usd` and the number its budget compares, the second is the sum of their totals. Both are computed when the plan is read and are not stored in the plan file. A task prints both of its own numbers.
 
 The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see [Plan and task files](arc-files.md#plan-and-task-files)).
 `list --plan <id>` always reads the plan.
@@ -162,6 +165,27 @@ For a task with a review verdict, the text form also prints `review_verdict`, `r
 The text form prints `session_id` after `attempt_id`.
 An id that names nothing exits `1`.
 
+### The `after` chain
+
+A task's `after` lists the tasks that must be merged before it is claimed (see [Plan and task files](arc-files.md#plan-and-task-files)).
+`show <task>` prints two more fields after `after`:
+
+- `waits_on`: every task in the `after` chain, transitively, nearest first, each as `<id> <state>.<phase>`; `-` when it waits on nothing.
+- `blocks`: every other task whose `after` chain contains this task, transitively, nearest first, in the same form; `-` when no task waits on it.
+
+The walk is breadth-first over `after` and visits each task once.
+An id that names no task is printed as `<id> missing`; only a hand-edited file that was adopted can hold one, because `add task` and the MCP `add_task` tool refuse an `after` id that names no task.
+
+A task in `waits_on` that can never become `done.merged` stops the chain for good.
+That is a `failed.*` task, a task whose plan is `cancelled` and that is not merged, or an id that names no task.
+`show` prints the first such task as `never_runs: <id> <state>.<phase>` (or `never_runs: <id> missing`).
+An `after` cycle, possible only through an adopted hand edit, is printed once as `cycle: <id> -> … -> <id>`, and the walk stops there instead of looping.
+A plan's `show` has none of these fields.
+
+The JSON object of a task holds `waits_on` and `blocks` too: arrays of `{"id": string, "state": string|null, "phase": string|null}`, nearest first, with `null` state and phase for an id that names no task.
+It also holds `never_runs` (that object, or `null`) and `cycle` (an array of ids that starts and ends with the same id, or `null`).
+The MCP `show` tool returns the same object.
+
 ## `radian arc adopt <ID>`
 
 Every file arc writes is recorded with a content hash in the ledger.
@@ -176,7 +200,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 
 It refuses with exit `3` when the id names both a plan and a task (see [Plan and task files](arc-files.md#plan-and-task-files)), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
-- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `auto_rework`, `retry_count`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
+- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `auto_rework`, `retry_count`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
 - a plan: `status`, `auto`, `priority`.
 
 A file that already matches the ledger is a no-op and prints so.
@@ -204,6 +228,37 @@ A task confirm refuses with exit `3` for a task in any state other than `todo.pr
 A refusal writes nothing.
 
 It prints `<plan> confirmed` or `<task> todo.ready`.
+
+### Trying it first: `--dry-run`
+
+| Flag | Value | What it does |
+|---|---|---|
+| `--dry-run` | — | Run every check the confirm runs, print what it would do, and write nothing. |
+
+`radian arc confirm <ID> --dry-run` runs every check the real `confirm` runs, in the same order, and refuses exactly as `confirm` would: the same message and the same exit code.
+It writes nothing: no plan or task file and no ledger entry.
+It checks `state.lock` only to find out whether another process holds it, and releases it; it does not create the lock file when it is missing, so no lock is left behind.
+
+On success it prints these lines and exits `0`:
+
+- first, the line the real confirm would print, prefixed `would: `: `would: TK0002-two todo.ready` or `would: PL0001-first confirmed`;
+- one `<id> waits on: <chain>` line per task the confirm would make `todo.ready` — the task itself, or a plan's `todo.ready` tasks in the plan's order — with the same entries as `show`'s [`waits_on`](#the-after-chain), or `<id> waits on: nothing`;
+- a `never runs: <id> <state>.<phase>` line for each such task whose chain cannot finish (the same test as `show`'s `never_runs`), and a `cycle: <id> -> … -> <id>` line for a cycle;
+- one `<id> queue: <n> of <m> todo.ready` line per such task: its place among every `todo.ready` task plus itself, in claim order (the plan's `priority`, the plan id, the task's order in the plan).
+
+When the next pass would not claim the task, the queue line ends with the reason in parentheses, in the words `radian arc run`'s summary uses: `(waiting for <id> to merge)`, or ``(waiting for you to start it (`auto` is `off`))``.
+The place is where the task would stand at that moment, not a promise: another task may be claimed or merged before it.
+
+```text
+would: TK0002-two todo.ready
+TK0002-two waits on: TK0001-one todo.ready
+TK0002-two queue: 2 of 2 todo.ready (waiting for TK0001-one to merge)
+```
+
+`--dry-run` exits `1` for an id that names nothing, `2` for a malformed id, `3` for a state that does not allow the confirm (an empty plan, an already confirmed plan, a task that is not `todo.proposed`, a file changed outside arc, a cancelled plan, a rejected worker line), and `4` when another process holds `state.lock`.
+
+A real `confirm` prints the same `never runs:` and `cycle:` lines on stderr after its line when they apply.
+They are warnings: the confirm still happens and still exits `0`.
 
 ## `radian arc auto <PLAN> <LEVEL>`
 
@@ -330,6 +385,7 @@ The wrapper enforces the attempt's limits itself, so they hold even after the pr
 
 - no new line in `runs/<task>/attempts/<attempt id>/result.jsonl` for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the worker's process group;
 - `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the wrapper started does the same; this clock also bounds the wrapper's own git steps, so a fetch or a push still running at the limit is stopped the same way.
+- a fetch, a push or an `ls-remote` is also bounded by [`limits.git_remote_timeout_secs`](arc-files.md#configtoml); whichever of it and the attempt's remaining wall time is shorter applies, and the call, with everything it started, is killed when it runs out.
 - after `[limits] cancel_grace_secs` the worker gets SIGKILL.
 
 A limit of `0` means no limit for that timer.
@@ -398,6 +454,8 @@ A plan id runs these steps in this order:
 
 A task a gate is running for is stopped as the task form stops it.
 If a task's cancel leaves it `doing.reconciling`, the plan still becomes `cancelled`; the next `radian arc run` pass ends the task at `failed.cancelled`, after the same process check the task form makes (see [Reconcile](arc-gate.md#reconcile)).
+That pass waits no second grace: the plan form already sent the wrapper its SIGTERM, so the pass checks the wrapper's pid and start time and kills it at once when it is still there.
+A task the lead adds to the plan while these steps run is cancelled too: the plan's tasks are read once more after the status becomes `cancelled`, and a task added after the first read is ended by the task form's rules.
 A plan that is already `cancelled` is refused with exit `3`.
 
 `cancel` prints one `<task> <state>.<phase>` line for each task it changed, in the plan's task order, then `<plan> cancelled`:
@@ -417,15 +475,15 @@ A cancelled plan is final.
 
 ## `radian arc reset-budget <ID>`
 
-`reset-budget` returns budget-paused tasks to `todo.ready` and resets the counted cost to zero from now on.
+`reset-budget` returns budget-paused tasks to `todo.ready` and resets the counted cost, `cost_usd`, to zero from now on. The task's `total_cost_usd` does not change: it is what the task has spent in total, not the budget counter.
 The id names one plan or task; an id that names both is refused with exit `3` (see [Plan and task files](arc-files.md#plan-and-task-files)).
 
 | Argument | Value | What it does |
 |---|---|---|
 | `<ID>` | a plan or task id | Required. A plan id resets every paused task of that plan. |
 
-- Task form: the task must be `todo.paused_budget`; it moves to `todo.ready` and its `cost_usd` becomes `0`. Any other state is refused (`3`).
-- Plan form: every task of the plan that is `todo.paused_budget` moves to `todo.ready`; every task of the plan gets `cost_usd` `0`, because the plan's budget counts all of them. The plan's `auto` level is not changed.
+- Task form: the task must be `todo.paused_budget`; it moves to `todo.ready`, its `cost_usd` becomes `0`, and its `total_cost_usd` stays. Any other state is refused (`3`).
+- Plan form: every task of the plan that is `todo.paused_budget` moves to `todo.ready`; every task of the plan gets `cost_usd` `0`, because the plan's budget counts all of them. `total_cost_usd` stays on every task. The plan's `auto` level is not changed.
 
 A `cancelled` plan is refused with exit `3`, in the plan form and in the task form.
 
@@ -466,7 +524,8 @@ A reverify claims a new attempt without a worker:
 The new attempt's verdicts are its own: an earlier attempt's verdict is not reused and no verdict is ever rewritten.
 The remote `work/<task>` must still equal `head_sha`; when it moved, `reverify` exits `3` with the moved-branch reason and the task stays in `review.verifying`, as verification does.
 
-A reverify attempt is not a retry: it changes neither `retry_count` nor `max_attempts`, costs nothing, and is not an automatic rework (`auto_rework` does not change).
+A reverify attempt is not a retry: it changes neither `retry_count` nor `max_attempts` and is not an automatic rework (`auto_rework` does not change).
+It runs no worker, so no worker cost is added, but the `review` stage it runs counts: its cost is added to the task's `cost_usd` and `total_cost_usd` when the gate's verdicts are applied, and it can pause the task in `todo.paused_budget` (see [`limits.max_cost_usd`](arc-files.md#configtoml)).
 
 It prints the claim's line and then the verification's:
 
@@ -620,6 +679,11 @@ With `--watch`, the summary is printed only when it differs from the summary the
 A pass that returns an error prints one `radian arc: <message>` line and the loop waits its interval and runs the next pass; the lock and every state file stay as they are.
 A one-shot `run` prints the same line and exits `1` instead.
 
+A repeated error stops the loop: when three passes in a row return the same error text, it prints one line, `radian arc: the same error three passes in a row; stopping (fix it and start the loop again)`, stops the gates the way a stop signal does (see below; workers are left alone), releases `runner.lock`, and exits `1`.
+A pass that succeeds, or a different error, starts the count again.
+A one-shot `run` is unchanged.
+The number three is a constant, not a configuration key.
+
 On SIGINT or SIGTERM the loop starts no new worker and no new gate.
 A Ctrl-C in the terminal reaches the loop only: each worker and each gate runs in its own process group, and both treat SIGINT exactly as SIGTERM.
 A running worker is left alone: it is a separate process with its own limits and record, and the next pass (or the next `run`) collects it.
@@ -630,85 +694,7 @@ It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or
 
 ## `radian arc mcp`
 
-`mcp` serves the lead's tools over standard input and output, and exits `0` when its client closes the connection.
-A client that closes before the handshake finishes exits `1` and says which handshake request was cut off.
-Like every subcommand except `init` it refuses without setup (exit `3`) and names `radian arc init`.
-
-The server speaks MCP over stdio and is meant to be started by a lead, not by hand.
-It reads the repository that contains its working directory.
-Set `cwd` so it works whatever directory the session started in: in a project file at the repository root, `"cwd": "."` is that root (a relative `cwd` resolves against the file that declares it).
-Without `cwd`, register it from inside the repository, or give that directory as its working directory.
-
-Register it with Claude Code:
-
-```sh
-claude mcp add arc -- radian arc mcp
-```
-
-Or add it to a project `.mcp.json`, in the shared form every MCP client reads:
-
-```json
-{
-  "mcpServers": {
-    "arc": {"command": "radian", "args": ["arc", "mcp"], "cwd": "."}
-  }
-}
-```
-
-Radian's own form is the same server with an `id`:
-
-```json
-{
-  "servers": [
-    {"id": "arc", "command": "radian", "args": ["arc", "mcp"], "cwd": "."}
-  ]
-}
-```
-
-See `mcp` for both forms and how a project file is trusted.
-A tool from a project `.mcp.json` asks before running under the `workspace` tier, like any other MCP tool.
-
-The server takes only `state.lock`, never `runner.lock`, so the lead can add tasks while a scheduling loop runs.
-Every tool is one of the store's transactions: a plan or task file that changed outside arc is refused with that reason, and the tool call fails without writing anything.
-
-### The tools
-
-| Tool | Parameters | Result |
-|---|---|---|
-| `add_plan` | `slug` (string, required), `title` (string, required), `request` (string, required) | `{"id": "<plan id>"}` |
-| `add_task` | `plan` (string, required), `slug` (string, required), `title` (string, required), `brief` (string, required), `after` (list of ids, optional), `allow_noop` (boolean, optional, default `false`), `extra_stages` (list of stage names, optional) | `{"id": "<task id>"}` |
-| `update_plan` | `plan` (string, required), `title` (string, optional), `request` (string, optional), `change_record` (string, optional) | the plan, as `radian arc show <plan> --json` |
-| `add_rework` | `task` (string, required), `brief` (string, required) | the task, as `radian arc show <task> --json` |
-| `list` | `plan` (string, optional: only this plan) | the JSON array `radian arc list --json` prints |
-| `show` | `id` (string, required) | the JSON object `radian arc show --json` prints |
-
-There is no tool to confirm a plan or a task, start a task, merge, reject, change `auto`, or approve: those are yours (see `confirm`, `auto`, and `pause` above).
-
-`add_plan` creates a `draft` plan with `auto` `off`.
-The `slug` rule and the title rule are the ones on this page; an empty title is refused.
-
-`add_task` depends on the plan's state. On a `draft` plan it keeps the rules of `radian arc add task`, and the new task is `todo.ready`: it is confirmed with the plan. On a `confirmed` plan the new task is `todo.proposed`, and it waits for you to confirm it with `radian arc confirm <task>`; the plan keeps its `status` and `auto`. A `cancelled` plan is refused, and the error names the status. In both cases each `after` id must name a task of the same plan or a task whose state is `done`, and each `extra_stages` name must be a gate stage.
-
-`update_plan` depends on the plan's state:
-
-- on a `draft` plan, `title` and `request` replace the plan's; a `change_record` is refused (`3`);
-- on a `confirmed` plan, `title` and `request` are refused (`3`) because the request text is never rewritten, and `change_record` is required: it is appended under the plan's `## Change records` heading with the UTC time, and the plan returns to `draft` with `auto` `off`, keeping its tasks' state. New tasks can be added again.
-
-A call with no field at all is refused: it would change nothing.
-A `cancelled` plan is refused by `update_plan`, and the error names the status.
-
-`add_rework` applies only to a task whose state is `review` (any phase); anything else is refused (`3`).
-A task of a `cancelled` plan is refused, and the error names the status.
-The brief is appended under `## Rework <n>`, where `n` is the task's `attempt` plus one, and the task moves to `todo.ready`.
-It does not change `attempt`: the attempt number belongs to the claim that starts the next run.
-
-### Tool errors
-
-A tool that cannot do its work answers with `isError: true` and one text line: the reason.
-That line is the same text the CLI prints for the same refusal, so a plan or task that changed outside arc says `changed outside arc` and names `radian arc adopt`.
-An argument of the wrong type, a missing required argument, and an argument the tool does not take are errors that name the argument.
-The arc exit codes below belong to the CLI; a tool error carries no code.
-An id that names both a plan and a task is a tool error that names both files (see [Plan and task files](arc-files.md#plan-and-task-files)); the CLI exits `3` for it.
+The lead's MCP server: registering it, its tools and its tool errors are in [`arc-mcp`](arc-mcp.md).
 
 ## Exit codes
 
@@ -727,7 +713,7 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
-A bare `radian arc` opens the TUI; the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md).
+A bare `radian arc` opens the TUI; the plans page lists one of four views (`active` by default, then `all`, `done` and `cancelled`, cycled with `f`), and the plans, task and merge pages, every mark and key, and the owner's actions are in [`arc-tui`](arc-tui.md). The plans page's `x` cancels the selected task or plan, `c` confirms a draft plan or a proposed task (depending on the focused column), and `+`/`-` move the selected plan's priority; the page draws `P<n>` with the plan's id and in the frame label.
 
 ## Not built yet
 

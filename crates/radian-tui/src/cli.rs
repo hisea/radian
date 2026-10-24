@@ -586,6 +586,10 @@ enum ArcCommand {
         /// The plan id, or the id of a `todo.proposed` task.
         #[arg(value_name = "ID")]
         id: String,
+        /// Run every check the confirm runs, print what it would do, and write nothing. It
+        /// refuses with the same message and exit code as a real confirm.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Set a plan's auto level. Only a confirmed plan can use a level other than `off`.
@@ -773,7 +777,7 @@ impl ArcCommand {
             ArcCommand::List { plan, all, json } => ArcRun::List { plan, all, json },
             ArcCommand::Show { id, json } => ArcRun::Show { id, json },
             ArcCommand::Adopt { id } => ArcRun::Adopt { id },
-            ArcCommand::Confirm { id } => ArcRun::Confirm { id },
+            ArcCommand::Confirm { id, dry_run } => ArcRun::Confirm { id, dry_run },
             ArcCommand::Auto { plan, level } => ArcRun::Auto { plan, level },
             ArcCommand::Priority { plan, priority } => ArcRun::Priority { plan, priority },
             ArcCommand::Pause { plan } => ArcRun::Pause { plan },
@@ -2239,8 +2243,9 @@ mod tests {
 
     // ---- the arc manual --------------------------------------------------------------
     //
-    // The arc manual is three pages: `arc.md` (the commands), `arc-gate.md` (the gate and
-    // failures) and `arc-files.md` (the config, the plan and task files, the layout).
+    // The arc manual is four pages: `arc.md` (the commands), `arc-gate.md` (the gate and
+    // failures), `arc-mcp.md` (the lead's MCP server) and `arc-files.md` (the config, the plan
+    // and task files, the layout).
     // Every check locates its table by the heading it sits under and the page that holds
     // it. The heading is the anchor: `arc_tables(doc, "arc.md", "## `radian arc show")` is
     // the only way a check reads rows, so an unrelated table elsewhere on any page can
@@ -2341,6 +2346,11 @@ mod tests {
     /// `docs/user/arc-gate.md`, the page the gate and failure sections are checked against.
     fn arc_gate_md() -> String {
         arc_page("arc-gate.md")
+    }
+
+    /// `docs/user/arc-mcp.md`, the page the lead's MCP server is checked against.
+    fn arc_mcp_md() -> String {
+        arc_page("arc-mcp.md")
     }
 
     /// `docs/user/arc-files.md`, the page the config and file sections are checked against.
@@ -2980,6 +2990,7 @@ mod tests {
             attempt_id: Some("0001-b-1".to_owned()),
             token: Some("a-token".to_owned()),
             cost_usd: Some(0.5),
+            total_cost_usd: Some(0.75),
             auto_rework: 2,
             retry_count: 1,
             allow_noop: false,
@@ -3012,18 +3023,21 @@ mod tests {
     }
 
     /// Every MCP tool of `radian arc mcp` and every parameter of every tool appears in the
-    /// table under `### The tools`, with the required or optional word the schema declares.
+    /// table under `### The tools` on `arc-mcp.md`, with the required or optional word the
+    /// schema declares.
     /// The source is `radian_arc::mcp::TOOLS`, the same list `tools/list` answers from, so a
     /// renamed tool or parameter fails here and a tool added without a page entry fails too.
     /// Mutation: drop one tool from the page's table → this fails naming it.
     #[test]
-    fn every_mcp_tool_appears_in_arc_md() {
-        let doc = arc_md();
-        let table = arc_table(&doc, "arc.md", "### The tools");
+    fn every_mcp_tool_appears_in_arc_mcp_md() {
+        let doc = arc_mcp_md();
+        let table = arc_table(&doc, "arc-mcp.md", "### The tools");
         assert!(!radian_arc::mcp::TOOLS.is_empty(), "the server has tools");
         for tool in radian_arc::mcp::TOOLS {
-            let row = row_with_first_cell(&table, &format!("`{}`", tool.name))
-                .unwrap_or_else(|| panic!("arc.md's tools table has no row for `{}`", tool.name));
+            let row =
+                row_with_first_cell(&table, &format!("`{}`", tool.name)).unwrap_or_else(|| {
+                    panic!("arc-mcp.md's tools table has no row for `{}`", tool.name)
+                });
             let parameters = row
                 .get(1)
                 .unwrap_or_else(|| panic!("`{}`'s row has no Parameters cell", tool.name));

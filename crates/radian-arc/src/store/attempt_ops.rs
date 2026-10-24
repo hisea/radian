@@ -338,23 +338,50 @@ pub fn write_signal(store: &Store, task: &str, attempt: u32, class: Class) -> Re
 
 // ---- claim ---------------------------------------------------------------------------
 
-/// Claims one task (decision 6): `todo.ready` or `todo.retry_wait` to `doing.starting` in one
-/// transaction. The owner's `start` accepts either; a `todo.retry_wait` task is claimed without
-/// consulting `retry_at`, because the backoff exists for the scheduling loop, which itself
-/// claims only `todo.ready` (decision 9).
+/// Claims one task for the owner's `start` (decision 6): `todo.ready` or `todo.retry_wait` to
+/// `doing.starting` in one transaction. A `todo.retry_wait` task is claimed without consulting
+/// `retry_at`, because the backoff exists for the scheduling loop (decision 9).
 ///
 /// Refused (exit 3) when the task is in any other state or phase, its plan is not `confirmed`,
 /// an `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
 pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
+    claim_by(store, task_id, ClaimBy::Owner)
+}
+
+/// Who claims a worker attempt. The allowed phases differ (decision 9): the owner's `start`
+/// may claim a task that is backing off, a scheduling pass may not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimBy {
+    /// `radian arc start`: `todo.ready` and `todo.retry_wait` are both claimable, and
+    /// `retry_at` is not consulted.
+    Owner,
+    /// A scheduling pass: only `todo.ready` is claimable. The phase is re-read under the lock,
+    /// so a task that entered `todo.retry_wait` after the pass took its snapshot keeps its
+    /// backoff.
+    SchedulingLoop,
+}
+
+/// [`Claim`] with the caller's [`ClaimBy`] rules (decision 9).
+///
+/// Refused (exit 3) when the task is in any other state or phase, its plan is not `confirmed`,
+/// an `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
+pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Error> {
     let _lock = store.lock_state()?;
     let loaded = store.load_task(task_id)?;
     require_unchanged(task_id, loaded.changed_outside_arc)?;
     let mut task = loaded.item;
-    let claimable =
-        task.state == TaskState::Todo && matches!(task.phase.as_str(), "ready" | "retry_wait");
+    let claimable = task.state == TaskState::Todo
+        && match by {
+            ClaimBy::Owner => matches!(task.phase.as_str(), "ready" | "retry_wait"),
+            ClaimBy::SchedulingLoop => task.phase == "ready",
+        };
     if !claimable {
+        let allowed = match by {
+            ClaimBy::Owner => "only a `todo.ready` or `todo.retry_wait` task starts",
+            ClaimBy::SchedulingLoop => "only a `todo.ready` task starts from the scheduling loop",
+        };
         return Err(Error::Refused(format!(
-            "task `{task_id}` is `{}.{}`; only a `todo.ready` or `todo.retry_wait` task starts",
+            "task `{task_id}` is `{}.{}`; {allowed}",
             task.state.as_str(),
             task.phase
         )));
@@ -745,10 +772,10 @@ pub fn apply(
             Next::Irrecoverable => Some("the session cannot continue".to_owned()),
             _ => None,
         });
-        // Every applied attempt adds its cost to the task's running total (decision 12), so a
-        // budget that ran out while the attempt ran pauses the task even when it failed
-        // otherwise retryable.
-        task.cost_usd = Some(task.cost_usd.unwrap_or(0.0) + cost.cost_usd);
+        // Every applied attempt adds its cost to the task's counters (decision 12): the
+        // budget counter and the total that `reset-budget` leaves alone. A budget that ran
+        // out while the attempt ran pauses the task even when it failed otherwise retryable.
+        task.add_cost(cost.cost_usd);
         let reached_verification = matches!(next, Next::Verifying);
         let mut retry_at = None;
         let mut pause_plan = false;
@@ -992,6 +1019,72 @@ impl BudgetCheck {
         self.plan_limit
             .is_some_and(|limit| self.plan_total + attempt_cost >= limit)
     }
+}
+
+/// Charges one attempt's `review` stage cost to the task and checks the budgets (ADR 0048
+/// decision 12). `cost_usd` is the summed `review_cost_micros` of the attempt's review verdict
+/// in US dollars; a review that reported no cost charges 0 and is still checked.
+///
+/// When the task's own limit (its `max_cost_usd`, else `[limits] max_cost_usd`) or the plan's
+/// `max_cost_usd` is reached, the task moves to `todo.paused_budget` in the same transaction,
+/// the caller writes no automatic rework, and a plan budget also sets the plan's `auto` to
+/// `off`. Returns whether the task was paused.
+///
+/// The charge is made only while the task is `review.verifying`: once the verdicts are
+/// applied the task has moved, so a second application charges nothing.
+///
+/// # Errors
+///
+/// The task file changed outside arc, or a file could not be read or written.
+pub fn charge_review_cost(store: &Store, task_id: &str, cost_usd: f64) -> Result<bool, Error> {
+    let (paused, pause_plan) = {
+        let _lock = store.lock_state()?;
+        let loaded = store.load_task(task_id)?;
+        require_unchanged(task_id, loaded.changed_outside_arc)?;
+        let mut task = loaded.item;
+        if task.state != TaskState::Review || task.phase != "verifying" {
+            return Ok(false);
+        }
+        task.add_cost(cost_usd);
+        let config = store.config()?;
+        let task_limit = task.max_cost_usd.or(config.limits.max_cost_usd);
+        let task_reached = task_limit.is_some_and(|limit| task.cost_usd.unwrap_or(0.0) >= limit);
+        // The plan budget counts every task of the plan; this task's new cost replaces the one
+        // on disk. A plan file or a sibling task that cannot be read counts as no cost, as the
+        // attempt-time check does.
+        let plan = store.load_plan(&task.plan)?.item;
+        let other_costs: f64 = plan
+            .tasks
+            .iter()
+            .filter(|id| id.as_str() != task_id)
+            .map(|id| {
+                store
+                    .load_task(id)
+                    .map(|task| task.item.cost_usd.unwrap_or(0.0))
+                    .unwrap_or(0.0)
+            })
+            .sum();
+        let plan_reached = plan
+            .max_cost_usd
+            .is_some_and(|limit| other_costs + task.cost_usd.unwrap_or(0.0) >= limit);
+        let paused = task_reached || plan_reached;
+        if paused {
+            task.state = TaskState::Todo;
+            task.phase = "paused_budget".to_owned();
+            task.retry_at = None;
+        }
+        let version = store.next_version(Kind::Task, task_id);
+        store.write_item(Kind::Task, task_id, &task.to_text(), version)?;
+        (paused, plan_reached)
+    };
+    if pause_plan {
+        let plan_id = store.load_task(task_id)?.item.plan;
+        let _ = store.change_plan(&plan_id, |plan| {
+            plan.auto = "off".to_owned();
+            Ok(())
+        });
+    }
+    Ok(paused)
 }
 
 // ---- retries and reset-budget --------------------------------------------------------

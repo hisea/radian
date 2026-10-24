@@ -15,6 +15,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 - arc fetches `[repository] remote` first.
   The remote's `work/<task>` must still be `head_sha`.
   When it differs, arc records the reason in the attempt's `review.json` and the task stays in `review.verifying`; `show` prints the reason.
+  The fetch is a git call that talks to a remote, so [`limits.git_remote_timeout_secs`](arc-files.md#configtoml) bounds it; a fetch that runs out fails the gate with `git fetch timed out after <n> s`.
 - The stages are the configured profile's (`gate.profile`, then `gate.profiles.<name>.stages`), in order, plus the task's `extra_stages`.
   `human` is your approval and does not run here.
   When the profile lists both `commands` and `review`, those two start at the same time; every other stage keeps its order.
@@ -48,6 +49,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage; the suggestions of every review round of a merged task become its follow-up task (see [The review's follow-up](#the-reviews-follow-up)).
   A blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items, each as `[level] path:line text` with the parts an item does not have left out. An item whose `text` starts with a tag that repeats its own level (`[major]`, any case, spaces allowed) prints the level once: the leading tag is dropped from the text. A `text` that starts with another tag keeps it, and the verdict on disk is never rewritten.
   No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
+  A gate that is started again for the same attempt does not reuse a review session whose journal exists: the stage names the run `<attempt id>-review-<run>-<k>` with the smallest free `k`, writes its logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log`, and `review_session_ids` lists the ids it used, so every run's session is found.
   The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros`, `review_settings` (`round`, `first` or `rework`; the `exec_args` source key; `timeout_secs` and the key it came from) and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
 - `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), and `review_timeout` (the last run hit `[gate.review] timeout_secs`).
 - When the profile lists both `commands` and `review`, the round's outcome follows the profile order.
@@ -97,7 +99,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 A review is a rework round when an earlier attempt of the same task has a review verdict for a `sha` other than the commit under review; the newest such verdict is the previous review.
 A review of the same commit as the previous review (a `reverify` of an unchanged head) gets the first review's prompt: the full diff, and no item is pre-existing.
 It reads the `[gate.review]` settings, not `[gate.review.first]`, because an earlier review verdict exists, so it is not a first review.
-The first review of a task is unchanged.
+A genuine first review, one with no earlier verdict at all, keeps the full-diff prompt and the `[gate.review.first]` settings.
 
 A rework round's prompt holds the brief, the previous review's blocking items, the commit list `<previous sha>..<sha>`, and the increment instead of the full diff.
 It asks the session to check that each previous blocking item is fixed, to review the increment, and to list every problem it finds; the session can read the files.
@@ -165,7 +167,7 @@ With `merge-main` on, the next attempt starts mid-merge, so arc writes its brief
 The heading is `## Rework <n> (conflict with main)`, with the lead's `add_rework` numbering.
 The text names the main commit (short sha) and the stage, lists the conflicted paths, says the next attempt starts mid-merge, and asks the worker to resolve the conflict keeping both sides' intent, commit the merge, rebuild, run the touched tests, and change nothing else.
 Every other reason, and a conflict without `merge-main`, keeps `review.rework_pending`; a `reverify` conflict takes the automatic path above.
-It never raises `auto_rework`, never pauses the plan, and never sends the task to `failed.exhausted`: a conflict rework is not a retry, and it sets the task's `retry_count` back to `0`.
+It never raises `auto_rework`, never pauses the plan, and never sends the task to `failed.exhausted` by itself: a conflict rework is not a retry, but it keeps the task's `retry_count` instead of resetting it, so a worker that keeps failing behind repeated conflict reworks still uses up `max_attempts`.
 
 A run of conflicts is bounded by [`limits.max_conflict_rework`](arc-files.md#configtoml) (default `3`).
 It is how many conflict reworks arc writes in a row: while it has written fewer than the limit, the conflict gets the brief above; once it has written the limit, arc writes no brief and the task stays in `review.rework_pending`.
@@ -214,22 +216,22 @@ commands = [
 | `scripts/arc-gate.sh quick` | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the two binary builds, then `cargo nextest run --locked --no-fail-fast` for every crate under `crates/` that the checkout changed since its merge base with `origin/main`, plus `radian-tui` always. It stops at the first failing step. |
 | `scripts/arc-gate.sh full` | `scripts/verify.sh`, here or on `ARC_GATE_HOST` when that is set. It prints the step lines and the names of failing tests, and exits with the verify exit code. |
 
-Before their first step, `verify.sh` and `arc-gate.sh` (`quick` and `full` both) check the file system that holds `${TMPDIR:-/tmp}` with `df`: the free inodes and the free space. When fewer than 50,000 inodes or fewer than 2 GiB are free, they fail at once, before building anything, with exit code `1` and one line on stderr that names the path, the free and total inodes, the free space and the two limits, for example:
+Before their first step, `verify.sh` and `arc-gate.sh` check the file system that holds `${TMPDIR:-/tmp}` with `df`: `quick` always, `full` when it runs here. When fewer than 50,000 inodes or fewer than 2 GiB are free, they fail at once, before building anything, with exit code `1` and one line on stderr that names the path, the free and total inodes, the free space and the two limits, for example:
 
 ```
 verify: /tmp has 0 of 1048576 inodes free (limit 50000) and 45 GiB free (limit 2 GiB); remove leaked test directories first
 ```
 
-The check deletes nothing. A file system that reports no inode count (some macOS volumes report none) skips the inode check and keeps the space check; a `df` that cannot read the file system skips that check with a warning. The two limits are the two variables below. For arc the failure is an ordinary failed command (`command_failed`), not a new failure class.
+The check deletes nothing. A file system that reports no usable inode count (some macOS volumes report none, `-`, or a number too large for the shell to compare) skips the inode check and keeps the space check. A `df` that cannot read the file system skips that check with a warning. A negative free space (GNU `df` on ext4 when fewer bytes are free than the reserved-block count) is a real value and fails the space check; it is not read as unreadable. The two limits are the two variables below. For arc the failure is an ordinary failed command (`command_failed`), not a new failure class.
 
-With `ARC_GATE_HOST` set, `full` ships `HEAD` as a git bundle (`HEAD --not origin/main`; no bundle when `HEAD` is already in `origin/main`). On that host it takes a blocking lock on `~/.arc-gate.lock`, fetches the bundle, checks out exactly that commit detached inside `ARC_GATE_TREE`, and runs that checkout's `scripts/verify.sh`.
+With `ARC_GATE_HOST` set, `full` ships `HEAD` as a git bundle (`HEAD --not origin/main`; no bundle when `HEAD` is already in `origin/main`). On that host it takes a blocking lock on `~/.arc-gate.lock`, fetches the bundle, checks out exactly that commit detached inside `ARC_GATE_TREE`, and runs that checkout's `scripts/verify.sh`. It does not check the local temp file system: the remote `verify.sh` checks the host's own `${TMPDIR:-/tmp}`, and the remote environment supplies both limits (they are not forwarded over ssh).
 
 | Environment variable | Type | Default | What it does |
 |---|---|---|---|
 | `ARC_GATE_HOST` | string | unset: `full` runs in this checkout | The ssh host that runs the full gate. |
 | `ARC_GATE_TREE` | string | unset | Required when `ARC_GATE_HOST` is set: the gate checkout on that host, as a path relative to the remote home directory. |
-| `RADIAN_VERIFY_MIN_FREE_INODES` | integer | `50000` | A whole number, `0` or more; `0` turns the inode check off. The fewest free inodes on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script. Any other value (not all digits) fails the check with a message naming the variable. |
-| `RADIAN_VERIFY_MIN_FREE_GIB` | integer | `2` | A whole number, `0` or more; `0` turns the space check off. The fewest free GiB on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script. Any other value (not all digits) fails the check with a message naming the variable. |
+| `RADIAN_VERIFY_MIN_FREE_INODES` | integer | `50000` | A whole number, `0` or more and at most `999999999999999999` (18 digits after leading zeros); `0` turns the inode check off. The fewest free inodes on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script, in the environment that script runs in (with `ARC_GATE_HOST` that is the remote environment). Any other value (not all digits, or above that bound) fails the check with a message naming the variable. |
+| `RADIAN_VERIFY_MIN_FREE_GIB` | integer | `2` | A whole number, `0` or more and at most `999999999999999999` (18 digits after leading zeros); `0` turns the space check off. The fewest free GiB on the temp file system at which `verify.sh` and `arc-gate.sh` start their first step. Unset or empty uses the default. It takes effect on the next run of either script, in the environment that script runs in (with `ARC_GATE_HOST` that is the remote environment). Any other value (not all digits, or above that bound) fails the check with a message naming the variable. |
 
 Neither script sets `CARGO_TARGET_DIR`: a build cache is the caller's setting.
 
@@ -262,7 +264,8 @@ The class is recorded in `runs/<task>/attempts/<attempt id>/attempt_result.json`
 
 A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 10 seconds for the first retry, doubled for each later one, capped at 5 minutes.
 `max_attempts` (the task's, else [`limits.max_attempts`](arc-files.md#configtoml)) counts retries, not attempts: every retry raises the task's `retry_count`, and when the count has reached the limit the task goes to `failed.exhausted` instead.
-Every rework sets `retry_count` back to `0` (the lead's brief, arc's review rework, and the conflict rework), so the new instructions get their own retries.
+Every rework sets `retry_count` back to `0` (the lead's brief and arc's review rework), so the new instructions get their own retries.
+A conflict rework keeps the count: it continues the same line of work, and the failures between conflicts then use up `max_attempts` even while a conflict keeps returning the task to `todo.ready`.
 The attempt number is never compared with the limit; `show` prints `retry_count`.
 A `reverify` attempt is not a retry: it changes neither `retry_count` nor the limit.
 `todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; the scheduling loop and `start` do this before they claim.
@@ -277,13 +280,18 @@ The attempt's session id is in `runs/<task>/attempts/<attempt id>/execution.json
 
 Cost is counted per attempt.
 `Result.cost` is the session total, so the attempt's cost is the difference from the previous attempt's session total when both ran in the same session (`resume`), and the whole session total when the attempt has a session of its own (`fresh`).
-The delta is added to the task's `cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
-A `reverify` attempt runs no worker and costs nothing: it adds nothing to `cost_usd`.
+The delta is added to the task's `cost_usd` and its `total_cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
+A `reverify` attempt runs no worker and costs nothing, but a `review` stage it runs costs the same as any review.
+
+A `review` stage's cost counts too: when arc applies a gate's verdicts, the sum of the attempt's `review_cost_micros` (every session the stage ran; a run that reported none adds `0`) is added to the task's `cost_usd` and `total_cost_usd`, and both budgets are checked then.
+Both counters include every worker attempt and every review; `reset-budget` sets `cost_usd` back to `0` and leaves `total_cost_usd` alone.
 
 When a retry is due and the budget is used up, the task goes to `todo.paused_budget` instead of `todo.retry_wait`:
 
 - the task's `max_cost_usd`, else `[limits] max_cost_usd`;
 - the plan's `max_cost_usd`, counted over every task of the plan. A plan budget also sets the plan's `auto` to `off`.
+
+The same check runs when a review verdict is applied: a review cost that reaches the budget stops the task in `todo.paused_budget` after that gate, arc writes no automatic rework for the round, and the task waits for `reset-budget`.
 
 `reset-budget` is the only way back.
 

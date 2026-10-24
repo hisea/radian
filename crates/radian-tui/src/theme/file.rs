@@ -195,7 +195,16 @@ pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
         // The `/context` grid's category roles have no pi source (spec
         // `tui-context-grid`): a theme file sets them by their Radian names, and
         // anything else falls back to the built-in palette.
-        Role::CtxSystem
+        // The arc plans page's priority roles (ADR 0048 decision 3) have no pi source: a
+        // theme file sets them by their Radian names (`priority_p0`..`priority_p5`), and
+        // anything else falls back to the built-in palette.
+        Role::PriorityP0
+        | Role::PriorityP1
+        | Role::PriorityP2
+        | Role::PriorityP3
+        | Role::PriorityP4
+        | Role::PriorityP5
+        | Role::CtxSystem
         | Role::CtxFiles
         | Role::CtxMemory
         | Role::CtxTools

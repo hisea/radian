@@ -115,9 +115,10 @@ parse or that repeats an argument the wrapper sets (`worker_args::OWNED_EXEC_ARG
 the manual's drift test reads). Nothing is claimed, started or written by the check.
 
 `start` reconciles `doing`, releases a due retry, and claims the
-task in one transaction (`todo.ready` → `doing.starting`, `attempt` + 1, `<task>-<n>`, a
-random token). A claim is refused (exit 3) when the task is not ready, its plan is not
-confirmed, an `after` task is not done, or `[limits] concurrency` tasks are already in
+task in one transaction (`todo.ready` or `todo.retry_wait` → `doing.starting`, `attempt` + 1,
+`<task>-<n>`, a random token); a `todo.retry_wait` task is claimed without waiting for
+`retry_at`. A claim is refused (exit 3) when the task is in any other state or phase, its plan
+is not confirmed, an `after` task is not done, or `[limits] concurrency` tasks are already in
 `doing`. A task already in `review.verifying` resumes verification instead of being claimed.
 
 It then runs the current executable as `arc work --task … --attempt … --token … --session …
@@ -236,6 +237,11 @@ crashed process releases the lock when its descriptor closes.
 `integration` holds its own `<repository>/.radian/arc/gates/integration.lock` for its whole
 stage, so two integration runs never work in the shared `gates/integration/` checkout at the
 same time.
+
+Every stage preparation (`commands`, `review`, `integration`) holds
+`<repository>/.radian/arc/gates/prepare.lock` (`PREPARE_LOCK`) while it fetches and creates or
+updates its checkout, so concurrent preparations take turns on the shared repository; the
+stage work after the prepare runs unlocked.
 
 `review` takes one of the slot locks `<repository>/.radian/arc/gates/review-<n>.lock`
 (`SlotLock`), `n` from 0 to `[gate.review] concurrency - 1`; a free slot is taken at once and a
@@ -468,22 +474,24 @@ again as unverified and counts no death.
 (`review::verify` = `plan_verification`, `run_stages`, `finish_verification`); a `radian arc
 run` pass starts the same stages in a background gate and calls `review::apply_verification`
 when the gate's record says `done`. Either way the remote's `work/<task>` must still equal the
-task's `head_sha`, then the effective stages of the profile plus the task's extra stages run
-in order, except `human`, each through the gate on the verification candidate
+task's `head_sha`, then the effective stages of the profile plus the task's extra stages run,
+except `human`, each through the gate on the verification candidate
 (`candidate_for`: `verified_sha` when the remote main is its ancestor, else a merge of
-`verified_sha` onto the remote main). This build runs `commands` and `review`; a profile or
-task that lists `mutation` or `ci` is refused with `stage <name> is not built yet` and the
-task stays in `review.verifying`. An existing verdict for the current attempt and stage is
-reused, so a gate that died between stages resumes.
+`verified_sha` onto the remote main). When the list holds both `commands` and `review`, those
+two start at the same time and the round's outcome follows the list's order (`commands`
+first); every other stage runs in the list's order. This build runs `commands` and `review`; a
+profile or task that lists `mutation` or `ci` is refused with `stage <name> is not built yet`
+and the task stays in `review.verifying`. An existing verdict for the current attempt and
+stage is reused, so a gate that died between stages resumes.
 
-`review` (`ReviewRun`) is a read-only session on the same candidate, after `commands` and
-before `human` (a profile that lists both must list `commands` first). Up to
+`review` (`ReviewRun`) is a read-only session on the same candidate. It runs at the same time
+as `commands` and before `human`; a profile that lists both must list `commands` first. Up to
 `[gate.review] concurrency` sessions run at once (default 2), each in its slot checkout
 `gates/review-<n>/`. It runs one `radian exec` per run with `--tools read,grep,glob`, no
 `--mcp-config` and `--no-config-mcp`. Its model route and wall-time limit come from
 `[gate.review] exec_args` (default `[worker] exec_args`) and `[gate.review] timeout_secs`; a
 task's first review reads `[gate.review.first] exec_args` and `timeout_secs` first, and a
-rework review never does (`ReviewConfig::choice`). The prompt is built from the brief, the
+later review never does (`ReviewConfig::choice`). The prompt is built from the brief, the
 commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The last
 fenced `json` block of the final message is parsed; an empty `blocking` list passes, any item
 fails with `review_blocking`. An item is `{level, file, line, text, pre_existing}`; a plain
@@ -497,7 +505,8 @@ round, `review_pre_existing`.
 
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)
-is a first review. A rework round's prompt holds the previous blocking items, the commits
+gets the first review's prompt, though it reads `[gate.review]` rather than
+`[gate.review.first]`. A rework round's prompt holds the previous blocking items, the commits
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
 `git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
 `suggestions` with `pre_existing` unless its `file:line` is within 3 lines of an increment
@@ -549,8 +558,8 @@ force. A main that moved after integration, or a rejected push, makes it integra
 (one round per pass in the loop; at most three runs per `radian arc merge` command). On
 success the task is `done.merged` and its worktree is removed; the branch stays.
 
-`finish_integration` then asks `review::propose_followup` for the task's review follow-up
-(ADR 0048 decision 10): it reads every `review` verdict of the task, oldest attempt first, and
+`finish_integration` then asks `review::propose_followup` for the task's review follow-up (ADR
+0048 decision 10): it reads every `review` verdict of the task, oldest attempt first, and
 collects every round's `suggestions` (the moved `pre_existing` items among them), never a
 `blocking` item, so a round that only had blocking items contributes nothing. Repeats are
 dropped: two items are the same when their `file`, `line` and `text` match after a leading tag
@@ -558,10 +567,9 @@ that repeats the item's own level is removed and whitespace is collapsed, and th
 is kept. The rest become one `todo.proposed` task of the same plan, `after` the merged task,
 when `[gate.review] propose_followups` is true and the plan does not already hold it; its brief
 groups the items by the round they came from (`From review <n> (attempt <n>):`) and names the
-path of every review verdict. A task
-that is itself a review follow-up gets none of its own; its review's unfixed items stay in its
-verdict and in the task's final report. A failure to add the follow-up is a warning after the
-merge, not a failed merge.
+path of every review verdict. A task that is itself a review follow-up gets none of its own;
+its review's unfixed items stay in its verdict and in the task's final report. A failure to add
+the follow-up is a warning after the merge, not a failed merge.
 
 `merge_step` reads `runs/<task>/gate.json` for a finished integration, and a
 `review.ready_to_merge` task finishes the newest passing integration verdict for its head.
@@ -595,6 +603,13 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   gives a follow-up, the same test `has_followup` uses, so the chain stops after one level.
 - `confirm` of a task checks `worker_args` first, as `confirm` of a plan does, so a broken
   worker line leaves the task `todo.proposed` instead of making it runnable.
+- `store::chain` is the one walk of a task's `after` graph: `show`, `show --json`, `confirm`,
+  its `--dry-run` and the MCP `show` tool use it. It returns `waits_on` and `blocks` (breadth
+  first, nearest first, each task once), the first entry that can never reach `done.merged`
+  (a `failed.*` task, a task of a `cancelled` plan, or an id that names no file), and one
+  `after` cycle. `queue_position` is the task's place among the `todo.ready` tasks. The dry
+  run calls `plan_ops::confirm_dry_run`, which shares `confirm_with`'s checks and writes
+  nothing; it checks the lock with `Store::check_state_lock`, which never creates the file.
 - The remote is always a parameter, never the literal `origin`: the caller passes
   `[repository] remote`.
 - A checkout that exists and is not a linked worktree is an error, unless it is an empty

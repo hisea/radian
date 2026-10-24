@@ -18,9 +18,10 @@
   fails, before any build, when fewer than 50,000 inodes or fewer than 2 GiB are
   free: one line on stderr names the path, the free and total inodes, the free
   space and the two limits. Nothing is deleted. A file system that reports no
-  inode count skips the inode check and keeps the space check. The two limits are
-  `RADIAN_VERIFY_MIN_FREE_INODES` and `RADIAN_VERIFY_MIN_FREE_GIB`; their type,
-  default, allowed values and when they take effect are in
+  usable inode count (none, `-`, or a number too large for the shell) skips the
+  inode check and keeps the space check; a negative free space fails it. The two
+  limits are `RADIAN_VERIFY_MIN_FREE_INODES` and `RADIAN_VERIFY_MIN_FREE_GIB`;
+  their type, default, allowed values and when they take effect are in
   [`docs/user/arc-gate.md`](../docs/user/arc-gate.md#a-gate-for-this-repository).
 
 ## Release

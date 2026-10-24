@@ -22,6 +22,7 @@ Each line names one page and what it covers.
 - `arc`: plan and task orchestration: every subcommand, the lead's MCP server, and the exit codes.
 - `arc-gate`: the gate: verification stages, the review stage, failures, retries, the budget, and reconcile.
 - `arc-files`: the files arc keeps: `config.toml`, plan and task files, and the `.radian/arc/` layout.
+- `arc-mcp`: the lead's MCP server: how a lead registers it, its six tools, and its tool errors.
 - `arc-tui`: the TUI: the plans, task and merge pages, every mark and key, and the owner's actions.
 - `keybindings`: every key in the full-screen interface, by area, and how to rebind it.
 - `sessions`: resume, list, search, fork, export, and attach to sessions.

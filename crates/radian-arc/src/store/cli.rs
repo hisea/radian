@@ -64,8 +64,9 @@ pub enum Command {
     /// `radian arc adopt <id>`.
     Adopt { id: String },
     /// `radian arc confirm <id>`: the owner confirms a draft plan, or a task arc or the
-    /// lead proposed (ADR 0048 decisions 3, 6 and 11).
-    Confirm { id: String },
+    /// lead proposed (ADR 0048 decisions 3, 6 and 11). `--dry-run` runs the same checks and
+    /// prints what it would do without writing anything.
+    Confirm { id: String, dry_run: bool },
     /// `radian arc auto <plan> <level>`.
     Auto { plan: String, level: String },
     /// `radian arc priority <plan> <priority>`: the plan's `P0`..`P5`.
@@ -107,7 +108,7 @@ pub fn run(command: &Command) -> u8 {
         Command::List { plan, all, json } => list(plan.as_deref(), *all, *json).map(emit),
         Command::Show { id, json } => show(id, *json).map(emit),
         Command::Adopt { id } => adopt(id).map(emit),
-        Command::Confirm { id } => confirm(id).map(emit),
+        Command::Confirm { id, dry_run } => confirm(id, *dry_run),
         Command::Auto { plan, level } => set_auto(plan, level).map(emit),
         Command::Priority { plan, priority } => set_priority(plan, priority).map(emit),
         Command::Pause { plan } => pause(plan).map(emit),
@@ -281,7 +282,7 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
     let mut hidden_tasks = 0usize;
     for view in views {
         let merged = view.tasks.iter().filter(|task| is_merged(task)).count();
-        let finished = !view.tasks.is_empty() && merged == view.tasks.len();
+        let finished = view.is_finished();
         if !all && !named && view.plan.item.is_cancelled() {
             hidden_cancelled += 1;
             hidden_tasks += merged;
@@ -293,13 +294,14 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
             continue;
         }
         out.push_str(&format!(
-            "{}  {}  auto: {}  priority: {}  {}/{} merged  {}{}\n",
+            "{}  {}  auto: {}  priority: {}  {}/{} merged  total_cost_usd: {}  {}{}\n",
             view.plan.item.id,
             view.plan.item.status,
             view.plan.item.auto,
             view.plan.item.priority(),
             merged,
             view.tasks.len(),
+            cost_text(view.total_cost_usd()),
             view.plan.item.title,
             changed_marker(view.plan.changed_outside_arc)
         ));
@@ -395,6 +397,11 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_owned())
         ));
     }
+    show_text(&store, id)
+}
+
+/// `radian arc show <id>`'s text: every field, the `after` chain, and the body.
+pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
     let item = store.show(id)?;
     let mut out = String::new();
     match &item {
@@ -414,6 +421,12 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
                 &mut out,
                 "max_wall_time_secs",
                 &optional_number(plan.item.max_wall_time_secs),
+            );
+            field(&mut out, "cost_usd", &cost_text(view.cost_usd()));
+            field(
+                &mut out,
+                "total_cost_usd",
+                &cost_text(view.total_cost_usd()),
             );
             field(&mut out, "tasks", &joined(&plan.item.tasks));
             field(
@@ -448,15 +461,29 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
                 &mut out,
                 "session_id",
                 &optional_text(
-                    super::attempt_ops::attempt_session_id(&store, &item.id, item.attempt)
+                    super::attempt_ops::attempt_session_id(store, &item.id, item.attempt)
                         .as_deref(),
                 ),
             );
             field(&mut out, "token", &optional_text(item.token.as_deref()));
             field(&mut out, "cost_usd", &optional_number(item.cost_usd));
+            field(
+                &mut out,
+                "total_cost_usd",
+                &optional_number(item.total_cost()),
+            );
             field(&mut out, "auto_rework", &item.auto_rework.to_string());
             field(&mut out, "retry_count", &item.retry_count.to_string());
             field(&mut out, "after", &joined(&item.after));
+            let chain = super::chain::chain(store, &item.id)?;
+            field(&mut out, "waits_on", &chain_entries(&chain.waits_on));
+            field(&mut out, "blocks", &chain_entries(&chain.blocks));
+            if let Some(entry) = &chain.never_runs {
+                field(&mut out, "never_runs", &entry.text());
+            }
+            if let Some(cycle) = &chain.cycle {
+                field(&mut out, "cycle", &cycle.join(" -> "));
+            }
             field(
                 &mut out,
                 "supersedes",
@@ -509,10 +536,10 @@ fn show(id: &str, json: bool) -> Result<String, Error> {
                 "retry_at",
                 &optional_text(item.retry_at.as_deref()),
             );
-            if let Some(reason) = crate::review::rework_reason(&store, item) {
+            if let Some(reason) = crate::review::rework_reason(store, item) {
                 field(&mut out, "rework_reason", &reason);
             }
-            if let Some((path, verdict)) = crate::review::latest_review_verdict(&store, &item.id) {
+            if let Some((path, verdict)) = crate::review::latest_review_verdict(store, &item.id) {
                 field(&mut out, "review_verdict", &path.display().to_string());
                 if let Some(review) = &verdict.review {
                     field(&mut out, "review_summary", &review.summary);
@@ -576,6 +603,19 @@ fn joined(values: &[String]) -> String {
     }
 }
 
+/// A chain as `<id> <state>.<phase>` entries separated by `, `, or `-` when it is empty.
+fn chain_entries(entries: &[super::chain::Entry]) -> String {
+    if entries.is_empty() {
+        "-".to_owned()
+    } else {
+        entries
+            .iter()
+            .map(super::chain::Entry::text)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// The review items as `[level] path:line text`, separated by `; `.
 fn joined_items(items: &[crate::gate::ReviewItem]) -> String {
     if items.is_empty() {
@@ -599,6 +639,23 @@ fn optional_number<T: std::fmt::Display>(value: Option<T>) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
+/// A summed cost as the text forms print it: up to six decimals, with the trailing zeros
+/// dropped. Costs are kept in micros of a US dollar, so the rounding hides the float's own
+/// noise and nothing a session reported.
+fn cost_text(cost: f64) -> String {
+    if cost == 0.0 {
+        return "0".to_owned();
+    }
+    let mut text = format!("{cost:.6}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
 fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_json::Value {
     let item = &task.item;
     let mut value = json!({
@@ -611,6 +668,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "attempt_id": item.attempt_id,
         "token": item.token,
         "cost_usd": item.cost_usd,
+        "total_cost_usd": item.total_cost(),
         "auto_rework": item.auto_rework,
         "retry_count": item.retry_count,
         "after": item.after,
@@ -644,6 +702,8 @@ fn plan_json(view: &PlanView, with_body: bool) -> serde_json::Value {
         "priority": plan.priority(),
         "max_cost_usd": plan.max_cost_usd,
         "max_wall_time_secs": plan.max_wall_time_secs,
+        "cost_usd": view.cost_usd(),
+        "total_cost_usd": view.total_cost_usd(),
         "tasks": view
             .tasks
             .iter()
@@ -674,10 +734,103 @@ fn adopt(id: &str) -> Result<String, Error> {
 
 /// `radian arc confirm <id>`: the owner confirms a draft plan, or a task arc or the lead
 /// proposed (ADR 0048 decisions 3, 6 and 11).
-fn confirm(id: &str) -> Result<String, Error> {
+///
+/// `--dry-run` runs every check the real command runs and prints what it would do, without
+/// writing a file. The real command prints the `never runs:` and `cycle:` warnings on stderr
+/// after its line; they warn, and the confirm still happens.
+fn confirm(id: &str, dry_run: bool) -> Result<u8, Error> {
     let store = open()?;
-    let confirmed = super::plan_ops::confirm(&store, id)?;
-    Ok(format!("{}\n", confirmed.line()))
+    if dry_run {
+        let report = super::plan_ops::confirm_dry_run(&store, id)?;
+        return Ok(emit(dry_run_text(&store, &report)?));
+    }
+    let report = super::plan_ops::confirm_report(&store, id)?;
+    let code = emit(format!("{}\n", report.confirmed.line()));
+    for line in warning_lines(&store, &report.tasks)? {
+        eprintln!("{line}");
+    }
+    Ok(code)
+}
+
+/// What `confirm --dry-run` prints: the line the real confirm would print, the chain of every
+/// task it would confirm, the chains that cannot finish, and each task's place among the
+/// `todo.ready` tasks at this moment.
+fn dry_run_text(store: &Store, report: &super::plan_ops::Confirmation) -> Result<String, Error> {
+    let mut out = format!("would: {}\n", report.confirmed.line());
+    let mut never = Vec::new();
+    let mut cycles = Vec::new();
+    for id in &report.tasks {
+        let chain = super::chain::chain(store, id)?;
+        let waits = if chain.waits_on.is_empty() {
+            "nothing".to_owned()
+        } else {
+            chain_entries(&chain.waits_on)
+        };
+        out.push_str(&format!("{id} waits on: {waits}\n"));
+        if let Some(entry) = &chain.never_runs {
+            never.push(format!("never runs: {}", entry.text()));
+        }
+        if let Some(cycle) = &chain.cycle {
+            cycles.push(format!("cycle: {}", cycle.join(" -> ")));
+        }
+    }
+    for line in never {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    for line in cycles {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    for id in &report.tasks {
+        let (position, total) = super::chain::queue_position(store, id)?;
+        out.push_str(&format!("{id} queue: {position} of {total} todo.ready"));
+        if let Some(reason) = queue_reason(store, id)? {
+            out.push_str(&format!(" ({reason})"));
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// The `never runs:` and `cycle:` warnings of the tasks a confirm would make ready.
+fn warning_lines(store: &Store, tasks: &[String]) -> Result<Vec<String>, Error> {
+    let mut lines = Vec::new();
+    for id in tasks {
+        let chain = super::chain::chain(store, id)?;
+        if let Some(entry) = &chain.never_runs {
+            lines.push(format!("never runs: {}", entry.text()));
+        }
+        if let Some(cycle) = &chain.cycle {
+            lines.push(format!("cycle: {}", cycle.join(" -> ")));
+        }
+    }
+    Ok(lines)
+}
+
+/// Why the next scheduling pass would not claim a task that is `todo.ready` now, in the words
+/// `radian arc run`'s summary uses: its plan's `auto` is `off`, or an `after` task has not
+/// merged. `None` when nothing stands in the way.
+fn queue_reason(store: &Store, id: &str) -> Result<Option<String>, Error> {
+    let task = store.load_task(id)?.item;
+    let plan = store.load_plan(&task.plan)?.item;
+    // The confirmation is what makes the task `todo.ready`, so the reason is the one a ready
+    // task gets, not the one it has as `todo.proposed` now.
+    let mut ready = task.clone();
+    ready.phase = "ready".to_owned();
+    if plan.auto == "off" {
+        return Ok(Some(crate::run::waiting_reason(store, &plan, &ready)?));
+    }
+    let blocked = task.after.iter().any(|dependency| {
+        !store.load_task(dependency).is_ok_and(|loaded| {
+            loaded.item.state == super::model::TaskState::Done && loaded.item.phase == "merged"
+        })
+    });
+    if blocked {
+        Ok(Some(crate::run::waiting_reason(store, &plan, &ready)?))
+    } else {
+        Ok(None)
+    }
 }
 
 /// `radian arc auto <plan> <level>`: the owner sets the plan's auto level (decision 12).
@@ -857,8 +1010,36 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
         Item::Plan(view) => plan_json(&view, true),
         Item::Task(task) => {
             let mut value = task_json(&task, true);
+            let chain = super::chain::chain(store, &task.item.id)?;
             let review = crate::review::latest_review_verdict(store, &task.item.id);
             if let Some(object) = value.as_object_mut() {
+                // The `after` chain, both ways (ADR 0048 decision 3): `show` and the MCP
+                // `show` tool report the same walk.
+                object.insert(
+                    "waits_on".to_owned(),
+                    json!(
+                        chain
+                            .waits_on
+                            .iter()
+                            .map(super::chain::Entry::json)
+                            .collect::<Vec<_>>()
+                    ),
+                );
+                object.insert(
+                    "blocks".to_owned(),
+                    json!(
+                        chain
+                            .blocks
+                            .iter()
+                            .map(super::chain::Entry::json)
+                            .collect::<Vec<_>>()
+                    ),
+                );
+                object.insert(
+                    "never_runs".to_owned(),
+                    json!(chain.never_runs.as_ref().map(super::chain::Entry::json)),
+                );
+                object.insert("cycle".to_owned(), json!(chain.cycle));
                 object.insert(
                     "rework_reason".to_owned(),
                     json!(crate::review::rework_reason(store, &task.item)),

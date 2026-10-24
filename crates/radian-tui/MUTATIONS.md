@@ -2471,3 +2471,48 @@ window). A cancelled plan also takes the failure mark and the `cancelled · ` pr
 | TK0040-M2 | the task list always starts at the first task (`task_top = 0`) | ✅ 1 failed | `the_task_list_scrolls_to_keep_the_selected_task_visible` (the selected `TK0011-h` is below the frame) |
 | TK0040-M3 | the attempts list always starts at the first attempt (`first = 0`) | ✅ 1 failed | `the_attempts_list_scrolls_to_keep_the_selected_attempt_visible` (with attempt 10 selected it draws attempts 1 to 3) |
 | TK0040-M4 | a cancelled plan takes `Mark::Active` (`●`), as before | ✅ 1 failed | `a_cancelled_plan_is_marked_and_named_cancelled` (`mark_cell` panics: `×` is not before `PL0002-images`) |
+
+## TK0047: the plans page's state view (2026-10-24, branch `work/TK0047-tui-plan-filter`)
+
+Base `76bcb8ba` (the branch point). The plans page lists one of four views and `f` cycles
+them; the header names the view and counts the plans it hides. Each mutation was applied by
+hand to the working file, the named test was run alone with `--profile sandbox
+--no-fail-fast`, and the file was restored from a copy under `.radian/mut-bak/`
+(`git status --short` empty afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0047-M1 | the default view is `all` again (`#[default]` moved from `Active` to `All`) | ✅ 1 failed | `the_default_plans_view_hides_finished_and_cancelled_plans` (`app.filter` is `All`, not `Active`) |
+| TK0047-M2 | `f` skips `cancelled` (`PlanFilter::Done.next()` returns `Active`) | ✅ 1 failed | `f_cycles_the_plan_views_in_order_and_back` (`left: Active`, `right: Cancelled` on the third press) |
+| TK0047-M3 | the selection always jumps to the first plan (`rebuild_visible` sets `plan_sel = 0`) | ✅ 1 failed | `the_selection_stays_on_a_plan_in_both_views_and_moves_to_the_first_otherwise` (`f` to `all` selects `PL0001-first`, not the held `PL0003-retro`) |
+
+3/3 caught.
+
+## TK0050: the plans page's cancel, proposed-task confirm and priority (2026-10-24, branch `work/TK0050-tui-cancel-confirm-priority`)
+
+Base `c697e101` (the branch point). The plans page's `x` asks before it cancels, `c` confirms
+a proposed task with the task column focused, and `+`/`-` step the selected plan's priority
+toward `P0`/`P5`; the page draws the priority in six new theme roles. Each mutation was
+applied by hand to the working file, the named test was run alone with `--profile sandbox
+--no-fail-fast`, and the file was restored from a copy under `.radian/mut-bak/`
+(`git status --short` showed only the intended changes afterwards).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0050-M1 | `x` queues the cancel without the confirmation float (`self.queue_action(action)` instead of `Float::Confirm`) | ✅ 1 failed | `x_on_a_task_asks_and_n_changes_nothing_while_y_cancels_it` (`no cancel float: None`) |
+| TK0050-M2 | `c` confirms the selected plan even with the task column focused (the proposed-task branch is replaced by the plan id) | ✅ 1 failed | `c_confirms_a_proposed_task_and_refuses_a_ready_one` (`left: Some(Confirm("PL0001-p"))`, `right: Some(Confirm("TK0004-proposed"))`) |
+| TK0050-M3 | `+` moves toward `P5` (the `+` and `-` handlers swap their step sign) | ✅ 1 failed | `plus_and_minus_move_the_priority_and_stop_at_the_ends` (`left: level "P4"`, `right: level "P2"`) |
+| TK0050-M4 | the dark palette swaps `priority_p0` and `priority_p5` (`P0` gets `GREEN`, `P5` gets `RED`) | ✅ 1 failed | `theme::tests::the_priority_roles_are_six_distinct_colors_and_mono_has_none` (`P0` is green, not `status_error`'s red) |
+
+4/4 caught.
+
+## TK0049: the gate usage names the temp file system limits (2026-10-24, branch `work/TK0049-verify-inode-check-followups`)
+
+Base: the branch's first commit. The mutation was applied by hand to
+`scripts/arc-gate.sh`, backed up under `.radian/` and restored from that copy (never
+`git checkout`), and the named test ran alone with
+`cargo nextest run -p radian-tui --locked --no-fail-fast --test arc <test>`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0049-M1 | drop `RADIAN_VERIFY_MIN_FREE_GIB` from the usage block | ✅ 1 failed | `arc_gate_without_arguments_exits_two_and_help_exits_zero` (the help did not name the two limits) |
