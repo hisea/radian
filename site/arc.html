@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>arc · radian</title>
+<meta name="description" content="arc is a plan and task orchestrator built into the radian binary: it runs each task as its own headless radian worker and merges only what passes a fixed gate.">
+<meta property="og:title" content="arc · radian">
+<meta property="og:description" content="arc is a plan and task orchestrator built into the radian binary: it runs each task as its own headless radian worker and merges only what passes a fixed gate.">
+<meta property="og:url" content="https://getrad.dev/arc.html">
+<meta property="og:image" content="https://getrad.dev/media/arc-en.jpg">
+<meta property="og:type" content="website">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta name="color-scheme" content="light dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@600&text=radian&display=swap">
+<style>
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; }
+[hidden] { display: none !important; }
+img { max-width: 100%; }
+/* Layout: a drafting sheet. A hairline-framed 1080 column on a faint grid; every section is a row of the sheet with a mono coordinate label; the real TUI frame is figure 1. One saturated violet, no cards. */
+:root {
+  --paper: #f7f7f9;
+  --sheet: #fbfbfc;
+  --ink: #16151b;
+  --muted: #6a6876;
+  --rule: #e2e1e8;
+  --grid: rgba(91, 63, 208, 0.07);
+  --accent: #5b3fd0;
+  --term: #ffffff;
+  --sans: "Geist", -apple-system, "Segoe UI", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, "PingFang SC", monospace;
+  --gl: max(16px, env(safe-area-inset-left, 0px));
+  --gr: max(16px, env(safe-area-inset-right, 0px));
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0d0c11; --sheet: #111016; --ink: #ecebf2; --muted: #8f8d9c; --rule: #25232e; --grid: rgba(167, 147, 255, 0.06);
+    --accent: #a793ff; --term: #16151c; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0d0c11; --sheet: #111016; --ink: #ecebf2; --muted: #8f8d9c; --rule: #25232e; --grid: rgba(167, 147, 255, 0.06);
+  --accent: #a793ff; --term: #16151c; color-scheme: dark;
+}
+
+/* language: .en / .zh pairs; English unless the root says zh */
+:root:not([data-lang="zh"]) .zh, :root[data-lang="zh"] .en { display: none !important; }
+:root[data-lang="zh"] body { letter-spacing: 0.01em; }
+
+/* logo wordmark: Sora, subset to the six letters */
+.lf-sora { font-family: "Sora", "Geist", sans-serif; font-weight: 600; letter-spacing: -0.04em; }
+
+body {
+  background-color: var(--paper); color: var(--ink);
+  font: 400 15px/1.6 var(--sans); -webkit-font-smoothing: antialiased;
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 24px 24px; background-position: center top;
+  padding-left: var(--gl); padding-right: var(--gr);
+}
+.sheet { max-width: 1080px; margin: 0 auto; border-left: 1px solid var(--rule); border-right: 1px solid var(--rule); background: var(--sheet); }
+.row { padding: 0 40px; border-bottom: 1px solid var(--rule); position: relative; }
+.row::before, .row::after { content: ""; position: absolute; bottom: -4px; width: 7px; height: 7px; border: 1px solid var(--rule); background: var(--sheet); }
+.row::before { left: -4px; } .row::after { right: -4px; }
+
+a { color: inherit; text-decoration: none; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+code, pre { font-family: var(--mono); font-size: 0.86em; }
+p code { color: var(--ink); }
+
+.label { font: 500 11px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); display: flex; gap: 14px; align-items: center; }
+.label i { font-style: normal; color: var(--accent); }
+.label::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+
+/* logo */
+.mark-a { display: block; }
+
+/* nav */
+nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 64px; }
+.brand { display: flex; align-items: center; gap: 12px; font-size: 23px; line-height: 1; }
+.brand .mark-a { width: 25px; height: 22px; transform: translateY(-1px); }
+.links { display: flex; align-items: center; gap: 24px; font: 400 13px var(--mono); color: var(--muted); }
+.links a { white-space: nowrap; }
+.links a:hover { color: var(--ink); }
+.lang { display: flex; border: 1px solid var(--rule); }
+.lang button { font: 500 11px var(--mono); color: var(--muted); background: none; border: 0; padding: 5px 9px; cursor: pointer; }
+.lang button[aria-pressed="true"] { color: var(--sheet); background: var(--ink); }
+
+/* hero */
+.hero { padding-block: 64px 40px; }
+.hero-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 56px; align-items: end; margin-top: 26px; }
+h1 { font: 600 clamp(36px, 5.4vw, 60px)/1.03 var(--sans); letter-spacing: -0.045em; margin: 0; text-wrap: balance; }
+h1 em { font-style: normal; color: var(--accent); }
+:root[data-lang="zh"] h1 { letter-spacing: -0.02em; line-height: 1.15; }
+:root[data-lang="zh"] h1 em { white-space: nowrap; }
+.lede { font-size: 16px; color: var(--muted); margin: 0 0 24px; }
+.lede strong { color: var(--ink); font-weight: 500; }
+
+.install { border: 1px solid var(--rule); background: var(--term); }
+.install-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; min-width: 0; }
+.install-row + .install-row { border-top: 1px solid var(--rule); }
+.install-row pre { margin: 0; flex: 1; min-width: 0; overflow-x: auto; line-height: 1.7; }
+.install-row .p { color: var(--accent); user-select: none; }
+.tag { font: 500 10px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--rule); padding: 2px 6px; white-space: nowrap; }
+.install-row button { font: 500 10px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); background: none; border: 0; padding: 4px 0 4px 8px; cursor: pointer; }
+.install-row button:hover { color: var(--accent); }
+.install-row pre a { color: var(--accent); }
+.oss { margin: 14px 0 0; font: 400 12.5px var(--mono); color: var(--muted); }
+.oss a { color: var(--accent); }
+
+/* sections */
+.sec { padding-block: 64px 72px; }
+.sec-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 56px; margin-top: 40px; }
+h2 { font: 600 28px/1.15 var(--sans); letter-spacing: -0.035em; margin: 0; text-wrap: balance; }
+:root[data-lang="zh"] h2 { letter-spacing: -0.01em; }
+h2 + p { color: var(--muted); margin: 14px 0 0; max-width: 26em; }
+
+
+/* headless pipeline */
+.pipe { display: grid; font-family: var(--mono); font-size: 12.5px; }
+.node { border: 1px solid var(--rule); background: var(--term); padding: 12px 14px; min-width: 0; overflow-wrap: anywhere; }
+.node .t { color: var(--muted); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; display: block; margin-bottom: 6px; }
+.node.on { border-color: var(--accent); }
+.node b { color: var(--accent); font-weight: 500; }
+.node .c { color: var(--muted); }
+.vline { width: 1px; height: 26px; margin-left: 28px; background: var(--muted); position: relative; }
+.vline::after { content: ""; position: absolute; left: -3px; bottom: 0; border: 3.5px solid transparent; border-top: 5px solid var(--muted); border-bottom: 0; }
+.fork { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.flow-note { margin-top: 20px; font-size: 14.5px; color: var(--muted); max-width: 48em; }
+.flow-note code { color: var(--ink); }
+
+/* works with what you have */
+.compat { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.compat li { display: grid; grid-template-columns: 17ch minmax(0, 1fr); gap: 16px; padding: 13px 0; border-bottom: 1px solid var(--rule); font-size: 14.5px; color: var(--muted); }
+.compat .k { font: 500 12.5px/1.7 var(--mono); color: var(--accent); }
+.compat code { color: var(--ink); }
+
+/* install */
+.install-notes { margin: 14px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+.install-notes li + li { margin-top: 4px; }
+.install-notes a { color: var(--accent); }
+
+/* video */
+.vid { margin: 0; }
+.video { border: 1px solid var(--rule); background: #000; }
+.video video { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; }
+.vcap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 24px; margin-top: 12px; font: 400 11.5px var(--mono); color: var(--muted); }
+.fig { padding-block: 0 56px; }
+.steps { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.steps li { display: grid; grid-template-columns: 17ch minmax(0, 1fr); gap: 16px; padding: 13px 0; border-bottom: 1px solid var(--rule); font-size: 14.5px; color: var(--muted); }
+.steps .k { font: 500 12.5px/1.7 var(--mono); color: var(--accent); }
+.steps code { color: var(--ink); }
+.install-notes { margin: 14px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+.install-notes li + li { margin-top: 4px; }
+.install-notes a { color: var(--accent); }
+@media (max-width: 880px) { .steps li { grid-template-columns: minmax(0, 1fr); gap: 2px; } }
+
+footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 24px; padding-block: 22px; font: 400 12px var(--mono); color: var(--muted); }
+footer nav { height: auto; gap: 20px; justify-content: flex-start; }
+footer a:hover { color: var(--ink); }
+
+@media (max-width: 880px) {
+  .row { padding: 0 20px; }
+  .hero-grid, .sec-grid { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+  .fork { grid-template-columns: minmax(0, 1fr); }
+  .compat li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+}
+@media (max-width: 560px) {
+  .links .opt-link { display: none; }
+  .hero { padding-block: 40px 32px; }
+  .sec { padding-block: 48px 56px; }
+}
+</style>
+</head>
+<body>
+
+<div class="sheet">
+  <div class="row">
+    <nav aria-label="Main">
+      <a class="brand lf-sora" id="brand" href="/" aria-label="radian">
+        <svg class="mark-a" viewBox="1.6 4.4 20.8 18" aria-hidden="true"><path d="M3 21 L21 21 A18 18 0 0 0 12.73 5.85 Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M19.13 21.75 L21.73 21.75 A18.75 18.75 0 0 0 12.49 4.83 L11.09 7.02 A16.15 16.15 0 0 1 19.13 21.75 Z" fill="var(--accent)"/></svg>
+        <span>radian</span>
+      </a>
+      <div class="links">
+        <a class="opt-link" href="#how"><span class="en">how it works</span><span class="zh">怎么运作</span></a>
+        <a class="opt-link" href="#control"><span class="en">control</span><span class="zh">你说了算</span></a>
+        <a class="opt-link" href="#start"><span class="en">start</span><span class="zh">开始</span></a>
+        <a href="/docs/arc.html"><span class="en">Docs</span><span class="zh">文档</span></a>
+        <a href="https://github.com/hisea/radian">GitHub ↗</a>
+        <div class="lang" role="group" aria-label="Language">
+          <button type="button" id="lang-en" data-lang="en" aria-pressed="true">EN</button>
+          <button type="button" id="lang-zh" data-lang="zh" aria-pressed="false">中</button>
+        </div>
+      </div>
+    </nav>
+  </div>
+
+  <div class="row">
+    <header class="hero" id="top">
+      <div class="label"><i>arc</i> <span class="en">plans · workers · a gate</span><span class="zh">计划 · worker · 门禁</span></div>
+      <div class="hero-grid">
+        <h1>
+          <span class="en">Turn a request into tasks. <em>Merge only what passes.</em></span>
+          <span class="zh">把需求拆成任务，<em>只合并通过门禁的</em>。</span>
+        </h1>
+        <div>
+          <p class="lede">
+            <span class="en">arc is built into the <strong>radian binary</strong>. It keeps plans and tasks as files in your repository, runs each task as its own headless radian worker, and merges only what passes a fixed gate. arc is a program, not a model, and you stay the one who confirms and merges.</span>
+            <span class="zh">arc 内置在 <strong>radian 这个二进制</strong>里。它把计划和任务存成你仓库里的文件，每个任务交给一个独立的无头 radian worker，只合并通过固定门禁的结果。arc 是一个程序，不是模型；确认和合并仍然由你来做。</span>
+          </p>
+          <div class="install">
+            <div class="install-row"><pre><span class="p">$ </span>radian arc</pre><button type="button" class="copy" data-copy="radian arc"><span class="en">copy</span><span class="zh">复制</span></button></div>
+          </div>
+          <p class="oss"><span class="en">Part of <a href="/">radian</a>, open source under MIT or Apache-2.0.</span><span class="zh">属于 <a href="/">radian</a>，开源，MIT 或 Apache-2.0 协议。</span></p>
+        </div>
+      </div>
+    </header>
+  </div>
+
+  <div class="row">
+    <figure class="fig vid">
+      <div class="video">
+        <video class="en" controls muted playsinline preload="none" poster="media/arc-en.jpg"><source src="media/arc-en.mp4" type="video/mp4"></video>
+        <video class="zh" controls muted playsinline preload="none" poster="media/arc-zh.jpg"><source src="media/arc-zh.mp4" type="video/mp4"></video>
+      </div>
+      <figcaption class="vcap"><span><span class="en">fig. 1 · the arc TUI on this repository's own backlog: plans, one task's conversation, brief, diff and attempts, then the board</span><span class="zh">图 1 · arc TUI 跑在这个仓库自己的待办上：计划、一个任务的对话、简报、diff 和尝试记录，然后是看板</span></span><span>1920 × 1080 · 90 s</span></figcaption>
+    </figure>
+  </div>
+
+  <div class="row">
+    <section class="sec" id="how">
+      <div class="label"><i>/01</i> <span class="en">how it works</span><span class="zh">怎么运作</span></div>
+      <div class="sec-grid">
+        <div>
+          <h2><span class="en">A request, five steps.</span><span class="zh">一个需求，五步。</span></h2>
+          <p><span class="en">Every step leaves a file or a journal you can read afterwards.</span><span class="zh">每一步都留下一个可以事后翻看的文件或日志。</span></p>
+        </div>
+        <div>
+          <div class="pipe" role="img" aria-label="A lead writes a plan and tasks; arc starts one headless radian worker per task in its own worktree; the gate checks the pushed commit; a pass is merged into the remote main, a failure goes back for rework.">
+            <div class="node on"><span class="t"><span class="en">lead · Claude Code or the radian TUI</span><span class="zh">lead · Claude Code 或 radian TUI</span></span><b>radian arc mcp</b> <span class="c"><span class="en">writes a plan and its tasks</span><span class="zh">写计划和任务</span></span></div>
+            <div class="vline"></div>
+            <div class="node"><span class="t"><span class="en">one headless worker per task</span><span class="zh">每个任务一个无头 worker</span></span><b>radian exec</b> <span class="c"><span class="en">own git worktree · own branch · own journal</span><span class="zh">自己的 worktree · 自己的分支 · 自己的日志</span></span></div>
+            <div class="vline"></div>
+            <div class="node"><span class="t"><span class="en">the gate · on the pushed commit</span><span class="zh">门禁 · 检查推上来的提交</span></span><span class="en">your commands · a read-only review session · your approval</span><span class="zh">你配置的命令 · 只读的 review 会话 · 你的批准</span></div>
+            <div class="vline"></div>
+            <div class="fork">
+              <div class="node"><span class="t"><span class="en">pass</span><span class="zh">通过</span></span><b>radian arc merge</b> <span class="c">→ <span class="en">remote main</span><span class="zh">远端 main</span></span></div>
+              <div class="node"><span class="t"><span class="en">fail</span><span class="zh">失败</span></span><span class="en">back to the task for rework</span><span class="zh">退回任务返工</span></div>
+            </div>
+          </div>
+          <ul class="steps" style="margin-top:28px">
+            <li><code class="k">01 · lead</code><span><span class="en">A lead writes the plan and its tasks through arc's MCP server. It cannot confirm, start or merge anything.</span><span class="zh">lead 通过 arc 的 MCP 服务器写计划和任务。它不能确认、启动或合并任何东西。</span></span></li>
+            <li><code class="k">02 · confirm</code><span><span class="en">You confirm the plan. At <code>auto</code> <code>off</code> you start each task yourself; at <code>run</code> arc starts a task once the tasks it waits for are merged.</span><span class="zh">你确认计划。<code>auto</code> 为 <code>off</code> 时每个任务由你启动；为 <code>run</code> 时，arc 在任务所等的任务合并之后自己启动它。</span></span></li>
+            <li><code class="k">03 · workers</code><span><span class="en">Each task runs as a separate <code>radian exec</code> process in its own worktree, on its own branch, and pushes the result.</span><span class="zh">每个任务是一个独立的 <code>radian exec</code> 进程，有自己的 worktree 和分支，做完把结果推上去。</span></span></li>
+            <li><code class="k">04 · gate</code><span><span class="en">The gate checks the pushed commit. A failed stage sends the task back for rework.</span><span class="zh">门禁检查推上来的提交。某个阶段失败，任务就退回去返工。</span></span></li>
+            <li><code class="k">05 · merge</code><span><span class="en"><code>radian arc merge</code> takes your approval and pushes to the remote main. If the branch moved after the gate, the approval is void and the task is verified again.</span><span class="zh"><code>radian arc merge</code> 取你的批准，再推到远端 main。门禁之后分支又动过的话，批准作废，任务重新验证。</span></span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="row">
+    <section class="sec" id="control">
+      <div class="label"><i>/02</i> <span class="en">control</span><span class="zh">你说了算</span></div>
+      <div class="sec-grid">
+        <div>
+          <h2><span class="en">You decide what runs and what merges.</span><span class="zh">跑什么、合并什么，<br>你来定。</span></h2>
+          <p><span class="en">arc schedules by fixed rules. No step waits on a model's judgement.</span><span class="zh">arc 按固定的规则调度，没有哪一步要等模型来判断。</span></p>
+        </div>
+        <ul class="compat">
+          <li><code class="k">auto</code><span><span class="en">Per plan: <code>off</code> (you start and merge each task), <code>run</code> (arc starts tasks and runs the gate, then waits for you), or <code>merge</code> (arc also merges when every required stage passed).</span><span class="zh">每个计划一个级别：<code>off</code>（启动和合并都由你）、<code>run</code>（arc 启动任务、跑门禁，然后等你）、<code>merge</code>（所有必需阶段都过了，arc 也替你合并）。</span></span></li>
+          <li><code class="k">owner-only</code><span><span class="en">Confirm, start, merge, reject, priority and auto are yours, in the TUI or on the CLI. The lead's MCP server has no tool for them.</span><span class="zh">确认、启动、合并、驳回、优先级和 auto 都是你的，在 TUI 里或命令行上做。lead 的 MCP 服务器里没有对应的工具。</span></span></li>
+          <li><code class="k">verdicts</code><span><span class="en">A verdict is written once and never changed. An approval binds to one commit.</span><span class="zh">结论只写一次，之后不再改动。批准绑定在一个提交上。</span></span></li>
+          <li><code class="k">budgets</code><span><span class="en">Every task and plan records its cost, and each can carry a cost and wall-time budget.</span><span class="zh">每个任务和计划都记录花费，也都可以设花费和耗时的预算。</span></span></li>
+          <li><code class="k">the TUI</code><span><span class="en">Plans, a board that groups open tasks by who acts next (todo, doing, verifying, needs you), each task's conversation, brief, diff and attempts, and the merge page.</span><span class="zh">计划列表，按“下一步由谁来做”分组的看板（待办、进行中、验证中、需要你处理），每个任务的对话、简报、diff 和尝试记录，以及合并页。</span></span></li>
+        </ul>
+      </div>
+    </section>
+  </div>
+
+  <div class="row">
+    <section class="sec" id="start">
+      <div class="label"><i>/03</i> <span class="en">start</span><span class="zh">开始</span></div>
+      <div class="sec-grid">
+        <div>
+          <h2><span class="en">Three commands.</span><span class="zh">三条命令。</span></h2>
+          <p><span class="en">arc comes with radian. Run these in the repository you want it to work on.</span><span class="zh">arc 随 radian 一起装好。在你要让它干活的仓库里运行下面三条。</span></p>
+        </div>
+        <div>
+          <div class="install">
+            <div class="install-row"><pre><span class="p">$ </span>radian arc init</pre><button type="button" class="copy" data-copy="radian arc init"><span class="en">copy</span><span class="zh">复制</span></button></div>
+            <div class="install-row"><pre><span class="p">$ </span>claude mcp add arc -- radian arc mcp</pre><button type="button" class="copy" data-copy="claude mcp add arc -- radian arc mcp"><span class="en">copy</span><span class="zh">复制</span></button></div>
+            <div class="install-row"><pre><span class="p">$ </span>radian arc</pre><button type="button" class="copy" data-copy="radian arc"><span class="en">copy</span><span class="zh">复制</span></button></div>
+          </div>
+          <ul class="install-notes">
+            <li><span class="en"><code>init</code> lays out <code>.radian/arc/</code> and checks four things: the credential, the <code>origin</code> remote, a dry-run push of the main branch, and the sandbox. Each failure is a warning.</span><span class="zh"><code>init</code> 建好 <code>.radian/arc/</code> 目录，并检查四件事：凭据、<code>origin</code> 远端、对 main 分支的一次试推送，以及沙箱。哪一项失败就给一行警告。</span></li>
+            <li><span class="en">arc needs a git working tree with an <code>origin</code> remote you can push the main branch to.</span><span class="zh">arc 需要一个 git 工作区，并且有一个你能往 main 分支推送的 <code>origin</code> 远端。</span></li>
+            <li><span class="en">The gate's commands go in <code>.radian/arc/config.toml</code>.</span><span class="zh">门禁要跑的命令写在 <code>.radian/arc/config.toml</code> 里。</span></li>
+            <li><span class="en">Reference: <a href="/docs/arc.html">commands</a>, <a href="/docs/arc-gate.html">the gate</a>, <a href="/docs/arc-files.html">files</a>, <a href="/docs/arc-mcp.html">the lead’s MCP server</a>, <a href="/docs/arc-tui.html">the TUI</a>.</span><span class="zh">参考：<a href="/docs/arc.html">命令</a>、<a href="/docs/arc-gate.html">门禁</a>、<a href="/docs/arc-files.html">文件</a>、<a href="/docs/arc-mcp.html">lead 的 MCP 服务器</a>、<a href="/docs/arc-tui.html">TUI</a>（手册是英文）。</span></li>
+            <li><span class="en">Not installed yet? <a href="/#install">Install radian</a>.</span><span class="zh">还没装？<a href="/#install">先装 radian</a>。</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="row">
+    <footer>
+      <span>getrad.dev</span>
+      <nav aria-label="Footer">
+        <a href="/">radian</a>
+        <a href="/docs/"><span class="en">Docs</span><span class="zh">文档</span></a>
+        <a href="https://github.com/hisea/radian">GitHub ↗</a>
+        <a href="https://github.com/hisea/radian/tree/main/docs/adr"><span class="en">decisions</span><span class="zh">设计决定</span> ↗</a>
+        <a href="https://github.com/hisea/radian/releases">Releases ↗</a>
+      </nav>
+      <span><span class="en">no telemetry by default</span><span class="zh">默认无遥测</span> · MIT / Apache-2.0</span>
+    </footer>
+  </div>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  function get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function put(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+  function setLang(l) {
+    root.setAttribute('data-lang', l);
+    root.setAttribute('lang', l === 'zh' ? 'zh-Hans' : 'en');
+    document.getElementById('lang-en').setAttribute('aria-pressed', String(l === 'en'));
+    document.getElementById('lang-zh').setAttribute('aria-pressed', String(l === 'zh'));
+    document.querySelectorAll('video').forEach(function (v) { v.pause(); });
+  }
+  var lang = get('rad-lang') || ((navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en');
+  setLang(lang);
+
+  document.querySelectorAll('.lang button').forEach(function (b) {
+    b.addEventListener('click', function () { setLang(b.dataset.lang); put('rad-lang', b.dataset.lang); });
+  });
+
+  document.querySelectorAll('.install-row button').forEach(function (b) {
+    b.addEventListener('click', function (e) {
+      var btn = e.currentTarget, pre = btn.previousElementSibling;
+      var text = btn.getAttribute('data-copy') || '';
+      function selectPre() { var r = document.createRange(); r.selectNodeContents(pre); var s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }
+      function done() { btn.style.color = 'var(--accent)'; setTimeout(function () { btn.style.color = ''; }, 1400); }
+      try { navigator.clipboard.writeText(text).then(done, selectPre); } catch (err) { selectPre(); }
+    });
+  });
+})();
+</script>
+</body>
+</html>
