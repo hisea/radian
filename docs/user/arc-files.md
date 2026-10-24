@@ -21,6 +21,7 @@ A key you leave out takes its default.
 | `limits.max_attempts` | integer | `3` | 1 or more | When a task fails and arc decides whether to retry: how many retries the task gets since its last rework. The count is the task's [`retry_count`](#task-fields); the attempt number is never compared with the limit. |
 | `limits.stall_timeout_secs` | integer | `900` | seconds | When a worker prints no new line for that long. |
 | `limits.max_wall_time_secs` | integer | `7200` | seconds | As an absolute limit on one attempt, on top of the stall timeout. |
+| `limits.git_remote_timeout_secs` | integer | `300` | seconds, `1` or more | A git call that talks to a remote (`fetch`, `push`, `ls-remote`): the call, and everything it started, is killed when it runs this long. It takes effect at the next git call. A local git call (`diff`, `log`, `merge-base`, `status`, a local `merge`) is not bounded. In the worker wrapper the shorter of this and the attempt's remaining wall time applies. |
 | `limits.max_cost_usd` | number | not set: no limit | 0 or more, US dollars | When an attempt ends and its cost is counted. |
 | `limits.cancel_grace_secs` | integer | `10` | seconds | After a cancel, before the worker gets SIGKILL. |
 | `limits.max_auto_rework` | integer | `2` | 0 or more | When an automatic rework would go past the limit; the plan then pauses. A review rework counts; a conflict rework that arc writes itself does not. |
@@ -50,6 +51,9 @@ A per-task field of the same name overrides a `[limits]` value for that task; a 
 An attempt's worker session id is in `runs/<task>/attempts/<attempt id>/execution.json`.
 With `worker.rework_session = "fresh"` it is `<task>-<attempt>`; with `resume` it is the task id.
 `radian arc show` prints it as `session_id`, and `radian attach <session id>` opens that session's journal.
+
+Every review run of an attempt has a session of its own, named `<attempt id>-review-<run>`.
+When a journal of that name already exists (a gate was started again for the same attempt), the stage uses `<attempt id>-review-<run>-<k>` with the smallest free `k` and writes the run's logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log` under the attempt's `logs/`; the review verdict's `review_session_ids` lists the ids it used.
 
 ## Plan and task files
 

@@ -27,6 +27,11 @@ pub enum GateError {
         stderr: String,
     },
 
+    /// A git command that talks to a remote ran past `[limits] git_remote_timeout_secs` and
+    /// was killed with its process group. The text is `git <subcommand> timed out after <n> s`.
+    #[error("{0}")]
+    RemoteTimeout(String),
+
     /// The commit a stage is prepared for does not exist after the fetch.
     #[error("{sha} is not a commit in {repository}")]
     UnknownCommit {

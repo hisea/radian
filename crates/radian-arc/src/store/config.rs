@@ -95,6 +95,9 @@ pub struct Limits {
     pub stall_timeout_secs: u64,
     /// An absolute limit on one attempt, on top of the stall timeout.
     pub max_wall_time_secs: u64,
+    /// The limit of one git call that talks to a remote (`fetch`, `push`, `ls-remote`). Local
+    /// git calls are not bounded.
+    pub git_remote_timeout_secs: u64,
     /// No limit when unset.
     pub max_cost_usd: Option<f64>,
     /// How long a cancel waits for the worker before SIGKILL.
@@ -119,6 +122,7 @@ impl Default for Limits {
             max_attempts: 3,
             stall_timeout_secs: 900,
             max_wall_time_secs: 7200,
+            git_remote_timeout_secs: crate::git::DEFAULT_REMOTE_TIMEOUT_SECS,
             max_cost_usd: None,
             cancel_grace_secs: 10,
             max_auto_rework: 2,
@@ -266,6 +270,7 @@ concurrency = 1
 max_attempts = 3
 stall_timeout_secs = 900
 max_wall_time_secs = 7200
+git_remote_timeout_secs = 300   # limit of one git call to a remote; local git is unbounded
 # max_cost_usd = 5.0          # not set = no limit
 cancel_grace_secs = 10
 max_auto_rework = 2
@@ -312,6 +317,11 @@ pub fn parse(text: &str) -> Result<Config, String> {
             "unsupported schema_version {} (this build reads {SCHEMA_VERSION})",
             config.schema_version
         ));
+    }
+    if config.limits.git_remote_timeout_secs == 0 {
+        return Err(
+            "`limits.git_remote_timeout_secs` is 0; it must be 1 second or more".to_owned(),
+        );
     }
     // One validation for every profile: `Profile::validate` reads the gate's one closed
     // stage list, so the parser cannot drift from it.
@@ -399,6 +409,50 @@ pub fn load(path: &Path) -> Result<Config, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The remote git calls are bounded by `[limits] git_remote_timeout_secs`: its default is
+    /// the code's, the text `init` writes names it, a file without it takes the default, and
+    /// `0` is refused by name.
+    #[test]
+    fn the_git_remote_timeout_is_a_bounded_positive_seconds_value() {
+        assert_eq!(
+            Limits::default().git_remote_timeout_secs,
+            crate::git::DEFAULT_REMOTE_TIMEOUT_SECS
+        );
+        let text = default_text("main");
+        assert!(
+            text.contains("git_remote_timeout_secs = 300"),
+            "init names the key:\n{text}"
+        );
+        assert_eq!(
+            parse(&text)
+                .expect("the default text parses")
+                .limits
+                .git_remote_timeout_secs,
+            crate::git::DEFAULT_REMOTE_TIMEOUT_SECS
+        );
+        assert_eq!(
+            parse("schema_version = 1\n")
+                .expect("an empty file")
+                .limits
+                .git_remote_timeout_secs,
+            crate::git::DEFAULT_REMOTE_TIMEOUT_SECS,
+            "a missing key takes the default"
+        );
+        for value in ["1", "300"] {
+            let config = parse(&format!(
+                "schema_version = 1\n[limits]\ngit_remote_timeout_secs = {value}\n"
+            ))
+            .expect("a positive value parses");
+            assert_eq!(
+                config.limits.git_remote_timeout_secs,
+                value.parse::<u64>().unwrap()
+            );
+        }
+        let error = parse("schema_version = 1\n[limits]\ngit_remote_timeout_secs = 0\n")
+            .expect_err("0 must be refused");
+        assert!(error.contains("limits.git_remote_timeout_secs"), "{error}");
+    }
 
     /// The text `init` writes parses, and it equals the code's defaults: a changed default
     /// must change the written file too.

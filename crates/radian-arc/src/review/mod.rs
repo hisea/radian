@@ -1900,6 +1900,12 @@ fn finish_integration(
                 context.remote, context.main_branch
             )));
         }
+        Push::TimedOut(text) => {
+            // Where a rejected push leaves it: the pass goes on and the next pass integrates
+            // again.
+            back_to_integrating(store, task_id)?;
+            return Ok(Integration::Again(text));
+        }
     }
     let remote_main = ls_remote_branch(store.repo(), &context.remote, &context.main_branch)?;
     if remote_main.as_deref() != Some(candidate.as_str()) {
@@ -2613,8 +2619,23 @@ fn git(dir: &Path, args: &[&str]) -> Result<crate::git::GitOutput, Error> {
     crate::git::run(dir, args).map_err(|error| Error::Failed(error.to_string()))
 }
 
-fn git_ok(dir: &Path, args: &[&str]) -> Result<String, Error> {
-    let out = git(dir, args)?;
+/// Runs a git command that talks to a remote, bounded by `[limits]
+/// git_remote_timeout_secs` (ADR 0048 decision 7.8). A call that runs out is an ordinary
+/// failure of the step, with `git <subcommand> timed out after <n> s`.
+fn git_remote(dir: &Path, args: &[&str]) -> Result<crate::git::GitOutput, Error> {
+    match crate::git::run_remote(dir, args, None)
+        .map_err(|error| Error::Failed(error.to_string()))?
+    {
+        crate::git::RemoteRun::Done(output) => Ok(output),
+        crate::git::RemoteRun::TimedOut { limit } => {
+            Err(Error::Failed(crate::git::timeout_text(args, limit)))
+        }
+    }
+}
+
+/// [`git_remote`] for a call that must succeed.
+fn git_remote_ok(dir: &Path, args: &[&str]) -> Result<String, Error> {
+    let out = git_remote(dir, args)?;
     if !out.success() {
         return Err(Error::Failed(format!(
             "git {} failed: {}",
@@ -2627,7 +2648,7 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<String, Error> {
 
 /// The remote's `work/<task>` after a fetch, when it exists.
 fn remote_work_sha(repo: &Path, remote: &str, task: &str) -> Result<Option<String>, Error> {
-    git_ok(repo, &["fetch", remote])?;
+    git_remote_ok(repo, &["fetch", remote])?;
     remote_branch(repo, remote, &format!("work/{task}"))
 }
 
@@ -2645,7 +2666,7 @@ fn remote_branch(repo: &Path, remote: &str, branch: &str) -> Result<Option<Strin
 /// The remote's branch read over the wire (`git ls-remote`), when it exists.
 fn ls_remote_branch(repo: &Path, remote: &str, branch: &str) -> Result<Option<String>, Error> {
     let reference = format!("refs/heads/{branch}");
-    let out = git_ok(repo, &["ls-remote", remote, &reference])?;
+    let out = git_remote_ok(repo, &["ls-remote", remote, &reference])?;
     let sha = out.split_whitespace().next().unwrap_or_default();
     Ok((!sha.is_empty()).then(|| sha.to_owned()))
 }
@@ -2654,6 +2675,9 @@ enum Push {
     Pushed,
     /// The remote main moved under the candidate. The caller integrates again.
     Rejected(String),
+    /// The push ran past `[limits] git_remote_timeout_secs`; the caller leaves the task where
+    /// a rejected push leaves it and reports the line.
+    TimedOut(String),
 }
 
 fn push_candidate(
@@ -2664,7 +2688,13 @@ fn push_candidate(
 ) -> Result<Push, Error> {
     // Never `--force`: a main that moved must reject the push, not lose its commits.
     let refspec = format!("{candidate}:refs/heads/{main_branch}");
-    let out = git(repo, &["push", remote, &refspec])?;
+    let out = match crate::git::run_remote(repo, &["push", remote, &refspec], None) {
+        Ok(crate::git::RemoteRun::Done(out)) => out,
+        Ok(crate::git::RemoteRun::TimedOut { limit }) => {
+            return Ok(Push::TimedOut(crate::git::timeout_text(&["push"], limit)));
+        }
+        Err(error) => return Err(Error::Failed(error.to_string())),
+    };
     if out.success() {
         return Ok(Push::Pushed);
     }

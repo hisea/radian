@@ -228,9 +228,9 @@ impl ReviewRun<'_> {
                 self.prompt(&checkout.path(), &candidate.sha, &candidate.main_sha)?;
             let mut unusable = Unusable::Output;
             for run in 1..=REVIEW_RUNS {
-                let session_id = format!("{}-review-{run}", self.attempt);
+                let (session_id, log_name) = self.session_for(run);
                 let ran =
-                    self.run_session(&checkout.path(), &session_id, &prompt, &log_dir, run)?;
+                    self.run_session(&checkout.path(), &session_id, &log_name, &prompt, &log_dir)?;
                 sessions.push(
                     ran.result
                         .as_ref()
@@ -379,17 +379,40 @@ impl ReviewRun<'_> {
         Ok((prompt, round))
     }
 
+    /// The session id and log name of `run` (ADR 0048 decision 10). A gate is started again
+    /// for the same attempt after it died, so a journal this attempt's earlier review left is
+    /// never reused: the stage takes `<attempt>-review-<run>-<k>` and the log
+    /// `review-<run>-<k>` for the smallest free `k`.
+    fn session_for(&self, run: u32) -> (String, String) {
+        let base_session = format!("{}-review-{run}", self.attempt);
+        let base_log = format!("review-{run}");
+        let Some(dir) = review_session_dir(self.exec_args) else {
+            return (base_session, base_log);
+        };
+        if !dir.join(format!("{base_session}.jsonl")).exists() {
+            return (base_session, base_log);
+        }
+        let mut k = 1u32;
+        loop {
+            let session = format!("{base_session}-{k}");
+            if !dir.join(format!("{session}.jsonl")).exists() {
+                return (session, format!("{base_log}-{k}"));
+            }
+            k = k.saturating_add(1);
+        }
+    }
+
     /// Runs one session and reads the last `Result` line of its jsonl stream.
     fn run_session(
         &self,
         checkout: &Path,
         session_id: &str,
+        log_name: &str,
         prompt: &str,
         log_dir: &Path,
-        run: u32,
     ) -> Result<Ran, GateError> {
-        let output_path = log_dir.join(format!("review-{run}.jsonl"));
-        let stderr_path = log_dir.join(format!("review-{run}.stderr.log"));
+        let output_path = log_dir.join(format!("{log_name}.jsonl"));
+        let stderr_path = log_dir.join(format!("{log_name}.stderr.log"));
         let output = File::create(&output_path).map_err(|source| GateError::Io {
             path: output_path.clone(),
             source,
@@ -486,6 +509,23 @@ impl ReviewRun<'_> {
             result: last_result(&output_path),
         })
     }
+}
+
+/// The directory the review sessions' journals live in: a `--session-dir` in
+/// `[gate.review] exec_args`, else `RADIAN_SESSION_DIR`, else the user's data directory. The
+/// session id of a review run is chosen against this directory, so a re-run never reuses a
+/// journal (ADR 0048 decision 10).
+fn review_session_dir(exec_args: &[String]) -> Option<PathBuf> {
+    let mut flag = None;
+    let mut args = exec_args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--session-dir" {
+            flag = args.next().map(PathBuf::from);
+        } else if let Some(dir) = arg.strip_prefix("--session-dir=") {
+            flag = Some(PathBuf::from(dir));
+        }
+    }
+    radian_host::session_dir(flag.as_deref()).ok()
 }
 
 /// What one session produced.
@@ -1260,5 +1300,58 @@ mod tests {
             );
         }
         assert!(!prompt.contains("## The diff"), "{prompt}");
+    }
+
+    fn run_for<'a>(attempt: &'a str, exec_args: &'a [String]) -> ReviewRun<'a> {
+        ReviewRun {
+            repository: Path::new("."),
+            remote: "origin",
+            task: "TK0001-a",
+            attempt,
+            sha: "sha",
+            brief: "the brief",
+            main_ref: "refs/remotes/origin/main",
+            exec_args,
+            prompt_file: None,
+            previous: None,
+            timeout: Duration::ZERO,
+            program: None,
+        }
+    }
+
+    /// A gate started again for the same attempt does not reuse a review session id whose
+    /// journal exists: it takes the smallest free `-<k>`, and the log name follows it.
+    /// Mutation: return the base id unconditionally and the second run cannot start.
+    #[test]
+    fn a_review_rerun_takes_the_next_free_session_and_log_name() {
+        let dir =
+            std::env::temp_dir().join(format!("radian-arc-review-sessions-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let args = vec![
+            "--session-dir".to_owned(),
+            dir.to_str().expect("a utf-8 path").to_owned(),
+        ];
+        let run = run_for("TK0001-1", &args);
+        assert_eq!(
+            run.session_for(1),
+            ("TK0001-1-review-1".to_owned(), "review-1".to_owned())
+        );
+        fs::write(dir.join("TK0001-1-review-1.jsonl"), "").unwrap();
+        assert_eq!(
+            run.session_for(1),
+            ("TK0001-1-review-1-1".to_owned(), "review-1-1".to_owned())
+        );
+        fs::write(dir.join("TK0001-1-review-1-1.jsonl"), "").unwrap();
+        assert_eq!(
+            run.session_for(1),
+            ("TK0001-1-review-1-2".to_owned(), "review-1-2".to_owned())
+        );
+        assert_eq!(
+            run.session_for(2),
+            ("TK0001-1-review-2".to_owned(), "review-2".to_owned()),
+            "the second run of the stage keeps its own base"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
