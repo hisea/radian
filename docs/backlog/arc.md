@@ -50,7 +50,7 @@
 4. attempt 生命周期：起包装器、失败分类、退避重试、stall、预算、取消、reconcile。
 5. `start`、`merge`、`reject`、`cancel`、`reset-budget` 接到状态机。
 6. `run` 循环、`confirm`、`auto`、`pause`、plan 层、`radian arc mcp`。
-7. TUI（三个界面）。已落地：`plans`、`task`、`merge` 三页与 owner 动作；TUI 自己从不持有 `runner.lock`、不跑 pass：打开时（以及按 `R`）在没有调度循环时以独立会话启动 `radian arc run --watch`，退出 TUI 不停它；页脚 ticker 与 `L` 日志读 `loop.log`；`doing.running` 的任务显示 `live · worktree` 的未提交改动。
+7. TUI（三个界面）。已落地：`plans`、`task`、`merge` 三页与 owner 动作；TUI 自己从不持有 `runner.lock`、不跑 pass：打开时（以及按 `R`）在没有调度循环时以独立会话启动 `radian arc serve`，退出 TUI 不停它；页脚 ticker 与 `L` 日志读 `loop.log`；`doing.running` 的任务显示 `live · worktree` 的未提交改动。
 
 1–3 可并行；4 在 1+2 之后；5 在 3+4 之后；6 在 5 之后。
 
