@@ -2714,18 +2714,6 @@ the named test was run alone, and the file was restored to the same bytes.
 
 2/2 caught.
 
-## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
-
-`run --watch` became `radian arc serve`: the TUI's detached start runs `arc serve`, and the
-old form is refused with one exact line. Each mutation was applied by hand to the working file,
-the named test was run alone, and the file was restored from a copy under `.radian/`.
-
-| # | Mutation | Result | Test that caught it |
-|---|---|---|---|
-| TK0079-M1 | the TUI starts `arc run` instead of `arc serve` (`LOOP_ARGS` in `src/arc/looping.rs`) | ✅ 1 failed | `arc_loop::the_detached_start_runs_arc_serve` (`left: ["arc", "run"]`, `right: ["arc", "serve"]`) |
-| TK0079-M2 | `run --watch` is accepted again (the refusal arm matches `watch: false`) | ✅ 1 failed | `arc::run_watch_is_refused_and_names_arc_serve` (`run --watch` exits 0 with a one-pass summary instead of 2) |
-
-2/2 caught.
 ## TK0076: the diff tab's file list keeps room for the diff (2026-10-24, branch `work/TK0076-tui-diff-list-half-and-own-change`)
 
 The file list took every row but five, so a task with many changed files left the selected
@@ -2876,3 +2864,50 @@ from that copy (never `git checkout`); the named test ran alone with
 | TK0089-M2 | `resolve_link` resolves a page link from the site root (`join_docs_user("", path)`) instead of the source page's directory | ✅ 1 failed | `site_docs::relative_page_links_resolve_from_the_source_directory` (a sibling `gate.md` becomes a `blob/main` repo link) |
 
 1/1 caught.
+
+## TK0097: the site links the moved arc manual pages (2026-10-24, branch `work/TK0097-site-arc-doc-links`)
+
+`site/arc.html` still linked the flat `/docs/arc.html` and `/docs/arc-*.html` paths that the
+manual's move into `docs/user/arc/` replaced. The new test renders the manual and checks every
+`/docs/…` link in the hand-written pages against the generator's output. The mutation was
+applied by hand to `site/arc.html`, backed up under `.radian/arc.html.bak` and restored from
+that copy (never `git checkout`); the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test site_docs -E 'test(the_hand_written_pages_only_link_generated_docs)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0097-M1 | a `/docs/arc/gate.html` link goes back to `/docs/arc-gate.html` | ✅ 1 failed | `site_docs::the_hand_written_pages_only_link_generated_docs` (`site/arc.html: link '/docs/arc-gate.html' names 'arc-gate.html', which the generator does not write`) |
+
+1/1 caught.
+## TK0082: `Esc` goes back one level, `q` quits everywhere (2026-10-24, branch `work/TK0082-tui-esc-back-q-quit`)
+
+`Esc` used to quit on the plans page, and every page and overlay kept its own `Esc` arm; `q` did
+nothing in a confirmation float. `Esc` now walks one level down from whatever is innermost open
+(`go_back` in `arc/mod.rs`) and never quits, and `q` quits from every page and overlay but the
+reject note, where it is a letter. Only a view that is on screen is a level: the merge page's
+command log and the board's finished list are skipped while another page hides them (M4, M5).
+Each mutation was applied by hand to `crates/radian-tui/src/arc/mod.rs`, the named test was run
+with `cargo nextest run -p radian-tui --locked --profile sandbox`, and the file was restored
+from a copy under `.radian/mut/` with `cp`, then compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0082-M1 | `go_back` returns `Quit` at the plans page's top level, as `Esc` used to | ✅ 9 failed | `arc_back::esc_at_the_top_level_does_not_quit_and_says_q_quits` (`Esc at the top level never quits`, `left: Quit`); every other test that walks to the top also failed |
+| TK0082-M2 | `Esc` in the task column leaves the focus there (the `self.focus = Focus::Plans` line is deleted) | ✅ 3 failed | `arc_back::esc_moves_the_focus_from_the_task_column_to_the_plan_column` (`focus` stays `Tasks`) |
+| TK0082-M3 | a `q` in the reject note quits (`KeyCode::Char('q') => self.quit_key()` in the reject arm) | ✅ 2 failed | `arc_back::q_in_the_reject_note_is_typed_then_esc_walks_out`, `arc_merge::a_q_in_the_reject_note_is_typed_and_does_not_quit` |
+| TK0082-M4 | `go_back` closes the board's finished list without asking whether the board is the page (`self.page == Page::Board &&` removed) | ✅ 1 failed | `arc_back::esc_from_a_task_opened_in_the_finished_list_keeps_the_finished_list` (the hidden list closed and the task page stayed open) |
+| TK0082-M5 | `go_back` closes a merge command log without asking whether the merge page is the page (`self.page == Page::Merge &&` removed) | ✅ 1 failed | `arc_back::esc_from_the_board_does_not_consume_a_hidden_merge_log` (the board stayed open after consuming the invisible log) |
+
+5/5 caught.
+## TK0079: `radian arc serve` is the loop (2026-10-24, branch `work/TK0079-arc-serve-command`)
+
+`run --watch` became `radian arc serve`: the TUI's detached start runs `arc serve`, and the
+old form is refused with one exact line. Each mutation was applied by hand to the working file,
+the named test was run alone, and the file was restored from a copy under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0079-M1 | the TUI starts `arc run` instead of `arc serve` (`LOOP_ARGS` in `src/arc/looping.rs`) | ✅ 1 failed | `arc_loop::the_detached_start_runs_arc_serve` (`left: ["arc", "run"]`, `right: ["arc", "serve"]`) |
+| TK0079-M2 | `run --watch` is accepted again (the refusal arm matches `watch: false`) | ✅ 1 failed | `arc::run_watch_is_refused_and_names_arc_serve` (`run --watch` exits 0 with a one-pass summary instead of 2) |
+
+2/2 caught.

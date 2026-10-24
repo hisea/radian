@@ -5,6 +5,9 @@
 use radian_tui::site_docs::{RenderedSite, render_site};
 use std::collections::HashSet;
 
+/// The hand-written site pages that link into the generated docs.
+const HAND_WRITTEN_PAGES: [&str; 2] = ["index.html", "arc.html"];
+
 fn site() -> RenderedSite {
     render_site(radian_coding::docs::DOCS).expect("the manual renders without broken links")
 }
@@ -282,6 +285,53 @@ fn a_link_to_a_missing_heading_fails_the_build() {
     let pages = [("a.md", "# A\n\n## Here\n\nSee [below](#gone).\n")];
     let error = render_site(&pages).expect_err("a link to #gone must fail");
     assert_eq!(error.link, "#gone");
+}
+
+/// Every `/docs/…` link in the hand-written site pages names a page the generator writes and,
+/// with a fragment, a heading on that page.
+#[test]
+fn the_hand_written_pages_only_link_generated_docs() {
+    let site = site();
+    let by_output: std::collections::HashMap<String, &radian_tui::site_docs::RenderedPage> = site
+        .pages
+        .iter()
+        .map(|page| (radian_tui::site_docs::output_path(&page.stem), page))
+        .collect();
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for file in HAND_WRITTEN_PAGES {
+        let source = root.join("site").join(file);
+        let html = std::fs::read_to_string(&source)
+            .unwrap_or_else(|error| panic!("{}: {error}", source.display()));
+        for href in hrefs(&html) {
+            let Some(rest) = href.strip_prefix("/docs/") else {
+                continue;
+            };
+            let (target, fragment) = match rest.split_once('#') {
+                Some((target, fragment)) => (target, Some(fragment)),
+                None => (rest, None),
+            };
+            // The generator writes `docs/index.html`; `/docs/` and `/docs/arc/` are the
+            // directory indexes GitHub Pages serves from those files.
+            let output = if target.is_empty() {
+                "index.html".to_owned()
+            } else if target.ends_with('/') {
+                format!("{target}index.html")
+            } else {
+                target.to_owned()
+            };
+            let page = by_output.get(&output).unwrap_or_else(|| {
+                panic!(
+                    "site/{file}: link `{href}` names `{output}`, which the generator does not write"
+                )
+            });
+            if let Some(id) = fragment
+                && !id.is_empty()
+                && !page.headings.iter().any(|heading| heading.id == id)
+            {
+                panic!("site/{file}: link `{href}` has no heading `#{id}` on `{output}`");
+            }
+        }
+    }
 }
 
 /// Resolves an output-relative href from `page_stem` to a docs-root-relative path.
