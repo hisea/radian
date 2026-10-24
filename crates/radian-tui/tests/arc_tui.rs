@@ -1238,6 +1238,7 @@ fn follow_then_k_scrolls_the_diff_up_from_the_end() {
         Ok(TaskDiff {
             files: vec![file],
             source: radian_arc::read::DiffSource::Range,
+            fallback: false,
         }),
     );
 
@@ -1280,6 +1281,130 @@ fn first_diff_body_row(text: &str) -> String {
     lines[title + 1].to_string()
 }
 
+/// Applies a diff of `count` files (`file-01.txt`..) to the open task's diff tab.
+fn show_files(app: &mut ArcApp, count: usize) {
+    use radian_arc::read::{DiffFile, TaskDiff};
+    let id = app.task.as_ref().unwrap().id.clone();
+    let attempt = app.task.as_ref().unwrap().attempt.unwrap();
+    let files = (1..=count)
+        .map(|i| DiffFile {
+            path: format!("file-{i:02}.txt"),
+            added: 40,
+            removed: 0,
+            text: (1..=40)
+                .map(|line| format!("+file-{i:02}.txt line {line}\n"))
+                .collect(),
+            uncommitted: false,
+        })
+        .collect();
+    assert!(app.apply_diff(
+        &id,
+        attempt,
+        Ok(TaskDiff {
+            files,
+            source: radian_arc::read::DiffSource::Range,
+            fallback: false,
+        }),
+    ));
+}
+
+/// The rows of `text` the file list takes and the body rows below the selected diff frame.
+fn list_and_body_rows(text: &str, selected: &str) -> (usize, usize, usize) {
+    let lines: Vec<&str> = text.lines().collect();
+    let first = lines
+        .iter()
+        .position(|line| line.contains("file-") || line.contains("files "))
+        .expect("the list is drawn");
+    let title = lines
+        .iter()
+        .position(|line| line.contains(&format!("╭─ {selected}")))
+        .expect("the selected file's frame is drawn");
+    let bottom = lines[title..]
+        .iter()
+        .position(|line| line.contains("╰──"))
+        .map(|offset| title + offset)
+        .expect("the diff frame ends");
+    let list_rows = lines[first..title]
+        .iter()
+        .filter(|line| line.contains("file-") || line.contains("files "))
+        .count();
+    (bottom - first + 1, list_rows, bottom - title - 1)
+}
+
+#[test]
+fn the_file_list_takes_at_most_half_of_the_diff_area() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    show_files(&mut app, 40);
+    // The last file: the list scrolls to it and its last row names the rows it shows.
+    for _ in 0..39 {
+        app.on_key(&key(KeyCode::Char('n')));
+    }
+    assert_eq!(app.task.as_ref().unwrap().file_sel, 39);
+
+    let text = screen(&mut app, 120, 50);
+    let (diff_area, list_rows, body_rows) = list_and_body_rows(&text, "file-40.txt");
+    assert_eq!(
+        diff_area,
+        46 - 4,
+        "the diff area is the body under the frame's first rows"
+    );
+    assert_eq!(list_rows, 21, "half the diff area, rounded down:\n{text}");
+    assert!(
+        list_rows * 2 <= diff_area,
+        "the list takes at most half: {list_rows} of {diff_area}\n{text}"
+    );
+    assert_eq!(
+        body_rows,
+        diff_area - list_rows - 4,
+        "the diff frame gets the rest:\n{text}"
+    );
+    assert!(
+        text.contains("files 21–40 of 40"),
+        "the list names the rows it shows:\n{text}"
+    );
+
+    // Fewer files than the cap: the list takes only the rows it needs.
+    show_files(&mut app, 5);
+    let text = screen(&mut app, 120, 50);
+    let (_, list_rows, _) = list_and_body_rows(&text, "file-05.txt");
+    assert_eq!(list_rows, 5, "five files take five rows:\n{text}");
+    assert!(
+        !text.contains("files "),
+        "a list that shows every file has no range label:\n{text}"
+    );
+}
+
+#[test]
+fn a_no_change_diff_still_names_the_fallback_range() {
+    use radian_arc::read::TaskDiff;
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    let id = app.task.as_ref().unwrap().id.clone();
+    let attempt = app.task.as_ref().unwrap().attempt.unwrap();
+    assert!(app.apply_diff(
+        &id,
+        attempt,
+        Ok(TaskDiff {
+            fallback: true,
+            ..TaskDiff::default()
+        }),
+    ));
+
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("base..head · no remote main"),
+        "an empty diff keeps the source line:\n{text}"
+    );
+    assert!(text.contains("no change yet"), "{text}");
+}
+
 #[test]
 fn a_long_file_list_still_leaves_the_diff_a_body_row() {
     use radian_arc::read::{DiffFile, TaskDiff};
@@ -1305,6 +1430,7 @@ fn a_long_file_list_still_leaves_the_diff_a_body_row() {
         Ok(TaskDiff {
             files,
             source: radian_arc::read::DiffSource::Range,
+            fallback: false,
         }),
     );
 
@@ -1741,7 +1867,16 @@ fn the_conversation_tab_follows_a_running_attempts_journal() {
     fs::create_dir_all(&sessions).unwrap();
     let session = format!("{task}-1");
     write_start(&fixture, &task, 1, &session);
-    write_journal(&sessions, &session, "the running worker", "is writing");
+    write_journal(&sessions, &session, "the running worker", "filler-00");
+    // More lines than the frame shows, so only a pinned follow keeps the tail in view.
+    for index in 2..41 {
+        append_journal(
+            &sessions,
+            &session,
+            index,
+            &format!("filler-{:02}", index - 1),
+        );
+    }
     let mut app = ArcApp::with_session_dir(fixture.store.clone(), Some(sessions.clone()));
     app.plan_sel = app
         .plans
@@ -1750,20 +1885,27 @@ fn the_conversation_tab_follows_a_running_attempts_journal() {
         .unwrap();
     app.task_sel = fixture.pos("g");
     app.open_task();
+    // The first frame measures the viewport; `k` then pauses the follow and `f` resumes it.
+    let text = screen(&mut app, 120, 30);
+    assert!(!text.contains("no session journal yet"), "{text}");
+    app.on_key(&key(KeyCode::Char('k')));
+    app.apply_pending_scroll();
     app.on_key(&key(KeyCode::Char('f')));
     app.apply_pending_scroll();
     let text = screen(&mut app, 120, 30);
-    assert!(text.contains("the running worker"), "{text}");
-    assert!(text.contains("is writing"), "{text}");
-    assert!(!text.contains("no session journal yet"), "{text}");
+    assert!(text.contains("filler-39"), "follow shows the end:\n{text}");
+    assert!(!text.contains("filler-00"), "follow is at the end:\n{text}");
 
     // The worker writes another line; the refresh polls the same journal and the followed
     // view shows it.
-    append_journal(&sessions, &session, "and one more line");
+    append_journal(&sessions, &session, 41, "and one more line");
     app.refresh();
     app.apply_pending_scroll();
     let text = screen(&mut app, 120, 30);
-    assert!(text.contains("and one more line"), "{text}");
+    assert!(
+        text.contains("and one more line"),
+        "follow did not tail the growing journal:\n{text}"
+    );
 }
 
 /// The task frame's state alone does not say whether a `doing` worker is alive (ADR 0048
@@ -1804,6 +1946,28 @@ fn a_doing_tasks_row_reports_its_worker_heartbeat_and_a_stopped_loop() {
         1,
         None,
     );
+    // A beat file that exists but holds no time, and a task that is not `doing`: neither may
+    // borrow the doing rows' labels.
+    let unreadable = add_task(
+        &store,
+        &plan,
+        "unreadable",
+        &[],
+        TaskState::Doing,
+        "running",
+        3,
+        None,
+    );
+    let todo = add_task(
+        &store,
+        &plan,
+        "waiting",
+        &[],
+        TaskState::Todo,
+        "ready",
+        0,
+        None,
+    );
     store
         .change_plan(&plan, |plan| {
             plan.status = "confirmed".to_owned();
@@ -1813,6 +1977,7 @@ fn a_doing_tasks_row_reports_its_worker_heartbeat_and_a_stopped_loop() {
     // A beat from just now, and one far past the default 900-second stall window.
     write_heartbeat(&store, &fresh, 1, &radian_arc::store::plan_ops::utc_now());
     write_heartbeat(&store, &old, 2, "2000-01-01T00:00:00Z");
+    write_heartbeat(&store, &unreadable, 3, "not a time");
 
     let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
     app.plan_sel = app
@@ -1828,11 +1993,33 @@ fn a_doing_tasks_row_reports_its_worker_heartbeat_and_a_stopped_loop() {
         "a fresh beat shows its age:\n{text}"
     );
     assert!(text.contains("starting"), "no beat yet:\n{text}");
+    assert!(
+        text.contains("heartbeat unreadable"),
+        "a present but unreadable beat says so:\n{text}"
+    );
     assert!(text.contains("stalled?"), "an old beat:\n{text}");
     assert_eq!(
         text.matches("loop stopped").count(),
-        3,
+        4,
         "every doing row names the stopped loop:\n{text}"
+    );
+    // A row that is not `doing` says neither: the freshness and the loop note are the doing
+    // rows'.
+    let todo_row = rows(&terminal)
+        .into_iter()
+        .find(|row| row.contains(&todo))
+        .expect("the todo row is drawn");
+    assert!(!todo_row.contains("heartbeat"), "{todo_row}");
+    assert!(!todo_row.contains("starting"), "{todo_row}");
+    assert!(!todo_row.contains("loop stopped"), "{todo_row}");
+    // The unreadable row is the one that says so, not the no-beat row.
+    let unreadable_row = rows(&terminal)
+        .into_iter()
+        .find(|row| row.contains(&unreadable))
+        .expect("the unreadable row is drawn");
+    assert!(
+        unreadable_row.contains("heartbeat unreadable"),
+        "{unreadable_row}"
     );
     // The stale beat takes the warning style.
     let (row, column) = fg_of(&terminal, "stalled?");
@@ -1894,7 +2081,7 @@ fn write_heartbeat(store: &Store, task: &str, attempt: u32, last_beat: &str) {
 }
 
 /// Appends one assistant line to an existing worker journal (the worker still writing).
-fn append_journal(dir: &Path, id: &str, assistant: &str) {
+fn append_journal(dir: &Path, id: &str, index: usize, assistant: &str) {
     use radian_core::TranscriptJournal;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1906,7 +2093,7 @@ fn append_journal(dir: &Path, id: &str, assistant: &str) {
             .expect("the journal resumes for the next line");
         journal
             .append(radian_core::JournalRecord::Message {
-                index: 2,
+                index,
                 message: radian_core::Message::assistant(assistant),
             })
             .await
@@ -2251,8 +2438,9 @@ fn a_fast_forward_merged_task_shows_every_commit_of_its_branch() {
 #[test]
 fn a_running_task_shows_the_worktree_including_uncommitted_files() {
     // ADR 0048 decision 13: a `doing.running` task's diff is the worker's worktree against the
-    // attempt's base, not only its commits. Mutation: use `base_sha..head_sha` for a running
-    // task, and the uncommitted and untracked files below drop out.
+    // merge base of the remote main and the worktree's HEAD (the recorded base here), not only
+    // its commits. Mutation: use `base_sha..head_sha` for a running task, and the uncommitted
+    // and untracked files below drop out.
     let fixture = GitFixture::new();
     let task = fixture.unmerged.clone();
     let base = fixture
