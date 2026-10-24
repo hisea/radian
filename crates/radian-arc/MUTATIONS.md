@@ -529,3 +529,21 @@ sandbox -E 'binary(read)'`, and the file was restored from a copy under `.radian
 | TK0084-M1 | `remote_main_base` reports a ref with no common ancestor as `MainBase::Missing` | ✅ 1 failed | `read::a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref` (`left: NoRemoteMain`, right `Unrelated`) |
 
 1/1 caught.
+
+## TK0091: the worker reads a brief's verdict from a copy in its worktree (2026-10-24, branch `work/TK0091-worker-verdict-copies`)
+
+ADR 0048 decision 7: when the wrapper composes an attempt's brief, it copies every file the
+text names under `<repository>/.radian/arc/runs/` into the worker's worktree at
+`.radian/arc-verdicts/<task>/<attempt>/<file>` and replaces the path in the text; a copy that
+cannot be made stays in the text with one `verdict copy skipped:` note. Each mutation was
+applied to the working file, `cargo build -p radian-tui --bin radian -p agent-extensions --bin
+mcp-fixture` ran before the test (the work tests refuse an older binary), the test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --no-fail-fast -E 'binary(work) and
+test(verdict)'`, and the file was restored from `.radian/mut/work_mod.rs` with `cp` and
+compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0091-M1 | the copy is made but the absolute path stays in the text (`Ok(_relative) => text.push_str(named)`) | `work::a_review_rework_reads_a_copy_of_its_verdict` (`!captured.contains(".radian/arc/runs/")`), `work::a_followup_brief_copies_two_verdicts_of_another_task` | ✅ 2 failed |
+| TK0091-M2 | the path is rewritten without copying (`copy_verdict` returns the relative path before its metadata and copy) | the same two, plus `work::a_missing_verdict_stays_in_the_brief_and_is_noted` (the missing file is rewritten and no note is recorded) and `work::a_verdict_copy_never_reaches_the_branch` (no copy in the worktree) | ✅ 4 failed |
+| TK0091-M3 | a skipped copy fails the attempt (`copy_notes.first()` returns `Err` before the worker starts) | `work::a_missing_verdict_stays_in_the_brief_and_is_noted` (the worker's stdin file is never written) | ✅ failed |

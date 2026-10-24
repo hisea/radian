@@ -396,13 +396,18 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     // They are read here, when the brief is composed, so an edit takes effect at the next
     // attempt; a file that is too large, not UTF-8, or unreadable is skipped with a note.
     let (footer, skipped) = worker_brief(&s.arc);
-    let notes: Vec<String> = skipped.into_iter().collect();
+    let mut notes: Vec<String> = skipped.into_iter().collect();
     let brief = compose_brief(&[
         conflict.as_deref(),
         handoff.as_deref(),
         Some(&brief),
         footer.as_deref(),
     ]);
+    // A path the brief names under `runs/` reaches the worker as a copy in its worktree (ADR
+    // 0048 decision 7): the sandbox still denies `.radian/arc/`, and the task file keeps the
+    // absolute path.
+    let (brief, copy_notes) = copy_verdicts(&brief, &s.arc, &s.worktree);
+    notes.extend(copy_notes);
     let started_at = now();
     let deny = deny_paths(&s.arc);
     let mut child = spawn_child(o, &s.worktree, &deny, &result_path, &stderr_path, &brief)?;
@@ -1415,6 +1420,111 @@ fn compose_brief(sections: &[Option<&str>]) -> String {
         .join("\n\n")
 }
 
+/// The largest file a brief may point at under `runs/`; a larger one is skipped (ADR 0048
+/// decision 7).
+const VERDICT_COPY_LIMIT: u64 = 1024 * 1024;
+
+/// The directory in the worker's worktree that holds the copies (ADR 0048 decision 7).
+const VERDICT_COPY_DIR: &str = ".radian/arc-verdicts";
+
+/// Copies every attempt file a brief names under `arc/runs/` into the worker's worktree and
+/// rewrites its path to the copy (ADR 0048 decision 7). A path that cannot be copied stays in
+/// the text as it is and gets one note line for the attempt record; nothing here fails the
+/// attempt. The copy is keyed by the path's own `runs/<task>/attempts/<attempt>/` segments, so
+/// a follow-up task can name another task's verdict.
+fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<String>) {
+    let runs = arc.join("runs");
+    let prefix = format!("{}/", runs.display());
+    let mut text = String::with_capacity(brief.len());
+    let mut notes = Vec::new();
+    let mut rest = brief;
+    while let Some(start) = rest.find(&prefix) {
+        text.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let end = tail
+            .char_indices()
+            .find(|(_, c)| ends_path(*c))
+            .map(|(index, _)| index)
+            .unwrap_or(tail.len());
+        let named = &tail[..end];
+        match copy_verdict(named, &runs, worktree) {
+            Ok(relative) => text.push_str(&relative.display().to_string()),
+            Err(reason) => {
+                text.push_str(named);
+                notes.push(format!("verdict copy skipped: {named}: {reason}"));
+            }
+        }
+        rest = &tail[end..];
+    }
+    text.push_str(rest);
+    (text, notes)
+}
+
+/// Whether `c` ends a path in a brief. The briefs wrap a path in backticks; prose around one
+/// may add a comma, a bracket or a quote.
+fn ends_path(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '`' | ',' | ';' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+        )
+}
+
+/// Copies one named attempt file into the worktree and returns the path the worker reads. The
+/// reason a copy is refused is the second half of the note line.
+fn copy_verdict(named: &str, runs: &Path, worktree: &Path) -> Result<PathBuf, String> {
+    let path = Path::new(named);
+    let Some((task, attempt)) = verdict_ids(path, runs) else {
+        return Err("not a file of an attempt".to_owned());
+    };
+    let file = path
+        .file_name()
+        .ok_or_else(|| "it names no file".to_owned())?;
+    let relative = Path::new(VERDICT_COPY_DIR)
+        .join(&task)
+        .join(&attempt)
+        .join(file);
+    let destination = worktree.join(&relative);
+    let metadata = fs::metadata(path).map_err(|error| format!("cannot read it: {error}"))?;
+    if !metadata.is_file() {
+        return Err("not a regular file".to_owned());
+    }
+    if metadata.len() > VERDICT_COPY_LIMIT {
+        return Err(format!(
+            "{} bytes, the limit is {VERDICT_COPY_LIMIT} bytes",
+            metadata.len()
+        ));
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", destination.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    fs::copy(path, &destination)
+        .map_err(|error| format!("cannot copy it to {}: {error}", destination.display()))?;
+    Ok(relative)
+}
+
+/// The `runs/<task>/attempts/<attempt>/…` ids a named path carries, when it has them. A path
+/// that walks out of `runs/` is not one of its files, whatever it names.
+fn verdict_ids(path: &Path, runs: &Path) -> Option<(String, String)> {
+    let relative = path.strip_prefix(runs).ok()?;
+    if !relative
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let mut parts = relative.iter();
+    let task = parts.next()?.to_str()?.to_owned();
+    if parts.next()?.to_str()? != "attempts" {
+        return None;
+    }
+    let attempt = parts.next()?.to_str()?.to_owned();
+    parts.next()?;
+    Some((task, attempt))
+}
+
 /// The section a fresh rework gets in front of the brief (ADR 0048 decision 7): the previous
 /// attempt's final report, the commits of the task's own change, and its diff stat. `None` on
 /// the first attempt and for a `resume` attempt, whose session already holds the earlier
@@ -2163,6 +2273,41 @@ mod tests {
             "conflict\n\nhand-off\n\nbody\n\nfooter"
         );
         assert_eq!(compose_brief(&[None, None, Some("  "), None]), "");
+    }
+
+    /// A path under `runs/` is copied under its own task and attempt ids and the text names
+    /// the copy; a path that walks out of `runs/` is left as it is, with one note (ADR 0048
+    /// decision 7).
+    #[test]
+    fn a_verdict_copy_uses_the_paths_task_and_attempt() {
+        let dir = crate::test_support::TempDir::named("radian-arc-verdict-copy");
+        let arc = dir.join("arc");
+        let worktree = dir.join("worktree");
+        let verdict = arc.join("runs/TK0002-b/attempts/TK0002-b-3/verdicts/review.json");
+        fs::create_dir_all(verdict.parent().expect("the verdict directory"))
+            .expect("the verdict directory");
+        fs::write(&verdict, b"the verdict").expect("the verdict");
+        let brief = format!("before `{}` after", verdict.display());
+        let (text, notes) = copy_verdicts(&brief, &arc, &worktree);
+        assert_eq!(
+            text,
+            "before `.radian/arc-verdicts/TK0002-b/TK0002-b-3/review.json` after"
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(
+            fs::read(worktree.join(".radian/arc-verdicts/TK0002-b/TK0002-b-3/review.json"))
+                .expect("the copy")
+                .as_slice(),
+            b"the verdict"
+        );
+
+        let outside = arc.join("runs/TK0002-b/attempts/TK0002-b-3/../../../../outside.txt");
+        let brief = format!("`{}`", outside.display());
+        let (text, notes) = copy_verdicts(&brief, &arc, &worktree);
+        assert_eq!(text, brief, "a path out of runs/ is left as it is");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("verdict copy skipped: "), "{notes:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A file over the limit, a file that is not UTF-8, and a missing file: the first two get
