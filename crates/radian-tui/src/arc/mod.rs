@@ -434,15 +434,30 @@ impl ArcApp {
         self.refresh_journal();
     }
 
-    /// Opens, or polls, the selected task's worker journal.
+    /// Opens, or polls, the selected attempt's worker journal.
+    ///
+    /// The file is named by the session id the attempt recorded in its `execution.json`
+    /// (ADR 0048 decision 4); an attempt without a record has the task id. A view opened for
+    /// another attempt is dropped, so `[`/`]` never keeps showing the previous conversation.
     pub fn refresh_journal(&mut self) {
-        let Some(id) = self.task.as_ref().map(|page| page.id.clone()) else {
+        let Some(page) = self.task.as_ref() else {
             return;
         };
-        let Some(page) = &mut self.task else {
+        let id = page.id.clone();
+        let attempt = page.attempt;
+        let session = attempt
+            .and_then(|attempt| {
+                radian_arc::store::attempt_ops::attempt_session_id(&self.store, &id, attempt)
+            })
+            .unwrap_or_else(|| id.clone());
+        let Some(page) = self.task.as_mut() else {
             return;
         };
-        if page.journal.is_some() {
+        if page
+            .journal
+            .as_ref()
+            .is_some_and(|view| view.id() == session.as_str())
+        {
             if let Some(view) = &mut page.journal
                 && let Err(error) = view.poll()
             {
@@ -450,17 +465,20 @@ impl ArcApp {
             }
             return;
         }
+        // No view yet, or one for another attempt: start over from the selected session.
+        page.journal = None;
+        page.journal_error = None;
         let Some(dir) = self.session_dir.clone() else {
             page.journal_checked = true;
             page.journal_error = Some("no session directory is known".to_owned());
             return;
         };
-        let path = dir.join(format!("{id}.jsonl"));
+        let path = dir.join(format!("{session}.jsonl"));
         if !path.is_file() {
             page.journal_checked = true;
             return;
         }
-        match AttachView::open(&path, &id) {
+        match AttachView::open(&path, &session) {
             Ok(mut view) => {
                 view.set_theme(self.theme.clone());
                 page.journal = Some(view);
@@ -714,10 +732,12 @@ impl ArcApp {
             }
             KeyCode::Char('[') => {
                 page.switch_attempt(-1);
+                self.refresh_journal();
                 ArcKey::Redraw
             }
             KeyCode::Char(']') => {
                 page.switch_attempt(1);
+                self.refresh_journal();
                 ArcKey::Redraw
             }
             KeyCode::Char('h') | KeyCode::Left => {

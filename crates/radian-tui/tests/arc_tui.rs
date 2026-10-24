@@ -817,12 +817,30 @@ fn the_attempts_tab_lists_each_verdict_with_its_reason() {
 }
 
 #[test]
-fn the_conversation_tab_renders_the_worker_journal() {
+fn the_conversation_tab_renders_the_selected_attempts_worker_journal() {
     let fixture = Fixture::new();
     let task = fixture.id("e").to_owned();
     let sessions = fixture.scratch.path("sessions");
     fs::create_dir_all(&sessions).unwrap();
-    write_journal(&sessions, &task);
+    write_verdicts(
+        &fixture,
+        &task,
+        1,
+        &[("commands", false, Some("command_failed"))],
+    );
+    write_verdicts(&fixture, &task, 2, &[("commands", true, None)]);
+    // The default `fresh` worker: attempt 2's session id is `<task>-2`, and its journal is
+    // named by the id its `execution.json` records.
+    let session = format!("{task}-2");
+    write_execution(&fixture, &task, 2, &session);
+    write_journal(
+        &sessions,
+        &session,
+        "the worker said hello",
+        "and the assistant replied",
+    );
+    // Attempt 1 wrote no record: its journal is looked for under the task id.
+    write_journal(&sessions, &task, "the first attempt", "the first reply");
     let mut app = ArcApp::with_session_dir(fixture.store.clone(), Some(sessions));
     app.plan_sel = app
         .plans
@@ -836,10 +854,30 @@ fn the_conversation_tab_renders_the_worker_journal() {
     assert!(text.contains("and the assistant replied"), "{text}");
     // The attach view's own user marker (the assistant body is the bare text column).
     assert!(text.contains("❯"), "the user marker:\n{text}");
+    // `[` selects attempt 1 and its own journal; attempt 2's is not kept on screen.
+    app.on_key(&key(KeyCode::Char('[')));
+    assert_eq!(app.task.as_ref().unwrap().attempt, Some(1));
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("the first attempt"), "{text}");
+    assert!(
+        !text.contains("the worker said hello"),
+        "attempt 2's journal is not drawn for attempt 1:\n{text}"
+    );
+}
+
+/// The attempt's `execution.json`, where the wrapper records the worker's session id.
+fn write_execution(fixture: &Fixture, task: &str, attempt: u32, session: &str) {
+    let dir = radian_arc::store::attempt_ops::run_dir(&fixture.store, task, attempt);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("execution.json"),
+        json!({ "session_id": session }).to_string(),
+    )
+    .unwrap();
 }
 
 /// A worker journal: one user message and one assistant reply.
-fn write_journal(dir: &Path, id: &str) {
+fn write_journal(dir: &Path, id: &str, user: &str, assistant: &str) {
     use radian_core::TranscriptJournal;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -856,14 +894,14 @@ fn write_journal(dir: &Path, id: &str) {
         journal
             .append(radian_core::JournalRecord::Message {
                 index: 0,
-                message: radian_core::Message::user("the worker said hello"),
+                message: radian_core::Message::user(user),
             })
             .await
             .unwrap();
         journal
             .append(radian_core::JournalRecord::Message {
                 index: 1,
-                message: radian_core::Message::assistant("and the assistant replied"),
+                message: radian_core::Message::assistant(assistant),
             })
             .await
             .unwrap();
