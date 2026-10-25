@@ -3129,9 +3129,9 @@ mod tests {
         }
     }
 
-    /// Every phase the channel reports, the notification method, the capability and the
-    /// version ceiling appear on `arc/mcp.md`, with the polling interval. The source is
-    /// `radian_arc::mcp`, so a phase added to or dropped from the sent set fails here.
+    /// Every phase and plan field the channel reports, the notification method, the capability
+    /// and the version ceiling appear on `arc/mcp.md`, with the polling interval. The source is
+    /// `radian_arc::mcp`, so a phase or field added to or dropped from the sent sets fails here.
     /// Mutation: drop a phase from the page → this fails naming it.
     #[test]
     fn every_channel_phase_appears_in_arc_mcp_md() {
@@ -3168,6 +3168,18 @@ mod tests {
             assert!(
                 doc.contains(&format!("`{phase}`")),
                 "arc/mcp.md is missing the channel phase `{phase}`"
+            );
+        }
+        for phase in radian_arc::mcp::CHANNEL_READY_FROM {
+            assert!(
+                doc.contains(&format!("`{phase}`")),
+                "arc/mcp.md is missing the phase `{phase}` a move into `todo.ready` comes from"
+            );
+        }
+        for field in radian_arc::mcp::CHANNEL_PLAN_FIELDS {
+            assert!(
+                doc.contains(&format!("`{field}`")),
+                "arc/mcp.md is missing the plan field `{field}`"
             );
         }
     }

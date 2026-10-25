@@ -3032,3 +3032,19 @@ restored from that copy (never `git checkout`); the named tests ran with
 
 1/1 caught.
 
+## TK0111: a failed panic-log append follows the panic report's stderr policy (2026-10-25, branch `work/TK0111-tui-worker-thread-panic-followups`)
+
+`record_panic` printed its `[diagnostics] cannot write …` line with `eprintln!`, before the
+hook's `main || !ALT_SCREEN` guard, so a worker's failed append printed over the TUI. The
+failure is now part of the panic record and the hook writes it through the one `stderr_text`
+policy that the report uses: on `main` always, on another thread only while the alternate screen
+is down. Each mutation was applied by hand to `crates/radian-tui/src/terminal.rs`, backed up
+under `.radian/mut/` and restored from that copy (never `git checkout`); the test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --lib -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0111-M1 | `stderr_text` ignores the alternate screen (the non-main guard's `return None` removed) | ✅ 1 failed | `terminal::tests::a_failed_panic_log_append_follows_the_report_policy` (`a worker's line must not print over the alternate screen`) |
+| TK0111-M2 | a failed append is dropped instead of recorded (`diagnostic` stays `None`) | ✅ 1 failed | `terminal::tests::a_failed_panic_log_append_follows_the_report_policy` (`the failed append must be reported: …`) |
+
+2/2 caught.
