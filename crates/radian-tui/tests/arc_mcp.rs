@@ -1,6 +1,6 @@
 //! `radian arc mcp` through the real binary and a real MCP client on stdio: the seven tools,
-//! the plan and task rules they keep, and the reasons they refuse (ADR 0048 decisions 3, 6
-//! and 11).
+//! the plan and task rules they keep, the reasons they refuse, and the shape of a successful
+//! result (ADR 0048 decisions 3, 6 and 11).
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -242,6 +242,13 @@ fn result_text(result: &CallToolResult) -> String {
         .filter_map(|block| block.as_text().map(|text| text.text.clone()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The text content parsed as JSON: the document the tool answers with.
+fn json_of(result: &CallToolResult) -> Value {
+    let text = result_text(result);
+    serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("the text content is not JSON ({error}): {text}"))
 }
 
 /// Adds a plan with one task through the tools and returns both ids.
@@ -495,6 +502,70 @@ async fn add_plan_add_task_and_list_work() {
     assert!(error.contains("title"), "{error}");
     let error = session.error("show", json!({"id": "TK0099-missing"})).await;
     assert!(error.contains("no plan or task"), "{error}");
+    session.close().await;
+}
+
+/// ADR 0048 decision 11: `structuredContent` is a JSON object or absent. `list` answers with
+/// the array `radian arc list --json` prints, so the result a client receives carries the text
+/// only; `show` answers with an object and carries it both ways. This goes through the real
+/// `radian arc mcp` process and a real client, so `call_tool`, the response conversion and the
+/// wire are covered, not only the handler's own helper.
+#[tokio::test]
+async fn list_is_text_only_and_show_is_structured() {
+    let scratch = fixture("mcp-result-shape");
+    let session = Session::open(&scratch).await;
+
+    // An empty store: the array `[]` in the text, nothing in `structuredContent`.
+    let empty = session.call("list", json!({})).await;
+    assert_eq!(
+        empty.is_error,
+        Some(false),
+        "`list` succeeds on an empty store"
+    );
+    assert_eq!(
+        empty.structured_content,
+        None,
+        "an array is not a structured result: {}",
+        result_text(&empty)
+    );
+    assert_eq!(json_of(&empty), json!([]), "an empty store lists nothing");
+
+    // A plan with a task: still the array, and the same one `list --json` prints.
+    let (plan, task) = plan_with_task(&session, "shape").await;
+    let listed = session.call("list", json!({})).await;
+    assert_eq!(listed.is_error, Some(false), "`list` succeeds");
+    assert_eq!(
+        listed.structured_content,
+        None,
+        "`list` keeps the array out of `structuredContent`: {}",
+        result_text(&listed)
+    );
+    let value = json_of(&listed);
+    assert_eq!(
+        value,
+        radian_arc::store::cli::list_json(&Store::at(scratch.repo()), None, false)
+            .expect("`list --json` reads the store"),
+        "the text is the array `list --json` prints"
+    );
+    assert_eq!(value[0]["id"], plan.as_str());
+    assert_eq!(value[0]["tasks"][0]["id"], task.as_str());
+
+    // An object is structured: `show` sends its JSON as text and as `structuredContent`.
+    for id in [&plan, &task] {
+        let shown = session.call("show", json!({ "id": id })).await;
+        assert_eq!(shown.is_error, Some(false), "`show {id}` succeeds");
+        let structured = shown
+            .structured_content
+            .as_ref()
+            .unwrap_or_else(|| panic!("`show {id}` is an object and is structured"));
+        assert!(structured.is_object(), "`show {id}`: {structured}");
+        assert_eq!(
+            structured,
+            &json_of(&shown),
+            "`show {id}`: structured content is the text content's JSON"
+        );
+    }
+
     session.close().await;
 }
 
