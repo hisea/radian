@@ -2447,6 +2447,20 @@ mod tests {
         }
     }
 
+    /// The three path prefixes of the "changed arc's code" line are one list in the code, and
+    /// the loop page names every one of them. A prefix added to the list fails here until the
+    /// page lists it.
+    #[test]
+    fn every_arc_code_prefix_appears_in_arc_loop_md() {
+        let doc = arc_loop_md();
+        for prefix in radian_arc::run::ARC_CODE_PREFIXES {
+            assert!(
+                doc.contains(&format!("`{prefix}`")),
+                "arc/loop.md does not name the arc-code prefix `{prefix}`"
+            );
+        }
+    }
+
     /// The review item's levels are one closed list in the code, and the gate page names every
     /// one of them and nothing else. A level added to the list fails here until the page lists
     /// it.

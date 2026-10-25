@@ -846,3 +846,19 @@ found identical.
 
 2/2 caught.
 
+## TK0104: serve replaces itself with a rebuilt binary (2026-10-24, branch `work/TK0104-serve-reexec`)
+
+ADR 0048 decision 13: a `serve` loop records its executable's identity, re-execs it when the
+file changed and is stable, and a merge that changed arc's code prints the rebuild line. Each
+mutation was applied to the working `crates/radian-arc/src/run.rs`, `radian` was rebuilt for
+the test that drives the binary, the named test ran alone with `cargo nextest run -p
+radian-arc --locked --profile sandbox`, and the file was restored from `.radian/run.rs.bak`
+with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0104-M1 | re-exec on the first look (drop the one-second second look) | `run::tests::a_binary_that_changes_between_the_two_looks_is_not_restarted`; `run::tests::a_changed_and_stable_binary_is_restarted` (the pause did not run) | ✅ 2 failed |
+| TK0104-M2 | stop the gates before `exec` (`stop_gates(store)` in the restart branch) | `run::serve_replaces_itself_with_a_rebuilt_binary_and_keeps_its_gate_running` (the gate was gone: "the restart stopped the gate") | ✅ failed |
+| TK0104-M3 | drop `crates/radian-tui/src/arc/` from `ARC_CODE_PREFIXES` | `run::tests::arc_code_is_the_three_path_prefixes` (`crates/radian-tui/src/arc/render.rs is arc code`) | ✅ failed |
+
+3/3 caught.
