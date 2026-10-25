@@ -55,7 +55,7 @@ Status: accepted
 
 - **Compaction summary message** (`origin.kind = "compaction_summary"`): collapsed shows one row `── context compacted (rev N, T_before → T_after) ──` and can expand to show summary content. The line starts at column 1 in `frame` color. Expanded summary text never changes.
 - Approval records, pending-request results, and memory additions show as one `Notice`-style row.
-- **User messages**: `❯ text`. `❯` and text are both accent (`user` is the foreground role). No background, no half-cell padding, no `▌` exists. They show as plain text with no Markdown render. `@` attachments still fold as `[file: P, N lines]`. **An image part shows one placeholder line `[image: <source name>, W×H, N KB]`** (name from the part's `annotations.name`, dimensions and size from its annotations, `N` in KiB rounded up). Journal replay shows the same
+- **User messages**: `❯ text`. `❯` and text are both accent (`user` is the foreground role). No background, no half-cell padding, no `▌` exists. They show as plain text with no Markdown render. `@` attachments still fold as `[file: P, N lines]`. **An image part shows one placeholder line `[image: <source name>, W×H, N KB]`** (name from the part's `annotations.name`, dimensions and size from its annotations, `N` in KiB rounded up). A pasted clipboard image has the source name `clipboard`; the action is `paste_image`, default `Ctrl-V`, rebindable. Journal replay shows the same
 line unchanged; `--export` keeps its `[<mime> image omitted]` text.
 
 ### R6 Search and folds

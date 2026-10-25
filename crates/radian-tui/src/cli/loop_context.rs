@@ -44,6 +44,10 @@ pub(super) struct LoopContext<'a> {
     /// How a selection copy reaches the clipboard (`tui.clipboard`), read once from the app
     /// when the context is built: the mode cannot change mid-run.
     pub(super) clipboard: ClipboardMode,
+    /// The system clipboard reader for `paste_image` (Q2/Q7), taken from the app when the
+    /// context is built. Tests inject a reader into the app, so the loop never needs a real
+    /// clipboard in a test.
+    pub(super) clipboard_reader: Arc<dyn radian_tui::clipboard::Reader>,
     /// Whether a `Bell` already rang in this frame: bell-class events that share a frame
     /// merge into one ring, and the loop re-arms the flag for the next frame.
     pub(super) bell_rang: bool,
@@ -377,6 +381,13 @@ impl LoopContext<'_> {
                     range,
                     outcome,
                 });
+                Ok(())
+            }
+            // The clipboard is read by the host too (Q2/Q7): `arboard` returns pixels, the
+            // shared pipeline turns them into an image part in memory. Nothing touches disk.
+            Effect::ReadClipboard => {
+                let outcome = radian_tui::clipboard::read(self.clipboard_reader.as_ref());
+                self.send(AppInput::ClipboardRead(outcome));
                 Ok(())
             }
             Effect::CompleteMention { text, cursor } => {
@@ -1333,6 +1344,7 @@ mod tests {
             queue: &queue,
             signal: None,
             clipboard: app.clipboard,
+            clipboard_reader: Arc::clone(&app.clipboard_reader),
             bell_rang: false,
             herdr: None,
             bash_sandbox: None,
@@ -1433,6 +1445,7 @@ mod tests {
             queue: &queue,
             signal: None,
             clipboard: app.clipboard,
+            clipboard_reader: Arc::clone(&app.clipboard_reader),
             bell_rang: false,
             herdr: None,
             bash_sandbox: None,
@@ -1546,6 +1559,7 @@ mod tests {
             queue: &queue,
             signal: None,
             clipboard: app.clipboard,
+            clipboard_reader: Arc::clone(&app.clipboard_reader),
             bell_rang: false,
             herdr: None,
             bash_sandbox: None,
@@ -1663,6 +1677,7 @@ mod tests {
             queue: &queue,
             signal: None,
             clipboard: app.clipboard,
+            clipboard_reader: Arc::clone(&app.clipboard_reader),
             bell_rang: false,
             herdr: None,
             bash_sandbox: Some(sandbox),

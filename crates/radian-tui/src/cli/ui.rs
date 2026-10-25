@@ -204,6 +204,7 @@ pub(super) fn ui_loop(
             command_hooks,
             signal: None,
             clipboard: app.clipboard,
+            clipboard_reader: Arc::clone(&app.clipboard_reader),
             bell_rang: false,
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,

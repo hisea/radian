@@ -60,6 +60,9 @@ pub enum Action {
     ToggleReasoning,
     /// Collapse or expand the tool card bodies (ADR 0028 R4, pi's Ctrl-O).
     ToggleToolOutput,
+    /// Read an image from the system clipboard (Q2/Q7). Default `Ctrl-V`; when the clipboard
+    /// holds no image nothing happens.
+    PasteImage,
     /// The question form (ADR 0024 Q7): the next question, or the overview from the last one.
     FormNext,
     /// The previous question.
@@ -127,6 +130,7 @@ impl Action {
             Action::FindClose => "find_close",
             Action::ToggleReasoning => "toggle_reasoning",
             Action::ToggleToolOutput => "toggle_tool_output",
+            Action::PasteImage => "paste_image",
             Action::FormNext => "form_next",
             Action::FormPrev => "form_prev",
             Action::FormUp => "form_up",
@@ -201,6 +205,7 @@ const DEFAULT_BINDINGS: &[(&str, Action)] = &[
     ("form_decline", Action::FormDecline),
     ("toggle_reasoning", Action::ToggleReasoning),
     ("toggle_tool_output", Action::ToggleToolOutput),
+    ("paste_image", Action::PasteImage),
 ];
 
 /// The default key strings per action.
@@ -235,6 +240,7 @@ const DEFAULT_KEYS: &[(&str, &[&str])] = &[
     ("find", &["ctrl-f"]),
     ("toggle_reasoning", &["ctrl-t"]),
     ("toggle_tool_output", &["ctrl-o"]),
+    ("paste_image", &["ctrl-v"]),
 ];
 
 /// The find box's default keys. These are looked up before the transcript layer while the box

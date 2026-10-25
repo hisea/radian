@@ -17,6 +17,7 @@ pub mod blocks;
 pub mod btw;
 pub mod cli;
 pub mod clip;
+pub mod clipboard;
 pub mod command;
 pub mod composer;
 pub mod copy;
