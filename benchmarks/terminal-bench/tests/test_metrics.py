@@ -277,6 +277,21 @@ class BoundedReadTest(unittest.TestCase):
             self.assertIsNone(metrics._read_json(path, limit=16))
             self.assertEqual(metrics._read_trajectory(path, limit=16), {})
 
+    def test_only_json_files_are_bounded_by_size(self):
+        """A journal has a per-line cap, never a total-size cap."""
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp)
+            journal = sessions / "trial.jsonl"
+            line = '{"event":"ModelUsageRecorded","data":{"usage":{"output":10}}}\n'
+            journal.write_text(line * 4, encoding="utf-8")
+            with mock.patch.object(metrics, "MAX_JSON_BYTES", len(line) + 1):
+                # The same bytes over the JSON cap are not a JSON file...
+                self.assertIsNone(metrics._read_json(journal))
+                # ...but the journal path still reads every record in them.
+                self.assertEqual(
+                    metrics._journal_metrics(sessions)["output_tokens"], 40
+                )
+
     def test_a_long_line_is_skipped_without_being_read(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "journal.jsonl"

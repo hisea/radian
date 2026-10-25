@@ -14,10 +14,12 @@ counted separately. The common-task section keeps only tasks for which every
 agent has at least one finished (not timed-out, not excluded) trial.
 
 A job can hold a multi-GB journal, so no trial file is read whole: a journal or
-stdout file is streamed line by line (a line over ``MAX_LINE_CHARS`` is
-skipped), and a JSON file is read only when it is at most ``MAX_JSON_BYTES``.
-An over-limit journal or trajectory is treated as unreadable, and its trial
-keeps the facts from ``result.json`` only.
+stdout file is streamed line by line, under a per-line cap of ``MAX_LINE_CHARS``
+(an over-long line is drained and skipped, and reading continues), with no limit
+on the file's total size. A JSON file (``result.json``, ``trajectory.json``) is
+read whole, and only when it is at most ``MAX_JSON_BYTES``; an over-limit
+trajectory is treated as unreadable, and its trial keeps the facts from
+``result.json`` only.
 
 Stdlib only. ``--self-test`` runs ``tests/test_metrics.py`` on
 ``tests/fixtures/jobs``; the same suite is a step of ``scripts/verify.sh``. See
@@ -39,7 +41,7 @@ from typing import Any
 OVER_16K_TOKENS = 16_000
 
 # Read bounds. One trial's journal is hundreds of MB in a long run, and the
-# jobs directory is untrusted input: an over-limit line or file is dropped
+# jobs directory is untrusted input: an over-limit line or JSON file is dropped
 # instead of being loaded into memory. The journal writer caps a tool result
 # near 64 KiB (a base64 image is at most ~7 MB), so a 16 MiB line is generous.
 MAX_LINE_CHARS = 16 * 1024 * 1024
