@@ -38,14 +38,15 @@
 //! UTC timestamp, flushed per line ([`LoopLog`]). The arc TUI reads that file for its ticker
 //! and its log view (ADR 0048 decision 13).
 
+use std::ffi::OsString;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::store::attempt_ops::{self, Claim};
 use crate::store::model::{self, TaskState};
-use crate::store::{Error, PlanView, Store, plan_ops};
+use crate::store::{Error, PlanView, RUNNER_LOCK, Store, plan_ops};
 
 /// A hard stop on the pass count. Every pass that continues changes at least one task; this
 /// only keeps a store that something else keeps rewriting from looping forever.
@@ -83,7 +84,33 @@ static STOP: AtomicBool = AtomicBool::new(false);
 /// the value, so change them with it.
 pub const REPEATED_ERROR_LIMIT: u32 = 3;
 
-/// The one line the loop's last pass reports instead of the repeated error; the CLI prints it
+/// The one line a `serve` loop prints, with its `radian arc: ` prefix, before it replaces
+/// itself with a rebuilt binary. The user manual quotes it.
+pub const RESTART_TEXT: &str = "the radian binary changed on disk; restarting the loop with it";
+
+/// How long a loop waits before its second look at a changed binary, so a build that is still
+/// writing the file is not run (ADR 0048 decision 13).
+const RECHECK: Duration = Duration::from_secs(1);
+
+/// The paths whose change in a merged task means that main gained arc's own code (ADR 0048
+/// decision 13). One list for the loop and the manual.
+pub const ARC_CODE_PREFIXES: [&str; 3] = [
+    "crates/radian-arc/",
+    "crates/radian-tui/src/arc/",
+    "crates/radian-tui/src/cli/arc",
+];
+
+/// The one line a scheduling pass prints, with its `radian arc: ` prefix, when a merge
+/// changed arc's own code. The user manual quotes it.
+#[must_use]
+pub fn arc_code_changed(task: &str) -> String {
+    format!(
+        "{task} changed arc's code on main; rebuild radian (the loop restarts itself when its \
+         binary changes)"
+    )
+}
+
+/// The one line a loop's last pass reports instead of the repeated error; the CLI prints it
 /// with its usual `radian arc: ` prefix and exits `1`. The count is [`REPEATED_ERROR_LIMIT`],
 /// so the line cannot drift from the constant.
 #[must_use]
@@ -164,6 +191,14 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
 /// again as unverified. The loop then prints the summary, releases the lock and returns
 /// [`Exit`](crate::store::Exit) `0` through the caller.
 ///
+/// **A rebuilt binary replaces the loop's code.** At start the loop records its executable's
+/// path (once) and that file's identity; after each pass, before the interval, it compares the
+/// file at that path with the recorded identity and, when a stable executable differs, prints
+/// [`RESTART_TEXT`], releases `runner.lock` and `exec`s the recorded path with the same
+/// arguments, working directory and environment (ADR 0048 decision 13). It stops no gate and
+/// touches no worker. When the `exec` fails it prints the error, takes the lock again (exit
+/// `1` when it cannot), records the new identity and goes on with the old code.
+///
 /// Three passes in a row that return the same error text stop the loop
 /// ([`REPEATED_ERROR_LIMIT`]): the loop reports [`repeated_error_stop`] instead of the third
 /// error, stops the gates the way a signal does (workers are left alone) and returns an error,
@@ -174,13 +209,14 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
 /// The same as [`run`], and [`repeated_error_stop`] after three identical pass errors.
 pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> Result<(), Error> {
     let mut log = LoopLog::new(store);
-    let lock = take_lock(store, &mut log)?;
-    let mut sink = |text: &str| {
-        log.write(text);
-        emit(text);
-    };
+    let mut lock = take_lock(store, &mut log)?;
     STOP.store(false, Ordering::SeqCst);
     catch_stop_signals();
+    // The executable this loop runs, read once: after a replace, `current_exe()` names a
+    // deleted file on Linux (ADR 0048 decision 13).
+    let executable = std::env::current_exe().ok();
+    let mut recorded = executable.as_deref().and_then(executable_identity);
+    let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     let mut last: Option<String> = None;
     // The error text of the pass before and how many passes in a row returned it.
     let mut repeated: Option<(String, u32)> = None;
@@ -188,11 +224,19 @@ pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
         if stop_requested() {
             break;
         }
-        let report = match run_quiet(store, &mut sink, Some(&STOP)) {
+        let result = {
+            let mut sink = |text: &str| say(&mut log, emit, text);
+            run_quiet(store, &mut sink, Some(&STOP))
+        };
+        match result {
             Ok(report) => {
                 // A pass that succeeds starts the repeated-error count again.
                 repeated = None;
-                report
+                let summary = report.render_summary();
+                if last.as_deref() != Some(summary.as_str()) {
+                    say(&mut log, emit, &summary);
+                    last = Some(summary);
+                }
             }
             // One task's error does not end the loop: print it and run the next pass. The
             // lock and every state file stay as they are; a one-shot `run` still returns
@@ -209,20 +253,51 @@ pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
                     stop_gates(store);
                     return Err(Error::Failed(repeated_error_stop()));
                 }
-                sink(&format!("radian arc: {text}\n"));
+                say(&mut log, emit, &format!("radian arc: {text}\n"));
                 repeated = Some((text, count));
-                if stop_requested() || !wait_interval(interval_secs) {
+            }
+        }
+        if stop_requested() {
+            break;
+        }
+        // A rebuilt binary: one line, the lock released, and `exec` of the recorded path. A
+        // gate and a worker are separate process groups and are left alone (ADR 0048
+        // decision 13).
+        if let (Some(path), Some(identity)) = (executable.as_deref(), recorded) {
+            let mut look = |path: &Path| executable_identity(path);
+            let mut pause = |wait: Duration| std::thread::sleep(wait);
+            if let Some(new_identity) = changed_binary(path, identity, &mut look, &mut pause) {
+                if stop_requested() {
                     break;
                 }
-                continue;
+                say(&mut log, emit, &format!("radian arc: {RESTART_TEXT}\n"));
+                drop(lock);
+                let exec_error = replace_process(path, &arguments);
+                say(
+                    &mut log,
+                    emit,
+                    &format!("radian arc: cannot restart with the new binary: {exec_error}\n"),
+                );
+                match store.try_runner_lock() {
+                    Ok(Some(retaken)) => lock = retaken,
+                    Ok(None) => {
+                        return Err(Error::Failed(format!(
+                            "the new binary could not start ({exec_error}); {RUNNER_LOCK} is held \
+                             by another process"
+                        )));
+                    }
+                    Err(error) => {
+                        return Err(Error::Failed(format!(
+                            "the new binary could not start ({exec_error}); did not take \
+                             {RUNNER_LOCK} again: {}",
+                            error.message()
+                        )));
+                    }
+                }
+                recorded = Some(new_identity);
             }
-        };
-        let summary = report.render_summary();
-        if last.as_deref() != Some(summary.as_str()) {
-            sink(&summary);
-            last = Some(summary);
         }
-        if stop_requested() || !wait_interval(interval_secs) {
+        if !wait_interval(interval_secs) {
             break;
         }
     }
@@ -231,6 +306,105 @@ pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
     }
     drop(lock);
     Ok(())
+}
+
+/// Writes a loop line through the log and the caller's sink. A transition line is also kept in
+/// the [`Report`]; a `radian arc:` notice is not.
+fn say(log: &mut LoopLog, emit: &mut dyn FnMut(&str), text: &str) {
+    log.write(text);
+    emit(text);
+}
+
+/// One identity of the running binary's file: what the loop compares after each pass (ADR 0048
+/// decision 13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BinaryIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+/// The identity of the file at `path` when it is a regular file with an execute bit. `None`
+/// for a missing file, a directory, a special file, or a file a build is still writing (no
+/// execute bit yet): the loop compares nothing then and looks again at a later pass.
+fn executable_identity(path: &Path) -> Option<BinaryIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || !executable(&metadata) {
+        return None;
+    }
+    Some(BinaryIdentity {
+        device: device_of(&metadata),
+        inode: inode_of(&metadata),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+#[cfg(unix)]
+fn executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn executable(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn device_of(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.dev()
+}
+
+#[cfg(not(unix))]
+fn device_of(_metadata: &std::fs::Metadata) -> u64 {
+    0
+}
+
+#[cfg(unix)]
+fn inode_of(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.ino()
+}
+
+#[cfg(not(unix))]
+fn inode_of(_metadata: &std::fs::Metadata) -> u64 {
+    0
+}
+
+/// The identity of a changed, stable executable at `path`: the first look differs from
+/// `recorded`, so the function looks again after one second and returns the identity only when
+/// the second look equals the first (ADR 0048 decision 13). `look` and `pause` are the seam
+/// the unit tests use; production passes [`executable_identity`] and [`std::thread::sleep`].
+fn changed_binary(
+    path: &Path,
+    recorded: BinaryIdentity,
+    look: &mut dyn FnMut(&Path) -> Option<BinaryIdentity>,
+    pause: &mut dyn FnMut(Duration),
+) -> Option<BinaryIdentity> {
+    let first = look(path)?;
+    if first == recorded {
+        return None;
+    }
+    pause(RECHECK);
+    let second = look(path)?;
+    (second == first).then_some(second)
+}
+
+/// Replaces this process with `program` and its arguments, in the same working directory and
+/// environment. It returns [`std::process::CommandExt::exec`]'s error; on success it never
+/// returns (ADR 0048 decision 13).
+#[cfg(unix)]
+fn replace_process(program: &Path, arguments: &[OsString]) -> std::io::Error {
+    use std::os::unix::process::CommandExt as _;
+    std::process::Command::new(program).args(arguments).exec()
+}
+
+#[cfg(not(unix))]
+fn replace_process(_program: &Path, _arguments: &[OsString]) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Unsupported, "exec is not available")
 }
 
 /// Stops the gates a serve loop leaves running: a short grace, then SIGKILL. Each gate arc
@@ -389,6 +563,12 @@ impl Transitions<'_> {
 
     fn note(&mut self, line: String) {
         self.report.notes.push(line);
+    }
+
+    /// Writes a line the loop prints that is not a transition, so it reaches `loop.log` and
+    /// the caller but is not part of the summary (the `changed arc's code` line).
+    fn say(&mut self, line: String) {
+        (self.emit)(&format!("{line}\n"));
     }
 }
 
@@ -708,6 +888,14 @@ fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
 
+/// Whether a path a merged task changed touches arc's own code (ADR 0048 decision 13): any
+/// entry of [`ARC_CODE_PREFIXES`] is a prefix of it.
+fn is_arc_code(path: &str) -> bool {
+    ARC_CODE_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
+
 /// Every plan in claim order: the owner's `priority` (`P0` first), then the plan id. A plan
 /// file that changed outside arc keeps its place; the caller skips it where it must not act.
 fn plans_in_claim_order(store: &Store) -> Result<Vec<PlanView>, Error> {
@@ -867,12 +1055,23 @@ fn merge_auto(
             let stopped = stop.is_some_and(|flag| flag.load(Ordering::SeqCst));
             match crate::review::merge_step(store, &task.item.id, stopped) {
                 Ok(step) => {
-                    if let Some(line) = step.line {
+                    let crate::review::MergeStep {
+                        line,
+                        note,
+                        changed_paths,
+                    } = step;
+                    if let Some(line) = line {
                         transitions.push(line);
                         changed = true;
                     }
-                    if let Some(note) = step.note {
+                    if let Some(note) = note {
                         transitions.note(note);
+                    }
+                    // A merge that put arc's own code on main tells the person to rebuild;
+                    // the loop then replaces itself when the binary changes (ADR 0048
+                    // decision 13).
+                    if changed_paths.iter().any(|path| is_arc_code(path)) {
+                        transitions.say(format!("radian arc: {}", arc_code_changed(&task.item.id)));
                     }
                     let after = store.load_task(&task.item.id)?.item;
                     // A failed integration of a worker attempt counts; the same failure of a
@@ -1089,5 +1288,119 @@ mod tests {
             notes: Vec::new(),
         };
         assert_eq!(report.render_summary(), "summary\nnothing waits\n");
+    }
+
+    fn identity(inode: u64) -> BinaryIdentity {
+        BinaryIdentity {
+            device: 1,
+            inode,
+            size: 10,
+            modified: None,
+        }
+    }
+
+    #[test]
+    fn an_unchanged_binary_is_not_restarted() {
+        let recorded = identity(1);
+        let mut looks = std::collections::VecDeque::from([Some(recorded)]);
+        let mut look = |_path: &Path| looks.pop_front().flatten();
+        let mut pauses = 0;
+        let mut pause = |_: Duration| pauses += 1;
+        assert_eq!(
+            changed_binary(Path::new("/bin/radian"), recorded, &mut look, &mut pause),
+            None
+        );
+        assert_eq!(pauses, 0, "an unchanged file needs no second look");
+    }
+
+    #[test]
+    fn a_changed_and_stable_binary_is_restarted() {
+        let recorded = identity(1);
+        let changed = identity(2);
+        let mut looks = std::collections::VecDeque::from([Some(changed), Some(changed)]);
+        let mut look = |_path: &Path| looks.pop_front().flatten();
+        let mut pauses = Vec::new();
+        let mut pause = |wait: Duration| pauses.push(wait);
+        assert_eq!(
+            changed_binary(Path::new("/bin/radian"), recorded, &mut look, &mut pause),
+            Some(changed)
+        );
+        assert_eq!(pauses, vec![RECHECK], "the second look waits one second");
+    }
+
+    #[test]
+    fn a_missing_binary_is_not_restarted() {
+        let recorded = identity(1);
+        let mut looks = std::collections::VecDeque::from([None]);
+        let mut look = |_path: &Path| looks.pop_front().flatten();
+        let mut pauses = 0;
+        let mut pause = |_: Duration| pauses += 1;
+        assert_eq!(
+            changed_binary(Path::new("/bin/radian"), recorded, &mut look, &mut pause),
+            None
+        );
+        assert_eq!(pauses, 0);
+    }
+
+    /// A build still writing the file changes it between the two looks: the loop waits for a
+    /// later pass instead of running a half-written binary. Mutation: return the first look
+    /// and this test runs it.
+    #[test]
+    fn a_binary_that_changes_between_the_two_looks_is_not_restarted() {
+        let recorded = identity(1);
+        let mut looks = std::collections::VecDeque::from([Some(identity(2)), Some(identity(3))]);
+        let mut look = |_path: &Path| looks.pop_front().flatten();
+        let mut pauses = 0;
+        let mut pause = |_: Duration| pauses += 1;
+        assert_eq!(
+            changed_binary(Path::new("/bin/radian"), recorded, &mut look, &mut pause),
+            None
+        );
+        assert_eq!(pauses, 1, "the second look ran");
+    }
+
+    /// The real metadata check: a missing file, a regular file without an execute bit and a
+    /// directory have no identity, so the loop ignores a build that is still writing.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_or_non_executable_file_has_no_identity() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::test_support::TempDir::new("binary-identity");
+        assert_eq!(executable_identity(&dir.path().join("missing")), None);
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, b"not a binary").expect("write the plain file");
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644))
+            .expect("remove the execute bits");
+        assert_eq!(executable_identity(&plain), None);
+        let program = dir.path().join("program");
+        std::fs::write(&program, b"#!/bin/sh\n").expect("write the program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make it executable");
+        assert!(executable_identity(&program).is_some());
+        assert_eq!(
+            executable_identity(dir.path()),
+            None,
+            "a directory is not a binary"
+        );
+    }
+
+    /// The path list has exactly the three entries ADR 0048 decision 13 and the manual name.
+    /// Mutation: drop `crates/radian-tui/src/arc/` and the second assertion fails.
+    #[test]
+    fn arc_code_is_the_three_path_prefixes() {
+        for path in [
+            "crates/radian-arc/src/run.rs",
+            "crates/radian-tui/src/arc/render.rs",
+            "crates/radian-tui/src/cli/arc.rs",
+        ] {
+            assert!(is_arc_code(path), "{path} is arc code");
+        }
+        for path in [
+            "crates/radian-tui/src/cli/attach.rs",
+            "crates/radian-tui/src/arcade/x.rs",
+            "docs/adr/0048-arc-orchestrator.md",
+        ] {
+            assert!(!is_arc_code(path), "{path} is not arc code");
+        }
     }
 }

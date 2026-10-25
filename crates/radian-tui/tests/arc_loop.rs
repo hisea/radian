@@ -171,8 +171,10 @@ fn the_detached_start_runs_arc_serve() {
     }
     let mut starter = LoopStarter::with_program_and_timeout(store, script, Duration::from_secs(5));
     starter.start().expect("the process is spawned");
+    // The shell creates the file for the redirection before it writes the arguments; wait for
+    // content, not existence, so a slow writer is not read as an empty argv.
     wait_until(Duration::from_secs(5), "the fake loop's arguments", || {
-        args_file.exists()
+        fs::read_to_string(&args_file).is_ok_and(|args| !args.trim().is_empty())
     });
     let args = fs::read_to_string(&args_file).expect("the fake loop wrote its arguments");
     assert_eq!(

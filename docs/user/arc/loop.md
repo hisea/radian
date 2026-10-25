@@ -50,6 +50,9 @@ A started worker prints `<attempt id> started -> doing.running`; a started gate 
 The limit's `<reason>` is the text `show` prints as the `rework_reason`: `the task used <n> automatic reverifies and `[limits] max_auto_reverify` is <max>`.
 A task a plan cancel left at `doing.reconciling` prints `<task> doing.reconciling -> failed.cancelled (its plan is cancelled)`.
 One line per `(head_sha, remote main)` pair is printed, so a summary that repeats every interval does not print it again.
+When a merged task's own change touches arc's code, its merge line is followed by one more: `radian arc: <task> changed arc's code on main; rebuild radian (the loop restarts itself when its binary changes)`.
+Arc's code is a path under `crates/radian-arc/`, a path under `crates/radian-tui/src/arc/`, or a path that starts with `crates/radian-tui/src/cli/arc`.
+The paths are the task's diff against its merge base, which the merge already reads; no network call is added.
 When a pass changes nothing, a summary of what waits on whom ends the pass:
 
 ```text
@@ -83,6 +86,20 @@ After every pass (which always ends quiet) it waits `--interval` seconds, then r
 | `--interval` | `SECONDS` | `30` | Whole seconds between passes, 5 to 3600. A value outside that range is a usage error (`2`). |
 
 It is a loop, not a daemon: nothing supervises it, and while it is not running nothing advances until a person (or the TUI) starts one. Quitting a TUI that started it leaves it running.
+
+A running `serve` follows a rebuilt binary by itself.
+When it starts it records the path of its own executable (once, from `current_exe`; it never calls `current_exe` again) and that file's identity: device, inode, size and modification time.
+After every pass, before it waits for the interval, it looks at the file at that path.
+When the file exists, is a regular file with an execute bit, and its identity differs from the recorded one, it looks once more after one second and acts only when the second look is the same.
+It then prints one line, `radian arc: the radian binary changed on disk; restarting the loop with it`, releases `runner.lock`, flushes [`loop.log`](#looplog), and replaces itself with `exec` of that path with the same arguments, working directory and environment.
+The pid does not change, so the pid in `runner.lock` and `pgrep` stay meaningful.
+It starts no gate, stops no gate and touches no worker: a worker and a gate are separate processes, and the new loop reconciles them exactly as it does after a killed loop.
+A file that is missing or has no execute bit (a build in the middle of writing it) is ignored, and a later pass looks again; a file that changes between the two looks is not run either.
+When `exec` fails, it prints one `radian arc:` line with the error, takes `runner.lock` again (when that fails it prints the line and exits `1`), records the new identity so it does not retry every pass, and goes on with the old code.
+A one-shot `run` does not do this.
+`radian arc mcp` does not do this either: after a rebuild, reconnect the lead's MCP server (see [`arc/mcp`](mcp.md)); it does not replace itself.
+
+The pass also prints the `changed arc's code on main` line when its merge touches arc's code, with the three path prefixes and the meaning [under `run`](#radian-arc-run).
 
 The summary is printed only when it differs from the summary the loop printed last, so a quiet loop does not repeat the same lines every interval. Every transition line is still printed when it happens.
 

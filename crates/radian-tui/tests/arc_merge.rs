@@ -1393,6 +1393,7 @@ impl actions::ArcOps for Recorder {
             warning: None,
             conflict: None,
             followup: None,
+            changed_paths: Vec::new(),
         })
     }
 
