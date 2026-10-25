@@ -164,7 +164,16 @@ pub fn message(text: impl Into<String>, images: &[LoadedImage]) -> radian_core::
 }
 
 /// The transcript placeholder line for one image.
+///
+/// The line is one display row, and the source is a file name, which a file system allows to
+/// contain a control character (`\n`, `\r`, `\t`, ESC). Each one shows as a space: the row never
+/// breaks, and no control character reaches the terminal. The part's `annotations.name` keeps
+/// the real name.
 pub fn placeholder(name: &str, width: u32, height: u32, bytes: usize) -> String {
+    let name: String = name
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
     format!(
         "[image: {name}, {width}×{height}, {} KB]",
         bytes.div_ceil(1024)
@@ -435,6 +444,24 @@ mod tests {
         let part = image.part();
         assert_eq!(part_placeholder(&part), Some(image.placeholder()));
         assert_eq!(image.placeholder(), "[image: shot.png, 1200×800, 1 KB]");
+    }
+
+    /// A file name is whatever the file system allows, and a newline, a carriage return or a tab
+    /// is allowed. The placeholder is one display line, so a control character in the name shows
+    /// as a space instead of breaking the line (and the part's `annotations.name` keeps the
+    /// real name).
+    #[test]
+    fn a_control_character_in_the_source_name_stays_on_one_line() {
+        let image = load("bad\nname\r\t.png", &png(10, 10)).expect("a valid PNG header");
+        assert_eq!(image.name, "bad\nname\r\t.png", "the annotations keep it");
+        let line = image.placeholder();
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        assert_eq!(line, "[image: bad name  .png, 10×10, 1 KB]");
+        assert_eq!(
+            part_placeholder(&image.part()),
+            Some(line),
+            "the transcript and the composer build the same line"
+        );
     }
 
     /// A unique scratch directory removed on drop.

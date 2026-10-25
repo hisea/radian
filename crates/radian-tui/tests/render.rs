@@ -1075,6 +1075,64 @@ fn a_composer_attachment_wider_than_the_input_is_cut_with_an_ellipsis() {
     }
 }
 
+/// A file name may contain a line break. The attachment row is one row of composer chrome
+/// (ADR 0028 R5): the placeholder normalizes the control character, so it stays on that row,
+/// in the text column, and the frame's chrome keeps its rows.
+#[test]
+fn a_composer_attachment_name_with_a_line_break_stays_on_one_row() {
+    use radian_tui::render::InputStyle;
+    for style in [InputStyle::Lines, InputStyle::Box] {
+        let mut app = App::new("m", "s");
+        app.input_style = style;
+        app.input = "hi".into();
+        app.composer_images
+            .push(attachment("bad\nname\r.png", 10, 10));
+        let terminal = render(&mut app, 60, 12);
+        let text = screen(&terminal);
+        let image_rows: Vec<u16> = (0..12)
+            .filter(|y| row(&terminal, *y).contains("[image:"))
+            .collect();
+        assert_eq!(
+            image_rows.len(),
+            1,
+            "{style:?}: one attachment row, as reserved:\n{text:?}"
+        );
+        let image_row = row(&terminal, image_rows[0]);
+        assert!(
+            image_row.contains("[image: bad name .png, 10×10, 1 KB]"),
+            "{style:?}: the control characters became spaces:\n{text:?}"
+        );
+        assert!(
+            !image_row.chars().any(char::is_control),
+            "{style:?}: no control character reaches the row:\n{text:?}"
+        );
+        // The text column and the chrome hold exactly as for a plain name.
+        let text_row = row_of(&terminal, "❯ hi").expect("the text row");
+        assert_eq!(
+            display_column(&image_row, '['),
+            display_column(&row(&terminal, text_row as u16), 'h'),
+            "{style:?}: the attachment row starts in the text column:\n{text:?}"
+        );
+        match style {
+            InputStyle::Lines => assert!(
+                row(&terminal, text_row as u16 + 1).starts_with("────"),
+                "the bottom rule keeps its row:\n{text:?}"
+            ),
+            InputStyle::Box => {
+                assert_eq!(
+                    image_row.chars().next(),
+                    Some('│'),
+                    "the frame's rail on the attachment row:\n{text:?}"
+                );
+                assert!(
+                    row(&terminal, text_row as u16 + 1).trim_end() == "╰──",
+                    "the frame's tail keeps its row:\n{text:?}"
+                );
+            }
+        }
+    }
+}
+
 /// ADR 0035: no tier draws a
 /// user half-cell pad. The `ascii` tier draws its own `> ` marker, and two user rows are
 /// separated by the container's one blank line like any two blocks.
