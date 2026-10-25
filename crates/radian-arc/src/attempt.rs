@@ -397,7 +397,8 @@ pub fn cancel_any(store: &Store, id: &str) -> Result<Cancelled, Error> {
 /// `radian arc cancel <task>`: stop one task.
 ///
 /// A `todo` task goes to `failed.cancelled`. A `doing` task gets SIGTERM on its wrapper (the
-/// pid and its start time must match, so a reused pid is never signalled), then SIGKILL after
+/// pid and its start time must match, so a reused pid is not signalled; when `ps` cannot
+/// report the time, the pid alone decides, as ADR 0048 decision 9 says), then SIGKILL after
 /// `[limits] cancel_grace_secs`. When the wrapper's `AttemptFinished` arrives the task goes to
 /// `failed.cancelled`; when it never arrives the task goes to `doing.reconciling`. A `review`
 /// task's running gate is signalled first (the way the loop's own stop signals one), and the
