@@ -1202,10 +1202,13 @@ touched by this cleanup.
 The log is set once the session exists and before the terminal is entered
 (`terminal::set_panic_log`); a panic before that has no log. The exit line names the log path.
 A diagnostics write or cleanup that fails is one `[diagnostics]` line on stderr, never a fault:
-the run continues and the panic still exits 101. Tested by
+the run continues and the panic still exits 101. A panic-log write failure follows the same
+policy as the panic report itself — on stderr on `main` always, and on another thread only while
+the alternate screen is down, so a worker's failure line cannot print over the TUI. Tested by
 `pty_clean_exit_prints_one_reason_line`, `pty_a_panic_writes_a_redacted_panic_log`,
-`pty_panic_path_restores_the_terminal` and
-`pty_an_unwritable_diagnostics_directory_is_only_a_notice`.
+`pty_panic_path_restores_the_terminal`,
+`pty_an_unwritable_diagnostics_directory_is_only_a_notice` and
+`terminal::tests::a_failed_panic_log_append_follows_the_report_policy`.
 
 ## The exit line is written with a bound (2026-10-15, small-fixes-3)
 
