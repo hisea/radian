@@ -354,15 +354,26 @@ pub fn redact(text: &str, secrets: &[String]) -> String {
     out
 }
 
+/// What one panic leaves for stderr: the redacted one-line report, and the diagnostic of a
+/// panic-log append that could not be written.
+struct PanicRecord {
+    report: String,
+    diagnostic: Option<String>,
+}
+
 /// Records the panic summary (for the exit line) and appends a timestamped line to the panic
-/// log, if one was set, and returns the redacted report for stderr. Never panics itself: a
-/// panic hook that panicked would abort.
-fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
+/// log, if one was set. Never panics itself: a panic hook that panicked would abort.
+fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> PanicRecord {
+    record_panic_text(&info.to_string())
+}
+
+/// [`record_panic`] on the panic text alone, so the record and the stderr policy can be tested
+/// without a real panic.
+fn record_panic_text(full: &str) -> PanicRecord {
     let thread = std::thread::current()
         .name()
         .unwrap_or("<unnamed>")
         .to_owned();
-    let full = info.to_string();
     let (path, secrets) = {
         // Poison-tolerant too: a panicked holder of `PANIC_LOG` must not drop the list.
         let slot = PANIC_LOG
@@ -373,12 +384,13 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
             None => (None, Vec::new()),
         }
     };
-    let redacted = redact(&full, &secrets);
+    let redacted = redact(full, &secrets);
     // The exit line is one line: keep the first line of the panic report.
     let summary = redacted.lines().next().unwrap_or("").to_owned();
     if let Ok(mut slot) = LAST_PANIC.lock() {
         *slot = Some(summary);
     }
+    let mut diagnostic = None;
     if let Some(path) = path {
         let line = format!(
             "{} thread={} {}\n",
@@ -389,10 +401,36 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
         // The diagnostics directory (ADR 0013 T4): owner-only, cleaned before the
         // write, and a failure is one line rather than a fault.
         if let Err(error) = radian_host::append(&path, &line) {
-            eprintln!("[diagnostics] cannot write {}: {error}", path.display());
+            // Returned, not printed: the hook sends it through the same policy as the
+            // report, so a worker's line cannot print over the alternate screen.
+            diagnostic = Some(format!(
+                "[diagnostics] cannot write {}: {error}",
+                path.display()
+            ));
         }
     }
-    format!("thread '{thread}' {redacted}")
+    PanicRecord {
+        report: format!("thread '{thread}' {redacted}"),
+        diagnostic,
+    }
+}
+
+/// The text a panic hook writes to stderr: the append-failure diagnostic first, then the
+/// report. `None` means nothing may be written: `main` always may, and another thread may only
+/// while no TUI owns the screen (ADR 0023 — under the alternate screen the bytes would print
+/// over a UI that keeps drawing).
+fn stderr_text(record: &PanicRecord, main: bool, alternate_screen: bool) -> Option<String> {
+    if !main && alternate_screen {
+        return None;
+    }
+    let mut text = String::new();
+    if let Some(diagnostic) = &record.diagnostic {
+        text.push_str(diagnostic);
+        text.push('\n');
+    }
+    text.push_str(&record.report);
+    text.push('\n');
+    Some(text)
 }
 
 /// Installs a panic hook that restores the terminal **only when the panicking thread is the
@@ -412,21 +450,22 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
 /// value or the key). What reaches stderr is the same redacted text the panic log gets. The
 /// cost is the default hook's backtrace note; `RUST_BACKTRACE` is not honoured here.
 ///
-/// The report goes to stderr **on `main`, always**, and on another thread only while the
-/// alternate screen is not up. Under the alternate screen a worker's report would be printed
-/// over a UI that keeps drawing; `record_panic` still puts the text in `LAST_PANIC` and the
-/// panic log, the arc TUI's reply puts the failure on its footer line, and the session TUI
-/// prints `last_panic` after the restore. A worker that panics before the terminal is entered,
-/// or after it is restored, still reports on stderr as before.
+/// The report, and the diagnostic of a panic log that could not be written, go to stderr
+/// **on `main`, always**, and on another thread only while the alternate screen is not up.
+/// Under the alternate screen a worker's report would be printed over a UI that keeps
+/// drawing; `record_panic` still puts the text in `LAST_PANIC` and the panic log, the arc
+/// TUI's reply puts the failure on its footer line, and the session TUI prints `last_panic`
+/// after the restore. A worker that panics before the terminal is entered, or after it is
+/// restored, still reports on stderr as before.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
-        let report = record_panic(info);
+        let record = record_panic(info);
         let main = std::thread::current().name() == Some("main");
         if main {
             restore_terminal();
         }
-        if main || !ALT_SCREEN.load(Ordering::SeqCst) {
-            let _ = writeln!(io::stderr(), "{report}");
+        if let Some(text) = stderr_text(&record, main, ALT_SCREEN.load(Ordering::SeqCst)) {
+            let _ = io::stderr().write_all(text.as_bytes());
         }
     }));
 }
@@ -488,5 +527,68 @@ mod tests {
             shared_secrets(&secrets),
             vec!["added-after-poison".to_string()]
         );
+    }
+
+    /// A panic log that cannot be written is a diagnostic on the record, not an `eprintln!`
+    /// from the middle of the hook: the same main/alternate-screen policy as the report decides
+    /// whether either line reaches stderr, so a worker's failure line cannot print over the TUI
+    /// (the review of TK0105).
+    #[test]
+    fn a_failed_panic_log_append_follows_the_report_policy() {
+        let root =
+            std::env::temp_dir().join(format!("radian-terminal-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // The resolved diagnostics path is a regular file, so creating the directory and
+        // appending under it fails — an unwritable diagnostics directory, reduced to its
+        // simplest form.
+        let blocker = root.join("diagnostics");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let broken = blocker.join("s-1.panic.log");
+        let secrets: SharedSecrets = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        set_panic_log(Some(broken.clone()), std::sync::Arc::clone(&secrets));
+
+        let record = record_panic_text("thread 'worker' panicked at boom");
+
+        set_panic_log(None, secrets);
+
+        let diagnostic = record
+            .diagnostic
+            .as_deref()
+            .unwrap_or_else(|| panic!("the failed append must be reported: {:?}", record.report));
+        assert!(
+            diagnostic.contains("[diagnostics] cannot write"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&broken.display().to_string()),
+            "the diagnostic names the log: {diagnostic}"
+        );
+        // Suppressing the stderr line never loses the text the session TUI prints after the
+        // restore.
+        assert!(
+            last_panic().is_some_and(|line| line.contains("panicked at boom")),
+            "the summary is still recorded"
+        );
+
+        // `main` may always write, and so may a worker while no TUI owns the screen.
+        let main_text = stderr_text(&record, true, true).expect("main always reports");
+        assert!(main_text.contains(&record.report), "{main_text}");
+        assert!(
+            main_text.contains("[diagnostics] cannot write"),
+            "the append failure is reported on main: {main_text}"
+        );
+        let idle_text = stderr_text(&record, false, false).expect("no UI: the worker reports");
+        assert!(
+            idle_text.contains("[diagnostics] cannot write"),
+            "{idle_text}"
+        );
+        // The trigger: a non-main thread panics while the alternate screen is up.
+        assert!(
+            stderr_text(&record, false, true).is_none(),
+            "a worker's line must not print over the alternate screen"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
