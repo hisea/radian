@@ -862,3 +862,20 @@ with `cp`, which `cmp` found identical.
 | TK0104-M3 | drop `crates/radian-tui/src/arc/` from `ARC_CODE_PREFIXES` | `run::tests::arc_code_is_the_three_path_prefixes` (`crates/radian-tui/src/arc/render.rs is arc code`) | ✅ failed |
 
 3/3 caught.
+
+## TK0112: every line a stopping `serve` prints reaches `loop.log` (2026-10-24, branch `work/TK0112-serve-reexec-followups`)
+
+A review of TK0104 found that after a failed `exec` the restart branch returned its
+`runner.lock`-retake failure without `say`, so the CLI printed it on stderr but `loop.log` did
+not hold it; the repeated-error stop line had the same gap. Both now go through `say` before the
+loop returns. Each mutation was applied to the working `crates/radian-arc/src/run.rs`, the
+`radian` binary was rebuilt for the test that drives it, the named tests ran with `cargo
+nextest run -p radian-arc --locked --profile sandbox`, and the file was restored from
+`.radian/bak/run.rs` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0112-M1 | return the lock-retake failure without `say` (both the held-lock and the unopenable-lock branch) | `run::tests::a_failed_restart_that_cannot_retake_the_lock_logs_the_reason_before_it_stops`, `run::tests::a_failed_restart_that_cannot_open_the_lock_logs_the_reason_before_it_stops` | ✅ 2 failed |
+| TK0112-M2 | return the repeated-error stop line without `say` | `run::three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock` (`loop.log is missing the stop line`) | ✅ failed |
+
+2/2 caught.

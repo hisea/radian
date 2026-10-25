@@ -1757,6 +1757,13 @@ fn three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock() {
         stderr.contains(&stop),
         "the stop line is missing: {stdout}{stderr}"
     );
+    // The stop line is a line `serve` prints, so `loop.log` holds it like every other
+    // `radian arc:` line (ADR 0048 decision 13).
+    let logged = fs::read_to_string(repo.arc().join("loop.log")).expect("loop.log");
+    assert!(
+        logged.contains(&stop),
+        "loop.log is missing the stop line: {logged}"
+    );
     assert_eq!(
         stdout
             .matches("worker.exec_args must not repeat `--profile`")
