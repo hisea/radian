@@ -26,7 +26,7 @@ const RESPONSES_PER_MODELS_DEV: &[&str] = &[
 ];
 
 const OPENCODE_GO_ANTHROPIC_BASE: &str = "https://opencode.ai/inference/go/anthropic";
-const OPENCODE_GO_OPENAI_BASE: &str = "https://opencode.ai/inference/go/openai/v1";
+const OPENCODE_GO_OPENAI_BASE: &str = "https://opencode.ai/inference/go/v1";
 
 fn upstream() -> Vec<serde_json::Value> {
     serde_json::from_str(include_str!("data/opencode-go-models.json")).expect("vendored JSON")

@@ -1436,3 +1436,17 @@ substring `pub const` never matched, so the real scan is green under M1; the sam
 rule. The decoy constants on the positive tests are what make them fail under the old
 unconditional-constant rule.
 
+## TK0170: opencode-go chat and Responses move to the `/inference/go/v1` base (2026-10-25)
+
+Worktree `.radian/arc/worktrees/TK0170-opencode-go-inference-v1`, branch
+`work/TK0170-opencode-go-inference-v1`. The mutation edits `OPENCODE_GO_OPENAI_BASE` in
+`crates/radian-host/src/provider.rs` back to the old `…/inference/go/openai/v1`, restores from
+`.radian/provider.rs.bak` with `cp` (never `git checkout`), and runs
+`cargo nextest run -p radian-host --locked --profile sandbox --no-fail-fast`. The restore was
+confirmed byte-identical with `diff -q`.
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| TK0170-M1 | `OPENCODE_GO_OPENAI_BASE` points at the old `https://opencode.ai/inference/go/openai/v1` | ✅ 6 failed | `provider::tests::a_route_picks_the_adapter_base_url_and_headers`, `provider::tests::an_explicit_base_url_survives_the_default_moving`, `provider::tests::opencode_go_maps_models_to_the_three_protocols`, `provider::tests::the_catalogs_api_field_is_never_used_for_the_endpoint`, `provider::tests::the_bundled_snapshot_decides_the_protocol_with_no_cache`, and `opencode_go_models::the_opencode_go_builtins_match_upstream` |
+
+1/1 caught.
