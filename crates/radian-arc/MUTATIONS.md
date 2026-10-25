@@ -782,3 +782,18 @@ the working file, the named test was run alone, and the file was restored from a
 
 1/1 caught.
 
+## TK0102: `pre_existing` is measured against the task's whole change (2026-10-24, branch `work/TK0102-pre-existing-whole-diff`)
+
+ADR 0048 decision 10: rule (a) of a rework round now follows the new side of the task's own diff
+(`merge-base(main, head)..head`), not the rework's increment. Each mutation was applied by hand to
+the working `crates/radian-arc/src/gate/review.rs`, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox`, and the file was restored from
+`.radian/review.rs.bak` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0102-M1 | use the rework's increment again for rule (a) (`changed: increment`) | `review::an_item_on_a_line_the_task_changed_in_an_earlier_attempt_keeps_blocking` (the item is moved and the stage passes) | ✅ failed |
+| TK0102-M2 | keep any item in a file the task changed, whatever its distance from a changed line (`path == file` without `abs_diff <= PRE_EXISTING_WINDOW`) | `gate::review::tests::an_item_more_than_the_window_from_a_changed_line_is_demoted`; `review::an_item_far_from_every_changed_line_of_its_file_is_moved` | ✅ 2 failed |
+
+2/2 caught.
+

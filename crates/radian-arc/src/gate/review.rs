@@ -14,10 +14,12 @@
 //! A review that follows an earlier review of the same task is a rework round (ADR 0048
 //! decision 10): its prompt holds the brief, the previous review's blocking items, the commit
 //! list `<previous sha>..<sha>` and the increment, the lines the rework itself added or changed
-//! ([`build_rework_prompt`]). After its report is parsed, arc moves a blocking item the rework
-//! did not touch to `suggestions` and marks it `pre_existing` ([`ReworkRound`]), except a
-//! `critical` item and an item without a `file` or a `line`, which keep blocking; the stage
-//! then passes when no blocking item is left.
+//! ([`build_rework_prompt`]). After its report is parsed, arc moves a blocking item to
+//! `suggestions` and marks it `pre_existing` ([`ReworkRound`]) unless it is within
+//! [`PRE_EXISTING_WINDOW`] lines of a line the task's own change added or changed (not the
+//! rework's increment), within [`PREVIOUS_ITEM_WINDOW`] lines of a blocking item of the previous
+//! review in the same file, a `critical` item, or an item without a `file` or a `line`; the
+//! stage then passes when no blocking item is left.
 //!
 //! The session ends with one fenced `json` block ([`ReviewReport`]). arc parses the last such
 //! block. An empty `blocking` list passes the stage; any item fails it with reason
@@ -63,8 +65,8 @@ pub const REVIEW_RUNS: u32 = 2;
 /// 10): the window rules never move it.
 const CRITICAL: &str = "critical";
 
-/// A rework round: how far a blocking item may sit from an increment line and still block
-/// (ADR 0048 decision 10, rule (a)).
+/// A rework round: how far a blocking item may sit from a line the task's own change added or
+/// changed and still block (ADR 0048 decision 10, rule (a)).
 pub const PRE_EXISTING_WINDOW: u32 = 3;
 
 /// A rework round: how far a blocking item may sit from a blocking item of the previous review
@@ -81,21 +83,23 @@ pub struct PreviousReview {
     pub blocking: Vec<ReviewItem>,
 }
 
-/// One rework round's input: the previous review and the lines the rework changed.
+/// One rework round's input: the previous review and the lines the task's own change added or
+/// changed.
 #[derive(Debug, Clone)]
 struct ReworkRound {
     previous: PreviousReview,
-    /// The new-side lines of `previous..sha` that are also new-side lines of the task's own
-    /// diff: `(path, line)`.
-    increment: BTreeSet<(String, u32)>,
+    /// The new-side lines of the task's own diff, `merge-base(main, sha)..sha`: the lines the
+    /// task itself added or changed. `(path, line)`.
+    changed: BTreeSet<(String, u32)>,
 }
 
 impl ReworkRound {
     /// Whether a blocking item stays blocking (ADR 0048 decision 10, the rework round's
     /// exceptions): a `critical` item always does, wherever it is; an item without a `file`
     /// or a `line` does too, at its level; any other item does when its `file:line` is within
-    /// [`PRE_EXISTING_WINDOW`] lines of an increment line, or it is in the same file as and
-    /// within [`PREVIOUS_ITEM_WINDOW`] lines of a blocking item of the previous review.
+    /// [`PRE_EXISTING_WINDOW`] lines of a line the task's own change added or changed, or it is
+    /// in the same file as and within [`PREVIOUS_ITEM_WINDOW`] lines of a blocking item of the
+    /// previous review.
     fn keeps(&self, item: &ReviewItem) -> bool {
         // A critical item blocks in every round, wherever it is: the position of a line does
         // not prove that a problem is harmless or old.
@@ -108,8 +112,8 @@ impl ReworkRound {
         let (Some(file), Some(line)) = (&item.file, item.line) else {
             return true;
         };
-        let near_increment = self
-            .increment
+        let near_change = self
+            .changed
             .iter()
             .any(|(path, at)| path == file && at.abs_diff(line) <= PRE_EXISTING_WINDOW);
         let near_previous = self.previous.blocking.iter().any(|earlier| {
@@ -118,7 +122,7 @@ impl ReworkRound {
                     .line
                     .is_some_and(|at| at.abs_diff(line) <= PREVIOUS_ITEM_WINDOW)
         });
-        near_increment || near_previous
+        near_change || near_previous
     }
 
     /// Moves every blocking item [`ReworkRound::keeps`] does not keep to `suggestions`, marks
@@ -365,16 +369,20 @@ impl ReviewRun<'_> {
                 // The increment is the rework's own new lines that the task's own diff also
                 // has: a line that came in with a merge of main is not in the task's own diff
                 // and drops out (ADR 0048 decision 10).
+                let own_lines = new_side_lines(&own_diff);
                 let increment: BTreeSet<(String, u32)> = new_side_lines(&rework)
-                    .intersection(&new_side_lines(&own_diff))
+                    .intersection(&own_lines)
                     .cloned()
                     .collect();
                 let diff = increment_diff(&own_diff, &increment);
                 let prompt =
                     build_rework_prompt(self.task, self.brief, previous, sha, &commits, &diff);
+                // Whether an item blocks is decided by the whole task's change, not by the
+                // increment: a problem in a line the task wrote in an earlier attempt is the
+                // task's, not pre-existing (ADR 0048 decision 10).
                 round = Some(ReworkRound {
                     previous: previous.clone(),
-                    increment,
+                    changed: own_lines,
                 });
                 prompt
             }
@@ -1187,10 +1195,10 @@ mod tests {
         );
     }
 
-    /// Rules (a) and (b): a blocking item near an increment line or near an earlier blocking
-    /// item stays blocking; an item far from both is moved to `suggestions` with `pre_existing`;
-    /// an item without a place stays blocking at its level. Mutation: demote an unplaced item
-    /// again → the `vague` item moves.
+    /// Rules (a) and (b): a blocking item near a line the task's own change touched, or near
+    /// an earlier blocking item, stays blocking; an item far from both is moved to `suggestions`
+    /// with `pre_existing`; an item without a place stays blocking at its level. Mutation:
+    /// demote an unplaced item again → the `vague` item moves.
     #[test]
     fn a_pre_existing_item_is_moved_and_marked() {
         let round = ReworkRound {
@@ -1198,17 +1206,17 @@ mod tests {
                 sha: "prev".to_owned(),
                 blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
             },
-            increment: [(String::from("src/new.rs"), 10)].into_iter().collect(),
+            changed: [(String::from("src/new.rs"), 10)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
             blocking: vec![
-                // (a) two lines from an increment line.
+                // (a) two lines from a line the task's own change touched.
                 item(
                     Some("major"),
                     Some("src/new.rs"),
                     Some(12),
-                    "near the rework",
+                    "near the change",
                 ),
                 // (b) seven lines from the previous item, in its file.
                 item(
@@ -1231,7 +1239,7 @@ mod tests {
             .iter()
             .map(|item| item.text.as_str())
             .collect();
-        assert_eq!(texts, vec!["near the rework", "the same problem", "vague"]);
+        assert_eq!(texts, vec!["near the change", "the same problem", "vague"]);
         assert_eq!(report.suggestions.len(), 1);
         assert!(
             report.suggestions.iter().all(|item| item.pre_existing),
@@ -1241,9 +1249,9 @@ mod tests {
         assert_eq!(report.suggestions[0].level.as_deref(), Some("minor"));
     }
 
-    /// A `critical` item blocks in every round, wherever it is: far from the increment and far
-    /// from every previous item. Mutation: let the window rule move it → this test sees it in
-    /// `suggestions`.
+    /// A `critical` item blocks in every round, wherever it is: far from the task's changed
+    /// lines and far from every previous item. Mutation: let the window rule move it → this test
+    /// sees it in `suggestions`.
     #[test]
     fn a_critical_item_blocks_wherever_it_is() {
         let round = ReworkRound {
@@ -1251,7 +1259,7 @@ mod tests {
                 sha: "prev".to_owned(),
                 blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
             },
-            increment: [(String::from("src/new.rs"), 10)].into_iter().collect(),
+            changed: [(String::from("src/new.rs"), 10)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
@@ -1297,7 +1305,7 @@ mod tests {
                 sha: "prev".to_owned(),
                 blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
             },
-            increment: [(String::from("src/new.rs"), 10)].into_iter().collect(),
+            changed: [(String::from("src/new.rs"), 10)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
@@ -1332,7 +1340,7 @@ mod tests {
                 sha: "prev".to_owned(),
                 blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
             },
-            increment: [(String::from("src/new.rs"), 10)].into_iter().collect(),
+            changed: [(String::from("src/new.rs"), 10)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
@@ -1349,6 +1357,116 @@ mod tests {
         assert_eq!(report.suggestions[0].level.as_deref(), Some("major"));
         assert!(report.suggestions[0].pre_existing);
         assert_eq!(report.suggestions[1].level.as_deref(), Some("minor"));
+    }
+
+    /// Rule (a) follows the task's own change, not the rework: an item on a line the task
+    /// added or changed in an earlier attempt keeps blocking even when the rework touched
+    /// nothing there. Mutation: measure against the rework's increment again → the item moves.
+    #[test]
+    fn an_item_on_a_line_the_task_changed_keeps_blocking() {
+        let round = ReworkRound {
+            previous: PreviousReview {
+                sha: "prev".to_owned(),
+                blocking: Vec::new(),
+            },
+            changed: [(String::from("src/kept.rs"), 20)].into_iter().collect(),
+        };
+        let mut report = ReviewReport {
+            summary: "s".to_owned(),
+            blocking: vec![
+                // Two lines from a line the task changed in an earlier attempt.
+                item(
+                    Some("major"),
+                    Some("src/kept.rs"),
+                    Some(22),
+                    "the task's own bug",
+                ),
+                // Exactly at the window's edge.
+                item(
+                    Some("minor"),
+                    Some("src/kept.rs"),
+                    Some(17),
+                    "the edge of the window",
+                ),
+            ],
+            suggestions: Vec::new(),
+            verified: Vec::new(),
+        };
+        assert_eq!(round.mark_pre_existing(&mut report), 0);
+        assert_eq!(report.blocking.len(), 2, "{:?}", report.blocking);
+        assert!(report.suggestions.is_empty(), "{:?}", report.suggestions);
+    }
+
+    /// Rule (a) is per file: an item in a file the task's own change does not touch is demoted,
+    /// even at a line number a changed file has. Mutation: compare only the line, not the
+    /// path → the item in the other file stays blocking.
+    #[test]
+    fn an_item_in_a_file_the_task_did_not_touch_is_demoted() {
+        let round = ReworkRound {
+            previous: PreviousReview {
+                sha: "prev".to_owned(),
+                blocking: Vec::new(),
+            },
+            changed: [(String::from("src/kept.rs"), 20)].into_iter().collect(),
+        };
+        let mut report = ReviewReport {
+            summary: "s".to_owned(),
+            blocking: vec![item(
+                Some("major"),
+                Some("src/other.rs"),
+                Some(20),
+                "another file",
+            )],
+            suggestions: Vec::new(),
+            verified: Vec::new(),
+        };
+        assert_eq!(round.mark_pre_existing(&mut report), 1);
+        assert!(report.blocking.is_empty(), "{:?}", report.blocking);
+        assert!(report.suggestions[0].pre_existing);
+        assert_eq!(report.suggestions[0].level.as_deref(), Some("major"));
+    }
+
+    /// Rule (a) has a window per file: a line more than [`PRE_EXISTING_WINDOW`] from every
+    /// changed line of its file is demoted, though one at the edge stays. Mutation: keep any
+    /// item in a file the task changed, whatever its distance → the far item stays blocking.
+    #[test]
+    fn an_item_more_than_the_window_from_a_changed_line_is_demoted() {
+        let round = ReworkRound {
+            previous: PreviousReview {
+                sha: "prev".to_owned(),
+                blocking: Vec::new(),
+            },
+            changed: [(String::from("src/kept.rs"), 20)].into_iter().collect(),
+        };
+        let mut report = ReviewReport {
+            summary: "s".to_owned(),
+            blocking: vec![
+                item(
+                    Some("minor"),
+                    Some("src/kept.rs"),
+                    Some(24),
+                    "four lines away",
+                ),
+                item(
+                    Some("minor"),
+                    Some("src/kept.rs"),
+                    Some(23),
+                    "three lines away",
+                ),
+            ],
+            suggestions: Vec::new(),
+            verified: Vec::new(),
+        };
+        assert_eq!(round.mark_pre_existing(&mut report), 1);
+        let texts: Vec<&str> = report
+            .blocking
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["three lines away"]);
+        assert_eq!(report.suggestions.len(), 1);
+        assert_eq!(report.suggestions[0].text, "four lines away");
+        assert!(report.suggestions[0].pre_existing);
     }
 
     /// The stage's own arguments are refused by name: an `exec_args` entry may not unmount

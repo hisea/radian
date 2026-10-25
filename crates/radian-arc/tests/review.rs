@@ -3067,11 +3067,11 @@ fn a_rework_prompt_holds_the_increment_and_the_previous_items() {
     );
 }
 
-/// A blocking item on a line the rework did not touch is moved to `suggestions` with
-/// `pre_existing`, the stage passes, and the verdict records the move. Mutation: skip the move
-/// → the stage stays in `review.rework_pending`.
+/// A blocking item in a file the task's own change never touched is moved to `suggestions`
+/// with `pre_existing`, the stage passes, and the verdict records the move. Mutation: skip the
+/// move → the stage stays in `review.rework_pending`.
 #[test]
-fn a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes() {
+fn an_item_in_a_file_the_task_did_not_touch_is_moved_and_the_stage_passes() {
     let fixture = Fixture::new("review-pre-existing");
     fixture.add_review_stage();
     let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
@@ -3097,7 +3097,7 @@ fn a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes() {
     );
 
     // The rework adds another file and leaves old.txt alone; the review now finds a problem
-    // far from its previous one.
+    // in a file the task itself never touched.
     fixture.rework(&first, "new.txt", "new\n");
     let fake = FakeReview::new(
         "review-pre-existing-second",
@@ -3105,8 +3105,8 @@ fn a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes() {
             "the rework adds new.txt",
             &[review_item(
                 "minor",
-                "old.txt",
-                30,
+                "file.txt",
+                1,
                 "this line was always odd",
             )],
             &[],
@@ -3126,8 +3126,8 @@ fn a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes() {
         report.suggestions,
         vec![ReviewItem {
             level: Some("minor".to_owned()),
-            file: Some("old.txt".to_owned()),
-            line: Some(30),
+            file: Some("file.txt".to_owned()),
+            line: Some(1),
             text: "this line was always odd".to_owned(),
             pre_existing: true,
         }]
@@ -3136,8 +3136,118 @@ fn a_blocking_item_the_rework_did_not_touch_is_moved_and_the_stage_passes() {
     assert!(stored.verdict_set_digest.is_some(), "the stage passed");
 }
 
-/// A blocking item on an increment line blocks: the rework introduced it. Mutation: treat every
-/// item as pre-existing → this test sees `awaiting_human`.
+/// An item on a line the task's own change added or changed in an earlier attempt keeps
+/// blocking, though the rework touched nothing there: it is the task's bug, not pre-existing.
+/// Mutation: measure against the rework's increment again → the item is moved and the stage
+/// passes.
+#[test]
+fn an_item_on_a_line_the_task_changed_in_an_earlier_attempt_keeps_blocking() {
+    let fixture = Fixture::new("review-attempt-one-line");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "review-attempt-one-line-first",
+        &[review_object_message(
+            "the change adds old.txt",
+            &[review_item(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // The rework adds another file and leaves old.txt alone; the review finds a problem in a
+    // line the task itself wrote in attempt 1.
+    fixture.rework(&first, "new.txt", "new\n");
+    let fake = FakeReview::new(
+        "review-attempt-one-line-second",
+        &[review_object_message(
+            "the rework adds new.txt",
+            &[review_item("major", "old.txt", 30, "a bug the task wrote")],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.review_pre_existing, Some(0));
+    assert_eq!(
+        verdict.review.expect("a report").blocking.len(),
+        1,
+        "the item on a line the task changed stayed blocking"
+    );
+}
+
+/// Rule (a) is per file: an item more than 3 lines from every changed line of its file is
+/// moved, even though the task changed that file. Mutation: keep any item in a file the task
+/// changed, whatever its distance → the stage stays in `review.rework_pending`.
+#[test]
+fn an_item_far_from_every_changed_line_of_its_file_is_moved() {
+    let fixture = Fixture::new("review-far-changed-line");
+    fixture.add_review_stage();
+    // The task changes line 1 of file.txt, which the base commit already has.
+    let first = fixture.publish(&fixture.base.clone(), "file.txt", "one\n");
+    let first_fake = FakeReview::new(
+        "review-far-changed-line-first",
+        &[review_object_message(
+            "the change rewrites file.txt",
+            &[review_item(
+                "major",
+                "file.txt",
+                40,
+                "the fortieth line is wrong",
+            )],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // The rework adds another file; the item is 9 lines from the changed line and 30 from the
+    // previous item, so neither window keeps it.
+    fixture.rework(&first, "new.txt", "new\n");
+    let fake = FakeReview::new(
+        "review-far-changed-line-second",
+        &[review_object_message(
+            "the rework adds new.txt",
+            &[review_item(
+                "major",
+                "file.txt",
+                10,
+                "a problem the task did not touch",
+            )],
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.review_pre_existing, Some(1));
+    assert!(verdict.review.expect("a report").blocking.is_empty());
+}
+
+/// A blocking item on a line the rework added blocks: it is part of the task's own change.
+/// Mutation: treat every item as pre-existing → this test sees `awaiting_human`.
 #[test]
 fn a_blocking_item_on_an_increment_line_blocks() {
     let fixture = Fixture::new("review-increment-blocks");
@@ -3163,12 +3273,7 @@ fn a_blocking_item_on_an_increment_line_blocks() {
         "review-increment-blocks-second",
         &[review_object_message(
             "the rework adds two.txt",
-            &[review_item(
-                "critical",
-                "two.txt",
-                1,
-                "the new line is wrong",
-            )],
+            &[review_item("major", "two.txt", 1, "the new line is wrong")],
             &[],
         )],
         0,
@@ -3187,7 +3292,8 @@ fn a_blocking_item_on_an_increment_line_blocks() {
 }
 
 /// Rule (b): an item in the same file as, and within 10 lines of, a blocking item of the
-/// previous review stays blocking, so an unfixed earlier item is not waved through. Mutation:
+/// previous review stays blocking, so an unfixed earlier item is not waved through. The file
+/// is one the task's own change never touched, so only rule (b) can keep the item. Mutation:
 /// drop rule (b) → the item is moved and the stage passes.
 #[test]
 fn a_blocking_item_near_an_unfixed_previous_item_still_blocks() {
@@ -3200,7 +3306,7 @@ fn a_blocking_item_near_an_unfixed_previous_item_still_blocks() {
             "the change adds old.txt",
             &[review_item(
                 "major",
-                "old.txt",
+                "file.txt",
                 10,
                 "the tenth line is wrong",
             )],
@@ -3222,7 +3328,7 @@ fn a_blocking_item_near_an_unfixed_previous_item_still_blocks() {
             "the rework adds new.txt",
             &[review_item(
                 "major",
-                "old.txt",
+                "file.txt",
                 13,
                 "still the same problem",
             )],
@@ -3242,8 +3348,8 @@ fn a_blocking_item_near_an_unfixed_previous_item_still_blocks() {
 }
 
 /// The hole an external review found (2026-10-24): the first review misses a `critical`
-/// problem in a file the rework does not touch; the rework changes another file, and the
-/// second review finds the problem far from the increment and far from the previous item. A
+/// problem in a file the task never touches; the rework changes another file, and the second
+/// review finds the problem far from the task's own change and far from the previous item. A
 /// `critical` item blocks in every round. Mutation: let the window rule move it → the stage
 /// passes and the task reaches `awaiting_human`.
 #[test]
@@ -3273,7 +3379,7 @@ fn a_critical_item_far_from_the_rework_and_the_previous_items_still_blocks() {
     );
 
     // The rework adds another file and leaves old.txt alone; the review now finds a critical
-    // problem 29 lines from its previous item.
+    // problem 29 lines from its previous item, in a file the task never touched.
     fixture.rework(&first, "new.txt", "new\n");
     let fake = FakeReview::new(
         "review-critical-far-second",
@@ -3281,7 +3387,7 @@ fn a_critical_item_far_from_the_rework_and_the_previous_items_still_blocks() {
             "the rework adds new.txt",
             &[review_item(
                 "critical",
-                "old.txt",
+                "file.txt",
                 30,
                 "a permission bypass",
             )],
@@ -3299,7 +3405,7 @@ fn a_critical_item_far_from_the_rework_and_the_previous_items_still_blocks() {
         verdict.review.expect("a report").blocking,
         vec![ReviewItem {
             level: Some("critical".to_owned()),
-            file: Some("old.txt".to_owned()),
+            file: Some("file.txt".to_owned()),
             line: Some(30),
             text: "a permission bypass".to_owned(),
             pre_existing: false,
@@ -4048,8 +4154,9 @@ fn a_demoted_major_item_reaches_the_followup_at_its_level() {
         "rework_pending"
     );
 
-    // The rework changes another file; the second review's `major` item is 29 lines from the
-    // previous one, so the window rule moves it as pre-existing.
+    // The rework changes another file; the second review's `major` item is in a file the
+    // task never touched and 29 lines from the previous item, so the window rule moves it as
+    // pre-existing.
     fixture.rework(&first, "new.txt", "new\n");
     let fake = FakeReview::new(
         "followup-pre-existing-major-second",
@@ -4057,7 +4164,7 @@ fn a_demoted_major_item_reaches_the_followup_at_its_level() {
             "the rework adds new.txt",
             &[review_item(
                 "major",
-                "old.txt",
+                "file.txt",
                 30,
                 "this line is still wrong",
             )],
@@ -4074,7 +4181,7 @@ fn a_demoted_major_item_reaches_the_followup_at_its_level() {
         verdict.review.expect("a report").suggestions,
         vec![ReviewItem {
             level: Some("major".to_owned()),
-            file: Some("old.txt".to_owned()),
+            file: Some("file.txt".to_owned()),
             line: Some(30),
             text: "this line is still wrong".to_owned(),
             pre_existing: true,
@@ -4087,7 +4194,7 @@ fn a_demoted_major_item_reaches_the_followup_at_its_level() {
     let task = fixture.store.load_task(&followup).expect("the task").item;
     assert!(
         task.body
-            .contains("[major] old.txt:30 this line is still wrong"),
+            .contains("[major] file.txt:30 this line is still wrong"),
         "the demoted item lost its level: {}",
         task.body
     );
@@ -4123,7 +4230,8 @@ fn a_major_item_a_failing_round_demoted_reaches_the_followup() {
     );
 
     // The rework adds another file. This round fails on a `critical` item in the increment and
-    // demotes a `major` item 29 lines from the previous review's item.
+    // demotes a `major` item 29 lines from the previous review's item, in a file the task never
+    // touched.
     let second = fixture.rework(&first, "new.txt", "new\n");
     let second_fake = FakeReview::new(
         "followup-two-rounds-second",
@@ -4131,7 +4239,7 @@ fn a_major_item_a_failing_round_demoted_reaches_the_followup() {
             "the rework adds new.txt and leaves the bypass",
             &[
                 review_item("critical", "new.txt", 1, "a permission bypass"),
-                review_item("major", "old.txt", 30, "this line is still wrong"),
+                review_item("major", "file.txt", 30, "this line is still wrong"),
             ],
             &[],
         )],
@@ -4176,7 +4284,7 @@ fn a_major_item_a_failing_round_demoted_reaches_the_followup() {
     let task = fixture.store.load_task(&followup).expect("the task").item;
     assert!(
         task.body
-            .contains("[major] old.txt:30 this line is still wrong"),
+            .contains("[major] file.txt:30 this line is still wrong"),
         "the failing round's demoted item was lost: {}",
         task.body
     );
@@ -4814,7 +4922,7 @@ fn a_pre_existing_item_from_an_earlier_round_is_carried() {
             "the rework adds new.txt",
             &[review_item(
                 "minor",
-                "old.txt",
+                "file.txt",
                 30,
                 "this line was always odd",
             )],
@@ -4852,7 +4960,7 @@ fn a_pre_existing_item_from_an_earlier_round_is_carried() {
         .item
         .body;
     assert!(
-        body.contains("- [minor] old.txt:30 this line was always odd"),
+        body.contains("- [minor] file.txt:30 this line was always odd"),
         "the pre-existing item is carried:\n{body}"
     );
     assert!(body.contains("From review 2 (attempt 2):"), "{body}");
