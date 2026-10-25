@@ -195,6 +195,34 @@ A `read` tool result's image is different: see `tools` for which routes deliver 
 An image over either limit makes the message unsendable and names the limit.
 See `tools` for the `read` tool's image branch, its two error codes and its limits.
 
+## Images in the transcript
+
+An image in your message or in a `read` result draws in the transcript where the terminal can
+draw it. The `[image: <name>, W×H, N KB]` line stays directly above the picture.
+The picture occupies 12 rows. Its width follows the image's shape at your terminal's cell size,
+and an image wider than the transcript is scaled down to its width.
+Kitty and Ghostty use the kitty graphics protocol, iTerm2 and WezTerm the iTerm2 protocol, and
+foot and xterm sixel. Terminal.app, Alacritty, Konsole, Warp and a terminal that answers
+nothing use half-block characters.
+Radian does not choose by terminal name: it asks the terminal once at startup, in the same
+pass as the keyboard question.
+Inside tmux or herdr it turns on `allow-passthrough` for the current pane
+(`tmux set -p allow-passthrough on`) so it can query the real terminal through it.
+Press `Ctrl-P` and read the `images:` line of the startup information to see the protocol and
+the cell size in use.
+
+A tool result's image draws only when the tool body is drawn in full (the `expanded` setting,
+`Ctrl-O`, or a failed call, whose body is never folded). With the body folded, only the
+`[image: …]` line shows.
+Your own messages have no fold, so their images always draw.
+Selecting and copying across an image copies the `[image: …]` line, never the picture;
+`Ctrl-F` searches the line, not the pixels.
+`/export` writes the session file's `[<mime> image omitted]` text, as before.
+When the image data cannot be decoded, only the `[image: …]` line shows; there is no error box.
+A payload that does not decode is remembered and never tried again, however many other images
+follow it. At most 8 images stay decoded in memory. Once an older image has been dropped, the
+first frame that draws it again decodes it once more, and the frames after that reuse it.
+
 ## While a turn runs
 
 A submitted `Enter` on an idle composer opens a turn at once. While a turn

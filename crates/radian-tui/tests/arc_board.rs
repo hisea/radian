@@ -622,6 +622,60 @@ fn d_lists_merged_and_failed_tasks_newest_first() {
     assert!(app.board.selected_done().is_some());
 }
 
+/// The finished list takes the owner's cancel for a `failed.exhausted` row (ADR 0048 decision
+/// 9): `x` asks, and `y` runs the CLI's library call. A merged row is no cancel target.
+#[test]
+fn x_on_a_finished_exhausted_row_cancels_it_and_a_merged_row_gets_no_float() {
+    let fixture = Fixture::new();
+    let failed = fixture.id("failed").to_owned();
+    let done = fixture.id("done").to_owned();
+    let select = |app: &mut ArcApp, id: &str| {
+        app.board.done_sel = app
+            .board
+            .done
+            .iter()
+            .position(|row| row.id == id)
+            .unwrap_or_else(|| panic!("no finished row `{id}`: {:?}", app.board.done));
+    };
+
+    let mut app = fixture.board();
+    app.rebuild_board();
+    app.on_key(&code(KeyCode::Char('d')));
+    assert!(app.board.finished);
+    select(&mut app, &failed);
+    assert_eq!(app.on_key(&code(KeyCode::Char('x'))), ArcKey::Redraw);
+    match app.float.clone() {
+        Some(radian_tui::arc::Float::Confirm { message, action }) => {
+            assert_eq!(message, format!("cancel {failed} ?"));
+            assert_eq!(action, actions::Action::Cancel(failed.clone()));
+        }
+        other => panic!("no cancel float: {other:?}"),
+    }
+    app.on_key(&code(KeyCode::Char('y')));
+    let action = app.take_action().expect("the cancel is queued");
+    let outcome = actions::run(&action, &fixture.store, &actions::Library);
+    assert!(outcome.ok, "{outcome:?}");
+    assert_eq!(outcome.text, format!("{failed} failed.cancelled"));
+    app.finish_action(outcome);
+    let stored = fixture
+        .store
+        .load_task(&failed)
+        .expect("the task reads")
+        .item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("failed", "cancelled")
+    );
+
+    // A merged row is not a cancel target: the key opens no float.
+    let mut app = fixture.board();
+    app.rebuild_board();
+    app.on_key(&code(KeyCode::Char('d')));
+    select(&mut app, &done);
+    assert_eq!(app.on_key(&code(KeyCode::Char('x'))), ArcKey::Ignored);
+    assert!(app.float.is_none());
+}
+
 #[test]
 fn a_medium_width_shows_two_columns_and_a_narrow_one_stacks_the_four_groups() {
     let fixture = Fixture::new();

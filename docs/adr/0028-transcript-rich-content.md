@@ -82,6 +82,16 @@ The renderer is grok-build `mermaid.rs`; details live in **ADR 0042**. This ADR 
 - Width uses `unicode-width` (CJK, fullwidth, box characters). Tab expands to spaces (width 4). No Markdown processing happens inside code blocks.
 - Character art outside code blocks is unreliably identified and shows as normal paragraphs.
 
+### R10 Images in the transcript
+
+- A `ContentPart::Image` in a user message or a tool result is drawn as the image itself where the terminal has a graphics protocol, and as half blocks where it has none. The `[image: <source>, W×H, N KB]` placeholder row (R5) stays directly above it and is the only row selection, copy, Ctrl-F and `--export` see; the image rows carry no characters at all. `--export` is the journal projection and keeps its `[<mime> image omitted]` text.
+- The image occupies a fixed run of `IMAGE_HEIGHT_ROWS` (12) rows in the body column (text starts at column 3, ADR 0035). Its width follows the image's aspect ratio from the terminal's cell pixel size, and an image wider than the body column is scaled down to the body column's width. The count and the drawing share one layout, so scrolling stays exact.
+- **Fold**: a tool result's image rows draw only when its body is drawn in full (the `expanded` fold, or a failed result, whose body is never folded). Under `collapsed`, and for a successful result under `errors`, only the placeholder row draws. A user message has no fold, so its images always draw.
+- **Protocol**: `ratatui-image`'s picker decides. Kitty unicode placeholders on kitty and Ghostty, iTerm2 on iTerm2 and WezTerm, sixel on foot and xterm, half blocks on Terminal.app, Alacritty, Konsole, Warp and every terminal that answers nothing. Radian writes no graphics protocol itself and never picks by terminal name.
+- **Probe**: the graphics queries are merged with the kitty keyboard query into **one** startup pass (`crates/radian-tui/src/terminal.rs`), written before the input thread reads stdin, with the existing 2 s bound. The pass parses both answers; a terminal that answers nothing keeps the keyboard result at "unsupported" and falls back to half blocks. Inside tmux the picker runs `tmux set -p allow-passthrough on` on the current pane and queries the outer terminal; that side effect is accepted and documented in the manual.
+- **Decode once per cached image**: an image is decoded once while it is in the image cache, which holds the decoded and protocol state of at most `IMAGE_CACHE_CAPACITY` (8) images, oldest dropped first. A frame never decodes an image that is in the cache, and re-encodes only when the image's area changes. An image dropped from the cache is decoded again once when it is next drawn, and is then in the cache again. A decode failure is remembered for the image and is never retried: the keys of payloads that failed to decode live in their own set, which eviction never touches and which takes no cache slot, so the same payload is undecodable for the life of the session however many images follow it. A failed image draws only the placeholder row — never an error block.
+- The startup information block (Ctrl-P) carries one `images: <protocol> (cell W×H px)` line, so the user can see what the probe picked. The journal does not change.
+
 ### Syntax highlight
 
 - It uses `syntect` (pure-Rust regex backend, no C dependency). Colors come from ADR 0029 `syntax*` roles, never from syntect builtin palettes.
@@ -96,4 +106,4 @@ The renderer is grok-build `mermaid.rs`; details live in **ADR 0042**. This ADR 
 
 ## Verification
 
-`blocks.rs` and `markdown.rs` row-count and window tests. Full-screen snapshots in `tests/card.rs`, `tests/diff.rs`, `tests/thinking.rs`, `tests/question.rs`, `tests/render.rs`, and `tests/thin.rs`. `tests/highlight.rs`. `tests/find.rs`. `tests/perf_render.rs` plus `benchmarks/perf-baseline.md`. The visual hand-test list in `crates/radian-tui/README.md`. Mermaid `tests/mermaid.rs`, see ADR 0042.
+`blocks.rs` and `markdown.rs` row-count and window tests. Full-screen snapshots in `tests/card.rs`, `tests/diff.rs`, `tests/thinking.rs`, `tests/question.rs`, `tests/render.rs`, and `tests/thin.rs`. `tests/highlight.rs`. `tests/find.rs`. `tests/perf_render.rs` plus `benchmarks/perf-baseline.md`. The visual hand-test list in `crates/radian-tui/README.md`. Mermaid `tests/mermaid.rs`, see ADR 0042. Image rows and folds: `tests/images.rs` and `tests/image_render.rs`; the merged probe: `terminal.rs` unit tests and the pty startup query count.

@@ -327,10 +327,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                 && task
                     .is_some_and(|task| task.state == TaskState::Todo && task.phase == "proposed");
             let can_confirm = (app.focus == Focus::Plans && draft) || proposed;
-            let have_item = match app.focus {
-                Focus::Plans => plan.is_some(),
-                Focus::Tasks => task.is_some(),
-            };
+            let can_cancel = app.cancel_enabled();
             let priority = selected.is_some_and(|view| !view.is_cancelled());
             let mut hints = vec![
                 Hint::new("↑↓", "select", false),
@@ -343,7 +340,7 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
             }
             hints.extend([
                 Hint::new("c", "confirm", !can_confirm),
-                Hint::new("x", "cancel", !have_item),
+                Hint::new("x", "cancel", !can_cancel),
                 Hint::new("a", "auto", !confirmed),
                 Hint::new("p", "pause", !auto_on),
                 Hint::new("s", "start", app.start_blocker().is_some()),
@@ -366,9 +363,13 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
         }
         Page::Board => {
             if app.board.finished {
+                let can_cancel = app
+                    .board_done_card()
+                    .is_some_and(|(_, task)| task.is_cancellable());
                 vec![
                     Hint::new("j/k", "scroll", false),
                     Hint::new("enter", "task", app.board.selected_done().is_none()),
+                    Hint::new("x", "cancel", !can_cancel),
                     Hint::new("d", "columns", false),
                     Hint::new("esc", "back", false),
                     Hint::essential("q", "quit", false),
@@ -397,13 +398,14 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
                     })
                 });
                 let review = task.is_some_and(|task| ArcApp::merge_page_applies(&task.item));
+                let can_cancel = task.is_some_and(|task| task.item.is_cancellable());
                 vec![
                     Hint::new("h/l", "column", false),
                     Hint::new("j/k", "card", card.is_none()),
                     Hint::new("enter", "task", card.is_none()),
                     Hint::new("s", "start", !can_start),
                     Hint::new("c", "confirm", !proposed),
-                    Hint::new("x", "cancel", card.is_none()),
+                    Hint::new("x", "cancel", !can_cancel),
                     Hint::new("a", "auto", !confirmed),
                     Hint::new("+/-", "priority", card.is_none()),
                     Hint::new("M", "merge page", !review),

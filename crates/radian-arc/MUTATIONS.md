@@ -880,6 +880,52 @@ identical.
 |---|---|---|---|
 | TK0107-M1 | `todo.proposed` is dropped from `CHANNEL_READY_FROM`, so the owner's confirm sends nothing | `arc_mcp::the_channel_reports_the_owner_confirm_and_the_rework_into_ready` (the confirm's event never arrives; `next_event` times out after 15 s) | ✅ failed |
 | TK0107-M2 | a plan event is sent when `priority` changes (the snapshot records it and `plan_transitions` emits an event for it) | `arc_mcp::the_channel_reports_the_plan_confirm_and_pause_and_stays_silent_for_the_rest` (the quiet wait receives `PL0001-owner-plan status P3 -> P1`) | ✅ failed |
+## TK0112: every line a stopping `serve` prints reaches `loop.log` (2026-10-24, branch `work/TK0112-serve-reexec-followups`)
+
+A review of TK0104 found that after a failed `exec` the restart branch returned its
+`runner.lock`-retake failure without `say`, so the CLI printed it on stderr but `loop.log` did
+not hold it; the repeated-error stop line had the same gap. Both now go through `say` before the
+loop returns. Each mutation was applied to the working `crates/radian-arc/src/run.rs`, the
+`radian` binary was rebuilt for the test that drives it, the named tests ran with `cargo
+nextest run -p radian-arc --locked --profile sandbox`, and the file was restored from
+`.radian/bak/run.rs` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0112-M1 | return the lock-retake failure without `say` (both the held-lock and the unopenable-lock branch) | `run::tests::a_failed_restart_that_cannot_retake_the_lock_logs_the_reason_before_it_stops`, `run::tests::a_failed_restart_that_cannot_open_the_lock_logs_the_reason_before_it_stops` | ✅ 2 failed |
+| TK0112-M2 | return the repeated-error stop line without `say` | `run::three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock` (`loop.log is missing the stop line`) | ✅ failed |
+
+2/2 caught.
+
+## TK0112 rework: the stop line is logged, not printed twice (2026-10-24, branch `work/TK0112-serve-reexec-followups`)
+
+The review of the first attempt found that both stop lines went through the sink as well as
+into the returned error, so `radian arc serve` printed them on stdout and the CLI printed the
+same `radian arc:` line on stderr. The repeated-error stop now writes its line straight to
+`LoopLog`, and so does the failed-`exec` lock-retake failure; the sink carries only the line
+the loop actually prints (`cannot restart with the new binary: …`). The M1 and M2 rows above
+record the first attempt's `say` implementation; these rows re-check the final code. Each
+mutation was applied to the working `crates/radian-arc/src/run.rs`, the `radian` binary was
+rebuilt with `cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture`,
+the named tests ran with `cargo nextest run -p radian-arc --locked --profile sandbox`, and the
+file was restored from `.radian/bak/run.rs.rework2` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0112-M3 | emit the repeated-error stop line through the sink as well (`say` instead of the direct `log.write`) | `run::three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock` (`the stop line is on stdout too`) | ✅ failed |
+| TK0112-M4 | return the lock-retake failure without the direct `log.write` (both branches) | `run::tests::a_failed_restart_that_cannot_retake_the_lock_logs_the_reason_before_it_stops`, `run::tests::a_failed_restart_that_cannot_open_the_lock_logs_the_reason_before_it_stops` (`loop.log is missing the stop line`) | ✅ 2 failed |
+## TK0114: the owner's cancel clears exhausted and irrecoverable tasks (2026-10-24, branch `work/TK0114-cancel-failed-exhausted`)
+
+ADR 0048 decision 9: `cancel` accepts `failed.exhausted` and `failed.irrecoverable` in the task
+form and the plan form, and `done.*` and `failed.cancelled` stay refused. Each mutation was
+applied to the working file, the named test ran alone with `cargo nextest run -p radian-arc
+--locked --profile sandbox --test attempt -E '<the test below>'`, and the file was restored from
+a copy under `.radian/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0114-M1 | accept `failed.cancelled` again in `TaskFile::is_cancellable` (`TaskState::Failed => true`) | `attempt::cancel_refuses_done_and_cancelled_and_lists_the_accepted_phases` (the second cancel succeeds) | ✅ failed |
+| TK0114-M2 | leave exhausted tasks alone in the plan form (`cancel_plan_tasks` filters on the old `todo`/`doing`/`review` states) | `attempt::cancelling_a_plan_ends_its_exhausted_and_irrecoverable_tasks` (no task line: the count is 0) | ✅ failed |
 
 2/2 caught.
 

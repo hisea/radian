@@ -933,7 +933,7 @@ fn x_on_a_task_asks_and_n_changes_nothing_while_y_cancels_it() {
 }
 
 #[test]
-fn x_on_a_plan_counts_its_open_tasks_and_y_cancels_the_plan() {
+fn x_on_a_plan_counts_the_tasks_it_will_cancel_and_y_cancels_the_plan() {
     let fixture = ActionFixture::new("cancel-plan");
     let mut app = fixture.app(&fixture.plan, &fixture.task);
     app.focus = radian_tui::arc::Focus::Plans;
@@ -942,8 +942,8 @@ fn x_on_a_plan_counts_its_open_tasks_and_y_cancels_the_plan() {
         Some(radian_tui::arc::Float::Confirm { message, action }) => {
             assert_eq!(
                 message,
-                &format!("cancel plan {} and its 2 open tasks?", fixture.plan),
-                "both todo tasks are open"
+                &format!("cancel plan {} and its 2 tasks?", fixture.plan),
+                "both todo tasks are cancel targets"
             );
             assert_eq!(action, &actions::Action::Cancel(fixture.plan.clone()));
         }
@@ -987,6 +987,107 @@ fn x_on_a_plan_counts_its_open_tasks_and_y_cancels_the_plan() {
         "failed.cancelled",
         "the plan form cancels every open task"
     );
+}
+
+/// A task that ran out of attempts is the owner's to end (ADR 0048 decision 9): `x` opens the
+/// cancel float on a `failed.exhausted` row and `y` runs the CLI's library call, which moves
+/// it to `failed.cancelled`. The attempt history and the costs stay.
+#[test]
+fn x_on_an_exhausted_task_opens_the_cancel_float_and_y_ends_it() {
+    let fixture = ActionFixture::new("cancel-exhausted");
+    fixture
+        .store
+        .change_task(&fixture.blocked, |task| {
+            task.state = TaskState::Failed;
+            task.phase = "exhausted".to_owned();
+            task.attempt = 2;
+            task.total_cost_usd = Some(1.25);
+            Ok(())
+        })
+        .expect("the exhausted task is set");
+    let mut app = fixture.app(&fixture.plan, &fixture.blocked);
+    assert!(
+        app.cancel_enabled(),
+        "the footer's `x` hint is enabled on an exhausted row"
+    );
+    app.on_key(&key(KeyCode::Char('x')));
+    match &app.float {
+        Some(radian_tui::arc::Float::Confirm { message, action }) => {
+            assert_eq!(message, &format!("cancel {} ?", fixture.blocked));
+            assert_eq!(action, &actions::Action::Cancel(fixture.blocked.clone()));
+        }
+        other => panic!("no cancel float: {other:?}"),
+    }
+    app.on_key(&key(KeyCode::Char('y')));
+    let action = app.take_action().expect("the cancel is queued");
+    let outcome = actions::run(&action, &fixture.store, &actions::Library);
+    assert!(outcome.ok, "{outcome:?}");
+    assert_eq!(
+        outcome.text,
+        format!("{} failed.cancelled", fixture.blocked)
+    );
+    app.finish_action(outcome);
+    let stored = fixture.store.load_task(&fixture.blocked).unwrap().item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("failed", "cancelled")
+    );
+    assert_eq!(stored.attempt, 2, "the attempt history stays");
+    assert_eq!(stored.total_cost_usd, Some(1.25), "the total stays");
+}
+
+/// `done.merged` and `failed.cancelled` are not cancel targets: `x` opens no float, and the
+/// footer's hint is faint. The CLI refuses them with exit 3 (ADR 0048 decision 9).
+#[test]
+fn x_on_a_done_or_cancelled_task_is_disabled() {
+    for (state, phase) in [
+        (TaskState::Done, "merged"),
+        (TaskState::Failed, "cancelled"),
+    ] {
+        let fixture = ActionFixture::new(&format!("cancel-{phase}"));
+        fixture
+            .store
+            .change_task(&fixture.blocked, |task| {
+                task.state = state;
+                task.phase = phase.to_owned();
+                Ok(())
+            })
+            .expect("the refused state is set");
+        let mut app = fixture.app(&fixture.plan, &fixture.blocked);
+        assert!(!app.cancel_enabled(), "{phase}: the hint is faint");
+        assert_eq!(
+            app.on_key(&key(KeyCode::Char('x'))),
+            ArcKey::Ignored,
+            "{phase}: the key opens no float"
+        );
+        assert!(app.float.is_none(), "{phase}");
+    }
+}
+
+/// The plan float counts every task the plan form ends: a `failed.exhausted` task included.
+/// Before this rule the count named only the `todo`, `doing` and `review` tasks.
+#[test]
+fn x_on_a_plan_counts_an_exhausted_task_too() {
+    let fixture = ActionFixture::new("cancel-plan-exhausted");
+    fixture
+        .store
+        .change_task(&fixture.blocked, |task| {
+            task.state = TaskState::Failed;
+            task.phase = "exhausted".to_owned();
+            Ok(())
+        })
+        .expect("the exhausted task is set");
+    let mut app = fixture.app(&fixture.plan, &fixture.task);
+    app.focus = radian_tui::arc::Focus::Plans;
+    app.on_key(&key(KeyCode::Char('x')));
+    match &app.float {
+        Some(radian_tui::arc::Float::Confirm { message, .. }) => assert_eq!(
+            message,
+            &format!("cancel plan {} and its 2 tasks?", fixture.plan),
+            "the ready task and the exhausted one"
+        ),
+        other => panic!("no cancel float: {other:?}"),
+    }
 }
 
 #[test]

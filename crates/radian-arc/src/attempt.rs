@@ -402,19 +402,22 @@ pub fn cancel_any(store: &Store, id: &str) -> Result<Cancelled, Error> {
 /// `[limits] cancel_grace_secs`. When the wrapper's `AttemptFinished` arrives the task goes to
 /// `failed.cancelled`; when it never arrives the task goes to `doing.reconciling`. A `review`
 /// task's running gate is signalled first (the way the loop's own stop signals one), and the
-/// task then goes to `failed.cancelled`.
+/// task then goes to `failed.cancelled`. A task that ran out of attempts (`failed.exhausted`)
+/// or cannot continue (`failed.irrecoverable`) goes to `failed.cancelled` as well: the owner
+/// says "seen, given up". `done.*` and `failed.cancelled` are refused (exit 3).
 pub fn cancel(store: &Store, task_id: &str) -> Result<Canceled, Error> {
     let _ = reconcile(store)?;
     cancel_task(store, task_id)
 }
 
-/// `radian arc cancel <plan>`: end every open task of a plan and the plan itself.
+/// `radian arc cancel <plan>`: end every task `cancel` accepts in a plan and the plan itself.
 ///
-/// In this order: the plan's `auto` becomes `off`; every task in `todo`, `doing` or `review`
-/// is cancelled by the task form's rules; a task in `done` or `failed` is left alone; the
-/// plan's `status` becomes `cancelled`. A task left at `doing.reconciling` does not stop the
-/// plan from being cancelled. Once the plan is `cancelled` nothing can be added to it, so one
-/// more walk ends any task that `add_task` added while the first walk ran.
+/// In this order: the plan's `auto` becomes `off`; every task `cancel` accepts (a `todo`,
+/// `doing` or `review` task, or one at `failed.exhausted` or `failed.irrecoverable`) is cancelled
+/// by the task form's rules; a task in `done.*` or `failed.cancelled` is left alone; the plan's
+/// `status` becomes `cancelled`. A task left at `doing.reconciling` does not stop the plan from
+/// being cancelled. Once the plan is `cancelled` nothing can be added to it, so one more walk
+/// ends any task that `add_task` added while the first walk ran.
 pub fn cancel_plan(store: &Store, plan_id: &str) -> Result<PlanCanceled, Error> {
     let loaded = store.load_plan(plan_id)?;
     if loaded.changed_outside_arc {
@@ -461,8 +464,8 @@ pub fn cancel_plan(store: &Store, plan_id: &str) -> Result<PlanCanceled, Error> 
     })
 }
 
-/// Ends every task of `task_ids` that is still `todo`, `doing` or `review`, by the task form's
-/// rules, and returns the ones it changed.
+/// Ends every task of `task_ids` that `cancel` accepts, by the task form's rules, and returns
+/// the ones it changed.
 fn cancel_plan_tasks(store: &Store, task_ids: &[String]) -> Result<Vec<Canceled>, Error> {
     let mut tasks = Vec::new();
     for task_id in task_ids {
@@ -474,16 +477,13 @@ fn cancel_plan_tasks(store: &Store, task_ids: &[String]) -> Result<Vec<Canceled>
         if task.changed_outside_arc {
             continue;
         }
-        if !matches!(
-            task.item.state,
-            model::TaskState::Todo | model::TaskState::Doing | model::TaskState::Review
-        ) {
+        if !task.item.is_cancellable() {
             continue;
         }
         match cancel_task(store, task_id) {
             Ok(canceled) => tasks.push(canceled),
-            // The task moved between the read and the cancel (a merge finished it, say):
-            // `done` and `failed` are left as they are.
+            // The task moved between the read and the cancel (a merge finished it, say): `done`
+            // and `failed.cancelled` are left as they are.
             Err(Error::Refused(_)) => {}
             Err(error) => return Err(error),
         }
@@ -538,12 +538,7 @@ fn cancel_task_once(store: &Store, task_id: &str, again: bool) -> Result<Cancele
             }
             store.change_task(task_id, |task| {
                 if task.state != model::TaskState::Review {
-                    return Err(Error::Refused(format!(
-                        "task `{}` is `{}.{}`; only a `todo`, `doing` or `review` task can be cancelled",
-                        task.id,
-                        task.state.as_str(),
-                        task.phase
-                    )));
+                    return Err(cancel_refusal(task));
                 }
                 task.state = model::TaskState::Failed;
                 task.phase = "cancelled".to_owned();
@@ -557,12 +552,45 @@ fn cancel_task_once(store: &Store, task_id: &str, again: bool) -> Result<Cancele
                 phase: "cancelled".to_owned(),
             })
         }
-        model::TaskState::Done | model::TaskState::Failed => Err(Error::Refused(format!(
-            "task `{task_id}` is `{}.{}`; only a `todo`, `doing` or `review` task can be cancelled",
-            task.state.as_str(),
-            task.phase
-        ))),
+        model::TaskState::Failed if task.is_cancellable() => cancel_failed(store, task_id),
+        model::TaskState::Done | model::TaskState::Failed => Err(cancel_refusal(&task)),
     }
+}
+
+/// The `failed` branch of the task form: a task that ran out of attempts (`failed.exhausted`)
+/// or cannot continue (`failed.irrecoverable`) has no worker, so `cancel` only says "seen,
+/// given up" and moves it to `failed.cancelled`. A stale gate record or lock, if one exists, is
+/// stopped by the same process check the `review` branch makes; nothing is signalled blindly.
+fn cancel_failed(store: &Store, task_id: &str) -> Result<Canceled, Error> {
+    if gate_running(store, task_id) {
+        let grace = Duration::from_secs(store.config()?.limits.cancel_grace_secs);
+        crate::gate::background::stop(store, task_id, grace);
+    }
+    store.change_task(task_id, |task| {
+        if task.state != model::TaskState::Failed || !task.is_cancellable() {
+            return Err(cancel_refusal(task));
+        }
+        task.phase = "cancelled".to_owned();
+        task.retry_at = None;
+        Ok(())
+    })?;
+    Ok(Canceled {
+        task: task_id.to_owned(),
+        applied: None,
+        state: "failed".to_owned(),
+        phase: "cancelled".to_owned(),
+    })
+}
+
+/// The one refusal text of the task form: the task's own state, then every phase `cancel`
+/// accepts.
+fn cancel_refusal(task: &model::TaskFile) -> Error {
+    Error::Refused(format!(
+        "task `{}` is `{}.{}`; only a `todo`, `doing` or `review` task, or a `failed.exhausted` or `failed.irrecoverable` one, can be cancelled",
+        task.id,
+        task.state.as_str(),
+        task.phase
+    ))
 }
 
 /// The `todo` branch: the write happens under the transaction's lock and only while the task
