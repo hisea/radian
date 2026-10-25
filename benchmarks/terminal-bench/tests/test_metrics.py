@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -199,10 +200,12 @@ class RadianJournalTest(unittest.TestCase):
             journal = next((target / "agent" / "radian-sessions").glob("*.jsonl"))
             journal.write_text(
                 journal.read_text(encoding="utf-8")
-                + '{"event":"ModelUsageRecorded","data":{"usage":{"output":999999}}',
+                + '{"event":"ModelUsageRecorded","data":{"usage":{"output":999999}}}',
                 encoding="utf-8",
             )
             trial = metrics.load_trial(target)
+            # The tail is complete JSON without the final LF; only a committed
+            # record counts, so its 999,999 tokens and >16k call are dropped.
             self.assertEqual(trial["output_tokens"], 17_500)
             self.assertEqual(trial["over_16k_calls"], 1)
 
@@ -254,6 +257,40 @@ class AtifTest(unittest.TestCase):
         self.assertIsNone(metrics_["model_calls"])
         self.assertEqual(metrics_["output_tokens"], 42)
         self.assertAlmostEqual(metrics_["cost_usd"], 0.5)
+
+
+class BoundedReadTest(unittest.TestCase):
+    """The jobs directory is input: no trial file is ever read whole."""
+
+    def test_trial_files_are_never_read_whole(self):
+        def refuse(*args, **kwargs):
+            raise AssertionError("read_text on a trial file")
+
+        with mock.patch.object(Path, "read_text", refuse):
+            report = metrics.build_report([JOBS])
+        self.assertEqual(len(report["trials"]), 7)
+
+    def test_oversized_json_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trajectory.json"
+            path.write_text('{"steps":[]}' + " " * 64, encoding="utf-8")
+            self.assertIsNone(metrics._read_json(path, limit=16))
+            self.assertEqual(metrics._read_trajectory(path, limit=16), {})
+
+    def test_a_long_line_is_skipped_without_being_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "journal.jsonl"
+            good = '{"a":1}\n'
+            path.write_text("x" * 100 + "\n" + good, encoding="utf-8")
+            self.assertEqual(list(metrics._iter_lines(path, limit=16)), [good])
+
+    def test_an_unterminated_tail_is_a_line_the_journal_drops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "journal.jsonl"
+            path.write_text('{"seq":1}\n{"seq":2', encoding="utf-8")
+            self.assertEqual(
+                list(metrics._iter_lines(path)), ['{"seq":1}\n', '{"seq":2']
+            )
 
 
 class ClassificationTest(unittest.TestCase):
@@ -308,6 +345,15 @@ class ClassificationTest(unittest.TestCase):
         self.assertEqual(
             metrics._cell_text({"trials": 3, "passed": 2, "failed": 0, "timeout": 1}),
             "P2/3 T1",
+        )
+
+
+class VerifyGateTest(unittest.TestCase):
+    def test_verify_runs_the_fixture_tests(self):
+        root = Path(__file__).resolve().parents[3]
+        verify = (root / "scripts" / "verify.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            "run_step python3 benchmarks/terminal-bench/metrics.py --self-test", verify
         )
 
 

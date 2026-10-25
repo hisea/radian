@@ -99,6 +99,7 @@ run_step cargo nextest run -p radian-core --locked --features journal-selfcheck 
 run_step cargo clippy -p radian-core --all-targets --features journal-selfcheck -- -D warnings
 run_step bash docs/schema/check-fixtures.sh
 run_step bash docs/schema/check-config-fixtures.sh
+run_step python3 benchmarks/terminal-bench/metrics.py --self-test
 
 # The provider contract suites.
 run_step cargo test -p agent-provider-openai-compatible --features testing --test contract

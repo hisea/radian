@@ -13,8 +13,15 @@ A trial whose exception is ``CancelledError`` is excluded from every total and
 counted separately. The common-task section keeps only tasks for which every
 agent has at least one finished (not timed-out, not excluded) trial.
 
-Stdlib only. The tests in ``tests/test_metrics.py`` run on
-``tests/fixtures/jobs``; see ``README.md`` for the column meanings.
+A job can hold a multi-GB journal, so no trial file is read whole: a journal or
+stdout file is streamed line by line (a line over ``MAX_LINE_CHARS`` is
+skipped), and a JSON file is read only when it is at most ``MAX_JSON_BYTES``.
+An over-limit journal or trajectory is treated as unreadable, and its trial
+keeps the facts from ``result.json`` only.
+
+Stdlib only. ``--self-test`` runs ``tests/test_metrics.py`` on
+``tests/fixtures/jobs``; the same suite is a step of ``scripts/verify.sh``. See
+``README.md`` for the column meanings.
 """
 
 from __future__ import annotations
@@ -30,6 +37,13 @@ from typing import Any
 # "More than 16k output tokens" in the report. A decimal 16k keeps the column
 # easy to check by hand; no provider reports a meaningful 384-token boundary.
 OVER_16K_TOKENS = 16_000
+
+# Read bounds. One trial's journal is hundreds of MB in a long run, and the
+# jobs directory is untrusted input: an over-limit line or file is dropped
+# instead of being loaded into memory. The journal writer caps a tool result
+# near 64 KiB (a base64 image is at most ~7 MB), so a 16 MiB line is generous.
+MAX_LINE_CHARS = 16 * 1024 * 1024
+MAX_JSON_BYTES = 64 * 1024 * 1024
 
 # Reasoning lives in a provider-shaped usage sub-object. Radian keeps the
 # provider's own object in `details`; ATIF producers put it in `metrics.extra`.
@@ -108,18 +122,61 @@ def _add(total: float | int | None, value: float | int | None) -> float | int | 
     return (total or 0) + value
 
 
+def _iter_lines(path: Path, limit: int | None = None) -> Iterator[str]:
+    """Yield a file's lines without loading the file whole.
+
+    A line longer than ``limit`` characters is drained and skipped: it cannot
+    be a trial record this report understands, and reading it whole is what a
+    multi-GB journal must not force. The final line is yielded even without a
+    trailing newline; a journal caller treats that as a torn tail (ADR 0006),
+    while a stdout caller keeps it as the closing record.
+    """
+    cap = MAX_LINE_CHARS if limit is None else limit
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        while True:
+            line = handle.readline(cap)
+            if not line:
+                return
+            if not line.endswith("\n") and len(line) >= cap:
+                while True:  # drain the rest of the overlong line
+                    rest = handle.readline(cap)
+                    if not rest or rest.endswith("\n"):
+                        break
+                continue
+            yield line
+            if not line.endswith("\n"):
+                return
+
+
+def _read_json(path: Path, limit: int | None = None) -> Any:
+    """A JSON file of at most ``limit`` bytes, or None when absent or over it."""
+    cap = MAX_JSON_BYTES if limit is None else limit
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(cap + 1)
+    except OSError:
+        return None
+    if len(data) > cap:
+        return None
+    try:
+        return json.loads(data)
+    except ValueError:
+        return None
+
+
 def _last_result(stdout_path: Path) -> dict[str, Any]:
     """The closing `Result` record of `radian exec --output jsonl`, or {}."""
+    last = ""
     try:
-        lines = [
-            line for line in stdout_path.read_text(encoding="utf-8").splitlines() if line.strip()
-        ]
+        for line in _iter_lines(stdout_path):
+            if line.strip():
+                last = line
     except OSError:
         return {}
-    if not lines:
+    if not last:
         return {}
     try:
-        record = json.loads(lines[-1])
+        record = json.loads(last)
     except ValueError:
         return {}
     return record if isinstance(record, dict) and record.get("type") == "Result" else {}
@@ -134,6 +191,7 @@ def _journal_metrics(sessions_dir: Path) -> dict[str, Any]:
     `ToolExecutionStarted` -> `ToolExecutionSettled` pair; parallel calls are
     summed, so tool minutes can exceed the trial's wall time. A torn tail (no
     final LF) is not a committed record and is dropped, like the Rust reader.
+    The journal is streamed, so one trial's memory use is one line, not the file.
     """
     files = sorted(sessions_dir.glob("*.jsonl"))
     model_calls = 0
@@ -142,75 +200,77 @@ def _journal_metrics(sessions_dir: Path) -> dict[str, Any]:
     generation = tool = 0.0
     max_tokens = False
     for path in files:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if text and not text.endswith("\n"):
-            text = text[: text.rfind("\n") + 1] if "\n" in text else ""
         started: dict[str, datetime] = {}
         anchor: datetime | None = None
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(record, dict):
-                continue
-            event = record.get("event")
-            data = _dict(record.get("data"))
-            ts = _time(record.get("ts"))
-            if event == "ToolExecutionStarted":
-                call_id = data.get("call_id")
-                if isinstance(call_id, str) and ts is not None:
-                    started[call_id] = ts
-            elif event == "ToolExecutionSettled":
-                call_id = data.get("call_id")
-                begin = started.pop(call_id, None) if isinstance(call_id, str) else None
-                elapsed = _seconds(begin, ts)
-                if elapsed is not None:
-                    tool += elapsed
-                if ts is not None:
-                    anchor = ts
-            elif event == "MessageAppended":
-                message = _dict(data.get("message"))
-                if "assistant" in message:
-                    model_calls += 1
-                    elapsed = _seconds(anchor, ts)
+        try:
+            for line in _iter_lines(path):
+                if not line.endswith("\n"):
+                    break  # torn tail: not a committed record
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                event = record.get("event")
+                data = _dict(record.get("data"))
+                ts = _time(record.get("ts"))
+                if event == "ToolExecutionStarted":
+                    call_id = data.get("call_id")
+                    if isinstance(call_id, str) and ts is not None:
+                        started[call_id] = ts
+                elif event == "ToolExecutionSettled":
+                    call_id = data.get("call_id")
+                    begin = started.pop(call_id, None) if isinstance(call_id, str) else None
+                    elapsed = _seconds(begin, ts)
                     if elapsed is not None:
-                        generation += elapsed
+                        tool += elapsed
                     if ts is not None:
                         anchor = ts
-                elif "user" in message and ts is not None:
-                    anchor = ts
-            elif event == "TurnStarted" and ts is not None:
-                anchor = ts
-            elif event in ("ModelUsageRecorded", "CompactionUsageRecorded"):
-                usage = _dict(data.get("usage"))
-                count = _int(usage.get("output"))
-                if count is not None:
-                    output_tokens = _add(output_tokens, count)
-                    if count > OVER_16K_TOKENS:
-                        over_16k += 1
-                count = _reasoning(usage.get("details"))
-                if count is not None:
-                    reasoning_tokens = _add(reasoning_tokens, count)
-                count = _int(_dict(data.get("fee")).get("micros"))
-                if count is not None:
-                    fee_micros = _add(fee_micros, count)
-                if event == "CompactionUsageRecorded":
-                    # A summarization call is a real model call and real money.
-                    model_calls += 1
-                    elapsed = _seconds(anchor, ts)
-                    if elapsed is not None:
-                        generation += elapsed
-                    if ts is not None:
+                elif event == "MessageAppended":
+                    message = _dict(data.get("message"))
+                    if "assistant" in message:
+                        model_calls += 1
+                        elapsed = _seconds(anchor, ts)
+                        if elapsed is not None:
+                            generation += elapsed
+                        if ts is not None:
+                            anchor = ts
+                    elif "user" in message and ts is not None:
                         anchor = ts
-            elif event == "TurnFinished":
-                if data.get("outcome") == "incomplete" and data.get("reason") == "max_tokens":
-                    max_tokens = True
+                elif event == "TurnStarted" and ts is not None:
+                    anchor = ts
+                elif event in ("ModelUsageRecorded", "CompactionUsageRecorded"):
+                    usage = _dict(data.get("usage"))
+                    count = _int(usage.get("output"))
+                    if count is not None:
+                        output_tokens = _add(output_tokens, count)
+                        if count > OVER_16K_TOKENS:
+                            over_16k += 1
+                    count = _reasoning(usage.get("details"))
+                    if count is not None:
+                        reasoning_tokens = _add(reasoning_tokens, count)
+                    count = _int(_dict(data.get("fee")).get("micros"))
+                    if count is not None:
+                        fee_micros = _add(fee_micros, count)
+                    if event == "CompactionUsageRecorded":
+                        # A summarization call is a real model call and real money.
+                        model_calls += 1
+                        elapsed = _seconds(anchor, ts)
+                        if elapsed is not None:
+                            generation += elapsed
+                        if ts is not None:
+                            anchor = ts
+                elif event == "TurnFinished":
+                    if (
+                        data.get("outcome") == "incomplete"
+                        and data.get("reason") == "max_tokens"
+                    ):
+                        max_tokens = True
+        except OSError:
+            continue
     return {
         "model_calls": model_calls,
         "output_tokens": output_tokens,
@@ -277,11 +337,8 @@ def _trajectory_metrics(trajectory: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _read_trajectory(path: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+def _read_trajectory(path: Path, limit: int | None = None) -> dict[str, Any]:
+    data = _read_json(path, limit)
     return _trajectory_metrics(data) if isinstance(data, dict) else {}
 
 
@@ -298,10 +355,7 @@ def _exit_four(trial_dir: Path, metadata: dict[str, Any]) -> bool:
 
 def load_trial(trial_dir: Path) -> dict[str, Any] | None:
     """One trial's report row, or None when the file is not a trial result."""
-    try:
-        result = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    result = _read_json(trial_dir / "result.json")
     if not isinstance(result, dict):
         return None
     agent_info = _dict(result.get("agent_info"))
@@ -621,18 +675,37 @@ def format_report(report: dict[str, Any]) -> str:
     return "\n\n".join(blocks)
 
 
+def _self_test() -> int:
+    """Run ``tests/test_metrics.py`` on the checked-in fixture jobs."""
+    import unittest
+
+    tests_dir = Path(__file__).resolve().parent / "tests"
+    suite = unittest.defaultTestLoader.discover(str(tests_dir), pattern="test_metrics.py")
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Per-task matrix and per-agent totals from Harbor job directories."
     )
     parser.add_argument(
         "jobs",
-        nargs="+",
+        nargs="*",
         metavar="JOBS",
         help="jobs directory (or any parent of trials)",
     )
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run tests/test_metrics.py on the fixture jobs and exit",
+    )
     args = parser.parse_args(argv)
+    if args.self_test:
+        return _self_test()
+    if not args.jobs:
+        parser.error("JOBS is required unless --self-test is given")
     report = build_report(args.jobs)
     if args.json:
         print(json.dumps(report, indent=2))

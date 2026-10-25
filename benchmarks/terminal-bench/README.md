@@ -20,7 +20,7 @@ Harbor releases may rename these modules.
 | `metrics.py` | Stdlib-only report over finished harbor jobs: per-task matrix, per-trial rows, per-agent totals |
 | `tests/test_radian_command.py` | Builder unit tests (no Harbor dependency) |
 | `tests/test_radian_agent.py` | Agent unit tests against the real Harbor 0.24.0 package |
-| `tests/test_metrics.py` | Metrics tests on `tests/fixtures/jobs/` (one fake trial per agent kind) |
+| `tests/test_metrics.py` | Metrics tests on `tests/fixtures/jobs/` (one fake trial per agent kind); `metrics.py --self-test` runs them |
 | `pyproject.toml` | Descriptive metadata only (agent import path, Harbor pin) |
 
 ## Key design (why the score measures the agent loop)
@@ -93,12 +93,18 @@ Harbor releases may rename these modules.
 
 ```sh
 python3 benchmarks/terminal-bench/tests/test_radian_command.py   # stdlib only
-python3 benchmarks/terminal-bench/tests/test_metrics.py          # stdlib only
+python3 benchmarks/terminal-bench/metrics.py --self-test          # stdlib only
 <home>/.local/share/uv/tools/harbor/bin/python benchmarks/terminal-bench/tests/test_radian_command.py
 <home>/.local/share/uv/tools/harbor/bin/python benchmarks/terminal-bench/tests/test_radian_agent.py
 PYTHONPATH=benchmarks/terminal-bench <home>/.local/share/uv/tools/harbor/bin/python -c \
   "from harbor.utils.import_path import import_class; print(import_class('radian_agent:RadianAgent'))"
 ```
+
+`metrics.py --self-test` is the same run of `tests/test_metrics.py` (the
+tests on the checked-in fixture jobs) that `scripts/verify.sh` runs, so the
+metrics report is covered by the repository's normal gate without Harbor, a
+model or Docker. Running the test file directly with `python3` gives the same
+result.
 
 The agent tests import the real Harbor 0.24.0 package; the fake environment is
 only a process double for container exec/upload. Trial orchestration is proven
@@ -116,7 +122,8 @@ python3 benchmarks/terminal-bench/metrics.py /tmp/tbench-ab/jobs --json > metric
 ```
 
 `JOBS` is a jobs root (`<jobs>/<agent>/<timestamp>/<task>__<id>/`) or any
-directory above the trials. The `<agent>` level is the column label, so two
+directory above the trials. `--self-test` runs the fixture tests and takes no
+`JOBS` argument. The `<agent>` level is the column label, so two
 radian builds in `radian-a/` and `radian-b/` stay separate columns even when
 Harbor's `agent_info.name` is `radian` for both. Every `result.json` below a
 root is read; a job-level `result.json` has no `task_name` and is skipped. What
@@ -163,12 +170,18 @@ those tasks. `--json` prints the same report as one object (`agents`, `tasks`,
 `trials`, `matrix`, `totals`, `common_tasks`, `common_totals`); a counter no
 record reported is `null`, never 0.
 
-The fixtures under `tests/fixtures/jobs/` hold one trial per agent kind plus a
-cancelled and a timed-out trial:
+A trial file is never read whole, because a long run's journal can be many
+GB. Journals and `radian-stdout.txt` are streamed line by line; a line over
+16 Mi characters (`MAX_LINE_CHARS`) is skipped and reading continues.
+`result.json` and `trajectory.json` are read only when they are at most 64 MiB
+(`MAX_JSON_BYTES`). An over-limit journal or trajectory is treated as
+unreadable: the trial keeps the facts from `result.json` and reports `-` for
+the counters that file would have supplied. An over-limit `result.json` is not
+a trial the report can read, so it is skipped like a missing one.
 
-```sh
-python3 benchmarks/terminal-bench/tests/test_metrics.py   # stdlib only
-```
+The fixtures under `tests/fixtures/jobs/` hold one trial per agent kind plus a
+cancelled and a timed-out trial; the commands to run their tests are in
+[Unit tests](#unit-tests-no-harbor-run-no-model-no-docker) above.
 
 ## Smoke (needs Docker + Harbor + a model key)
 
