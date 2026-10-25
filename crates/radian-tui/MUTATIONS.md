@@ -2961,3 +2961,18 @@ with `cargo nextest run -p radian-tui --locked --profile sandbox -E 'test(<name>
 | TK0101-M1 | `draw_loop_log` pushes its frame's tail without clamping the lines to the body again (`arc/render.rs`) | ✅ 1 failed | `arc_loop::a_one_row_body_keeps_the_log_views_frame_tail` (`left: "  ╭─ log ───…"` for `right: "  ╰──"`) |
 
 1/1 caught.
+## TK0096: the diff's file list takes a third, not half (2026-10-24, branch `work/TK0096-tui-diff-list-third`)
+
+The selected file's diff got too little room because the list took at most half of the diff
+area's rows. The list now takes at most one third of them, still at least `MIN_FILE_ROWS` (3),
+through the one `FILE_LIST_DIVISOR` that the task page and the merge page share. The mutation was
+applied by hand to `crates/radian-tui/src/arc/render.rs`, backed up under `.radian/mut/` and
+restored from that copy (never `git checkout`); the named tests ran with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test <binary> -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0096-M1 | the list takes half the diff area again (`FILE_LIST_DIVISOR = 2`) | ✅ 2 failed | `arc_tui::the_file_list_takes_at_most_one_third_of_the_diff_area` (`left: 21`, `right: 14`), `arc_merge::the_merge_pages_file_list_takes_at_most_one_third_of_the_diff_area` (`left: 9`, `right: 6`) |
+
+1/1 caught.
+
