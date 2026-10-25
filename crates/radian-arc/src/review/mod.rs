@@ -2052,9 +2052,6 @@ pub struct MergeContext {
     pub main_branch: String,
     pub main_ref: String,
     pub profile: crate::gate::Profile,
-    /// `[gate.review] propose_followups` as it is at the merge: only a task that merges while
-    /// it is `true` gets `followup_pending` (ADR 0048 decision 10).
-    pub propose_followups: bool,
 }
 
 /// Checks the approval's preconditions, writes the approval when the task is
@@ -2187,7 +2184,6 @@ fn prepare_merge(
         main_branch,
         main_ref,
         profile,
-        propose_followups: config.gate.review.propose_followups,
     })
 }
 
@@ -2372,10 +2368,13 @@ fn finish_integration(
         task.state = model::TaskState::Done;
         task.phase = "merged".to_owned();
         task.retry_at = None;
-        // The task merged under the per-plan follow-up rule only when the switch was on at
-        // this moment and the task is not a follow-up itself (ADR 0048 decision 10). A task
-        // without the field was never merged under the rule and is never collected.
-        if context.propose_followups && !is_followup(task) {
+        // The switch is read here, with the merged-state write, not when the merge started:
+        // an auto merge can run its integration while the owner changes the setting, and the
+        // task merged under the per-plan rule only when the switch is on at this moment and
+        // the task is not a follow-up itself (ADR 0048 decision 10). A task without the field
+        // was never merged under the rule and is never collected.
+        let propose_followups = store.config()?.gate.review.propose_followups;
+        if propose_followups && !is_followup(task) {
             task.followup_pending = true;
         }
         Ok(())

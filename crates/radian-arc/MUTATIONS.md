@@ -1050,3 +1050,19 @@ restored from its copy under `.radian/mut/` with `cp`, which `cmp` found identic
 | TK0157-M2 | `Store::add_followup` skips the open-task re-check under its lock | `review::a_confirm_between_the_scan_and_the_write_adds_no_followup` (`a follow-up was added while TK0002-idea is open`) | ✅ failed |
 
 2/2 caught.
+
+## TK0157 rework 2: the switch is read at the merged-state write (2026-10-25, branch `work/TK0157-followup-collect-only-new-merges`)
+
+ADR 0048 decision 10: `followup_pending` is recorded when the task *reaches* `done.merged`,
+so `finish_integration` reads `[gate.review] propose_followups` under the same `state.lock`
+that writes the merged state, not the value the merge context captured before the integration
+ran. The mutation was applied by hand to `crates/radian-arc/src/review/mod.rs`, the named test
+ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test review -E '<the
+test below>'`, and the file was restored from `.radian/mutation/review-mod.rs.fixed` with
+`cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0157-M3 | the merged-state write takes `propose_followups` from the merge context prepared before the integration | `review::the_switch_is_read_when_the_task_reaches_merged` (`a merge with the switch off at the write carries the field`) | ✅ failed |
+
+1/1 caught.

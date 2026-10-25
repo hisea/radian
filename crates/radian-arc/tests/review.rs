@@ -5573,6 +5573,84 @@ fn a_task_merged_while_the_switch_was_false_is_never_collected() {
     );
 }
 
+/// The switch counts when the task reaches `done.merged`, not when the merge started: an owner
+/// who changes `[gate.review] propose_followups` while the integration runs decides whether
+/// the task can be collected (ADR 0048 decision 10). The key command installs the new setting
+/// over `config.toml` after the merge context was prepared and before the merged-state write,
+/// which is the window a background auto merge leaves open too.
+///
+/// Mutation: take the switch from the merge context prepared before the integration → the
+/// first merge carries the field although the switch is off at the write, and the second does
+/// not although it is on.
+#[test]
+fn the_switch_is_read_when_the_task_reaches_merged() {
+    // Off during the integration: a task merged with follow-ups off is never collected.
+    let (field, followup) = merge_across_a_switch_change("true", "false", "followup-switch-off");
+    assert!(
+        !field,
+        "a merge with the switch off at the write carries the field"
+    );
+    assert!(
+        followup.is_none(),
+        "a follow-up was proposed with the switch off"
+    );
+    // On during the integration: a task merged under the rule is collected.
+    let (field, followup) = merge_across_a_switch_change("false", "true", "followup-switch-on");
+    assert!(
+        field,
+        "a merge with the switch on at the write lacks the field"
+    );
+    assert!(
+        followup.is_some(),
+        "no follow-up was proposed with the switch on"
+    );
+}
+
+/// One merge of a suggested change whose integration changes `[gate.review] propose_followups`
+/// from `from` to `to`. Returns the merged task's field and the follow-up arc proposed.
+fn merge_across_a_switch_change(from: &str, to: &str, label: &str) -> (bool, Option<String>) {
+    let fixture = Fixture::new(label);
+    fixture.add_review_stage();
+    let switch = |value: &str| format!("propose_followups = {value}");
+    fixture.tune(&switch("true"), &switch(from));
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        &format!("{label}-fake"),
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 1, "a nicer name")],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture.verifying_with_review(&head, fake.program()).phase,
+        "awaiting_human"
+    );
+    let config = fixture.store.root().join("config.toml");
+    let at_write = fixture
+        .repo
+        .repo
+        .with_file_name(format!("{label}-at-write.toml"));
+    let switched =
+        fs::read_to_string(&config)
+            .expect("config.toml")
+            .replacen(&switch(from), &switch(to), 1);
+    fs::write(&at_write, switched).expect("the config at the write");
+    let copy = format!("cp '{}' '{}'", at_write.display(), config.display());
+    fixture.key_commands(&[copy.as_str()]);
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
+    let field = fixture
+        .store
+        .load_task(&fixture.task)
+        .expect("the task")
+        .item
+        .followup_pending;
+    (field, merged.followup.map(|followup| followup.task))
+}
+
 /// A `confirm` between the scan and the write: the store function that appends the follow-up
 /// re-checks the plan's open-task condition under its own lock, so a task confirmed in
 /// between holds the follow-up back (ADR 0048 decision 10).
