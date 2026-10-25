@@ -102,10 +102,7 @@ impl Fixture {
     }
 
     fn tune(&self, from: &str, to: &str) {
-        let path = self.store.root().join("config.toml");
-        let text = fs::read_to_string(&path).expect("config.toml");
-        assert!(text.contains(from), "config.toml has `{from}`:\n{text}");
-        fs::write(&path, text.replacen(from, to, 1)).expect("write config.toml");
+        tune_config(&self.store, from, to);
     }
 
     fn commands(&self, lines: &[&str]) {
@@ -178,11 +175,7 @@ impl Fixture {
 
     /// Adds `review`, required, between `commands` and `human` in the default profile.
     fn add_review_stage(&self) {
-        self.tune(
-            "stages = [{ stage = \"commands\", required = true }, { stage = \"human\", required = true }]",
-            "stages = [{ stage = \"commands\", required = true }, { stage = \"review\", \
-             required = true }, { stage = \"human\", required = true }]",
-        );
+        add_review_stage_to(&self.store);
     }
 
     /// Sets `gate.review.exec_args`.
@@ -370,6 +363,24 @@ fn assert_state(fixture: &Fixture, expected: (&str, &str)) {
     assert_eq!(
         fixture.state(),
         (expected.0.to_owned(), expected.1.to_owned())
+    );
+}
+
+/// Replaces one piece of the arc store's `config.toml`.
+fn tune_config(store: &Store, from: &str, to: &str) {
+    let path = store.root().join("config.toml");
+    let text = fs::read_to_string(&path).expect("config.toml");
+    assert!(text.contains(from), "config.toml has `{from}`:\n{text}");
+    fs::write(&path, text.replacen(from, to, 1)).expect("write config.toml");
+}
+
+/// Adds `review`, required, between `commands` and `human` in the default profile.
+fn add_review_stage_to(store: &Store) {
+    tune_config(
+        store,
+        "stages = [{ stage = \"commands\", required = true }, { stage = \"human\", required = true }]",
+        "stages = [{ stage = \"commands\", required = true }, { stage = \"review\", \
+         required = true }, { stage = \"human\", required = true }]",
     );
 }
 
@@ -4112,6 +4123,10 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
         vec![fixture.task.clone()],
         "it waits on the merge"
     );
+    assert!(
+        task.allow_noop,
+        "the follow-up's brief allows a no-op (ADR 0048 decision 10)"
+    );
     assert_eq!(
         task.title,
         format!("Follow-ups from {}'s review", fixture.task)
@@ -4136,6 +4151,166 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
         task.body.contains(&verdict_path.display().to_string()),
         "the verdict path is in the brief: {}",
         task.body
+    );
+}
+
+/// A follow-up's attempt that adds no commit passes the delivery check, because arc proposed
+/// the task with `allow_noop` (ADR 0048 decision 10). Its empty change passes a `commands` and
+/// `review` profile — the review without starting a session — and reaches `done.merged`.
+/// Mutations: pass `false` in `propose_followup` → the attempt fails the delivery check and
+/// never verifies; let the review start a session on the empty change → the fake is called.
+#[test]
+fn a_followup_that_adds_no_commit_passes_every_stage_and_merges() {
+    let repo = Repo::new("followup-noop");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task(
+            &plan,
+            "work",
+            "A task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .expect("add a task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    add_review_stage_to(&store);
+    tune_config(&store, "\ncommands = []", "\ncommands = [\"true\"]");
+    // The repository's `.gitignore` ignores `/.radian/`; the test clone needs the same rule,
+    // so the verdict copy a follow-up's brief names is not a dirty file (ADR 0048 decision 7).
+    let exclude = repo.clone.join(".git/info/exclude");
+    let mut text = fs::read_to_string(&exclude).unwrap_or_default();
+    text.push_str("\n/.radian/\n");
+    fs::write(&exclude, text).expect("the clone's exclude file");
+    let base = repo.main_sha();
+
+    // The first task's change, its review with one suggestion, and the merge that proposes
+    // the follow-up.
+    let branch = format!("work/{task}");
+    repo.git(&["checkout", "-B", &branch, &base]);
+    write(&repo.clone.join("feature.txt"), "feature\n");
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&["commit", "-m", "feature"]);
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    repo.git(&["push", "origin", &branch]);
+    set_task_verifying(&store, &task, &base, &head, 1);
+    let fake = FakeReview::new(
+        "followup-noop-fake",
+        &[review_object_message(
+            "the change adds feature.txt",
+            &[],
+            &[review_item("minor", "feature.txt", 3, "a nicer name")],
+        )],
+        0,
+    );
+    assert_eq!(
+        review::verify_with(&store, &task, Some(fake.program()))
+            .expect("verification runs")
+            .phase,
+        "awaiting_human"
+    );
+    let followup = review::merge(&store, &task)
+        .expect("the merge runs")
+        .followup
+        .expect("a follow-up task")
+        .task;
+    let proposed = store.load_task(&followup).expect("the follow-up").item;
+    assert!(proposed.allow_noop, "the follow-up allows a no-op");
+    assert_eq!(fake.count(), 1, "the first review ran one session");
+
+    // The owner confirms the follow-up, and its attempt adds no commit at all.
+    plan_ops::confirm(&store, &followup).expect("the owner confirms");
+    let claim = attempt_ops::claim(&store, &followup).expect("the claim");
+    assert!(
+        claim.allow_noop,
+        "the claim carries the task's allow_noop to the wrapper"
+    );
+    let mock = Mock::start(vec![text_reply(
+        "nothing to do: every item is fixed on main",
+    )]);
+    let extra = model_args(mock.base_url());
+    let mut flags = Vec::new();
+    if claim.allow_noop {
+        flags.push("--allow-noop");
+    }
+    let args = work_args(&followup, claim.attempt, &claim.token, &flags, &extra);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let run = repo.work(&refs, &claim.brief);
+    let finished = run.finished();
+    assert_eq!(finished["pushed"], json!(true), "{finished}");
+    assert!(finished["failure"].is_null(), "{finished}");
+    assert_eq!(
+        finished["head_sha"], finished["base_sha"],
+        "the attempt added no commit: {finished}"
+    );
+    let finish = attempt_ops::read_finish(&store, &followup, claim.attempt)
+        .expect("the wrapper wrote its end record");
+    attempt_ops::apply(
+        &store,
+        &followup,
+        claim.attempt,
+        Some(&finish),
+        None,
+        Some(finished["exit_code"].as_i64().unwrap_or(0) as i32),
+    )
+    .expect("the attempt result applies");
+    let stored = store.load_task(&followup).expect("the task").item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("review", "verifying"),
+        "the no-op attempt passed the delivery check"
+    );
+
+    // Every stage passes, and the review starts no session.
+    let verified =
+        review::verify_with(&store, &followup, Some(fake.program())).expect("verification runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = verdict_for(&store, &followup, &claim.attempt_id, Stage::Review);
+    assert!(verdict.is_pass(), "{:?}", verdict.reason);
+    assert!(
+        verdict.review_session_ids.is_empty(),
+        "the empty review ran no session"
+    );
+    assert_eq!(
+        fake.count(),
+        1,
+        "the follow-up's review started no model session"
+    );
+    let report = verdict.review.as_ref().expect("the empty report");
+    assert!(report.summary.contains("empty"), "{}", report.summary);
+    assert!(report.blocking.is_empty(), "{report:?}");
+    assert!(report.suggestions.is_empty(), "{report:?}");
+    assert!(report.verified.is_empty(), "{report:?}");
+    assert!(verdict.review_cost_micros.is_none(), "{verdict:?}");
+
+    let merged = review::merge(&store, &followup).expect("the merge runs");
+    assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
+    assert!(merged.followup.is_none(), "a follow-up gets no follow-up");
+}
+
+/// A lead's task that does not allow a no-op still fails the delivery check with the `no
+/// change` reason (ADR 0048 decision 8): `allow_noop` `true` is the follow-up's own.
+#[test]
+fn a_lead_task_without_allow_noop_still_fails_a_no_change_attempt() {
+    let repo = Repo::new("followup-noop-lead");
+    let mock = Mock::start(vec![text_reply("nothing to do")]);
+    let extra = model_args(mock.base_url());
+    let args = work_args("TK0001-lead", 1, "tok-lead", &[], &extra);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let run = repo.work(&refs, "do nothing");
+    let finished = run.finished();
+    assert_eq!(finished["pushed"], json!(false), "{finished}");
+    assert!(
+        finished["failure"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no change"),
+        "{finished}"
     );
 }
 

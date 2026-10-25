@@ -1727,7 +1727,8 @@ fn followup_items(rounds: &[FollowupRound]) -> Vec<(usize, ReviewItem)> {
 /// review of the task suggested — every attempt's `review` verdict, oldest first — become one
 /// `todo.proposed` task of the same plan, `after` the merged task. The `pre_existing` items
 /// are among them. Nothing from `blocking` is carried: a merged task's blocking items were
-/// fixed or the review would not have passed.
+/// fixed or the review would not have passed. Its brief lets each item be left with a reason,
+/// so it is proposed with `allow_noop`: an attempt that adds no commit may deliver nothing.
 ///
 /// `None` when `[gate.review] propose_followups` is `false`, when the merged task is itself a
 /// review follow-up (a follow-up gets none of its own), when the task has no review verdict,
@@ -1758,7 +1759,7 @@ fn propose_followup(store: &Store, task: &model::TaskFile) -> Result<Option<Foll
         &followup_slug(&task.id),
         &followup_title(&task.id),
         vec![task.id.clone()],
-        false,
+        true,
         Vec::new(),
         &followup_brief(&task.id, &rounds, &items),
     )?;

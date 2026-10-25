@@ -27,6 +27,9 @@
 //! the stage run the session once more; when the second run is unusable too the stage fails
 //! with `review_output` (or `review_timeout` when the last run timed out). The verdict records
 //! every run's session id and their summed cost.
+//!
+//! A task whose own change is empty starts no session: the stage passes and its report says
+//! that there is nothing to review (ADR 0048 decision 10).
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -64,6 +67,12 @@ pub const REVIEW_RUNS: u32 = 2;
 /// The item level whose item always blocks a rework round, wherever it is (ADR 0048 decision
 /// 10): the window rules never move it.
 const CRITICAL: &str = "critical";
+
+/// The report of a review of a task whose own change is empty (ADR 0048 decision 10): no
+/// session starts, and the verdict's summary says why the stage passed.
+const EMPTY_CHANGE_SUMMARY: &str = "The task's own change is empty: its tree is the remote \
+     main's tree. There is nothing for the review to check, so the stage passes without \
+     starting a session.";
 
 /// A rework round: how far a blocking item may sit from a line the task's own change added or
 /// changed and still block (ADR 0048 decision 10, rule (a)).
@@ -251,48 +260,67 @@ impl ReviewRun<'_> {
         let mut pre_existing = None;
         let mut reason = candidate.failure.clone();
         if candidate.failure.is_none() {
-            let (prompt, round) =
-                self.prompt(&checkout.path(), &candidate.sha, &candidate.main_sha)?;
-            let mut unusable = Unusable::Output;
-            for run in 1..=REVIEW_RUNS {
-                let (session_id, log_name) = self.session_for(run);
-                let ran =
-                    self.run_session(&checkout.path(), &session_id, &log_name, &prompt, &log_dir)?;
-                sessions.push(
-                    ran.result
-                        .as_ref()
-                        .and_then(|result| result.get("session_id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or(&session_id)
-                        .to_owned(),
-                );
-                if let Some(micros) = ran.result.as_ref().and_then(cost_micros) {
-                    cost = Some(cost.unwrap_or(0).saturating_add(micros));
-                }
-                unusable = if ran.timed_out {
-                    Unusable::Timeout
-                } else {
-                    Unusable::Output
-                };
-                let Some(found) = usable_report(&ran) else {
-                    continue;
-                };
-                report = Some(found);
-                break;
-            }
-            if let Some(found) = report.as_mut() {
-                // A rework round's report is judged by arc, not by the session: an item blocks
-                // only when it is near a line the task's own change added or changed (the whole
-                // task, not just the rework's increment), near a blocking item of the previous
-                // review, critical, or without a `file` or a `line` (ADR 0048 decision 10).
-                if let Some(round) = &round {
-                    pre_existing = Some(round.mark_pre_existing(found));
-                }
-                if !found.blocking.is_empty() {
-                    reason = Some("review_blocking".to_owned());
-                }
+            let (base, own_diff) =
+                self.own_change(&checkout.path(), &candidate.sha, &candidate.main_sha)?;
+            if own_diff.is_empty() {
+                // Nothing to review (ADR 0048 decision 10): the stage passes without a session
+                // and its report says why.
+                report = Some(ReviewReport {
+                    summary: EMPTY_CHANGE_SUMMARY.to_owned(),
+                    blocking: Vec::new(),
+                    suggestions: Vec::new(),
+                    verified: Vec::new(),
+                });
             } else {
-                reason = Some(unusable.reason().to_owned());
+                let (prompt, round) =
+                    self.prompt(&checkout.path(), &candidate.sha, &base, &own_diff)?;
+                let mut unusable = Unusable::Output;
+                for run in 1..=REVIEW_RUNS {
+                    let (session_id, log_name) = self.session_for(run);
+                    let ran = self.run_session(
+                        &checkout.path(),
+                        &session_id,
+                        &log_name,
+                        &prompt,
+                        &log_dir,
+                    )?;
+                    sessions.push(
+                        ran.result
+                            .as_ref()
+                            .and_then(|result| result.get("session_id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(&session_id)
+                            .to_owned(),
+                    );
+                    if let Some(micros) = ran.result.as_ref().and_then(cost_micros) {
+                        cost = Some(cost.unwrap_or(0).saturating_add(micros));
+                    }
+                    unusable = if ran.timed_out {
+                        Unusable::Timeout
+                    } else {
+                        Unusable::Output
+                    };
+                    let Some(found) = usable_report(&ran) else {
+                        continue;
+                    };
+                    report = Some(found);
+                    break;
+                }
+                if let Some(found) = report.as_mut() {
+                    // A rework round's report is judged by arc, not by the session: an item
+                    // blocks only when it is near a line the task's own change added or
+                    // changed (the whole task, not just the rework's increment), near a
+                    // blocking item of the previous review, critical, or without a `file` or
+                    // a `line` (ADR 0048 decision 10).
+                    if let Some(round) = &round {
+                        pre_existing = Some(round.mark_pre_existing(found));
+                    }
+                    if !found.blocking.is_empty() {
+                        reason = Some("review_blocking".to_owned());
+                    }
+                } else {
+                    reason = Some(unusable.reason().to_owned());
+                }
             }
         }
 
@@ -330,17 +358,17 @@ impl ReviewRun<'_> {
         Ok(verdict)
     }
 
-    /// The built-in prompt, with the configured file appended, and the rework round it
-    /// reviews (`None` for a first review).
-    fn prompt(
+    /// The task's own change and the commit it is measured from: the diff from the merge base
+    /// of the remote main and the task's commit to that commit (ADR 0048 decision 10). An empty
+    /// diff means there is nothing to review. The range starts at the merge base because main's
+    /// commits reach the branch through the merge the step before an attempt makes, and those
+    /// are not the task's change (decision 7).
+    fn own_change(
         &self,
         checkout: &Path,
         sha: &str,
         main_sha: &str,
-    ) -> Result<(String, Option<ReworkRound>), GateError> {
-        // The range starts at the merge base of the remote main and the task's commit: main's
-        // commits reach the branch through the merge the step before an attempt makes, and
-        // those are not the task's change (ADR 0048 decisions 7 and 10).
+    ) -> Result<(String, String), GateError> {
         let base = super::git::ok(checkout, &["merge-base", main_sha, sha])?;
         let own_diff = super::git::ok(
             checkout,
@@ -351,6 +379,19 @@ impl ReviewRun<'_> {
                 &format!("{base}..{sha}"),
             ],
         )?;
+        Ok((base, own_diff))
+    }
+
+    /// The built-in prompt, with the configured file appended, and the rework round it
+    /// reviews (`None` for a first review). `base` and `own_diff` are [`ReviewRun::own_change`]'s
+    /// answer for this commit.
+    fn prompt(
+        &self,
+        checkout: &Path,
+        sha: &str,
+        base: &str,
+        own_diff: &str,
+    ) -> Result<(String, Option<ReworkRound>), GateError> {
         let mut round = None;
         let mut prompt = match self.previous {
             // A previous sha this checkout does not have cannot be diffed: the review is a
@@ -371,12 +412,12 @@ impl ReviewRun<'_> {
                 // The increment is the rework's own new lines that the task's own diff also
                 // has: a line that came in with a merge of main is not in the task's own diff
                 // and drops out (ADR 0048 decision 10).
-                let own_lines = new_side_lines(&own_diff);
+                let own_lines = new_side_lines(own_diff);
                 let increment: BTreeSet<(String, u32)> = new_side_lines(&rework)
                     .intersection(&own_lines)
                     .cloned()
                     .collect();
-                let diff = increment_diff(&own_diff, &increment);
+                let diff = increment_diff(own_diff, &increment);
                 let prompt =
                     build_rework_prompt(self.task, self.brief, previous, sha, &commits, &diff);
                 // Whether an item blocks is decided by the whole task's change, not by the
@@ -398,7 +439,7 @@ impl ReviewRun<'_> {
                         &format!("{base}..{sha}"),
                     ],
                 )?;
-                build_prompt(self.task, self.brief, &base, sha, &commits, &own_diff)
+                build_prompt(self.task, self.brief, base, sha, &commits, own_diff)
             }
         };
         if let Some(path) = self.prompt_file {

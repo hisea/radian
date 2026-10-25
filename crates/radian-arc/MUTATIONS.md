@@ -987,3 +987,18 @@ identical: `crates/radian-arc/src/store/attempt_ops.rs` from
 | TK0115-M4 | `pause_reason` ignores the marker and suppresses whenever the previous read has the same record id | `mcp::tests::a_pause_record_seen_while_the_plan_still_ran_is_kept_for_its_pause` (`left: None`), `arc_mcp::a_pause_record_the_baseline_read_before_auto_turned_off_is_the_pause_reason` (`PL0001-pause-race-baseline paused false -> true` with no second line) | ✅ 2 failed |
 
 2/2 caught.
+
+## TK0126: a review follow-up allows a no-op, and an empty change passes the gate (2026-10-25, branch `work/TK0126-followup-allow-noop`)
+
+ADR 0048 decision 10: every follow-up task arc proposes carries `allow_noop` `true`, and the
+`review` stage passes a task whose own change is empty without starting a session. Each mutation
+was applied by hand to the working file, `cargo build -p radian-tui --bin radian -p
+agent-extensions --bin mcp-fixture` ran before the test (the wrapper test drives the binary and
+refuses one older than its sources), the named tests ran with `cargo nextest run -p radian-arc
+--locked --profile sandbox --test review --no-fail-fast -E '<the tests below>'`, and the file
+was restored from a copy under `.radian/mut/` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0126-M1 | `propose_followup` passes `false` again, so the follow-up does not allow a no-op | `review::a_merge_with_review_suggestions_proposes_one_followup_task` (`the follow-up allows a no-op`), `review::a_followup_that_adds_no_commit_passes_every_stage_and_merges` (the same assertion, before the attempt) | ✅ 2 failed |
+| TK0126-M2 | the `review` stage starts a session on an empty change (`if false` in place of the empty-diff check) | `review::a_followup_that_adds_no_commit_passes_every_stage_and_merges` (`the empty review ran no session`) | ✅ failed |
