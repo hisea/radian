@@ -206,7 +206,10 @@ stays ordinary text. Inside tmux or herdr both work.
 These images travel in your user message, and every provider route sends a user-message image.
 A `read` tool result's image is different: see `tools` for which routes deliver it.
 
-An image over either limit makes the message unsendable and names the limit.
+An `@` or dropped-path image over either limit makes the message unsendable:
+Radian puts the text back into the composer with a notice naming the limit, so you can fix it.
+A clipboard image over either limit is refused as it is pasted: a notice names the limit,
+nothing is attached, and the text you already typed stays sendable.
 See `tools` for the `read` tool's image branch, its two error codes and its limits.
 
 ## Images in the transcript
