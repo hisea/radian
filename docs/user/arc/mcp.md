@@ -79,8 +79,8 @@ Every other change (`doing.*`, `review.verifying`, `review.integrating`, a `todo
 
 A plan sends one event per field whose value differs from the previous read, over these fields: `status` and `paused`.
 
-- `status` is sent only for `draft` to `confirmed`. A plan that returns to `draft` with a change record sends nothing.
-- `paused` is `true` when the plan's `auto` is `off`, and the event is sent in both directions. `radian arc pause` and the automatic rework limit (`auto` goes to `off`) send the pause; the next level that is not `off` sends the resume. `auto` is the only field `list --json` exposes for this, so a level change from `run` to `merge` sends nothing, and so does a change of `priority` or a title.
+- `status` is sent only for `draft` to `confirmed`. A plan that returns to `draft` with a change record sends nothing, for `status` or for `paused`.
+- `paused` is `true` when the plan is `confirmed` and its `auto` is `off`; a `draft` plan is not paused, it waits for your confirm. A read that changes the plan's `status` sends no `paused` event, so `update_plan`'s change record (which returns a confirmed plan to `draft` and sets `auto` to `off`) and your confirm of a draft plan are not a pause or a resume. On a plan whose status did not change, the event is sent in both directions. `radian arc pause` and the automatic rework limit (`auto` goes to `off`) send the pause; the next level that is not `off` sends the resume. `auto` is the only field `list --json` exposes for this, so a level change from `run` to `merge` sends nothing, and so does a change of `priority` or a title.
 - A plan that is new since the previous read sends nothing for either field, and a cancelled plan sends no plan event at all: it is final.
 
 The notification's method is `notifications/claude/channel`.
@@ -95,7 +95,7 @@ A task event's `meta` has exactly these keys, and every value is a string:
 | `phase` | the new `phase` |
 | `previous` | the previous `state.phase`, or `new` |
 
-A plan event's `content` is one line `<plan id> <field> <previous> -> <value>`, for example `PL0044-x status draft -> confirmed` or `PL0044-x paused false -> true`, then, when the store records a pause reason (the automatic rework limit's text), a second line with it.
+A plan event's `content` is one line `<plan id> <field> <previous> -> <value>`, for example `PL0044-x status draft -> confirmed` or `PL0044-x paused false -> true`, then, when the pause is the automatic rework limit's, a second line with the reason it recorded. That record stays on the task's attempt after you resume, so only a record that is new since the previous read is that pause's reason: your own `radian arc pause` sends no second line.
 A plan event's `meta` has exactly these keys, and every value is a string:
 
 | Key | Value |

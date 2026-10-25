@@ -1237,3 +1237,110 @@ async fn the_channel_reports_the_plan_confirm_and_pause_and_stays_silent_for_the
 
     session.close().await;
 }
+
+#[tokio::test]
+async fn a_change_record_sends_no_pause_event() {
+    let scratch = fixture("mcp-channel-change-record");
+    let setup = Session::open(&scratch).await;
+    let (plan, _task) = plan_with_task(&setup, "change-record").await;
+    setup.close().await;
+    let store = Store::at(scratch.repo());
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("the plan runs");
+
+    let mut session = Session::open_flagged(&scratch, true).await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // The lead's change record returns the plan to `draft` and sets `auto` to `off` in one
+    // write. That is neither the owner's pause nor the automatic rework limit's, so it is not
+    // a pause event.
+    let changed = session
+        .ok(
+            "update_plan",
+            json!({"plan": plan, "change_record": "the owner wants this instead"}),
+        )
+        .await;
+    assert_eq!(changed["status"].as_str(), Some("draft"), "{changed}");
+    assert_eq!(changed["auto"].as_str(), Some("off"), "{changed}");
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // The owner confirms the plan again. The confirm's `status` event is the only one: a
+    // `draft` plan at `auto` `off` is not a paused plan that just resumed.
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed again");
+    let event = session.next_event().await;
+    let content = expect_plan_event(&event, &plan, "status", "draft", "confirmed");
+    assert_eq!(content, format!("{plan} status draft -> confirmed"));
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // A change record on a confirmed plan at `auto` `off` sends no resume either: the plan is
+    // a `draft` now, not a plan that left a pause.
+    session
+        .ok(
+            "update_plan",
+            json!({"plan": plan, "change_record": "another change"}),
+        )
+        .await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    session.close().await;
+}
+
+#[tokio::test]
+async fn a_manual_pause_does_not_repeat_the_automatic_pause_reason() {
+    let scratch = fixture("mcp-channel-stale-pause-reason");
+    let setup = Session::open(&scratch).await;
+    let (plan, task) = plan_with_task(&setup, "stale-pause").await;
+    setup.close().await;
+    let store = Store::at(scratch.repo());
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("the plan runs");
+
+    let mut session = Session::open_flagged(&scratch, true).await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // The automatic rework limit pauses the plan and records its reason beside the task.
+    set_state(&scratch, &task, TaskState::Review, "rework_pending");
+    let event = session.next_event().await;
+    expect_event(
+        &event,
+        &task,
+        &plan,
+        "review",
+        "rework_pending",
+        "todo.ready",
+    );
+    store
+        .change_task(&task, |task| {
+            task.auto_rework = 2;
+            Ok(())
+        })
+        .expect("the task has used its automatic reworks");
+    let paused = radian_arc::store::attempt_ops::record_auto_rework(&store, &task)
+        .expect("the automatic rework is counted")
+        .expect("the plan pauses at the limit");
+    let event = session.next_event().await;
+    let content = expect_plan_event(&event, &plan, "paused", "false", "true");
+    assert_eq!(
+        content,
+        format!("{plan} paused false -> true\n{}", paused.text)
+    );
+
+    // The owner resumes the plan. The task does not start another attempt, so the automatic
+    // rework limit's record stays where it was.
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("the plan resumes");
+    let event = session.next_event().await;
+    expect_plan_event(&event, &plan, "paused", "true", "false");
+
+    // The owner's own pause is not the automatic rework limit's: the stale record is not its
+    // reason and sends no second line.
+    radian_arc::store::plan_ops::pause(&store, &plan).expect("the owner pauses the plan");
+    let event = session.next_event().await;
+    let content = expect_plan_event(&event, &plan, "paused", "false", "true");
+    assert_eq!(
+        content,
+        format!("{plan} paused false -> true"),
+        "the manual pause carries no stale automatic reason"
+    );
+
+    session.close().await;
+}
