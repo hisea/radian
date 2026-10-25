@@ -3163,3 +3163,21 @@ The mutation was applied by hand to `crates/radian-tui/src/blocks/layout.rs`, ba
 | TK0120-M1 | `append_tool_images` hides the image rows when the body is folded again (`if image.decodable && visible`, `visible` = `entry.is_error \|\| expanded(entry, fold == Expanded)`) | ✅ 2 failed | `a_tool_result_image_draws_under_every_fold` (`the run draws under Collapsed`); `two_tool_images_keep_their_order_under_a_fold` (`under the first placeholder`) |
 
 1/1 caught.
+
+## TK0161: the pty suite's exit wait is synchronized on `STTY-END` (2026-10-25, branch `work/TK0161-pty-stty-read-race`)
+
+`Pty::wait_for_exit` used to ignore the result of its marker wait: when the reader thread had
+not copied the trailing `stty -a` by the deadline, it still reported the exit, and the callers'
+`EXITED:`/`icanon` assertions read a partial buffer — a failure at the assertion instead of at
+the wait. It now returns `None` when the marker is absent and spends the caller's remaining
+deadline on the marker instead of a fresh one. The mutation put the ignored result back
+(`if !self.wait_for_raw(STTY_END, timeout) {}`), ran with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test pty -E
+'test(=pty_wait_for_exit_fails_when_the_stty_tail_has_not_arrived)'`, and was restored from
+`.radian/pty.rs.final` (`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0161-M2 | ignore `wait_for_raw`'s result (and give it a fresh full `timeout`) | ✅ 1 failed | `pty_wait_for_exit_fails_when_the_stty_tail_has_not_arrived` (`left: Some(0)`, `right: None`) |
+
+1/1 caught.
