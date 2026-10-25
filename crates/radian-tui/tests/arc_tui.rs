@@ -1217,51 +1217,59 @@ fn a_failed_cancelled_task_keeps_the_failed_mark() {
     assert_eq!(task_mark(TaskState::Failed, "cancelled"), Mark::Failed);
 }
 
-/// Every task the owner's set names makes its plan draw `◉` (ADR 0048 decision 11), beside a
-/// merged task so the failed phases have no open task left.
+/// Every task in the phase table that `task_needs_owner` names makes its plan draw `◉`
+/// (ADR 0048 decision 11), beside a merged task so the failed phases have no open task left.
+/// The loop reads the table and the predicate, so a phase the predicate later accepts is
+/// covered here too instead of being left to a hand-kept list.
 #[test]
 fn every_task_that_needs_the_owner_makes_its_plan_draw_needs_you() {
+    use radian_arc::store::model::TASK_PHASES;
+
     let scratch = Scratch::new("needs-owner");
     let store = store(&scratch.path("repo"));
-    let phases = [
-        (TaskState::Review, "awaiting_human"),
-        (TaskState::Todo, "proposed"),
-        (TaskState::Failed, "exhausted"),
-        (TaskState::Failed, "irrecoverable"),
-    ];
-    for (index, (state, phase)) in phases.iter().enumerate() {
-        assert!(
-            task_needs_owner(*state, phase),
-            "{}.{phase} needs the owner",
-            state.as_str()
-        );
-        let plan = add_plan(&store, &format!("owner-{index}"), "the owner plan");
-        add_task(
-            &store,
-            &plan,
-            "merged",
-            &[],
-            TaskState::Done,
-            "merged",
-            1,
-            None,
-        );
-        add_task(&store, &plan, "waiting", &[], *state, phase, 1, None);
-        store
-            .change_plan(&plan, |plan| {
-                plan.status = "confirmed".to_owned();
-                plan.auto = "run".to_owned();
-                Ok(())
-            })
-            .unwrap();
-        let view = store.plan_view(&plan).expect("the plan reads");
-        assert_eq!(
-            plan_mark(&view),
-            PlanMark::NeedsYou,
-            "{}.{phase} makes its plan ◉",
-            state.as_str()
-        );
+    let mut checked = 0;
+    for (state_name, phases) in TASK_PHASES {
+        let state = TaskState::ALL
+            .iter()
+            .copied()
+            .find(|state| state.as_str() == *state_name)
+            .expect("every task state is in the phase table");
+        for phase in *phases {
+            if !task_needs_owner(state, phase) {
+                continue;
+            }
+            let plan = add_plan(&store, &format!("owner-{checked}"), "the owner plan");
+            add_task(
+                &store,
+                &plan,
+                "merged",
+                &[],
+                TaskState::Done,
+                "merged",
+                1,
+                None,
+            );
+            add_task(&store, &plan, "waiting", &[], state, phase, 1, None);
+            store
+                .change_plan(&plan, |plan| {
+                    plan.status = "confirmed".to_owned();
+                    plan.auto = "run".to_owned();
+                    Ok(())
+                })
+                .unwrap();
+            let view = store.plan_view(&plan).expect("the plan reads");
+            assert_eq!(
+                plan_mark(&view),
+                PlanMark::NeedsYou,
+                "{state_name}.{phase} makes its plan ◉"
+            );
+            checked += 1;
+        }
     }
+    assert!(
+        checked > 0,
+        "the phase table names no phase that needs the owner, so this test checked nothing"
+    );
 }
 
 /// The row that made a plan `◉` draws `!` in the waiting role, and a `failed.cancelled` row

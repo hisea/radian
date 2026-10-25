@@ -3059,3 +3059,13 @@ A `todo.proposed`, `failed.exhausted` or `failed.irrecoverable` task drew `◻` 
 | TK0113-M2 | `task_needs_owner` drops `todo.proposed` (`TaskState::Todo => phase == PROPOSED_PHASE` becomes `false`) | ✅ 2 failed | `arc_tui::every_task_phase_draws_its_mark` (`todo.proposed`: `left: Todo`, `right: Waiting`); `arc_tui::every_task_that_needs_the_owner_makes_its_plan_draw_needs_you` (`todo.proposed needs the owner`) |
 
 2/2 caught.
+
+## TK0121: the owner-needed plan test reads the phase table (2026-10-25, branch `work/TK0121-tui-needs-you-task-mark-followups`)
+
+`every_task_that_needs_the_owner_makes_its_plan_draw_needs_you` enumerated the four phases it expected instead of iterating `TASK_PHASES` and taking every phase `task_needs_owner` accepts, so a phase the predicate later gained was never checked against `plan_mark`. The test now walks the table and asserts `plan_mark` is `NeedsYou` for each accepted phase. The mutation was applied by hand to `crates/radian-tui/src/arc/mod.rs`, backed up under `.radian/mut/` and restored from that copy (never `git checkout`); the test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test arc_tui -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0121-M1 | `plan_mark`'s `needs_owner` ignores the failed phases (hardcoded to `review.awaiting_human` and `todo.proposed`, not `task_needs_owner`) | ✅ 1 failed | `arc_tui::every_task_that_needs_the_owner_makes_its_plan_draw_needs_you` (`failed.exhausted makes its plan ◉`) |
+
+1/1 caught.
