@@ -148,13 +148,19 @@ With `auto` `off`, the task stays in `review.rework_pending` and waits for you, 
 ### The review's follow-up
 
 A task is **open** when it is in `todo.ready`, `doing.*` or `review.*`; a `todo.proposed`, `done.*` or `failed.*` task is not open.
-When a plan has no open task, arc collects the review suggestions of its merged tasks and proposes one follow-up task for the plan, and no more.
+When a plan has no open task, arc collects the review suggestions of the merged tasks that merged under this rule and proposes one follow-up task for the plan, and no more.
 arc checks after every change that can leave a plan with no open task: a merge, a `cancel`, and every scheduling pass.
 The check is idempotent: running it again adds no task.
+The check and the write are one transaction under `state.lock`: the open-task condition and the set of merged tasks to collect are re-read under the lock that appends the follow-up, so a `confirm` between a scheduling pass's read and its write cannot add a follow-up beside an open task.
 
-A merged task is **collected** when it is `done.merged`, is not itself a follow-up, and no earlier follow-up of the plan names it in its `after`.
+When a task reaches `done.merged`, arc records `followup_pending` on it if [`gate.review.propose_followups`](files.md#configtoml) is `true` at that moment and the task is not itself a follow-up.
+That is the per-plan rule: every merge path writes the field under the same switch the follow-up check reads.
+A merged task is **collected** only when it carries that field, is not itself a follow-up, and no earlier follow-up of the plan names it in its `after`.
 A follow-up's `after` lists the merged tasks it collected, so a task is collected at most once, and a collected task whose follow-up is later cancelled stays collected.
 A merged follow-up is never collected.
+
+A task merged before the field existed (by an older arc), or merged while `propose_followups` was `false`, does not carry it and is never collected, whatever its review verdicts say: turning the switch back on does not bring it back.
+So an old per-task follow-up (the title `Follow-ups from <task id>'s review`, with that task as its only `after` entry) collects nothing, and it is never collected itself.
 
 For each collected task arc reads every `review` verdict of the task, oldest attempt first, and collects every `suggestions` item of every round; the items a rework round moved (marked `pre_existing`) are in `suggestions`.
 Every round is read, not only the newest: a round that failed can carry a demoted item, and a later round can pass with nothing to suggest.
@@ -179,6 +185,7 @@ An item whose `text` starts with a tag that repeats its own level prints the lev
 
 A plan whose merged tasks left no item gets no follow-up.
 A follow-up task gets no follow-up of its own: a merged follow-up is never collected, so the review's unfixed items stay in its verdict and in the task's final report.
+arc recognises a follow-up by a shape it gave it: the per-plan shape above (title `Follow-ups from <plan id>'s reviews`, the `<plan slug>-followups` id, `allow_noop`, a non-empty `after` list, and the fixed first line of its brief), or the per-task shape an earlier arc wrote (title `Follow-ups from <task id>'s review` with that task as its only `after` entry).
 With `propose_followups` `false` arc adds none (see the [`propose_followups` row](files.md#configtoml)); the lead can still add a task to the plan with MCP `add_task`.
 `radian arc run` prints `<new task id> proposed (follow-ups from <plan id>)`.
 

@@ -40,7 +40,7 @@ use crate::gate::{
     verdict_set_digest,
 };
 use crate::store::attempt_ops::Paused;
-use crate::store::{Error, Store, model};
+use crate::store::{Error, Loaded, Store, model};
 
 /// The file in an attempt's run directory that holds the last verify or merge reason.
 pub const REVIEW_FILE: &str = "review.json";
@@ -1733,24 +1733,22 @@ struct FollowupSource {
     items: Vec<(usize, ReviewItem)>,
 }
 
-/// Whether `task` counts as an open task of its plan (ADR 0048 decision 10): `todo.ready`,
-/// `doing.*` or `review.*`. A `todo.proposed` task waits for the owner, and a `done.*` or
-/// `failed.*` task is finished, so none of them holds the plan's follow-up back.
-fn is_open(task: &model::TaskFile) -> bool {
-    match task.state {
-        model::TaskState::Todo => task.phase == "ready",
-        model::TaskState::Doing | model::TaskState::Review => true,
-        model::TaskState::Done | model::TaskState::Failed => false,
-    }
-}
-
 /// The plan's review follow-up (ADR 0048 decision 10): when no task of the plan is open, the
-/// `suggestions` of every merged task that no earlier follow-up collected become one
-/// `todo.proposed` task of the plan, `after` those merged tasks in merge order. The
-/// `pre_existing` items are among them. Nothing from `blocking` is carried: a merged task's
-/// blocking items were fixed or the review would not have passed. Its brief lets each item be
-/// left with a reason, so it is proposed with `allow_noop`: an attempt that adds no commit may
-/// deliver nothing.
+/// `suggestions` of every merged task that merged under the per-plan rule and that no earlier
+/// follow-up collected become one `todo.proposed` task of the plan, `after` those merged tasks
+/// in merge order. The `pre_existing` items are among them. Nothing from `blocking` is carried:
+/// a merged task's blocking items were fixed or the review would not have passed. Its brief
+/// lets each item be left with a reason, so it is proposed with `allow_noop`: an attempt that
+/// adds no commit may deliver nothing.
+///
+/// A merged task counts only when it carries `followup_pending`: arc wrote the field when the
+/// task merged while `[gate.review] propose_followups` was `true` and the task was not itself a
+/// follow-up. A task merged before the field existed, or while the switch was `false`, is never
+/// collected, and neither is an old per-task follow-up.
+///
+/// The read and the write are one transaction under `state.lock`: the plan's open-task
+/// condition and the set of merged tasks to collect are re-read under the lock that appends the
+/// task, so an owner's `confirm` between a scheduling pass's read and its write adds no task.
 ///
 /// `None` when `[gate.review] propose_followups` is `false`, when a task of the plan is open,
 /// when the plan is cancelled (it is final), when no uncollected merged task has a review
@@ -1760,65 +1758,50 @@ pub fn propose_followup(store: &Store, plan_id: &str) -> Result<Option<Followup>
     if !store.config()?.gate.review.propose_followups {
         return Ok(None);
     }
-    let loaded = store.load_plan(plan_id)?;
-    if loaded.changed_outside_arc {
-        return Err(Error::ChangedOutsideArc(plan_id.to_owned()));
-    }
-    let plan = loaded.item;
-    // A cancelled plan is final: arc adds nothing to it (ADR 0048 decision 3).
-    if store.plan_is_cancelled(plan_id)? {
-        return Ok(None);
-    }
-    let mut tasks: Vec<(model::TaskFile, bool)> = Vec::new();
-    for id in &plan.tasks {
-        let loaded = store.load_task(id)?;
-        tasks.push((loaded.item, loaded.changed_outside_arc));
-    }
-    if tasks.iter().any(|(task, _)| is_open(task)) {
-        return Ok(None);
-    }
-    let mut sources: Vec<(Option<String>, FollowupSource)> = Vec::new();
-    for (task, changed) in &tasks {
-        if *changed
-            || !task.is_merged()
-            || is_followup(task)
-            || has_followup(store, &plan, &task.id)?
-        {
-            continue;
+    let added = store.add_followup(plan_id, |plan, tasks| {
+        let mut sources: Vec<(Option<String>, FollowupSource)> = Vec::new();
+        for loaded in tasks {
+            let task = &loaded.item;
+            if loaded.changed_outside_arc
+                || !task.is_merged()
+                || !task.followup_pending
+                || is_followup(task)
+                || collected(tasks, &task.id)
+            {
+                continue;
+            }
+            let rounds = followup_rounds(&review_verdicts(store, &task.id)?);
+            let items = followup_items(&rounds);
+            if items.is_empty() {
+                continue;
+            }
+            sources.push((
+                merge_time(store, &task.id),
+                FollowupSource {
+                    task: task.id.clone(),
+                    rounds,
+                    items,
+                },
+            ));
         }
-        let rounds = followup_rounds(&review_verdicts(store, &task.id)?);
-        let items = followup_items(&rounds);
-        if items.is_empty() {
-            continue;
+        // Merge order, with the plan's task order as the tie-break.
+        sources.sort_by(|(one, _), (other, _)| one.cmp(other));
+        if sources.is_empty() {
+            return Ok(None);
         }
-        sources.push((
-            merge_time(store, &task.id),
-            FollowupSource {
-                task: task.id.clone(),
-                rounds,
-                items,
-            },
-        ));
-    }
-    // Merge order, with the plan's task order as the tie-break.
-    sources.sort_by(|(one, _), (other, _)| one.cmp(other));
-    if sources.is_empty() {
-        return Ok(None);
-    }
-    let sources: Vec<FollowupSource> = sources.into_iter().map(|(_, source)| source).collect();
-    let after: Vec<String> = sources.iter().map(|source| source.task.clone()).collect();
-    let id = store.add_task_proposed(
-        &plan.id,
-        &followup_slug(&plan.id, &plan.tasks),
-        &followup_title(&plan.id),
-        after,
-        true,
-        Vec::new(),
-        &followup_brief(&plan.id, &sources),
-    )?;
-    Ok(Some(Followup {
-        task: id,
-        from: plan.id,
+        let sources: Vec<FollowupSource> = sources.into_iter().map(|(_, source)| source).collect();
+        Ok(Some(crate::store::FollowupTask {
+            slug: followup_slug(&plan.id, &plan.tasks),
+            title: followup_title(&plan.id),
+            after: sources.iter().map(|source| source.task.clone()).collect(),
+            allow_noop: true,
+            extra_stages: Vec::new(),
+            brief: followup_brief(&plan.id, &sources),
+        }))
+    })?;
+    Ok(added.map(|task| Followup {
+        task,
+        from: plan_id.to_owned(),
     }))
 }
 
@@ -1833,34 +1816,45 @@ fn merge_time(store: &Store, task: &str) -> Option<String> {
         .max()
 }
 
-/// Whether `task` is itself a review follow-up of its plan (ADR 0048 decision 10): the title,
-/// the plan-slug id, `allow_noop`, a non-empty `after` list and the fixed first line of the
-/// brief arc gives it. The title alone is not enough: a lead can give an ordinary task the same
-/// title, and its review suggestions are collected like any task's. The first line is compared
-/// whole, not as a prefix: a body that only begins with arc's line is the lead's. A merged
-/// follow-up is never collected, and a follow-up never gets a follow-up of its own.
+/// Whether `task` is itself a review follow-up of its plan (ADR 0048 decision 10): a shape arc
+/// gave it. The per-plan shape is the title, the plan-slug id, `allow_noop`, a non-empty
+/// `after` list and the fixed first line of the brief; the per-task shape an earlier arc wrote
+/// is the title `Follow-ups from <task id>'s review` with that task as its only `after` entry.
+/// The title alone is not enough: a lead can give an ordinary task the same title, and its
+/// review suggestions are collected like any task's. The first line is compared whole, not as
+/// a prefix: a body that only begins with arc's line is the lead's. A merged follow-up is never
+/// collected, and a follow-up never gets a follow-up of its own.
 fn is_followup(task: &model::TaskFile) -> bool {
     let opening = followup_brief_opening(&task.plan);
-    task.title == followup_title(&task.plan)
+    let per_plan = task.title == followup_title(&task.plan)
         && followup_slug_matches(&task.plan, &task.id)
         && task.allow_noop
         && !task.after.is_empty()
-        && task.body.lines().next() == Some(opening.as_str())
+        && task.body.lines().next() == Some(opening.as_str());
+    // An old per-task follow-up had no `allow_noop` test and no fixed brief line, only its
+    // title and the one task it collected; an already merged one carries no
+    // `followup_pending`, so this shape only keeps a still-open one from being collected when
+    // it later merges.
+    let per_task = match task.after.as_slice() {
+        [parent] => task.title == legacy_followup_title(parent),
+        _ => false,
+    };
+    per_plan || per_task
+}
+
+/// The title an earlier arc gave one merged task's follow-up (ADR 0048 decision 10).
+fn legacy_followup_title(task: &str) -> String {
+    format!("Follow-ups from {task}'s review")
 }
 
 /// Whether a follow-up task of `plan` already collected `task`: the task's id is in the
 /// `after` list of a follow-up. A task is collected at most once, and a collected task whose
-/// follow-up is later cancelled stays collected (ADR 0048 decision 10).
-fn has_followup(store: &Store, plan: &model::PlanFile, task: &str) -> Result<bool, Error> {
-    for id in &plan.tasks {
-        let Ok(loaded) = store.load_task(id) else {
-            continue;
-        };
-        if is_followup(&loaded.item) && loaded.item.after.iter().any(|after| after == task) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+/// follow-up is later cancelled stays collected (ADR 0048 decision 10). `tasks` is the plan's
+/// tasks as they were read under `state.lock`.
+fn collected(tasks: &[Loaded<model::TaskFile>], task: &str) -> bool {
+    tasks.iter().any(|loaded| {
+        is_followup(&loaded.item) && loaded.item.after.iter().any(|after| after == task)
+    })
 }
 
 /// The slug of `plan`'s follow-up: `<plan slug>-followups`, cut to the 48-character slug
@@ -2374,6 +2368,15 @@ fn finish_integration(
         task.state = model::TaskState::Done;
         task.phase = "merged".to_owned();
         task.retry_at = None;
+        // The switch is read here, with the merged-state write, not when the merge started:
+        // an auto merge can run its integration while the owner changes the setting, and the
+        // task merged under the per-plan rule only when the switch is on at this moment and
+        // the task is not a follow-up itself (ADR 0048 decision 10). A task without the field
+        // was never merged under the rule and is never collected.
+        let propose_followups = store.config()?.gate.review.propose_followups;
+        if propose_followups && !is_followup(task) {
+            task.followup_pending = true;
+        }
         Ok(())
     })?;
     let mut warning = remove_worktree(store, task_id).err();

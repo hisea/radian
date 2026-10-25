@@ -1033,3 +1033,36 @@ restored from `.radian/review.mod.rs.bak` with `cp`, which `cmp` found identical
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
 | TK0127-M4 | `is_followup` matches the brief opening as a prefix (`task.body.starts_with(&opening)`) again | `review::an_ordinary_task_whose_brief_only_starts_with_the_opening_is_not_a_followup` (`the lead task's own item is not skipped`) and `review::an_ordinary_task_whose_brief_only_starts_with_the_opening_collects_nothing` (no follow-up is proposed) | ✅ 2 failed |
+
+## TK0157: only a task merged under the per-plan rule is collected (2026-10-25, branch `work/TK0157-followup-collect-only-new-merges`)
+
+ADR 0048 decision 10: a task records `followup_pending` when it reaches `done.merged` while
+`[gate.review] propose_followups` is `true` and it is not itself a follow-up, and the plan's
+follow-up collects only tasks that carry the field and that no earlier follow-up names. The
+same lock that appends the follow-up re-checks the plan's open-task condition and the set it
+collects. Each mutation was applied by hand, the named tests ran with `cargo nextest run -p
+radian-arc --locked --profile sandbox --test review -E '<the tests below>'`, and the file was
+restored from its copy under `.radian/mut/` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0157-M1 | `propose_followup` collects a merged task without the field (`\|\| !task.followup_pending` removed) | `review::a_store_from_before_the_field_proposes_no_followup` (the pass added a follow-up), `review::a_task_merged_now_collects_only_itself` (`after` holds `TK0002-old-second`), `review::a_task_merged_while_the_switch_was_false_is_never_collected` | ✅ 3 failed |
+| TK0157-M2 | `Store::add_followup` skips the open-task re-check under its lock | `review::a_confirm_between_the_scan_and_the_write_adds_no_followup` (`a follow-up was added while TK0002-idea is open`) | ✅ failed |
+
+2/2 caught.
+
+## TK0157 rework 2: the switch is read at the merged-state write (2026-10-25, branch `work/TK0157-followup-collect-only-new-merges`)
+
+ADR 0048 decision 10: `followup_pending` is recorded when the task *reaches* `done.merged`,
+so `finish_integration` reads `[gate.review] propose_followups` under the same `state.lock`
+that writes the merged state, not the value the merge context captured before the integration
+ran. The mutation was applied by hand to `crates/radian-arc/src/review/mod.rs`, the named test
+ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test review -E '<the
+test below>'`, and the file was restored from `.radian/mutation/review-mod.rs.fixed` with
+`cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0157-M3 | the merged-state write takes `propose_followups` from the merge context prepared before the integration | `review::the_switch_is_read_when_the_task_reaches_merged` (`a merge with the switch off at the write carries the field`) | ✅ failed |
+
+1/1 caught.

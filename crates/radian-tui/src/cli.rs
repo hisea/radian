@@ -3061,6 +3061,7 @@ mod tests {
             auto_rework: 2,
             retry_count: 1,
             allow_noop: false,
+            followup_pending: true,
             extra_stages: vec!["mutation".to_owned()],
             max_attempts: Some(2),
             max_cost_usd: Some(1.0),
