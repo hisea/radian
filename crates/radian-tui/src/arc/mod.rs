@@ -261,12 +261,13 @@ pub enum ArcKey {
 pub enum Mark {
     /// `✓`: `done.merged`.
     Done,
-    /// `×`: a `failed` task.
+    /// `×`: `failed.cancelled`.
     Failed,
     /// `●`: `doing`, or a `review` phase that is working (verifying, integrating,
     /// ready_to_merge).
     Active,
-    /// `!`: `review.awaiting_human` or `review.rework_pending` — the owner or the lead acts.
+    /// `!`: a task that needs the owner ([`task_needs_owner`]), or `review.rework_pending`,
+    /// which waits for the lead.
     Waiting,
     /// `◻`: `todo`.
     Todo,
@@ -296,15 +297,33 @@ impl Mark {
     }
 }
 
-/// The mark of one task.
+/// Whether a task waits for the owner (ADR 0048 decision 11): `review.awaiting_human`,
+/// `todo.proposed`, `failed.exhausted` and `failed.irrecoverable`. The plan's `◉` and the task
+/// row's `!` both read it, so the row that made a plan `◉` is a `!` row. `review.rework_pending`
+/// waits for the lead and `failed.cancelled` is final: neither one is here.
+pub fn task_needs_owner(state: TaskState, phase: &str) -> bool {
+    match state {
+        TaskState::Review => phase == "awaiting_human",
+        TaskState::Todo => phase == PROPOSED_PHASE,
+        TaskState::Failed => phase != "cancelled",
+        TaskState::Doing | TaskState::Done => false,
+    }
+}
+
+/// The mark of one task (ADR 0048 decision 11): a task that needs the owner draws
+/// [`Mark::Waiting`], and so does `review.rework_pending`, which waits for the lead; every
+/// other phase keeps its state's mark.
 pub fn task_mark(state: TaskState, phase: &str) -> Mark {
+    if task_needs_owner(state, phase) {
+        return Mark::Waiting;
+    }
     match state {
         TaskState::Done => Mark::Done,
         TaskState::Failed => Mark::Failed,
         TaskState::Todo => Mark::Todo,
         TaskState::Doing => Mark::Active,
         TaskState::Review => match phase {
-            "awaiting_human" | "rework_pending" => Mark::Waiting,
+            "rework_pending" => Mark::Waiting,
             _ => Mark::Active,
         },
     }
@@ -373,14 +392,14 @@ pub fn plan_mark(view: &PlanView) -> PlanMark {
         return PlanMark::Draft;
     }
     let tasks = &view.tasks;
-    let needs_you = tasks.iter().any(|task| {
-        (task.item.state == TaskState::Review && task.item.phase == "awaiting_human")
-            || (task.item.state == TaskState::Todo && task.item.phase == PROPOSED_PHASE)
-    });
+    let needs_owner = |item: &TaskFile| task_needs_owner(item.state, &item.phase);
+    let needs_you = tasks
+        .iter()
+        .any(|task| task.item.state != TaskState::Failed && needs_owner(&task.item));
     let open = tasks.iter().any(|task| task_open(&task.item));
     let failed_other = tasks
         .iter()
-        .any(|task| task.item.state == TaskState::Failed && task.item.phase != "cancelled");
+        .any(|task| task.item.state == TaskState::Failed && needs_owner(&task.item));
     if needs_you || (!open && failed_other) {
         return PlanMark::NeedsYou;
     }
