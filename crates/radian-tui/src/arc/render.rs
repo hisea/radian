@@ -997,8 +997,8 @@ fn draw_brief(
     }
 }
 
-/// The conversation tab: the frame's first rows, then the attach renderer's transcript, then
-/// the frame's tail.
+/// The conversation tab: the frame's first rows, then the attach renderer's transcript (a
+/// `radian exec` attempt) or a command worker's stdout, then the frame's tail.
 fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut ArcApp, lines: Vec<Line<'static>>) {
     let theme = app.theme.clone();
     let height = area.height as usize;
@@ -1013,30 +1013,52 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut ArcApp, lines: Vec
         height: 4,
     };
     draw_lines(frame, first, lines);
+    // A command worker's tab names the program its execution record names (ADR 0048 §13). A
+    // `radian exec` attempt keeps the four rows it always had.
+    let title = app.task.as_ref().and_then(|page| {
+        page.stdout
+            .as_ref()
+            .map(|view| format!("conversation · {} stdout", view.program()))
+    });
+    let top = if title.is_some() { 5 } else { 4 };
+    if let Some(title) = &title {
+        draw_line(
+            frame,
+            Rect {
+                x: area.x,
+                y: area.y + 4,
+                width: area.width,
+                height: 1,
+            },
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("│ ", theme.frame),
+                Span::styled(
+                    fit(title, area.width.saturating_sub(4) as usize),
+                    theme.hint,
+                ),
+            ]),
+        );
+    }
     let transcript = Rect {
         x: area.x + 4,
-        y: area.y + 4,
+        y: area.y + top,
         width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(5),
+        height: area.height.saturating_sub(top + 1),
     };
     let page = app.task.as_mut().expect("the page exists");
-    match &mut page.journal {
-        Some(view) => view.draw(frame, transcript),
-        None => {
-            let text = page
-                .journal_error
-                .clone()
-                .unwrap_or_else(|| "no session journal yet".to_owned());
-            let style = if page.journal_error.is_some() {
-                theme.status_error
-            } else {
-                theme.hint
+    if let Some(view) = &mut page.stdout {
+        view.draw(frame, transcript, &theme);
+        if view.is_empty() {
+            let (text, style) = match &page.journal_error {
+                Some(error) => (error.clone(), theme.status_error),
+                None => ("no output yet".to_owned(), theme.hint),
             };
             draw_line(
                 frame,
                 Rect {
                     x: area.x,
-                    y: area.y + 4,
+                    y: transcript.y,
                     width: area.width,
                     height: 1,
                 },
@@ -1047,6 +1069,35 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut ArcApp, lines: Vec
                 ]),
             );
         }
+    } else {
+        match &mut page.journal {
+            Some(view) => view.draw(frame, transcript),
+            None => {
+                let text = page
+                    .journal_error
+                    .clone()
+                    .unwrap_or_else(|| "no session journal yet".to_owned());
+                let style = if page.journal_error.is_some() {
+                    theme.status_error
+                } else {
+                    theme.hint
+                };
+                draw_line(
+                    frame,
+                    Rect {
+                        x: area.x,
+                        y: transcript.y,
+                        width: area.width,
+                        height: 1,
+                    },
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("│ ", theme.frame),
+                        Span::styled(text, style),
+                    ]),
+                );
+            }
+        }
     }
     // The frame's rail runs down every row the transcript occupies: the view starts at
     // column 5, so column 3 is the frame's own (ADR 0035: one left line down to the corner).
@@ -1055,7 +1106,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut ArcApp, lines: Vec
             frame,
             Rect {
                 x: area.x + 2,
-                y: area.y + 4 + row,
+                y: transcript.y + row,
                 width: 1,
                 height: 1,
             },

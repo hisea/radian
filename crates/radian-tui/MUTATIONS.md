@@ -3181,3 +3181,24 @@ deadline on the marker instead of a fresh one. The mutation put the ignored resu
 | TK0161-M2 | ignore `wait_for_raw`'s result (and give it a fresh full `timeout`) | ✅ 1 failed | `pty_wait_for_exit_fails_when_the_stty_tail_has_not_arrived` (`left: Some(0)`, `right: None`) |
 
 1/1 caught.
+
+## TK0160: a command worker's conversation tab shows its stdout (2026-10-25, branch `work/TK0160-tui-command-worker-log`)
+
+A `[worker] command` attempt has no radian session, so its conversation tab had nothing to show.
+The tab now reads the attempt's `runs/<task>/attempts/<attempt>/result.jsonl` one row per line
+(`crates/radian-tui/src/arc/stdout.rs`) and names the program the attempt's `execution.json`
+records; a `radian exec` attempt keeps the attach view. The mutations were applied by hand to
+`crates/radian-tui/src/arc/stdout.rs` and `crates/radian-tui/src/arc/mod.rs`, backed up under
+`.radian/mut/` and restored from those copies (never `git checkout`); the tests ran with
+`cargo nextest run -p radian-tui --locked --profile sandbox --lib --test arc_tui -E
+'test(a_summary_is_found_at_the_top_level_before_one_level_down) |
+test(the_conversation_tab_shows_a_command_workers_stdout) |
+test(the_conversation_tab_follows_a_command_workers_growing_stdout) |
+test(the_conversation_tab_renders_the_selected_attempts_worker_journal)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0160-M1 | skip the one-level-down summary lookup: `first_summary` keeps only the top-level pass | ✅ 2 failed | `arc::stdout::tests::a_summary_is_found_at_the_top_level_before_one_level_down` (`left: None`, `right: Some("nested")`); `the_conversation_tab_shows_a_command_workers_stdout` (the `item.completed` row printed `{"item":…}` instead of `the agent's answer`) |
+| TK0160-M2 | treat a command attempt as a radian session: `refresh_journal` takes `command = None`, so the tab looks for a session journal | ✅ 2 failed | `the_conversation_tab_shows_a_command_workers_stdout` (the title and rows are missing); `the_conversation_tab_follows_a_command_workers_growing_stdout` (the growing line never appears); `the_conversation_tab_renders_the_selected_attempts_worker_journal` stayed green, so a `radian exec` attempt is unchanged |
+
+2/2 caught.

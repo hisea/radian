@@ -2358,6 +2358,177 @@ fn the_conversation_tab_follows_a_running_attempts_journal() {
     );
 }
 
+/// A `[worker] command` attempt has no radian session: the conversation tab shows the attempt's
+/// `result.jsonl`, one row per line, under a title that names the program (ADR 0048 §13).
+///
+/// Mutation: skip the one-level-down summary lookup (`item.text`, `item.command`).
+#[test]
+fn the_conversation_tab_shows_a_command_workers_stdout() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    let attempt = 2;
+    write_command_execution(&fixture, &task, attempt, "codex", "codex");
+    let path = radian_arc::store::attempt_ops::run_dir(&fixture.store, &task, attempt)
+        .join("result.jsonl");
+    let long = "x".repeat(200);
+    fs::write(
+        &path,
+        [
+            r#"{"type":"thread.started","thread_id":"t1"}"#.to_owned(),
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"the agent's answer"}}"#.to_owned(),
+            r#"{"type":"item.completed","item":{"type":"command_execution","command":"cargo test -p radian-tui"}}"#.to_owned(),
+            "not json at all".to_owned(),
+            format!(r#"{{"type":"item.completed","item":{{"text":"{long}"}}}}"#),
+            r#"{"type":"item.completed","item":{"text":"line one\nline two"}}"#.to_owned(),
+            r#"{"type":"Result","outcome":"completed","text":"all done"}"#.to_owned(),
+            r#"{"type":"Result","outcome":"error","text":"it failed"}"#.to_owned(),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), None);
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    let terminal = render(&mut app, 80, 40);
+    let text = rows(&terminal).join("\n");
+    let row = |needle: &str| {
+        text.lines()
+            .find(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("no row with `{needle}`:\n{text}"))
+    };
+    let theme = radian_tui::theme::Theme::default();
+
+    // The title names the program the execution record names.
+    assert!(
+        text.contains("conversation · codex stdout"),
+        "the tab title names the program:\n{text}"
+    );
+    // The type is drawn weak, then the summary.
+    assert_eq!(
+        row("the agent's answer"),
+        "  │ item.completed the agent's answer"
+    );
+    assert_eq!(
+        row("cargo test -p radian-tui"),
+        "  │ item.completed cargo test -p radian-tui"
+    );
+    // No summary one level down: the object is printed compactly, with no inserted spaces.
+    let started = row("thread_id");
+    assert!(
+        started.starts_with("  │ thread.started {\"thread_id\":\"t1\","),
+        "the object is printed compactly: {started:?}"
+    );
+    assert!(
+        !started.contains(": "),
+        "compact means no spaces: {started:?}"
+    );
+    // A line that is not a JSON object is shown as it is.
+    assert_eq!(row("not json at all"), "  │ not json at all");
+    // A multi-line summary turns its line breaks into spaces.
+    assert_eq!(
+        row("line one line two"),
+        "  │ item.completed line one line two"
+    );
+    // A long row is cut to the transcript's width with `…`.
+    let long_row = row("xxxx");
+    assert!(
+        long_row.ends_with('…'),
+        "the long row is cut:\n{long_row:?}"
+    );
+    assert_eq!(
+        long_row.chars().count(),
+        80,
+        "the row fills the width exactly:\n{long_row:?}"
+    );
+    // The Result rows keep their outcome, in the done or the failed colour.
+    let (completed_row, completed_text) = text
+        .lines()
+        .enumerate()
+        .find(|(_, row)| row.contains("Result completed"))
+        .expect("the completed Result is drawn");
+    let completed_column = completed_text[..completed_text.find("completed").unwrap()]
+        .chars()
+        .count() as u16;
+    assert_eq!(
+        fg(&terminal, completed_row as u16, completed_column),
+        theme.status_ok.fg,
+        "`completed` takes the done colour"
+    );
+    let (error_row, error_text) = text
+        .lines()
+        .enumerate()
+        .find(|(_, row)| row.contains("Result error"))
+        .expect("the error Result is drawn");
+    let error_column = error_text[..error_text.find("error").unwrap()]
+        .chars()
+        .count() as u16;
+    assert_eq!(
+        fg(&terminal, error_row as u16, error_column),
+        theme.status_error.fg,
+        "any other outcome takes the failed colour"
+    );
+    // The journal's "no session journal yet" line belongs to a `radian exec` attempt only.
+    assert!(!text.contains("no session journal yet"), "{text}");
+}
+
+/// A running command worker's file grows while the tab follows it: the 2-second refresh reads
+/// the new lines and the follow keeps the end in view.
+#[test]
+fn the_conversation_tab_follows_a_command_workers_growing_stdout() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    let attempt = 2;
+    write_command_execution(&fixture, &task, attempt, "codex", "codex");
+    let path = radian_arc::store::attempt_ops::run_dir(&fixture.store, &task, attempt)
+        .join("result.jsonl");
+    let mut text = String::new();
+    for index in 0..30 {
+        text.push_str(&format!(
+            "{{\"type\":\"item.completed\",\"item\":{{\"text\":\"filler-{index:02}\"}}}}\n"
+        ));
+    }
+    fs::write(&path, &text).unwrap();
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), None);
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("filler-29"), "the end is shown:\n{text}");
+    assert!(!text.contains("filler-00"), "follow is at the end:\n{text}");
+
+    // The worker writes another line; the refresh reads it and the followed view shows it.
+    fs::write(
+        &path,
+        format!(
+            "{}\
+             {{\"type\":\"item.completed\",\"item\":{{\"text\":\"the growing line\"}}}}\n",
+            fs::read_to_string(&path).unwrap()
+        ),
+    )
+    .unwrap();
+    app.refresh();
+    app.apply_pending_scroll();
+    let text = screen(&mut app, 120, 30);
+    assert!(
+        text.contains("the growing line"),
+        "follow did not tail the growing stdout:\n{text}"
+    );
+    assert!(
+        !text.contains("filler-00"),
+        "follow moved to the new end:\n{text}"
+    );
+}
+
 /// The task frame's state alone does not say whether a `doing` worker is alive (ADR 0048
 /// decisions 7.9 and 9): the row adds the heartbeat's age, `stalled?` past the stall window,
 /// `starting` before the first beat, and `loop stopped` when nothing holds `runner.lock`.
@@ -2503,6 +2674,28 @@ fn write_execution(fixture: &Fixture, task: &str, attempt: u32, session: &str) {
     fs::write(
         dir.join("execution.json"),
         json!({ "session_id": session }).to_string(),
+    )
+    .unwrap();
+}
+
+/// The attempt's `execution.json` for a `[worker] command` worker: the record names the program
+/// the conversation tab's title shows (ADR 0048 decision 7).
+fn write_command_execution(
+    fixture: &Fixture,
+    task: &str,
+    attempt: u32,
+    program: &str,
+    session: &str,
+) {
+    let dir = radian_arc::store::attempt_ops::run_dir(&fixture.store, task, attempt);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("execution.json"),
+        json!({
+            "session_id": session,
+            "worker": { "kind": "command", "program": program },
+        })
+        .to_string(),
     )
     .unwrap();
 }

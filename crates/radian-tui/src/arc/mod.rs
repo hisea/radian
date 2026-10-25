@@ -23,6 +23,7 @@ pub mod board;
 pub mod loop_log;
 pub mod looping;
 pub mod render;
+pub mod stdout;
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ use ratatui::style::Style;
 use crate::attach::AttachView;
 use crate::theme::Theme;
 use looping::LoopStatus;
+use stdout::StdoutView;
 
 /// The left plan column's width in cells, from column 3 to the divider.
 pub const LEFT_WIDTH: u16 = 35;
@@ -548,6 +550,9 @@ pub struct TaskPage {
     follow_latest: bool,
     pub attempts: Vec<AttemptView>,
     pub journal: Option<AttachView>,
+    /// A command worker's stdout, the conversation tab's other source (ADR 0048 §13). Exactly
+    /// one of this and [`TaskPage::journal`] is set.
+    pub stdout: Option<StdoutView>,
     pub journal_error: Option<String>,
     pub diff: Option<TaskDiff>,
     /// The `(task, attempt)` a diff is loaded for, or is being loaded for.
@@ -597,6 +602,7 @@ impl TaskPage {
             follow_latest: true,
             attempts,
             journal: None,
+            stdout: None,
             journal_error: None,
             diff: None,
             diff_key: None,
@@ -1160,27 +1166,47 @@ impl ArcApp {
         self.refresh_journal();
     }
 
-    /// Opens, or polls, the selected attempt's worker journal.
+    /// Opens, or polls, the selected attempt's conversation.
     ///
-    /// The file is named by the attempt's session id (ADR 0048 decision 4): the wrapper's
-    /// `execution.json` or `identity.json`, else the claim's `start.json`. Only an attempt that
-    /// names none (an older attempt, or a worker-less `reverify`) falls back to the task id. A
-    /// view opened for another attempt is dropped, so `[`/`]` never keeps showing the previous
-    /// conversation.
+    /// A `radian exec` attempt is its worker journal: the file is named by the attempt's session
+    /// id (ADR 0048 decision 4) — the wrapper's `execution.json` or `identity.json`, else the
+    /// claim's `start.json`. Only an attempt that names none (an older attempt, or a worker-less
+    /// `reverify`) falls back to the task id. A command worker has no session: its conversation
+    /// is the attempt's `result.jsonl` (ADR 0048 §13). A view opened for another attempt is
+    /// dropped, so `[`/`]` never keeps showing the previous conversation.
     pub fn refresh_journal(&mut self) {
         let Some(page) = self.task.as_ref() else {
             return;
         };
         let id = page.id.clone();
         let attempt = page.attempt;
+        let command = attempt.and_then(|attempt| command_worker(&self.store, &id, attempt));
+        let stdout_path = attempt.map(|attempt| {
+            radian_arc::store::attempt_ops::run_dir(&self.store, &id, attempt).join("result.jsonl")
+        });
+        let Some(page) = self.task.as_mut() else {
+            return;
+        };
+        if let (Some(program), Some(attempt), Some(path)) = (command, attempt, stdout_path) {
+            page.journal = None;
+            page.journal_error = None;
+            match &mut page.stdout {
+                Some(view) if view.is_for(&id, attempt) => view.set_program(program),
+                _ => page.stdout = Some(StdoutView::new(&id, attempt, path, program)),
+            }
+            if let Some(view) = &mut page.stdout
+                && let Err(error) = view.poll()
+            {
+                page.journal_error = Some(error);
+            }
+            return;
+        }
+        page.stdout = None;
         let session = match attempt.and_then(|attempt| {
             radian_arc::store::attempt_ops::attempt_session_id(&self.store, &id, attempt)
         }) {
             Some(session) => session,
             None => id.clone(),
-        };
-        let Some(page) = self.task.as_mut() else {
-            return;
         };
         if page
             .journal
@@ -1761,6 +1787,15 @@ impl ArcApp {
             return;
         };
         if let Some(view) = &mut page.journal {
+            if page.pending_scroll != 0 {
+                view.scroll_lines(page.pending_scroll);
+                page.pending_scroll = 0;
+            }
+            if page.pending_follow {
+                view.follow_end();
+                page.pending_follow = false;
+            }
+        } else if let Some(view) = &mut page.stdout {
             if page.pending_scroll != 0 {
                 view.scroll_lines(page.pending_scroll);
                 page.pending_scroll = 0;
@@ -2764,6 +2799,42 @@ impl ArcApp {
             return;
         };
         self.log_request = Some(LogRequest { task, title, path });
+    }
+}
+
+/// The program of the command worker that ran, or is running, one attempt, when the attempt is
+/// not a `radian exec` attempt (ADR 0048 decisions 7 and 13).
+///
+/// The wrapper writes `execution.json` when the worker exits, and that record names the worker;
+/// while an attempt still runs there is no record yet, and then the configured `[worker] command`
+/// names it — but only when the attempt has a `result.jsonl`, the file the wrapper creates for a
+/// worker it started. A worker-less `reverify` attempt writes none and stays a journal attempt.
+fn command_worker(store: &Store, task: &str, attempt: u32) -> Option<String> {
+    let dir = radian_arc::store::attempt_ops::run_dir(store, task, attempt);
+    match std::fs::read_to_string(dir.join("execution.json")) {
+        Ok(text) => {
+            // The record decides: one that names `radian` (or predates the `worker` field) is
+            // not a command worker, whatever the config says now.
+            let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let worker = value.get("worker")?;
+            if worker.get("kind").and_then(serde_json::Value::as_str) != Some("command") {
+                return None;
+            }
+            Some(
+                worker
+                    .get("program")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !dir.join("result.jsonl").is_file() {
+                return None;
+            }
+            store.config().ok()?.worker.command?.first().cloned()
+        }
+        Err(_) => None,
     }
 }
 
