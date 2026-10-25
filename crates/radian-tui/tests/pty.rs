@@ -259,6 +259,11 @@ fn wait_positive() -> Duration {
 /// wait *is* the assertion, so a longer window only makes every run slower.
 const WAIT_NEGATIVE: Duration = Duration::from_secs(2);
 
+/// Printed by the pty's shell after its trailing `stty -a`. The shell exits only after that, so a
+/// reader that waits for the marker knows the whole tty state was written (see
+/// [`Pty::wait_for_exit`]).
+const STTY_END: &str = "STTY-END";
+
 /// A deliberate latency bound: the test asserts that something arrives **fast**, so the wait is
 /// the measurement and stays short. `pty_attach_follow_shows_new_committed_events` pins the
 /// attach follow to "within a second" (the README hand-test note).
@@ -306,9 +311,9 @@ enum TestConfig<'a> {
 }
 
 impl Pty {
-    /// Spawns the bin under `sh -c '"$@"; echo EXITED:$?; stty -a'` so the same pty reports
-    /// the exit code and the tty state after the app exits. `Drop` kills the whole process
-    /// group (the shell and the app), never just the shell.
+    /// Spawns the bin under `sh -c '"$@"; echo EXITED:$?; stty -a; echo STTY-END'` so the same pty
+    /// reports the exit code and the tty state after the app exits. `Drop` kills the whole
+    /// process group (the shell and the app), never just the shell.
     fn spawn(args: &[&str], rows: u16, cols: u16) -> Self {
         Self::spawn_with_env(args, &[], rows, cols)
     }
@@ -389,7 +394,9 @@ impl Pty {
             .unwrap();
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.arg("-c");
-        cmd.arg(r#""$@"; echo "EXITED:$?"; stty -a"#);
+        cmd.arg(format!(
+            r#""$@"; echo "EXITED:$?"; stty -a; echo "{STTY_END}""#
+        ));
         cmd.arg("sh");
         for arg in argv {
             cmd.arg(arg);
@@ -549,8 +556,13 @@ impl Pty {
         loop {
             self.pump();
             if let Ok(Some(status)) = self.child.try_wait() {
-                // Let the shell's trailing `stty -a` output arrive.
-                std::thread::sleep(Duration::from_millis(150));
+                // The shell prints `STTY-END` after `stty -a` and exits only then, so every
+                // byte of the tty state is written by now. The reader thread may not have copied
+                // it into `bytes` yet, though, and one `pump` processes only what is there at
+                // that instant: wait for the marker (by the same watchdog) instead of sleeping a
+                // fixed time before the pump, which a loaded machine can outrun. The assertions
+                // read `EXITED:` and `icanon` from those bytes.
+                self.wait_for_raw(STTY_END, timeout);
                 self.pump();
                 return Some(status.exit_code());
             }
