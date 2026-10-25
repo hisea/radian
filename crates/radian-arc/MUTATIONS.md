@@ -1017,5 +1017,6 @@ which `cmp` found identical.
 |---|---|---|---|
 | TK0127-M1 | `is_open` counts `todo.proposed` as open (`matches!(task.phase.as_str(), "ready" \| model::PROPOSED_PHASE)`) | `review::a_proposed_lead_task_does_not_hold_the_followup_back` (`the plan's follow-up`) | ✅ failed |
 | TK0127-M2 | the collected check is dropped (`has_followup` removed from the candidate filter), so a merged task is collected twice | `review::running_the_followup_check_twice_adds_one_task` (`the check is idempotent: Some(Followup { task: "TK0003-p-followups-2", ... })`) | ✅ failed |
+| TK0127-M3 | `is_followup` knows a follow-up by its title alone (the shape checks removed) | `review::an_ordinary_task_titled_like_a_followup_is_not_a_followup` (`both merged tasks are collected`) and `review::an_ordinary_task_titled_like_a_followup_collects_nothing` (no follow-up is proposed) | ✅ 2 failed |
 
-2/2 caught.
+3/3 caught.

@@ -613,11 +613,13 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   (decision 7).
 - The merged task's worktree is removed with plain `git worktree remove`; a checkout with
   uncommitted files is left in place and reported as a warning, never forced away.
-- The follow-up's slug is `<merged task slug>-followups` cut from the end to
-  `SLUG_MAX_CHARS`, then a trailing `-` from the cut is removed so it stays a valid slug. A
-  plan that already holds the follow-up (the same title and `after`) gets no second one. A
-  follow-up task gets none of its own: its title and single `after` entry are the ones arc
-  gives a follow-up, the same test `has_followup` uses, so the chain stops after one level.
+- The follow-up's slug is `<plan slug>-followups` cut to `SLUG_MAX_CHARS`, then a trailing `-`
+  from the cut is removed so it stays a valid slug; a plan that already holds that slug gets
+  `-2`, `-3`, … within the limit. A follow-up task gets none of its own: `is_followup` reads
+  back the shape arc gave it (the title, the plan-slug id, `allow_noop`, a non-empty `after` and
+  the fixed first line of its brief), the same test `has_followup` uses, so the chain stops
+  after one level. An ordinary task that only carries the title is collected like any other,
+  and its `after` collects nothing.
 - `confirm` of a task checks `worker_args` first, as `confirm` of a plan does, so a broken
   worker line leaves the task `todo.proposed` instead of making it runnable.
 - `store::chain` is the one walk of a task's `after` graph: `show`, `show --json`, `confirm`,

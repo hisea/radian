@@ -1833,11 +1833,17 @@ fn merge_time(store: &Store, task: &str) -> Option<String> {
         .max()
 }
 
-/// Whether `task` is itself a review follow-up of its plan: its title is the one arc gives the
-/// plan's follow-up. A merged follow-up is never collected, and a follow-up never gets a
-/// follow-up of its own (ADR 0048 decision 10).
+/// Whether `task` is itself a review follow-up of its plan (ADR 0048 decision 10): the title,
+/// the plan-slug id, `allow_noop`, a non-empty `after` list and the fixed first line of the
+/// brief arc gives it. The title alone is not enough: a lead can give an ordinary task the same
+/// title, and its review suggestions are collected like any task's. A merged follow-up is never
+/// collected, and a follow-up never gets a follow-up of its own.
 fn is_followup(task: &model::TaskFile) -> bool {
     task.title == followup_title(&task.plan)
+        && followup_slug_matches(&task.plan, &task.id)
+        && task.allow_noop
+        && !task.after.is_empty()
+        && task.body.starts_with(&followup_brief_opening(&task.plan))
 }
 
 /// Whether a follow-up task of `plan` already collected `task`: the task's id is in the
@@ -1859,25 +1865,14 @@ fn has_followup(store: &Store, plan: &model::PlanFile, task: &str) -> Result<boo
 /// limit, with a trailing `-` removed so the cut stays a valid slug. When a task of the plan
 /// already holds it, `-2`, `-3`, … is appended within the limit.
 fn followup_slug(plan: &str, tasks: &[String]) -> String {
-    let base = model::split_id(plan)
-        .map(|(_, _, slug)| slug)
-        .unwrap_or(plan);
     let taken: Vec<&str> = tasks
         .iter()
         .filter_map(|id| model::split_id(id).map(|(_, _, slug)| slug))
         .collect();
-    let candidate = |suffix: &str| {
-        let room = model::SLUG_MAX_CHARS.saturating_sub(suffix.chars().count());
-        let mut text: String = format!("{base}-followups").chars().take(room).collect();
-        while text.ends_with('-') {
-            text.pop();
-        }
-        format!("{text}{suffix}")
-    };
     let mut suffix = String::new();
     let mut number = 2u32;
     loop {
-        let slug = candidate(&suffix);
+        let slug = followup_slug_stem(plan, &suffix);
         if !taken.contains(&slug.as_str()) {
             return slug;
         }
@@ -1886,9 +1881,54 @@ fn followup_slug(plan: &str, tasks: &[String]) -> String {
     }
 }
 
+/// The slug [`followup_slug`] gives `plan` with `suffix` appended: the plan's slug and the
+/// marker, cut to the room the suffix leaves, with a trailing `-` removed so the cut stays a
+/// valid slug.
+fn followup_slug_stem(plan: &str, suffix: &str) -> String {
+    let base = model::split_id(plan)
+        .map(|(_, _, slug)| slug)
+        .unwrap_or(plan);
+    let room = model::SLUG_MAX_CHARS.saturating_sub(suffix.chars().count());
+    let mut text: String = format!("{base}-followups").chars().take(room).collect();
+    while text.ends_with('-') {
+        text.pop();
+    }
+    format!("{text}{suffix}")
+}
+
+/// Whether `slug` is one [`followup_slug`] can give `plan`: the base, or the base with `-2`,
+/// `-3`, … appended inside the limit, with no leading zero. [`is_followup`] reads the id back
+/// with this, so an ordinary task that only carries the title does not pass for a follow-up.
+fn followup_slug_matches(plan: &str, id: &str) -> bool {
+    let Some((_, _, slug)) = model::split_id(id) else {
+        return false;
+    };
+    if slug == followup_slug_stem(plan, "") {
+        return true;
+    }
+    let Some((_, digits)) = slug.rsplit_once('-') else {
+        return false;
+    };
+    let Ok(number) = digits.parse::<u32>() else {
+        return false;
+    };
+    let suffix = format!("-{number}");
+    number >= 2 && suffix.len() == digits.len() + 1 && slug == followup_slug_stem(plan, &suffix)
+}
+
 /// The title arc gives a plan's follow-up.
 fn followup_title(plan: &str) -> String {
     format!("Follow-ups from {plan}'s reviews")
+}
+
+/// The fixed first line of `plan`'s follow-up brief (ADR 0048 decision 10): where the items
+/// come from and what to do with each. [`is_followup`] reads it back, so an ordinary task that
+/// carries only the title does not pass for arc's follow-up.
+fn followup_brief_opening(plan: &str) -> String {
+    format!(
+        "The items below are from the reviews of the merged tasks of `{plan}`; fix each one, \
+         or leave it with a one-line reason in the final answer."
+    )
 }
 
 /// The fixed brief of `plan`'s follow-up (ADR 0048 decision 10): the line that says where the
@@ -1896,10 +1936,7 @@ fn followup_title(plan: &str) -> String {
 /// `From <task id>` holding the task's items grouped by the round they came from as
 /// `[level] path:line text`, then the path of every review verdict.
 fn followup_brief(plan: &str, sources: &[FollowupSource]) -> String {
-    let mut brief = format!(
-        "The items below are from the reviews of the merged tasks of `{plan}`; fix each one, \
-         or leave it with a one-line reason in the final answer."
-    );
+    let mut brief = followup_brief_opening(plan);
     for source in sources {
         brief.push_str(&format!("\n\nFrom {}", source.task));
         for (index, round) in source.rounds.iter().enumerate() {

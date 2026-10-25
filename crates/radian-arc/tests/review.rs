@@ -4112,7 +4112,9 @@ fn merge_with_suggestions(
     review::merge(&fixture.store, task).expect("the merge runs")
 }
 
-/// The follow-up tasks of the fixture's plan, in plan order.
+/// The follow-up tasks of the fixture's plan, in plan order: arc's title, `allow_noop`, an
+/// `after` list and the fixed first line of the brief. A lead's own task can carry the title,
+/// so the test recognises the same shape the code does.
 fn followups(fixture: &Fixture) -> Vec<radian_arc::store::model::TaskFile> {
     let plan = fixture
         .store
@@ -4123,7 +4125,14 @@ fn followups(fixture: &Fixture) -> Vec<radian_arc::store::model::TaskFile> {
         .iter()
         .filter_map(|id| fixture.store.load_task(id).ok())
         .map(|loaded| loaded.item)
-        .filter(|task| task.title == format!("Follow-ups from {}'s reviews", fixture.plan))
+        .filter(|task| {
+            task.title == format!("Follow-ups from {}'s reviews", fixture.plan)
+                && task.allow_noop
+                && !task.after.is_empty()
+                && task
+                    .body
+                    .starts_with("The items below are from the reviews of the merged tasks of")
+        })
         .collect()
 }
 
@@ -4530,6 +4539,116 @@ fn running_the_followup_check_twice_adds_one_task() {
         .expect("the plan")
         .item;
     assert_eq!(plan.tasks, vec![fixture.task.clone(), first]);
+}
+
+/// A lead's ordinary task can carry the title arc gives a follow-up, but it is not one: its
+/// review suggestions are collected like any merged task's (ADR 0048 decision 10).
+///
+/// Mutation: recognise a follow-up by its title alone → the lead task's item is left out.
+#[test]
+fn an_ordinary_task_titled_like_a_followup_is_not_a_followup() {
+    let fixture = Fixture::new("followup-title-only");
+    fixture.add_review_stage();
+    let ordinary = fixture
+        .store
+        .add_task_proposed(
+            &fixture.plan,
+            "ledger-check",
+            &format!("Follow-ups from {}'s reviews", fixture.plan),
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the lead's own task\n",
+        )
+        .expect("the lead's task");
+    plan_ops::confirm(&fixture.store, &ordinary).expect("the owner confirms the task");
+
+    let first_merge = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    );
+    assert!(first_merge.followup.is_none(), "{first_merge:?}");
+    let merged = merge_with_suggestions(
+        &fixture,
+        &ordinary,
+        "ordinary.txt",
+        vec![item("minor", "ordinary.txt", 1, "the lead's item")],
+    );
+    let followup = merged.followup.expect("the plan's follow-up");
+    let task = fixture
+        .store
+        .load_task(&followup.task)
+        .expect("the follow-up")
+        .item;
+    assert_eq!(
+        task.after,
+        vec![fixture.task.clone(), ordinary.clone()],
+        "both merged tasks are collected"
+    );
+    assert!(
+        task.body.contains("- [minor] one.txt:1 first item"),
+        "{}",
+        task.body
+    );
+    assert!(
+        task.body
+            .contains("- [minor] ordinary.txt:1 the lead's item"),
+        "the lead task's own item is not skipped: {}",
+        task.body
+    );
+}
+
+/// An ordinary task that carries the follow-up title and names a merged task in its `after`
+/// collects nothing: only an arc follow-up's `after` collects (ADR 0048 decision 10).
+///
+/// Mutation: recognise a follow-up by its title alone → the real task is collected by the
+/// lead's task and no follow-up is proposed.
+#[test]
+fn an_ordinary_task_titled_like_a_followup_collects_nothing() {
+    let fixture = Fixture::new("followup-title-only-after");
+    fixture.add_review_stage();
+    let ordinary = fixture
+        .store
+        .add_task_proposed(
+            &fixture.plan,
+            "ledger-check",
+            &format!("Follow-ups from {}'s reviews", fixture.plan),
+            vec![fixture.task.clone()],
+            false,
+            Vec::new(),
+            "the lead's own task\n",
+        )
+        .expect("the lead's task");
+    plan_ops::confirm(&fixture.store, &ordinary).expect("the owner confirms the task");
+
+    let first_merge = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    );
+    assert!(first_merge.followup.is_none(), "{first_merge:?}");
+    let merged = merge_with_suggestions(&fixture, &ordinary, "ordinary.txt", Vec::new());
+    let followup = merged
+        .followup
+        .expect("the plan's follow-up still collects the merged task");
+    let task = fixture
+        .store
+        .load_task(&followup.task)
+        .expect("the follow-up")
+        .item;
+    assert_eq!(
+        task.after,
+        vec![fixture.task.clone()],
+        "only the real follow-up collects"
+    );
+    assert!(
+        task.body.contains("- [minor] one.txt:1 first item"),
+        "the merged task's item is not suppressed: {}",
+        task.body
+    );
 }
 
 /// A follow-up's attempt that adds no commit passes the delivery check, because arc proposed
