@@ -547,7 +547,8 @@ fn a_tool_result_placeholder_is_copied_and_the_run_is_not() {
             start.offset, spans[0].0,
             "clicking the placeholder anchors in it"
         );
-        // Dragging to the end of the (folded: absent) run copies exactly the placeholder.
+        // Dragging to the end of the run copies exactly the placeholder; the image rows carry no
+        // characters, and the run draws under both folds.
         let end_row = lines
             .iter()
             .rposition(|line| line.image.is_some())

@@ -905,7 +905,8 @@ Run a general `workspace` session in a throwaway terminal and get the model to c
    `errors → expanded → collapsed`. *Expect* `errors` = the last `tool_preview_lines` rows under
    a `◻` head, `expanded` = all of them under `◻` (and a multi-line command's own lines above
    them, under `│ `), `collapsed` = the head only with `· N lines`
-   in the meta and a `◼` head; a failed
+   in the meta and a `◼` head — except that a result carrying images keeps each `[image: …]`
+   placeholder and its picture below the head under every fold; a failed
    call's body is never hidden. *Look*: does the head stay put as the body folds, is the fold
    marker `◻`/`◼` the right one, does a folded multi-line command read
    `◼ shell $ <first line> … (+N lines) · …` with the meta on that row, and is the
