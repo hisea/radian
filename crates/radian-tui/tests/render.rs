@@ -956,6 +956,125 @@ fn the_box_frame_falls_back_to_ascii() {
     );
 }
 
+/// A composer attachment with only the facts its placeholder reads.
+fn attachment(name: &str, width: u32, height: u32) -> radian_coding::LoadedImage {
+    radian_coding::LoadedImage {
+        name: name.to_string(),
+        mime: "image/png",
+        width,
+        height,
+        bytes: 1024,
+        data: String::new(),
+    }
+}
+
+/// The display column of `needle`'s first byte in `text` (a box rail is one cell but three
+/// bytes, so a byte offset is not a column).
+fn display_column(text: &str, needle: char) -> usize {
+    unicode_width::UnicodeWidthStr::width(&text[..text.find(needle).expect("the needle")])
+}
+
+/// ADR 0028 R5: a composer attachment row is a composer row like the text rows. Its placeholder
+/// starts in the text column — after the prompt, and inside the box's frame — with one and with
+/// two attachments, in both input styles.
+#[test]
+fn a_composer_attachment_starts_in_the_text_column() {
+    use radian_tui::render::InputStyle;
+    for style in [InputStyle::Lines, InputStyle::Box] {
+        for count in [1, 2] {
+            let mut app = App::new("m", "s");
+            app.input_style = style;
+            app.input = "hi".into();
+            app.composer_images = (1..=count)
+                .map(|n| attachment(&format!("shot{n}.png"), 10, 10))
+                .collect();
+            let terminal = render(&mut app, 60, 12);
+            let text = screen(&terminal);
+            let text_row = row_of(&terminal, "❯ hi").expect("the text row");
+            let text_col = display_column(&row(&terminal, text_row as u16), 'h');
+            let image_rows: Vec<u16> = (0..12)
+                .filter(|y| row(&terminal, *y).contains("[image:"))
+                .collect();
+            assert_eq!(image_rows.len(), count, "{style:?}:\n{text}");
+            for y in image_rows {
+                let image_row = row(&terminal, y);
+                assert_eq!(
+                    display_column(&image_row, '['),
+                    text_col,
+                    "{style:?}: the attachment row starts in the text column:\n{text}"
+                );
+                if style == InputStyle::Box {
+                    assert_eq!(
+                        image_row.chars().next(),
+                        Some('│'),
+                        "the frame's rail on every attachment row:\n{text}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// ADR 0028 R5: a placeholder wider than the inner width is cut with `…` at the inner width. It
+/// never wraps and never pushes the frame: the chrome above and below it keeps its row.
+#[test]
+fn a_composer_attachment_wider_than_the_input_is_cut_with_an_ellipsis() {
+    use radian_tui::render::InputStyle;
+    let name = "arc-one-task-from-request-to-merge.webp";
+    for style in [InputStyle::Lines, InputStyle::Box] {
+        let mut app = App::new("m", "s");
+        app.input_style = style;
+        app.input = "hi".into();
+        app.composer_images.push(attachment(name, 3432, 3198));
+        let terminal = render(&mut app, 40, 12);
+        let text = screen(&terminal);
+        let image_rows: Vec<u16> = (0..12)
+            .filter(|y| row(&terminal, *y).contains("[image:"))
+            .collect();
+        assert_eq!(image_rows.len(), 1, "the row never wraps:\n{text}");
+        let y = image_rows[0];
+        let image_row = row(&terminal, y);
+        assert!(
+            image_row.trim_end().ends_with('…'),
+            "cut with an ellipsis:\n{text}"
+        );
+        assert!(
+            !image_row.contains(name),
+            "the full placeholder is gone:\n{text}"
+        );
+        // The row fills the input area and no more: the last cell of the row is still inside it.
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(image_row.as_str()),
+            40,
+            "the cut row keeps the frame's width:\n{text}"
+        );
+        assert_eq!(
+            display_column(&image_row, '…'),
+            39,
+            "the ellipsis sits in the last cell:\n{text}"
+        );
+        // The chrome above and below the attachment row keeps its own row: the top rule (or the
+        // box's full-width top) directly above, the text row and then the bottom chrome after.
+        let above = row(&terminal, y - 1);
+        let below = row(&terminal, y + 2);
+        match style {
+            InputStyle::Lines => {
+                assert!(above.starts_with("────"), "the top rule:\n{text}");
+                assert!(below.starts_with("────"), "the bottom rule:\n{text}");
+            }
+            InputStyle::Box => {
+                assert!(above.starts_with('╭'), "the box's top:\n{text}");
+                assert_eq!(
+                    unicode_width::UnicodeWidthStr::width(above.as_str()),
+                    40,
+                    "the top rule stays full width:\n{text}"
+                );
+                assert_eq!(below.trim_end(), "╰──", "the box's tail:\n{text}");
+            }
+        }
+    }
+}
+
 /// ADR 0035: no tier draws a
 /// user half-cell pad. The `ascii` tier draws its own `> ` marker, and two user rows are
 /// separated by the container's one blank line like any two blocks.

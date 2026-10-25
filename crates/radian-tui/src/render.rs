@@ -28,7 +28,8 @@ pub use approval::{
 };
 use input::{
     BOX_PROMPT, BoxGlyphs, FIND_BOX_HEIGHT, INPUT_HINT, INPUT_HINT_NO_MODEL, INPUT_PROMPT,
-    input_height, input_inner_width, input_status_spans, input_visible_rows, prompt_width,
+    composer_prefix, cut_to_width, input_height, input_inner_width, input_status_spans,
+    input_visible_rows, prompt_width,
 };
 pub use input::{
     COMPLETION_MAX_LINES, INPUT_STYLES, InputStyle, completion_rows, completion_visible_rows,
@@ -385,12 +386,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let offset = cursor_row.saturating_sub(visible.saturating_sub(1));
             let offset = offset.min(rows.len().saturating_sub(1));
             let empty = app.input.is_empty();
+            // The style's left chrome, shared by the text rows and the attachment rows below:
+            // an attachment row is a continuation row, so its placeholder starts in the text
+            // column and the frame stays unbroken (ADR 0028 R5).
+            let glyphs = BoxGlyphs::for_glyphs(app.footer_glyphs());
+            let frame_style = app.theme.notice_label;
             // Composer image attachments (dropped paths) draw one placeholder row each above
             // the text, the same `[image: …]` line the transcript shows (ADR 0028 R5).
             let image_rows: Vec<Line> = app
                 .composer_images
                 .iter()
-                .map(|image| Line::from(Span::styled(image.placeholder(), app.theme.hint)))
+                .map(|image| {
+                    let mut spans = composer_prefix(app, &glyphs, frame_style, false);
+                    spans.push(Span::styled(
+                        cut_to_width(&image.placeholder(), inner_width),
+                        app.theme.hint,
+                    ));
+                    Line::from(spans)
+                })
                 .collect();
             let style = if empty {
                 app.theme.hint
@@ -411,23 +424,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     };
                     let body: Vec<Line> = if empty {
                         let mut body = image_rows.clone();
-                        body.push(Line::from(vec![
-                            Span::styled(INPUT_PROMPT, app.theme.hint),
-                            Span::styled(hint, style),
-                        ]));
+                        let mut hint_spans = composer_prefix(app, &glyphs, frame_style, true);
+                        hint_spans.push(Span::styled(hint, style));
+                        body.push(Line::from(hint_spans));
                         body
                     } else {
                         let mut body = image_rows.clone();
                         body.extend(rows[offset..].iter().enumerate().map(|(index, row)| {
-                            let lead = if index == 0 {
-                                INPUT_PROMPT.to_string()
-                            } else {
-                                " ".repeat(prompt_width(INPUT_PROMPT))
-                            };
-                            Line::from(vec![
-                                Span::styled(lead, app.theme.hint),
-                                Span::styled(row.clone(), style),
-                            ])
+                            let mut spans = composer_prefix(app, &glyphs, frame_style, index == 0);
+                            spans.push(Span::styled(row.clone(), style));
+                            Line::from(spans)
                         }));
                         body
                     };
@@ -452,8 +458,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     // 0029 revision 1: the accent level is for labels and attention surfaces),
                     // so the frame and the `❯` prompt keep it; the body stays on the ordinary
                     // text level. (`model` is the model's own display color, not chrome.)
-                    let frame_style = app.theme.notice_label;
-                    let glyphs = BoxGlyphs::for_glyphs(app.footer_glyphs());
                     let area_width = input_area.width as usize;
                     // The top border: a full-width rule when idle, the running status where a
                     // code block's language label sits (`╭─ <status> ───…`, one space either
@@ -502,16 +506,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         rows[offset..].to_vec()
                     };
                     for (index, row) in text_rows.iter().enumerate() {
-                        let lead = if index == 0 {
-                            BOX_PROMPT.to_string()
-                        } else {
-                            " ".repeat(prompt_width(BOX_PROMPT))
-                        };
-                        body.push(Line::from(vec![
-                            Span::styled(glyphs.rail, frame_style),
-                            Span::styled(lead, frame_style),
-                            Span::styled(row.clone(), style),
-                        ]));
+                        let mut spans = composer_prefix(app, &glyphs, frame_style, index == 0);
+                        spans.push(Span::styled(row.clone(), style));
+                        body.push(Line::from(spans));
                     }
                     body.push(Line::from(Span::styled(glyphs.bottom, frame_style)));
                     frame.render_widget(Paragraph::new(body), input_area);
