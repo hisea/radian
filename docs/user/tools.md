@@ -36,7 +36,7 @@ Whether the model receives that image depends on the provider route:
 
 - Anthropic sends the image block inside the tool result.
 - OpenAI-compatible and OpenAI Responses send a tool result's text only. On those routes the model receives `[image/png image omitted]`, not the image. The image part is still in the transcript and the session file.
-- An image in a **user message** (`@path`, a dropped path, or `exec --image`) is sent by every route: Anthropic as an image block, OpenAI-compatible as `image_url`, and OpenAI Responses as `input_image`.
+- An image in a **user message** (`@path`, a dropped path, a pasted clipboard image, or `exec --image`) is sent by every route: Anthropic as an image block, OpenAI-compatible as `image_url`, and OpenAI Responses as `input_image`.
 
 When the image's long side is over 1568 px, the text line adds that the provider scales it down.
 Radian never resizes or re-encodes the file itself.

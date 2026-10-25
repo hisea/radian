@@ -72,6 +72,7 @@ and its default keys.
 | `find` | `ctrl-f` | Open the in-transcript search box. Pressed again while the box is open, it moves to the earlier match. |
 | `toggle_reasoning` | `ctrl-t` | Fold or unfold the thinking blocks. |
 | `toggle_tool_output` | `ctrl-o` | Expand or fold the tool result bodies. |
+| `paste_image` | `ctrl-v` | Attach an image from the system clipboard. Radian reads the clipboard itself and turns the pixels into an image part in memory. When the clipboard holds no image, the key does nothing. Over a limit, the unusable-attachment notice names the limit. |
 
 Type any other printable character to insert it. Paste inserts at the cursor
 and never sends. The mouse `wheel` scrolls the transcript three lines per notch

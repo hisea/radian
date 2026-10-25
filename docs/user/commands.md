@@ -189,6 +189,20 @@ A path outside the workspace is accepted: Radian reads the bytes itself and the 
 Backspace on an empty input removes the newest image attachment.
 A path that does not exist stays as ordinary text, with no error.
 
+Press `ctrl-v` to attach an image from the system clipboard (a macOS screenshot with
+Cmd-Ctrl-Shift-4, or Cmd-C in Preview).
+The terminal does not send an image on Cmd-V, so Radian reads the clipboard itself,
+encodes the pixels to PNG in memory, and attaches the result: nothing is written to disk
+and no path enters your message.
+The attachment shows `[image: clipboard, W×H, N KB]` and Backspace on an empty input removes
+it, like a dropped path.
+When the clipboard holds no image, `ctrl-v` does nothing.
+Rebind it as the `paste_image` action in `tui.keybindings` (see `keybindings`).
+
+Over ssh the clipboard is the remote machine's and usually holds no image;
+a dropped path is your local machine's path, which the remote machine does not have, so it
+stays ordinary text. Inside tmux or herdr both work.
+
 These images travel in your user message, and every provider route sends a user-message image.
 A `read` tool result's image is different: see `tools` for which routes deliver it.
 
