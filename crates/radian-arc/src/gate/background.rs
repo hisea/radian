@@ -543,16 +543,9 @@ pub fn stop(store: &Store, task: &str, grace: Duration) {
         return;
     };
     // Only the process the record names: a reused pid has another start time. Without a
-    // recorded start time (the sandbox refused `ps`) the pid alone is what identity there is,
-    // and it is checked rather than assumed.
-    let started = record.process_started_at.unwrap_or_default();
-    let alive = || {
-        if started.is_empty() {
-            crate::process::alive(pid)
-        } else {
-            crate::process::same_process(pid, &started)
-        }
-    };
+    // recorded start time, or when `ps` cannot report it (the sandbox refused `ps`), the pid
+    // alone is what identity there is, and it is checked rather than assumed.
+    let alive = || crate::process::still_the_process(pid, record.process_started_at.as_deref());
     if !alive() {
         return;
     }

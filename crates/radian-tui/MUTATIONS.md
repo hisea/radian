@@ -2800,6 +2800,29 @@ was restored from a copy under `.radian/` with `cp`.
 
 1/1 caught.
 
+## TK0087: the arc TUI shares radian's theme (2026-10-24, branch `work/TK0087-tui-arc-shared-theme`)
+
+The arc TUI drew with `Theme::default()` and ignored `config.toml`. It now resolves its theme
+with the radian TUI's own `theme::load` call from the same config file
+(`radian_host::config::resolved_path` → the new `config::load_path`), applies `NO_COLOR` and
+truecolor detection, and shows the load's warnings, or the config reader's reason, as one footer
+result line when it opens. The rework made that footer line start with the loader's theme even
+when the config cannot be read (`NO_COLOR` and truecolor still decide it), and made a loop start
+that fails before the first frame add its line after the warning instead of replacing it. Each
+mutation was applied by hand to `src/arc/mod.rs` (M1–M4) or `src/cli/arc.rs` (M5), the
+`arc_theme` test binary was run with `cargo nextest run -p radian-tui --locked --profile sandbox
+-E 'binary(arc_theme)'` (M5 ran the pty test alone), and the file was restored from a copy
+under `.radian/` with `cp`, then compared with `cmp`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0087-M1 | `with_theme` ignores its theme and builds the app with `Theme::default()` | ✅ 4 failed | `arc_theme::the_configured_theme_is_the_radian_tuis` (the app's theme is dark, not `Theme::builtin(Light, …)`); also `no_color_forces_mono`, `a_theme_file_name_resolves_through_the_themes_dir` and `tui_colors_reaches_the_plans_pages_running_mark` |
+| TK0087-M2 | `open_theme` passes `&[]` instead of `&config.tui.colors` | ✅ 1 failed | `arc_theme::tui_colors_reaches_the_plans_pages_running_mark` (`app.theme.plan_running.fg` stays the dark default) |
+| TK0087-M3 | `open_theme` drops `theme::load`'s warnings | ✅ 1 failed | `arc_theme::an_unknown_theme_opens_with_the_fallback_and_warns_in_the_footer` (no footer line names `future`) |
+| TK0087-M4 | `open_theme` returns `Theme::default()` on a config read error, bypassing `theme::load` | ✅ 1 failed | `arc_theme::an_unreadable_config_opens_with_the_loader_theme_and_names_the_reason_in_the_footer` (an unreadable config under `NO_COLOR` opens in colored dark, not `Theme::mono()`) |
+| TK0087-M5 | the open `starter.start()` failure calls `set_result` and replaces the open-time warning | ✅ 1 failed | `pty::pty_arc_keeps_the_theme_warning_when_a_loop_already_runs` (the footer shows only "a loop is already running") |
+
+5/5 caught.
 ## TK0080: the `active` view reads the shared finished rule (2026-10-24, branch `work/TK0080-finished-plan-one-rule`)
 
 `PlanFilter::Active` read `PlanView::is_finished`, so a plan with one merged task and one cancelled
@@ -2945,3 +2968,67 @@ the named file, backed up under `.radian/mut/` and restored from that copy (neve
 | TK0083-M4 | `draw_conversation` draws no rail on the transcript's rows (`arc/render.rs`) | ✅ 1 failed | `arc_tui::the_conversation_tab_rails_every_transcript_row` (row 6 has a space where the rail belongs) |
 
 4/4 caught.
+
+## TK0105: every arc TUI worker thread replies, even when it panics (2026-10-24, branch `work/TK0105-tui-worker-thread-panic`)
+
+The arc TUI's five worker threads (owner action, command log, remote main, task diff, merge view)
+sent their reply as the last statement, so a panic left `pending`, `log_pending`, the diff's and
+merge's request ids or `main_pending` set for the rest of the session — with `pending` set every
+page key was swallowed and the spinner never stopped. All five now run through `spawn_reply`
+(`src/cli/arc.rs`), which catches the panic and sends the caller's failure value; the loop clears
+the screen for the next frame. The panic hook (`src/terminal.rs`) writes its report to stderr only
+on `main` or while the alternate screen is down. Each mutation was applied by hand to the named
+file, backed up under `.radian/mut/` and restored from that copy (never `git checkout`); the named
+tests ran with `cargo nextest run -p radian-tui --locked --profile sandbox`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0105-M1 | the worker's `catch_unwind` is removed and `body()` runs directly | ✅ 3 failed | `cli::arc::tests::a_panicking_worker_still_sends_its_failure_reply` and `cli::arc::tests::a_panicked_action_clears_pending_and_the_next_page_key_is_handled` (`Disconnected`: the sender is dropped by the unwind), `pty_arc_a_panicked_action_still_replies_and_leaves_the_tui_responsive` (the footer never shows the failure) |
+| TK0105-M2 | the hook writes its report to stderr from every thread (the `main \|\| !ALT_SCREEN` guard removed) | ✅ 1 failed | `pty_arc_a_panicked_action_still_replies_and_leaves_the_tui_responsive` (the raw output holds `thread '<unnamed>' panicked at …` printed over the plans page) |
+
+2/2 caught.
+## TK0094: a space always separates a task row's id from `state.phase` (2026-10-24, branch `work/TK0094-tui-task-row-id-gap`)
+
+`task_columns` and `task_row_line` count the one space before `state.phase` as the id block's
+last cell, so the widest id and every id cut with `…` leave that gap, on every connector depth
+and at every width; a narrow page cuts the id one cell earlier to hold it. The mutation was
+applied by hand to `crates/radian-tui/src/arc/render.rs`, backed up under `.radian/mut/` and
+restored from that copy (never `git checkout`); the tests ran with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_tui -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0094-M1 | the id block drops its trailing space again (the old `id_max`, `min_id` and `fit` widths: the widest id fills the block and its phase follows with no gap) | ✅ 3 failed | `arc_tui::a_task_whose_id_fills_the_block_keeps_a_space_before_its_phase` (the id runs into `todo.ready`); `arc_tui::a_cut_id_is_followed_by_a_space_before_its_phase` and `arc_tui::a_narrow_page_keeps_the_gap_and_one_phase_column` (the cell before the phase is `…`) |
+
+1/1 caught.
+
+## TK0101: the log view keeps its frame tail in a one-row body (2026-10-24, branch `work/TK0101-tui-log-view-and-brief-wrap-followups`)
+
+`draw_loop_log` emitted its frame's top line and its tail for a body too short to hold both,
+and `draw_lines` clipped the tail away: the shortest body `draw` accepts (one row, a 5-row
+terminal with no ticker) showed the top line alone, so the view promised a bottom frame it
+never drew. The view now clamps its lines to the body and keeps the tail, as the task and merge
+pages already do. The mutation was applied by hand to the working file, backed up under
+`.radian/mut/` and restored from that copy (never `git checkout`); the named test ran alone
+with `cargo nextest run -p radian-tui --locked --profile sandbox -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0101-M1 | `draw_loop_log` pushes its frame's tail without clamping the lines to the body again (`arc/render.rs`) | ✅ 1 failed | `arc_loop::a_one_row_body_keeps_the_log_views_frame_tail` (`left: "  ╭─ log ───…"` for `right: "  ╰──"`) |
+
+1/1 caught.
+## TK0096: the diff's file list takes a third, not half (2026-10-24, branch `work/TK0096-tui-diff-list-third`)
+
+The selected file's diff got too little room because the list took at most half of the diff
+area's rows. The list now takes at most one third of them, still at least `MIN_FILE_ROWS` (3),
+through the one `FILE_LIST_DIVISOR` that the task page and the merge page share. The mutation was
+applied by hand to `crates/radian-tui/src/arc/render.rs`, backed up under `.radian/mut/` and
+restored from that copy (never `git checkout`); the named tests ran with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test <binary> -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0096-M1 | the list takes half the diff area again (`FILE_LIST_DIVISOR = 2`) | ✅ 2 failed | `arc_tui::the_file_list_takes_at_most_one_third_of_the_diff_area` (`left: 21`, `right: 14`), `arc_merge::the_merge_pages_file_list_takes_at_most_one_third_of_the_diff_area` (`left: 9`, `right: 6`) |
+
+1/1 caught.
+

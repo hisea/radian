@@ -171,8 +171,10 @@ fn the_detached_start_runs_arc_serve() {
     }
     let mut starter = LoopStarter::with_program_and_timeout(store, script, Duration::from_secs(5));
     starter.start().expect("the process is spawned");
+    // The shell creates the file for the redirection before it writes the arguments; wait for
+    // content, not existence, so a slow writer is not read as an empty argv.
     wait_until(Duration::from_secs(5), "the fake loop's arguments", || {
-        args_file.exists()
+        fs::read_to_string(&args_file).is_ok_and(|args| !args.trim().is_empty())
     });
     let args = fs::read_to_string(&args_file).expect("the fake loop wrote its arguments");
     assert_eq!(
@@ -618,4 +620,49 @@ fn a_short_log_leaves_the_rest_of_its_body_cleared() {
             "the page under the log shows through: {row:?}\n{text}"
         );
     }
+}
+
+/// The shortest body `draw` accepts is one row: a 5-row terminal with no ticker leaves
+/// `height - 2 header rows - 2 footer rows`. That row cannot hold the frame's top line, a log
+/// row and its tail at once, so the view keeps the tail (the way the task and merge pages keep
+/// theirs): it never promises a bottom frame it clipped away.
+#[test]
+fn a_one_row_body_keeps_the_log_views_frame_tail() {
+    let scratch = Scratch::new("log-one-row");
+    let store = store_at(&scratch.path("repo"));
+    // A plan under the overlay: a row of it must not show through the log's clear body.
+    store
+        .add_plan("under", "the page under the log", "a request\n")
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store.clone(), Some(scratch.path("sessions")));
+    let mut tail = LoopLogTail::new(&store);
+    let path = scratch.path("repo/.radian/arc/loop.log");
+    fs::write(&path, "2026-10-24T10:00:00.000Z line 0\n").unwrap();
+    app.apply_loop_log(tail.read());
+    assert!(app.ticker.is_none(), "the fixture adds no ticker row");
+    app.on_key(&key(KeyCode::Char('L')));
+
+    let text = screen(&mut app, 80, 5);
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(rows.len(), 5, "{text}");
+    // Header, blank, the body's one row, the footer's rule and its key hints.
+    assert!(rows[1].is_empty(), "the body is one row:\n{text}");
+    assert_eq!(
+        rows[2], "  ╰──",
+        "the one-row body is the frame's tail, not a clipped top:\n{text}"
+    );
+    assert!(
+        !text.contains("╭─ log") && !text.contains("PLANS"),
+        "the log view is drawn as its tail alone, over a cleared body:\n{text}"
+    );
+
+    // One row more gives the body its top line back, still with the tail directly under it.
+    let text = screen(&mut app, 80, 6);
+    let rows: Vec<&str> = text.lines().collect();
+    assert!(rows[2].contains("╭─ log"), "{text}");
+    assert_eq!(rows[3], "  ╰──", "the two frame lines meet:\n{text}");
+
+    // A terminal shorter than the header, the body and the footer draws nothing at all.
+    let text = screen(&mut app, 80, 4);
+    assert!(text.trim().is_empty(), "nothing fits:\n{text}");
 }

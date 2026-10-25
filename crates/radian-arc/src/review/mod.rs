@@ -283,6 +283,10 @@ pub struct Merged {
     /// The follow-up task arc proposed from the merged task's review, if any (ADR 0048
     /// decision 10).
     pub followup: Option<Followup>,
+    /// Every path the task's own change touched on main, from its merge base: the loop reads
+    /// it for the "changed arc's code" line (ADR 0048 decision 13). Empty unless the merge
+    /// happened.
+    pub changed_paths: Vec<String>,
 }
 
 impl Merged {
@@ -834,7 +838,9 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
     // whatever this round's outcome (ADR 0048 decision 12). A commands-only profile has no
     // review verdict, so nothing extra is charged then.
     let budget_paused = match review_cost(store, &task.id, &plan.label)? {
-        Some(cost) => crate::store::attempt_ops::charge_review_cost(store, &task.id, cost)?,
+        Some(cost) => {
+            crate::store::attempt_ops::charge_review_cost(store, &task.id, &plan.label, cost)?
+        }
         None => false,
     };
     if let Some((verdict, path)) = failed {
@@ -1183,6 +1189,16 @@ pub fn auto_reverify_pending(store: &Store, task_id: &str) -> bool {
     (record.reverified.len() as u64) < u64::from(max)
 }
 
+/// Whether `stage` failed with `reason` in a way a reverify can re-run: the `commands` stage
+/// or the integration stage, with a command that failed or ran past its timeout. One list
+/// serves the scheduling loop's automatic reverify and the owner's `radian arc reverify`
+/// (ADR 0048 decisions 9 and 11).
+#[must_use]
+pub fn reverifiable_failure(stage: &str, reason: &str) -> bool {
+    [Stage::Commands.as_str(), Stage::Integration.as_str()].contains(&stage)
+        && AUTO_REVERIFY_REASONS.contains(&reason)
+}
+
 /// The main sha the failing verdict of `task`'s current attempt recorded, when the failure is
 /// one a moved main can fix (ADR 0048 decision 9): a `commands` or integration stage that
 /// failed with `command_failed` or `timeout`. `None` for every other reason, and for a reason
@@ -1209,9 +1225,7 @@ fn recorded_failure_main(store: &Store, task: &model::TaskFile) -> Result<Option
         .get("reason")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let fixable = [Stage::Commands.as_str(), Stage::Integration.as_str()].contains(&stage)
-        && AUTO_REVERIFY_REASONS.contains(&reason);
-    if !fixable {
+    if !reverifiable_failure(stage, reason) {
         return Ok(None);
     }
     let Some(verdict_file) = value.get("verdict").and_then(Value::as_str) else {
@@ -2138,6 +2152,30 @@ enum Integration {
     Again(String),
 }
 
+/// The paths the task's own change put on main: its diff from the merge base of the main the
+/// integration ran on and the task's head, to that head (ADR 0048 decisions 10 and 13). A
+/// local git call only; a range that cannot be read is no paths, never a failed merge.
+fn task_change_paths(repo: &Path, main_sha: Option<&str>, base: &str, head: &str) -> Vec<String> {
+    let reference = main_sha.filter(|sha| !sha.is_empty()).unwrap_or(base);
+    let from = crate::git::ok(repo, &["merge-base", reference, head])
+        .ok()
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| base.to_owned());
+    if from == head {
+        return Vec::new();
+    }
+    let output = match crate::git::run(repo, &["diff", "--name-only", "-z", &from, head]) {
+        Ok(output) if output.success() => output,
+        _ => return Vec::new(),
+    };
+    output
+        .stdout
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Finishes a passing integration verdict: `review.ready_to_merge`, the fast-forward push to
 /// the remote main, `done.merged`, and the removal of the worktree (ADR 0048 decisions 6 and
 /// 11).
@@ -2247,6 +2285,12 @@ fn finish_integration(
         warning,
         conflict: None,
         followup,
+        changed_paths: task_change_paths(
+            store.repo(),
+            verdict.main_sha.as_deref(),
+            &context.base,
+            &context.head,
+        ),
     })))
 }
 
@@ -2288,6 +2332,7 @@ fn integration_failed(
             warning: None,
             conflict: Some(conflict),
             followup: None,
+            changed_paths: Vec::new(),
         });
     }
     // This integration did not end in a conflict, so the task's run of conflicts is over.
@@ -2303,6 +2348,7 @@ fn integration_failed(
         warning: None,
         conflict: None,
         followup: None,
+        changed_paths: Vec::new(),
     })
 }
 
@@ -2313,6 +2359,9 @@ pub struct MergeStep {
     pub line: Option<String>,
     /// A reason the step could not move the task; the summary prints it.
     pub note: Option<String>,
+    /// The paths the merged task's own change touched on main; the loop reads them for the
+    /// "changed arc's code" line (ADR 0048 decision 13). Empty when nothing merged.
+    pub changed_paths: Vec<String>,
 }
 
 impl MergeStep {
@@ -2324,6 +2373,7 @@ impl MergeStep {
         Self {
             line: Some(line),
             note: None,
+            changed_paths: Vec::new(),
         }
     }
 
@@ -2331,6 +2381,7 @@ impl MergeStep {
         Self {
             line: None,
             note: Some(note),
+            changed_paths: Vec::new(),
         }
     }
 
@@ -2340,6 +2391,7 @@ impl MergeStep {
         Self {
             line: Some(merged.line()),
             note: merged.warning,
+            changed_paths: merged.changed_paths,
         }
     }
 }

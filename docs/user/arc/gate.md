@@ -111,12 +111,12 @@ A line that came in only with a merge of main is not in the task's own diff, so 
 arc, not the session, decides whether a blocking item is pre-existing.
 After a rework round's report is parsed, an item is moved to `suggestions` and marked `"pre_existing": true` unless one of these holds:
 
-- its `file:line` is within 3 lines of an increment line in that file;
+- its `file:line` is within 3 lines of a line the task's own change added or changed in that file (the new side of `git diff <the merge base of the remote main and the head>..<head>`): a problem in code the task itself wrote in an earlier attempt is the task's, not pre-existing, so the rework's increment does not decide this;
 - it is in the same file as and within 10 lines of a blocking item of the previous review, so an item that was not fixed stays blocking;
 - its `level` is `critical`: a `critical` item blocks in every round, wherever it is;
 - it has no `file` or no `line`: it stays in `blocking` at its level, because the review prompt asks for both fields and an omission is not evidence that the problem is old.
 
-A moved item keeps its `level` (`major` included), and a `major` item outside both windows is still moved, so the rework is not sent back for a problem it did not touch; `minor` items follow the same window rules.
+A moved item keeps its `level` (`major` included), and a `major` item in a file the task's own change does not touch, or more than 3 lines from any changed line in that file, is still moved, so the rework is not sent back for a problem that predates the task; `minor` items follow the same window rules.
 The stage passes when no blocking item is left, and the verdict records how many items arc moved as `review_pre_existing`.
 The follow-up task of a merged task carries a moved item at its level (see [The review's follow-up](#the-reviews-follow-up)).
 
@@ -285,7 +285,7 @@ A reader takes the first of those records that names one: `execution.json`, then
 Cost is counted per attempt.
 `Result.cost` is the session total, so the attempt's cost is the difference from the previous attempt's session total when both ran in the same session (`resume`), and the whole session total when the attempt has a session of its own (`fresh`).
 The delta is added to the task's `cost_usd` and its `total_cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
-A `reverify` attempt runs no worker and costs nothing, but a `review` stage it runs costs the same as any review.
+A `reverify` attempt runs no worker and adds no worker cost, but a `review` stage it runs costs the same as any review.
 
 A `review` stage's cost counts too: when arc applies a gate's verdicts, the sum of the attempt's `review_cost_micros` (every session the stage ran; a run that reported none adds `0`) is added to the task's `cost_usd` and `total_cost_usd`, and both budgets are checked then.
 Both counters include every worker attempt and every review; `reset-budget` sets `cost_usd` back to `0` and leaves `total_cost_usd` alone.

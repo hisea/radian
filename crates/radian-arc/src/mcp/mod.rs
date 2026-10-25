@@ -285,11 +285,36 @@ impl ServerHandler for ArcServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<CallToolResponse, ErrorData>> + '_ {
-        let result = match self.dispatch(request.name.as_ref(), request.arguments) {
-            Ok(value) => CallToolResult::structured(value),
-            Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
-        };
+        let result = self.call(request.name.as_ref(), request.arguments);
         std::future::ready(Ok(result.into()))
+    }
+}
+
+/// Answers one `tools/call` as the client receives it: the tool's JSON result, or the reason
+/// it failed. This is the one place the result's shape is decided, so `call_tool` and a test
+/// cannot disagree about it.
+impl ArcServer {
+    /// One call's [`CallToolResult`]. The text content is always the tool's JSON, exactly what
+    /// the CLI prints; [`success_result`] decides whether the value also rides in
+    /// `structuredContent`.
+    pub fn call(&self, name: &str, arguments: Option<Map<String, Value>>) -> CallToolResult {
+        match self.dispatch(name, arguments) {
+            Ok(value) => success_result(value),
+            Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
+        }
+    }
+}
+
+/// One successful call's result. The text content is the value's JSON, the same document the
+/// CLI prints. `structuredContent` is set only when that value is a JSON object: the MCP spec
+/// requires a structured result to be an object, and a client that checks the field rejects a
+/// result whose `structuredContent` is anything else. `list` answers with the array
+/// `radian arc list --json` prints, so its result is text only.
+fn success_result(value: Value) -> CallToolResult {
+    if value.is_object() {
+        CallToolResult::structured(value)
+    } else {
+        CallToolResult::success(vec![ContentBlock::text(value.to_string())])
     }
 }
 
@@ -561,5 +586,50 @@ mod tests {
         assert_eq!(args.optional_strings("after"), Ok(Vec::new()));
         assert!(!args.optional_bool("allow_noop").expect("absent"));
         assert_eq!(args.finish(), Ok(()));
+    }
+
+    #[test]
+    fn a_result_carries_structured_content_only_when_the_value_is_an_object() {
+        let object = success_result(json!({"id": "PL0001-a"}));
+        assert_eq!(object.is_error, Some(false));
+        assert_eq!(
+            object.structured_content,
+            Some(json!({"id": "PL0001-a"})),
+            "an object is structured"
+        );
+        assert_eq!(
+            text_of(&object),
+            object
+                .structured_content
+                .as_ref()
+                .expect("the object")
+                .to_string(),
+            "the text is the same JSON"
+        );
+
+        // `list`'s document is an array; a string and a null are as far from an object. Each
+        // is text only, so a client that requires an object in `structuredContent` still
+        // reads the result.
+        for value in [
+            json!([]),
+            json!([{"id": "PL0001-a"}]),
+            json!("text"),
+            Value::Null,
+        ] {
+            let result = success_result(value.clone());
+            assert_eq!(result.structured_content, None, "{value}");
+            assert_eq!(result.is_error, Some(false), "{value}");
+            assert_eq!(text_of(&result), value.to_string(), "{value}");
+        }
+    }
+
+    /// The text blocks of a result, joined as a client reads them.
+    fn text_of(result: &CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

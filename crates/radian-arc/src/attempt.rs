@@ -372,13 +372,10 @@ fn wrapper_process(store: &Store, task: &str, attempt: u32) -> Option<(u32, Opti
 }
 
 /// Whether the process the record names is still there. A recorded start time is compared, so
-/// a reused pid is never signalled; without one (the sandbox refused `ps`) the pid alone is
-/// the best identity arc has.
+/// a reused pid is never signalled; without one, or when `ps` cannot report it (the sandbox
+/// refused `ps`), the pid alone is the best identity arc has (ADR 0048 decision 9).
 fn still_running(pid: u32, started: Option<&str>) -> bool {
-    match started.filter(|start| !start.is_empty()) {
-        Some(start) => process::same_process(pid, start),
-        None => process::alive(pid),
-    }
+    process::still_the_process(pid, started)
 }
 
 fn read_json(path: &std::path::Path) -> Option<serde_json::Value> {
@@ -400,7 +397,8 @@ pub fn cancel_any(store: &Store, id: &str) -> Result<Cancelled, Error> {
 /// `radian arc cancel <task>`: stop one task.
 ///
 /// A `todo` task goes to `failed.cancelled`. A `doing` task gets SIGTERM on its wrapper (the
-/// pid and its start time must match, so a reused pid is never signalled), then SIGKILL after
+/// pid and its start time must match, so a reused pid is not signalled; when `ps` cannot
+/// report the time, the pid alone decides, as ADR 0048 decision 9 says), then SIGKILL after
 /// `[limits] cancel_grace_secs`. When the wrapper's `AttemptFinished` arrives the task goes to
 /// `failed.cancelled`; when it never arrives the task goes to `doing.reconciling`. A `review`
 /// task's running gate is signalled first (the way the loop's own stop signals one), and the

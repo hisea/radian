@@ -152,11 +152,27 @@ fn commit_reply(id: &str, file: &str) -> Reply {
 /// Publishes a branch `work/<task>` with one commit and puts the task in `review.verifying`
 /// the way a pushed attempt leaves it.
 fn publish_verifying(repo: &Repo, store: &Store, plan: &str, task: &str) -> String {
+    publish_verifying_file(repo, store, plan, task, "feature.txt", "feature\n")
+}
+
+/// [`publish_verifying`] with the path and content of the task's one commit.
+fn publish_verifying_file(
+    repo: &Repo,
+    store: &Store,
+    plan: &str,
+    task: &str,
+    path: &str,
+    content: &str,
+) -> String {
     let base = repo.main_sha();
     let branch = format!("work/{task}");
     repo.git(&["checkout", "-B", &branch, &base]);
-    write(&repo.clone.join("feature.txt"), "feature\n");
-    repo.git(&["add", "feature.txt"]);
+    let file = repo.clone.join(path);
+    if let Some(parent) = file.parent() {
+        fs::create_dir_all(parent).expect("the changed file's directory");
+    }
+    write(&file, content);
+    repo.git(&["add", path]);
     repo.git(&["commit", "-m", "feature"]);
     let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
     repo.git(&["push", "origin", &branch]);
@@ -2041,7 +2057,30 @@ fn run_until_gate_record(
             Instant::now() < deadline,
             "the gate record did not reach the expected state within the limit:\n{output}"
         );
-        std::thread::sleep(Duration::from_millis(100));
+        // The next pass can only learn the truth from a gate that has exited: wait for the
+        // process the record names instead of polling with one-shot passes. A pass that runs
+        // while the gate is still starting changes nothing, and under load that wait is what
+        // made this test slow.
+        wait_for_gate_process(repo, task);
+    }
+}
+
+/// Waits for the process the gate record names to be gone. The record's pid is the gate the
+/// last pass started; a record without one (a refusal or an outcome) has nothing to wait for.
+fn wait_for_gate_process(repo: &Repo, task: &str) {
+    let Some(pid) = gate_record(repo, task)
+        .and_then(|record| record["pid"].as_u64())
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "the gate process {pid} the record names never exited"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -4196,5 +4235,152 @@ fn a_read_only_loop_log_is_reported_once_and_the_pass_completes() {
         errors, 1,
         "one write-error line for the process, not one per line: {}",
         run.stderr
+    );
+}
+
+// ---- a rebuilt binary and a merge that changed arc's code (ADR 0048 decision 13) -----------
+
+/// Starts `radian arc serve --interval <interval>` from `program` (a copy of the binary) with
+/// the test's isolated environment, the same one [`Repo::radian`] uses.
+fn spawn_serve_from(repo: &Repo, program: &Path, interval: &str) -> std::process::Child {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(["arc", "serve", "--interval", interval])
+        .current_dir(&repo.clone)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &repo.home)
+        .env("RADIAN_HOME", &repo.home)
+        .env("RADIAN_SESSION_DIR", &repo.sessions)
+        .env("RADIAN_CATALOG_URL", fast_catalog_url())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command.spawn().expect("spawn the copied radian")
+}
+
+/// **A slow test (the slow-test plan PL0043 tracks it):** it copies the `radian` binary and
+/// waits for a pass, an interval and a one-second recheck; it stays under 30 seconds.
+///
+/// A `serve` loop follows a rebuilt binary by itself: after the file at its own path changes,
+/// it prints the restart line, keeps its pid and takes `runner.lock` again, and leaves its
+/// running gate alone. Mutation: stop the gates before `exec` and the gate's record becomes
+/// `interrupted`.
+#[test]
+fn serve_replaces_itself_with_a_rebuilt_binary_and_keeps_its_gate_running() {
+    let repo = Repo::new("run-reexec");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "reexec");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    tune(&repo, "cancel_grace_secs = 10", "cancel_grace_secs = 1");
+    // A gate that holds its lock until stopped.
+    let wake = repo.root.join("gate.wake");
+    commands(
+        &repo,
+        &format!("while [ ! -f '{}' ]; do sleep 0.2; done", wake.display()),
+    );
+    publish_verifying(&repo, &store, &plan, &task);
+    let first = repo.radian(&["arc", "run"]);
+    assert_eq!(first.code, 0, "run: {}", first.stderr);
+    wait_until(Duration::from_secs(30), "the gate's running record", || {
+        gate_record(&repo, &task).is_some_and(|record| record["status"] == "running")
+    });
+    let gate = gate_record(&repo, &task).expect("the record")["pid"]
+        .as_u64()
+        .expect("the gate pid") as u32;
+    assert!(process_alive(gate), "the gate did not start");
+
+    // The loop runs a copy, so replacing it leaves the built binary alone.
+    let dir = TempDir::new("run-reexec-bin");
+    let program = dir.path().join("radian");
+    fs::copy(radian_bin(), &program).expect("copy the radian binary");
+    let mut watch = spawn_serve_from(&repo, &program, "5");
+    wait_for_loop_log(&repo, "no transition", 1);
+    let pid = watch.id();
+
+    let replacement = dir.path().join("radian.new");
+    fs::copy(radian_bin(), &replacement).expect("copy the new radian binary");
+    fs::rename(&replacement, &program).expect("replace the running binary");
+
+    wait_for_loop_log(&repo, radian_arc::run::RESTART_TEXT, 1);
+    assert!(
+        watch.try_wait().expect("try_wait").is_none(),
+        "the loop exited instead of replacing itself"
+    );
+    let log = fs::read_to_string(repo.arc().join("loop.log")).expect("loop.log");
+    assert!(
+        !log.contains("cannot restart with the new binary"),
+        "the exec failed: {log}"
+    );
+    assert!(process_alive(gate), "the restart stopped the gate");
+    assert_eq!(
+        gate_record(&repo, &task).expect("the record")["status"],
+        "running",
+        "the restart recorded the gate as interrupted"
+    );
+    // The restart line is written before the lock is released; the exec'd loop takes it again
+    // and writes its own first summary a moment later, which only a loop holding the lock can
+    // do.
+    wait_for_loop_log(&repo, "no transition", 2);
+    assert!(
+        !runner_lock_is_free(&repo),
+        "the new loop did not take runner.lock again"
+    );
+    assert_eq!(
+        store.runner_lock_pid(),
+        Some(pid),
+        "the pid changed across the exec"
+    );
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = watch.wait_with_output().expect("the serve loop ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "serve: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A merge whose task changed arc's code prints the rebuild line; a merge that only changed
+/// `docs/` does not. Mutation: drop `crates/radian-tui/src/arc/` and the unit test for the
+/// path list fails; this test fixes the loop end of the line.
+#[test]
+fn a_merge_that_changed_arcs_code_says_to_rebuild_and_a_docs_merge_does_not() {
+    let repo = Repo::new("run-arc-code");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "arc-code");
+    let code = add_task(&store, &plan, "code", &[]);
+    let docs = add_task(&store, &plan, "docs", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "merge").expect("auto merge");
+    commands(&repo, "true");
+    publish_verifying_file(
+        &repo,
+        &store,
+        &plan,
+        &code,
+        "crates/radian-arc/x.rs",
+        "code\n",
+    );
+    publish_verifying_file(&repo, &store, &plan, &docs, "docs/x.md", "docs\n");
+
+    let output = run_until(&repo, Duration::from_secs(90), || {
+        state(&store, &code) == ("done".to_owned(), "merged".to_owned())
+            && state(&store, &docs) == ("done".to_owned(), "merged".to_owned())
+    });
+    let line = format!("radian arc: {}", radian_arc::run::arc_code_changed(&code));
+    assert!(
+        output.contains(&line),
+        "the rebuild line is missing:\n{output}"
+    );
+    assert!(
+        !output.contains(&radian_arc::run::arc_code_changed(&docs)),
+        "a docs-only merge printed the rebuild line:\n{output}"
     );
 }

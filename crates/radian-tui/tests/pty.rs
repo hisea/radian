@@ -14173,6 +14173,63 @@ async fn pty_arc_opens_switches_pages_and_quits() {
     stop_arc_loop(&repo);
 }
 
+/// A panicked owner action still replies: the footer shows the failure, the spinner stops, the
+/// next page key is handled, and the panic hook writes no report to stderr while the alternate
+/// screen is up (its bytes reach the pty and would print over the UI).
+///
+/// `RADIAN_ARC_PANIC_ACTION` is the test seam that makes the action worker panic
+/// (`src/cli/arc.rs`); it is test-only and undocumented, like `--panic-in-driver`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_arc_a_panicked_action_still_replies_and_leaves_the_tui_responsive() {
+    let scratch = TempDir::new("arc-action-panic");
+    let repo = scratch.path().join("repo");
+    arc_test_repo(&repo);
+    let mut pty = Pty::spawn_in(
+        &["arc"],
+        &[("RADIAN_ARC_PANIC_ACTION", "1")],
+        &repo,
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("PLANS", wait_positive()),
+        "the plans page is not on screen:\n{}",
+        pty.screen()
+    );
+    // `c` confirms the draft plan; its worker panics instead.
+    pty.send(b"c");
+    assert!(
+        pty.wait_for_screen(
+            "confirm failed: it panicked (arc action worker panic test)",
+            wait_positive()
+        ),
+        "the panicked action left no footer line:\n{}",
+        pty.screen()
+    );
+    // The hook's report would read `thread '<unnamed>' panicked at ...`; the footer's own line
+    // does not contain those words.
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        !raw.contains("panicked at"),
+        "the panic hook wrote its report over the alternate screen:\n{raw}"
+    );
+    // `pending` would swallow this key: the board must open.
+    pty.send(b"b");
+    assert!(
+        pty.wait_for_screen("all plans", wait_positive()),
+        "the TUI stayed stuck after the panic:\n{}",
+        pty.screen()
+    );
+    pty.send(b"q");
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "q must quit the arc view:\n{}",
+        pty.screen()
+    );
+    stop_arc_loop(&repo);
+}
+
 /// The owner acts from the TUI: `m` opens the merge page of a `review.awaiting_human` task,
 /// `M` asks for confirmation, and `y` merges through the library — the footer then shows
 /// `done.merged` and the remote main holds the task's commit.
@@ -14514,6 +14571,74 @@ fn pty_arc_is_a_viewer_while_arc_serve_holds_the_lock() {
         arc_lock_free(&repo),
         "the lock is free after the watch loop exits"
     );
+}
+
+/// The open-time theme warning is not lost when a loop already runs: `radian arc` opened with
+/// a config whose theme warns, while `radian arc serve` holds `runner.lock`, shows the
+/// warning in the footer with the start's line after it — not only "a loop is already running"
+/// (brief TK0087).
+#[test]
+fn pty_arc_keeps_the_theme_warning_when_a_loop_already_runs() {
+    let scratch = TempDir::new("arc-theme-warning");
+    let repo = scratch.path().join("repo");
+    arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
+    let home = TempDir::new("arc-theme-warning-home");
+    let serve = KillOnDrop(
+        std::process::Command::new(BIN)
+            .args(["arc", "serve", "--interval", "5"])
+            .current_dir(&repo)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", home.path())
+            .env("TMPDIR", std::env::var("TMPDIR").unwrap_or_default())
+            .env("RADIAN_CATALOG_URL", fast_catalog_url())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("arc serve starts"),
+    );
+    wait_until(Duration::from_secs(10), "the serve loop's lock", || {
+        !arc_lock_free(&repo)
+    });
+    let pid = serve.0.id();
+
+    // `system` is pi's reserved name: `theme::load` warns once and falls back to dark. The line
+    // is short enough to share the footer's one result line with the start's.
+    let config = "schema_version = 1\n[tui]\ntheme = \"system\"\n";
+    let argv = vec![BIN.to_owned(), "arc".to_owned()];
+    let mut pty = Pty::spawn_argv_in(
+        &argv,
+        &[],
+        TestConfig::Explicit(config),
+        Some(&repo),
+        30,
+        140,
+    );
+    assert!(
+        pty.wait_for_screen("theme `system` is not a usable theme name", wait_positive()),
+        "the open-time theme warning is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("using built-in dark", wait_positive()),
+        "the fallback theme is not named:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("a loop is already running", wait_positive()),
+        "the start's line is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen(&format!("loop ● running (pid {pid})"), wait_positive()),
+        "the header does not name the holder's pid:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"q");
+    assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
+    assert!(arc_process_alive(pid), "quitting stopped the serve loop");
 }
 
 /// SIGTERM closes the TUI and nothing else: the loop it started keeps running with the lock

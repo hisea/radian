@@ -113,7 +113,7 @@ Lists plans in claim order — the order `radian arc run` serves them in: the hi
 Each plan's header line shows its id, `status`, `auto` level, `priority`, progress as `<merged>/<tasks> merged`, `total_cost_usd` (its tasks' totals sum) and title.
 The progress total leaves out `failed.cancelled` tasks: one merged task and one cancelled follow-up read `1/1`, an all-cancelled plan `0/0`.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
-A task's `cost_usd` is the budget counter (worker attempts and `review` stages, reset by `reset-budget`); `total_cost_usd` adds every review and never resets.
+A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage) and what `reset-budget` sets back to `0`; its `total_cost_usd` is the same spend and is never reset.
 
 By default finished work is left out, so you see the work in progress:
 
@@ -509,15 +509,18 @@ radian arc reverify <TASK>
 |---|---|---|
 | `<TASK>` | `ID` | The task id. Required. It must be `review.rework_pending`, `review.awaiting_human`, or `review.verifying` with a stuck gate. |
 
-It applies only when the task's `rework_reason`, if there is one, comes from a verification stage (`commands`, `mutation`, `review`, or `ci`).
-A reject note, a failed delivery check, a failed integration, and every other state are refused with exit `3`.
+It applies only when the task's `rework_reason`, if there is one, is one a re-run can fix:
+
+- a failed verification stage: `commands`, `mutation`, `review`, or `ci`, with any reason;
+- the integration stage failed with reason `command_failed` or `timeout`, the same stage and reason pair the automatic reverify of a moved main accepts (see [A command failure and a moved main](gate.md#a-command-failure-and-a-moved-main)); main does not need to have moved.
+
+A reject note, a failed delivery check, an integration failure with any other reason (a `conflict` has its own rework path, in [A conflict with main](gate.md#a-conflict-with-main)), and every other state are refused with exit `3`.
 A task in `review.verifying` is accepted when its gate is stuck: its `runs/<task>/gate.json` record names the task's current attempt with status `no_record` or `died` (see [the gate run](gate.md#the-gate-run)), and no gate process holds the task's gate lock.
 Any other `review.verifying` task, including one whose gate is still running, is refused with exit `3`.
-A plan paused by the automatic rework limit does not block `reverify` when the task's own reason is a failed verification stage.
+A plan paused by the automatic rework limit does not block `reverify` when the task's own reason is one of the failures above.
 
 A task whose `commands` or integration stage failed with `command_failed` or `timeout` is also re-verified by `radian arc run` once main moved (see [A command failure and a moved main](gate.md#a-command-failure-and-a-moved-main)).
 A task of a `cancelled` plan is refused with exit `3`.
-That automatic path is the only one that re-runs an integration failure.
 `reverify` ignores the automatic path's two guards: it runs whether or not the `(head_sha, main)` pair was re-verified before, and whether or not `limits.max_auto_reverify` is used up; it does not use up the count.
 
 A reverify claims a new attempt without a worker:
@@ -547,7 +550,7 @@ A gate stage that fails again is a normal result: the task moves to `review.rewo
 |---|---|---|
 | `0` | success | The verification ran, whether it passed or a stage failed. |
 | `1` | an error | A git or file error. |
-| `3` | the state does not allow the operation | The task is in another state, its rework reason is not a verification stage, it has no `head_sha`, the branch moved, or a listed stage is not built in this build. |
+| `3` | the state does not allow the operation | The task is in another state, its rework reason is not one of the failures `reverify` accepts, it has no `head_sha`, the branch moved, or a listed stage is not built in this build. |
 | `4` | a lock is held by another process | Another process holds `state.lock`. |
 
 ## `radian arc merge <TASK>`
@@ -627,7 +630,7 @@ It exits `0` on success, `1` on an error, `2` for an empty note, `3` when the ta
 
 ## `radian arc mcp [--claude-experimental]`
 
-The lead's MCP server: registering it, its tools and its tool errors are in [`arc/mcp`](mcp.md).
+`radian arc mcp` is the stdio MCP server the lead writes plans and tasks through. Registering it, its tools and its tool errors are in [`arc/mcp`](mcp.md).
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|

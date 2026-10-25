@@ -237,6 +237,24 @@ pub fn resolve_path(
     radian_home.map(|root| crate::home::config_dir_for(root).join(CONFIG_FILE_NAME))
 }
 
+/// Reads a configuration from an already-resolved path (see [`resolve_path`]). A missing file is
+/// an empty configuration (it is never created); any other read failure is the reader's error.
+/// Split out so a host that resolves the path itself (the arc TUI, which has no `--config` flag)
+/// reads it with the same rules, and a test can inject a path instead of the environment.
+pub fn load_path(path: Option<&Path>) -> Result<Config, ConfigError> {
+    match path {
+        None => Ok(Config::default()),
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => parse(path, &text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(error) => Err(ConfigError::Read {
+                path: path.to_path_buf(),
+                source: error,
+            }),
+        },
+    }
+}
+
 /// Resolves the path for this process and reads it. A missing file is an empty configuration
 /// (it is never created). The command line's `--config` wins over `RADIAN_CONFIG`, which wins
 /// over `~/.radian/config/config.toml`.
@@ -244,17 +262,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     let env = std::env::var(RADIAN_CONFIG_ENV).ok();
     let home = crate::home::radian_home();
     let path = resolve_path(explicit, env.as_deref(), home.as_deref());
-    match path {
-        None => Ok(Config::default()),
-        Some(path) => match std::fs::read_to_string(&path) {
-            Ok(text) => parse(&path, &text),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(error) => Err(ConfigError::Read {
-                path,
-                source: error,
-            }),
-        },
-    }
+    load_path(path.as_deref())
 }
 
 /// The path this process reads its configuration from (`--config` > `RADIAN_CONFIG` >
