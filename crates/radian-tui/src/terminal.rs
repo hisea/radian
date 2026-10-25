@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{
@@ -15,6 +16,9 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui_image::FontSize;
+use ratatui_image::picker::cap_parser::{Parser as CapParser, QueryStdioOptions, Response};
+use ratatui_image::picker::{Picker, ProtocolType};
 
 /// Whether mouse reporting is on. A process-global rather than a [`TtyGuard`] field because
 /// the panic hook constructs a bare `TtyGuard` to restore the terminal and must know whether
@@ -33,14 +37,47 @@ static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 /// terminal is restored.
 static ALT_SCREEN: AtomicBool = AtomicBool::new(false);
 
-/// The environment variable that decides the keyboard-enhancement query:
+/// The environment variable that decides the startup terminal probe:
 ///
-/// * unset — ask the terminal (`supports_keyboard_enhancement`), which is a **2 s** wait on a
-///   terminal that answers neither the kitty flags query nor the device-attributes query;
-/// * `0`/`false` — never ask and never push (the pty tests set this: a pty has nobody to
-///   answer, and the probe would cost 2 s per spawn);
-/// * `1`/`true` — push without asking (a pty test can then assert the push/pop sequences).
+/// * unset — one combined query asks the terminal for the kitty keyboard flags and for its
+///   graphics protocol (ADR 0028 R10), with a **2 s** bound;
+/// * `0`/`false` — never ask: no keyboard flags are pushed and images draw as half blocks
+///   (the pty tests set this: a pty has nobody to answer, and the probe would cost 2 s per
+///   spawn);
+/// * `1`/`true` — push the keyboard flags without asking, and still probe for graphics (a
+///   pty test can then assert the push/pop sequences).
 pub const KEYBOARD_ENHANCEMENT_ENV: &str = "RADIAN_KEYBOARD_ENHANCEMENT";
+
+/// How long the one startup probe waits for the terminal's answers (the crossterm keyboard
+/// probe's bound, kept for the merged graphics query).
+pub const PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
+
+/// The picker the transcript draws images with (ADR 0028 R10). Set once by
+/// [`TtyGuard::enter`] from the startup probe; `None` in a process that never entered a
+/// terminal (the layout tests), where images draw as nothing and the placeholder row is all.
+static IMAGE_PICKER: std::sync::OnceLock<Picker> = std::sync::OnceLock::new();
+
+/// The startup probe's picker, or `None` when no terminal was entered.
+pub fn image_picker() -> Option<&'static Picker> {
+    IMAGE_PICKER.get()
+}
+
+/// The startup information line naming the graphics protocol (ADR 0028 R10): what the probe
+/// picked and the cell size it measured. `None` before the terminal is entered.
+pub fn images_line() -> Option<String> {
+    let picker = IMAGE_PICKER.get()?;
+    let protocol = match picker.protocol_type() {
+        ProtocolType::Halfblocks => "half blocks",
+        ProtocolType::Sixel => "sixel",
+        ProtocolType::Kitty => "kitty",
+        ProtocolType::Iterm2 => "iTerm2",
+    };
+    let font = picker.font_size();
+    Some(format!(
+        "images: {protocol} (cell {}×{} px)",
+        font.width, font.height
+    ))
+}
 
 /// What [`KEYBOARD_ENHANCEMENT_ENV`] says: `Some(true)` force on, `Some(false)` off, `None`
 /// ask the terminal.
@@ -52,26 +89,240 @@ fn keyboard_enhancement_override() -> Option<bool> {
     }
 }
 
-/// Whether the terminal should get the keyboard-enhancement flags: the override when set,
-/// otherwise the terminal's own answer.
+/// Whether the terminal should get the keyboard-enhancement flags, and the picker the
+/// transcript draws images with: **one** startup pass (ADR 0028 R10).
 ///
-/// `supports_keyboard_enhancement` (crossterm 0.29.0, `terminal/sys/unix.rs:188-263`) writes
-/// `ESC[?u ESC[c` to `/dev/tty` (stdout when that cannot be opened) and polls for the kitty
-/// flags reply for up to **2000 ms**. A terminal that answers the device-attributes query but
-/// not the flags query makes it return `Ok(None)` quickly (the reply ends the wait), so a
-/// modern terminal pays milliseconds; a terminal that answers neither pays the full 2 s and
-/// comes back as `Err`, which is treated as "unsupported" - never as a failure (ADR 0009: no
-/// correctness depends on a terminal's reply). It must run **before** the input thread reads:
-/// crossterm documents that the query blocks while `event::read`/`poll` are in progress, and
-/// both would race for the same bytes.
-fn should_enhance_keyboard() -> bool {
+/// The combined query (`ESC[?u` plus `ratatui-image`'s graphics queries) is written once and
+/// its answers are parsed for both: the kitty keyboard flags and the graphics protocol/cell
+/// size. It must run **before** the input thread reads: both read the same bytes from stdin.
+/// A terminal that answers nothing keeps the keyboard result at "unsupported" and falls back
+/// to half blocks. `RADIAN_KEYBOARD_ENHANCEMENT` still skips (`0`) or forces (`1`) the keyboard
+/// half; `0` skips the whole pass, because a pty has nobody to answer and would wait the full
+/// [`PROBE_TIMEOUT`] per spawn.
+fn probe_terminal() -> (bool, Picker) {
     match keyboard_enhancement_override() {
-        Some(force) => force,
+        Some(false) => (false, Picker::halfblocks()),
+        Some(true) => {
+            let reply = probe_with(&mut StdioProbe);
+            (true, picker_from_reply(reply))
+        }
         None => {
-            use ratatui::crossterm::terminal::supports_keyboard_enhancement;
-            supports_keyboard_enhancement().unwrap_or(false)
+            let reply = probe_with(&mut StdioProbe);
+            (reply.keyboard, picker_from_reply(reply))
         }
     }
+}
+
+/// The startup probe's I/O, split from its query and parser so a test can drive one canned
+/// answer in (ADR 0028 R10's one-pass rule).
+pub(crate) trait ProbeIo {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()>;
+    fn read(&mut self, timeout: Duration) -> io::Result<Vec<u8>>;
+}
+
+/// Writes the one combined query and parses the one answer (ADR 0028 R10). A write failure is
+/// a no-answer probe, never a startup failure.
+pub(crate) fn probe_with(io: &mut impl ProbeIo) -> ProbeReply {
+    let query = probe_query(in_tmux());
+    if io.write(query.as_bytes()).is_err() {
+        return ProbeReply::default();
+    }
+    let reply = io.read(PROBE_TIMEOUT).unwrap_or_default();
+    parse_probe_reply(&reply)
+}
+
+/// The single query: `ratatui-image`'s graphics/font-size queries plus the kitty keyboard
+/// flags query (`ESC[?u`), inside the tmux passthrough wrapper when needed. `ESC[c` (device
+/// attributes) is in the graphics query already, so the keyboard probe's own DA1 is not sent
+/// a second time.
+pub(crate) fn probe_query(tmux: bool) -> String {
+    let mut query = CapParser::query(tmux, QueryStdioOptions::default());
+    let (_, escape, end) = CapParser::tmux_start_escape_end(tmux);
+    let keyboard = format!("{escape}[?u");
+    // Inside the wrapper, before its terminator; at the end otherwise.
+    let at = query.len() - end.len();
+    query.insert_str(at, &keyboard);
+    query
+}
+
+/// What one startup probe answered (ADR 0028 R10).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProbeReply {
+    /// The kitty keyboard-enhancement flags were answered (`CSI ? <flags> u`).
+    pub keyboard: bool,
+    /// The graphics protocol the terminal reported, if any.
+    pub protocol: Option<ProtocolType>,
+    /// The cell size in pixels (`CSI 6 ; height ; width t`).
+    pub cell: Option<(u16, u16)>,
+}
+
+/// Parses the one reply for both answers: the graphics parser reads kitty/sixel/cell size, and
+/// the keyboard flags are the `CSI ? <digits> u` reply crossterm's probe used to wait for.
+pub(crate) fn parse_probe_reply(bytes: &[u8]) -> ProbeReply {
+    let text = String::from_utf8_lossy(bytes);
+    let mut parser = CapParser::new();
+    let mut reply = ProbeReply {
+        keyboard: keyboard_flags(&text),
+        ..ProbeReply::default()
+    };
+    for ch in text.chars() {
+        for response in parser.push(ch) {
+            match response {
+                Response::Kitty => reply.protocol = Some(ProtocolType::Kitty),
+                Response::Sixel => {
+                    reply.protocol.get_or_insert(ProtocolType::Sixel);
+                }
+                Response::CellSize(Some((width, height))) if width > 0 && height > 0 => {
+                    reply.cell = Some((width, height));
+                }
+                _ => {}
+            }
+        }
+    }
+    reply
+}
+
+/// Whether the reply carries a kitty keyboard-flags answer (`CSI ? <flags> u`). The device
+/// attributes answer is `CSI ? … c` and must not count. The `[?` may be reached through a
+/// doubled escape (tmux passthrough), so only the byte before it must be an ESC.
+fn keyboard_flags(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'[' && bytes[index + 1] == b'?' && index > 0 && bytes[index - 1] == 0x1b
+        {
+            let mut at = index + 2;
+            let mut digit = false;
+            while at < bytes.len() && (bytes[at].is_ascii_digit() || bytes[at] == b';') {
+                digit |= bytes[at].is_ascii_digit();
+                at += 1;
+            }
+            if digit && at < bytes.len() && bytes[at] == b'u' {
+                return true;
+            }
+            index = at.max(index + 1);
+        } else {
+            index += 1;
+        }
+    }
+    false
+}
+
+/// The real probe: stdout for the query, stdin for the answer (both raw-mode terminals).
+struct StdioProbe;
+
+impl ProbeIo for StdioProbe {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let mut out = io::stdout();
+        out.write_all(bytes)?;
+        out.flush()
+    }
+
+    fn read(&mut self, timeout: Duration) -> io::Result<Vec<u8>> {
+        read_probe_reply(timeout)
+    }
+}
+
+/// Reads the terminal's answers until the device-status report (`ESC[0n`, which ends
+/// `ratatui-image`'s query) or the timeout. A terminal that answers nothing returns whatever
+/// arrived (nothing) at the deadline.
+#[cfg(unix)]
+fn read_probe_reply(timeout: Duration) -> io::Result<Vec<u8>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let millis = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let mut poll = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd of our own, and the timeout is positive.
+        let ready = unsafe { libc::poll(&mut poll, 1, millis.max(1)) };
+        if ready <= 0 {
+            break;
+        }
+        // SAFETY: `buf` is writable for its whole length and fd 0 is our stdin.
+        let read = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
+        if read <= 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..read as usize]);
+        if out.windows(4).any(|window| window == b"\x1b[0n") {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Windows (and any non-unix target): the probe is not implemented, so the keyboard flags are
+/// asked for the way crossterm does and images fall back to half blocks.
+#[cfg(not(unix))]
+fn read_probe_reply(_timeout: Duration) -> io::Result<Vec<u8>> {
+    Ok(Vec::new())
+}
+
+/// The picker one reply describes (ADR 0028 R10): the terminal's reported protocol, its cell
+/// size, and `ratatui-image`'s own env/tmux fallbacks through its picker. A terminal that
+/// reported no cell size uses the window's pixel size when the ioctl reports one; with none,
+/// half blocks (the only protocol that does not need a cell size). A terminal that answered
+/// nothing falls back to half blocks even when the environment names a protocol: silence is
+/// not an answer.
+fn picker_from_reply(reply: ProbeReply) -> Picker {
+    let Some(font_size) = reply.cell.map(FontSize::from).or_else(window_cell_size) else {
+        return Picker::halfblocks();
+    };
+    // `from_fontsize` is the only constructor that takes a measured cell size; it also runs
+    // the tmux detection (the `allow-passthrough` side effect) and the env-based protocol
+    // guesses, which the probed answer overrides below.
+    #[allow(deprecated)]
+    let picker = Picker::from_fontsize(font_size);
+    let blacklisted = std::env::var("WEZTERM_EXECUTABLE").is_ok_and(|value| !value.is_empty())
+        || std::env::var("KONSOLE_VERSION").is_ok_and(|value| !value.is_empty());
+    apply_probe_protocol(picker, reply.protocol, blacklisted)
+}
+
+/// Applies one probe answer to the picker `ratatui-image` built from the cell size and the
+/// environment (ADR 0028 R10). A reported protocol wins; the two terminals whose kitty/sixel
+/// implementations `ratatui-image` refuses (its own query blacklists them) keep the
+/// environment's derived protocol; a **silent** probe is half blocks, never an environment
+/// guess.
+fn apply_probe_protocol(
+    mut picker: Picker,
+    protocol: Option<ProtocolType>,
+    blacklisted: bool,
+) -> Picker {
+    match (protocol, blacklisted) {
+        (Some(protocol), false) => picker.set_protocol_type(protocol),
+        (Some(_), true) => {}
+        (None, _) => picker.set_protocol_type(ProtocolType::Halfblocks),
+    }
+    picker
+}
+
+/// The cell size from the terminal's pixel/column/row window size, when the ioctl reports one.
+fn window_cell_size() -> Option<FontSize> {
+    let size = ratatui::crossterm::terminal::window_size().ok()?;
+    if size.width == 0 || size.height == 0 || size.columns == 0 || size.rows == 0 {
+        return None;
+    }
+    Some(FontSize::new(
+        size.width / size.columns,
+        size.height / size.rows,
+    ))
+}
+
+/// Whether the process runs inside tmux, by the same env rule `ratatui-image` uses. tmux needs
+/// the query wrapped in a passthrough sequence, and the picker turns on the pane's
+/// `allow-passthrough` option (accepted side effect, ADR 0028 R10).
+fn in_tmux() -> bool {
+    std::env::var("TERM").is_ok_and(|term| term.starts_with("tmux"))
+        || std::env::var("TERM_PROGRAM").is_ok_and(|program| program == "tmux")
 }
 
 /// Turns mouse reporting on (`\x1b[?1000h\x1b[?1002h\x1b[?1006h`) or off (the `l` forms,
@@ -212,11 +463,14 @@ impl TtyGuard {
                 return Err(error);
             }
         }
-        // The keyboard-enhancement query runs **here**, before the caller spawns the input
-        // thread (see `should_enhance_keyboard`): it reads the terminal's reply, and an input
-        // thread reading at the same time would race it. `DISAMBIGUATE_ESCAPE_CODES` is what
-        // makes Shift+Enter arrive as Enter+SHIFT instead of a plain Enter.
-        if should_enhance_keyboard() {
+        // The startup probe runs **here**, before the caller spawns the input thread (see
+        // `probe_terminal`): it reads the terminal's replies, and an input thread reading at
+        // the same time would race it. The one pass answers both the kitty keyboard flags
+        // (`DISAMBIGUATE_ESCAPE_CODES` makes Shift+Enter arrive as Enter+SHIFT instead of a
+        // plain Enter) and the graphics protocol the transcript's images use (ADR 0028 R10).
+        let (keyboard, picker) = probe_terminal();
+        let _ = IMAGE_PICKER.set(picker);
+        if keyboard {
             KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
             if let Err(error) = execute!(
                 out,
@@ -473,6 +727,125 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0028 R10: one startup pass carries both questions — the kitty keyboard flags
+    /// (`ESC[?u`) and `ratatui-image`'s graphics query, whose own `ESC[c` is the only device
+    /// attributes query. A second, separate probe would show up as a second write here.
+    #[test]
+    fn the_startup_probe_is_one_combined_write() {
+        struct OneShot {
+            writes: Vec<String>,
+            reply: Vec<u8>,
+        }
+        impl ProbeIo for OneShot {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+                self.writes
+                    .push(String::from_utf8_lossy(bytes).into_owned());
+                Ok(())
+            }
+            fn read(&mut self, _timeout: Duration) -> io::Result<Vec<u8>> {
+                Ok(self.reply.clone())
+            }
+        }
+        let reply = b"\x1b[?1u\x1b[?62;4c\x1b[6;20;10t\x1b[0n".to_vec();
+        let mut io = OneShot {
+            writes: Vec::new(),
+            reply,
+        };
+        let parsed = probe_with(&mut io);
+        assert_eq!(io.writes.len(), 1, "one startup probe pass, not two");
+        let query = &io.writes[0];
+        assert_eq!(
+            query.matches("\x1b[c").count(),
+            1,
+            "exactly one device-attributes query: {query:?}"
+        );
+        assert!(
+            query.contains("\x1b[?u"),
+            "the keyboard flags query: {query:?}"
+        );
+        assert!(
+            query.contains("_Gi=31"),
+            "the kitty graphics query: {query:?}"
+        );
+        assert!(query.contains("\x1b[16t"), "the cell-size query: {query:?}");
+        assert!(
+            query.contains("\x1b[5n"),
+            "the status end marker: {query:?}"
+        );
+        // Both answers come from that one reply.
+        assert!(parsed.keyboard, "the keyboard flags answer");
+        assert_eq!(parsed.protocol, Some(ProtocolType::Sixel));
+        assert_eq!(parsed.cell, Some((10, 20)));
+    }
+
+    /// The graphics answers: kitty wins over sixel; a device-attributes reply alone is not a
+    /// keyboard answer.
+    #[test]
+    fn the_reply_parser_reads_each_answer_from_its_own_sequence() {
+        let kitty = parse_probe_reply(b"\x1b_Gi=31;OK\x1b\\\x1b[?64;4c\x1b[0n");
+        assert_eq!(kitty.protocol, Some(ProtocolType::Kitty));
+        assert!(!kitty.keyboard, "DA1 is not the keyboard flags reply");
+        assert_eq!(kitty.cell, None);
+
+        let da_only = parse_probe_reply(b"\x1b[?62c\x1b[0n");
+        assert!(!da_only.keyboard, "the DA answer must not count");
+        assert_eq!(da_only.protocol, None);
+
+        let flags = parse_probe_reply(b"\x1b[?3u");
+        assert!(flags.keyboard);
+        assert_eq!(flags.protocol, None);
+        // Through tmux's passthrough the escape may arrive doubled.
+        assert!(
+            parse_probe_reply(b"\x1b\x1b[?1u").keyboard,
+            "a doubled escape still carries the flags"
+        );
+    }
+
+    /// A terminal that answers nothing: the keyboard result stays unsupported (the old
+    /// behaviour) and no graphics protocol is picked, which is the half-block fallback even
+    /// when the environment (iTerm2, WezTerm) names one.
+    #[test]
+    fn a_silent_terminal_keeps_unsupported_keyboard_and_no_protocol() {
+        assert_eq!(parse_probe_reply(b""), ProbeReply::default());
+        assert!(!parse_probe_reply(b"").keyboard);
+        assert_eq!(parse_probe_reply(b"").protocol, None);
+        assert_eq!(parse_probe_reply(b"garbage without escapes").protocol, None);
+
+        // The picker cannot inherit the environment's guess for a terminal that stayed quiet
+        // (ADR 0028 R10).
+        #[allow(deprecated)]
+        let mut guessed = Picker::from_fontsize(FontSize::new(10, 20));
+        guessed.set_protocol_type(ProtocolType::Iterm2);
+        let silent = apply_probe_protocol(guessed, None, false);
+        assert_eq!(silent.protocol_type(), ProtocolType::Halfblocks);
+        assert_eq!(
+            (silent.font_size().width, silent.font_size().height),
+            (10, 20)
+        );
+        // A reported protocol still wins, and so does a cell size without one.
+        #[allow(deprecated)]
+        let mut guessed = Picker::from_fontsize(FontSize::new(10, 20));
+        guessed.set_protocol_type(ProtocolType::Iterm2);
+        let answered = apply_probe_protocol(guessed, Some(ProtocolType::Sixel), false);
+        assert_eq!(answered.protocol_type(), ProtocolType::Sixel);
+        let via_reply = picker_from_reply(ProbeReply {
+            keyboard: false,
+            protocol: None,
+            cell: Some((10, 20)),
+        });
+        assert_eq!(via_reply.protocol_type(), ProtocolType::Halfblocks);
+    }
+
+    /// tmux wraps the query for passthrough; the keyboard query goes inside the same wrapper.
+    #[test]
+    fn the_tmux_query_wraps_everything_in_one_passthrough() {
+        let query = probe_query(true);
+        assert!(query.starts_with("\x1bPtmux;"), "{query:?}");
+        assert!(query.ends_with("\x1b\\"), "{query:?}");
+        assert!(query.contains("\x1b\x1b[?u"), "the escaped keyboard query");
+        assert_eq!(query.matches("[c").count(), 1);
+    }
 
     /// A poisoned secrets lock must still supply the list: redaction must never fail open
     ///. The lock is poisoned by a thread that panics while

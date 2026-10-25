@@ -144,6 +144,10 @@ pub struct Entry {
     /// the global fold says, which is how a search hit opens exactly one folded entry.
     /// Cleared by the next global fold toggle. Part of the layout cache key.
     pub fold_override: Option<bool>,
+    /// The images the entry's message carried (ADR 0028 R10), in order. A user message's
+    /// placeholder line is already in `text`; a tool result's placeholder row is synthesized
+    /// by the layout above the image run.
+    pub images: Vec<crate::media::EntryImage>,
     /// True for the wake-budget notice entry of the current degrade burst. `update`
     /// rewrites this entry (not a new line per degrade) while the burst lasts; the next
     /// turn start clears the session's index, leaving the line as plain history.
@@ -196,6 +200,7 @@ impl Entry {
             card: crate::blocks::Card::None,
             error_code: None,
             fold_override: None,
+            images: Vec::new(),
             wake_notice: false,
             reasoning_started: None,
             reasoning_ended: None,

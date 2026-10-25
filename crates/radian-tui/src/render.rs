@@ -4,13 +4,16 @@
 //! `App`, so `TestBackend` can assert on the result.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui_image::StatefulImage;
+use ratatui_image::protocol::StatefulProtocol;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Modal};
+use crate::media;
 
 mod approval;
 mod input;
@@ -37,10 +40,10 @@ use panels::{access_height, login_height, logout_keys_panel, question_height, tr
 use status::{status_height, status_lines};
 use transcript::apply_selection;
 pub use transcript::{
-    display_lines, highlight, split_label, transcript_lines, transcript_lines_with, visible_lines,
-    visible_lines_with,
+    ImageRun, display_lines, highlight, split_label, transcript_lines, transcript_lines_with,
+    visible_lines, visible_lines_images, visible_lines_with,
 };
-pub(crate) use transcript::{display_text, marker_prefix, spinner_style};
+pub(crate) use transcript::{display_text, marker_prefix, selection_text, spinner_style};
 pub(crate) use wrap::clip_display;
 pub use wrap::{WrappedLine, wrap, wrap_char_offsets, wrap_line_count};
 
@@ -182,7 +185,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     radian_session::trace::took("draw/measure", t_draw);
     app.set_viewport(chunks[0].height, total);
     let t_window = std::time::Instant::now();
-    let (_, visible) = visible_lines_with(
+    let (_, visible, images) = transcript::visible_lines_images(
         &mut app.session.entries,
         modes,
         width,
@@ -228,6 +231,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let t_render = std::time::Instant::now();
     frame.render_widget(Paragraph::new(visible), chunks[0]);
+    draw_images(frame, app, &images, chunks[0]);
     radian_session::trace::took("draw/render-transcript", t_render);
 
     // The picker overlay draws over the transcript; the input box and the status bar stay
@@ -539,4 +543,48 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     radian_session::trace::took("draw/status-lines", t_status);
     frame.render_widget(Paragraph::new(status), chunks[4]);
     radian_session::trace::mark("draw/end");
+}
+
+/// The body column: the marker column is two cells and text starts at column 3 (ADR 0035).
+const BODY_COLUMN: u16 = 2;
+
+/// Draws the visible images over the transcript's image rows (ADR 0028 R10). The rows carry
+/// no text, so the image is the only content there; a run that is not fully on screen, or an
+/// image that does not decode, draws nothing and leaves the placeholder row as the whole
+/// story. Decoding and encoding are cached in `app.images`, so a frame that does not change
+/// the image's area costs no work.
+fn draw_images(frame: &mut Frame, app: &mut App, runs: &[ImageRun], area: Rect) {
+    let Some(picker) = crate::terminal::image_picker() else {
+        return;
+    };
+    if area.width <= BODY_COLUMN || area.height == 0 {
+        return;
+    }
+    for run in runs {
+        let Some(image) = app
+            .session
+            .entries
+            .get(run.entry)
+            .and_then(|entry| entry.images.get(run.image))
+            .cloned()
+        else {
+            continue;
+        };
+        let columns = media::image_columns(picker, &image, area.width - BODY_COLUMN);
+        if columns == 0 {
+            continue;
+        }
+        let rect = Rect {
+            x: area.x + BODY_COLUMN,
+            y: area.y + run.row as u16,
+            width: columns,
+            height: media::IMAGE_HEIGHT_ROWS,
+        };
+        if rect.right() > area.right() || rect.bottom() > area.bottom() {
+            continue;
+        }
+        if let Some(protocol) = app.images.protocol(&image, picker) {
+            frame.render_stateful_widget(StatefulImage::<StatefulProtocol>::new(), rect, protocol);
+        }
+    }
 }

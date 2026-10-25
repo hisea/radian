@@ -25,6 +25,7 @@ impl App {
             footer_context: radian_host::FooterContext::new(),
             input: Composer::new(),
             composer_images: Vec::new(),
+            images: crate::media::ImageCache::default(),
             quit: false,
             new_session: false,
             pending: 0,

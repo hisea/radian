@@ -172,6 +172,26 @@ pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
     }
 }
 
+/// The text a selection maps offsets into and copies. It is [`display_text`] plus, for a tool
+/// result, the `[image: …]` placeholder lines the layout synthesizes above each run (ADR 0028
+/// R10). They are not in the entry's own text, so without this a selection could neither
+/// anchor on the placeholder row nor copy it. The spans are the layout's own
+/// ([`crate::media::placeholder_spans`]), so the two cannot disagree.
+pub(crate) fn selection_text(entry: &Entry) -> Cow<'_, str> {
+    let base = display_text(entry);
+    if entry.kind != EntryKind::ToolResult || entry.images.is_empty() {
+        return base;
+    }
+    let mut out = base.into_owned();
+    for image in &entry.images {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&image.placeholder);
+    }
+    Cow::Owned(out)
+}
+
 /// The display text lines of `entry`'s body (the prefix and the interrupted marker are not
 /// included), at `width` — the block model's layout, flattened to strings. The renderer
 /// renders exactly these, and [`crate::find`] matches against exactly these, so a folded `@`
@@ -495,32 +515,18 @@ fn tool_body_follows(entries: &[Entry], index: usize, result_lines: usize) -> bo
         && result_lines > 0
 }
 
-/// The transcript's total line count and the `height` lines starting at line `start`, laying
-/// out only the entries that overlap that window (dogfooding D9). Every other entry
-/// contributes its cached line count, so a long session costs an integer sum per frame
-/// instead of re-laying out every entry.
-pub fn visible_lines(
-    entries: &mut [Entry],
-    modes: DisplayModes,
-    width: usize,
-    start: usize,
-    height: usize,
-    theme: &Theme,
-) -> (usize, Vec<Line<'static>>) {
-    visible_lines_with(
-        entries,
-        modes,
-        width,
-        start,
-        height,
-        theme,
-        crate::spinner::Frame::default(),
-    )
+/// One image the visible window draws (ADR 0028 R10): its entry, its index in the entry's
+/// image list, and the window row its fixed run starts at. Only a **fully visible** run is
+/// reported: the frame does not split an image across the top or bottom edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageRun {
+    pub entry: usize,
+    pub image: usize,
+    pub row: usize,
 }
 
-/// [`visible_lines`] with the live spinner frame (ADR 0027): the frame lays out
-/// only the visible entries, so the spinner is what makes it redraw every tick.
-pub fn visible_lines_with(
+/// [`visible_lines`] plus the image runs the window can draw (ADR 0028 R10).
+pub fn visible_lines_images(
     entries: &mut [Entry],
     modes: DisplayModes,
     width: usize,
@@ -528,7 +534,7 @@ pub fn visible_lines_with(
     height: usize,
     theme: &Theme,
     spinner: crate::spinner::Frame,
-) -> (usize, Vec<Line<'static>>) {
+) -> (usize, Vec<Line<'static>>, Vec<ImageRun>) {
     let __t = std::time::Instant::now();
     let counts: Vec<usize> = entries
         .iter_mut()
@@ -550,6 +556,7 @@ pub fn visible_lines_with(
         total += blocks::gap_at(entries, index);
     }
     let mut out = Vec::with_capacity(height);
+    let mut slots: Vec<(usize, usize, usize)> = Vec::new();
     let mut line = 0usize;
     for index in 0..entries.len() {
         if out.len() >= height {
@@ -585,35 +592,93 @@ pub fn visible_lines_with(
             let style = body_style(entry, theme);
             let first_text = (!body.is_empty()).then_some(0);
             let last = body.len().checked_sub(1);
-            out.extend(
-                body.into_iter()
-                    .enumerate()
-                    .skip(skip)
-                    .take(height - out.len())
-                    .map(|(i, row)| {
-                        let mut line = render_row(
-                            entry,
-                            &row,
-                            prefix,
-                            prefix_style,
-                            style,
-                            theme,
-                            Some(i) == first_text,
-                            modes.glyphs,
-                            spinner,
-                            head_marker,
-                        );
-                        if Some(i) == last && entry.interrupted {
-                            line.spans
-                                .push(Span::styled(" [interrupted]", theme.interrupted));
-                        }
-                        line
-                    }),
-            );
+            let rows: Vec<(usize, BodyLine)> = body
+                .into_iter()
+                .enumerate()
+                .skip(skip)
+                .take(height - out.len())
+                .collect();
+            let out_start = out.len();
+            for (offset, (i, row)) in rows.into_iter().enumerate() {
+                if let Some(image) = row.image {
+                    slots.push((index, image, out_start + offset));
+                }
+                let mut line = render_row(
+                    entry,
+                    &row,
+                    prefix,
+                    prefix_style,
+                    style,
+                    theme,
+                    Some(i) == first_text,
+                    modes.glyphs,
+                    spinner,
+                    head_marker,
+                );
+                if Some(i) == last && entry.interrupted {
+                    line.spans
+                        .push(Span::styled(" [interrupted]", theme.interrupted));
+                }
+                out.push(line);
+            }
         }
         line = next;
     }
-    (total, out)
+    // Only a complete run is drawable (its fixed height in rows): a run clipped by the top or
+    // the bottom edge stays blank, the placeholder row still says what it was.
+    let mut runs = Vec::new();
+    let mut at = 0usize;
+    while at < slots.len() {
+        let (entry, image, row) = slots[at];
+        let mut count = 1usize;
+        while at + count < slots.len() && slots[at + count] == (entry, image, row + count) {
+            count += 1;
+        }
+        if count == usize::from(crate::media::IMAGE_HEIGHT_ROWS) {
+            runs.push(ImageRun { entry, image, row });
+        }
+        at += count;
+    }
+    (total, out, runs)
+}
+
+/// The transcript's total line count and the `height` lines starting at line `start`, laying
+/// out only the entries that overlap that window (dogfooding D9). Every other entry
+/// contributes its cached line count, so a long session costs an integer sum per frame
+/// instead of re-laying out every entry.
+pub fn visible_lines(
+    entries: &mut [Entry],
+    modes: DisplayModes,
+    width: usize,
+    start: usize,
+    height: usize,
+    theme: &Theme,
+) -> (usize, Vec<Line<'static>>) {
+    visible_lines_with(
+        entries,
+        modes,
+        width,
+        start,
+        height,
+        theme,
+        crate::spinner::Frame::default(),
+    )
+}
+
+/// [`visible_lines`] with the live spinner frame (ADR 0027): the frame lays out
+/// only the visible entries, so the spinner is what makes it redraw every tick.
+pub fn visible_lines_with(
+    entries: &mut [Entry],
+    modes: DisplayModes,
+    width: usize,
+    start: usize,
+    height: usize,
+    theme: &Theme,
+    spinner: crate::spinner::Frame,
+) -> (usize, Vec<Line<'static>>) {
+    let (total, lines, _) =
+        visible_lines_images(entries, modes, width, start, height, theme, spinner);
+    (total, lines)
 }
 
 /// Marks every occurrence of `query` (case-insensitive) in a rendered line with

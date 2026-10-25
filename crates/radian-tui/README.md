@@ -199,14 +199,19 @@ bare arrow keys belong to the composer.
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
 Shift-Enter needs the terminal's **keyboard-enhancement** protocol: without it most terminals
-send Shift+Enter as a plain Enter, which sends. Radian asks the terminal at startup
-(`supports_keyboard_enhancement`, crossterm 0.29's kitty-protocol probe: it writes
-`ESC[?u ESC[c` and waits up to **2 s** for a reply; a terminal that answers the
-device-attributes query but not the flags query ends the wait immediately) and, when the answer
-is yes, pushes `DISAMBIGUATE_ESCAPE_CODES`; the flags are popped on every exit path, panic and
-signal included. `RADIAN_KEYBOARD_ENHANCEMENT=0` skips the probe and the push (a pty has nobody
-to answer, so the tests set it); `=1` pushes without asking. Ctrl-J and Alt-Enter work
-everywhere and stay the fallback.
+send Shift+Enter as a plain Enter, which sends. The startup **probe** asks the terminal once,
+for both answers at the same time (ADR 0028 R10): a single query carries the kitty keyboard
+flags (`ESC[?u`, the `supports_keyboard_enhancement` half) and `ratatui-image`'s graphics
+queries (`ESC[c` device attributes, `ESC[16t` cell size, the kitty graphics query, and
+`ESC[5n` as the end marker), and the one reply is parsed for both. It waits up to **2 s** on a
+terminal that answers nothing. When the keyboard answer is yes, radian pushes
+`DISAMBIGUATE_ESCAPE_CODES`; the flags are popped on every exit path, panic and signal
+included. A terminal that answers nothing keeps the keyboard unsupported and draws images as
+half blocks. `RADIAN_KEYBOARD_ENHANCEMENT=0` skips the whole pass and the push (a pty has
+nobody to answer, and the probe would cost 2 s per spawn; the tests set it); `=1` pushes
+without asking and still probes for the image protocol. Inside tmux the query is wrapped in a
+passthrough and `ratatui-image` turns on the pane's `allow-passthrough` option. Ctrl-J and
+Alt-Enter work everywhere and stay the fallback.
 
 `@relative/path` in a message attaches the file's contents to the request (Phase 4): resolved
 inside the workspace like the `read` tool (no absolute path, no `..`, a symlink that leaves is
@@ -676,7 +681,7 @@ The transcript owns its scrolling:
 | 15 | `--mcp-config` mounts the fixture; its tool runs through the approval dialog; the status bar shows the connected servers/tools; the startup notice names the MCP sandbox gap | `tests/pty.rs` |
 | 16 | the status bar shows the tier, reported usage (or `none`) and the MCP counts; a 60-column terminal drops the long segments and marks it | `tests/status.rs` |
 | 17 | `--version` prints `<program> <CARGO_PKG_VERSION>` and exits 0 without entering the terminal | `tests/version.rs` |
-| 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept; an image attaches as a part and shows `[image: name, W×H, N KB]` (also after a journal round trip), a dropped absolute path becomes an attachment outside the workspace too, and Backspace removes it | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs`, `tests/images.rs` |
+| 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept; an image attaches as a part and shows `[image: name, W×H, N KB]` (also after a journal round trip), a dropped absolute path becomes an attachment outside the workspace too, and Backspace removes it; the image draws in a fixed 12-row run under the placeholder, the run is hidden under a folded tool body, selection/search see only the placeholder, and a broken image keeps the placeholder alone | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs`, `tests/images.rs`, `tests/image_render.rs`, `src/media.rs` |
 | 19 | `--pick` lists this workspace's sessions, filters, full-text searches, resumes the choice (the next request carries its history), `n` starts new, `Esc` exits 0 with no session file; `/sessions` lists a copyable `--resume`; `/export` writes and refuses to overwrite without `--force` | `tests/pty.rs`, `tests/sessions.rs` (host) |
 | 20 | Ctrl-C: idle with text, the first press clears it into the history (not a quit); idle and empty, the first press only shows `Press Ctrl-C again to quit` and a second inside 2 s quits with the exit line; a key in between, or the window closing, disarms | `tests/quit.rs`, `tests/pty.rs` |
 | 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |
@@ -997,6 +1002,23 @@ throwaway terminal, not your working one.
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
    kitty-protocol terminals), and `Ctrl-J` always does; a terminal that cannot report it sends
    instead - record which of the three did what. *Fail*: a newline that also sends.
+3d. **Images in the transcript** (ADR 0028 R10). *Steps*: in kitty (or Ghostty), iTerm2 (or
+   WezTerm), Terminal.app, and inside tmux/herdr, run a session and send a message with
+   `@shot.png` (a real photo, not a screenshot of text); then have the model call `read` on
+   an image, and press `Ctrl-O` through `errors → expanded → collapsed`.
+   *Expect*: the picture appears under its `[image: shot.png, W×H, N KB]` line, 12 rows tall,
+   at the right aspect ratio, never wider than the transcript; kitty/Ghostty use unicode
+   placeholders that scroll and fold with the text, iTerm2/WezTerm the iTerm2 protocol,
+   Terminal.app half blocks; in tmux the picture still appears after the probe turned on
+   `allow-passthrough` for the pane. The user message's image always draws; the `read`
+   result's image draws only when the body does (a successful result under the default
+   `errors` fold shows the placeholder line only; `Ctrl-O` expands the body and the image; a
+   failed call, whose body is never folded, always draws it).
+   *Look*: are the image rows aligned with the text column (not the marker column), is the
+   placeholder line legible above it, does a partly scrolled image disappear cleanly rather
+   than shear, and does `Ctrl-P`'s `images:` line name the protocol you expected?
+   *Fail*: record the terminal name/version, `echo $TERM $TERM_PROGRAM`, the `images:` line,
+   and whether the picture, half blocks, or only the placeholder showed.
 3c. **Spinner** (`tui.spinner`; ADR 0027). *Steps*: start a turn (send a
    message) with `tui.spinner = "pulse"` (the default), then `"arc"`, then `"quadrant"`, then
    `"braille"`, then `glyphs = "ascii"`. *Expect*: the input rule shows

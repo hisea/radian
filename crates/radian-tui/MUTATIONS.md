@@ -2852,6 +2852,18 @@ restored from that copy (never `git checkout`), and the named test ran alone wit
 2/2 caught. TK0085-M1, -M2 and -M5 mutate `radian-arc` and are recorded in
 `crates/radian-arc/MUTATIONS.md`.
 
+## TK0014: the transcript draws images with ratatui-image (2026-10-24, branch `work/TK0014-image-render`)
+
+Each mutation was applied by hand, backed up under `.radian/` and restored from that copy (never
+`git checkout`), and the named test ran alone.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0014-M1 | a second, separate startup probe (`supports_keyboard_enhancement`) beside the merged one | ✅ 1 failed | `pty_the_startup_probe_is_one_combined_pass` (`one device-attributes query, not two probes`: left 2, right 1) |
+| TK0014-M2 | the folded state draws the image run too (`rows_visible` always true) | ✅ 1 failed | `a_folded_tool_result_shows_the_placeholder_but_not_the_image` |
+| TK0014-M3 | the image rows carry their payload as text, so search matches inside them | ✅ 3 failed | `selection_and_search_never_see_the_image_rows` (`search must not match inside the image rows`, 12 matches) |
+
+3/3 caught.
 ## the docs site's `arc/` pages (2026-10-24, branch `work/TK0089-arc-docs-subdir`)
 
 Base: the branch's move commit. The mutation was applied by hand to
@@ -2879,6 +2891,20 @@ that copy (never `git checkout`); the named test ran alone with
 | TK0097-M1 | a `/docs/arc/gate.html` link goes back to `/docs/arc-gate.html` | ✅ 1 failed | `site_docs::the_hand_written_pages_only_link_generated_docs` (`site/arc.html: link '/docs/arc-gate.html' names 'arc-gate.html', which the generator does not write`) |
 
 1/1 caught.
+
+## TK0014 rework 2: the decode-failure fallback, tool-result selection and the silent probe (2026-10-24, branch `work/TK0014-image-render`)
+
+The review found three ways the ADR 0028 R10 rules could still be broken. Each mutation was
+applied by hand, backed up under `.radian/bak/` and restored from that copy (never
+`git checkout`), and the named test ran alone.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0014-M4 | an image that did not decode at ingest still reserves its `IMAGE_HEIGHT_ROWS` run (drop the `decodable` guard in `insert_user_images`) | ✅ 1 failed | `a_broken_image_draws_only_its_placeholder` (`a failed decode reserves no run`: 12 blank rows after the placeholder) |
+| TK0014-M5 | `selection_text` projects `display_text` only, so a tool result's synthesized placeholder is not copied (drop the placeholder lines) | ✅ 1 failed | `a_tool_result_placeholder_is_copied_and_the_run_is_not` |
+| TK0014-M6 | a silent probe keeps `ratatui-image`'s env-derived protocol instead of half blocks (drop the `(None, _)` arm of `apply_probe_protocol`) | ✅ 1 failed | `a_silent_terminal_keeps_unsupported_keyboard_and_no_protocol` (`left: Iterm2, right: Halfblocks`) |
+
+3/3 caught.
 ## TK0082: `Esc` goes back one level, `q` quits everywhere (2026-10-24, branch `work/TK0082-tui-esc-back-q-quit`)
 
 `Esc` used to quit on the plans page, and every page and overlay kept its own `Esc` arm; `q` did
@@ -2912,6 +2938,18 @@ the named test was run alone, and the file was restored from a copy under `.radi
 
 2/2 caught.
 
+## TK0014 rework 3: one decode per image and each image's own run (2026-10-24, branch `work/TK0014-image-render`)
+
+The review found that the ingest-time decode was repeated by the first frame, and that a broken
+image could take a valid twin's run. Each mutation was applied by hand, backed up under
+`.radian/bak/` and restored from that copy (never `git checkout`), and the named test ran alone.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0014-M7 | the entry's decode is thrown away, so the first frame decodes the payload again (`from_part` calls `decode` without `cache.remember`) | ✅ 1 failed | `an_image_decodes_once_and_a_failure_is_cached` (`the first frame reuses the entry's decode`: left 2, right 1) |
+| TK0014-M8 | `insert_user_images` advances the placeholder search only for a decodable image (the `search = end` line moves below the `decodable` check) | ✅ 1 failed | `a_broken_image_does_not_steal_a_valid_twins_run` (`the broken image reserves no run`) |
+
+2/2 caught.
 ## TK0083: the log view fills the body, the brief wraps by words, the conversation tab rails its rows (2026-10-24, branch `work/TK0083-tui-log-view-and-brief-wrap`)
 
 The `L` view started at the stored index (`log_scroll`, the last line while following) and drew

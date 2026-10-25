@@ -35,6 +35,17 @@ Files stay for 7 days.
 Total size stays under 50 MiB.
 Old files leave first.
 A write failure never stops the agent.
+
+When an image shows only its `[image: …]` line, press `Ctrl-P` and read the `images:` line of
+the startup information: it names the protocol the startup probe picked and the cell size it
+measured. `half blocks` means the terminal answered no graphics query, or the answer arrived
+after the probe's two-second wait.
+Inside tmux or herdr radian turns on `allow-passthrough` for the pane; a terminal outside it
+that cannot pass the query through still gets half blocks.
+The same line stays when the image data itself cannot be decoded: the transcript then keeps the
+placeholder and draws nothing else.
+See `commands.md` for which terminals draw which protocol.
+
 Find session files under `~/.radian/sessions`.
 Set `$RADIAN_SESSION_DIR` to move them.
 Set `$RADIAN_HOME` to move the whole home tree.

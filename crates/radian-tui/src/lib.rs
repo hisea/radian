@@ -29,6 +29,7 @@ pub mod keys;
 pub mod login;
 pub mod logout;
 pub mod markdown;
+pub mod media;
 pub mod mention;
 pub mod panel;
 pub mod picker;

@@ -15886,3 +15886,104 @@ async fn pty_docs_page_reads_end_to_end() {
         "journal holds the page text"
     );
 }
+
+/// ADR 0028 R10: the graphics probe and the kitty keyboard probe are **one** startup pass.
+/// With `RADIAN_KEYBOARD_ENHANCEMENT=1` the pass runs (the flags are pushed without asking),
+/// so the raw stream must carry exactly one device-attributes query (`ESC[c`): the merged
+/// query's own. A second, separate probe would write a second one.
+#[test]
+fn pty_the_startup_probe_is_one_combined_pass() {
+    let dir = TempDir::new("image-probe");
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "image-probe",
+            "--offline-catalog",
+        ],
+        &[("RADIAN_KEYBOARD_ENHANCEMENT", "1")],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    // The graphics half of the one pass (ADR 0028 R10): the cell-size query, the kitty
+    // graphics query and the status end marker; the pre-merge keyboard probe had none of
+    // them.
+    for needle in ["\u{1b}[16t", "_Gi=31", "\u{1b}[5n"] {
+        assert!(raw.contains(needle), "the merged query carries {needle:?}");
+    }
+    assert_eq!(
+        raw.matches("\u{1b}[c").count(),
+        1,
+        "one device-attributes query, not two probes"
+    );
+    assert_eq!(
+        raw.matches("\u{1b}[?u").count(),
+        1,
+        "the keyboard query is part of the same pass"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0028 R10 end to end: a user message with an image draws (half blocks on a pty, which
+/// answers no graphics query) without a panic, and the placeholder line is on screen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_a_user_image_keeps_its_placeholder_and_draws() {
+    // A 1×1 GIF: the smallest image the pipeline accepts and `image` decodes.
+    const GIF: &[u8] = &[
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+    ];
+    let server = MockServer::start(vec![text_reply("IMAGE-REPLY-OK")]).await;
+    let dir = TempDir::new("image-render");
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("shot.gif"), GIF).unwrap();
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "image-render",
+            "--offline-catalog",
+        ],
+        30,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"@shot.gif\r");
+    assert!(
+        pty.wait_for_screen("[image: shot.gif", wait_positive()),
+        "the placeholder line is on screen:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("IMAGE-REPLY-OK", wait_positive()),
+        "the turn completes:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "no panic with an image drawn");
+}

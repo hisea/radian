@@ -606,10 +606,11 @@ impl App {
                 }
                 // ADR 0018: an attachment is its own part, so the display renders
                 // it as `[file: P, N lines]` rather than joining its body into the message.
-                self.session.entries.push(Entry::new(
-                    EntryKind::User,
-                    crate::mention::display_parts(content),
-                ));
+                let mut entry = Entry::new(EntryKind::User, crate::mention::display_parts(content));
+                // ADR 0028 R10: the images draw under their placeholder lines. The decode
+                // happens here, once; the drawn protocol is built from it.
+                entry.images = crate::media::images_of(&mut self.images, content);
+                self.session.entries.push(entry);
             }
             Message::Assistant {
                 content,
@@ -714,6 +715,10 @@ impl App {
                 entry.is_error = result.is_error;
                 entry.error_code = result.error_code.clone();
                 entry.tool = Some(Box::new(card));
+                // ADR 0028 R10: a `read` image (or any tool's image part) draws under a
+                // placeholder row inside the block's body. The decode happens here, once,
+                // even while the block is folded; the drawn protocol is built from it.
+                entry.images = crate::media::images_of(&mut self.images, &result.content);
                 entry.card = crate::blocks::Card::Solo;
                 // Rule 4: the result sits right after **its own** call, so a batch reads
                 // call/result, call/result instead of every call then every result. The

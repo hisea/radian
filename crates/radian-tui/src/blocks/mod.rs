@@ -380,6 +380,10 @@ pub struct BodyLine {
     /// A syntax-highlighted code line (ADR 0028 R2): per-piece text and Radian syntax role
     /// (`None` when the block is not highlighted). `text` still holds the concatenation.
     pub syntax: Option<crate::highlight::HighlightedLine>,
+    /// The image this row draws, by index into the entry's [`crate::media::EntryImage`] list
+    /// (ADR 0028 R10): a row of the image's fixed run. The row carries no characters, so the
+    /// selection, copy and search never see it; the frame overlays the image here.
+    pub image: Option<usize>,
 }
 
 /// One Markdown piece: its displayed text, its role, and its source offset (`None` when the
@@ -490,6 +494,55 @@ impl BodyLine {
             reason: false,
             md: None,
             syntax: None,
+            image: None,
+        }
+    }
+
+    /// One row of an image's fixed run (ADR 0028 R10): no characters, no source offsets, so a
+    /// copy across it copies nothing and a search matches nothing in it.
+    fn image_row(image: usize, end: usize) -> Self {
+        Self {
+            chars: Vec::new(),
+            end,
+            text: String::new(),
+            code: false,
+            frame: Frame::None,
+            role: tools::LineRole::Normal,
+            hint: false,
+            diagram: None,
+            reason: false,
+            md: None,
+            syntax: None,
+            image: Some(image),
+        }
+    }
+
+    /// The `[image: …]` placeholder row a tool result draws (ADR 0028 R10): it is always
+    /// visible, even when the tool body is folded, and it is the text selection and search may
+    /// match. The user-message placeholder comes from the entry's own text instead. `start`
+    /// and `end` are the row's byte range in the entry's selection text (its own text plus the
+    /// synthesized placeholder lines), so a click on the row anchors inside that text and a
+    /// copy includes the placeholder.
+    fn image_placeholder(text: String, start: usize, end: usize) -> Self {
+        let mut offset = start;
+        let mut chars = Vec::with_capacity(text.len());
+        for ch in text.chars() {
+            chars.push(Some(offset));
+            offset += ch.len_utf8();
+        }
+        Self {
+            chars,
+            end,
+            text,
+            code: false,
+            frame: Frame::Body,
+            role: tools::LineRole::Normal,
+            hint: true,
+            diagram: None,
+            reason: false,
+            md: None,
+            syntax: None,
+            image: None,
         }
     }
 
@@ -511,6 +564,7 @@ impl BodyLine {
             reason: false,
             md: None,
             syntax: None,
+            image: None,
         }
     }
 
@@ -529,6 +583,7 @@ impl BodyLine {
             reason: false,
             md: Some(pieces),
             syntax: None,
+            image: None,
         }
     }
 
@@ -545,6 +600,7 @@ impl BodyLine {
             reason: true,
             md: None,
             syntax: None,
+            image: None,
         }
     }
 }
@@ -622,8 +678,9 @@ fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
     // `chars.is_empty()` would also match a **synthesized** line that draws text but has no
     // source characters — the thinking channel's `◻ thinking · …` header or a tool block's
     // head (ADR 0028). `text.is_empty()` is the real "blank line"
-    // test; a synthesized line with text is content and must survive.
-    let blank = |line: &BodyLine| !line.hint && line.text.is_empty();
+    // test; a synthesized line with text is content and must survive. An image row (ADR 0028
+    // R10) is blank on purpose and must survive too: it is the image's own space.
+    let blank = |line: &BodyLine| !line.hint && line.image.is_none() && line.text.is_empty();
     let start = lines
         .iter()
         .position(|line| !blank(line))

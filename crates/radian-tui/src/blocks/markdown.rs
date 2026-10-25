@@ -312,6 +312,7 @@ fn frame_line(text: String, start: usize) -> BodyLine {
             offset: None,
         }]),
         syntax: None,
+        image: None,
     }
 }
 /// Lays one fenced code block out (ADR 0028 R9, ADR 0035): the fence
@@ -387,6 +388,7 @@ pub(super) fn code_lines(
                 offset: None,
             }]),
             syntax: Some(syntax),
+            image: None,
         });
     }
     if out.is_empty() {

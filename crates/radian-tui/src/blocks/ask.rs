@@ -88,6 +88,7 @@ fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
         reason: false,
         md: Some(md),
         syntax: None,
+        image: None,
     }
 }
 
