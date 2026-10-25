@@ -18,7 +18,7 @@ use radian_arc::gate::{
 use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
 use radian_arc::store::model::TaskState;
-use radian_arc::store::{Exit, Store, plan_ops};
+use radian_arc::store::{Exit, FollowupTask, Store, plan_ops};
 use serde_json::{Value, json};
 
 // ---- store-level fixture -------------------------------------------------------------
@@ -5450,6 +5450,262 @@ fn propose_followups_false_adds_no_task() {
             .tasks,
         vec![fixture.task.clone()]
     );
+}
+
+/// A store from before the field existed: its tasks merged without `followup_pending`, one of
+/// them with the old per-task follow-up that machine wrote. A scheduling pass collects
+/// nothing: the old merges' suggestions are not proposed again, and the old follow-up is not
+/// collected (ADR 0048 decision 10).
+///
+/// Mutation: drop the `followup_pending` check in `propose_followup` → the pass proposes a
+/// follow-up for the old merges.
+#[test]
+fn a_store_from_before_the_field_proposes_no_followup() {
+    let fixture = Fixture::new("followup-old-store");
+    fixture.add_review_stage();
+    let old = old_store_with_an_old_followup(&fixture);
+
+    let before = fixture
+        .store
+        .load_plan(&fixture.plan)
+        .expect("the plan")
+        .item
+        .tasks;
+    let mut lines: Vec<String> = Vec::new();
+    radian_arc::run::run(&fixture.store, &mut |line| lines.push(line.to_owned()))
+        .expect("the pass runs");
+    assert_eq!(
+        fixture
+            .store
+            .load_plan(&fixture.plan)
+            .expect("the plan")
+            .item
+            .tasks,
+        before,
+        "the pass proposed a follow-up for the old merges: {lines:?} (old task {old})"
+    );
+    assert!(
+        review::propose_followup(&fixture.store, &fixture.plan)
+            .expect("the check runs")
+            .is_none(),
+        "the check collected an old merge"
+    );
+}
+
+/// A task merged now carries `followup_pending`, and the plan's follow-up names only that
+/// task: a task merged before the field existed, and the old per-task follow-up, stay out of
+/// it (ADR 0048 decision 10).
+#[test]
+fn a_task_merged_now_collects_only_itself() {
+    let fixture = Fixture::new("followup-old-store-new");
+    fixture.add_review_stage();
+    old_store_with_an_old_followup(&fixture);
+    let new = fixture.add_ready_task("new", "A new task");
+
+    let merged = merge_with_suggestions(
+        &fixture,
+        &new,
+        "new.txt",
+        vec![item("minor", "new.txt", 1, "the new item")],
+    );
+    let followup = merged.followup.expect("the plan's follow-up").task;
+    let task = fixture
+        .store
+        .load_task(&followup)
+        .expect("the follow-up")
+        .item;
+    assert_eq!(
+        task.after,
+        vec![new.clone()],
+        "only the task merged under the rule"
+    );
+    assert!(
+        task.body.contains("- [minor] new.txt:1 the new item"),
+        "{}",
+        task.body
+    );
+    assert!(
+        !task.body.contains("old item"),
+        "an old merge's item came along: {}",
+        task.body
+    );
+    assert!(
+        fixture
+            .store
+            .load_task(&new)
+            .expect("the new task")
+            .item
+            .followup_pending,
+        "a task merged now carries the field"
+    );
+}
+
+/// `propose_followups` false at merge time leaves the task without the field: turning the
+/// switch back on later does not collect it (ADR 0048 decision 10).
+#[test]
+fn a_task_merged_while_the_switch_was_false_is_never_collected() {
+    let fixture = Fixture::new("followup-off-later");
+    fixture.add_review_stage();
+    fixture.tune("propose_followups = true", "propose_followups = false");
+    let merged = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "an item")],
+    );
+    assert!(merged.followup.is_none(), "{merged:?}");
+    assert!(
+        !fixture
+            .store
+            .load_task(&fixture.task)
+            .expect("the task")
+            .item
+            .followup_pending,
+        "a merge while the switch was off wrote the field"
+    );
+
+    fixture.tune("propose_followups = false", "propose_followups = true");
+    assert!(
+        review::propose_followup(&fixture.store, &fixture.plan)
+            .expect("the check runs")
+            .is_none(),
+        "the task is collected after the switch came back on"
+    );
+}
+
+/// A `confirm` between the scan and the write: the store function that appends the follow-up
+/// re-checks the plan's open-task condition under its own lock, so a task confirmed in
+/// between holds the follow-up back (ADR 0048 decision 10).
+///
+/// Mutation: drop the open-task re-check in `Store::add_followup` → the follow-up is added
+/// beside the open task.
+#[test]
+fn a_confirm_between_the_scan_and_the_write_adds_no_followup() {
+    let fixture = Fixture::new("followup-confirm-race");
+    fixture.add_review_stage();
+    // A merged task that merged under the rule, with a suggestion to collect.
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    write_passing_review_at(
+        &fixture,
+        &fixture.task,
+        &fixture.attempt_label(),
+        &head,
+        suggestions(vec![item("minor", "one.txt", 1, "an item")]),
+    );
+    fixture
+        .store
+        .change_task(&fixture.task, |task| {
+            task.state = TaskState::Done;
+            task.phase = "merged".to_owned();
+            task.followup_pending = true;
+            Ok(())
+        })
+        .expect("the task merged under the rule");
+    // The scan sees no open task: a `todo.proposed` task is not open (decision 10).
+    let proposed = fixture.add_proposed_task("idea", "An idea");
+
+    // What the scan collected, ready to append.
+    let draft = FollowupTask {
+        slug: format!("{}-followups", "p"),
+        title: format!("Follow-ups from {}'s reviews", fixture.plan),
+        after: vec![fixture.task.clone()],
+        allow_noop: true,
+        extra_stages: Vec::new(),
+        brief: "the items\n".to_owned(),
+    };
+    // The owner confirms a task before the write takes its lock: it is open now.
+    plan_ops::confirm(&fixture.store, &proposed).expect("the owner confirms the task");
+
+    let added = fixture
+        .store
+        .add_followup(&fixture.plan, |_, _| Ok(Some(draft)))
+        .expect("the write runs");
+    assert!(
+        added.is_none(),
+        "a follow-up was added while `{proposed}` is open: {added:?}"
+    );
+    let plan = fixture
+        .store
+        .load_plan(&fixture.plan)
+        .expect("the plan")
+        .item;
+    assert_eq!(
+        plan.tasks,
+        vec![fixture.task.clone(), proposed],
+        "the write added a task"
+    );
+}
+
+/// The shared setup of the two old-store tests: a task that merged before `followup_pending`
+/// existed, with a suggestion on record, and the old per-task follow-up that machine wrote,
+/// also merged and without the field. Returns the old task's id.
+fn old_store_with_an_old_followup(fixture: &Fixture) -> String {
+    let head = fixture.publish(&fixture.base.clone(), "old.txt", "old\n");
+    write_passing_review_at(
+        fixture,
+        &fixture.task,
+        &fixture.attempt_label(),
+        &head,
+        suggestions(vec![item("minor", "old.txt", 1, "an old item")]),
+    );
+    fixture
+        .store
+        .change_task(&fixture.task, |task| {
+            task.state = TaskState::Done;
+            task.phase = "merged".to_owned();
+            Ok(())
+        })
+        .expect("the old task merged without the field");
+    // A second old merge that no old follow-up names: only the field can keep it out.
+    let old_second = fixture.add_ready_task("old-second", "Another old task");
+    let second_head = fixture.publish_for(&old_second, &fixture.base, "older.txt", "older\n");
+    write_passing_review_at(
+        fixture,
+        &old_second,
+        &format!("{old_second}-1"),
+        &second_head,
+        suggestions(vec![item("minor", "older.txt", 1, "another old item")]),
+    );
+    fixture
+        .store
+        .change_task(&old_second, |task| {
+            task.state = TaskState::Done;
+            task.phase = "merged".to_owned();
+            Ok(())
+        })
+        .expect("the second old task merged without the field");
+    let old_followup = fixture
+        .store
+        .add_task_proposed(
+            &fixture.plan,
+            "work-followups",
+            &format!("Follow-ups from {}'s review", fixture.task),
+            vec![fixture.task.clone()],
+            true,
+            Vec::new(),
+            "The items below are from the review of the task.\n",
+        )
+        .expect("the old per-task follow-up");
+    fixture
+        .store
+        .change_task(&old_followup, |task| {
+            task.state = TaskState::Done;
+            task.phase = "merged".to_owned();
+            Ok(())
+        })
+        .expect("the old follow-up merged");
+    for id in [&fixture.task, &old_second, &old_followup] {
+        assert!(
+            !fixture
+                .store
+                .load_task(id)
+                .expect("the task")
+                .item
+                .followup_pending,
+            "`{id}` carries the field, so the store is not an old one"
+        );
+    }
+    old_followup
 }
 
 /// The follow-up takes the suggestions and nothing from `blocking`.

@@ -280,6 +280,18 @@ impl PlanView {
     }
 }
 
+/// One task [`Store::add_followup`] appends: everything except the id, which the store assigns
+/// under `state.lock` (ADR 0048 decision 10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowupTask {
+    pub slug: String,
+    pub title: String,
+    pub after: Vec<String>,
+    pub allow_noop: bool,
+    pub extra_stages: Vec<String>,
+    pub brief: String,
+}
+
 /// What `show <id>` found. The task variant is the larger one (a task file has the attempt
 /// fields); `show` returns one at a time, so the difference costs nothing.
 #[allow(clippy::large_enum_variant)]
@@ -730,21 +742,118 @@ impl Store {
         // The tasks decide too: a plan whose tasks are all `failed.cancelled` is cancelled, so
         // a task added here would bring a final plan back to life (ADR 0048 decisions 3 and 9).
         self.refuse_cancelled(plan_id)?;
-        let proposed = if plan.item.status == "draft" {
+        self.append_task_locked(
+            plan.item,
+            slug,
+            title,
+            after,
+            allow_noop,
+            extra_stages,
+            brief,
+            allow_confirmed,
+        )
+    }
+
+    /// Adds the plan's review follow-up in one transaction (ADR 0048 decision 10).
+    ///
+    /// `build` runs under `state.lock` with the plan and its tasks as they are then, and
+    /// returns the `todo.proposed` task to append, or `None` when there is nothing to add.
+    /// The plan's cancelled state and its open-task condition are re-checked here, under the
+    /// same lock that writes, and `build` sees the tasks as they are now, so an owner's
+    /// `confirm` between a scheduling pass's read and its write cannot add a follow-up to a
+    /// plan that now has an open task. A plan without an open task is the only one the
+    /// closure runs for.
+    ///
+    /// # Errors
+    ///
+    /// The plan file changed outside arc, a task file could not be read, or `build` failed.
+    pub fn add_followup<F>(&self, plan_id: &str, build: F) -> Result<Option<String>, Error>
+    where
+        F: FnOnce(
+            &model::PlanFile,
+            &[Loaded<model::TaskFile>],
+        ) -> Result<Option<FollowupTask>, Error>,
+    {
+        check_id(plan_id)?;
+        let _lock = self.lock_state()?;
+        let plan = self.load_plan(plan_id)?;
+        require_unchanged(plan_id, plan.changed_outside_arc)?;
+        let plan = plan.item;
+        let mut tasks = Vec::new();
+        for id in &plan.tasks {
+            // A task file a person deleted is left out, as `plan_view` leaves it out.
+            if self.path(Kind::Task, id).is_file() {
+                tasks.push(self.load_task(id)?);
+            }
+        }
+        // A cancelled plan is final, and a plan whose tasks are all `failed.cancelled` is
+        // cancelled too (ADR 0048 decisions 3 and 9).
+        if plan.is_cancelled()
+            || (!tasks.is_empty() && tasks.iter().all(|task| task.item.is_cancelled()))
+        {
+            return Ok(None);
+        }
+        // The open-task condition is checked here, not only by the caller: a `confirm`
+        // between the caller's read and this lock makes a task open (ADR 0048 decision 10).
+        if tasks.iter().any(|task| task.item.is_open()) {
+            return Ok(None);
+        }
+        let Some(FollowupTask {
+            slug,
+            title,
+            after,
+            allow_noop,
+            extra_stages,
+            brief,
+        }) = build(&plan, &tasks)?
+        else {
+            return Ok(None);
+        };
+        self.append_task_locked(
+            plan,
+            &slug,
+            &title,
+            after,
+            allow_noop,
+            extra_stages,
+            &brief,
+            true,
+        )
+        .map(Some)
+    }
+
+    /// Appends one task to a plan, in one transaction: the task file, its ledger entry, and
+    /// the plan's `tasks` list. The caller holds `state.lock` and has checked the plan.
+    #[allow(clippy::too_many_arguments)]
+    fn append_task_locked(
+        &self,
+        plan: model::PlanFile,
+        slug: &str,
+        title: &str,
+        after: Vec<String>,
+        allow_noop: bool,
+        extra_stages: Vec<String>,
+        brief: &str,
+        allow_confirmed: bool,
+    ) -> Result<String, Error> {
+        check_new(slug, title)?;
+        check_stages(&extra_stages)?;
+        let plan_id = plan.id.clone();
+        let proposed = if plan.status == "draft" {
             false
-        } else if plan.item.status == "confirmed" && allow_confirmed {
+        } else if plan.status == "confirmed" && allow_confirmed {
             true
         } else {
             return Err(Error::Refused(format!(
                 "plan `{plan_id}` is `{}`; a confirmed plan gets no new tasks",
-                plan.item.status
+                plan.status
             )));
         };
-        check_after(self, plan_id, None, &after)?;
+        check_after(self, &plan_id, None, &after)?;
         let id = self.next_id(Kind::Task, slug)?;
         let mut task = model::TaskFile::new(
             id.clone(),
-            plan_id.to_owned(),
+            plan_id.clone(),
             title.trim().to_owned(),
             after,
             allow_noop,
@@ -757,10 +866,10 @@ impl Store {
         // The task file comes first: a crash between the two writes leaves an unlisted task
         // file, which is visible, instead of a plan that names a file that does not exist.
         self.write_item(Kind::Task, &id, &task.to_text(), 1)?;
-        let mut plan = plan.item;
+        let mut plan = plan;
         plan.tasks.push(id.clone());
-        let version = self.next_version(Kind::Plan, plan_id);
-        self.write_item(Kind::Plan, plan_id, &plan.to_text(), version)?;
+        let version = self.next_version(Kind::Plan, &plan_id);
+        self.write_item(Kind::Plan, &plan_id, &plan.to_text(), version)?;
         Ok(id)
     }
 
@@ -1274,6 +1383,9 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             }
             if last.retry_count != current.retry_count {
                 touched.push("retry_count");
+            }
+            if last.followup_pending != current.followup_pending {
+                touched.push("followup_pending");
             }
             if last.retry_at != current.retry_at {
                 touched.push("retry_at");

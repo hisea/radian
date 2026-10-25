@@ -367,6 +367,12 @@ pub struct TaskFile {
     /// conflict rework keeps it.
     pub retry_count: u32,
     pub allow_noop: bool,
+    /// Whether the task merged under the review follow-up rule: arc writes it when the task
+    /// reaches `done.merged` while `[gate.review] propose_followups` is `true` and the task is
+    /// not itself a follow-up (ADR 0048 decision 10). Only a task that carries it is
+    /// collected by the plan's follow-up. Absent reads `false`, so a task merged before the
+    /// field existed is never collected.
+    pub followup_pending: bool,
     /// Gate stages this brief adds to the profile's.
     pub extra_stages: Vec<String>,
     pub max_attempts: Option<u32>,
@@ -398,6 +404,17 @@ impl TaskFile {
     /// not counted in its plan's progress.
     pub fn is_cancelled(&self) -> bool {
         self.state == TaskState::Failed && self.phase == "cancelled"
+    }
+
+    /// Whether the task is open in its plan (ADR 0048 decision 10): `todo.ready`, `doing.*` or
+    /// `review.*`. A `todo.proposed` task waits for the owner, and a `done.*` or `failed.*`
+    /// task is finished, so none of them holds the plan's follow-up back.
+    pub fn is_open(&self) -> bool {
+        match self.state {
+            TaskState::Todo => self.phase == "ready",
+            TaskState::Doing | TaskState::Review => true,
+            TaskState::Done | TaskState::Failed => false,
+        }
     }
 
     /// Whether the owner's `cancel` accepts the task (ADR 0048 decision 9): a `todo`, `doing`
@@ -459,6 +476,7 @@ impl TaskFile {
             auto_rework: 0,
             retry_count: 0,
             allow_noop,
+            followup_pending: false,
             extra_stages,
             max_attempts: None,
             max_cost_usd: None,
@@ -506,6 +524,9 @@ impl TaskFile {
             out.push_str(&format!("retry_count: {}\n", self.retry_count));
         }
         out.push_str(&format!("allow_noop: {}\n", self.allow_noop));
+        if self.followup_pending {
+            out.push_str("followup_pending: true\n");
+        }
         out.push_str(&frontmatter::list_field("extra_stages", &self.extra_stages));
         if let Some(limit) = self.max_attempts {
             out.push_str(&format!("max_attempts: {limit}\n"));
@@ -592,6 +613,7 @@ impl TaskFile {
         let auto_rework = fields.optional_u32("auto_rework")?.unwrap_or(0);
         let retry_count = fields.optional_u32("retry_count")?.unwrap_or(0);
         let allow_noop = fields.optional_bool("allow_noop")?.unwrap_or(false);
+        let followup_pending = fields.optional_bool("followup_pending")?.unwrap_or(false);
         let extra_stages = fields.optional_list("extra_stages")?;
         for stage in &extra_stages {
             if !STAGE_NAMES.contains(&stage.as_str()) {
@@ -635,6 +657,7 @@ impl TaskFile {
             auto_rework,
             retry_count,
             allow_noop,
+            followup_pending,
             extra_stages,
             max_attempts,
             max_cost_usd,
@@ -824,6 +847,7 @@ mod tests {
             auto_rework: 2,
             retry_count: 1,
             allow_noop: true,
+            followup_pending: true,
             extra_stages: vec!["mutation".to_owned(), "review".to_owned()],
             max_attempts: Some(2),
             max_cost_usd: Some(1.5),
@@ -914,6 +938,25 @@ mod tests {
         assert_eq!(read.cost_usd, Some(1.75));
         assert_eq!(read.total_cost_usd, Some(1.75));
         assert!(read.to_text().contains("total_cost_usd: 1.75"));
+    }
+
+    #[test]
+    fn an_absent_followup_pending_reads_false() {
+        let mut task = sample_task();
+        task.followup_pending = false;
+        let text = task.to_text();
+        assert!(!text.contains("followup_pending:"), "{text}");
+        assert!(
+            !TaskFile::from_text(&text)
+                .expect("an older file reads")
+                .followup_pending
+        );
+        task.followup_pending = true;
+        assert!(
+            TaskFile::from_text(&task.to_text())
+                .expect("the field reads")
+                .followup_pending
+        );
     }
 
     #[test]

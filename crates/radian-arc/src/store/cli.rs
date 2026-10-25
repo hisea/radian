@@ -512,6 +512,11 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 &item.supersedes.clone().unwrap_or_else(|| "-".to_owned()),
             );
             field(&mut out, "allow_noop", &item.allow_noop.to_string());
+            field(
+                &mut out,
+                "followup_pending",
+                &item.followup_pending.to_string(),
+            );
             field(&mut out, "extra_stages", &joined(&item.extra_stages));
             field(
                 &mut out,
@@ -702,6 +707,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "after": item.after,
         "supersedes": item.supersedes,
         "allow_noop": item.allow_noop,
+        "followup_pending": item.followup_pending,
         "extra_stages": item.extra_stages,
         "max_attempts": item.max_attempts,
         "max_cost_usd": item.max_cost_usd,
