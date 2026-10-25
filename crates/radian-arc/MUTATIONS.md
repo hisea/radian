@@ -879,3 +879,23 @@ nextest run -p radian-arc --locked --profile sandbox`, and the file was restored
 | TK0112-M2 | return the repeated-error stop line without `say` | `run::three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock` (`loop.log is missing the stop line`) | ✅ failed |
 
 2/2 caught.
+
+## TK0112 rework: the stop line is logged, not printed twice (2026-10-24, branch `work/TK0112-serve-reexec-followups`)
+
+The review of the first attempt found that both stop lines went through the sink as well as
+into the returned error, so `radian arc serve` printed them on stdout and the CLI printed the
+same `radian arc:` line on stderr. The repeated-error stop now writes its line straight to
+`LoopLog`, and so does the failed-`exec` lock-retake failure; the sink carries only the line
+the loop actually prints (`cannot restart with the new binary: …`). The M1 and M2 rows above
+record the first attempt's `say` implementation; these rows re-check the final code. Each
+mutation was applied to the working `crates/radian-arc/src/run.rs`, the `radian` binary was
+rebuilt with `cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture`,
+the named tests ran with `cargo nextest run -p radian-arc --locked --profile sandbox`, and the
+file was restored from `.radian/bak/run.rs.rework2` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0112-M3 | emit the repeated-error stop line through the sink as well (`say` instead of the direct `log.write`) | `run::three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock` (`the stop line is on stdout too`) | ✅ failed |
+| TK0112-M4 | return the lock-retake failure without the direct `log.write` (both branches) | `run::tests::a_failed_restart_that_cannot_retake_the_lock_logs_the_reason_before_it_stops`, `run::tests::a_failed_restart_that_cannot_open_the_lock_logs_the_reason_before_it_stops` (`loop.log is missing the stop line`) | ✅ 2 failed |
+
+2/2 caught.

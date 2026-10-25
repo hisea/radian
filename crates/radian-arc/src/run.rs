@@ -251,13 +251,10 @@ pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
                 };
                 if count >= REPEATED_ERROR_LIMIT {
                     stop_gates(store);
-                    // The stop line is a line this loop prints, so it goes to `loop.log` like
-                    // every other `radian arc:` line; the caller prints it once more on stderr.
-                    say(
-                        &mut log,
-                        emit,
-                        &format!("radian arc: {}\n", repeated_error_stop()),
-                    );
+                    // The stop line is the error this loop returns, so the CLI prints it once on
+                    // stderr; the log gets it directly, never through the sink, so stdout does
+                    // not repeat it (ADR 0048 decision 13).
+                    log.write(&format!("radian arc: {}\n", repeated_error_stop()));
                     return Err(Error::Failed(repeated_error_stop()));
                 }
                 say(&mut log, emit, &format!("radian arc: {text}\n"));
@@ -382,8 +379,9 @@ fn changed_binary(
 
 /// Prints the failed `exec` and takes `runner.lock` again. When the lock cannot be taken —
 /// another process took it in the gap, or the file cannot be opened — the reason the loop stops
-/// goes through the loop's logger too, so `loop.log` holds every `radian arc:` line `serve`
-/// prints (ADR 0048 decision 13); the caller then exits `1` with the same text.
+/// is appended to the loop's log before the error is returned, so `loop.log` holds every
+/// `radian arc:` line `serve` prints (ADR 0048 decision 13) without printing the line twice: the
+/// caller prints the returned error once, on stderr.
 fn take_lock_after_failed_exec(
     store: &Store,
     log: &mut LoopLog,
@@ -406,7 +404,7 @@ fn take_lock_after_failed_exec(
             error.message()
         ),
     };
-    say(log, emit, &format!("radian arc: {text}\n"));
+    log.write(&format!("radian arc: {text}\n"));
     Err(Error::Failed(text))
 }
 
@@ -1402,9 +1400,10 @@ mod tests {
     }
 
     /// A restart whose `exec` failed and whose lock another process took in the gap stops the
-    /// loop with a line that also reaches `loop.log`: the log holds every `radian arc:` line
-    /// `serve` prints (ADR 0048 decision 13). Mutation: return the error without `say` and the
-    /// log and the sink keep only the `cannot restart` line.
+    /// loop with a line that reaches `loop.log` without a second visible copy: the CLI prints the
+    /// returned error on stderr, the sink carries only the printed `cannot restart` line, and the
+    /// log holds every `radian arc:` line `serve` prints (ADR 0048 decision 13). Mutation: drop
+    /// the `log.write` of the returned error and `loop.log` keeps only the `cannot restart` line.
     #[test]
     fn a_failed_restart_that_cannot_retake_the_lock_logs_the_reason_before_it_stops() {
         let dir = crate::test_support::TempDir::new("restart-lock-held");
@@ -1430,10 +1429,11 @@ mod tests {
              process"
         );
         assert_eq!(error.message(), expected);
-        let said = format!(
-            "radian arc: cannot restart with the new binary: {exec_error}\nradian arc: {expected}\n"
+        let said = format!("radian arc: cannot restart with the new binary: {exec_error}\n");
+        assert_eq!(
+            emitted, said,
+            "the sink repeated the stop line the CLI prints on stderr"
         );
-        assert_eq!(emitted, said, "the sink saw the stop line");
         let written = std::fs::read_to_string(log.path()).expect("loop.log");
         assert!(
             written.contains(&format!("radian arc: {expected}")),
@@ -1465,8 +1465,8 @@ mod tests {
         );
         let line = format!("radian arc: {}", error.message());
         assert!(
-            emitted.ends_with(&format!("{line}\n")),
-            "the sink: {emitted}"
+            !emitted.contains(&line),
+            "the sink repeated the stop line the CLI prints on stderr: {emitted}"
         );
         let written = std::fs::read_to_string(log.path()).expect("loop.log");
         assert!(

@@ -1757,6 +1757,12 @@ fn three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock() {
         stderr.contains(&stop),
         "the stop line is missing: {stdout}{stderr}"
     );
+    // The stop line is printed once, on stderr by the CLI: the loop logs it without emitting it
+    // through the sink, so stdout carries no second copy (ADR 0048 decision 13).
+    assert!(
+        !stdout.contains(&stop),
+        "the stop line is on stdout too: {stdout}"
+    );
     // The stop line is a line `serve` prints, so `loop.log` holds it like every other
     // `radian arc:` line (ADR 0048 decision 13).
     let logged = fs::read_to_string(repo.arc().join("loop.log")).expect("loop.log");
