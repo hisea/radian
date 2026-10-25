@@ -84,6 +84,7 @@ The renderer is grok-build `mermaid.rs`; details live in **ADR 0042**. This ADR 
 
 ### R10 Images in the transcript
 
+- **`read` of an image takes no range**: an image is read whole, so `offset` and `limit` have no meaning for it. `read` ignores them and, when either is given, adds one line to the text part: `offset and limit ignored: an image is read whole`. No `image_offset` error exists.
 - A `ContentPart::Image` in a user message or a tool result is drawn as the image itself where the terminal has a graphics protocol, and as half blocks where it has none. The `[image: <source>, W×H, N KB]` placeholder row (R5) stays directly above it and is the only row selection, copy, Ctrl-F and `--export` see; the image rows carry no characters at all. `--export` is the journal projection and keeps its `[<mime> image omitted]` text.
 - The image occupies a fixed run of `IMAGE_HEIGHT_ROWS` (12) rows in the body column (text starts at column 3, ADR 0035). Its width follows the image's aspect ratio from the terminal's cell pixel size, and an image wider than the body column is scaled down to the body column's width. The count and the drawing share one layout, so scrolling stays exact.
 - **Fold**: a tool result's image rows draw only when its body is drawn in full (the `expanded` fold, or a failed result, whose body is never folded). Under `collapsed`, and for a successful result under `errors`, only the placeholder row draws. A user message has no fold, so its images always draw.

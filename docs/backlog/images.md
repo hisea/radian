@@ -39,7 +39,7 @@
 
 **Q2 剪贴板和拖拽都由 host 直接拿字节，不落盘。** pi 写临时文件再插路径，到 radian 这里有读根问题：workspace 档下 `read` 只能读工作区和 ADR 0039 §4 的只读根，`os.tmpdir()` 和 `~/Desktop` 都不在里面。所以 host 当场把字节做成 `ContentPart::Image` 挂在用户消息上，模型拿到图不拿路径；transcript 显示 `[image: clipboard, W×H, N KB]` 或 `[image: <文件名>, W×H, N KB]`。ADR 0020 布局和 0039 读根都不动。
 
-**Q3 `read` 返回形状跟 pi 一样：** 一个文本 part（`Read image file [image/png] 1200×800`）加一个 `Image` part。不另开 `view_image` 工具（Codex 的做法多一个工具定义，每轮多付字节，和 0043 §4 的工具数也要再谈）。识别靠魔数（PNG / JPEG / GIF / WebP），不靠扩展名；BMP 不收（Anthropic 不收 BMP）。`read` 的 `offset`/`limit` 对图无意义，传了就报错。读根规则不变：图和文本走同一个 `RootDir`。
+**Q3 `read` 返回形状跟 pi 一样：** 一个文本 part（`Read image file [image/png] 1200×800`）加一个 `Image` part。不另开 `view_image` 工具（Codex 的做法多一个工具定义，每轮多付字节，和 0043 §4 的工具数也要再谈）。识别靠魔数（PNG / JPEG / GIF / WebP），不靠扩展名；BMP 不收（Anthropic 不收 BMP）。`read` 的 `offset`/`limit` 对图无意义，传了忽略，文本行里加一句说明。读根规则不变：图和文本走同一个 `RootDir`。
 
 **Q4 限额和缩放。** 不重编码：单图原始字节 ≤ 5 MiB（Anthropic API 的上限；OpenAI 更宽），像素 ≤ 8000×8000（Anthropic 上限），长边 > 1568 的只在 `read` 的说明文本里提示「服务端会缩放」。读尺寸只解头部（`imagesize` crate，几百行，无 decode）。超限 → `read` 返回错误 `image_too_large`，`@`、拖拽、剪贴板返回 unusable，`exec --image` 按参数错误退出。本地缩到 1568 不做：`image` crate 因 Q8 已经要进来，但缩放是重编码，这一项只用它解码取尺寸和渲染；要不要本地缩放等有实测 token 差再开一条。
 
@@ -67,7 +67,7 @@
 
 ## 涉及的输入（手册要写）
 
-- `read` 工具：描述改成「text file, directory, or image」；新错误码 `image_too_large`、`image_offset`。
+- `read` 工具：描述改成「text file, directory, or image」；新错误码 `image_too_large`；`offset`/`limit` 对图忽略并在文本里说明。
 - `@path`：指向 PNG / JPEG / GIF / WebP 时附图；限额两个常量。
 - `radian exec --image <PATH>`：可重复，和 `-p` 一起用；超限退出码按 0032 的参数错误。
 - 键：剪贴板贴图的键绑定，缺省 Ctrl-V，可重绑。
