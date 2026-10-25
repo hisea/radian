@@ -160,7 +160,9 @@ doubling, capped at 5 minutes). Cost is the
 reached task or plan budget pauses the task at `todo.paused_budget` instead of retrying, and a
 plan budget also sets the plan's `auto` to `off`. `record_auto_rework` counts a stage or
 integration failure while the plan is not `off` in the task's `auto_rework`; past
-`[limits] max_auto_rework` it writes `paused.json` and sets the plan's `auto` to `off`.
+`[limits] max_auto_rework` it writes `paused.json` marked `pending`, sets the plan's `auto` to
+`off`, and then clears the marker, so a reader between the two writes knows the pause is still
+to come and an applied record is one an earlier pause left.
 
 `attempt_ops::apply` counts retries, not attempts: a retryable failure raises the task's
 `retry_count` and sets `todo.retry_wait` while the count is below the task's `max_attempts`

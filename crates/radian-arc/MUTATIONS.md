@@ -928,3 +928,62 @@ a copy under `.radian/`, which `cmp` found identical.
 | TK0114-M2 | leave exhausted tasks alone in the plan form (`cancel_plan_tasks` filters on the old `todo`/`doing`/`review` states) | `attempt::cancelling_a_plan_ends_its_exhausted_and_irrecoverable_tasks` (no task line: the count is 0) | ✅ failed |
 
 2/2 caught.
+
+## TK0115: the channel keeps the pause reason a read saw before `auto` turned off (2026-10-24, branch `work/TK0115-channel-owner-actions-followups`)
+
+ADR 0048 decision 11: the automatic rework limit writes `paused.json` and then sets the plan's
+`auto` to `off` in a second write. A poller read between the two writes finds the record on a
+plan that still runs; the paused read after it must still report the record as that pause's
+reason, while a record an earlier pause left stays out of a later manual pause. The mutation was
+applied by hand to the working `crates/radian-arc/src/mcp/mod.rs`, `radian` was rebuilt because
+the integration test drives the real binary, the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_mcp -E '<the test
+below>'`, and the file was restored from `.radian/mut/mcp.mod.rs.bak` with `cp`, which `cmp`
+found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0115-M1 | `carry_pause_records` is not called, so a record a read finds while the plan still runs becomes the previous read's record and suppresses the pause's reason | `arc_mcp::a_pause_record_read_before_auto_turned_off_is_the_pause_reason` (the pause event arrived with no second line: `PL0001-pause-race paused false -> true`) | ✅ failed |
+
+1/1 caught.
+
+## TK0115 rework 1: the baseline read does not lose the pause record it finds (2026-10-24, branch `work/TK0115-channel-owner-actions-followups`)
+
+ADR 0048 decision 11: a record a read finds while the plan is not paused belongs to no pause
+yet, so the pause that follows reports it. The poller's first read has no previous read to carry
+from; it now carries nothing for a running plan rather than keeping the record it found, so the
+record is still the following pause's reason. The record of a pause an earlier read saw stays on
+the snapshot across the resume, so a later manual pause still sends no second line. Each mutation
+was applied by hand to the working `crates/radian-arc/src/mcp/mod.rs`, `radian` was rebuilt
+because the integration test drives the real binary, the named tests ran alone with `cargo
+nextest run -p radian-arc --locked --profile sandbox -E '<the test below>'` and `cargo nextest
+run -p radian-tui --locked --profile sandbox --test arc_mcp -E '<the test below>'`, and the file
+was restored from `.radian/mut/mcp.mod.rs.tk0115-m2.bak` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0115-M2 | `carry_pause_records` leaves a running plan's record in place when there is no previous read, so the baseline read keeps the record and the pause that follows suppresses its reason | `mcp::tests::a_pause_record_seen_while_the_plan_still_ran_is_kept_for_its_pause` (`left: None`), `arc_mcp::a_pause_record_the_baseline_read_before_auto_turned_off_is_the_pause_reason` (`PL0001-pause-race-baseline paused false -> true` with no second line) | ✅ 2 failed |
+
+1/1 caught.
+
+## TK0115 rework 2: the record's applied marker tells a pause in progress from a stale one (2026-10-24, branch `work/TK0115-channel-owner-actions-followups`)
+
+ADR 0048 decisions 11 and 12: `record_auto_rework` writes `paused.json` marked `pending`, sets
+the plan's `auto` to `off`, and then clears the marker. The channel keeps a record a running
+plan still shows only while the marker says its pause has not been applied, so the poller's
+first read reports the pause that follows; an applied record on a running plan belongs to a
+pause that already ended, so the owner's next manual pause repeats neither its text. Each
+mutation was applied by hand, `radian` was rebuilt because the integration test drives the real
+binary, the named tests ran alone with `cargo nextest run -p radian-arc --locked --profile
+sandbox -E '<the test below>'` and `cargo nextest run -p radian-tui --locked --profile sandbox
+--test arc_mcp -E '<the test below>'`, and the file was restored with `cp`, which `cmp` found
+identical: `crates/radian-arc/src/store/attempt_ops.rs` from
+`.radian/mut/attempt_ops.rs.tk0115-m3.bak`, and `crates/radian-arc/src/mcp/mod.rs` from
+`.radian/mut/mcp.mod.rs.tk0115-m4.bak`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0115-M3 | `record_auto_rework` leaves the record `pending` after the plan write (the clearing write dropped) | `arc_mcp::a_stale_pause_record_read_at_the_baseline_is_not_the_manual_pause_reason` (the manual pause repeated the old automatic reason) | ✅ failed |
+| TK0115-M4 | `pause_reason` ignores the marker and suppresses whenever the previous read has the same record id | `mcp::tests::a_pause_record_seen_while_the_plan_still_ran_is_kept_for_its_pause` (`left: None`), `arc_mcp::a_pause_record_the_baseline_read_before_auto_turned_off_is_the_pause_reason` (`PL0001-pause-race-baseline paused false -> true` with no second line) | ✅ 2 failed |
+
+2/2 caught.

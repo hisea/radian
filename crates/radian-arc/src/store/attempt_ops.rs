@@ -1457,7 +1457,7 @@ pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>
         "the plan paused: task {task_id} used {count} automatic reworks and the auto rework \
          limit is {max}"
     );
-    let record = json!({
+    let mut record = json!({
         "kind": "auto_rework",
         "task": task_id,
         "plan": plan.item.id,
@@ -1465,18 +1465,24 @@ pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>
         "max_auto_rework": max,
         "text": text,
         "at": super::plan_ops::utc_now(),
+        // The plan's `auto` is still on: this record announces a pause that has not been
+        // applied yet, and the marker stays until the plan write below has happened. A read
+        // in between, the channel's first read included, is the pause's reason (decision 11).
+        "pending": true,
     });
     let dir = run_dir(store, task_id, task.attempt);
-    if fs::create_dir_all(&dir).is_ok()
-        && let Ok(body) = serde_json::to_string_pretty(&record)
-    {
-        let _ = fs::write(dir.join(PAUSED_FILE), format!("{body}\n"));
-    }
+    write_pause_record(&dir, &record);
     let plan_id = plan.item.id.clone();
-    store.change_plan(&plan_id, |plan| {
+    let changed = store.change_plan(&plan_id, |plan| {
         plan.auto = "off".to_owned();
         Ok(())
-    })?;
+    });
+    // The record no longer announces a pause to come, whether the plan write applied it or
+    // failed: in the second case no pause is left to report, so no later read may treat the
+    // record's text as a pause's reason.
+    record["pending"] = json!(false);
+    write_pause_record(&dir, &record);
+    changed?;
     Ok(Some(Paused {
         task: task_id.to_owned(),
         plan: plan_id,
@@ -1484,6 +1490,17 @@ pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>
         max_auto_rework: max,
         text,
     }))
+}
+
+/// Writes one attempt's `paused.json`. A path arc cannot write never fails the pause itself:
+/// the plan still pauses and the reason is still in the returned [`Paused`]; only the reason
+/// `show` prints from the record is lost.
+fn write_pause_record(dir: &Path, record: &Value) {
+    if fs::create_dir_all(dir).is_ok()
+        && let Ok(body) = serde_json::to_string_pretty(record)
+    {
+        let _ = fs::write(dir.join(PAUSED_FILE), format!("{body}\n"));
+    }
 }
 
 /// The plan `arc` paused through `task`'s current attempt: the `plan` field of the
