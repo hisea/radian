@@ -1,0 +1,1 @@
+{"type":"Result","session_id":"radian-fix-git","outcome":"completed","exit_code":0,"stop_reason":"completed","turns":1,"usage":{"input":3000,"output":17500,"cache_read":200},"cost":{"micros":12000},"text":"Done."}

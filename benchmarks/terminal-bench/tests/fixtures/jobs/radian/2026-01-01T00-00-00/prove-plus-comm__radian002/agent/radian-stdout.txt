@@ -1,0 +1,1 @@
+{"type":"Result","session_id":"radian-prove","outcome":"incomplete","exit_code":4,"stop_reason":"max_tokens","turns":1,"usage":{"input":1200,"output":4000},"cost":{"micros":3000},"text":"Trying."}

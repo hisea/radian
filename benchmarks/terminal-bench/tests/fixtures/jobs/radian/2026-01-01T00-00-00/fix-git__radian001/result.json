@@ -1,0 +1,37 @@
+{
+  "id": "1f0a6c0e-0000-4000-8000-000000000001",
+  "task_name": "fix-git",
+  "trial_name": "fix-git__radian001",
+  "agent_info": {
+    "name": "radian",
+    "version": "0.2.0"
+  },
+  "agent_result": {
+    "n_input_tokens": 3000,
+    "n_cache_tokens": 200,
+    "n_output_tokens": 17500,
+    "cost_usd": 0.0125,
+    "metadata": {
+      "agent": "radian",
+      "return_code": 0,
+      "exit_code": 0,
+      "stop_reason": "completed"
+    }
+  },
+  "verifier_result": {
+    "rewards": {
+      "reward": 1.0
+    }
+  },
+  "exception_info": null,
+  "started_at": "2026-01-01T00:00:00Z",
+  "finished_at": "2026-01-01T00:04:10Z",
+  "agent_execution": {
+    "started_at": "2026-01-01T00:00:00Z",
+    "finished_at": "2026-01-01T00:04:00Z"
+  },
+  "verifier": {
+    "started_at": "2026-01-01T00:04:00Z",
+    "finished_at": "2026-01-01T00:04:10Z"
+  }
+}

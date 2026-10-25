@@ -1,0 +1,39 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "trajectory_id": "opencode-fix-git",
+  "session_id": "opencode-fix-git",
+  "agent": {
+    "name": "opencode",
+    "version": "1.0.0",
+    "model_name": "opencode-go/deepseek-v4.1-flash"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "fix the repo"
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-01-01T00:00:20Z",
+      "source": "agent",
+      "model_name": "opencode-go/deepseek-v4.1-flash",
+      "message": "Trying.",
+      "llm_call_count": 1,
+      "metrics": {
+        "prompt_tokens": 700,
+        "completion_tokens": 400,
+        "cost_usd": 0.005,
+        "extra": {
+          "reasoning_tokens": 50
+        }
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 700,
+    "total_completion_tokens": 400,
+    "total_cost_usd": 0.005,
+    "total_steps": 2
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "trajectory_id": "pi-fix-git",
+  "session_id": "pi-fix-git",
+  "agent": {
+    "name": "pi",
+    "version": "0.85.1",
+    "model_name": "opencode-go/deepseek-v4.1-flash"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "fix the repo"
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-01-01T00:00:00Z",
+      "source": "agent",
+      "model_name": "opencode-go/deepseek-v4.1-flash",
+      "message": "checking",
+      "llm_call_count": 1,
+      "metrics": {
+        "prompt_tokens": 1000,
+        "completion_tokens": 500,
+        "cached_tokens": 100,
+        "cost_usd": 0.01,
+        "extra": {
+          "reasoning_tokens": 120
+        }
+      }
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-01-01T00:01:30Z",
+      "source": "agent",
+      "model_name": "opencode-go/deepseek-v4.1-flash",
+      "message": "Done.",
+      "llm_call_count": 1,
+      "metrics": {
+        "prompt_tokens": 2000,
+        "completion_tokens": 20000,
+        "cost_usd": 0.01,
+        "extra": {
+          "reasoning_tokens": 300
+        }
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 3000,
+    "total_completion_tokens": 20500,
+    "total_cached_tokens": 100,
+    "total_cost_usd": 0.02,
+    "total_steps": 3
+  }
+}

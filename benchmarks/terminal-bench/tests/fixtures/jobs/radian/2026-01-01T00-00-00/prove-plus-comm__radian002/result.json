@@ -1,0 +1,32 @@
+{
+  "id": "1f0a6c0e-0000-4000-8000-000000000002",
+  "task_name": "prove-plus-comm",
+  "trial_name": "prove-plus-comm__radian002",
+  "agent_info": {
+    "name": "radian",
+    "version": "0.2.0"
+  },
+  "agent_result": {
+    "n_input_tokens": 1200,
+    "n_output_tokens": 4000,
+    "cost_usd": 0.003,
+    "metadata": {
+      "agent": "radian",
+      "return_code": 4,
+      "exit_code": 4,
+      "stop_reason": "max_tokens"
+    }
+  },
+  "verifier_result": {
+    "rewards": {
+      "reward": 0.0
+    }
+  },
+  "exception_info": null,
+  "started_at": "2026-01-01T00:10:00Z",
+  "finished_at": "2026-01-01T00:15:10Z",
+  "agent_execution": {
+    "started_at": "2026-01-01T00:10:00Z",
+    "finished_at": "2026-01-01T00:15:00Z"
+  }
+}

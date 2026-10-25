@@ -1,0 +1,39 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "trajectory_id": "pi-prove",
+  "session_id": "pi-prove",
+  "agent": {
+    "name": "pi",
+    "version": "0.85.1",
+    "model_name": "opencode-go/deepseek-v4.1-flash"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "prove commutativity"
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-01-01T00:00:30Z",
+      "source": "agent",
+      "model_name": "opencode-go/deepseek-v4.1-flash",
+      "message": "Trying.",
+      "llm_call_count": 1,
+      "metrics": {
+        "prompt_tokens": 900,
+        "completion_tokens": 100,
+        "cost_usd": 0.001,
+        "extra": {
+          "reasoning_tokens": 0
+        }
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 900,
+    "total_completion_tokens": 100,
+    "total_cost_usd": 0.001,
+    "total_steps": 2
+  }
+}

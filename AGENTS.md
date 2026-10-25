@@ -30,6 +30,7 @@ cargo nextest run -p radian-core --locked --features journal-selfcheck --no-fail
 cargo clippy -p radian-core --all-targets --features journal-selfcheck -- -D warnings
 bash docs/schema/check-fixtures.sh
 bash docs/schema/check-config-fixtures.sh
+python3 benchmarks/terminal-bench/metrics.py --self-test
 ```
 
 `scripts/verify.sh` runs exactly that list, in that order, after the two binary builds (`radian` and `mcp-fixture`) and before the three provider contract suites; a docs drift test reads this block and the script's `run_step` lines and fails when they differ.

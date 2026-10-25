@@ -1,0 +1,28 @@
+{
+  "id": "1f0a6c0e-0000-4000-8000-000000000011",
+  "task_name": "fix-git",
+  "trial_name": "fix-git__pi001",
+  "agent_info": {
+    "name": "pi",
+    "version": "0.85.1"
+  },
+  "agent_result": {
+    "n_input_tokens": 3000,
+    "n_cache_tokens": 100,
+    "n_output_tokens": 20500,
+    "cost_usd": 0.02,
+    "metadata": {}
+  },
+  "verifier_result": {
+    "rewards": {
+      "reward": 1
+    }
+  },
+  "exception_info": null,
+  "started_at": "2026-01-01T00:00:00Z",
+  "finished_at": "2026-01-01T00:03:10Z",
+  "agent_execution": {
+    "started_at": "2026-01-01T00:00:00Z",
+    "finished_at": "2026-01-01T00:03:00Z"
+  }
+}
