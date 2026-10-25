@@ -1,9 +1,9 @@
 //! The input area: the input box (its style, height, inner width and glyphs), the running status
 //! drawn on the top rule, and the `@` completion menu above it.
 
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::App;
 
@@ -137,6 +137,59 @@ pub(super) fn input_inner_width(app: &App, width: usize) -> usize {
         InputStyle::Box => 2 + prompt_width(BOX_PROMPT),
     };
     width.saturating_sub(reserved).max(1)
+}
+
+/// The left chrome of one composer row, in the current style: `lines` draws the `❯ ` prompt on
+/// the first text row and its width of spaces on a continuation row; `box` draws its `│ ` rail
+/// before either. An image attachment row is a continuation row, so its placeholder starts in
+/// the text column inside the frame (ADR 0028 R5). The text rows and the attachment rows both
+/// call this, so the gutter is written once.
+pub(super) fn composer_prefix(
+    app: &App,
+    glyphs: &BoxGlyphs,
+    frame_style: Style,
+    first: bool,
+) -> Vec<Span<'static>> {
+    // The prompt takes the style's own role: the `lines` prompt is the hint level, the `box`
+    // rail and prompt the frame's accent role (ADR 0035).
+    let (prompt, prompt_style) = match app.input_style {
+        InputStyle::Lines => (INPUT_PROMPT, app.theme.hint),
+        InputStyle::Box => (BOX_PROMPT, frame_style),
+    };
+    let lead = if first {
+        prompt.to_string()
+    } else {
+        " ".repeat(prompt_width(prompt))
+    };
+    let mut spans = Vec::with_capacity(2);
+    if app.input_style == InputStyle::Box {
+        spans.push(Span::styled(glyphs.rail, frame_style));
+    }
+    spans.push(Span::styled(lead, prompt_style));
+    spans
+}
+
+/// Cuts `text` to `width` cells, ending in `…` when it was longer. A composer attachment row
+/// never wraps and never pushes the frame (ADR 0028 R5).
+pub(super) fn cut_to_width(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let cell = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cell > width - 1 {
+            break;
+        }
+        out.push(ch);
+        used += cell;
+    }
+    out.push('…');
+    out
 }
 
 /// The running input's status content: `<spinner> Working · 12s · esc to interrupt`, or `None`

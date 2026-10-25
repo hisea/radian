@@ -3096,3 +3096,20 @@ copy (never `git checkout`); the named test ran alone with
 | TK0015-M4 | `clipboard::from_image` converts the pixels with `into_owned()` before the per-side check, so an over-limit borrowed buffer is copied and only then refused | ✅ 1 failed | `clipboard::tests::an_over_limit_buffer_is_refused_before_it_is_copied` (`the pixels were copied before the limit check: 4194304 bytes allocated`) |
 
 1/1 caught.
+
+## TK0117: an attachment row lines up with the composer text (2026-10-25, branch `work/TK0117-composer-attachment-align`)
+
+A composer image attachment row used to start at column 0 of the input area, left of the
+frame's rail. The text rows and the attachment rows now share one gutter
+(`composer_prefix` in `crates/radian-tui/src/render/input.rs`): the `lines` prompt's width of
+spaces, or the `box` style's `│ ` rail before it, so the placeholder starts in the text column
+and the frame stays unbroken; a placeholder wider than the inner width is cut with `…`. The
+mutation was applied by hand to `crates/radian-tui/src/render.rs`, backed up under
+`.radian/render.rs.bak` and restored from that copy (never `git checkout`); the tests ran with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test render -E 'test(a_composer_attachment)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0117-M1 | the attachment row drops its prefix again: `Line::from(Span::styled(image.placeholder(), …))` with no `composer_prefix` | ✅ 2 failed | `render::a_composer_attachment_starts_in_the_text_column` (`Lines: the attachment row starts in the text column`; the box case is the same assertion after it); `render::a_composer_attachment_wider_than_the_input_is_cut_with_an_ellipsis` (`the ellipsis sits in the last cell`) |
+
+1/1 caught.
