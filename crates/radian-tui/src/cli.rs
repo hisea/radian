@@ -552,6 +552,11 @@ enum ArcCommand {
             hide = true
         )]
         extra: Vec<String>,
+        /// Internal: the configured `[worker] command`, as one JSON array with the program
+        /// first. arc passes it for a command worker; unset runs `radian exec`. Not in the
+        /// manual.
+        #[arg(long, value_name = "JSON", hide = true)]
+        command: Option<String>,
         /// Test-only: run this shell command as the worker instead of `radian exec`.
         /// The wrapper's forwarding test starts a plain process with a child of its own.
         #[arg(long, value_name = "SHELL-COMMAND", hide = true)]
@@ -838,6 +843,7 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
             remote,
             main_branch,
             extra,
+            command,
             worker_command,
             stall_timeout_secs,
             max_wall_time_secs,
@@ -845,6 +851,18 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
         }) => {
             let (remote, main_branch) = work_remote_and_main(remote, main_branch);
             let session = session.unwrap_or_else(|| task.clone());
+            let command = match command {
+                Some(json) => match serde_json::from_str::<Vec<String>>(&json) {
+                    Ok(command) => Some(command),
+                    Err(error) => {
+                        eprintln!(
+                            "radian arc work: --command is not a JSON array of strings: {error}"
+                        );
+                        return ExitCode::from(2);
+                    }
+                },
+                None => None,
+            };
             ExitCode::from(radian_arc::work::run(radian_arc::work::Options {
                 task,
                 attempt,
@@ -855,6 +873,7 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
                 remote,
                 main_branch,
                 extra_args: extra,
+                command,
                 worker_command,
                 stall_timeout_secs: stall_timeout_secs.unwrap_or(0),
                 max_wall_time_secs: max_wall_time_secs.unwrap_or(0),
@@ -2832,6 +2851,25 @@ mod tests {
             documented, code,
             "arc/files.md's `worker.rework_session` row lists the code's closed list: {row:?}"
         );
+    }
+
+    /// Every environment variable the wrapper adds for a command worker appears in the
+    /// environment table under `## Another agent as the worker` on `arc/index.md`. The source
+    /// is `radian_arc::work::WORKER_ENV`, so a new variable fails here until the manual names
+    /// it (ADR 0048 decision 7).
+    #[test]
+    fn every_command_worker_variable_appears_in_arc_md() {
+        let doc = arc_md();
+        let table = arc_table(&doc, "arc/index.md", "## Another agent as the worker");
+        for name in radian_arc::work::WORKER_ENV {
+            let found = table
+                .iter()
+                .any(|row| row.iter().any(|cell| cell.contains(&format!("`{name}`"))));
+            assert!(
+                found,
+                "arc/index.md's command-worker table has no row for `{name}`"
+            );
+        }
     }
 
     /// Every attempt failure class appears in the Class cell of the table under

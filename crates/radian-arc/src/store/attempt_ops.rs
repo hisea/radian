@@ -165,6 +165,10 @@ pub struct Claim {
     pub allow_noop: bool,
     /// The task body: the brief and every rework section.
     pub brief: String,
+    /// The one line a claim prints when it starts a command worker for a task or plan with a
+    /// cost limit: `<task>: worker.command reports no cost; the cost limit does not apply`
+    /// (ADR 0048 decisions 7 and 12).
+    pub no_cost_warning: Option<String>,
 }
 
 /// What one worker-less `radian arc reverify` claim created.
@@ -438,6 +442,14 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         ReworkSession::Resume => task_id.to_owned(),
     };
     let resume = number > 1 && config.worker.rework_session == ReworkSession::Resume;
+    // A command worker reports no cost, so a task or plan cost limit cannot stop it. The
+    // warning is printed once per attempt by `start`, `run` and `serve` (ADR 0048 decisions
+    // 7 and 12).
+    let cost_limited = task.max_cost_usd.or(config.limits.max_cost_usd).is_some()
+        || plan.item.max_cost_usd.is_some();
+    let no_cost_warning = (config.worker.command.is_some() && cost_limited).then(|| {
+        format!("{task_id}: worker.command reports no cost; the cost limit does not apply")
+    });
     task.attempt = number;
     task.attempt_id = Some(attempt_id.clone());
     task.token = Some(token.clone());
@@ -478,6 +490,7 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         session_id,
         allow_noop: task.allow_noop,
         brief: task.body.clone(),
+        no_cost_warning,
     })
 }
 
@@ -790,9 +803,11 @@ pub fn apply(
             _ => None,
         });
         // Every applied attempt adds its cost to the task's counters (decision 12): the
-        // budget counter and the total that `reset-budget` leaves alone. A budget that ran
-        // out while the attempt ran pauses the task even when it failed otherwise retryable.
-        task.add_cost(cost.cost_usd);
+        // budget counter and the total that `reset-budget` leaves alone. An unknown cost (a
+        // command worker that reported none) adds nothing and cannot reach a budget.
+        if cost.known {
+            task.add_cost(cost.cost_usd);
+        }
         let reached_verification = matches!(next, Next::Verifying);
         let mut retry_at = None;
         let mut pause_plan = false;
@@ -823,8 +838,8 @@ pub fn apply(
                 let max_attempts = task
                     .max_attempts
                     .unwrap_or(budget.config.limits.max_attempts);
-                let plan_reached = budget.plan_reached(cost.cost_usd);
-                if budget.task_reached(&task) || plan_reached {
+                let plan_reached = cost.known && budget.plan_reached(cost.cost_usd);
+                if (cost.known && budget.task_reached(&task)) || plan_reached {
                     task.state = TaskState::Todo;
                     task.phase = "paused_budget".to_owned();
                     task.retry_at = None;
@@ -872,7 +887,11 @@ pub fn apply(
         "outcome": applied.outcome,
         "class": applied.class.map(Class::as_str),
         "reason": applied.reason,
-        "cost_usd": applied.cost_usd,
+        // A command worker that reported no `cost` leaves both sides null: the attempt's
+        // cost is unknown, it added nothing, and a reader tells it from a real zero
+        // (decision 12).
+        "cost_usd": cost.known.then_some(applied.cost_usd),
+        "cost_known": cost.known,
         "session_cost_usd": cost.session_cost_usd,
         "state": applied.state,
         "phase": applied.phase,
@@ -948,21 +967,29 @@ pub fn retry_delay_secs(retry_count: u32) -> u64 {
 struct AttemptCost {
     cost_usd: f64,
     session_cost_usd: Option<f64>,
+    /// Whether the attempt's stream carries a `cost` field at all. A `Result` without one (a
+    /// command worker that reports none) leaves the attempt's cost unknown (ADR 0048
+    /// decisions 7 and 12); a `cost` that is null or carries no `micros` is a reported zero,
+    /// the shape `radian exec` writes when it recorded no fee.
+    known: bool,
 }
 
 fn attempt_cost(store: &Store, task: &str, attempt: u32) -> AttemptCost {
-    let this = session_total_micros(store, task, attempt);
+    let this = result_cost(store, task, attempt);
     let shared_session = attempt > 1
         && attempt_session_id(store, task, attempt).is_some_and(|session| {
             attempt_session_id(store, task, attempt - 1).as_deref() == Some(session.as_str())
         });
     let previous = shared_session
-        .then(|| session_total_micros(store, task, attempt - 1))
-        .flatten();
-    let delta = this.unwrap_or(0).saturating_sub(previous.unwrap_or(0));
+        .then(|| result_cost(store, task, attempt - 1))
+        .flatten()
+        .and_then(|cost| cost.micros);
+    let micros = this.as_ref().and_then(|cost| cost.micros);
+    let delta = micros.unwrap_or(0).saturating_sub(previous.unwrap_or(0));
     AttemptCost {
         cost_usd: delta as f64 / 1_000_000.0,
-        session_cost_usd: this.map(|micros| micros as f64 / 1_000_000.0),
+        session_cost_usd: micros.map(|micros| micros as f64 / 1_000_000.0),
+        known: this.as_ref().is_some_and(|cost| cost.present),
     }
 }
 
@@ -1019,8 +1046,9 @@ fn notes_in(path: &Path) -> Option<Vec<String>> {
     (!notes.is_empty()).then_some(notes)
 }
 
-/// The `Result.cost.micros` of one attempt's jsonl stream, when it wrote one.
-fn session_total_micros(store: &Store, task: &str, attempt: u32) -> Option<u64> {
+/// The `cost` the last `Result` of one attempt's jsonl stream carries. `None` when the stream
+/// has no `Result` at all (a crash, a kill), which is an unknown cost.
+fn result_cost(store: &Store, task: &str, attempt: u32) -> Option<ResultCost> {
     let text = fs::read_to_string(run_dir(store, task, attempt).join("result.jsonl")).ok()?;
     for line in text.lines().rev() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -1029,12 +1057,23 @@ fn session_total_micros(store: &Store, task: &str, attempt: u32) -> Option<u64> 
         if value.get("type").and_then(Value::as_str) != Some("Result") {
             continue;
         }
-        return value
-            .get("cost")
-            .and_then(|cost| cost.get("micros"))
-            .and_then(Value::as_u64);
+        let cost = value.get("cost");
+        return Some(ResultCost {
+            present: cost.is_some(),
+            micros: cost
+                .and_then(|cost| cost.get("micros"))
+                .and_then(Value::as_u64),
+        });
     }
     None
+}
+
+/// What one `Result` said about cost.
+struct ResultCost {
+    /// The `cost` key is there. A `Result` without it is an unknown cost.
+    present: bool,
+    /// `cost.micros`, when it is a number.
+    micros: Option<u64>,
 }
 
 /// What the budget checks need: the config, the task's limit, and the plan's limit and its

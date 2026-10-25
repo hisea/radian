@@ -320,7 +320,7 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
             view.plan.item.priority(),
             merged,
             total,
-            cost_text(view.total_cost_usd()),
+            plan_cost_text(view),
             view.plan.item.title,
             changed_marker(view.plan.changed_outside_arc)
         ));
@@ -442,11 +442,7 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 &optional_number(plan.item.max_wall_time_secs),
             );
             field(&mut out, "cost_usd", &cost_text(view.cost_usd()));
-            field(
-                &mut out,
-                "total_cost_usd",
-                &cost_text(view.total_cost_usd()),
-            );
+            field(&mut out, "total_cost_usd", &plan_cost_text(view));
             field(&mut out, "tasks", &joined(&plan.item.tasks));
             field(
                 &mut out,
@@ -488,11 +484,15 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 field(&mut out, "attempt_note", &note);
             }
             field(&mut out, "token", &optional_text(item.token.as_deref()));
-            field(&mut out, "cost_usd", &optional_cost(item.cost_usd));
+            field(&mut out, "cost_usd", &task_cost_text(item));
             field(
                 &mut out,
                 "total_cost_usd",
-                &optional_cost(item.total_cost()),
+                &if cost_unknown(item) {
+                    "unknown".to_owned()
+                } else {
+                    optional_cost(item.total_cost())
+                },
             );
             field(&mut out, "auto_rework", &item.auto_rework.to_string());
             field(&mut out, "retry_count", &item.retry_count.to_string());
@@ -670,6 +670,31 @@ fn optional_number<T: std::fmt::Display>(value: Option<T>) -> String {
 /// none, else [`cost_text`]'s rounding.
 fn optional_cost(value: Option<f64>) -> String {
     value.map(cost_text).unwrap_or_else(|| "-".to_owned())
+}
+
+/// Whether a task's counted cost is unknown: it has run an attempt that reported no `cost` and
+/// has no known cost to show (ADR 0048 decisions 7 and 12). A task that has not run has no
+/// cost either, and that is not an unknown report.
+fn cost_unknown(task: &super::model::TaskFile) -> bool {
+    task.attempt > 0 && task.cost_usd.is_none()
+}
+
+/// A task's counted cost as `show` prints it: `unknown` when a command worker reported none,
+/// `-` when the task has not run, else the number.
+fn task_cost_text(task: &super::model::TaskFile) -> String {
+    if cost_unknown(task) {
+        return "unknown".to_owned();
+    }
+    optional_cost(task.cost_usd)
+}
+
+/// A plan's total as the text forms print it: `unknown` when one of its tasks ran without
+/// reporting a cost, else the summed total (ADR 0048 decisions 7 and 12).
+fn plan_cost_text(view: &PlanView) -> String {
+    if view.tasks.iter().any(|task| cost_unknown(&task.item)) {
+        return "unknown".to_owned();
+    }
+    cost_text(view.total_cost_usd())
 }
 
 /// A summed cost as the text forms print it: up to six decimals, with the trailing zeros

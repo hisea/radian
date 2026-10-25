@@ -30,6 +30,9 @@ const POLL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Started {
     pub reconciled: Vec<Applied>,
+    /// The warning of a command worker with a cost limit, printed once per attempt before the
+    /// attempt's own line (ADR 0048 decisions 7 and 12).
+    pub no_cost_warning: Option<String>,
     /// The attempt this call ran. `None` when the task was already `review.verifying` and
     /// the call only resumed verification.
     pub applied: Option<Applied>,
@@ -94,10 +97,10 @@ impl Cancelled {
 /// A task already in `review.verifying` (one a moved branch or a changed digest sent back)
 /// resumes verification instead of being refused.
 pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
-    // The worker's command line is checked before anything is claimed or written: a wrong
-    // `[worker] exec_args` entry would otherwise fail every attempt the same way, after the
-    // claim (ADR 0048 decision 7).
-    crate::worker_args::check(&store.config()?.worker.exec_args)?;
+    // The worker's line is checked before anything is claimed or written: a wrong
+    // `[worker] exec_args` entry, or a `[worker] command` program that does not resolve,
+    // would otherwise fail every attempt the same way, after the claim (ADR 0048 decision 7).
+    crate::worker_args::check_config(&store.config()?, store.repo())?;
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
@@ -110,6 +113,7 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
     if task.state == model::TaskState::Review && task.phase == "verifying" {
         return Ok(Started {
             reconciled: Vec::new(),
+            no_cost_warning: None,
             applied: None,
             verification: Some(crate::review::verify(store, task_id)),
         });
@@ -122,6 +126,7 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
     attempt_ops::release_retries(store, &crate::store::plan_ops::utc_now())?;
     let config = store.config()?;
     let claim = attempt_ops::claim(store, task_id)?;
+    let no_cost_warning = claim.no_cost_warning.clone();
     let task = store.load_task(task_id)?.item;
     let applied = run_claim(store, &claim, &task, &config)?;
     // A pushed attempt continues into the gate in the same process (ADR 0048 decision 6):
@@ -134,6 +139,7 @@ pub fn start(store: &Store, task_id: &str) -> Result<Started, Error> {
         .then(|| crate::review::verify(store, task_id));
     Ok(Started {
         reconciled,
+        no_cost_warning,
         applied: Some(applied),
         verification,
     })
@@ -210,6 +216,15 @@ pub fn spawn_claim(
         .arg(limits.wall.as_secs().to_string())
         .arg("--cancel-grace-secs")
         .arg(limits.grace.as_secs().to_string());
+    // The configured command worker, one JSON array on a hidden flag: the wrapper runs it
+    // instead of `radian exec` (ADR 0048 decision 7). The program is made absolute here, at
+    // the claim, so a path with a `/` means the same file in the wrapper's worktree.
+    if let Some(words) = &config.worker.command {
+        let worker = crate::worker_args::resolved(words, store.repo());
+        let json = serde_json::to_string(&worker)
+            .map_err(|error| Error::Failed(format!("cannot encode worker.command: {error}")))?;
+        command.arg("--command").arg(json);
+    }
     command.arg("--");
     command.args(&config.worker.exec_args);
     let stdout = File::create(&stdout_path).map_err(|error| {
@@ -780,6 +795,9 @@ pub fn lines(started: &Started) -> Vec<String> {
         .iter()
         .map(|applied| format!("reconciled: {}", applied.line()))
         .collect();
+    if let Some(warning) = &started.no_cost_warning {
+        lines.push(warning.clone());
+    }
     if let Some(applied) = &started.applied {
         lines.push(applied.line());
     }
