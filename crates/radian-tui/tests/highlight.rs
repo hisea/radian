@@ -259,18 +259,18 @@ fn highlighting_does_not_change_the_text() {
     let mut plain = Entry::new(EntryKind::Assistant, RUST);
     let blocks = blocks::blocks_for(&mut entry, ReasoningMode::Expanded);
     let plain_blocks = blocks::blocks_for(&mut plain, ReasoningMode::Expanded);
-    let with: Vec<String> = blocks::layout(&entry, &blocks, modes(true), 40)
+    let with: Vec<String> = blocks::layout(&entry, &blocks, modes(true), 40, 24)
         .into_iter()
         .map(|line| line.text)
         .collect();
-    let without: Vec<String> = blocks::layout(&plain, &plain_blocks, modes(false), 40)
+    let without: Vec<String> = blocks::layout(&plain, &plain_blocks, modes(false), 40, 24)
         .into_iter()
         .map(|line| line.text)
         .collect();
     assert_eq!(with, without, "highlighting must not change the drawn text");
     // And the search/reference path (text only) agrees.
-    let searched = blocks::body_text_lines(&entry, modes(true), 40);
-    let searched_plain = blocks::body_text_lines(&plain, modes(false), 40);
+    let searched = blocks::body_text_lines(&entry, modes(true), 40, 24);
+    let searched_plain = blocks::body_text_lines(&plain, modes(false), 40, 24);
     assert_eq!(searched, searched_plain);
 }
 
@@ -297,7 +297,8 @@ fn the_measure_pass_never_highlights() {
         .collect();
     let before = radian_tui::highlight::highlight_calls();
     // Height 0: measure only, no visible line is laid out.
-    let (total, lines) = radian_tui::render::visible_lines(&mut entries, modes, 80, 0, 0, &theme);
+    let (total, lines) =
+        radian_tui::render::visible_lines(&mut entries, modes, 80, 24, 0, 0, &theme);
     assert!(total > 0 && lines.is_empty(), "measured {total}");
     assert_eq!(
         radian_tui::highlight::highlight_calls(),
@@ -305,7 +306,7 @@ fn the_measure_pass_never_highlights() {
         "the measure pass must not highlight"
     );
     // A visible window does highlight its block.
-    let _ = radian_tui::render::visible_lines(&mut entries, modes, 80, 0, 20, &theme);
+    let _ = radian_tui::render::visible_lines(&mut entries, modes, 80, 24, 0, 20, &theme);
     assert!(
         radian_tui::highlight::highlight_calls() > before,
         "laying a visible code block must highlight it"
@@ -319,10 +320,10 @@ fn a_resize_reuses_the_highlight_cache() {
     let theme = Theme::dark();
     let modes_on = modes(true);
     let mut entries = vec![Entry::new(EntryKind::Assistant, rust_block(60, "resize"))];
-    let _ = radian_tui::render::visible_lines(&mut entries, modes_on, 100, 0, 40, &theme);
+    let _ = radian_tui::render::visible_lines(&mut entries, modes_on, 100, 24, 0, 40, &theme);
     let after_first = radian_tui::highlight::highlight_calls();
-    let _ = radian_tui::render::visible_lines(&mut entries, modes_on, 80, 0, 40, &theme);
-    let _ = radian_tui::render::visible_lines(&mut entries, modes_on, 60, 0, 40, &theme);
+    let _ = radian_tui::render::visible_lines(&mut entries, modes_on, 80, 24, 0, 40, &theme);
+    let _ = radian_tui::render::visible_lines(&mut entries, modes_on, 60, 24, 0, 40, &theme);
     assert_eq!(
         radian_tui::highlight::highlight_calls(),
         after_first,
@@ -334,7 +335,7 @@ fn a_resize_reuses_the_highlight_cache() {
         rust_block(60, "resize-off"),
     )];
     let before = radian_tui::highlight::highlight_calls();
-    let _ = radian_tui::render::visible_lines(&mut plain, modes(false), 100, 0, 40, &theme);
+    let _ = radian_tui::render::visible_lines(&mut plain, modes(false), 100, 24, 0, 40, &theme);
     assert_eq!(radian_tui::highlight::highlight_calls(), before);
 }
 
@@ -354,13 +355,13 @@ fn resize_first_frame_does_not_pay_for_highlighting() {
     let mut on = corpus();
     let mut off = corpus();
     // Warm each at one width, then time the resize frame.
-    let _ = radian_tui::render::visible_lines(&mut on, modes(true), 100, 0, 40, &theme);
-    let _ = radian_tui::render::visible_lines(&mut off, modes(false), 100, 0, 40, &theme);
+    let _ = radian_tui::render::visible_lines(&mut on, modes(true), 100, 24, 0, 40, &theme);
+    let _ = radian_tui::render::visible_lines(&mut off, modes(false), 100, 24, 0, 40, &theme);
     let started = std::time::Instant::now();
-    let _ = radian_tui::render::visible_lines(&mut on, modes(true), 80, 0, 40, &theme);
+    let _ = radian_tui::render::visible_lines(&mut on, modes(true), 80, 24, 0, 40, &theme);
     let with = started.elapsed();
     let started = std::time::Instant::now();
-    let _ = radian_tui::render::visible_lines(&mut off, modes(false), 80, 0, 40, &theme);
+    let _ = radian_tui::render::visible_lines(&mut off, modes(false), 80, 24, 0, 40, &theme);
     let without = started.elapsed();
     assert!(
         with <= without * 5 + std::time::Duration::from_millis(200),

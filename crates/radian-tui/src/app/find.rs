@@ -53,6 +53,9 @@ impl App {
 
     pub(super) fn find_recompute(&mut self) {
         let width = self.session.transcript_width;
+        // The image runs depend on the transcript area's height (ADR 0028 R10), so the match
+        // geometry does too.
+        let height = usize::from(self.session.view_height);
         // Split the borrow: the entries to match (the session view) and the layer that holds
         // the query (the app chrome) are two different fields.
         let modes = self.display_modes();
@@ -61,7 +64,7 @@ impl App {
             Layer::Overlay(Overlay::Find(find)) => Some(find),
             _ => None,
         }) {
-            find.recompute(entries.as_slice(), modes, width);
+            find.recompute(entries.as_slice(), modes, width, height);
         }
         self.find_jump();
     }
@@ -135,9 +138,10 @@ impl App {
         // entry itself is measured with its override, so its own lines line up).
         let modes = self.display_modes();
         let width = self.session.transcript_width;
+        let height = usize::from(self.session.view_height);
         let mut display_line = 0usize;
         for item in self.session.entries[..entry].iter_mut() {
-            display_line += crate::blocks::line_count_cached(item, modes, width);
+            display_line += crate::blocks::line_count_cached(item, modes, width, height);
         }
         let line = display_line + line;
         let height = usize::from(self.session.view_height.max(1));

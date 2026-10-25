@@ -201,8 +201,8 @@ fn a_width_change_recounts_and_redraws() {
     let blocks = blocks::parse_blocks(entry.text.as_str());
     for width in [80usize, 16] {
         let modes = modes(ReasoningMode::Expanded, true);
-        let count = blocks::line_count(entry, modes, width);
-        let laid_out = blocks::layout(entry, &blocks, modes, width).len();
+        let count = blocks::line_count(entry, modes, width, 24);
+        let laid_out = blocks::layout(entry, &blocks, modes, width, 24).len();
         assert_eq!(count, laid_out, "width {width}: count == laid out");
     }
     // Wide: the diagram renders (box drawing).
@@ -216,6 +216,7 @@ fn a_width_change_recounts_and_redraws() {
         &blocks,
         modes(ReasoningMode::Expanded, true),
         16,
+        24,
     );
     assert!(
         laid_out_16.iter().any(|line| line.reason),
@@ -231,9 +232,9 @@ fn a_width_change_recounts_and_redraws() {
     // diagram cache, the 16-column count must be the narrow layout's, or virtualization
     // would count rows the renderer does not draw.
     let entry = &mut app.session.entries[0];
-    let cached_16 = blocks::line_count_cached(entry, modes(ReasoningMode::Expanded, true), 16);
+    let cached_16 = blocks::line_count_cached(entry, modes(ReasoningMode::Expanded, true), 16, 24);
     let laid_out_16 =
-        blocks::layout(entry, &blocks, modes(ReasoningMode::Expanded, true), 16).len();
+        blocks::layout(entry, &blocks, modes(ReasoningMode::Expanded, true), 16, 24).len();
     assert_eq!(
         cached_16, laid_out_16,
         "the cached count must be re-measured at the new width"
@@ -498,7 +499,7 @@ fn a_too_wide_sample_names_the_columns_in_the_transcript() {
     assistant(&mut app, &fenced(sample("radian crates (12 nodes)"), true));
     let entry = &app.session.entries[0];
     let blocks = blocks::parse_blocks(entry.text.as_str());
-    let text = blocks::layout(entry, &blocks, modes(ReasoningMode::Expanded, true), 80)
+    let text = blocks::layout(entry, &blocks, modes(ReasoningMode::Expanded, true), 80, 24)
         .iter()
         .map(|line| line.text.as_str())
         .collect::<Vec<_>>()

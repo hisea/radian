@@ -778,16 +778,16 @@ fn a_copy_of_a_diff_block_has_no_marker_or_line_number() {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                blocks::gap_at(entries, i) + render::display_lines(entry, modes, width).len()
+                blocks::gap_at(entries, i) + render::display_lines(entry, modes, width, 24).len()
             })
             .sum::<usize>()
             + blocks::gap_at(entries, index)
     };
     let first = start_line(call_index);
-    let body_lines = render::display_lines(&entries[result_index], modes, width).len();
+    let body_lines = render::display_lines(&entries[result_index], modes, width, 24).len();
     let last = start_line(result_index) + body_lines - 1;
-    let anchor = locate(entries, modes, width, first, 0).expect("the block's start");
-    let head = locate(entries, modes, width, last, 200).expect("the block's end");
+    let anchor = locate(entries, modes, width, 24, first, 0).expect("the block's start");
+    let head = locate(entries, modes, width, 24, last, 200).expect("the block's end");
     let copied = logical_text(entries, &Selection { anchor, head });
 
     assert!(copied.contains("let a = 1;"), "{copied:?}");

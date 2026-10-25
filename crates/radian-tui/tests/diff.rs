@@ -284,7 +284,7 @@ fn a_diff_row_copies_its_own_text_without_the_gutter() {
         .position(|entry| entry.kind == EntryKind::ToolResult)
         .expect("the result entry");
     let entry = &entries[result_index];
-    let body = radian_tui::blocks::layout(entry, &[], modes, width);
+    let body = radian_tui::blocks::layout(entry, &[], modes, width, 24);
     let row = body
         .iter()
         .position(|line| line.text.ends_with("- let a = 1;"))
@@ -314,19 +314,19 @@ fn a_diff_row_copies_its_own_text_without_the_gutter() {
         .enumerate()
         .map(|(index, entry)| {
             radian_tui::blocks::gap_at(entries, index)
-                + render::display_lines(entry, modes, width).len()
+                + render::display_lines(entry, modes, width, 24).len()
         })
         .sum::<usize>()
         + radian_tui::blocks::gap_at(entries, result_index)
         + row;
     // A press on the gutter's first cell anchors at the sign: a number is not selectable, and
     // the five gutter cells are synthesized.
-    let hit = locate_hit(entries, modes, width, line, 0).expect("a hit");
+    let hit = locate_hit(entries, modes, width, 24, line, 0).expect("a hit");
     assert_eq!(hit.anchor.offset, start, "the gutter anchors at the sign");
     assert!(!hit.on_char, "a synthesized cell is not a char");
-    let anchor = locate(entries, modes, width, line, 0).expect("the row's start");
+    let anchor = locate(entries, modes, width, 24, line, 0).expect("the row's start");
     assert_eq!(anchor.offset, start);
-    let head = locate(entries, modes, width, line, 200).expect("the row's end");
+    let head = locate(entries, modes, width, 24, line, 200).expect("the row's end");
     let copied = logical_text(entries, &Selection { anchor, head });
     assert_eq!(
         copied, "-let a = 1;",
@@ -358,7 +358,7 @@ fn a_write_body_numbers_the_content_and_copies_it_without_the_gutter() {
         .position(|entry| entry.kind == EntryKind::ToolResult)
         .expect("the result entry");
     let entry = &entries[result_index];
-    let body = radian_tui::blocks::layout(entry, &[], modes, width);
+    let body = radian_tui::blocks::layout(entry, &[], modes, width, 24);
     let row = body
         .iter()
         .position(|line| line.text.ends_with("+ let a = 1;"))
@@ -385,13 +385,13 @@ fn a_write_body_numbers_the_content_and_copies_it_without_the_gutter() {
         .enumerate()
         .map(|(index, entry)| {
             radian_tui::blocks::gap_at(entries, index)
-                + render::display_lines(entry, modes, width).len()
+                + render::display_lines(entry, modes, width, 24).len()
         })
         .sum::<usize>()
         + radian_tui::blocks::gap_at(entries, result_index);
-    let anchor = locate(entries, modes, width, base, 0).expect("the first row's start");
+    let anchor = locate(entries, modes, width, 24, base, 0).expect("the first row's start");
     let head =
-        locate(entries, modes, width, base + body.len() - 1, 200).expect("the last row's end");
+        locate(entries, modes, width, 24, base + body.len() - 1, 200).expect("the last row's end");
     let copied = logical_text(entries, &Selection { anchor, head });
     assert_eq!(
         copied, "let a = 1;\nlet b = 2;",
@@ -426,8 +426,8 @@ fn a_diff_body_line_count_matches_its_layout() {
         .find(|entry| entry.kind == EntryKind::ToolResult)
         .expect("the result entry");
     for width in [80usize, 30] {
-        let count = radian_tui::blocks::line_count(entry, modes, width);
-        let laid_out = radian_tui::blocks::layout(entry, &[], modes, width).len();
+        let count = radian_tui::blocks::line_count(entry, modes, width, 24);
+        let laid_out = radian_tui::blocks::layout(entry, &[], modes, width, 24).len();
         assert_eq!(count, laid_out, "width {width}");
     }
 }
@@ -457,7 +457,7 @@ fn a_long_diff_row_truncates_instead_of_wrapping() {
         .iter()
         .find(|entry| entry.kind == EntryKind::ToolResult)
         .expect("the result entry");
-    let body = radian_tui::blocks::layout(entry, &[], modes, 40);
+    let body = radian_tui::blocks::layout(entry, &[], modes, 40, 24);
     let rows: Vec<&radian_tui::blocks::BodyLine> = body
         .iter()
         .filter(|line| line.text.contains("let a = 2;"))

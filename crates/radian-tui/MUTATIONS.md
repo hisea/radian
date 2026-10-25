@@ -3131,3 +3131,19 @@ An unquoted dropped-path token ended at `char::is_whitespace()`, and U+202F NARR
 | TK0122-M1 | an unquoted token ends at `char::is_whitespace()` again (the loop condition becomes `!chars[j].is_whitespace()`) | ✅ 5 failed | `mention::tests::a_macos_screenshot_path_is_one_unquoted_token`, `a_dropped_macos_screenshot_attaches_its_image`, `a_trailing_ascii_space_is_outside_a_screenshot_path`, `any_non_ascii_whitespace_stays_inside_an_unquoted_token`, `two_dropped_paths_separated_by_an_ascii_space_stay_two` |
 
 1/1 caught. The `unescape` half is held by `a_backslash_before_the_narrow_no_break_space_is_unescaped_like_any_whitespace`: it fails when both rules are reverted to the old code (the old `unescape` kept the backslash), and stays green under TK0122-M1 alone because it is the other rule's test.
+## TK0119: an image's run follows the transcript area's height (2026-10-25, branch `work/TK0119-image-height-follows-screen`)
+
+An image used to occupy a fixed 12-row run (`IMAGE_HEIGHT_ROWS`). Its height is now half the
+transcript area's height, rounded down and clamped to 12..=40 (`image_height_rows` in
+`crates/radian-tui/src/media.rs`); the area height reaches every layout path (count, drawing,
+selection, find) as a parameter beside the width, and the layout cache key holds it. The
+mutations were applied by hand, backed up under `.radian/media.rs.bak` and
+`.radian/render.rs.bak`, and restored from those copies (never `git checkout`); the tests ran
+with `cargo nextest run -p radian-tui --locked --profile sandbox --lib --test image_render`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0119-M1 | drop the maximum clamp: `image_height_rows` is `half.max(IMAGE_MIN_ROWS)`, so a 100-row area reserves 50 | ✅ 4 failed | `media::tests::the_image_height_is_half_the_transcript_area` (`capped at the maximum`: 100 rows → 50); also `image_render::the_run_height_follows_the_transcript_area` (`transcript area of 100 rows`), `image_render::a_resize_recomputes_the_run_and_keeps_scrolling_exact`, and `media::tests::a_resize_recomputes_the_run_without_decoding_again` |
+| TK0119-M2 | `draw` lays out at the whole terminal height (`let height = area.height as usize`) instead of the transcript area's `chunks[0].height` | ✅ 1 failed | `image_render::the_run_follows_the_transcript_area_not_the_whole_terminal` (`the frame measured at the transcript area's height`) |
+
+2/2 caught.

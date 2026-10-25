@@ -168,7 +168,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let height = chunks[0].height as usize;
     let theme = app.theme.clone();
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
-    app.set_transcript_width(width);
+    // The image run follows the transcript area's height (ADR 0028 R10), so a height change
+    // re-measures too; both are recorded before the measure pass.
+    app.set_transcript_size(width, chunks[0].height);
     let modes = app.display_modes();
     let t_draw = std::time::Instant::now();
     // The live spinner frame (ADR 0027): computed once per frame from the loop's
@@ -178,6 +180,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         &mut app.session.entries,
         modes,
         width,
+        height,
         0,
         0,
         &theme,
@@ -190,6 +193,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         &mut app.session.entries,
         modes,
         width,
+        height,
         app.session.scroll,
         height,
         &theme,
@@ -212,6 +216,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 &app.session.entries,
                 modes,
                 width,
+                height,
                 app.session.scroll,
                 visible.len(),
                 &selection,
@@ -567,7 +572,8 @@ fn draw_images(frame: &mut Frame, app: &mut App, runs: &[ImageRun], area: Rect) 
         else {
             continue;
         };
-        let columns = media::image_columns(picker, &image, area.width - BODY_COLUMN);
+        let rows = media::image_height_rows(usize::from(area.height));
+        let columns = media::image_columns(picker, &image, area.width - BODY_COLUMN, rows);
         if columns == 0 {
             continue;
         }
@@ -575,7 +581,7 @@ fn draw_images(frame: &mut Frame, app: &mut App, runs: &[ImageRun], area: Rect) 
             x: area.x + BODY_COLUMN,
             y: area.y + run.row as u16,
             width: columns,
-            height: media::IMAGE_HEIGHT_ROWS,
+            height: rows,
         };
         if rect.right() > area.right() || rect.bottom() > area.bottom() {
             continue;

@@ -945,7 +945,7 @@ mod tests {
             "an interrupted reply keeps its block"
         );
         assert_eq!(
-            line_count(&interrupted, EXPANDED, 20),
+            line_count(&interrupted, EXPANDED, 20, 24),
             1,
             "and it lays out one line for the marker"
         );

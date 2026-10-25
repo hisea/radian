@@ -36,6 +36,9 @@ pub struct FindState {
     pub anchor: usize,
     /// The width `matches` and `starts` were computed at.
     pub width: usize,
+    /// The transcript area height they were computed at (ADR 0028 R10: it decides an image
+    /// run's rows, so a height change re-measures too).
+    pub height: usize,
 }
 
 impl FindState {
@@ -48,15 +51,24 @@ impl FindState {
             cursor: None,
             anchor,
             width: 0,
+            height: 0,
         }
     }
 
-    /// Recomputes the matches and the current match after the query or the width changed.
-    pub fn recompute(&mut self, entries: &[Entry], modes: DisplayModes, width: usize) {
-        let (matches, starts) = compute(entries, modes, width, &self.query);
+    /// Recomputes the matches and the current match after the query, the width or the
+    /// transcript area's height changed.
+    pub fn recompute(
+        &mut self,
+        entries: &[Entry],
+        modes: DisplayModes,
+        width: usize,
+        height: usize,
+    ) {
+        let (matches, starts) = compute(entries, modes, width, height, &self.query);
         self.matches = matches;
         self.starts = starts;
         self.width = width;
+        self.height = height;
         // The nearest match above the anchor, or the first match when none is above (a search
         // opened at the top of the transcript).
         self.cursor = self.nearest_above();
@@ -123,12 +135,15 @@ impl FindState {
 }
 
 /// Every wrapped display line of `entries` at `width` that contains `query`
-/// (case-insensitive), plus the absolute start line of each entry. One pass, one wrap per
-/// entry; an empty query matches nothing (but the starts are still filled for the viewport).
+/// (case-insensitive), plus the absolute start line of each entry. `height` is the transcript
+/// area's height, so an image run is measured at the rows the frame draws. One pass, one wrap
+/// per entry; an empty query matches nothing (but the starts are still filled for the
+/// viewport).
 pub fn compute(
     entries: &[Entry],
     modes: DisplayModes,
     width: usize,
+    height: usize,
     query: &str,
 ) -> (Vec<MatchLine>, Vec<usize>) {
     let needle = query.to_lowercase();
@@ -145,7 +160,7 @@ pub fn compute(
         // A hit then expands exactly that entry, and the jump maps the expanded line onto the
         // display (App::find_jump).
         let modes = crate::blocks::search_modes(modes);
-        let lines = display_lines(item, modes, width);
+        let lines = display_lines(item, modes, width, height);
         if !needle.is_empty() {
             for (index, text) in lines.iter().enumerate() {
                 if text.to_lowercase().contains(&needle) {
@@ -181,6 +196,20 @@ mod tests {
         glyphs: crate::footer::Glyphs::Unicode,
     };
     use crate::app::{Entry, EntryKind};
+
+    /// The transcript area's height the test geometry is computed at. None of these fixtures
+    /// carries an image, so only the value's consistency matters (ADR 0028 R10).
+    const HEIGHT: usize = 24;
+
+    /// [`super::compute`] at the fixtures' transcript height.
+    fn compute(
+        entries: &[Entry],
+        modes: DisplayModes,
+        width: usize,
+        query: &str,
+    ) -> (Vec<MatchLine>, Vec<usize>) {
+        super::compute(entries, modes, width, HEIGHT, query)
+    }
 
     fn entry(kind: EntryKind, text: &str) -> Entry {
         Entry::new(kind, text)
@@ -241,7 +270,7 @@ mod tests {
         ];
         let mut state = FindState::open(100); // anchor below everything
         state.query = "hit".into();
-        state.recompute(&entries, EXPANDED, 80);
+        state.recompute(&entries, EXPANDED, 80, HEIGHT);
         assert_eq!(state.matches.len(), 2);
         // Nearest above the anchor is the last match.
         assert_eq!(state.cursor, Some(1));

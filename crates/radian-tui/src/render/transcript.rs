@@ -198,8 +198,13 @@ pub(crate) fn selection_text(entry: &Entry) -> Cow<'_, str> {
 /// attachment is shown and searched as its `[file: path, N lines]` line, never as the hidden
 /// content. Padding rows (a user block's blank rows) come through as empty lines: they occupy
 /// transcript lines and occupy space in the geometry, they just never match a query.
-pub fn display_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<String> {
-    blocks::body_text_lines(entry, modes, width)
+pub fn display_lines(
+    entry: &Entry,
+    modes: DisplayModes,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
+    blocks::body_text_lines(entry, modes, width, height)
 }
 
 /// One entry's styled lines (ADR 0028 R1: the block layout, styled). An interrupted
@@ -208,6 +213,7 @@ fn entry_lines(
     entry: &Entry,
     modes: DisplayModes,
     width: usize,
+    height: usize,
     theme: &Theme,
     spinner: crate::spinner::Frame,
     body_follows: bool,
@@ -215,7 +221,7 @@ fn entry_lines(
     let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
     let head_marker = blocks::head_marker(entry, modes, body_follows);
     let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
-    let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
+    let body = blocks::layout_with(entry, &blocks, modes, width, height, spinner);
     let style = body_style(entry, theme);
     // The first and last text rows: the `first_text` flag is the structured-notice label's
     // (ADR 0028) and the interrupted marker sits on the last.
@@ -446,8 +452,8 @@ pub(crate) fn spinner_style(theme: &Theme, frame: crate::spinner::Frame) -> Styl
 
 /// How many lines `entry` lays out to at `width`, from its cache when the entry has not
 /// changed since it was last measured.
-fn entry_line_count(entry: &mut Entry, modes: DisplayModes, width: usize) -> usize {
-    blocks::line_count_cached(entry, modes, width)
+fn entry_line_count(entry: &mut Entry, modes: DisplayModes, width: usize, height: usize) -> usize {
+    blocks::line_count_cached(entry, modes, width, height)
 }
 
 /// Lays the whole transcript out into styled lines. The frame does not use this (it lays out
@@ -457,12 +463,14 @@ pub fn transcript_lines(
     entries: &[Entry],
     modes: DisplayModes,
     width: usize,
+    height: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     transcript_lines_with(
         entries,
         modes,
         width,
+        height,
         theme,
         crate::spinner::Frame::default(),
     )
@@ -473,6 +481,7 @@ pub fn transcript_lines_with(
     entries: &[Entry],
     modes: DisplayModes,
     width: usize,
+    height: usize,
     theme: &Theme,
     spinner: crate::spinner::Frame,
 ) -> Vec<Line<'static>> {
@@ -488,12 +497,13 @@ pub fn transcript_lines_with(
         let result_lines = entries
             .get(index + 1)
             .filter(|next| next.kind == EntryKind::ToolResult)
-            .map_or(0, |next| blocks::line_count(next, modes, width));
+            .map_or(0, |next| blocks::line_count(next, modes, width, height));
         let body_follows = tool_body_follows(entries, index, result_lines);
         out.extend(entry_lines(
             entry,
             modes,
             width,
+            height,
             theme,
             spinner,
             body_follows,
@@ -525,20 +535,24 @@ pub struct ImageRun {
     pub row: usize,
 }
 
-/// [`visible_lines`] plus the image runs the window can draw (ADR 0028 R10).
+/// [`visible_lines`] plus the image runs the window can draw (ADR 0028 R10). `height` is the
+/// transcript area's height (the rows the transcript can draw in), which decides how many
+/// rows an image run reserves; `start` and `window` are the visible slice.
+#[allow(clippy::too_many_arguments)]
 pub fn visible_lines_images(
     entries: &mut [Entry],
     modes: DisplayModes,
     width: usize,
-    start: usize,
     height: usize,
+    start: usize,
+    window: usize,
     theme: &Theme,
     spinner: crate::spinner::Frame,
 ) -> (usize, Vec<Line<'static>>, Vec<ImageRun>) {
     let __t = std::time::Instant::now();
     let counts: Vec<usize> = entries
         .iter_mut()
-        .map(|entry| entry_line_count(entry, modes, width))
+        .map(|entry| entry_line_count(entry, modes, width, height))
         .collect();
     if radian_session::trace::enabled() {
         eprintln!(
@@ -555,11 +569,11 @@ pub fn visible_lines_images(
     for index in 1..entries.len() {
         total += blocks::gap_at(entries, index);
     }
-    let mut out = Vec::with_capacity(height);
+    let mut out = Vec::with_capacity(window);
     let mut slots: Vec<(usize, usize, usize)> = Vec::new();
     let mut line = 0usize;
     for index in 0..entries.len() {
-        if out.len() >= height {
+        if out.len() >= window {
             break;
         }
         let gap = blocks::gap_at(entries, index);
@@ -573,7 +587,7 @@ pub fn visible_lines_images(
         if next > start {
             // The gap lines first, then the entry's own lines.
             for _ in 0..gap {
-                if out.len() >= height {
+                if out.len() >= window {
                     break;
                 }
                 if line >= start {
@@ -581,12 +595,12 @@ pub fn visible_lines_images(
                 }
                 line += 1;
             }
-            if out.len() >= height {
+            if out.len() >= window {
                 break;
             }
             let skip = start.saturating_sub(line);
             let blocks = blocks::blocks_for(entry, modes.reasoning);
-            let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
+            let body = blocks::layout_with(entry, &blocks, modes, width, height, spinner);
             let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
             let head_marker = blocks::head_marker(entry, modes, body_follows);
             let style = body_style(entry, theme);
@@ -596,7 +610,7 @@ pub fn visible_lines_images(
                 .into_iter()
                 .enumerate()
                 .skip(skip)
-                .take(height - out.len())
+                .take(window - out.len())
                 .collect();
             let out_start = out.len();
             for (offset, (i, row)) in rows.into_iter().enumerate() {
@@ -624,8 +638,8 @@ pub fn visible_lines_images(
         }
         line = next;
     }
-    // Only a complete run is drawable (its fixed height in rows): a run clipped by the top or
-    // the bottom edge stays blank, the placeholder row still says what it was.
+    // Only a complete run is drawable (its computed height in rows): a run clipped by the top
+    // or the bottom edge stays blank, the placeholder row still says what it was.
     let mut runs = Vec::new();
     let mut at = 0usize;
     while at < slots.len() {
@@ -634,7 +648,7 @@ pub fn visible_lines_images(
         while at + count < slots.len() && slots[at + count] == (entry, image, row + count) {
             count += 1;
         }
-        if count == usize::from(crate::media::IMAGE_HEIGHT_ROWS) {
+        if count == usize::from(crate::media::image_height_rows(height)) {
             runs.push(ImageRun { entry, image, row });
         }
         at += count;
@@ -642,24 +656,27 @@ pub fn visible_lines_images(
     (total, out, runs)
 }
 
-/// The transcript's total line count and the `height` lines starting at line `start`, laying
-/// out only the entries that overlap that window (dogfooding D9). Every other entry
+/// The transcript's total line count and the `window` lines starting at line `start`, laying
+/// out only the entries that overlap that window (dogfooding D9). `height` is the transcript
+/// area's height (ADR 0028 R10: it decides an image run's rows). Every other entry
 /// contributes its cached line count, so a long session costs an integer sum per frame
 /// instead of re-laying out every entry.
 pub fn visible_lines(
     entries: &mut [Entry],
     modes: DisplayModes,
     width: usize,
-    start: usize,
     height: usize,
+    start: usize,
+    window: usize,
     theme: &Theme,
 ) -> (usize, Vec<Line<'static>>) {
     visible_lines_with(
         entries,
         modes,
         width,
-        start,
         height,
+        start,
+        window,
         theme,
         crate::spinner::Frame::default(),
     )
@@ -667,17 +684,19 @@ pub fn visible_lines(
 
 /// [`visible_lines`] with the live spinner frame (ADR 0027): the frame lays out
 /// only the visible entries, so the spinner is what makes it redraw every tick.
+#[allow(clippy::too_many_arguments)]
 pub fn visible_lines_with(
     entries: &mut [Entry],
     modes: DisplayModes,
     width: usize,
-    start: usize,
     height: usize,
+    start: usize,
+    window: usize,
     theme: &Theme,
     spinner: crate::spinner::Frame,
 ) -> (usize, Vec<Line<'static>>) {
     let (total, lines, _) =
-        visible_lines_images(entries, modes, width, start, height, theme, spinner);
+        visible_lines_images(entries, modes, width, height, start, window, theme, spinner);
     (total, lines)
 }
 

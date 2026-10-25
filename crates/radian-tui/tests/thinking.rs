@@ -407,8 +407,8 @@ fn a_thinking_code_block_draws_the_open_frame_and_counts_the_drawn_lines() {
     for width in [60usize, 24] {
         let modes = thinking_modes(ReasoningMode::Expanded);
         assert_eq!(
-            blocks::line_count(entry, modes, width),
-            blocks::layout(entry, &parsed, modes, width).len(),
+            blocks::line_count(entry, modes, width, 24),
+            blocks::layout(entry, &parsed, modes, width, 24).len(),
             "width {width}"
         );
     }

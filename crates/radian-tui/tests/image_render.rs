@@ -16,6 +16,15 @@ const GIF: &[u8] = &[
     0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
 ];
 
+/// The transcript area's height these fixtures are laid out at. 24 rows is the image
+/// minimum's boundary: half is 12, exactly `IMAGE_MIN_ROWS`.
+const HEIGHT: usize = 24;
+
+/// The image run the layout reserves at [`HEIGHT`].
+fn run_rows() -> usize {
+    usize::from(radian_tui::media::image_height_rows(HEIGHT))
+}
+
 fn base64(bytes: &[u8]) -> String {
     radian_coding::image::base64_encode(bytes)
 }
@@ -78,8 +87,8 @@ fn image_entry(app: &App) -> &radian_tui::Entry {
         .expect("an entry with an image")
 }
 
-/// ADR 0028 R10: the run is directly under the placeholder, `IMAGE_HEIGHT_ROWS` rows of no
-/// text, and the counting and the drawing agree.
+/// ADR 0028 R10: the run is directly under the placeholder, `IMAGE_MIN_ROWS` rows of no
+/// text at this transcript height, and the counting and the drawing agree.
 #[test]
 fn a_user_image_gets_a_fixed_run_under_its_placeholder() {
     let app = user_app(vec![
@@ -89,7 +98,7 @@ fn a_user_image_gets_a_fixed_run_under_its_placeholder() {
     let entry = image_entry(&app);
     assert_eq!(entry.kind, EntryKind::User);
     let all = modes(ToolFold::Expanded);
-    let lines = blocks::layout(entry, &[], all, 80);
+    let lines = blocks::layout(entry, &[], all, 80, HEIGHT);
     let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
     let placeholder = texts
         .iter()
@@ -101,10 +110,7 @@ fn a_user_image_gets_a_fixed_run_under_its_placeholder() {
     );
     let rows: Vec<&radian_tui::blocks::BodyLine> =
         lines.iter().filter(|line| line.image.is_some()).collect();
-    assert_eq!(
-        rows.len(),
-        usize::from(radian_tui::media::IMAGE_HEIGHT_ROWS)
-    );
+    assert_eq!(rows.len(), run_rows());
     assert!(rows.iter().all(|line| line.text.is_empty()), "{texts:?}");
     assert_eq!(
         lines[placeholder + 1].image,
@@ -112,15 +118,18 @@ fn a_user_image_gets_a_fixed_run_under_its_placeholder() {
         "the run starts directly under the placeholder: {texts:?}"
     );
     // The measure pass, the layout and the text-only view agree.
-    assert_eq!(blocks::line_count(entry, all, 80), lines.len());
-    assert_eq!(blocks::body_text_lines(entry, all, 80).len(), lines.len());
+    assert_eq!(blocks::line_count(entry, all, 80, HEIGHT), lines.len());
+    assert_eq!(
+        blocks::body_text_lines(entry, all, 80, HEIGHT).len(),
+        lines.len()
+    );
     // And all the text the transcript shows is the placeholder (the run is blank).
     assert!(
-        blocks::body_text_lines(entry, all, 80)
+        blocks::body_text_lines(entry, all, 80, HEIGHT)
             .iter()
             .all(|text| text.is_empty() || text.starts_with("[image:") || text == "look at this"),
         "{:?}",
-        blocks::body_text_lines(entry, all, 80)
+        blocks::body_text_lines(entry, all, 80, HEIGHT)
     );
 }
 
@@ -135,6 +144,7 @@ fn the_window_reports_a_run_only_when_the_whole_run_is_visible() {
         &mut app.session.entries,
         all,
         80,
+        HEIGHT,
         0,
         0,
         &theme,
@@ -144,6 +154,7 @@ fn the_window_reports_a_run_only_when_the_whole_run_is_visible() {
         &mut app.session.entries,
         all,
         80,
+        HEIGHT,
         0,
         total,
         &theme,
@@ -163,6 +174,7 @@ fn the_window_reports_a_run_only_when_the_whole_run_is_visible() {
         &mut app.session.entries,
         all,
         80,
+        HEIGHT,
         0,
         runs[0].row + 2,
         &radian_tui::theme::Theme::dark(),
@@ -179,7 +191,7 @@ fn a_folded_tool_result_shows_the_placeholder_but_not_the_image() {
     let app = tool_app();
     let entry = image_entry(&app);
 
-    let collapsed = blocks::layout(entry, &[], modes(ToolFold::Collapsed), 80);
+    let collapsed = blocks::layout(entry, &[], modes(ToolFold::Collapsed), 80, HEIGHT);
     let texts: Vec<&str> = collapsed.iter().map(|line| line.text.as_str()).collect();
     assert!(
         texts
@@ -193,9 +205,9 @@ fn a_folded_tool_result_shows_the_placeholder_but_not_the_image() {
     );
     assert_eq!(collapsed.len(), 1, "only the placeholder row: {texts:?}");
 
-    let expanded = blocks::layout(entry, &[], modes(ToolFold::Expanded), 80);
+    let expanded = blocks::layout(entry, &[], modes(ToolFold::Expanded), 80, HEIGHT);
     let rows = expanded.iter().filter(|line| line.image.is_some()).count();
-    assert_eq!(rows, usize::from(radian_tui::media::IMAGE_HEIGHT_ROWS));
+    assert_eq!(rows, run_rows());
     assert!(
         expanded
             .iter()
@@ -204,7 +216,7 @@ fn a_folded_tool_result_shows_the_placeholder_but_not_the_image() {
     );
 
     // The default `errors` fold is folded for a successful result.
-    let errors = blocks::layout(entry, &[], modes(ToolFold::Errors), 80);
+    let errors = blocks::layout(entry, &[], modes(ToolFold::Errors), 80, HEIGHT);
     assert!(errors.iter().all(|line| line.image.is_none()), "{errors:?}");
 
     // A failed result's body is never folded (ADR 0028 R4), so its image draws under every
@@ -225,7 +237,7 @@ fn a_folded_tool_result_shows_the_placeholder_but_not_the_image() {
     });
     let failed_entry = image_entry(&app);
     for fold in [ToolFold::Collapsed, ToolFold::Errors, ToolFold::Expanded] {
-        let lines = blocks::layout(failed_entry, &[], modes(fold), 80);
+        let lines = blocks::layout(failed_entry, &[], modes(fold), 80, HEIGHT);
         assert!(
             lines.iter().any(|line| line.image.is_some()),
             "a failed result keeps its image rows under {fold:?}: {lines:?}"
@@ -240,11 +252,11 @@ fn selection_and_search_never_see_the_image_rows() {
     let app = user_app(vec![ContentPart::text("look"), image_part("shot.gif")]);
     let entries = &app.session.entries;
     let all = modes(ToolFold::Expanded);
-    let lines = blocks::layout(&entries[0], &[], all, 80);
+    let lines = blocks::layout(&entries[0], &[], all, 80, HEIGHT);
     let last_row = lines.len() - 1;
     let selection = Selection {
-        anchor: select::locate(entries, all, 80, 0, 0).expect("first line"),
-        head: select::locate(entries, all, 80, last_row, 200).expect("last image row"),
+        anchor: select::locate(entries, all, 80, HEIGHT, 0, 0).expect("first line"),
+        head: select::locate(entries, all, 80, HEIGHT, last_row, 200).expect("last image row"),
     };
     assert_eq!(
         select::logical_text(entries, &selection),
@@ -258,16 +270,16 @@ fn selection_and_search_never_see_the_image_rows() {
         ContentPart::Image { data, .. } => data[..16].to_owned(),
         _ => unreachable!("an image part"),
     };
-    let (matches, _) = radian_tui::find::compute(entries, all, 80, &payload);
+    let (matches, _) = radian_tui::find::compute(entries, all, 80, HEIGHT, &payload);
     assert!(
         matches.is_empty(),
         "search must not match inside the image rows: {matches:?}"
     );
-    let (matches, _) = radian_tui::find::compute(entries, all, 80, "shot.gif");
+    let (matches, _) = radian_tui::find::compute(entries, all, 80, HEIGHT, "shot.gif");
     assert!(!matches.is_empty(), "the placeholder row is searchable");
     // Every match is on a row that draws text; none is on an image row.
     for hit in matches {
-        let row = &blocks::layout(&entries[hit.entry], &[], all, 80)[hit.line];
+        let row = &blocks::layout(&entries[hit.entry], &[], all, 80, HEIGHT)[hit.line];
         assert!(row.image.is_none(), "a match landed on an image row");
     }
 }
@@ -292,7 +304,7 @@ fn a_broken_image_does_not_steal_a_valid_twins_run() {
     assert!(!entry.images[0].decodable, "the first payload is broken");
     assert!(entry.images[1].decodable, "the second payload decodes");
     let all = modes(ToolFold::Expanded);
-    let lines = blocks::layout(entry, &[], all, 80);
+    let lines = blocks::layout(entry, &[], all, 80, HEIGHT);
     let placeholder = entry.images[0].placeholder.clone();
     let rows: Vec<usize> = lines
         .iter()
@@ -309,7 +321,7 @@ fn a_broken_image_does_not_steal_a_valid_twins_run() {
         lines.iter().filter(|line| line.image.is_some()).collect();
     assert_eq!(
         run.len(),
-        usize::from(radian_tui::media::IMAGE_HEIGHT_ROWS),
+        run_rows(),
         "only the valid image has a run: {lines:?}"
     );
     assert!(
@@ -338,7 +350,7 @@ fn a_broken_image_draws_only_its_placeholder() {
     let app = user_app(vec![ContentPart::text("look"), part.clone()]);
     let entry = image_entry(&app);
     let all = modes(ToolFold::Expanded);
-    let lines = blocks::layout(entry, &[], all, 80);
+    let lines = blocks::layout(entry, &[], all, 80, HEIGHT);
     let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
     assert!(
         texts
@@ -357,9 +369,9 @@ fn a_broken_image_draws_only_its_placeholder() {
         "no error block: {texts:?}"
     );
     // The counting, the drawing and the text-only view agree on the shorter shape.
-    assert_eq!(blocks::line_count(entry, all, 80), lines.len());
+    assert_eq!(blocks::line_count(entry, all, 80, HEIGHT), lines.len());
     assert_eq!(
-        blocks::body_text_lines(entry, all, 80)
+        blocks::body_text_lines(entry, all, 80, HEIGHT)
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
@@ -391,14 +403,14 @@ fn a_tool_result_placeholder_is_copied_and_the_run_is_not() {
 
     for fold in [ToolFold::Collapsed, ToolFold::Expanded] {
         let all = modes(fold);
-        let lines = blocks::layout(entry, &[], all, 80);
+        let lines = blocks::layout(entry, &[], all, 80, HEIGHT);
         let row = lines
             .iter()
             .position(|line| line.text == placeholder)
             .unwrap_or_else(|| panic!("the placeholder row under {fold:?}: {lines:?}"));
         // The placeholder row maps its first cell into the selection text, past the entry's own
         // text.
-        let start = select::locate(entries, all, 80, row, 2).expect("the placeholder row");
+        let start = select::locate(entries, all, 80, HEIGHT, row, 2).expect("the placeholder row");
         assert_eq!(
             start.offset, spans[0].0,
             "clicking the placeholder anchors in it"
@@ -408,7 +420,7 @@ fn a_tool_result_placeholder_is_copied_and_the_run_is_not() {
             .iter()
             .rposition(|line| line.image.is_some())
             .unwrap_or(row);
-        let head = select::locate(entries, all, 80, end_row, 200).expect("past the run");
+        let head = select::locate(entries, all, 80, HEIGHT, end_row, 200).expect("past the run");
         let selection = Selection {
             anchor: start,
             head,
@@ -444,11 +456,155 @@ fn a_tool_result_placeholder_is_copied_and_the_run_is_not() {
 fn a_tool_image_placeholder_is_a_body_row() {
     let app = tool_app();
     let entry = image_entry(&app);
-    let lines = blocks::layout(entry, &[], modes(ToolFold::Collapsed), 80);
+    let lines = blocks::layout(entry, &[], modes(ToolFold::Collapsed), 80, HEIGHT);
     let placeholder = lines
         .iter()
         .find(|line| line.text.starts_with("[image: shot.gif"))
         .expect("the placeholder row");
     assert_eq!(placeholder.frame, radian_tui::blocks::Frame::Body);
     assert!(placeholder.hint, "synthesized, like a head's meta");
+}
+
+fn text(lines: &[ratatui::text::Line<'static>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect()
+}
+
+/// ADR 0028 R10: the run is half the transcript area's height for 20, 50 and 100 rows (the
+/// minimum, a middle value, the maximum).
+#[test]
+fn the_run_height_follows_the_transcript_area() {
+    let app = user_app(vec![ContentPart::text("look"), image_part("shot.gif")]);
+    let entry = image_entry(&app);
+    let all = modes(ToolFold::Expanded);
+    for (height, want) in [(20usize, 12usize), (50, 25), (100, 40)] {
+        let lines = blocks::layout(entry, &[], all, 80, height);
+        let rows = lines.iter().filter(|line| line.image.is_some()).count();
+        assert_eq!(rows, want, "transcript area of {height} rows");
+        assert_eq!(
+            blocks::line_count(entry, all, 80, height),
+            lines.len(),
+            "the count equals the drawing at {height} rows"
+        );
+        assert_eq!(
+            blocks::body_text_lines(entry, all, 80, height).len(),
+            lines.len(),
+            "the text-only view equals the drawing at {height} rows"
+        );
+    }
+}
+
+/// ADR 0028 R10: resizing the transcript from 50 to 100 rows recomputes the run, and every
+/// window at the new height still equals the full wrap row for row (scrolling stays exact).
+#[test]
+fn a_resize_recomputes_the_run_and_keeps_scrolling_exact() {
+    let mut app = user_app(vec![
+        ContentPart::text("look at this"),
+        image_part("shot.gif"),
+    ]);
+    let all = modes(ToolFold::Expanded);
+    let theme = radian_tui::theme::Theme::dark();
+    let mut totals = Vec::new();
+    for height in [50usize, 100] {
+        let full = text(&render::transcript_lines(
+            &app.session.entries,
+            all,
+            80,
+            height,
+            &theme,
+        ));
+        // The image entry's run is part of the full wrap.
+        let entry = image_entry(&app);
+        let laid_out = blocks::layout(entry, &[], all, 80, height);
+        assert_eq!(
+            laid_out.len(),
+            full.len(),
+            "one entry: the user message and its run"
+        );
+        for start in 0..=full.len() {
+            let (total, window, _) = render::visible_lines_images(
+                &mut app.session.entries,
+                all,
+                80,
+                height,
+                start,
+                full.len().max(1),
+                &theme,
+                radian_tui::spinner::Frame::default(),
+            );
+            assert_eq!(total, full.len(), "height {height}, start {start}");
+            assert_eq!(
+                text(&window),
+                full[start..].to_vec(),
+                "height {height}, start {start}"
+            );
+        }
+        totals.push(full.len());
+    }
+    // The taller area's run is 15 rows longer (25 → 40), so the transcript grew by exactly that.
+    assert_eq!(totals[1] - totals[0], 40 - 25);
+}
+
+/// ADR 0028 R10: a very wide image is scaled down to the body column's width. The reserved
+/// run keeps its computed height (the drawn picture is shorter, top-aligned); row counting and
+/// drawing stay on that one layout.
+#[test]
+fn a_very_wide_image_is_bounded_by_the_body_column() {
+    let picker = ratatui_image::picker::Picker::halfblocks(); // a 10×20 px cell
+    let mut image = radian_tui::media::EntryImage::from_part(
+        &image_part("wide.gif"),
+        &mut radian_tui::media::ImageCache::default(),
+    )
+    .expect("an image part");
+    // A 40:1 image: at 40 rows it would want 40×20 px × 40 / 10 px = 3200 columns.
+    image.width = 4000;
+    image.height = 100;
+    let rows = radian_tui::media::image_height_rows(100);
+    assert_eq!(rows, 40);
+    assert_eq!(
+        radian_tui::media::image_columns(&picker, &image, 60, rows),
+        60,
+        "the body column bounds the width"
+    );
+    // The layout still reserves the full run: the width clamp does not shrink it.
+    let app = user_app(vec![ContentPart::text("look"), image_part("wide.gif")]);
+    let entry = image_entry(&app);
+    let lines = blocks::layout(entry, &[], modes(ToolFold::Expanded), 80, 100);
+    assert_eq!(
+        lines.iter().filter(|line| line.image.is_some()).count(),
+        usize::from(rows)
+    );
+}
+
+/// ADR 0028 R10: a frame sizes the image run from the **transcript area** (the rows the
+/// transcript can draw in), not from the whole terminal: the composer, footer and other
+/// chrome are not part of the half. A tall fixture where the two differ is the proof.
+#[test]
+fn the_run_follows_the_transcript_area_not_the_whole_terminal() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = user_app(vec![ContentPart::text("look"), image_part("shot.gif")]);
+    let mut terminal = Terminal::new(TestBackend::new(80, 50)).unwrap();
+    terminal
+        .draw(|frame| radian_tui::render::draw(frame, &mut app))
+        .unwrap();
+    let area = usize::from(app.session.view_height);
+    assert!(area < 50, "the fixture leaves room for the chrome: {area}");
+    assert_ne!(
+        radian_tui::media::image_height_rows(area),
+        radian_tui::media::image_height_rows(50),
+        "the fixture must tell the transcript area from the whole terminal"
+    );
+    let modes = app.display_modes();
+    let theme = app.theme.clone();
+    let (total, _) = render::visible_lines(&mut app.session.entries, modes, 80, area, 0, 0, &theme);
+    let (whole, _) = render::visible_lines(&mut app.session.entries, modes, 80, 50, 0, 0, &theme);
+    assert_ne!(total, whole, "the fixture must tell the two layouts apart");
+    assert_eq!(
+        app.session.total_lines, total,
+        "the frame measured at the transcript area's height"
+    );
 }

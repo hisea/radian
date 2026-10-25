@@ -251,8 +251,15 @@ fn an_oversized_selection_is_refused_with_the_reason() {
     app.session.entries.clear();
     app.push_message(&Message::assistant("z".repeat(MAX_CLIPBOARD_BYTES + 1)));
     app.set_transcript_width(30);
-    let (total, _) =
-        radian_tui::render::visible_lines(&mut app.session.entries, EXPANDED, 30, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.session.entries,
+        EXPANDED,
+        30,
+        24,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(1, total);
     app.session.scroll = 0;
     app.session.follow = false;

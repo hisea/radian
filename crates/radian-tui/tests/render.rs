@@ -1236,13 +1236,20 @@ fn a_user_selection_never_copies_the_marker() {
     classic_footer(&mut app);
     app.push_message(&Message::user("hello"));
     app.set_transcript_width(40);
-    let (total, _) =
-        radian_tui::render::visible_lines(&mut app.session.entries, EXPANDED, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.session.entries,
+        EXPANDED,
+        40,
+        24,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
     // The whole row, from the marker cell (column 0) through the last word.
     let selection = Selection {
-        anchor: locate(&app.session.entries, EXPANDED, 40, 0, 0).expect("anchor"),
-        head: locate(&app.session.entries, EXPANDED, 40, 0, 20).expect("head"),
+        anchor: locate(&app.session.entries, EXPANDED, 40, 24, 0, 0).expect("anchor"),
+        head: locate(&app.session.entries, EXPANDED, 40, 24, 0, 20).expect("head"),
     };
     let text = radian_tui::select::logical_text(&app.session.entries, &selection);
     assert_eq!(text, "hello", "the marker is not copied");
@@ -1523,15 +1530,16 @@ fn a_skipped_reply_does_not_shift_the_selection_or_find_rows() {
         .position(|entry| entry.kind == EntryKind::ToolCall)
         .expect("the tool call entry");
     let reasoning_lines =
-        radian_tui::render::display_lines(&app.session.entries[reasoning], modes, width).len();
-    let (_, starts) = radian_tui::find::compute(&app.session.entries, modes, width, "");
+        radian_tui::render::display_lines(&app.session.entries[reasoning], modes, width, 24).len();
+    let (_, starts) = radian_tui::find::compute(&app.session.entries, modes, width, 24, "");
     assert_eq!(
         starts[call] - starts[reasoning],
         reasoning_lines + 1,
         "the tool call starts one blank row (not two) below the reasoning block"
     );
-    let hit = radian_tui::select::locate_hit(&app.session.entries, modes, width, starts[call], 2)
-        .expect("a hit on the tool head");
+    let hit =
+        radian_tui::select::locate_hit(&app.session.entries, modes, width, 24, starts[call], 2)
+            .expect("a hit on the tool head");
     assert_eq!(
         hit.anchor.entry, call,
         "the head row maps to the tool call, not to the skipped reply"
@@ -1582,14 +1590,21 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
     classic_footer(&mut app);
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) =
-        radian_tui::render::visible_lines(&mut app.session.entries, EXPANDED, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.session.entries,
+        EXPANDED,
+        40,
+        24,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
     // Select "selection" on the block's only line (the thin user row, ADR 0035):
     // body columns 6..15 → screen columns 8..17 (the `❯ ` marker takes the first two cells).
     let selection = Selection {
-        anchor: locate(&app.session.entries, EXPANDED, 40, 0, 8).expect("anchor"),
-        head: locate(&app.session.entries, EXPANDED, 40, 0, 17).expect("head"),
+        anchor: locate(&app.session.entries, EXPANDED, 40, 24, 0, 8).expect("anchor"),
+        head: locate(&app.session.entries, EXPANDED, 40, 24, 0, 17).expect("head"),
     };
     app.session.selection = Some(selection);
     // Tall enough that the one-row user block is on screen.
@@ -1620,12 +1635,19 @@ fn the_mono_selection_is_reversed_not_colored() {
     app.theme = radian_tui::theme::Theme::mono();
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) =
-        radian_tui::render::visible_lines(&mut app.session.entries, EXPANDED, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.session.entries,
+        EXPANDED,
+        40,
+        24,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
     app.session.selection = Some(Selection {
-        anchor: locate(&app.session.entries, EXPANDED, 40, 0, 8).expect("anchor"),
-        head: locate(&app.session.entries, EXPANDED, 40, 0, 17).expect("head"),
+        anchor: locate(&app.session.entries, EXPANDED, 40, 24, 0, 8).expect("anchor"),
+        head: locate(&app.session.entries, EXPANDED, 40, 24, 0, 17).expect("head"),
     });
     let terminal = render(&mut app, 40, 10);
     let word = style_of(&terminal, "selection").expect("on screen");
@@ -1644,10 +1666,17 @@ fn an_empty_selection_draws_nothing() {
     classic_footer(&mut app);
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) =
-        radian_tui::render::visible_lines(&mut app.session.entries, EXPANDED, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.session.entries,
+        EXPANDED,
+        40,
+        24,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    let at = locate(&app.session.entries, EXPANDED, 40, 1, 8).expect("anchor");
+    let at = locate(&app.session.entries, EXPANDED, 40, 24, 1, 8).expect("anchor");
     app.session.selection = Some(Selection {
         anchor: at,
         head: at,
@@ -3535,7 +3564,7 @@ fn the_ask_panel_and_the_transcript_block_use_the_same_markers() {
     card.structured = Some(serde_json::json!({"answers":[{"id":"q","selected":["a"]}]}));
     let mut entry = radian_tui::app::Entry::new(radian_tui::app::EntryKind::ToolResult, "result");
     entry.tool = Some(Box::new(card));
-    let block = radian_tui::blocks::layout(&entry, &[], EXPANDED, 60);
+    let block = radian_tui::blocks::layout(&entry, &[], EXPANDED, 60, 24);
     let block_text: String = block
         .iter()
         .map(|line| line.text.clone())

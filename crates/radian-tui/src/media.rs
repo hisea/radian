@@ -1,5 +1,5 @@
-//! Images in the transcript (ADR 0028 R10): the data an entry carries, the fixed row run an
-//! image occupies, and the decoded protocol state cached across frames.
+//! Images in the transcript (ADR 0028 R10): the data an entry carries, the row run an image
+//! occupies, and the decoded protocol state cached across frames.
 //!
 //! An image part's display facts (name, dimensions, size) live in its `annotations`, so the
 //! placeholder line needs no decode. The payload is decoded **once**, when the entry is built:
@@ -25,9 +25,26 @@ use ratatui_image::protocol::StatefulProtocol;
 use crate::app::{Entry, EntryKind};
 use crate::tools::{DisplayModes, ToolFold};
 
-/// How many transcript rows one image occupies (ADR 0028 R10). Fixed, so scrolling and the
-/// selection geometry do not depend on the image's dimensions or on the terminal's font.
-pub const IMAGE_HEIGHT_ROWS: u16 = 12;
+/// The least number of transcript rows one image occupies (ADR 0028 R10): half the transcript
+/// area's height, rounded down, but never less than this, so a short terminal still shows a
+/// picture.
+pub const IMAGE_MIN_ROWS: u16 = 12;
+
+/// The most number of transcript rows one image occupies (ADR 0028 R10): half the transcript
+/// area's height, rounded down, but never more than this, so one picture never takes over a
+/// tall terminal.
+pub const IMAGE_MAX_ROWS: u16 = 40;
+
+/// How many transcript rows one image occupies on a transcript area `height` rows tall (ADR
+/// 0028 R10): **half the area's height**, rounded down, clamped to
+/// [`IMAGE_MIN_ROWS`]..=[`IMAGE_MAX_ROWS`]. The area is what the transcript can draw in: the
+/// composer, the footer and the other chrome are not part of it. The count, the drawing and
+/// the selection geometry all read this one function, so they cannot disagree.
+pub fn image_height_rows(height: usize) -> u16 {
+    let half = height / 2;
+    u16::try_from(half.clamp(usize::from(IMAGE_MIN_ROWS), usize::from(IMAGE_MAX_ROWS)))
+        .unwrap_or(IMAGE_MAX_ROWS)
+}
 
 /// The most images whose decoded protocol state is kept. Each may hold a decoded copy of up to
 /// the 5 MiB image limit; an older image is decoded again if it scrolls back into view.
@@ -150,9 +167,10 @@ pub fn rows_visible(entry: &Entry, modes: DisplayModes) -> bool {
     entry.is_error || crate::blocks::expanded(entry, modes.tools.fold == ToolFold::Expanded)
 }
 
-/// The image's width in columns: its aspect ratio at [`IMAGE_HEIGHT_ROWS`] rows, from the
-/// terminal's cell pixel size, clamped to the body column (ADR 0028 R10).
-pub fn image_columns(picker: &Picker, image: &EntryImage, max_columns: u16) -> u16 {
+/// The image's width in columns: its aspect ratio at `rows` rows, from the terminal's cell
+/// pixel size, clamped to the body column (ADR 0028 R10). `rows` is the run's height
+/// ([`image_height_rows`]).
+pub fn image_columns(picker: &Picker, image: &EntryImage, max_columns: u16, rows: u16) -> u16 {
     let font = picker.font_size();
     let cell_width = u32::from(font.width.max(1));
     let cell_height = u32::from(font.height.max(1));
@@ -160,7 +178,7 @@ pub fn image_columns(picker: &Picker, image: &EntryImage, max_columns: u16) -> u
         return 0;
     }
     // The run's pixel height, then the width that keeps the aspect ratio.
-    let pixel_height = u32::from(IMAGE_HEIGHT_ROWS) * cell_height;
+    let pixel_height = u32::from(rows) * cell_height;
     let pixel_width = (u64::from(pixel_height) * u64::from(image.width))
         .div_ceil(u64::from(image.height))
         .min(u64::from(u32::MAX)) as u32;
@@ -577,25 +595,68 @@ mod tests {
         );
     }
 
-    /// The width keeps the aspect ratio at the fixed row height and never exceeds the body
+    /// The width keeps the aspect ratio at the run's height and never exceeds the body
     /// column (ADR 0028 R10).
     #[test]
     fn the_image_width_follows_the_aspect_ratio_and_the_column() {
         let picker = Picker::halfblocks(); // a 10×20 px cell
         let image = EntryImage::from_part(&image_part(), &mut ImageCache::default())
             .expect("an image part");
-        // A square image: 12 rows × 20 px = 240 px tall, so 240 px / 10 px = 24 columns.
-        assert_eq!(image_columns(&picker, &image, 80), 24);
+        // A square image at the minimum run: 12 rows × 20 px = 240 px tall, so 240 px / 10 px
+        // = 24 columns.
+        assert_eq!(image_columns(&picker, &image, 80, IMAGE_MIN_ROWS), 24);
         // A column narrower than that wins.
-        assert_eq!(image_columns(&picker, &image, 10), 10);
+        assert_eq!(image_columns(&picker, &image, 10, IMAGE_MIN_ROWS), 10);
         // A 2:1 image is twice as wide at the same height.
         let wide = EntryImage {
             width: 2,
             ..image.clone()
         };
-        assert_eq!(image_columns(&picker, &wide, 80), 48);
+        assert_eq!(image_columns(&picker, &wide, 80, IMAGE_MIN_ROWS), 48);
         // And a 1:2 image is half as wide.
         let tall = EntryImage { height: 2, ..image };
-        assert_eq!(image_columns(&picker, &tall, 80), 12);
+        assert_eq!(image_columns(&picker, &tall, 80, IMAGE_MIN_ROWS), 12);
+    }
+
+    /// ADR 0028 R10: the run is half the transcript area's height, rounded down, clamped to
+    /// 12..=40 rows.
+    #[test]
+    fn the_image_height_is_half_the_transcript_area() {
+        // The named limits are the decision, not implementation detail.
+        assert_eq!((IMAGE_MIN_ROWS, IMAGE_MAX_ROWS), (12, 40));
+        assert_eq!(image_height_rows(0), 12, "a tiny area keeps the minimum");
+        assert_eq!(image_height_rows(20), 12, "10 rows clamps up to 12");
+        assert_eq!(image_height_rows(23), 12, "11 rows clamps up to 12");
+        assert_eq!(image_height_rows(24), 12, "exactly 12 rows");
+        assert_eq!(image_height_rows(50), 25, "half of 50");
+        assert_eq!(image_height_rows(79), 39, "rounded down");
+        assert_eq!(image_height_rows(80), 40, "half of 80 is the maximum");
+        assert_eq!(image_height_rows(100), 40, "capped at the maximum");
+        assert_eq!(image_height_rows(10_000), 40, "capped at the maximum");
+    }
+
+    /// ADR 0028 R10: a resize changes the run's rows, never the decode. The layout at a new
+    /// transcript height reserves a different run without decoding the image again.
+    #[test]
+    fn a_resize_recomputes_the_run_without_decoding_again() {
+        let mut cache = ImageCache::default();
+        let image = EntryImage::from_part(&image_part(), &mut cache).expect("an image part");
+        let mut entry = crate::app::Entry::new(crate::app::EntryKind::User, "");
+        entry.text = format!("look\n\n{}", image.placeholder);
+        entry.images = vec![image];
+        let modes = crate::tools::DisplayModes::default();
+        let before = decodes();
+        let short = crate::blocks::layout(&entry, &[], modes, 80, 50);
+        let tall = crate::blocks::layout(&entry, &[], modes, 80, 100);
+        assert_eq!(
+            decodes(),
+            before,
+            "laying out at a new height decodes nothing"
+        );
+        let rows = |lines: &[crate::blocks::BodyLine]| {
+            lines.iter().filter(|line| line.image.is_some()).count()
+        };
+        assert_eq!(rows(&short), 25, "half of 50 rows");
+        assert_eq!(rows(&tall), 40, "half of 100 rows, clamped");
     }
 }
