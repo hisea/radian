@@ -144,7 +144,8 @@ The TUI's owner actions are the CLI's own library calls, run in the TUI process;
 | merge | `r` | `reject` with a note | a one-line note float: `Enter` rejects, `Esc` cancels; an empty note is refused like the CLI |
 | merge | `v` | `reverify` | none |
 
-`y` confirms and `n` (or `Esc`) closes a confirmation float without changing anything. `start` in the TUI does what `radian arc start` does; the scheduling loop (the `radian arc serve` the TUI starts, or one started by hand) is what schedules the rest.
+`y` confirms and `n` (or `Esc`) closes a confirmation float without changing anything.
+`v` runs the same `reverify` as the CLI, so it accepts the same failures (see [`radian arc reverify`](index.md#radian-arc-reverify-task), which lists every one); the TUI has no enable check of its own, and a refusal shows the CLI's message and exit code in the footer. `start` in the TUI does what `radian arc start` does; the scheduling loop (the `radian arc serve` the TUI starts, or one started by hand) is what schedules the rest.
 
 ## Quitting
 

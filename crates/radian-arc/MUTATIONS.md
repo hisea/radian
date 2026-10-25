@@ -820,3 +820,20 @@ drives the binary.
 
 3/3 caught.
 
+## TK0103: the owner's `reverify` accepts an integration command failure (2026-10-24, branch `work/TK0103-reverify-integration`)
+
+ADR 0048 decision 11: `radian arc reverify` accepts a `review.rework_pending` task whose
+rework reason is the integration stage failed with `command_failed` or `timeout`, through the
+same `review::reverifiable_failure` helper the scheduling loop reads. Each mutation was applied
+by hand to the working `crates/radian-arc/src/store/attempt_ops.rs`, the named test ran alone
+with `cargo nextest run -p radian-arc --locked --profile sandbox --test review -E '<the test
+below>'`, and the file was restored from `.radian/attempt_ops.rs.bak` with `cp`, which `cmp`
+found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0103-M1 | accept every integration reason (`if stage == Some("integration")` instead of the shared stage/reason check) | `review::reverify_refuses_an_integration_failure_with_another_reason` (the conflict is claimed and reverified) | ✅ failed |
+| TK0103-M2 | refuse integration again (drop the second acceptance branch, so only a verification stage passes) | `review::reverify_accepts_an_integration_command_failure`, `review::reverify_accepts_an_integration_timeout` (both exit 3 with the "not a verification stage" refusal) | ✅ 2 failed |
+
+2/2 caught.
+

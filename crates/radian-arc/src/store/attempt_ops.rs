@@ -484,13 +484,14 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
 /// Claims a new attempt for `radian arc reverify` (ADR 0048 decision 11): no worker runs and
 /// nothing is pushed.
 ///
-/// The task must be `review.rework_pending` or `review.awaiting_human`, and a rework reason
-/// must come from a verification stage: a reject note, a delivery failure and any other
-/// reason are refused (exit 3). A `review.verifying` task is accepted when its gate is stuck
-/// (`no_record` or `died` for its current attempt, with no gate running). The claim keeps
-/// `head_sha`, gives the attempt a new number, `attempt_id` and `token`, clears the old
-/// approval, and records an attempt result whose class is [`REVERIFY_CLASS`]. No
-/// `result.jsonl` is written: no worker ran.
+/// The task must be `review.rework_pending` or `review.awaiting_human`, and its rework reason
+/// must be one a re-run can fix: a failed verification stage, or the integration stage failed
+/// with `command_failed` or `timeout`. A reject note, a delivery failure, an integration
+/// failure with any other reason, and any other reason are refused (exit 3). A
+/// `review.verifying` task is accepted when its gate is stuck (`no_record` or `died` for its
+/// current attempt, with no gate running). The claim keeps `head_sha`, gives the attempt a new
+/// number, `attempt_id` and `token`, clears the old approval, and records an attempt result
+/// whose class is [`REVERIFY_CLASS`]. No `result.jsonl` is written: no worker ran.
 pub fn claim_reverify(store: &Store, task_id: &str) -> Result<ReverifyClaim, Error> {
     claim_reverify_by(store, task_id, ReverifyBy::Owner)
 }
@@ -498,7 +499,8 @@ pub fn claim_reverify(store: &Store, task_id: &str) -> Result<ReverifyClaim, Err
 /// Who claims a worker-less attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReverifyBy {
-    /// `radian arc reverify`: the rework reason must be a failed verification stage.
+    /// `radian arc reverify`: the rework reason must be one a re-run can fix (a failed
+    /// verification stage, or an integration command failure or timeout).
     Owner,
     /// A scheduling pass's automatic reverify: the pass proved itself that the reason is a
     /// `commands` or integration command failure or timeout that a moved main can fix
@@ -575,9 +577,11 @@ pub fn claim_reverify_by(
     })
 }
 
-/// Whether `radian arc reverify` may re-run the gate for `task`: its rework reason must be a
-/// failed verification stage. A reject note and a delivery failure are refused, and so is any
-/// other recorded reason; a task with no recorded reason is accepted (the decision's "if any").
+/// Whether `radian arc reverify` may re-run the gate for `task`: its rework reason must be one
+/// a re-run can fix, a failed verification stage or an integration command failure or timeout
+/// (ADR 0048 decisions 9 and 11). A reject note, a paused task, a delivery failure, and any
+/// other recorded reason are refused; a task with no recorded reason is accepted (the
+/// decision's "if any").
 fn reverify_reason_allowed(store: &Store, task: &model::TaskFile) -> Result<(), Error> {
     if task.phase == "awaiting_human" {
         return Ok(());
@@ -595,7 +599,13 @@ fn reverify_reason_allowed(store: &Store, task: &model::TaskFile) -> Result<(), 
     {
         let action = value.get("action").and_then(Value::as_str);
         let stage = value.get("stage").and_then(Value::as_str);
+        let reason = value.get("reason").and_then(Value::as_str);
         if action == Some("verify") && stage.is_some_and(is_verification_stage) {
+            return Ok(());
+        }
+        if stage.is_some_and(|stage| {
+            reason.is_some_and(|reason| crate::review::reverifiable_failure(stage, reason))
+        }) {
             return Ok(());
         }
         let reason = value

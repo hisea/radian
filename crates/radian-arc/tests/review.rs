@@ -826,6 +826,134 @@ fn reverify_reruns_the_gate_without_a_worker_and_does_not_use_an_attempt() {
     );
 }
 
+/// The `review.json` reason recorded for one attempt of the fixture's task.
+fn recorded_reason(fixture: &Fixture, attempt: u32) -> Value {
+    let path = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(format!("{}-{attempt}", fixture.task))
+        .join("review.json");
+    serde_json::from_str(&fs::read_to_string(&path).expect("review.json"))
+        .expect("review.json parses")
+}
+
+/// A failed integration key command is one the owner may re-run without a worker: the same
+/// `command_failed` pair the loop's automatic reverify accepts, with no main move needed.
+/// Mutation: accept only a verification stage again and the claim is refused.
+#[test]
+fn reverify_accepts_an_integration_command_failure() {
+    let fixture = Fixture::new("reverify-integration-command");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    fixture.key_commands(&["false"]);
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("review", "rework_pending"),
+        "{merged:?}"
+    );
+    let reason = recorded_reason(&fixture, 1);
+    assert_eq!(reason["stage"], "integration", "{reason}");
+    assert_eq!(reason["reason"], "command_failed", "{reason}");
+
+    let reverified = review::reverify(&fixture.store, &fixture.task).expect("reverify");
+    assert_eq!(reverified.attempt, 2);
+    assert_eq!(reverified.attempt_id, format!("{}-2", fixture.task));
+    let verified = reverified
+        .verification
+        .expect("the verification runs after the claim");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.attempt, 2);
+    assert_eq!(
+        stored.head_sha.as_deref(),
+        Some(head.as_str()),
+        "the commit does not change"
+    );
+    let run = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(format!("{}-2", fixture.task));
+    assert!(
+        !run.join("result.jsonl").exists(),
+        "a reverify attempt runs no worker"
+    );
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(run.join("attempt_result.json")).expect("the attempt result"),
+    )
+    .expect("the attempt result parses");
+    assert_eq!(record["class"], "reverify");
+}
+
+/// An integration key command that ran past its timeout is accepted the same way.
+#[test]
+fn reverify_accepts_an_integration_timeout() {
+    let fixture = Fixture::new("reverify-integration-timeout");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    fixture.tune("command_timeout_secs = 3600", "command_timeout_secs = 1");
+    fixture.key_commands(&["sleep 5"]);
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("review", "rework_pending"),
+        "{merged:?}"
+    );
+    let reason = recorded_reason(&fixture, 1);
+    assert_eq!(reason["stage"], "integration", "{reason}");
+    assert_eq!(reason["reason"], "timeout", "{reason}");
+
+    let reverified = review::reverify(&fixture.store, &fixture.task).expect("reverify");
+    assert_eq!(reverified.attempt, 2);
+    let verified = reverified
+        .verification
+        .expect("the verification runs after the claim");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+}
+
+/// An integration failure with any other reason is still refused: a conflict has its own
+/// rework path. Mutation: accept every integration reason and this claim succeeds.
+#[test]
+fn reverify_refuses_an_integration_failure_with_another_reason() {
+    let fixture = Fixture::new("reverify-integration-conflict");
+    // With `merge-main` off a conflict stays in `review.rework_pending` for the owner.
+    fixture.before_attempt(&[]);
+    let head = fixture.publish(&fixture.base.clone(), "file.txt", "work side\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    fixture.repo.advance_main("file.txt", "main side\n");
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("review", "rework_pending"),
+        "{merged:?}"
+    );
+    let reason = recorded_reason(&fixture, 1);
+    assert_eq!(reason["stage"], "integration", "{reason}");
+    assert!(
+        reason["reason"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("conflict")),
+        "{reason}"
+    );
+
+    let error = review::reverify(&fixture.store, &fixture.task)
+        .expect_err("an integration conflict is refused");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(error.message().contains("integration"), "{error:?}");
+    assert_eq!(
+        fixture.store.load_task(&fixture.task).unwrap().item.attempt,
+        1,
+        "a refusal claims nothing"
+    );
+}
+
 /// A reject note is the owner's decision about the work, not a wrong gate: `reverify` refuses
 /// it and claims nothing. Mutation: accept a reject-note task and this test sees attempt 2.
 #[test]
