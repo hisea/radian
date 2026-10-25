@@ -220,7 +220,7 @@ A plan's `auto` level may only be other than `off` once it is confirmed.
 
 A task moves from `todo.proposed` to `todo.ready`.
 The plan's `status` and `auto` do not change, and the plan does not return to `draft`.
-A task waits in `todo.proposed` until you confirm it when arc proposed it from a review (see [The review's follow-up](gate.md#the-reviews-follow-up)) or when the lead added it to a confirmed plan with the MCP `add_task` tool; the scheduling loop passes over it, and `start` refuses it.
+A task waits in `todo.proposed` until you confirm it when arc proposed it as the plan's review follow-up (see [The review's follow-up](gate.md#the-reviews-follow-up)) or when the lead added it to a confirmed plan with the MCP `add_task` tool; the scheduling loop passes over it, and `start` refuses it.
 A proposed task you do not want is ended with `radian arc cancel` (`failed.cancelled`).
 
 | Argument | Value | What it does |
@@ -596,7 +596,7 @@ Then it:
    The task's branch stays on the remote.
 
 `merge` never checks out or updates the main checkout's working tree: it fetches, pushes, and reads refs only.
-On `done.merged` it prints `<task> done.merged (<candidate sha>)`; a failed worktree removal is a `warning:` line after it and does not undo the merge, and so is a follow-up task that could not be added (see [The review's follow-up](gate.md#the-reviews-follow-up)).
+On `done.merged` it prints `<task> done.merged (<candidate sha>)`, followed by `<new task id> proposed (follow-ups from <plan id>)` when the merge left the plan with no open task and it has review items to collect (see [The review's follow-up](gate.md#the-reviews-follow-up)). A failed worktree removal is a `warning:` line after it and does not undo the merge, and so is a follow-up task that could not be added.
 
 The exit codes are the command's own:
 
