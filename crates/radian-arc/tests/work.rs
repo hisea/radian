@@ -2461,6 +2461,18 @@ fn a_verdict_copy_never_follows_a_link_the_worktree_already_has() {
     );
 }
 
+/// The main clone's common git directory.
+fn common_git_dir(repo: &Repo) -> PathBuf {
+    PathBuf::from(repo.git(&["rev-parse", "--absolute-git-dir"]).trim())
+}
+
+/// Appends one git configuration section to the common `config` from a `--worker-command`
+/// line, the way a worker with a wider sandbox could.
+fn append_to_common_config(repo: &Repo, lines: &str) -> String {
+    let config = common_git_dir(repo).join("config");
+    format!("cat >> '{}' <<'EOF'\n{lines}\nEOF", config.display())
+}
+
 /// The copy is ignored in the worktree, so it is not committed, `git status` stays clean, and
 /// the delivery check pushes the attempt (ADR 0048 decisions 7 and 8).
 #[test]
@@ -2521,4 +2533,399 @@ fn a_verdict_copy_never_reaches_the_branch() {
         !tracked.contains(".radian"),
         "the copies are not committed:\n{tracked}"
     );
+}
+
+/// The wrapper's git status runs after the control check: a worker cannot hide a dirty file
+/// behind a config it wrote (ADR 0048 decisions 7 and 8).
+#[test]
+fn the_worker_cannot_hide_a_dirty_file_from_the_check() {
+    let repo = Repo::new("control-excludes");
+    let config = common_git_dir(&repo).join("config");
+    let excludes = repo.root.join("worker-excludes");
+    std::fs::write(&excludes, "change.txt\n").expect("the excludes file");
+    let worktree = repo.worktree("TK0006-excludes");
+    let worker = format!(
+        "printf 'change.txt\\n' > '{worktree}/change.txt' \
+         && cat >> '{config}' <<'EOF'\n[core]\n\texcludesFile = {excludes}\nEOF",
+        worktree = worktree.display(),
+        config = config.display(),
+        excludes = excludes.display(),
+    );
+    let run = run(
+        &repo,
+        "TK0006-excludes",
+        1,
+        "tok-excludes",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(failure.contains("config"), "{failure}");
+    assert_eq!(
+        finished["dirty"],
+        json!(["change.txt"]),
+        "the wrapper's status ran after the control check, without the worker's config"
+    );
+}
+
+/// The wrapper's worktree setup writes no branch section into the common config, which another
+/// attempt's control check would read as the worker's change (ADR 0048 decision 7).
+#[test]
+fn the_wrapper_creates_the_branch_without_tracking() {
+    let repo = Repo::new("control-no-track");
+    run(
+        &repo,
+        "TK0007-notrack",
+        1,
+        "tok-notrack",
+        &["--worker-command", "true"],
+        &[],
+        "the body\n",
+    );
+    let config =
+        std::fs::read_to_string(common_git_dir(&repo).join("config")).expect("the common config");
+    assert!(
+        !config.contains("branch \"work/TK0007-notrack\""),
+        "the wrapper wrote a branch section:\n{config}"
+    );
+}
+
+/// A worker that appends to the common `config` fails the attempt, the file is put back, and
+/// nothing is pushed (ADR 0048 decisions 7 and 8).
+#[test]
+fn a_worker_that_changes_the_common_config_fails_and_is_restored() {
+    let repo = Repo::new("control-config");
+    // The first attempt creates the worktree: the second attempt then records exactly the
+    // config a reused worktree sees, and compares against that.
+    let first = run(
+        &repo,
+        "TK0001-config",
+        1,
+        "tok-first",
+        &["--worker-command", "true"],
+        &[],
+        "the body\n",
+    );
+    assert_eq!(first.finished()["pushed"], json!(false));
+    let config = common_git_dir(&repo).join("config");
+    let before = std::fs::read(&config).expect("the common config");
+    let worker = append_to_common_config(&repo, "[arc-test]\n\tchanged = true");
+    let run = run(
+        &repo,
+        "TK0001-config",
+        2,
+        "tok-config",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(
+        failure.starts_with("the worker changed git control files: "),
+        "{failure}"
+    );
+    assert!(
+        failure.contains("config"),
+        "the reason names config: {failure}"
+    );
+    assert_eq!(finished["pushed"], json!(false));
+    assert_eq!(
+        std::fs::read(&config).expect("the config is back"),
+        before,
+        "the recorded content is restored"
+    );
+    assert_eq!(
+        repo.remote_branch("TK0001-config"),
+        None,
+        "nothing was pushed"
+    );
+}
+
+/// The check runs before any git command of the wrapper after the worker: none of them may
+/// execute a `core.fsmonitor` the worker wrote (ADR 0048 decisions 7 and 8).
+#[test]
+fn no_wrapper_git_command_runs_the_workers_fsmonitor() {
+    let repo = Repo::new("control-fsmonitor");
+    let config = common_git_dir(&repo).join("config");
+    let marker = repo.root.join("fsmonitor-ran");
+    let script = repo.root.join("fsmonitor.sh");
+    let worker = format!(
+        "printf '#!/bin/sh\\necho ran > \"{marker}\"\\nexit 1\\n' > '{script}' \
+         && chmod +x '{script}' \
+         && cat >> '{config}' <<'EOF'\n[core]\n\tfsmonitor = {script}\nEOF",
+        marker = marker.display(),
+        script = script.display(),
+        config = config.display(),
+    );
+    let run = run(
+        &repo,
+        "TK0002-fsmonitor",
+        1,
+        "tok-fsmonitor",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(failure.contains("config"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    assert!(
+        !marker.exists(),
+        "a wrapper git command ran the worker's fsmonitor"
+    );
+}
+
+/// A worker that adds a hook fails the attempt, and the hook is removed (ADR 0048 decisions
+/// 7 and 8).
+#[test]
+fn a_worker_that_adds_a_hook_fails_and_the_hook_is_removed() {
+    let repo = Repo::new("control-hook");
+    let hook = common_git_dir(&repo).join("hooks/pre-commit");
+    let worker = format!(
+        "printf '#!/bin/sh\\nexit 0\\n' > '{hook}' && chmod +x '{hook}'",
+        hook = hook.display()
+    );
+    let run = run(
+        &repo,
+        "TK0003-hook",
+        1,
+        "tok-hook",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(failure.contains("hooks/pre-commit"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    assert!(!hook.exists(), "the hook the worker added is removed");
+}
+
+/// A control file too large to read whole fails the attempt and is removed instead of being
+/// loaded into the wrapper's memory (ADR 0048 decisions 7 and 8).
+#[test]
+fn an_oversized_control_file_fails_the_attempt_and_is_removed() {
+    let repo = Repo::new("control-oversized");
+    let hook = common_git_dir(&repo).join("hooks/big");
+    let worker = format!(
+        "dd if=/dev/zero of='{hook}' bs=1048576 count=2 2>/dev/null",
+        hook = hook.display()
+    );
+    let run = run(
+        &repo,
+        "TK0008-oversized",
+        1,
+        "tok-oversized",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(failure.contains("hooks/big"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    assert!(!hook.exists(), "the oversized file is removed");
+}
+
+/// A worker that only changes tracked files and commits leaves the git control files alone,
+/// so the attempt passes as before (ADR 0048 decisions 7 and 8).
+#[test]
+fn a_worker_that_only_commits_tracked_files_still_passes() {
+    let repo = Repo::new("control-clean");
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo change > change.txt && git add change.txt && git commit -m change",
+        ),
+        text_reply("done"),
+    ]);
+    let run = run(
+        &repo,
+        "TK0004-clean",
+        1,
+        "tok-clean",
+        &[],
+        &model_args(mock.base_url()),
+        "make a change\n",
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let finished = run.finished();
+    assert_eq!(finished["outcome"], json!("completed"));
+    assert_eq!(finished["failure"], json!(null));
+    assert_eq!(finished["pushed"], json!(true));
+    assert_eq!(
+        repo.remote_branch("TK0004-clean").as_deref(),
+        finished["head_sha"].as_str(),
+        "the wrapper pushed the attempt"
+    );
+}
+
+/// A worker that writes `config.worktree` in the worktree's own git dir fails the attempt and
+/// the file is removed (ADR 0048 decisions 7 and 8).
+#[test]
+fn a_worker_that_changes_its_own_config_worktree_fails() {
+    let repo = Repo::new("control-config-worktree");
+    let worktree = repo.worktree("TK0005-config-worktree");
+    let worker = format!(
+        "d=$(git -C '{worktree}' rev-parse --absolute-git-dir) \
+         && printf '[worktree]\\n\\tmarker = 1\\n' > \"$d/config.worktree\"",
+        worktree = worktree.display()
+    );
+    let run = run(
+        &repo,
+        "TK0005-config-worktree",
+        1,
+        "tok-worktree",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(failure.contains("config.worktree"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    let git_dir = PathBuf::from(
+        repo.git_at(&worktree, &["rev-parse", "--absolute-git-dir"])
+            .trim(),
+    );
+    assert!(
+        !git_dir.join("config.worktree").exists(),
+        "the worker's config.worktree is removed"
+    );
+}
+
+/// A process the worker leaves in its own process group cannot change a control file after the
+/// direct child exits: the wrapper stops the whole group before it compares (ADR 0048
+/// decisions 7 and 8).
+#[test]
+fn a_background_process_cannot_change_a_control_file_after_the_worker_exits() {
+    let repo = Repo::new("control-background");
+    let config = common_git_dir(&repo).join("config");
+    let before = std::fs::read(&config).expect("the common config");
+    let trigger = repo.root.join("background-trigger");
+    let changed = repo.root.join("background-changed");
+    // The background process waits for the test to let it write, so it acts after the wrapper
+    // has observed the direct child's exit, whatever the poll timing.
+    let worker = format!(
+        "(while [ ! -e '{trigger}' ]; do sleep 0.02; done \
+          && printf '[arc-test]\\n\\tchanged = true\\n' >> '{config}' \
+          && printf changed > '{changed}') &",
+        trigger = trigger.display(),
+        config = config.display(),
+        changed = changed.display(),
+    );
+    let run = run(
+        &repo,
+        "TK0009-background",
+        1,
+        "tok-background",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    // A process that outlived the wrapper is still there to see the trigger. Nothing is there
+    // when the wrapper stopped the group, as it must.
+    std::fs::write(&trigger, "").expect("the trigger");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !changed.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !changed.exists(),
+        "a process the worker left behind outlived the attempt"
+    );
+    assert_eq!(
+        std::fs::read(&config).expect("the common config"),
+        before,
+        "the background process changed the common config after the check"
+    );
+    assert_eq!(run.finished()["pushed"], json!(false));
+}
+
+/// A worker that makes a recorded control file unreadable changed it, as far as the check can
+/// tell: the attempt fails with the changed-files reason and the recorded content comes back
+/// (ADR 0048 decisions 7 and 8).
+#[test]
+fn an_unreadable_control_file_is_restored_and_fails_the_attempt() {
+    let repo = Repo::new("control-unreadable");
+    let config = common_git_dir(&repo).join("config");
+    let before = std::fs::read(&config).expect("the common config");
+    let worker = format!(
+        "cat >> '{config}' <<'EOF'\n[arc-test]\n\tchanged = true\nEOF\n\
+         chmod 000 '{config}'",
+        config = config.display(),
+    );
+    let run = run(
+        &repo,
+        "TK0010-unreadable",
+        1,
+        "tok-unreadable",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(
+        failure.starts_with("the worker changed git control files: "),
+        "{failure}"
+    );
+    assert!(failure.contains("config"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    assert_eq!(
+        std::fs::read(&config).expect("the config is back"),
+        before,
+        "the recorded content is restored"
+    );
+}
+
+/// A control directory the wrapper cannot read back is a change too; when the restore cannot
+/// repair it, the reason carries both the changed paths and the restore error, and no further
+/// git command runs (ADR 0048 decisions 7 and 8).
+#[test]
+fn an_unreadable_hooks_directory_reports_both_reasons() {
+    let repo = Repo::new("control-unreadable-hooks");
+    let hooks = common_git_dir(&repo).join("hooks");
+    let worker = format!("chmod 000 '{}'", hooks.display());
+    let run = run(
+        &repo,
+        "TK0011-unreadable-hooks",
+        1,
+        "tok-unreadable-hooks",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(
+        failure.starts_with("the worker changed git control files: "),
+        "{failure}"
+    );
+    assert!(failure.contains("hooks"), "{failure}");
+    assert!(failure.contains("restoring them failed"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    // Leave the temporary repository removable; the wrapper could not repair the directory.
+    use std::os::unix::fs::PermissionsExt as _;
+    let _ = std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755));
 }
