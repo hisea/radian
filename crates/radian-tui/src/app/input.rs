@@ -53,6 +53,11 @@ pub enum Input {
         range: std::ops::Range<usize>,
         outcome: crate::mention::DroppedImage,
     },
+    /// The system clipboard was read (the result of [`Effect::ReadClipboard`]). A loaded image
+    /// joins the composer attachments; `Unusable` shows the unusable-attachment notice and
+    /// changes nothing; `NoImage` changes nothing (Ctrl-V's old meaning in the composer is a
+    /// no-op).
+    ClipboardRead(crate::clipboard::Outcome),
     /// The terminal was resized. The renderer re-measures on the next frame.
     Resize { rows: u16, cols: u16 },
     /// The hardcoded answer to the approval prompt on screen (`y`/`a`/`n`/`Esc`).

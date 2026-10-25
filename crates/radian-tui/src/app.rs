@@ -129,6 +129,10 @@ pub enum Effect {
         path: PathBuf,
         range: std::ops::Range<usize>,
     },
+    /// Read the system clipboard for an image (the `paste_image` action, Q2/Q7). The host
+    /// reads it off the update path; the answer is [`Input::ClipboardRead`]. Nothing is
+    /// written to disk.
+    ReadClipboard,
     /// Complete the `@` reference at the cursor (reads a directory).
     CompleteMention { text: String, cursor: usize },
     /// List one level's candidates in the host (I/O): the loop answers with
@@ -725,9 +729,13 @@ pub struct App {
     pub footer_context: std::sync::Arc<radian_host::FooterContext>,
     /// The input composer: text plus a cursor (ADR 0009 Phase 4).
     pub input: Composer,
-    /// Images attached in the composer by a dropped absolute path (Q7). They join the next
-    /// message after its text; Backspace on an empty input removes the newest.
+    /// Images attached in the composer: a dropped absolute path or a clipboard paste (Q7).
+    /// They join the next message after its text; Backspace on an empty input removes the
+    /// newest.
     pub composer_images: Vec<radian_coding::LoadedImage>,
+    /// The system clipboard reader for the `paste_image` action (Q2/Q7). Production reads
+    /// `arboard`; a test injects pixels so no test ever touches the real clipboard.
+    pub clipboard_reader: std::sync::Arc<dyn crate::clipboard::Reader>,
     /// The transcript's decoded image protocols (ADR 0028 R10), keyed by the image payload.
     /// Each entry hands over its one decode; the first frame that draws it builds the protocol
     /// from that, and a failed decode is remembered, so a broken image costs one attempt and

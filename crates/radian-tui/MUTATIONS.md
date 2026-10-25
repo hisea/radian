@@ -3048,3 +3048,20 @@ under `.radian/mut/` and restored from that copy (never `git checkout`); the tes
 | TK0111-M2 | a failed append is dropped instead of recorded (`diagnostic` stays `None`) | ✅ 1 failed | `terminal::tests::a_failed_panic_log_append_follows_the_report_policy` (`the failed append must be reported: …`) |
 
 2/2 caught.
+
+## TK0015: Ctrl-V pastes an image from the system clipboard (2026-10-24, branch `work/TK0015-image-clipboard`)
+
+A clipboard paste reads `arboard`'s RGBA pixels, encodes them to PNG in memory, and runs them
+through the same `radian_coding::image::load` pipeline `@` and a dropped path use; the action is
+the rebindable `paste_image`. Each mutation was applied by hand to `crates/radian-tui/src/clipboard.rs`
+or `src/app/update.rs` + `src/keys.rs`, backed up under `.radian/backup/` and restored from that
+copy (never `git checkout`). The named test ran alone, with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test clipboard -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0015-M1 | `clipboard::read` writes the PNG to `std::env::temp_dir()/radian-clipboard-<pid>.png` and reads it back instead of keeping the bytes in memory | ✅ 1 failed | `clipboard::the_clipboard_image_never_touches_the_disk` (`nothing is written under the system temp dir`) |
+| TK0015-M2 | `clipboard::read` builds `LoadedImage` itself from the PNG bytes, skipping `image::load`'s magic-number and limit checks | ✅ 1 failed | `clipboard::an_over_limit_clipboard_image_is_unusable` (an `Image` where `Unusable` was expected) |
+| TK0015-M3 | `key_input` returns `PasteImage` for Ctrl-V before the keymap, and the default key row is deleted (hard-coded instead of bound) | ✅ 1 failed | `clipboard::the_rebound_key_pastes_and_the_old_one_no_longer_does` (`Ctrl-V must not paste after the rebind: [ReadClipboard]`) |
+
+3/3 caught.

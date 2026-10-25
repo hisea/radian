@@ -138,6 +138,7 @@ impl App {
                 range,
                 outcome,
             } => self.dropped_loaded(text, range, outcome),
+            Input::ClipboardRead(outcome) => self.clipboard_read(outcome),
             Input::CompletionReady(completion) => self.completion_ready(completion),
             Input::CompletionsReady { fetch, candidates } => {
                 self.completions_ready(fetch, candidates)
@@ -512,6 +513,27 @@ impl App {
                 UpdateResult::dirty()
             }
             crate::mention::DroppedImage::NotImage => UpdateResult::none(),
+        }
+    }
+
+    /// A clipboard image came back. A loaded image joins the composer attachments (the same
+    /// shape a dropped path has); a limit refusal shows the same unusable-attachment line `@`
+    /// produces; no image changes nothing.
+    fn clipboard_read(&mut self, outcome: crate::clipboard::Outcome) -> UpdateResult {
+        match outcome {
+            crate::clipboard::Outcome::Image(image) => {
+                self.session.note = Some(format!("attached {}", image.placeholder()));
+                self.composer_images.push(image);
+                UpdateResult::dirty()
+            }
+            crate::clipboard::Outcome::Unusable(reason) => {
+                self.push_notice(format!(
+                    "unusable attachment(s): {}: {reason}",
+                    crate::clipboard::CLIPBOARD_NAME
+                ));
+                UpdateResult::dirty()
+            }
+            crate::clipboard::Outcome::NoImage => UpdateResult::none(),
         }
     }
 
@@ -978,6 +1000,9 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            // A pasted image is read by the host (the clipboard is I/O), then joins the
+            // composer attachments like a dropped path.
+            Action::PasteImage => UpdateResult::effect(Effect::ReadClipboard),
             Action::DeleteUnder => {
                 self.input.delete();
                 UpdateResult::dirty()

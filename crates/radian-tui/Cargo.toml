@@ -69,6 +69,11 @@ ratatui-image = { version = "11.1.0", default-features = false, features = ["ima
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # The image parts' base64 payload: decode once per image for the transcript (ADR 0028 R10).
 base64 = "0.22"
+# Reading an image from the system clipboard for the `paste_image` action (ADR 0028 R5;
+# docs/backlog/images.md Q2/Q7): macOS NSPasteboard, Linux X11 and Wayland, Windows.
+# `wayland-data-control` is on so a Wayland session reads the clipboard without an XWayland
+# fallback; the crate is pure Rust there and needs no new system library at build time.
+arboard = { version = "3.7", default-features = false, features = ["image-data", "wayland-data-control"] }
 serde_json.workspace = true
 # The TOML theme files (ADR 0029): the same parser the config uses
 # (`radian-host`), so a `[roles]` table and `[tui.colors]` share one value shape
