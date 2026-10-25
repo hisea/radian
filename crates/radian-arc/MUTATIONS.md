@@ -796,4 +796,27 @@ the working `crates/radian-arc/src/gate/review.rs`, the named test ran with
 | TK0102-M2 | keep any item in a file the task changed, whatever its distance from a changed line (`path == file` without `abs_diff <= PRE_EXISTING_WINDOW`) | `gate::review::tests::an_item_more_than_the_window_from_a_changed_line_is_demoted`; `review::an_item_far_from_every_changed_line_of_its_file_is_moved` | ✅ 2 failed |
 
 2/2 caught.
+## TK0099: the slow arc tests run in bounded time (2026-10-24, branch `work/TK0099-arc-slow-tests`)
+
+`failure_sequences` runs its independent sequences over a bounded number of threads, each bucket
+in a repository of its own with one head commit and one push for all of its branches; the model
+test's scripted sequences and assertions are unchanged. `cancel_stops_a_running_attempt` tunes
+`[limits] cancel_grace_secs` to 1, waits for the wrapper's `AttemptFinished`, and bounds the
+`start` process instead of waiting on it forever. `run_until_gate_record` waits for the gate
+process the record names to be gone before the next pass, instead of sleeping 100 ms and running
+a pass that can only change nothing. `process::still_the_process` now implements ADR 0048
+decision 9's fallback: a recorded start time is compared with `ps`, and when `ps` reports nothing
+the pid alone is signalled (the old code treated that answer as "gone"). Each mutation was
+applied to the working file, the named test was run with `cargo nextest run -p radian-arc
+--locked --profile sandbox --no-fail-fast`, the file was restored from a copy under `.radian/mut/`
+with `cp`, and `cmp` found it identical. M3 also rebuilt `radian` before the run, because the test
+drives the binary.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0099-M1 | TK0052-M1 re-run: an attempt that never reached the gate does not reset the conflict run (`attempt_ops::apply` drops `reset_conflict_rework`) | `failure_sequences::every_automatic_failure_sequence_ends_within_the_limits` (an attempt that never reached the gate left the conflict run at 1) | ✅ failed |
+| TK0099-M2 | TK0052-M2 re-run: `max_auto_rework` never pauses the plan (`record_auto_rework` uses `u32::MAX`) | `failure_sequences::every_automatic_failure_sequence_ends_within_the_limits` (`auto_rework 3 tripped max_auto_rework but the plan did not pause`, in two buckets) | ✅ failed |
+| TK0099-M3 | `ps` reporting nothing means the process is gone again (`still_the_process` returns `false` instead of falling back to `alive`) | `attempt::cancel_signals_the_recorded_wrapper_when_ps_is_unavailable` (the wrapper was not signalled; the task reads `doing.reconciling`) | ✅ failed |
+
+3/3 caught.
 

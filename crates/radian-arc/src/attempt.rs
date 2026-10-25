@@ -372,13 +372,10 @@ fn wrapper_process(store: &Store, task: &str, attempt: u32) -> Option<(u32, Opti
 }
 
 /// Whether the process the record names is still there. A recorded start time is compared, so
-/// a reused pid is never signalled; without one (the sandbox refused `ps`) the pid alone is
-/// the best identity arc has.
+/// a reused pid is never signalled; without one, or when `ps` cannot report it (the sandbox
+/// refused `ps`), the pid alone is the best identity arc has (ADR 0048 decision 9).
 fn still_running(pid: u32, started: Option<&str>) -> bool {
-    match started.filter(|start| !start.is_empty()) {
-        Some(start) => process::same_process(pid, start),
-        None => process::alive(pid),
-    }
+    process::still_the_process(pid, started)
 }
 
 fn read_json(path: &std::path::Path) -> Option<serde_json::Value> {

@@ -2041,7 +2041,30 @@ fn run_until_gate_record(
             Instant::now() < deadline,
             "the gate record did not reach the expected state within the limit:\n{output}"
         );
-        std::thread::sleep(Duration::from_millis(100));
+        // The next pass can only learn the truth from a gate that has exited: wait for the
+        // process the record names instead of polling with one-shot passes. A pass that runs
+        // while the gate is still starting changes nothing, and under load that wait is what
+        // made this test slow.
+        wait_for_gate_process(repo, task);
+    }
+}
+
+/// Waits for the process the gate record names to be gone. The record's pid is the gate the
+/// last pass started; a record without one (a refusal or an outcome) has nothing to wait for.
+fn wait_for_gate_process(repo: &Repo, task: &str) {
+    let Some(pid) = gate_record(repo, task)
+        .and_then(|record| record["pid"].as_u64())
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "the gate process {pid} the record names never exited"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

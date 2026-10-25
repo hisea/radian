@@ -441,11 +441,6 @@ fn commit_on(repo: &Repo, branch: &str, base: &str, file: &str, content: &str) -
     repo.git(&["rev-parse", "HEAD"]).trim().to_owned()
 }
 
-/// Publishes a local ref on the fixture's remote.
-fn push_ref(repo: &Repo, refspec: &str) {
-    repo.git(&["push", "origin", refspec]);
-}
-
 /// Moves the remote main to the other fixture commit and returns the new sha.
 fn move_main(repo: &Repo, current: &str, one: &str, other: &str) -> String {
     let next = if current == one { other } else { one };
@@ -699,21 +694,9 @@ struct Fixture<'a> {
     main_two: &'a str,
 }
 
-/// Drives one task through `script` until a terminal state. Panics with the sequence and the
-/// step log when the bound is reached first.
-fn run_sequence(
-    fixture: &Fixture<'_>,
-    sequence: usize,
-    head: &str,
-    script: &mut Script,
-    seen: &mut HashSet<Event>,
-) -> Outcome {
-    let repo = fixture.repo;
-    let store = fixture.store;
-    let limits = fixture.limits;
-    let base = fixture.base;
-    let main_one = fixture.main_one;
-    let main_two = fixture.main_two;
+/// Creates one sequence's plan and task, confirmed and at `auto` `run`: the state a pass
+/// starts from. The task's branch is published for it by the bucket, in one push.
+fn create_sequence(store: &Store, sequence: usize) -> String {
     let plan = store
         .add_plan(&format!("seq{sequence}"), "A plan", "the request\n")
         .expect("add a plan");
@@ -730,8 +713,26 @@ fn run_sequence(
         .expect("add a task");
     plan_ops::confirm(store, &plan).expect("confirm");
     plan_ops::set_auto(store, &plan, "run").expect("auto run");
-    push_ref(repo, &format!("seq-{sequence}:refs/heads/work/{task}"));
-    reset_main(repo, base);
+    task
+}
+
+/// Drives one task through `script` until a terminal state. Panics with the sequence and the
+/// step log when the bound is reached first.
+fn run_sequence(
+    fixture: &Fixture<'_>,
+    sequence: usize,
+    task: &str,
+    head: &str,
+    script: &mut Script,
+    seen: &mut HashSet<Event>,
+) -> Outcome {
+    let repo = fixture.repo;
+    let store = fixture.store;
+    let limits = fixture.limits;
+    let base = fixture.base;
+    let main_one = fixture.main_one;
+    let main_two = fixture.main_two;
+    let task = task.to_owned();
     let mut main = base.to_owned();
     let bound = limits.bound(script);
     let mut log = Vec::new();
@@ -965,11 +966,15 @@ fn generated_script(rng: &mut Rng) -> Script {
     Script::new(events, lead_reworks, main_moves)
 }
 
-/// The model test. Mutation TK0052-M1 (do not reset the conflict run on an attempt that never
-/// reached the gate) fails the per-attempt assertion; TK0052-M2 (`max_auto_rework` never
-/// pauses the plan) fails `check_counters` or the terminal assertion.
-#[test]
-fn every_automatic_failure_sequence_ends_within_the_limits() {
+/// What one bucket returns: its sequences' outcomes, in index order, and every event its
+/// sequences produced.
+type BucketResult = (Vec<(usize, Outcome)>, HashSet<Event>);
+
+/// Runs one bucket of sequences in a repository of its own: the store, the remote and the
+/// commits a main move goes between are the bucket's, so two buckets never share a file. The
+/// config and the limits are the ones [`configure`] writes; a bucket asserts them so a config
+/// change cannot quietly make one thread's sequences run under another's bounds.
+fn run_bucket(scripts: Vec<(usize, Script)>) -> BucketResult {
     let repo = Repo::new("failure-sequences");
     Store::init(&repo.clone, false).expect("arc init");
     configure(&repo);
@@ -995,15 +1000,10 @@ fn every_automatic_failure_sequence_ends_within_the_limits() {
     let base = repo.remote_main_sha();
     let main_one = commit_on(&repo, "main-one", &base, "main-one.txt", "one\n");
     let main_two = commit_on(&repo, "main-two", &base, "main-two.txt", "two\n");
-
-    let mut rng = Rng(SEED);
-    let mut scripts = targeted_scripts();
-    for _ in 0..GENERATED {
-        scripts.push(generated_script(&mut rng));
-    }
-
-    let mut seen = HashSet::new();
-    let mut outcomes = Vec::new();
+    // One commit is the head of every sequence in this bucket. A sequence's truth is its own
+    // task, plan and attempt; the head only has to descend from `base` and be what the remote
+    // branch names, so publishing it once is the same fixture with fewer git calls.
+    let head = commit_on(&repo, "sequences", &base, "sequences.txt", "change\n");
     let fixture = Fixture {
         repo: &repo,
         store: &store,
@@ -1012,25 +1012,93 @@ fn every_automatic_failure_sequence_ends_within_the_limits() {
         main_one: &main_one,
         main_two: &main_two,
     };
-    for (index, mut script) in scripts.into_iter().enumerate() {
-        let head = commit_on(
-            &repo,
-            &format!("seq-{index}"),
-            &base,
-            &format!("seq-{index}.txt"),
-            &format!("change {index}\n"),
+
+    // Every sequence's plan and task exist before the first runs, so all their branches go to
+    // the remote in one push: `plan_verification` reads `work/<task>` over the wire, and one
+    // push says the same thing as one per sequence.
+    let mut prepared = Vec::new();
+    for (index, script) in scripts {
+        let task = create_sequence(&store, index);
+        prepared.push((index, task, script));
+    }
+    let refspecs: Vec<String> = prepared
+        .iter()
+        .map(|(_, task, _)| format!("{head}:refs/heads/work/{task}"))
+        .collect();
+    let mut push = vec!["push", "origin"];
+    push.extend(refspecs.iter().map(String::as_str));
+    repo.git(&push);
+
+    let mut seen = HashSet::new();
+    let mut outcomes = Vec::new();
+    for (index, task, mut script) in prepared {
+        let moves = script.main_moves;
+        let outcome = run_sequence(&fixture, index, &task, &head, &mut script, &mut seen);
+        assert_eq!(
+            outcome.task, task,
+            "sequence {index} reported another task's outcome"
         );
-        let outcome = run_sequence(&fixture, index, &head, &mut script, &mut seen);
         assert!(
             !outcome.terminal.is_empty(),
             "sequence {index} reported an empty terminal state"
         );
-        let task = outcome.task.clone();
         outcomes.push((index, outcome));
-        // Delete the remote branch, not the local one: the next sequence checks out a new
-        // branch from the base anyway, and a short remote keeps each gate's fetch cheap.
-        let _ = repo.git(&["push", "origin", &format!(":refs/heads/work/{task}")]);
+        // A sequence that moved the remote main puts it back before the next one starts; the
+        // next sequence's verdicts are written against `base`.
+        if script.main_moves < moves {
+            reset_main(&repo, &base);
+        }
     }
+    (outcomes, seen)
+}
+
+/// The model test. Mutation TK0052-M1 (do not reset the conflict run on an attempt that never
+/// reached the gate) fails the per-attempt assertion; TK0052-M2 (`max_auto_rework` never
+/// pauses the plan) fails `check_counters` or the terminal assertion.
+///
+/// The sequences are independent: each names its own plan, task and branch, and moves the
+/// remote main only through its own fixture. The test splits them over a bounded number of
+/// threads, each with its own repository, store and remote, so a slow machine runs several at
+/// once instead of one after another. The sequences a thread runs still share that thread's
+/// store, exactly as they did when the whole test used one; the assertions after the joins see
+/// every sequence's outcome and every event the same way.
+#[test]
+fn every_automatic_failure_sequence_ends_within_the_limits() {
+    let mut rng = Rng(SEED);
+    let mut scripts: Vec<(usize, Script)> = targeted_scripts().into_iter().enumerate().collect();
+    for index in scripts.len()..scripts.len() + GENERATED {
+        scripts.push((index, generated_script(&mut rng)));
+    }
+
+    // Each thread owns a repository; the count is bounded so the test does not starve the
+    // other tests nextest runs beside it.
+    let threads = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .clamp(2, 6);
+    let mut buckets: Vec<Vec<(usize, Script)>> = (0..threads).map(|_| Vec::new()).collect();
+    for (index, script) in scripts {
+        buckets[index % threads].push((index, script));
+    }
+
+    let parts: Vec<BucketResult> = std::thread::scope(|scope| {
+        let handles: Vec<_> = buckets
+            .into_iter()
+            .map(|bucket| scope.spawn(move || run_bucket(bucket)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("a sequence thread panicked"))
+            .collect()
+    });
+    let mut seen = HashSet::new();
+    let mut outcomes = Vec::new();
+    for (bucket_outcomes, bucket_seen) in parts {
+        outcomes.extend(bucket_outcomes);
+        seen.extend(bucket_seen);
+    }
+    outcomes.sort_by_key(|(index, _)| *index);
+
     classes_are_covered(&seen);
     // The suite is not vacuous: some sequences settle at every kind of terminal state the
     // automatic path reaches here.
