@@ -862,3 +862,18 @@ with `cp`, which `cmp` found identical.
 | TK0104-M3 | drop `crates/radian-tui/src/arc/` from `ARC_CODE_PREFIXES` | `run::tests::arc_code_is_the_three_path_prefixes` (`crates/radian-tui/src/arc/render.rs is arc code`) | ✅ failed |
 
 3/3 caught.
+
+## TK0114: the owner's cancel clears exhausted and irrecoverable tasks (2026-10-24, branch `work/TK0114-cancel-failed-exhausted`)
+
+ADR 0048 decision 9: `cancel` accepts `failed.exhausted` and `failed.irrecoverable` in the task
+form and the plan form, and `done.*` and `failed.cancelled` stay refused. Each mutation was
+applied to the working file, the named test ran alone with `cargo nextest run -p radian-arc
+--locked --profile sandbox --test attempt -E '<the test below>'`, and the file was restored from
+a copy under `.radian/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0114-M1 | accept `failed.cancelled` again in `TaskFile::is_cancellable` (`TaskState::Failed => true`) | `attempt::cancel_refuses_done_and_cancelled_and_lists_the_accepted_phases` (the second cancel succeeds) | ✅ failed |
+| TK0114-M2 | leave exhausted tasks alone in the plan form (`cancel_plan_tasks` filters on the old `todo`/`doing`/`review` states) | `attempt::cancelling_a_plan_ends_its_exhausted_and_irrecoverable_tasks` (no task line: the count is 0) | ✅ failed |
+
+2/2 caught.

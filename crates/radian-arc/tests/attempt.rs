@@ -1741,6 +1741,204 @@ fn cancelling_a_plan_ends_every_open_task_and_the_plan() {
     let _ = wrapper.wait();
 }
 
+/// The owner's `cancel` accepts a task that ran out of attempts (`failed.exhausted`) or cannot
+/// continue (`failed.irrecoverable`) and moves it to `failed.cancelled` (ADR 0048 decision 9):
+/// "seen, given up". The attempt history, the attempt id, the costs and the plan's task list
+/// stay as they are.
+#[test]
+fn cancel_moves_a_terminal_failure_to_failed_cancelled() {
+    for phase in ["exhausted", "irrecoverable"] {
+        let (_repo, store) = setup(&format!("cancel-{phase}"));
+        let (plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work", "other"]);
+        let task = &tasks[0];
+        let attempt_id = format!("{task}-3");
+        store
+            .change_task(task, |stored| {
+                stored.state = TaskState::Failed;
+                stored.phase = phase.to_owned();
+                stored.attempt = 3;
+                stored.attempt_id = Some(attempt_id.clone());
+                stored.cost_usd = Some(0.25);
+                stored.total_cost_usd = Some(1.5);
+                stored.retry_at = None;
+                Ok(())
+            })
+            .expect("the terminal task is set");
+
+        let canceled = attempt::cancel(&store, task).expect("the terminal failure cancels");
+        assert_eq!(
+            (canceled.state.as_str(), canceled.phase.as_str()),
+            ("failed", "cancelled"),
+            "{phase}"
+        );
+        let stored = store.load_task(task).expect("the task reads").item;
+        assert_eq!(
+            (stored.state.as_str(), stored.phase.as_str()),
+            ("failed", "cancelled"),
+            "{phase}"
+        );
+        assert_eq!(stored.attempt, 3, "{phase}: the attempt number stays");
+        assert_eq!(
+            stored.attempt_id.as_deref(),
+            Some(attempt_id.as_str()),
+            "{phase}: the attempt id stays"
+        );
+        assert_eq!(
+            stored.cost_usd,
+            Some(0.25),
+            "{phase}: the budget counter stays"
+        );
+        assert_eq!(stored.total_cost_usd, Some(1.5), "{phase}: the total stays");
+        assert_eq!(
+            store
+                .load_plan(&plan)
+                .expect("the plan reads")
+                .item
+                .tasks
+                .len(),
+            2,
+            "{phase}: cancelling adds no follow-up task"
+        );
+    }
+}
+
+/// `done.*` and `failed.cancelled` are still refused with exit 3 (ADR 0048 decision 9), and
+/// the refusal lists every phase `cancel` accepts. Mutation: accept `failed.cancelled` in
+/// `TaskFile::is_cancellable` and a second cancel succeeds instead.
+#[test]
+fn cancel_refuses_done_and_cancelled_and_lists_the_accepted_phases() {
+    let (_repo, store) = setup("cancel-refused");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["done", "cancelled"]);
+    for (task, state, phase) in [
+        (&tasks[0], TaskState::Done, "merged"),
+        (&tasks[1], TaskState::Failed, "cancelled"),
+    ] {
+        store
+            .change_task(task, |stored| {
+                stored.state = state;
+                stored.phase = phase.to_owned();
+                Ok(())
+            })
+            .expect("the refused state is set");
+        let error = attempt::cancel(&store, task).expect_err("the state is refused");
+        assert_eq!(error.exit(), Exit::State, "{phase}: {error:?}");
+        let message = error.message();
+        for accepted in [
+            "`todo`",
+            "`doing`",
+            "`review`",
+            "`failed.exhausted`",
+            "`failed.irrecoverable`",
+        ] {
+            assert!(
+                message.contains(accepted),
+                "{phase}: the refusal does not name {accepted}: {message}"
+            );
+        }
+    }
+}
+
+/// The plan form cancels exhausted and irrecoverable tasks by the task form's rules and leaves
+/// `done` and `failed.cancelled` alone (ADR 0048 decision 9). Mutation: leave exhausted tasks
+/// alone in `cancel_plan_tasks` and they stay `failed.exhausted`.
+#[test]
+fn cancelling_a_plan_ends_its_exhausted_and_irrecoverable_tasks() {
+    let (_repo, store) = setup("cancel-plan-terminal");
+    let (plan, tasks) = confirmed_plan_with_tasks(
+        &store,
+        "plan",
+        &["merged", "exhausted", "irrecoverable", "cancelled"],
+    );
+    for (task, state, phase) in [
+        (&tasks[0], TaskState::Done, "merged"),
+        (&tasks[1], TaskState::Failed, "exhausted"),
+        (&tasks[2], TaskState::Failed, "irrecoverable"),
+        (&tasks[3], TaskState::Failed, "cancelled"),
+    ] {
+        store
+            .change_task(task, |stored| {
+                stored.state = state;
+                stored.phase = phase.to_owned();
+                Ok(())
+            })
+            .expect("the fixture state is set");
+    }
+
+    let canceled = attempt::cancel_any(&store, &plan).expect("the plan cancels");
+    let attempt::Cancelled::Plan(canceled) = canceled else {
+        panic!("a plan id takes the plan form");
+    };
+    let lines = canceled.lines();
+    assert_eq!(canceled.tasks.len(), 2, "{lines:?}");
+    for task in [&tasks[1], &tasks[2]] {
+        assert_eq!(
+            state(&store, task),
+            ("failed".to_owned(), "cancelled".to_owned()),
+            "{task}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == &format!("{task} failed.cancelled")),
+            "{task} has its line: {lines:?}"
+        );
+    }
+    assert_eq!(
+        state(&store, &tasks[0]),
+        ("done".to_owned(), "merged".to_owned()),
+        "a merged task is left alone"
+    );
+    assert_eq!(
+        state(&store, &tasks[3]),
+        ("failed".to_owned(), "cancelled".to_owned()),
+        "an already cancelled task is left alone"
+    );
+    assert_eq!(lines.last(), Some(&format!("{plan} cancelled")));
+}
+
+/// A plan whose only non-merged task was `failed.exhausted` reads finished after the owner
+/// cancels it (`PlanView::is_finished`, ADR 0048 decisions 3 and 9): every task is now
+/// `done.merged` or `failed.cancelled`, and at least one merged.
+#[test]
+fn a_plan_reads_finished_after_its_exhausted_task_is_cancelled() {
+    let (_repo, store) = setup("cancel-finished");
+    let (plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["merged", "gone"]);
+    store
+        .change_task(&tasks[0], |stored| {
+            stored.state = TaskState::Done;
+            stored.phase = "merged".to_owned();
+            Ok(())
+        })
+        .expect("the merged task is set");
+    store
+        .change_task(&tasks[1], |stored| {
+            stored.state = TaskState::Failed;
+            stored.phase = "exhausted".to_owned();
+            Ok(())
+        })
+        .expect("the exhausted task is set");
+    assert!(
+        !store
+            .plan_view(&plan)
+            .expect("the plan reads")
+            .is_finished(),
+        "the exhausted task is still work left"
+    );
+
+    attempt::cancel(&store, &tasks[1]).expect("the exhausted task cancels");
+
+    let view = store.plan_view(&plan).expect("the plan reads");
+    assert!(
+        view.is_finished(),
+        "every task is done.merged or failed.cancelled: {:?}",
+        view.tasks
+            .iter()
+            .map(|task| format!("{}.{}", task.item.state.as_str(), task.item.phase))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(view.progress(), (1, 1), "a cancelled task is not counted");
+}
+
 /// The plan's status write is a transaction of its own, so the lead's `add_task` can land
 /// between the task walk and that write. The plan is `cancelled` by then and takes no task, so
 /// one more walk ends the one that made it in: nothing is left `todo.proposed` under a final

@@ -2283,8 +2283,10 @@ async fn pty_approval_allow_once_runs_the_tool() {
         ],
         30,
         // Wide enough that a long macOS temp path is not wrapped in the approval box;
-        // the resolved-path assertion below needs it on one line.
-        140,
+        // the resolved-path assertion below needs it on one line. A scratch tree under the
+        // workspace (`.radian-sandbox/tmp`) is longer than a `/var/folders` one, so the box
+        // is wide enough for the longer path too.
+        160,
     );
     assert!(
         pty.wait_for_screen("message", wait_positive()),

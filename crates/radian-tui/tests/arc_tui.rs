@@ -18,7 +18,9 @@ use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
 use radian_tui::arc::render;
-use radian_tui::arc::{ArcApp, ArcKey, Focus, PlanFilter, PlanOrder, TaskTab, actions};
+use radian_tui::arc::{
+    ArcApp, ArcKey, Focus, PlanFilter, PlanMark, PlanOrder, TaskTab, actions, plan_mark,
+};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -822,6 +824,56 @@ fn a_merged_and_cancelled_plan_is_done_with_a_cancelled_task_and_reads_1_of_1() 
         "the cancelled task stays in the task column:\n{text}"
     );
     assert!(text.contains(&merged), "{text}");
+}
+
+/// The `◉` an exhausted task draws is the owner's to clear (ADR 0048 decisions 9 and 11): the
+/// task form's cancel moves it to `failed.cancelled`, and a plan whose other task merged draws
+/// `✓`.
+#[test]
+fn cancelling_an_exhausted_task_clears_the_needs_you_mark() {
+    let scratch = Scratch::new("exhausted-mark");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "marks", "the marks plan");
+    let _merged = add_task(
+        &store,
+        &plan,
+        "merged",
+        &[],
+        TaskState::Done,
+        "merged",
+        1,
+        None,
+    );
+    let exhausted = add_task(
+        &store,
+        &plan,
+        "gone",
+        &[],
+        TaskState::Failed,
+        "exhausted",
+        1,
+        None,
+    );
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+
+    let view = store.plan_view(&plan).expect("the plan reads");
+    assert_eq!(
+        plan_mark(&view),
+        PlanMark::NeedsYou,
+        "the exhausted task needs the owner"
+    );
+
+    radian_arc::attempt::cancel(&store, &exhausted).expect("the exhausted task cancels");
+
+    let view = store.plan_view(&plan).expect("the plan reads");
+    assert_eq!(plan_mark(&view), PlanMark::Done, "the plan is finished");
+    assert_eq!(view.progress(), (1, 1), "the cancelled task is not counted");
 }
 
 /// A plan whose tasks are all `failed.cancelled` is cancelled by its tasks (ADR 0048 decision
