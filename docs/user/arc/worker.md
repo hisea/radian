@@ -56,6 +56,7 @@ The array's first element is the program and the rest are its arguments; there i
 Unset, the worker is `radian exec` and this section does not apply.
 
 The program runs in the task's worktree, gets the same brief on stdin as a `radian exec` worker (the conflict section, the hand-off, the task body, then [`worker-brief.md`](files.md#worker-briefmd)), and its stdout goes to `runs/<task>/attempts/<attempt id>/result.jsonl` and its stderr to `stderr.log`.
+The arc TUI's conversation tab shows those rows while the attempt runs, under the program's name (see [the task page's conversation tab](tui.md#the-task-page)).
 The wrapper gives it its own process group and enforces the attempt's limits itself, exactly as it does for `radian exec`: no new stdout line for [`stall_timeout_secs`](files.md#task-fields), `max_wall_time_secs` in total, the cancel grace period after SIGTERM.
 After it exits the wrapper runs the same git control-file check, [delivery check](#what-the-wrapper-checks-after-the-worker-exits), push and records; nothing about those changes.
 

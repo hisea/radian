@@ -849,7 +849,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   page: does the tree's `├─`/`└─` indentation line up, is
   `also after`/`waits` obvious as an explanation, and does a row with a long phase keep its
   columns? Open the conversation tab on a task whose worker ran: do the `❯`/thinking/tool blocks
-  match the main transcript, and do `j`/`k` and `f` move the way you expect? On the diff tab:
+  match the main transcript, and do `j`/`k` and `f` move the way you expect? For a task whose
+  worker is `[worker] command`, does the tab name the program, show the stdout rows one per
+  line, colour the `Result` outcome, and add a row while the worker writes? On the diff tab:
   is the file list's `+N`/`-N` readable, is the second frame's title the path, and does the
   syntax highlighting help at your width? Open the merge page on a task in `review.awaiting_human`
   (`m`): do the stage marks, the `on <sha>` column and the `summary` frame read at your width, is
