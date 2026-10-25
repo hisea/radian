@@ -19,7 +19,8 @@ use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
 use radian_tui::arc::render;
 use radian_tui::arc::{
-    ArcApp, ArcKey, Focus, PlanFilter, PlanMark, PlanOrder, TaskTab, actions, plan_mark,
+    ArcApp, ArcKey, Focus, Mark, PlanFilter, PlanMark, PlanOrder, TaskTab, actions, plan_mark,
+    task_mark, task_needs_owner,
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -1156,7 +1157,13 @@ fn every_state_mark_takes_its_role() {
         );
     };
     check(fixture.id("a"), '✓', theme.status_ok, "done");
-    check(fixture.id("f"), '×', theme.status_error, "failed");
+    // `f` is `failed.exhausted`: the owner clears it, so it draws the waiting mark.
+    check(
+        fixture.id("f"),
+        '!',
+        theme.notice_label,
+        "failed and needs you",
+    );
     check(fixture.id("g"), '●', theme.model, "doing");
     check(fixture.id("h"), '●', theme.model, "verifying");
     check(fixture.id("e"), '!', theme.notice_label, "waiting");
@@ -1171,6 +1178,173 @@ fn every_state_mark_takes_its_role() {
         "a plan whose task waits for you",
     );
     check("PL0002-images", '◌', theme.plan_draft, "a draft plan");
+}
+
+/// Every task phase draws its mark (ADR 0048 decision 11): `!` for the phases that wait for
+/// the owner or the lead, `×` only for `failed.cancelled`, and the state's own mark otherwise.
+#[test]
+fn every_task_phase_draws_its_mark() {
+    use radian_arc::store::model::TASK_PHASES;
+
+    for (state_name, phases) in TASK_PHASES {
+        let state = TaskState::ALL
+            .iter()
+            .copied()
+            .find(|state| state.as_str() == *state_name)
+            .expect("every task state is in the phase table");
+        for phase in *phases {
+            let expected = match (*state_name, *phase) {
+                ("review", "awaiting_human")
+                | ("review", "rework_pending")
+                | ("todo", "proposed")
+                | ("failed", "exhausted")
+                | ("failed", "irrecoverable") => Mark::Waiting,
+                ("failed", "cancelled") => Mark::Failed,
+                ("done", "merged") => Mark::Done,
+                ("todo", _) => Mark::Todo,
+                ("doing", _) | ("review", _) => Mark::Active,
+                other => panic!("no mark for {other:?}"),
+            };
+            assert_eq!(task_mark(state, phase), expected, "{state_name}.{phase}");
+        }
+    }
+}
+
+/// `failed.cancelled` is final, not the owner's: it keeps the red `×` (ADR 0048 decision 11).
+#[test]
+fn a_failed_cancelled_task_keeps_the_failed_mark() {
+    assert!(!task_needs_owner(TaskState::Failed, "cancelled"));
+    assert_eq!(task_mark(TaskState::Failed, "cancelled"), Mark::Failed);
+}
+
+/// Every task the owner's set names makes its plan draw `◉` (ADR 0048 decision 11), beside a
+/// merged task so the failed phases have no open task left.
+#[test]
+fn every_task_that_needs_the_owner_makes_its_plan_draw_needs_you() {
+    let scratch = Scratch::new("needs-owner");
+    let store = store(&scratch.path("repo"));
+    let phases = [
+        (TaskState::Review, "awaiting_human"),
+        (TaskState::Todo, "proposed"),
+        (TaskState::Failed, "exhausted"),
+        (TaskState::Failed, "irrecoverable"),
+    ];
+    for (index, (state, phase)) in phases.iter().enumerate() {
+        assert!(
+            task_needs_owner(*state, phase),
+            "{}.{phase} needs the owner",
+            state.as_str()
+        );
+        let plan = add_plan(&store, &format!("owner-{index}"), "the owner plan");
+        add_task(
+            &store,
+            &plan,
+            "merged",
+            &[],
+            TaskState::Done,
+            "merged",
+            1,
+            None,
+        );
+        add_task(&store, &plan, "waiting", &[], *state, phase, 1, None);
+        store
+            .change_plan(&plan, |plan| {
+                plan.status = "confirmed".to_owned();
+                plan.auto = "run".to_owned();
+                Ok(())
+            })
+            .unwrap();
+        let view = store.plan_view(&plan).expect("the plan reads");
+        assert_eq!(
+            plan_mark(&view),
+            PlanMark::NeedsYou,
+            "{}.{phase} makes its plan ◉",
+            state.as_str()
+        );
+    }
+}
+
+/// The row that made a plan `◉` draws `!` in the waiting role, and a `failed.cancelled` row
+/// keeps the red `×` (ADR 0048 decision 11): PL0012's reason was its one `failed.exhausted`
+/// task among cancelled ones.
+#[test]
+fn a_failed_exhausted_row_draws_the_waiting_mark_among_cancelled_rows() {
+    let scratch = Scratch::new("pl0012");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "follow-ups", "the follow-up plan");
+    add_task(
+        &store,
+        &plan,
+        "merged",
+        &[],
+        TaskState::Done,
+        "merged",
+        1,
+        None,
+    );
+    let exhausted = add_task(
+        &store,
+        &plan,
+        "exhausted",
+        &[],
+        TaskState::Failed,
+        "exhausted",
+        3,
+        Some(0.05),
+    );
+    let irrecoverable = add_task(
+        &store,
+        &plan,
+        "irrecoverable",
+        &[],
+        TaskState::Failed,
+        "irrecoverable",
+        1,
+        None,
+    );
+    let cancelled = add_task(
+        &store,
+        &plan,
+        "cancelled",
+        &[],
+        TaskState::Failed,
+        "cancelled",
+        2,
+        None,
+    );
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    let theme = app.theme.clone();
+    let terminal = render(&mut app, 140, 40);
+
+    for (id, mark, role, what) in [
+        (&exhausted, '!', theme.notice_label, "exhausted"),
+        (&irrecoverable, '!', theme.notice_label, "irrecoverable"),
+        (&cancelled, '×', theme.status_error, "cancelled"),
+    ] {
+        let (row, column) = mark_cell(&terminal, id, mark);
+        assert_eq!(fg(&terminal, row, column), role.fg, "{what}: {id} {mark}");
+    }
+    // The `state.phase` text takes the mark's role too.
+    let (row, column) = fg_of(&terminal, "failed.exhausted");
+    assert_eq!(
+        fg(&terminal, row, column),
+        theme.notice_label.fg,
+        "the exhausted phase text is waiting"
+    );
+    let (row, column) = fg_of(&terminal, "failed.cancelled");
+    assert_eq!(
+        fg(&terminal, row, column),
+        theme.status_error.fg,
+        "the cancelled phase text is red"
+    );
 }
 
 #[test]

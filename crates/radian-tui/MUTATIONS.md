@@ -3010,3 +3010,14 @@ under `.radian/mut/` and restored from that copy (never `git checkout`); the tes
 | TK0111-M2 | a failed append is dropped instead of recorded (`diagnostic` stays `None`) | ✅ 1 failed | `terminal::tests::a_failed_panic_log_append_follows_the_report_policy` (`the failed append must be reported: …`) |
 
 2/2 caught.
+
+## TK0113: a task that needs the owner draws the waiting mark (2026-10-25, branch `work/TK0113-tui-needs-you-task-mark`)
+
+A `todo.proposed`, `failed.exhausted` or `failed.irrecoverable` task drew `◻` or `×`, so the row that made a plan `◉` could not be found among the plan's other rows. `task_needs_owner` is now one predicate that `task_mark` and `plan_mark` read, and those three phases draw `!` in the waiting role; `failed.cancelled` keeps `×`. Each mutation was applied by hand to `crates/radian-tui/src/arc/mod.rs`, backed up under `.radian/mut/` and restored from that copy (never `git checkout`); the named tests ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test arc_tui -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0113-M1 | `task_needs_owner` answers `true` for every `failed.*` phase, so `failed.cancelled` draws Waiting (`TaskState::Failed => phase != "cancelled"` becomes `true`) | ✅ 3 failed | `arc_tui::a_failed_cancelled_task_keeps_the_failed_mark` (`!task_needs_owner(TaskState::Failed, "cancelled")` fails); `arc_tui::every_task_phase_draws_its_mark` (`failed.cancelled` draws `!`); `arc_tui::a_failed_exhausted_row_draws_the_waiting_mark_among_cancelled_rows` (the cancelled row's `×` is missing) |
+| TK0113-M2 | `task_needs_owner` drops `todo.proposed` (`TaskState::Todo => phase == PROPOSED_PHASE` becomes `false`) | ✅ 2 failed | `arc_tui::every_task_phase_draws_its_mark` (`todo.proposed`: `left: Todo`, `right: Waiting`); `arc_tui::every_task_that_needs_the_owner_makes_its_plan_draw_needs_you` (`todo.proposed needs the owner`) |
+
+2/2 caught.
