@@ -362,8 +362,7 @@ pub struct TaskFile {
     /// Whether one of the task's attempts reported no cost, so `cost_usd`, `total_cost_usd`
     /// and the plan's sums over them are incomplete: arc shows them as unknown (ADR 0048
     /// decisions 7 and 12). The field records the fact across later attempts that do report a
-    /// cost; absent reads `false`, and a file written before the field existed still counts an
-    /// attempt that ran and left no cost at all.
+    /// cost, and it is absent in a file from before the field, where it reads `false`.
     pub cost_unknown: bool,
     /// How many reworks arc counted while the plan's `auto` level was not `off`
     /// (`[limits] max_auto_rework`).
