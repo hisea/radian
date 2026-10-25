@@ -251,6 +251,10 @@ pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
                 };
                 if count >= REPEATED_ERROR_LIMIT {
                     stop_gates(store);
+                    // The stop line is the error this loop returns, so the CLI prints it once on
+                    // stderr; the log gets it directly, never through the sink, so stdout does
+                    // not repeat it (ADR 0048 decision 13).
+                    log.write(&format!("radian arc: {}\n", repeated_error_stop()));
                     return Err(Error::Failed(repeated_error_stop()));
                 }
                 say(&mut log, emit, &format!("radian arc: {text}\n"));
@@ -273,27 +277,7 @@ pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> R
                 say(&mut log, emit, &format!("radian arc: {RESTART_TEXT}\n"));
                 drop(lock);
                 let exec_error = replace_process(path, &arguments);
-                say(
-                    &mut log,
-                    emit,
-                    &format!("radian arc: cannot restart with the new binary: {exec_error}\n"),
-                );
-                match store.try_runner_lock() {
-                    Ok(Some(retaken)) => lock = retaken,
-                    Ok(None) => {
-                        return Err(Error::Failed(format!(
-                            "the new binary could not start ({exec_error}); {RUNNER_LOCK} is held \
-                             by another process"
-                        )));
-                    }
-                    Err(error) => {
-                        return Err(Error::Failed(format!(
-                            "the new binary could not start ({exec_error}); did not take \
-                             {RUNNER_LOCK} again: {}",
-                            error.message()
-                        )));
-                    }
-                }
+                lock = take_lock_after_failed_exec(store, &mut log, emit, &exec_error)?;
                 recorded = Some(new_identity);
             }
         }
@@ -391,6 +375,37 @@ fn changed_binary(
     pause(RECHECK);
     let second = look(path)?;
     (second == first).then_some(second)
+}
+
+/// Prints the failed `exec` and takes `runner.lock` again. When the lock cannot be taken —
+/// another process took it in the gap, or the file cannot be opened — the reason the loop stops
+/// is appended to the loop's log before the error is returned, so `loop.log` holds every
+/// `radian arc:` line `serve` prints (ADR 0048 decision 13) without printing the line twice: the
+/// caller prints the returned error once, on stderr.
+fn take_lock_after_failed_exec(
+    store: &Store,
+    log: &mut LoopLog,
+    emit: &mut dyn FnMut(&str),
+    exec_error: &std::io::Error,
+) -> Result<crate::store::RunnerLock, Error> {
+    say(
+        log,
+        emit,
+        &format!("radian arc: cannot restart with the new binary: {exec_error}\n"),
+    );
+    let text = match store.try_runner_lock() {
+        Ok(Some(retaken)) => return Ok(retaken),
+        Ok(None) => format!(
+            "the new binary could not start ({exec_error}); {RUNNER_LOCK} is held by another \
+             process"
+        ),
+        Err(error) => format!(
+            "the new binary could not start ({exec_error}); did not take {RUNNER_LOCK} again: {}",
+            error.message()
+        ),
+    };
+    log.write(&format!("radian arc: {text}\n"));
+    Err(Error::Failed(text))
 }
 
 /// Replaces this process with `program` and its arguments, in the same working directory and
@@ -1381,6 +1396,82 @@ mod tests {
             executable_identity(dir.path()),
             None,
             "a directory is not a binary"
+        );
+    }
+
+    /// A restart whose `exec` failed and whose lock another process took in the gap stops the
+    /// loop with a line that reaches `loop.log` without a second visible copy: the CLI prints the
+    /// returned error on stderr, the sink carries only the printed `cannot restart` line, and the
+    /// log holds every `radian arc:` line `serve` prints (ADR 0048 decision 13). Mutation: drop
+    /// the `log.write` of the returned error and `loop.log` keeps only the `cannot restart` line.
+    #[test]
+    fn a_failed_restart_that_cannot_retake_the_lock_logs_the_reason_before_it_stops() {
+        let dir = crate::test_support::TempDir::new("restart-lock-held");
+        let store = Store::at(dir.path());
+        std::fs::create_dir_all(store.root()).expect("the arc directory");
+        let mut log = LoopLog::new(&store);
+        // A second open file description of the same lock file: `try_runner_lock` sees it as
+        // another process's lock, exactly as a loop started in the gap would.
+        let held = store
+            .try_runner_lock()
+            .expect("take runner.lock")
+            .expect("runner.lock is free");
+        let mut emitted = String::new();
+        let mut emit = |text: &str| emitted.push_str(text);
+        let exec_error = std::io::Error::from_raw_os_error(22);
+
+        let error = take_lock_after_failed_exec(&store, &mut log, &mut emit, &exec_error)
+            .expect_err("another process holds runner.lock");
+        drop(held);
+
+        let expected = format!(
+            "the new binary could not start ({exec_error}); {RUNNER_LOCK} is held by another \
+             process"
+        );
+        assert_eq!(error.message(), expected);
+        let said = format!("radian arc: cannot restart with the new binary: {exec_error}\n");
+        assert_eq!(
+            emitted, said,
+            "the sink repeated the stop line the CLI prints on stderr"
+        );
+        let written = std::fs::read_to_string(log.path()).expect("loop.log");
+        assert!(
+            written.contains(&format!("radian arc: {expected}")),
+            "loop.log is missing the stop line: {written}"
+        );
+    }
+
+    /// The same failure when `runner.lock` cannot be opened at all: the stop line is logged too.
+    #[test]
+    fn a_failed_restart_that_cannot_open_the_lock_logs_the_reason_before_it_stops() {
+        let dir = crate::test_support::TempDir::new("restart-lock-unopenable");
+        let store = Store::at(dir.path());
+        // A directory in the lock's place makes the lock file impossible to open.
+        std::fs::create_dir_all(store.root().join(RUNNER_LOCK)).expect("a directory at the lock");
+        let mut log = LoopLog::new(&store);
+        let mut emitted = String::new();
+        let mut emit = |text: &str| emitted.push_str(text);
+        let exec_error = std::io::Error::from_raw_os_error(22);
+
+        let error = take_lock_after_failed_exec(&store, &mut log, &mut emit, &exec_error)
+            .expect_err("the lock cannot be opened");
+
+        assert!(
+            error
+                .message()
+                .contains(&format!("did not take {RUNNER_LOCK} again")),
+            "{}",
+            error.message()
+        );
+        let line = format!("radian arc: {}", error.message());
+        assert!(
+            !emitted.contains(&line),
+            "the sink repeated the stop line the CLI prints on stderr: {emitted}"
+        );
+        let written = std::fs::read_to_string(log.path()).expect("loop.log");
+        assert!(
+            written.contains(&line),
+            "loop.log is missing the stop line: {written}"
         );
     }
 
