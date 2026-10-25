@@ -1086,3 +1086,20 @@ below>'` (after `cargo build -p radian-tui --bin radian`, because the harness re
 | TK0158-M2 | the wrapper's `dirty_paths` (`git status`) runs before `GitControl::check` | `work::the_worker_cannot_hide_a_dirty_file_from_the_check` (`dirty` is `[]`, not `["change.txt"]`) | ✅ failed |
 
 2/2 caught.
+
+## TK0158 rework: the worker's process group and unreadable control files (2026-10-25, branch `work/TK0158-worker-git-config-check`)
+
+ADR 0048 decisions 7 and 8: the wrapper stops everything the worker left in its process group
+before it compares the control files, and a control file it cannot read back is a change the
+restore repairs like any other. Each mutation was applied by hand to
+`crates/radian-arc/src/work/mod.rs`, the named tests ran with `cargo nextest run -p radian-arc
+--locked --profile sandbox --test work -E '<the tests below>'` (after `cargo build -p
+radian-tui --bin radian`), and the file was restored from `.radian/mut/work.rs.orig` with
+`cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0158-M3 | `monitor_child` returns on the direct child's exit without calling `stop_group` | `work::a_background_process_cannot_change_a_control_file_after_the_worker_exits` (`a process the worker left behind outlived the attempt`) | ✅ failed |
+| TK0158-M4 | `GitControl::check` returns `Unchanged` when the scan has an unreadable path, so the restore is skipped | `work::an_unreadable_control_file_is_restored_and_fails_the_attempt`, `work::an_unreadable_hooks_directory_reports_both_reasons` | ✅ 2 failed |
+
+2/2 caught.

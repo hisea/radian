@@ -2809,3 +2809,123 @@ fn a_worker_that_changes_its_own_config_worktree_fails() {
         "the worker's config.worktree is removed"
     );
 }
+
+/// A process the worker leaves in its own process group cannot change a control file after the
+/// direct child exits: the wrapper stops the whole group before it compares (ADR 0048
+/// decisions 7 and 8).
+#[test]
+fn a_background_process_cannot_change_a_control_file_after_the_worker_exits() {
+    let repo = Repo::new("control-background");
+    let config = common_git_dir(&repo).join("config");
+    let before = std::fs::read(&config).expect("the common config");
+    let trigger = repo.root.join("background-trigger");
+    let changed = repo.root.join("background-changed");
+    // The background process waits for the test to let it write, so it acts after the wrapper
+    // has observed the direct child's exit, whatever the poll timing.
+    let worker = format!(
+        "(while [ ! -e '{trigger}' ]; do sleep 0.02; done \
+          && printf '[arc-test]\\n\\tchanged = true\\n' >> '{config}' \
+          && printf changed > '{changed}') &",
+        trigger = trigger.display(),
+        config = config.display(),
+        changed = changed.display(),
+    );
+    let run = run(
+        &repo,
+        "TK0009-background",
+        1,
+        "tok-background",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    // A process that outlived the wrapper is still there to see the trigger. Nothing is there
+    // when the wrapper stopped the group, as it must.
+    std::fs::write(&trigger, "").expect("the trigger");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !changed.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !changed.exists(),
+        "a process the worker left behind outlived the attempt"
+    );
+    assert_eq!(
+        std::fs::read(&config).expect("the common config"),
+        before,
+        "the background process changed the common config after the check"
+    );
+    assert_eq!(run.finished()["pushed"], json!(false));
+}
+
+/// A worker that makes a recorded control file unreadable changed it, as far as the check can
+/// tell: the attempt fails with the changed-files reason and the recorded content comes back
+/// (ADR 0048 decisions 7 and 8).
+#[test]
+fn an_unreadable_control_file_is_restored_and_fails_the_attempt() {
+    let repo = Repo::new("control-unreadable");
+    let config = common_git_dir(&repo).join("config");
+    let before = std::fs::read(&config).expect("the common config");
+    let worker = format!(
+        "cat >> '{config}' <<'EOF'\n[arc-test]\n\tchanged = true\nEOF\n\
+         chmod 000 '{config}'",
+        config = config.display(),
+    );
+    let run = run(
+        &repo,
+        "TK0010-unreadable",
+        1,
+        "tok-unreadable",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(
+        failure.starts_with("the worker changed git control files: "),
+        "{failure}"
+    );
+    assert!(failure.contains("config"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    assert_eq!(
+        std::fs::read(&config).expect("the config is back"),
+        before,
+        "the recorded content is restored"
+    );
+}
+
+/// A control directory the wrapper cannot read back is a change too; when the restore cannot
+/// repair it, the reason carries both the changed paths and the restore error, and no further
+/// git command runs (ADR 0048 decisions 7 and 8).
+#[test]
+fn an_unreadable_hooks_directory_reports_both_reasons() {
+    let repo = Repo::new("control-unreadable-hooks");
+    let hooks = common_git_dir(&repo).join("hooks");
+    let worker = format!("chmod 000 '{}'", hooks.display());
+    let run = run(
+        &repo,
+        "TK0011-unreadable-hooks",
+        1,
+        "tok-unreadable-hooks",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(
+        failure.starts_with("the worker changed git control files: "),
+        "{failure}"
+    );
+    assert!(failure.contains("hooks"), "{failure}");
+    assert!(failure.contains("restoring them failed"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    // Leave the temporary repository removable; the wrapper could not repair the directory.
+    use std::os::unix::fs::PermissionsExt as _;
+    let _ = std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755));
+}

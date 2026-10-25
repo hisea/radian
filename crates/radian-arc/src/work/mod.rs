@@ -60,6 +60,10 @@ use crate::store::attempt_ops::{HEARTBEAT_FILE, SIGNAL_FILE, heartbeat_interval}
 /// How often the wrapper looks at the worker, its jsonl stream and a cancel signal.
 const POLL: Duration = Duration::from_millis(100);
 
+/// How long the wrapper waits after SIGKILL for the worker's process group to disappear: a
+/// killed process is reaped by its new parent, not by the wrapper (ADR 0048 decisions 7 and 8).
+const GROUP_REAP: Duration = Duration::from_secs(5);
+
 /// The `radian arc work` flags. `radian-tui`'s `arc work` subcommand fills this.
 pub struct Options {
     /// The task id: the branch suffix and the worktree name.
@@ -471,27 +475,11 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
 
     // ADR 0048 decisions 7 and 8: a worker that changed the repository's git control files
     // fails the attempt, and they are put back before this wrapper runs its next git command.
-    // A record it cannot read back, or a restore that fails, stops the attempt here so no
-    // git command runs on files the wrapper could not repair.
+    // A control file the check cannot read back counts as a change and is restored too; a
+    // restore that fails stops the attempt here, so no git command runs on files the wrapper
+    // could not repair.
     let mut failure = match control.check() {
         ControlCheck::Unchanged => None,
-        ControlCheck::Unreadable(message) => {
-            return write_finish(
-                o,
-                s,
-                Finish {
-                    base_sha: &base_sha,
-                    head_sha: None,
-                    dirty: Vec::new(),
-                    pushed: false,
-                    remote_sha: None,
-                    outcome: &outcome,
-                    exit_code,
-                    failure: Some(format!("cannot check the git control files: {message}")),
-                    notes: &notes,
-                },
-            );
-        }
         ControlCheck::Changed(change) if change.restore_failed.is_some() => {
             return write_finish(
                 o,
@@ -838,6 +826,11 @@ fn monitor_child(
             .try_wait()
             .map_err(|error| Failure::error(format!("cannot wait for the worker: {error}")))?
         {
+            // The direct child is gone, but a background process it left in its own process
+            // group is not necessarily: it could change a git control file after this exit
+            // and before the wrapper compares them, or after the attempt ends. Nothing the
+            // worker started runs from this point (ADR 0048 decisions 7 and 8).
+            stop_group(child.id(), limits.grace);
             return Ok(status);
         }
         let now = Instant::now();
@@ -871,6 +864,36 @@ fn monitor_child(
         {
             process::signal_group(child.id(), process::SIGKILL);
             kill_at = None;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// Stops everything the worker left in its process group after the direct child exits: SIGTERM,
+/// then SIGKILL once `grace` runs out, the same way a cancel stops it. The probe with signal 0
+/// ends the wait as soon as the group is empty, which is the normal case (ADR 0048 decisions 7
+/// and 8).
+fn stop_group(pgid: u32, grace: Duration) {
+    if !process::signal_group(pgid, process::SIGTERM) {
+        return;
+    }
+    let deadline = Instant::now() + grace;
+    loop {
+        if !process::signal_group(pgid, 0) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    process::signal_group(pgid, process::SIGKILL);
+    // A killed process can stay a zombie for a moment until its parent reaps it. Wait a
+    // bounded time, so the check after this does not race the group's last entry.
+    let deadline = Instant::now() + GROUP_REAP;
+    while process::signal_group(pgid, 0) {
+        if Instant::now() >= deadline {
+            return;
         }
         std::thread::sleep(POLL);
     }
@@ -2222,10 +2245,9 @@ enum RecordedFile {
 enum ControlCheck {
     /// Every recorded file is as it was and nothing new exists.
     Unchanged,
-    /// A control file was created, removed or changed; the restore was attempted.
+    /// A control file was created, removed, changed or could not be read back; the restore was
+    /// attempted.
     Changed(ControlChange),
-    /// The files could not be read again, so they could not be compared or restored.
-    Unreadable(String),
 }
 
 /// One check that found a change.
@@ -2263,9 +2285,13 @@ impl GitControl {
     fn record(worktree: &Path, clock: &Clock) -> Result<Self, Failure> {
         let git_dir = git_directory(worktree, "--absolute-git-dir", clock)?;
         let common = git_directory(worktree, "--git-common-dir", clock)?;
-        let files = control_files(&common, &git_dir).map_err(|error| {
-            Failure::error(format!("cannot record the git control files: {error}"))
-        })?;
+        let scan = ControlScan::read(&common, &git_dir);
+        if let Some(error) = scan.errors.values().next() {
+            return Err(Failure::error(format!(
+                "cannot record the git control files: {error}"
+            )));
+        }
+        let files = scan.files;
         // A file too large to read whole cannot be compared or restored. Fail before the
         // worker starts rather than run unattended with a control file the check cannot see.
         if let Some(path) = files
@@ -2285,25 +2311,25 @@ impl GitControl {
     }
 
     /// Compares the control files with the record and, on a change, restores them. No git
-    /// command of the wrapper runs between the worker exiting and this call.
+    /// command of the wrapper runs between the worker exiting and this call. A control file
+    /// the scan cannot read back cannot be proven unchanged, so it is a change too: the
+    /// restore puts the recorded content back and reports what it could not repair
+    /// (ADR 0048 decisions 7 and 8).
     fn check(&self) -> ControlCheck {
-        let current = match control_files(&self.common, &self.git_dir) {
-            Ok(files) => files,
-            Err(error) => return ControlCheck::Unreadable(error),
-        };
-        if current == self.files {
-            return ControlCheck::Unchanged;
-        }
+        let current = ControlScan::read(&self.common, &self.git_dir);
         let mut paths = BTreeSet::new();
         for (path, before) in &self.files {
-            if current.get(path) != Some(before) {
+            if current.files.get(path) != Some(before) {
                 paths.insert(shown_control_path(path, &self.common));
             }
         }
-        for path in current.keys() {
+        for path in current.files.keys().chain(current.errors.keys()) {
             if !self.files.contains_key(path) {
                 paths.insert(shown_control_path(path, &self.common));
             }
+        }
+        if paths.is_empty() && current.errors.is_empty() {
+            return ControlCheck::Unchanged;
         }
         let restore_failed = self.restore(&current).err();
         ControlCheck::Changed(ControlChange {
@@ -2315,26 +2341,28 @@ impl GitControl {
     /// Puts every recorded file back and removes every file that was not there before. It
     /// keeps going after a failure, so one file that cannot be restored does not leave the
     /// others as the worker left them; the errors are reported together.
-    fn restore(&self, current: &BTreeMap<PathBuf, RecordedFile>) -> Result<(), String> {
+    fn restore(&self, current: &ControlScan) -> Result<(), String> {
         let mut errors = Vec::new();
         for (path, before) in &self.files {
-            if current.get(path) == Some(before) {
+            if current.files.get(path) == Some(before) {
                 continue;
             }
             if let Err(error) = self.restore_one(path, before) {
                 errors.push(error);
             }
         }
-        for path in current.keys() {
+        for path in current.files.keys().chain(current.errors.keys()) {
             if self.files.contains_key(path) {
                 continue;
             }
             // A directory is not a file that runs, and the recorded files under it are already
             // back in place; leave it rather than remove a directory the restore just made.
+            // An unreadable directory is the exception: its contents are unknown, so it is
+            // removed like an unreadable file.
             let is_dir = fs::symlink_metadata(path)
                 .map(|metadata| metadata.is_dir())
                 .unwrap_or(false);
-            if is_dir {
+            if is_dir && !current.errors.contains_key(path) {
                 continue;
             }
             if let Err(error) = remove_control_entry(path) {
@@ -2393,23 +2421,135 @@ fn git_directory(worktree: &Path, flag: &str, clock: &Clock) -> Result<PathBuf, 
 /// larger file is never loaded into memory, so a worker cannot exhaust the wrapper with one.
 const CONTROL_FILE_LIMIT: u64 = 1024 * 1024;
 
-/// Every git control file of decision 7, keyed by path.
-fn control_files(common: &Path, git_dir: &Path) -> Result<BTreeMap<PathBuf, RecordedFile>, String> {
-    let mut files = BTreeMap::new();
-    for path in [
-        common.join("config"),
-        git_dir.join("config.worktree"),
-        common.join("config.worktree"),
-    ] {
-        if let Some(recorded) = recorded_entry(&path)? {
-            files.insert(path, recorded);
+/// Every git control file of decision 7 read in one pass, plus the paths the pass could not
+/// read. A scan that cannot read one path keeps the rest: the check treats the unreadable path
+/// as a change and restores what it recorded (ADR 0048 decisions 7 and 8).
+struct ControlScan {
+    files: BTreeMap<PathBuf, RecordedFile>,
+    /// The paths that could not be read, with the error, keyed by the path that failed (a file
+    /// or a directory the scan could not list).
+    errors: BTreeMap<PathBuf, String>,
+}
+
+impl ControlScan {
+    fn read(common: &Path, git_dir: &Path) -> Self {
+        let mut scan = Self {
+            files: BTreeMap::new(),
+            errors: BTreeMap::new(),
+        };
+        for path in [
+            common.join("config"),
+            git_dir.join("config.worktree"),
+            common.join("config.worktree"),
+        ] {
+            scan.entry(&path);
+        }
+        for dir in [common.join("hooks"), common.join("info")] {
+            scan.tree(&dir);
+        }
+        scan.modules(&common.join("modules"), false);
+        scan
+    }
+
+    fn unreadable(&mut self, path: &Path, error: std::io::Error) {
+        self.errors.insert(
+            path.to_path_buf(),
+            format!("cannot read {}: {error}", path.display()),
+        );
+    }
+
+    fn entry(&mut self, path: &Path) {
+        match recorded_entry(path) {
+            Ok(Some(recorded)) => {
+                self.files.insert(path.to_path_buf(), recorded);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.errors.insert(path.to_path_buf(), error);
+            }
         }
     }
-    for dir in [common.join("hooks"), common.join("info")] {
-        record_tree(&mut files, &dir)?;
+
+    /// Every non-directory entry under `dir`, recursively, without following a link. A link or
+    /// a file where the directory itself should be is recorded as that entry, so swapping the
+    /// directory for a link is a change.
+    fn tree(&mut self, dir: &Path) {
+        let metadata = match fs::symlink_metadata(dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                self.unreadable(dir, error);
+                return;
+            }
+        };
+        if !metadata.is_dir() {
+            self.entry(dir);
+            return;
+        }
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.unreadable(dir, error);
+                return;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    self.unreadable(dir, error);
+                    continue;
+                }
+            };
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => self.tree(&path),
+                Ok(_) => self.entry(&path),
+                Err(error) => self.unreadable(&path, error),
+            }
+        }
     }
-    record_modules(&mut files, &common.join("modules"))?;
-    Ok(files)
+
+    /// `config` files and `hooks/` entries anywhere under the submodule gitdirs
+    /// (`<common dir>/modules/**`, nested submodules included).
+    fn modules(&mut self, dir: &Path, under_hooks: bool) {
+        let metadata = match fs::symlink_metadata(dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                self.unreadable(dir, error);
+                return;
+            }
+        };
+        if !metadata.is_dir() {
+            return;
+        }
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.unreadable(dir, error);
+                return;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    self.unreadable(dir, error);
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let name = entry.file_name();
+            let is_hooks = name == std::ffi::OsStr::new("hooks");
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => self.modules(&path, under_hooks || is_hooks),
+                Ok(_) if under_hooks || name == std::ffi::OsStr::new("config") => self.entry(&path),
+                Ok(_) => {}
+                Err(error) => self.unreadable(&path, error),
+            }
+        }
+    }
 }
 
 /// One entry's recorded content: a regular file's bytes or a symbolic link's target. A
@@ -2446,80 +2586,6 @@ fn recorded_entry(path: &Path) -> Result<Option<RecordedFile>, String> {
         return Ok(Some(RecordedFile::Oversized));
     }
     Ok(Some(RecordedFile::Regular(bytes)))
-}
-
-/// Records every non-directory entry under `dir`, recursively, without following a link. A
-/// link or a file where the directory itself should be is recorded as that entry, so swapping
-/// the directory for a link is a change.
-fn record_tree(files: &mut BTreeMap<PathBuf, RecordedFile>, dir: &Path) -> Result<(), String> {
-    let metadata = match fs::symlink_metadata(dir) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("cannot read {}: {error}", dir.display())),
-    };
-    if !metadata.is_dir() {
-        if let Some(recorded) = recorded_entry(dir)? {
-            files.insert(dir.to_path_buf(), recorded);
-        }
-        return Ok(());
-    }
-    let entries =
-        fs::read_dir(dir).map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
-        let path = entry.path();
-        let kind = entry
-            .file_type()
-            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        if kind.is_dir() {
-            record_tree(files, &path)?;
-        } else if let Some(recorded) = recorded_entry(&path)? {
-            files.insert(path, recorded);
-        }
-    }
-    Ok(())
-}
-
-/// Records `config` files and `hooks/` entries anywhere under the submodule gitdirs
-/// (`<common dir>/modules/**`, nested submodules included).
-fn record_modules(
-    files: &mut BTreeMap<PathBuf, RecordedFile>,
-    modules: &Path,
-) -> Result<(), String> {
-    record_modules_tree(files, modules, false)
-}
-
-fn record_modules_tree(
-    files: &mut BTreeMap<PathBuf, RecordedFile>,
-    dir: &Path,
-    under_hooks: bool,
-) -> Result<(), String> {
-    let metadata = match fs::symlink_metadata(dir) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("cannot read {}: {error}", dir.display())),
-    };
-    if !metadata.is_dir() {
-        return Ok(());
-    }
-    let entries =
-        fs::read_dir(dir).map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
-        let path = entry.path();
-        let kind = entry
-            .file_type()
-            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        let is_hooks = entry.file_name() == std::ffi::OsStr::new("hooks");
-        if kind.is_dir() {
-            record_modules_tree(files, &path, under_hooks || is_hooks)?;
-        } else if (under_hooks || entry.file_name() == std::ffi::OsStr::new("config"))
-            && let Some(recorded) = recorded_entry(&path)?
-        {
-            files.insert(path, recorded);
-        }
-    }
-    Ok(())
 }
 
 /// A changed path as the failure text shows it: relative to the common dir when it lies under
