@@ -9471,9 +9471,14 @@ async fn logout_with_an_unknown_key_name_names_the_known_ones() {
     assert_eq!(auth["opencode-go"]["keys"][0]["name"], "team");
 }
 
-/// A minimal pty: the child runs `sh -c '"$@"; echo EXITED:$?; stty -a'`, so the same pty
-/// reports the exit code and the terminal state **after** the app left (the echo-restore
-/// invariant is only observable there). Raw bytes accumulate; the reader drains them.
+/// Printed by the pty's shell after its trailing `stty -a`, so a reader that waits for it knows
+/// it has the whole tty state (see [`PtyChild::wait_for_stty`]).
+const STTY_END: &str = "STTY-END";
+
+/// A minimal pty: the child runs `sh -c '"$@"; echo EXITED:$?; stty -a; echo STTY-END'`, so
+/// the same pty reports the exit code and the terminal state **after** the app left (the
+/// echo-restore invariant is only observable there). Raw bytes accumulate; the reader drains
+/// them.
 struct PtyChild {
     child: tokio::process::Child,
     master: std::fs::File,
@@ -9501,7 +9506,9 @@ impl PtyChild {
         assert!(stdout_fd >= 0, "dup failed");
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.arg("-c")
-            .arg(r#""$@"; echo "EXITED:$?"; stty -a"#)
+            .arg(format!(
+                r#""$@"; echo "EXITED:$?"; stty -a; echo "{STTY_END}""#
+            ))
             .arg("sh")
             .args(args)
             .env("HOME", home)
@@ -9551,6 +9558,28 @@ impl PtyChild {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// Waits until the shell's trailing `stty -a` is complete and returns its text.
+    ///
+    /// `stty -a` writes to a tty line by line, and [`Self::drain`] copies at most one chunk
+    /// per call, so its first line (`speed …`) can be in `buf` while the line that carries
+    /// `icanon` and `echo` has not been read yet: asserting on that prefix fails on a healthy
+    /// terminal under load. The shell prints [`STTY_END`] after `stty -a`, so this waits for
+    /// that marker — everything before it is complete — and returns what followed the app's
+    /// `EXITED:<code>` line.
+    async fn wait_for_stty(
+        &mut self,
+        buf: &mut Vec<u8>,
+        exited: &str,
+        secs: u64,
+    ) -> Option<String> {
+        if !self.wait_for(buf, STTY_END, secs).await {
+            return None;
+        }
+        let text = String::from_utf8_lossy(buf).into_owned();
+        let after = text.split(exited).nth(1)?;
+        Some(after.split(STTY_END).next().unwrap_or(after).to_owned())
     }
 
     fn write(&self, bytes: &[u8]) {
@@ -9658,17 +9687,14 @@ async fn pty_agent_login_custom_hides_the_key_and_restores_echo() {
             & 0o777,
         0o600
     );
-    // Echo restored after the exit: `stty -a` must show `echo` enabled. Wait for the `stty`
-    // output itself (its first line is "speed …"): waiting only for `EXITED:0` races the
-    // shell's next command.
-    assert!(
-        pty.wait_for(&mut seen, "speed ", 5).await,
-        "no stty output: {}",
-        String::from_utf8_lossy(&seen)
-    );
-    let tail = String::from_utf8_lossy(&seen);
-    let stty = tail.split("EXITED:0").nth(1).unwrap_or("");
-    assert_stty_has_echo(stty);
+    // Echo restored after the exit: `stty -a` must show `echo` enabled. Wait for the whole
+    // `stty` output (its end marker), not just `EXITED:0` or stty's first line: the pty
+    // delivers those bytes in several writes.
+    let stty = pty
+        .wait_for_stty(&mut seen, "EXITED:0", 5)
+        .await
+        .unwrap_or_else(|| panic!("no stty output: {}", String::from_utf8_lossy(&seen)));
+    assert_stty_has_echo(&stty);
 }
 
 /// Ctrl-C **during the hidden key prompt** ends the process (130) and still restores the
@@ -9692,16 +9718,13 @@ async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
         "Ctrl-C did not end the login: {}",
         String::from_utf8_lossy(&seen)
     );
-    // The terminal is back to cooked mode: echo on, canonical on. `stty -a` opens with
-    // "speed …".
-    assert!(
-        pty.wait_for(&mut seen, "speed ", 5).await,
-        "no stty output: {}",
-        String::from_utf8_lossy(&seen)
-    );
-    let tail = String::from_utf8_lossy(&seen);
-    let stty = tail.split("EXITED:130").nth(1).unwrap_or("");
-    assert_stty_has_echo(stty);
+    // The terminal is back to cooked mode: echo on, canonical on. The whole `stty -a` output
+    // is only in `seen` at its end marker.
+    let stty = pty
+        .wait_for_stty(&mut seen, "EXITED:130", 5)
+        .await
+        .unwrap_or_else(|| panic!("no stty output: {}", String::from_utf8_lossy(&seen)));
+    assert_stty_has_echo(&stty);
 }
 
 /// ADR 0043: a headless `radian exec` mounts neither `git_commit` nor any task/lead/

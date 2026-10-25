@@ -448,3 +448,23 @@ Restored from `.radian/setup.rs.bak` byte-identically.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | RW5-1 | `load_images` reads the whole file (`std::fs::read`) before the magic/size checks | ✅ 2 failed | `setup::tests::a_large_non_image_is_refused_without_reading_it_whole` and `setup::tests::an_over_limit_image_is_refused_without_reading_its_body` (0 bytes through the bounded reader) |
+
+## TK0161: the pty login tests wait for the whole `stty -a` output (2026-10-25, branch `work/TK0161-pty-stty-read-race`)
+
+`PtyChild`'s shell now prints `STTY-END` after `stty -a`, and `wait_for_stty` waits for that
+marker before `assert_stty_has_echo` runs. The mutation was run in place with the reproduction
+in place: the pty shell ran
+`stty -a | while IFS= read -r line; do printf '%s\n' "$line"; sleep 0.05; done`
+so the lines arrive in separate writes, as they do when the writer and the drain are not
+scheduled together. Command: `cargo nextest run -p radian-exec --locked --test cli -E
+'test(pty_agent_login)'`. Restored from `.radian/cli.rs.final`, `cmp` identical,
+`git status --short` empty afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0161-M1 | put the old wait back: `wait_for(.., "speed ", ..)` and then assert on `seen.split("EXITED:0").nth(1)` / `"EXITED:130"` without waiting for the marker | ✅ 2 failed | `pty_agent_login_custom_hides_the_key_and_restores_echo` and `pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo`: `canonical mode must be restored: ` in `assert_stty_has_echo` — the buffer held only the `speed …` line |
+
+Measured with that reproduction: the old wait failed 20/20 runs of each test, `wait_for_stty`
+passed 20/20 of each. With the real `stty -a` and ten `yes` CPU hogs on this macOS box neither
+form failed (old 0/100, new 0/200 per test): the natural race needs the Linux line writer plus
+the full workspace load.
