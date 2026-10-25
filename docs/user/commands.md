@@ -219,6 +219,8 @@ Selecting and copying across an image copies the `[image: …]` line, never the 
 `Ctrl-F` searches the line, not the pixels.
 `/export` writes the session file's `[<mime> image omitted]` text, as before.
 When the image data cannot be decoded, only the `[image: …]` line shows; there is no error box.
+At most 8 images stay decoded in memory. Once an older image has been dropped, the first frame
+that draws it again decodes it once more, and the frames after that reuse it.
 
 ## While a turn runs
 

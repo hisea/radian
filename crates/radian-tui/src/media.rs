@@ -420,6 +420,135 @@ mod tests {
         assert_eq!(decodes(), before, "an undecodable part is not retried");
     }
 
+    /// A part whose payload is the test GIF with `extra` zero bytes appended: distinct data
+    /// (so a distinct cache key) that still decodes.
+    fn distinct_part(extra: usize) -> ContentPart {
+        use base64::Engine;
+        let mut bytes = GIF.to_vec();
+        bytes.extend(std::iter::repeat_n(0u8, extra));
+        ContentPart::Image {
+            mime_type: "image/gif".to_owned(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            annotations: Some(json!({
+                "kind": radian_coding::image::IMAGE_KIND,
+                "name": "shot.gif",
+                "width": 1,
+                "height": 1,
+                "bytes": GIF.len(),
+            })),
+            meta: None,
+        }
+    }
+
+    /// ADR 0028 R10: the cache is bounded. Nine distinct images leave the first out of it, so
+    /// drawing it again decodes it exactly once, and the frames after that reuse it.
+    #[test]
+    fn the_ninth_image_evicts_the_first_and_drawing_it_again_decodes_once() {
+        let picker = Picker::halfblocks();
+        let mut cache = ImageCache::default();
+        let images: Vec<EntryImage> = (0..=IMAGE_CACHE_CAPACITY)
+            .map(|extra| {
+                EntryImage::from_part(&distinct_part(extra), &mut cache).expect("an image")
+            })
+            .collect();
+        assert_eq!(images.len(), IMAGE_CACHE_CAPACITY + 1);
+        assert_eq!(
+            cache.entries.len(),
+            IMAGE_CACHE_CAPACITY,
+            "the ninth image evicted the first"
+        );
+
+        // Drawing the eight images still in the cache decodes nothing.
+        let after_ingest = decodes();
+        for image in &images[1..] {
+            assert!(cache.protocol(image, &picker).is_some());
+        }
+        assert_eq!(
+            decodes(),
+            after_ingest,
+            "a cached image is not decoded by a frame"
+        );
+
+        // The first image was evicted, so drawing it again costs exactly one decode.
+        let before = decodes();
+        assert!(cache.protocol(&images[0], &picker).is_some());
+        assert_eq!(
+            decodes() - before,
+            1,
+            "an evicted image is decoded once more"
+        );
+        // And the frames after that reuse it: the image is in the cache again.
+        for _ in 0..3 {
+            assert!(cache.protocol(&images[0], &picker).is_some());
+        }
+        assert_eq!(
+            decodes() - before,
+            1,
+            "drawing the re-decoded image again decodes nothing more"
+        );
+        assert!(cache.is_ready(&images[0]));
+    }
+
+    /// ADR 0028 R10: the decoded state of at most [`IMAGE_CACHE_CAPACITY`] images is held,
+    /// however many images the transcript pushes and draws.
+    #[test]
+    fn the_cache_never_holds_more_than_its_capacity() {
+        // ADR 0028 R10 and `commands` name 8: the number is not a free implementation detail.
+        assert_eq!(IMAGE_CACHE_CAPACITY, 8);
+        let picker = Picker::halfblocks();
+        let mut cache = ImageCache::default();
+        let mut images: Vec<EntryImage> = Vec::new();
+        for extra in 0..(IMAGE_CACHE_CAPACITY * 3) {
+            images
+                .push(EntryImage::from_part(&distinct_part(extra), &mut cache).expect("an image"));
+            assert!(
+                cache.entries.len() <= IMAGE_CACHE_CAPACITY,
+                "adding an image must not grow the cache past its capacity"
+            );
+            // Draw the newest and a few older ones: an older image re-enters the cache.
+            let newest = images.len() - 1;
+            let first = newest.saturating_sub(3);
+            for older in images[first..=newest].iter() {
+                let _ = cache.protocol(older, &picker);
+                assert!(
+                    cache.entries.len() <= IMAGE_CACHE_CAPACITY,
+                    "drawing an image must not grow the cache past its capacity"
+                );
+            }
+        }
+        assert_eq!(cache.entries.len(), IMAGE_CACHE_CAPACITY);
+    }
+
+    /// ADR 0028 R10: a decode failure is remembered for the image and is never retried, not
+    /// even after the failure was pushed out of the cache.
+    #[test]
+    fn a_failed_decode_is_not_retried_after_eviction() {
+        let picker = Picker::halfblocks();
+        let mut cache = ImageCache::default();
+        let mut broken = image_part();
+        if let ContentPart::Image { data, .. } = &mut broken {
+            // Valid base64 that is not an image: the decode runs and fails.
+            use base64::Engine;
+            *data = base64::engine::general_purpose::STANDARD.encode(b"not an image at all");
+        }
+        let failed = EntryImage::from_part(&broken, &mut cache).expect("the annotations survive");
+        assert!(!failed.decodable, "the payload does not decode");
+
+        // Push the failure out of the cache with a full cache's worth of good images.
+        for extra in 0..IMAGE_CACHE_CAPACITY {
+            EntryImage::from_part(&distinct_part(extra), &mut cache).expect("an image");
+        }
+        assert!(
+            !cache.entries.contains_key(&failed.key()),
+            "the failure was evicted"
+        );
+
+        let before = decodes();
+        assert!(cache.protocol(&failed, &picker).is_none());
+        assert_eq!(decodes(), before, "an evicted failure is not decoded again");
+        assert!(!cache.is_ready(&failed));
+    }
+
     /// The width keeps the aspect ratio at the fixed row height and never exceeds the body
     /// column (ADR 0028 R10).
     #[test]
