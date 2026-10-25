@@ -1412,3 +1412,59 @@ async fn a_pause_record_read_before_auto_turned_off_is_the_pause_reason() {
 
     session.close().await;
 }
+
+#[tokio::test]
+async fn a_pause_record_the_baseline_read_before_auto_turned_off_is_the_pause_reason() {
+    let scratch = fixture("mcp-channel-pause-race-baseline");
+    let setup = Session::open(&scratch).await;
+    let (plan, task) = plan_with_task(&setup, "pause-race-baseline").await;
+    setup.close().await;
+    let store = Store::at(scratch.repo());
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("the plan runs");
+    set_state(&scratch, &task, TaskState::Review, "rework_pending");
+    store
+        .change_task(&task, |task| {
+            task.auto_rework = 2;
+            Ok(())
+        })
+        .expect("the task has used its automatic reworks");
+
+    // The automatic rework limit's first write: the record beside the attempt. The plan's
+    // `auto` is still on when the client connects, so the poller's baseline read lands in
+    // the window before the second write and finds the record on a plan that still runs.
+    let text = "the plan paused: the automatic rework limit";
+    let record = json!({
+        "kind": "auto_rework",
+        "task": task,
+        "plan": plan,
+        "count": 3,
+        "max_auto_rework": 2,
+        "text": text,
+        "at": radian_arc::store::plan_ops::utc_now(),
+    });
+    let dir = radian_arc::store::attempt_ops::run_dir(&store, &task, 0);
+    fs::create_dir_all(&dir).expect("the attempt directory is creatable");
+    fs::write(
+        dir.join(radian_arc::store::attempt_ops::PAUSED_FILE),
+        record.to_string(),
+    )
+    .expect("the pause record is writable");
+
+    let mut session = Session::open_flagged(&scratch, true).await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // The second write sets `auto` to `off`. The baseline's record belongs to no pause yet,
+    // so the pause that follows reports it as its reason.
+    store
+        .change_plan(&plan, |plan| {
+            plan.auto = "off".to_owned();
+            Ok(())
+        })
+        .expect("the plan pauses");
+    let event = session.next_event().await;
+    let content = expect_plan_event(&event, &plan, "paused", "false", "true");
+    assert_eq!(content, format!("{plan} paused false -> true\n{text}"));
+
+    session.close().await;
+}

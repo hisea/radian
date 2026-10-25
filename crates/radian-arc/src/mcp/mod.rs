@@ -351,9 +351,11 @@ struct TaskSnapshot {
 
 /// One plan as the previous poll read it. `paused` is a `confirmed` plan whose `auto` is
 /// `off`: a `draft` plan waits for the owner's confirm and is not paused. `pause_record` is
-/// the record that belongs to the plan's current or most recent pause: the one a read found
-/// while the plan was paused, or the one the plan's first read found. A read that finds the
-/// plan not paused keeps the previous one (see [`carry_pause_records`]).
+/// the record that belongs to the last pause the poller knows about: the one a read found
+/// while the plan was paused. A read that finds the plan not paused carries the previous one
+/// (see [`carry_pause_records`]); a record it finds there belongs to no pause yet, so the
+/// poller's first read carries none either, even with the automatic rework limit's record
+/// already beside the task.
 #[derive(Debug, Clone)]
 struct PlanSnapshot {
     status: String,
@@ -587,26 +589,28 @@ fn plan_transitions(
     events
 }
 
-/// Carries each plan's pause record into the new read while the plan is not paused. The
-/// automatic rework limit writes the record and then sets `auto` to `off` in a second write, so
-/// a read between the two finds the new record on a plan that is still running. That read must
-/// not count as having seen the record: the next read, which sees the pause, still reports it
-/// as the pause's reason. A read that finds the plan paused keeps the record it found.
+/// Carries each plan's last known pause record into the new read while the plan is not paused.
+/// The automatic rework limit writes the record and then sets `auto` to `off` in a second
+/// write, so a read between the two finds the new record on a plan that is still running. That
+/// record belongs to no pause yet, and the next read, which sees the pause, reports it as the
+/// pause's reason. A read that finds the plan paused keeps the record it found, which is that
+/// pause's record. With no previous read to carry from (the poller's first read) a running plan
+/// has no pause record, so the record such a read finds is not lost to the pause that follows.
 fn carry_pause_records(
-    previous: &BTreeMap<String, PlanSnapshot>,
+    previous: Option<&BTreeMap<String, PlanSnapshot>>,
     current: &mut BTreeMap<String, PlanSnapshot>,
 ) {
     for (plan_id, plan) in current.iter_mut().filter(|(_, plan)| !plan.paused) {
-        if let Some(before) = previous.get(plan_id) {
-            plan.pause_record = before.pause_record.clone();
-        }
+        plan.pause_record = previous
+            .and_then(|previous| previous.get(plan_id))
+            .and_then(|before| before.pause_record.clone());
     }
 }
 
 /// The reason line of a pause event: the text of the record that caused this pause. The
 /// automatic rework limit writes the record just before it sets `auto` to `off`, so the record
 /// the paused read finds is this pause's cause. A record from an earlier pause stays on its
-/// attempt after the owner resumes; [`carry_pause_records`] keeps it as the previous read's
+/// attempt after the owner resumes; [`carry_pause_records`] keeps it as the last pause's
 /// record, so a later `radian arc pause` sends no second line.
 fn pause_reason(before: &PlanSnapshot, plan: &PlanSnapshot) -> Option<String> {
     if !plan.paused {
@@ -699,8 +703,11 @@ async fn poll(store: Store, peer: Peer<RoleServer>) {
     let mut previous: Option<Snapshot> = None;
     loop {
         if let Ok(mut current) = snapshot(&store) {
+            carry_pause_records(
+                previous.as_ref().map(|before| &before.plans),
+                &mut current.plans,
+            );
             if let Some(before) = &previous {
-                carry_pause_records(&before.plans, &mut current.plans);
                 for (task_id, task, phase) in task_transitions(&before.tasks, &current.tasks) {
                     send_event(&store, &peer, &task_id, &task, &phase).await;
                 }
@@ -925,10 +932,21 @@ mod tests {
         // the paused read after it must still report the record as the pause's reason.
         let before = plan(false, None);
         let mut racing = plan(false, Some(record));
-        carry_pause_records(&before, &mut racing);
+        carry_pause_records(Some(&before), &mut racing);
         let paused = plan(true, Some(record));
         let events = plan_transitions(&racing, &paused);
         assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].1.field, "paused");
+        assert_eq!(events[0].1.reason.as_deref(), Some(record));
+
+        // The poller's first read can land in that window too: the client connects after
+        // the record is written and before `auto` goes `off`. That read has no previous
+        // read to carry from, so the record it finds belongs to no pause yet; the pause that
+        // follows still reports it.
+        let mut baseline = plan(false, Some(record));
+        carry_pause_records(None, &mut baseline);
+        let paused = plan(true, Some(record));
+        let events = plan_transitions(&baseline, &paused);
         assert_eq!(events[0].1.field, "paused");
         assert_eq!(events[0].1.reason.as_deref(), Some(record));
 

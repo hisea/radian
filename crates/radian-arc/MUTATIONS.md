@@ -946,3 +946,22 @@ found identical.
 | TK0115-M1 | `carry_pause_records` is not called, so a record a read finds while the plan still runs becomes the previous read's record and suppresses the pause's reason | `arc_mcp::a_pause_record_read_before_auto_turned_off_is_the_pause_reason` (the pause event arrived with no second line: `PL0001-pause-race paused false -> true`) | ✅ failed |
 
 1/1 caught.
+
+## TK0115 rework 1: the baseline read does not lose the pause record it finds (2026-10-24, branch `work/TK0115-channel-owner-actions-followups`)
+
+ADR 0048 decision 11: a record a read finds while the plan is not paused belongs to no pause
+yet, so the pause that follows reports it. The poller's first read has no previous read to carry
+from; it now carries nothing for a running plan rather than keeping the record it found, so the
+record is still the following pause's reason. The record of a pause an earlier read saw stays on
+the snapshot across the resume, so a later manual pause still sends no second line. Each mutation
+was applied by hand to the working `crates/radian-arc/src/mcp/mod.rs`, `radian` was rebuilt
+because the integration test drives the real binary, the named tests ran alone with `cargo
+nextest run -p radian-arc --locked --profile sandbox -E '<the test below>'` and `cargo nextest
+run -p radian-tui --locked --profile sandbox --test arc_mcp -E '<the test below>'`, and the file
+was restored from `.radian/mut/mcp.mod.rs.tk0115-m2.bak` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0115-M2 | `carry_pause_records` leaves a running plan's record in place when there is no previous read, so the baseline read keeps the record and the pause that follows suppresses its reason | `mcp::tests::a_pause_record_seen_while_the_plan_still_ran_is_kept_for_its_pause` (`left: None`), `arc_mcp::a_pause_record_the_baseline_read_before_auto_turned_off_is_the_pause_reason` (`PL0001-pause-race-baseline paused false -> true` with no second line) | ✅ 2 failed |
+
+1/1 caught.

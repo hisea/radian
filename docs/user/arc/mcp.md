@@ -95,7 +95,7 @@ A task event's `meta` has exactly these keys, and every value is a string:
 | `phase` | the new `phase` |
 | `previous` | the previous `state.phase`, or `new` |
 
-A plan event's `content` is one line `<plan id> <field> <previous> -> <value>`, for example `PL0044-x status draft -> confirmed` or `PL0044-x paused false -> true`, then, when the pause is the automatic rework limit's, a second line with the reason it recorded. That record stays on the task's attempt after you resume, so only a record that belongs to this pause is its reason: a record an earlier read found while the plan was paused, or the baseline read found, is not, and your own `radian arc pause` sends no second line. The automatic rework limit writes the record before it sets `auto` to `off`, so a read between those two writes does not take it from the pause that follows.
+A plan event's `content` is one line `<plan id> <field> <previous> -> <value>`, for example `PL0044-x status draft -> confirmed` or `PL0044-x paused false -> true`, then, when the pause is the automatic rework limit's, a second line with the reason it recorded. That record stays on the task's attempt after you resume, so only a record that belongs to this pause is its reason: a record an earlier read found while the plan was paused is not, and your own `radian arc pause` sends no second line. A record a read finds while the plan is not paused belongs to no pause yet, so the read that sees the pause reports it; the automatic rework limit writes the record before it sets `auto` to `off`, so a read between those two writes, the first read after the client connects included, does not take it from the pause that follows.
 A plan event's `meta` has exactly these keys, and every value is a string:
 
 | Key | Value |
