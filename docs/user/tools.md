@@ -19,7 +19,7 @@ Every tool name, argument and result is visible in the transcript.
 | `path` | string, required | — | A file, a directory, or an image. Workspace-relative, or absolute or `~` for a read-only root. |
 | `max_bytes` | integer, 1 to 1048576 | `65536` | Maximum bytes of text to read. |
 | `offset` | integer, 1-based, negative counts from the end | `1` | First text line to read. |
-| `limit` | integer, at least 1 | `500` | Maximum text lines to read. For a directory it caps entries instead, up to `5000`. |
+| `limit` | integer, at least 1 for text and directory reads | `500` | Maximum text lines to read. For a directory it caps entries instead, up to `5000`. Ignored for an image. |
 
 A text read prefixes each line with its file line number and `": "`.
 That prefix is not file content; remove it before you reuse the text in `patch`.

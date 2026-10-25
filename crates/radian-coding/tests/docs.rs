@@ -403,6 +403,12 @@ fn the_manual_names_the_image_limits_from_the_code() {
         text.contains("offset and limit ignored: an image is read whole"),
         "tools.md names the ignore line"
     );
+    // The `limit` minimum is conditional: it applies to text and directory reads, while an
+    // image ignores the value, so the manual never promises it unconditionally.
+    assert!(
+        text.contains("at least 1 for text and directory reads"),
+        "tools.md makes the `limit` minimum conditional"
+    );
     assert!(
         !text.contains("image_offset"),
         "tools.md drops `image_offset`"

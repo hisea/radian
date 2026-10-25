@@ -65,7 +65,21 @@ async fn the_read_spec_offers_offset_and_limit() {
         assert!(properties.get(field).is_some(), "missing {field}");
     }
     assert!(properties["offset"].get("minimum").is_none());
-    assert_eq!(properties["limit"]["minimum"], 1);
+    // An image ignores both arguments, even a value a text read refuses (ADR 0028 R10), so
+    // neither carries an unconditional constraint: `limit`'s minimum is stated for text and
+    // directory reads in its description, not as a bare schema keyword.
+    assert!(
+        properties["limit"].get("minimum").is_none(),
+        "`limit` has no unconditional minimum: {}",
+        properties["limit"]
+    );
+    assert!(
+        properties["limit"]["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("at least 1 for text and directory reads")),
+        "`limit`'s minimum is conditional: {}",
+        properties["limit"]
+    );
     assert!(
         properties["offset"]["description"]
             .as_str()
