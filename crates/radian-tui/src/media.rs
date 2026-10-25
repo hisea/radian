@@ -13,7 +13,7 @@
 //!
 //! Nothing here reads a file: the bytes are the part's own base64 payload.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -180,6 +180,10 @@ pub struct ImageCache {
     entries: HashMap<u64, Cached>,
     /// Insertion order for the capacity bound (oldest first).
     order: VecDeque<u64>,
+    /// The keys of payloads that failed to decode. Kept apart from `entries` on purpose: a
+    /// failure costs only its key, so it takes no cache slot and [`ImageCache::evict`] never
+    /// drops it (ADR 0028 R10: a decode failure is remembered and never retried).
+    failures: HashSet<u64>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -196,20 +200,25 @@ impl ImageCache {
     /// cache already holds (the same image in an earlier entry) keeps the entry it has, so
     /// two entries of one image share one decode and one protocol.
     fn remember(&mut self, key: u64, decoded: Option<image::DynamicImage>) {
+        let Some(decoded) = decoded else {
+            // Remembered for good, not only while it happens to fit in `entries` (ADR 0028 R10):
+            // a failure takes no cache slot.
+            self.failures.insert(key);
+            return;
+        };
         if self.entries.contains_key(&key) {
             return;
         }
-        let cached = match decoded {
-            Some(decoded) => Cached::Decoded(Box::new(decoded)),
-            None => Cached::Failed,
-        };
-        self.entries.insert(key, cached);
+        self.entries.insert(key, Cached::Decoded(Box::new(decoded)));
         self.order.push_back(key);
         self.evict();
     }
 
     /// The decode result already known for this payload: `Some(false)` is a failure.
     fn known(&self, key: u64) -> Option<bool> {
+        if self.failures.contains(&key) {
+            return Some(false);
+        }
         self.entries
             .get(&key)
             .map(|cached| !matches!(cached, Cached::Failed))
@@ -234,6 +243,11 @@ impl ImageCache {
         picker: &Picker,
     ) -> Option<&mut StatefulProtocol> {
         let key = image.key();
+        // A failure is remembered outside the bounded cache: no frame and no new entry pays
+        // for the same broken payload twice (ADR 0028 R10).
+        if self.failures.contains(&key) {
+            return None;
+        }
         match self.entries.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
                 // The entry's own decode becomes the protocol on the first frame that draws it
@@ -250,18 +264,17 @@ impl ImageCache {
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 // Evicted since the entry was built (or an image built without a cache): the
-                // one decode the layout saw is repeated here, and the failure is remembered.
-                let cached = if image.decodable {
-                    match decode(image) {
-                        Some(decoded) => {
-                            Cached::Ready(Box::new(picker.new_resize_protocol(decoded)))
-                        }
-                        None => Cached::Failed,
-                    }
-                } else {
-                    Cached::Failed
+                // one decode the layout saw is repeated here, and a failure is remembered
+                // outside the bounded cache, taking no slot.
+                if !image.decodable {
+                    self.failures.insert(key);
+                    return None;
+                }
+                let Some(decoded) = decode(image) else {
+                    self.failures.insert(key);
+                    return None;
                 };
-                slot.insert(cached);
+                slot.insert(Cached::Ready(Box::new(picker.new_resize_protocol(decoded))));
                 self.order.push_back(key);
                 self.evict();
             }
@@ -519,8 +532,9 @@ mod tests {
         assert_eq!(cache.entries.len(), IMAGE_CACHE_CAPACITY);
     }
 
-    /// ADR 0028 R10: a decode failure is remembered for the image and is never retried, not
-    /// even after the failure was pushed out of the cache.
+    /// ADR 0028 R10: a decode failure is remembered for the image and is never retried: not by
+    /// a later frame, and not when the same payload arrives again after the failure's key was
+    /// pushed out of the bounded cache.
     #[test]
     fn a_failed_decode_is_not_retried_after_eviction() {
         let picker = Picker::halfblocks();
@@ -544,9 +558,23 @@ mod tests {
         );
 
         let before = decodes();
-        assert!(cache.protocol(&failed, &picker).is_none());
+        // A new entry carrying the same broken payload is not decoded: the failure is
+        // remembered outside the bounded cache, so eviction cannot forget it.
+        let again = EntryImage::from_part(&broken, &mut cache).expect("the annotations survive");
+        assert!(!again.decodable);
+        assert_eq!(
+            decodes(),
+            before,
+            "an evicted failure is not decoded again when it is ingested"
+        );
+        assert!(cache.protocol(&again, &picker).is_none());
         assert_eq!(decodes(), before, "an evicted failure is not decoded again");
-        assert!(!cache.is_ready(&failed));
+        assert!(!cache.is_ready(&again));
+        assert_eq!(
+            cache.entries.len(),
+            IMAGE_CACHE_CAPACITY,
+            "a remembered failure does not take a cache slot"
+        );
     }
 
     /// The width keeps the aspect ratio at the fixed row height and never exceeds the body
