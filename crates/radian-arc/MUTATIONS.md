@@ -1020,3 +1020,16 @@ which `cmp` found identical.
 | TK0127-M3 | `is_followup` knows a follow-up by its title alone (the shape checks removed) | `review::an_ordinary_task_titled_like_a_followup_is_not_a_followup` (`both merged tasks are collected`) and `review::an_ordinary_task_titled_like_a_followup_collects_nothing` (no follow-up is proposed) | ✅ 2 failed |
 
 3/3 caught.
+
+## TK0127: a follow-up's brief is matched line for line (2026-10-25, branch `work/TK0127-followup-one-per-plan`)
+
+ADR 0048 decision 10: a follow-up is recognised by its generated title, its plan-slug id,
+`allow_noop`, a non-empty `after`, and the fixed first line of the brief compared whole; an
+ordinary task that only starts with that line is not a follow-up. The mutation was applied by
+hand to `crates/radian-arc/src/review/mod.rs`, the named tests ran with `cargo nextest run -p
+radian-arc --locked --profile sandbox --test review -E '<the tests below>'`, and the file was
+restored from `.radian/review.mod.rs.bak` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0127-M4 | `is_followup` matches the brief opening as a prefix (`task.body.starts_with(&opening)`) again | `review::an_ordinary_task_whose_brief_only_starts_with_the_opening_is_not_a_followup` (`the lead task's own item is not skipped`) and `review::an_ordinary_task_whose_brief_only_starts_with_the_opening_collects_nothing` (no follow-up is proposed) | ✅ 2 failed |

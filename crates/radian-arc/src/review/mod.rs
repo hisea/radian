@@ -1836,14 +1836,16 @@ fn merge_time(store: &Store, task: &str) -> Option<String> {
 /// Whether `task` is itself a review follow-up of its plan (ADR 0048 decision 10): the title,
 /// the plan-slug id, `allow_noop`, a non-empty `after` list and the fixed first line of the
 /// brief arc gives it. The title alone is not enough: a lead can give an ordinary task the same
-/// title, and its review suggestions are collected like any task's. A merged follow-up is never
-/// collected, and a follow-up never gets a follow-up of its own.
+/// title, and its review suggestions are collected like any task's. The first line is compared
+/// whole, not as a prefix: a body that only begins with arc's line is the lead's. A merged
+/// follow-up is never collected, and a follow-up never gets a follow-up of its own.
 fn is_followup(task: &model::TaskFile) -> bool {
+    let opening = followup_brief_opening(&task.plan);
     task.title == followup_title(&task.plan)
         && followup_slug_matches(&task.plan, &task.id)
         && task.allow_noop
         && !task.after.is_empty()
-        && task.body.starts_with(&followup_brief_opening(&task.plan))
+        && task.body.lines().next() == Some(opening.as_str())
 }
 
 /// Whether a follow-up task of `plan` already collected `task`: the task's id is in the
@@ -1922,8 +1924,9 @@ fn followup_title(plan: &str) -> String {
 }
 
 /// The fixed first line of `plan`'s follow-up brief (ADR 0048 decision 10): where the items
-/// come from and what to do with each. [`is_followup`] reads it back, so an ordinary task that
-/// carries only the title does not pass for arc's follow-up.
+/// come from and what to do with each. [`is_followup`] compares it to the body's first line
+/// exactly, so an ordinary task that only carries the title, or only starts with this line,
+/// does not pass for arc's follow-up.
 fn followup_brief_opening(plan: &str) -> String {
     format!(
         "The items below are from the reviews of the merged tasks of `{plan}`; fix each one, \

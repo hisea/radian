@@ -4112,26 +4112,34 @@ fn merge_with_suggestions(
     review::merge(&fixture.store, task).expect("the merge runs")
 }
 
+/// The fixed first line of the brief arc gives a plan's follow-up (ADR 0048 decision 10).
+fn followup_opening(plan: &str) -> String {
+    format!(
+        "The items below are from the reviews of the merged tasks of `{plan}`; fix each one, \
+         or leave it with a one-line reason in the final answer."
+    )
+}
+
 /// The follow-up tasks of the fixture's plan, in plan order: arc's title, `allow_noop`, an
 /// `after` list and the fixed first line of the brief. A lead's own task can carry the title,
-/// so the test recognises the same shape the code does.
+/// so the test recognises the same shape the code does, the first line included.
 fn followups(fixture: &Fixture) -> Vec<radian_arc::store::model::TaskFile> {
     let plan = fixture
         .store
         .load_plan(&fixture.plan)
         .expect("the plan")
         .item;
+    let title = format!("Follow-ups from {}'s reviews", fixture.plan);
+    let opening = followup_opening(&fixture.plan);
     plan.tasks
         .iter()
         .filter_map(|id| fixture.store.load_task(id).ok())
         .map(|loaded| loaded.item)
         .filter(|task| {
-            task.title == format!("Follow-ups from {}'s reviews", fixture.plan)
+            task.title == title
                 && task.allow_noop
                 && !task.after.is_empty()
-                && task
-                    .body
-                    .starts_with("The items below are from the reviews of the merged tasks of")
+                && task.body.lines().next() == Some(opening.as_str())
         })
         .collect()
 }
@@ -4619,6 +4627,119 @@ fn an_ordinary_task_titled_like_a_followup_collects_nothing() {
             false,
             Vec::new(),
             "the lead's own task\n",
+        )
+        .expect("the lead's task");
+    plan_ops::confirm(&fixture.store, &ordinary).expect("the owner confirms the task");
+
+    let first_merge = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    );
+    assert!(first_merge.followup.is_none(), "{first_merge:?}");
+    let merged = merge_with_suggestions(&fixture, &ordinary, "ordinary.txt", Vec::new());
+    let followup = merged
+        .followup
+        .expect("the plan's follow-up still collects the merged task");
+    let task = fixture
+        .store
+        .load_task(&followup.task)
+        .expect("the follow-up")
+        .item;
+    assert_eq!(
+        task.after,
+        vec![fixture.task.clone()],
+        "only the real follow-up collects"
+    );
+    assert!(
+        task.body.contains("- [minor] one.txt:1 first item"),
+        "the merged task's item is not suppressed: {}",
+        task.body
+    );
+}
+
+/// An ordinary task can carry the follow-up's title, slug, `allow_noop` and a non-empty
+/// `after` while its brief only *starts* with arc's opening line: its first line is not the
+/// fixed one, so it is not a follow-up and its suggestions are collected like any merged
+/// task's (ADR 0048 decision 10).
+///
+/// Mutation: match the opening as a prefix → the lead task's own item is left out.
+#[test]
+fn an_ordinary_task_whose_brief_only_starts_with_the_opening_is_not_a_followup() {
+    let fixture = Fixture::new("followup-brief-prefix");
+    fixture.add_review_stage();
+    let second = fixture.add_ready_task("second", "A second task");
+    let ordinary = fixture
+        .store
+        .add_task_proposed(
+            &fixture.plan,
+            "p-followups",
+            &format!("Follow-ups from {}'s reviews", fixture.plan),
+            vec![second.clone()],
+            true,
+            Vec::new(),
+            &format!("{} The lead added this.\n", followup_opening(&fixture.plan)),
+        )
+        .expect("the lead's task");
+    plan_ops::confirm(&fixture.store, &ordinary).expect("the owner confirms the task");
+
+    // `second` merges with no item, then the fixture's task with one; the ordinary task is
+    // the plan's last open task.
+    let merged_second = merge_with_suggestions(&fixture, &second, "two.txt", Vec::new());
+    assert!(merged_second.followup.is_none(), "{merged_second:?}");
+    let merged_first = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    );
+    assert!(merged_first.followup.is_none(), "{merged_first:?}");
+    let merged = merge_with_suggestions(
+        &fixture,
+        &ordinary,
+        "ordinary.txt",
+        vec![item("minor", "ordinary.txt", 1, "the lead's item")],
+    );
+    let followup = merged.followup.expect("the plan's follow-up");
+    let task = fixture
+        .store
+        .load_task(&followup.task)
+        .expect("the follow-up")
+        .item;
+    assert!(
+        task.body
+            .contains("- [minor] ordinary.txt:1 the lead's item"),
+        "the lead task's own item is not skipped: {}",
+        task.body
+    );
+    assert!(
+        task.body.contains("- [minor] one.txt:1 first item"),
+        "{}",
+        task.body
+    );
+}
+
+/// The same near-match task names a merged task in its `after`: only an arc follow-up's
+/// `after` collects, so the merged task's real follow-up is still proposed (ADR 0048
+/// decision 10).
+///
+/// Mutation: match the opening as a prefix → the real task is collected by the lead's task and
+/// no follow-up is proposed.
+#[test]
+fn an_ordinary_task_whose_brief_only_starts_with_the_opening_collects_nothing() {
+    let fixture = Fixture::new("followup-brief-prefix-after");
+    fixture.add_review_stage();
+    let ordinary = fixture
+        .store
+        .add_task_proposed(
+            &fixture.plan,
+            "p-followups",
+            &format!("Follow-ups from {}'s reviews", fixture.plan),
+            vec![fixture.task.clone()],
+            true,
+            Vec::new(),
+            &format!("{} The lead added this.\n", followup_opening(&fixture.plan)),
         )
         .expect("the lead's task");
     plan_ops::confirm(&fixture.store, &ordinary).expect("the owner confirms the task");
