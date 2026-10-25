@@ -10,16 +10,18 @@
 //! change the auto level, or approve (decision 11).
 //!
 //! With `--claude-experimental` (decision 11) the server also declares the `claude/channel`
-//! capability and pushes task transitions to the lead over the same stdio connection: it
-//! reads the store every [`CHANNEL_INTERVAL_SECS`] seconds and sends one
+//! capability and pushes task and plan transitions to the lead over the same stdio
+//! connection: it reads the store every [`CHANNEL_INTERVAL_SECS`] seconds and sends one
 //! [`CHANNEL_METHOD`] notification for each task whose `state.phase` entered
-//! [`CHANNEL_PHASES`]. The channel is one-way; the read tools are how the lead learns the
-//! details.
+//! [`CHANNEL_PHASES`] (or that moved into `todo.ready` from [`CHANNEL_READY_FROM`]), and for
+//! each plan field of [`CHANNEL_PLAN_FIELDS`] that changed. The channel is one-way; the read
+//! tools are how the lead learns the details.
 
 pub mod tools;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fs;
 use std::time::Duration;
 
 pub use tools::{TOOLS, ToolDef, names};
@@ -34,6 +36,7 @@ use rmcp::{ErrorData, Peer, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{Map, Value, json};
 
 use crate::store::model::TaskFile;
+use crate::store::plan_ops::{CONFLICT_REWORK_SUFFIX, REVIEW_REWORK_SUFFIX, REWORK_HEADING};
 use crate::store::{self, Error, Store};
 
 /// The experiment capability Claude Code reads a channel declaration from.
@@ -61,11 +64,24 @@ pub const CHANNEL_PHASES: &[&str] = &[
     "failed.irrecoverable",
 ];
 
+/// The previous phases whose move into `todo.ready` also sends a task event: the owner's
+/// confirm of a proposed task, and a task that left a `review.*` phase (the owner's reject, or
+/// the lead's `add_rework`). An entry that ends in `.*` is a prefix. This is the second closed
+/// task list the manual's drift test reads.
+pub const CHANNEL_READY_FROM: &[&str] = &["todo.proposed", "review.*"];
+
+/// The plan fields that cost the lead a turn when they change: the plan's `status`, and
+/// whether it is `paused` (a `confirmed` plan whose `auto` is `off`). This is the closed list
+/// the manual's drift test reads.
+pub const CHANNEL_PLAN_FIELDS: &[&str] = &["status", "paused"];
+
 /// The paragraph the flagged server adds to its `instructions`: what the lead receives and
 /// how to read the details.
 const CHANNEL_INSTRUCTIONS: &str = "Task transitions from arc arrive as `<channel>` blocks, one \
      per transition, with the meta attributes `task`, `plan`, `state`, `phase` and `previous`. \
-     They are one-way: there is no reply tool. Read the details with `show`.";
+     Plan transitions arrive the same way, with `plan`, `field`, `previous` and `value` and no \
+     `task`; `field` is `status` or `paused`. They are one-way: there is no reply tool. Read \
+     the details with `show`.";
 
 /// The MCP server for one repository's arc store.
 #[derive(Debug, Clone)]
@@ -326,12 +342,50 @@ struct TaskSnapshot {
     state: String,
     phase: String,
     full: String,
+    /// Whether the newest rework heading is one arc wrote itself (a conflict with main, or a
+    /// review that failed with blocking items), so the poller can tell it from the owner's or
+    /// the lead's move into `todo.ready`.
+    arc_rework: bool,
 }
 
-/// Every task the store currently holds, by task id. The read is the same read-only call
+/// One plan as the previous poll read it. `paused` is a `confirmed` plan whose `auto` is
+/// `off`: a `draft` plan waits for the owner's confirm and is not paused. `pause_record` is
+/// the newest record the automatic rework limit left for the plan, whether the plan is paused
+/// now or not.
+#[derive(Debug, Clone)]
+struct PlanSnapshot {
+    status: String,
+    paused: bool,
+    /// A plan that is `cancelled`, by its status or by its tasks, is final and sends nothing.
+    cancelled: bool,
+    /// The record the automatic rework limit wrote (decision 12), when a task still carries
+    /// one on its current attempt. The text goes only with the pause that record caused: the
+    /// record stays after the owner resumes, so a later `radian arc pause` must not repeat it.
+    pause_record: Option<PauseRecord>,
+}
+
+/// The newest `paused.json` record the automatic rework limit wrote for a plan: which record,
+/// and the reason it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PauseRecord {
+    /// The task, its attempt and the record's `at`: the same record read twice has the same
+    /// identity, and a later attempt's record has a different one.
+    id: String,
+    /// The record's `text`, the pause's reason line.
+    text: String,
+}
+
+/// Every plan and task the store holds, as one poll reads them.
+#[derive(Debug, Clone, Default)]
+struct Snapshot {
+    tasks: BTreeMap<String, TaskSnapshot>,
+    plans: BTreeMap<String, PlanSnapshot>,
+}
+
+/// Every plan and task the store currently holds, by id. The read is the same read-only call
 /// the CLI's `list` uses: it takes no lock.
-fn snapshot(store: &Store) -> Result<BTreeMap<String, TaskSnapshot>, Error> {
-    let mut tasks = BTreeMap::new();
+fn snapshot(store: &Store) -> Result<Snapshot, Error> {
+    let mut snapshot = Snapshot::default();
     for view in store.plans()? {
         // A file someone changed outside arc makes the round fail: arc refuses to act on it,
         // and the channel sends nothing from a read it cannot trust. The next round tries
@@ -339,30 +393,99 @@ fn snapshot(store: &Store) -> Result<BTreeMap<String, TaskSnapshot>, Error> {
         if view.plan.changed_outside_arc {
             return Err(Error::ChangedOutsideArc(view.plan.item.id.clone()));
         }
+        let plan = &view.plan.item;
+        let cancelled = view.is_cancelled();
+        let paused = plan.status == "confirmed" && plan.auto == "off";
+        snapshot.plans.insert(
+            plan.id.clone(),
+            PlanSnapshot {
+                status: plan.status.clone(),
+                paused,
+                cancelled,
+                pause_record: pause_record(store, &plan.id, &view.tasks),
+            },
+        );
         for task in &view.tasks {
             if task.changed_outside_arc {
                 return Err(Error::ChangedOutsideArc(task.item.id.clone()));
             }
             let state = task.item.state.as_str().to_owned();
             let phase = task.item.phase.clone();
-            tasks.insert(
+            snapshot.tasks.insert(
                 task.item.id.clone(),
                 TaskSnapshot {
                     plan: view.plan.item.id.clone(),
                     full: format!("{state}.{phase}"),
                     state,
                     phase,
+                    arc_rework: arc_wrote_rework(&task.item.body),
                 },
             );
         }
     }
-    Ok(tasks)
+    Ok(snapshot)
 }
 
-/// The events to send, with the phase each task had before (`new` for a task the previous
+/// The newest `paused.json` record the automatic rework limit left for `plan` on one of its
+/// tasks' current attempts: the record's identity and its `text` (decision 12). `radian arc
+/// pause` records none. The record stays on its attempt after the owner resumes, so a caller
+/// compares the identity with the previous read's before it trusts the text as this pause's
+/// reason; another task's older record is not this pause's reason either.
+fn pause_record(
+    store: &Store,
+    plan: &str,
+    tasks: &[store::Loaded<TaskFile>],
+) -> Option<PauseRecord> {
+    let mut newest: Option<(String, PauseRecord)> = None;
+    for task in tasks {
+        let path = crate::store::attempt_ops::run_dir(store, &task.item.id, task.item.attempt)
+            .join(crate::store::attempt_ops::PAUSED_FILE);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if value.get("plan").and_then(Value::as_str) != Some(plan) {
+            continue;
+        }
+        let Some(text) = value.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        let at = value
+            .get("at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let record = PauseRecord {
+            id: format!("{}@{}@{at}", task.item.id, task.item.attempt),
+            text: text.to_owned(),
+        };
+        if newest
+            .as_ref()
+            .is_none_or(|(newest_at, _)| at >= *newest_at)
+        {
+            newest = Some((at, record));
+        }
+    }
+    newest.map(|(_, record)| record)
+}
+
+/// Whether the newest `## Rework <n>` heading of a task body is one arc wrote itself. The
+/// lead's `add_rework` and the owner's reject leave the heading without a suffix; a conflict
+/// with main and a review that failed with blocking items carry one (decision 9).
+fn arc_wrote_rework(body: &str) -> bool {
+    body.lines()
+        .rfind(|line| line.starts_with(REWORK_HEADING))
+        .is_some_and(|line| {
+            line.ends_with(CONFLICT_REWORK_SUFFIX) || line.ends_with(REVIEW_REWORK_SUFFIX)
+        })
+}
+
+/// The task events to send, with the phase each task had before (`new` for a task the previous
 /// read did not have). `previous` is a task map, not a phase map, so a task that moved to a
 /// different plan is still one task.
-fn transitions(
+fn task_transitions(
     previous: &BTreeMap<String, TaskSnapshot>,
     current: &BTreeMap<String, TaskSnapshot>,
 ) -> Vec<(String, TaskSnapshot, String)> {
@@ -372,12 +495,118 @@ fn transitions(
             .get(task_id)
             .map(|task| task.full.clone())
             .unwrap_or_else(|| "new".to_owned());
-        if before == task.full || !CHANNEL_PHASES.contains(&task.full.as_str()) {
+        if !sends_task(&before, task) {
             continue;
         }
         events.push((task_id.clone(), task.clone(), before));
     }
     events
+}
+
+/// Whether a task's move from `before` to its current phase sends an event.
+fn sends_task(before: &str, task: &TaskSnapshot) -> bool {
+    if before == task.full {
+        return false;
+    }
+    if CHANNEL_PHASES.contains(&task.full.as_str()) {
+        return true;
+    }
+    if !ready_from(before) || task.full != "todo.ready" {
+        return false;
+    }
+    // The owner's reject leaves the task in `review.rework_pending` (decision 6), so the phase
+    // list above sends it, note and all. A move into `todo.ready` from a `review.*` phase is the
+    // lead's `add_rework`, and a rework arc wrote itself sends nothing.
+    !task.arc_rework
+}
+
+/// Whether `before` is one of [`CHANNEL_READY_FROM`]'s phases. An entry ending in `.*` is a
+/// prefix.
+fn ready_from(before: &str) -> bool {
+    CHANNEL_READY_FROM
+        .iter()
+        .any(|from| match from.strip_suffix(".*") {
+            Some(prefix) => before.starts_with(prefix),
+            None => before == *from,
+        })
+}
+
+/// One plan event: the field, the two values `meta` carries, and the reason line to put under
+/// them when the event is a pause the automatic rework limit caused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanEvent {
+    field: &'static str,
+    previous: String,
+    value: String,
+    reason: Option<String>,
+}
+
+/// The plan events to send. A plan the previous read did not have sends nothing, and neither
+/// does a cancelled one.
+fn plan_transitions(
+    previous: &BTreeMap<String, PlanSnapshot>,
+    current: &BTreeMap<String, PlanSnapshot>,
+) -> Vec<(String, PlanEvent)> {
+    let mut events = Vec::new();
+    for (plan_id, plan) in current {
+        let Some(before) = previous.get(plan_id) else {
+            continue;
+        };
+        // A cancelled plan is final (decision 3): it sends no plan event.
+        if plan.cancelled {
+            continue;
+        }
+        if before.status == "draft" && plan.status == "confirmed" {
+            events.push((
+                plan_id.clone(),
+                PlanEvent {
+                    field: "status",
+                    previous: before.status.clone(),
+                    value: plan.status.clone(),
+                    reason: None,
+                },
+            ));
+        }
+        // A plan whose `status` changed is not paused or resumed by this read: `update_plan`'s
+        // change record returns a confirmed plan to `draft` and sets `auto` to `off` in the
+        // same write, and a confirm takes a draft plan to `confirmed`. Neither is a pause.
+        if before.status == plan.status && before.paused != plan.paused {
+            events.push((
+                plan_id.clone(),
+                PlanEvent {
+                    field: "paused",
+                    previous: bool_text(before.paused).to_owned(),
+                    value: bool_text(plan.paused).to_owned(),
+                    reason: pause_reason(before, plan),
+                },
+            ));
+        }
+    }
+    events
+}
+
+/// The reason line of a pause event: the text of a `paused.json` record that appeared since the
+/// previous read. The automatic rework limit writes the record and sets `auto` to `off` in the
+/// same write, so a new record is this pause's cause. A record from an earlier pause stays on
+/// its attempt after the owner resumes, and another task's record may be older still; neither
+/// is this pause's reason.
+fn pause_reason(before: &PlanSnapshot, plan: &PlanSnapshot) -> Option<String> {
+    if !plan.paused {
+        return None;
+    }
+    let record = plan.pause_record.as_ref()?;
+    if before
+        .pause_record
+        .as_ref()
+        .is_some_and(|before| before.id == record.id)
+    {
+        return None;
+    }
+    Some(record.text.clone())
+}
+
+fn bool_text(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
 }
 
 /// The event's second line: the same `rework_reason` `show --json` gives, when the task has
@@ -387,8 +616,8 @@ fn rework_reason(store: &Store, task_id: &str) -> Option<String> {
     crate::review::rework_reason(store, &task)
 }
 
-/// Sends one `notifications/claude/channel` event. A send that fails means the client closed
-/// the connection; the poller keeps going until `serve` aborts it.
+/// Sends one task's `notifications/claude/channel` event. A send that fails means the client
+/// closed the connection; the poller keeps going until `serve` aborts it.
 async fn send_event(
     store: &Store,
     peer: &Peer<RoleServer>,
@@ -411,6 +640,34 @@ async fn send_event(
             "previous": previous,
         },
     });
+    send(peer, params).await;
+}
+
+/// Sends one plan's `notifications/claude/channel` event. Its `meta` has no `task` key, so a
+/// reader tells a plan event from a task event.
+async fn send_plan_event(peer: &Peer<RoleServer>, plan_id: &str, event: &PlanEvent) {
+    debug_assert!(CHANNEL_PLAN_FIELDS.contains(&event.field));
+    let mut content = format!(
+        "{plan_id} {} {} -> {}",
+        event.field, event.previous, event.value
+    );
+    if let Some(reason) = &event.reason {
+        content.push('\n');
+        content.push_str(reason);
+    }
+    let params = json!({
+        "content": content,
+        "meta": {
+            "plan": plan_id,
+            "field": event.field,
+            "previous": event.previous,
+            "value": event.value,
+        },
+    });
+    send(peer, params).await;
+}
+
+async fn send(peer: &Peer<RoleServer>, params: Value) {
     let notification = CustomNotification::new(CHANNEL_METHOD, Some(params));
     let _ = peer
         .send_notification(ServerNotification::CustomNotification(notification))
@@ -421,12 +678,15 @@ async fn send_event(
 /// [`CHANNEL_INTERVAL_SECS`] seconds. A failed read sends nothing that round and is retried
 /// next round; it never ends the server and prints nothing.
 async fn poll(store: Store, peer: Peer<RoleServer>) {
-    let mut previous: Option<BTreeMap<String, TaskSnapshot>> = None;
+    let mut previous: Option<Snapshot> = None;
     loop {
         if let Ok(current) = snapshot(&store) {
             if let Some(before) = &previous {
-                for (task_id, task, phase) in transitions(before, &current) {
+                for (task_id, task, phase) in task_transitions(&before.tasks, &current.tasks) {
                     send_event(&store, &peer, &task_id, &task, &phase).await;
+                }
+                for (plan_id, event) in plan_transitions(&before.plans, &current.plans) {
+                    send_plan_event(&peer, &plan_id, &event).await;
                 }
             }
             previous = Some(current);
