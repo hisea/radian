@@ -2931,6 +2931,24 @@ the named file, backed up under `.radian/mut/` and restored from that copy (neve
 
 4/4 caught.
 
+## TK0105: every arc TUI worker thread replies, even when it panics (2026-10-24, branch `work/TK0105-tui-worker-thread-panic`)
+
+The arc TUI's five worker threads (owner action, command log, remote main, task diff, merge view)
+sent their reply as the last statement, so a panic left `pending`, `log_pending`, the diff's and
+merge's request ids or `main_pending` set for the rest of the session — with `pending` set every
+page key was swallowed and the spinner never stopped. All five now run through `spawn_reply`
+(`src/cli/arc.rs`), which catches the panic and sends the caller's failure value; the loop clears
+the screen for the next frame. The panic hook (`src/terminal.rs`) writes its report to stderr only
+on `main` or while the alternate screen is down. Each mutation was applied by hand to the named
+file, backed up under `.radian/mut/` and restored from that copy (never `git checkout`); the named
+tests ran with `cargo nextest run -p radian-tui --locked --profile sandbox`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0105-M1 | the worker's `catch_unwind` is removed and `body()` runs directly | ✅ 3 failed | `cli::arc::tests::a_panicking_worker_still_sends_its_failure_reply` and `cli::arc::tests::a_panicked_action_clears_pending_and_the_next_page_key_is_handled` (`Disconnected`: the sender is dropped by the unwind), `pty_arc_a_panicked_action_still_replies_and_leaves_the_tui_responsive` (the footer never shows the failure) |
+| TK0105-M2 | the hook writes its report to stderr from every thread (the `main \|\| !ALT_SCREEN` guard removed) | ✅ 1 failed | `pty_arc_a_panicked_action_still_replies_and_leaves_the_tui_responsive` (the raw output holds `thread '<unnamed>' panicked at …` printed over the plans page) |
+
+2/2 caught.
 ## TK0094: a space always separates a task row's id from `state.phase` (2026-10-24, branch `work/TK0094-tui-task-row-id-gap`)
 
 `task_columns` and `task_row_line` count the one space before `state.phase` as the id block's

@@ -26,6 +26,13 @@ static MOUSE_REPORTING: AtomicBool = AtomicBool::new(false);
 /// not enter, and must pop the flags exactly when they were pushed.
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the alternate screen is up. The panic hook reads it: while a TUI owns the screen, a
+/// panic on a thread other than `main` must not write to stderr, where its report would print
+/// over the UI. The text still goes to the panic log and `last_panic`; the arc TUI shows a
+/// worker's failure on its footer line, and the session TUI prints `last_panic` once the
+/// terminal is restored.
+static ALT_SCREEN: AtomicBool = AtomicBool::new(false);
+
 /// The environment variable that decides the keyboard-enhancement query:
 ///
 /// * unset — ask the terminal (`supports_keyboard_enhancement`), which is a **2 s** wait on a
@@ -101,6 +108,7 @@ fn restore_to(out: &mut impl Write) {
         let _ = write_mouse(out, false);
     }
     let _ = execute!(out, Show, DisableBracketedPaste, LeaveAlternateScreen);
+    ALT_SCREEN.store(false, Ordering::SeqCst);
     let _ = out.flush();
     let _ = disable_raw_mode();
     let _ = out.write_all(b"\r\n");
@@ -193,6 +201,7 @@ impl TtyGuard {
             let _ = disable_raw_mode();
             return Err(error);
         }
+        ALT_SCREEN.store(true, Ordering::SeqCst);
         if mouse {
             // Set the flag before the write: if the write fails partway, `restore` still
             // sends the `l` forms, which are harmless when the `h` never took effect.
@@ -402,13 +411,23 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
 /// panic text to stderr, and that text is not redacted (a panic message can carry a header
 /// value or the key). What reaches stderr is the same redacted text the panic log gets. The
 /// cost is the default hook's backtrace note; `RUST_BACKTRACE` is not honoured here.
+///
+/// The report goes to stderr **on `main`, always**, and on another thread only while the
+/// alternate screen is not up. Under the alternate screen a worker's report would be printed
+/// over a UI that keeps drawing; `record_panic` still puts the text in `LAST_PANIC` and the
+/// panic log, the arc TUI's reply puts the failure on its footer line, and the session TUI
+/// prints `last_panic` after the restore. A worker that panics before the terminal is entered,
+/// or after it is restored, still reports on stderr as before.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         let report = record_panic(info);
-        if std::thread::current().name() == Some("main") {
+        let main = std::thread::current().name() == Some("main");
+        if main {
             restore_terminal();
         }
-        let _ = writeln!(io::stderr(), "{report}");
+        if main || !ALT_SCREEN.load(Ordering::SeqCst) {
+            let _ = writeln!(io::stderr(), "{report}");
+        }
     }));
 }
 
