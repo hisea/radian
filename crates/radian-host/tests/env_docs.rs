@@ -220,6 +220,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "RADIAN_ARC_GATE_TEST_REVIEW_PROGRAM",
         "read in radian-arc/src/gate/background.rs: runs this program instead of `radian exec` for the review stage, so a test drives the background gate's `commands`/`review` pair without a model",
     ),
+    (
+        "RADIAN_ARC_PANIC_ACTION",
+        "read in radian-tui/src/cli/arc.rs: makes the arc TUI's owner-action worker panic, so the pty suite checks that a panicked worker still replies and leaves the TUI responsive",
+    ),
 ];
 
 /// The headings whose tables list environment variables. Each heading is an anchor: a row

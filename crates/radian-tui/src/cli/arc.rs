@@ -159,8 +159,8 @@ pub(super) fn run_arc(config: Option<&Path>) -> ExitCode {
     app.set_loop_status(starter.status());
     // Test seam (like `--panic-in-driver`): with `RADIAN_ARC_PANIC_ACTION` set, every owner
     // action's worker panics instead of running its library call, so the pty suite can check
-    // that a panicked worker still replies and leaves the TUI responsive. Test-only: the
-    // manual does not document it and radian never sets it itself.
+    // that a panicked worker still replies and leaves the TUI responsive. It exists only for
+    // tests: the manual does not document it and radian never sets it itself.
     let panic_action = std::env::var_os("RADIAN_ARC_PANIC_ACTION").is_some();
     let (tx, rx) = mpsc::channel();
     let mut main_pending = false;
