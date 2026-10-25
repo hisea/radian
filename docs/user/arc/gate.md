@@ -91,6 +91,19 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   The digest covers the verification verdicts for `verified_sha`; it leaves out the `human` approval and the `integration` verdict, which are written later, at merge.
   A new verdict for the same commit changes the digest and invalidates an approval.
 
+### An empty change
+
+A task's own change is empty when the diff from the merge base of the remote main and `verified_sha` to `verified_sha` names no path; a commit that adds no content on top of main is empty too.
+A task whose brief allows it, such as the review's follow-up, may deliver nothing, and no stage fails it for being empty:
+
+- `commands` runs the profile's commands on the candidate; when main has not moved the candidate is the remote main, and nothing about the empty change fails it.
+- `mutation` has nothing to mutate, so it passes; this build does not run it, and a profile that lists it is refused as unbuilt (see above), which is not a failure of the empty change.
+- `review` passes without starting a session. Its verdict is a pass whose `review` report has a summary saying that the task's change is empty and empty `blocking`, `suggestions` and `verified`, with no session ids and no cost.
+- `human` is your approval and does not change: it still binds to `verified_sha` and `verdict_set_digest`.
+- `integration` merges the empty change onto the current main (the candidate is the remote main when main moved) and runs the profile's `key_commands` on it as usual.
+
+`allow_noop` is the task field that lets a worker deliver no commit (see [Task fields](files.md#task-fields)).
+
 `list` and `show` do not use the network: they do not check the remote and cannot see a branch that moved after the gate.
 `merge` checks the remote before it acts.
 
@@ -147,7 +160,8 @@ When at least one item is left, and `[gate.review] propose_followups` is `true` 
 - the slug is `<merged task slug>-followups`, cut to the 48-character slug limit;
 - the title is `Follow-ups from <task id>'s review`;
 - its `after` is the merged task;
-- its phase is `todo.proposed`, so the loop never claims it until you confirm it (see [`confirm`](index.md#radian-arc-confirm-id)).
+- its phase is `todo.proposed`, so the loop never claims it until you confirm it (see [`confirm`](index.md#radian-arc-confirm-id));
+- its `allow_noop` is `true`: its brief lets each item be left with a one-line reason, so an attempt that adds no commit may deliver nothing (see [An empty change](#an-empty-change));
 
 Its brief is fixed: one line saying the items are from the review of `<task id>`, which is now merged, and that each item is to be fixed or left with a one-line reason in the final answer; then the items grouped by the round they came from, each group headed `From review <n> (attempt <n>):`, one item per line as `[level] path:line text`; then the path of every review verdict.
 The worker gets each verdict as a copy at `.radian/arc-verdicts/<task>/<attempt>/<file>` in its worktree, one copy for every task and attempt the brief names, and the task file keeps the absolute paths; the skip line is the same as for a review rework ([A failed review](#a-failed-review)).
