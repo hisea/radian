@@ -598,7 +598,7 @@ fn chatgpt_headers(session_id: &str) -> Vec<(String, String)> {
 /// The base URL `opencode-go` serves its OpenAI **chat** and **Responses** protocols on (ADR
 /// 0026 revision 2 decision 2): everything before `/chat/completions` / `/responses`. This is
 /// models.dev's `api` value for the provider — but radian writes it here and never reads it.
-const OPENCODE_GO_OPENAI_BASE: &str = "https://opencode.ai/inference/go/openai/v1";
+const OPENCODE_GO_OPENAI_BASE: &str = "https://opencode.ai/inference/go/v1";
 /// The base URL `opencode-go` serves Anthropic Messages on: everything before `/v1/messages`,
 /// which is what the Anthropic adapter appends (`agent-provider-anthropic/src/model.rs:73`). So
 /// models.dev's `…/anthropic/v1` value is **not** used verbatim — the adapter's own convention
@@ -1504,15 +1504,16 @@ mod tests {
         );
         // A model the list does not name uses the descriptor default (openai-compatible).
         assert_eq!(go.protocol_for("not-a-model"), Protocol::OpenAiCompatible);
-        // The base URL is per (descriptor, protocol): chat and Responses share the OpenAI base,
-        // Anthropic has its own, and neither is models.dev's `api` verbatim.
+        // The base URL is per (descriptor, protocol): chat and Responses share the OpenAI base
+        // (models.dev's `api` for the provider), while Anthropic has its own, which is not
+        // models.dev's `…/anthropic/v1` verbatim.
         assert_eq!(
             descriptor_base_url("opencode-go", Protocol::OpenAiCompatible),
-            Some("https://opencode.ai/inference/go/openai/v1")
+            Some("https://opencode.ai/inference/go/v1")
         );
         assert_eq!(
             descriptor_base_url("opencode-go", Protocol::Responses),
-            Some("https://opencode.ai/inference/go/openai/v1")
+            Some("https://opencode.ai/inference/go/v1")
         );
         assert_eq!(
             descriptor_base_url("opencode-go", Protocol::Anthropic),
@@ -1566,7 +1567,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(route.protocol, Protocol::Responses);
-        assert_eq!(route.base_url, "https://opencode.ai/inference/go/openai/v1");
+        assert_eq!(route.base_url, "https://opencode.ai/inference/go/v1");
     }
 
     /// The shipped table and the bundled snapshot agree, so no startup prints `protocol from
@@ -1696,7 +1697,7 @@ mod tests {
         .unwrap();
         assert_eq!(responses.protocol, Protocol::Responses);
         assert_eq!(
-            responses.base_url, "https://opencode.ai/inference/go/openai/v1",
+            responses.base_url, "https://opencode.ai/inference/go/v1",
             "the catalog's api must not be used"
         );
         let chat = resolve_route(
@@ -1709,7 +1710,7 @@ mod tests {
             Some(&catalog),
         )
         .unwrap();
-        assert_eq!(chat.base_url, "https://opencode.ai/inference/go/openai/v1");
+        assert_eq!(chat.base_url, "https://opencode.ai/inference/go/v1");
         // The notice fires only when the catalog overrules the table (here it does not).
         assert_eq!(chat.protocol_notice, None);
     }
@@ -1777,7 +1778,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(route.protocol, Protocol::OpenAiCompatible);
-        assert_eq!(route.base_url, "https://opencode.ai/inference/go/openai/v1");
+        assert_eq!(route.base_url, "https://opencode.ai/inference/go/v1");
         assert_eq!(
             route.headers,
             vec![
@@ -1813,14 +1814,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(responses.protocol, Protocol::Responses);
-        assert_eq!(
-            responses.base_url,
-            "https://opencode.ai/inference/go/openai/v1"
-        );
+        assert_eq!(responses.base_url, "https://opencode.ai/inference/go/v1");
         // A model neither the catalog nor the list names uses the descriptor default.
         let unknown_model =
             resolve_route("opencode-go", "future-model", None, None, &[], "s1", None).unwrap();
         assert_eq!(unknown_model.protocol, Protocol::OpenAiCompatible);
+    }
+
+    /// ADR 0026: only the default moved. A saved base URL that still names the old address is
+    /// an explicit user value and resolves unchanged, for a built-in entry's `env` and for a
+    /// generic provider's `model.base_url`; there is no migration.
+    #[test]
+    fn an_explicit_base_url_survives_the_default_moving() {
+        let old = "https://opencode.ai/inference/go/openai/v1";
+        // An existing `auth.json` entry's `env.RADIAN_BASE_URL` wins over the descriptor's base.
+        let builtin = resolve_route(
+            "opencode-go",
+            "deepseek-v4.1-flash",
+            None,
+            Some(old),
+            &[],
+            "s1",
+            None,
+        )
+        .unwrap();
+        assert_eq!(builtin.base_url, old);
+        // A saved `model.base_url` on the generic provider is the override and stays as written.
+        let generic = resolve_route(GENERIC_ID, "m", Some(old), None, &[], "s1", None).unwrap();
+        assert_eq!(generic.base_url, old);
+        // The built-in default itself is the new address for chat and Responses alike.
+        for protocol in [Protocol::OpenAiCompatible, Protocol::Responses] {
+            assert_eq!(
+                descriptor_base_url("opencode-go", protocol),
+                Some("https://opencode.ai/inference/go/v1"),
+                "{protocol:?}"
+            );
+        }
     }
 
     #[test]

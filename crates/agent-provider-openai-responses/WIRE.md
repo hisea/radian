@@ -161,7 +161,7 @@ verbatim in the slice's brief):
 
 Where the request goes, field by field, when a **built-in descriptor's** `@ai-sdk/openai` model
 is sent to a Responses endpoint other than `chatgpt.com` (e.g. `opencode-go`'s
-`…/inference/go/openai/v1/responses`) with `Authorization: Bearer <key>` from `auth.json`.
+`…/inference/go/v1/responses`) with `Authorization: Bearer <key>` from `auth.json`.
 
 | Field | Codex (current, chatgpt descriptor) | API-key route | Why |
 |---|---|---|---|

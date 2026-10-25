@@ -660,7 +660,7 @@ mod tests {
         // Without an entry base URL, the descriptor's own default stands.
         let base =
             provider_base_url("opencode-go", &empty_config(), None).expect("a built-in resolves");
-        assert_eq!(base, "https://opencode.ai/inference/go/openai/v1");
+        assert_eq!(base, "https://opencode.ai/inference/go/v1");
         // A named provider keeps `<its base>/models`.
         let mut config = empty_config();
         config.insert("corp".to_owned(), corp_decl("https://corp.example/v1/"));

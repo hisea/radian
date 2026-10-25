@@ -1166,7 +1166,7 @@ mod tests {
         let text = r#"{
             "opencode-go": {
                 "npm": "@ai-sdk/openai-compatible",
-                "api": "https://opencode.ai/inference/go/openai/v1",
+                "api": "https://opencode.ai/inference/go/v1",
                 "models": {
                     "plain": {"limit": {"context": 5}},
                     "openai": {"limit": {"context": 5},
@@ -1838,7 +1838,7 @@ mod provider_models_tests {
     #[test]
     fn opencode_go_refresh_uses_the_discovery_endpoint_not_models() {
         assert_eq!(
-            provider_models_url("opencode-go", "https://opencode.ai/inference/go/openai/v1"),
+            provider_models_url("opencode-go", "https://opencode.ai/inference/go/v1"),
             "https://opencode.ai/zen/go/v1/models",
         );
         assert_eq!(

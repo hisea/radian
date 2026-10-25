@@ -233,7 +233,7 @@ mod tests {
             verification_url(
                 "opencode-go",
                 Protocol::OpenAiCompatible,
-                "https://opencode.ai/inference/go/openai/v1"
+                "https://opencode.ai/inference/go/v1"
             ),
             crate::opencode_go::USAGE_URL,
         );
