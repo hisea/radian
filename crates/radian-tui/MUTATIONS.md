@@ -3121,3 +3121,13 @@ mutation was applied by hand to `crates/radian-tui/src/render.rs`, backed up und
 | TK0117-M1 | the attachment row drops its prefix again: `Line::from(Span::styled(image.placeholder(), …))` with no `composer_prefix` | ✅ 2 failed | `render::a_composer_attachment_starts_in_the_text_column` (`Lines: the attachment row starts in the text column`; the box case is the same assertion after it); `render::a_composer_attachment_wider_than_the_input_is_cut_with_an_ellipsis` (`the ellipsis sits in the last cell`) |
 
 1/1 caught.
+
+## TK0122: a macOS screenshot's U+202F stays inside a dropped path (2026-10-25, branch `work/TK0122-drop-macos-screenshot-path`)
+
+An unquoted dropped-path token ended at `char::is_whitespace()`, and U+202F NARROW NO-BREAK SPACE (the character before `AM`/`PM` in macOS screenshot names) is Unicode whitespace, so the token stopped inside the name and `load_dropped` returned `NotImage`. The token now ends only at ASCII whitespace (`ends_unquoted_token`), and `unescape` removes the backslash before any whitespace character. The mutation was applied by hand to `crates/radian-tui/src/mention.rs`, backed up under `.radian/mut/` and restored from that copy (never `git checkout`); the tests ran with `cargo nextest run -p radian-tui --locked --profile sandbox --lib -E 'test(mention)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0122-M1 | an unquoted token ends at `char::is_whitespace()` again (the loop condition becomes `!chars[j].is_whitespace()`) | ✅ 5 failed | `mention::tests::a_macos_screenshot_path_is_one_unquoted_token`, `a_dropped_macos_screenshot_attaches_its_image`, `a_trailing_ascii_space_is_outside_a_screenshot_path`, `any_non_ascii_whitespace_stays_inside_an_unquoted_token`, `two_dropped_paths_separated_by_an_ascii_space_stay_two` |
+
+1/1 caught. The `unescape` half is held by `a_backslash_before_the_narrow_no_break_space_is_unescaped_like_any_whitespace`: it fails when both rules are reverted to the old code (the old `unescape` kept the backslash), and stays green under TK0122-M1 alone because it is the other rule's test.

@@ -185,6 +185,8 @@ Drop a file onto the terminal to attach an image.
 The terminal inserts the file's absolute path as text; Radian recognises it at the cursor,
 removes the path from your message, and attaches the image.
 A path with escaped spaces, a single- or double-quoted path, and a trailing space all work.
+A macOS screenshot works too, whether you drag the floating thumbnail or its file: the
+narrow no-break space before `AM`/`PM` is part of the path, not a separator.
 A path outside the workspace is accepted: Radian reads the bytes itself and the model receives the image, not the path.
 Backspace on an empty input removes the newest image attachment.
 A path that does not exist stays as ordinary text, with no error.
