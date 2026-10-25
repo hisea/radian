@@ -3096,3 +3096,13 @@ copy (never `git checkout`); the named test ran alone with
 | TK0015-M4 | `clipboard::from_image` converts the pixels with `into_owned()` before the per-side check, so an over-limit borrowed buffer is copied and only then refused | ✅ 1 failed | `clipboard::tests::an_over_limit_buffer_is_refused_before_it_is_copied` (`the pixels were copied before the limit check: 4194304 bytes allocated`) |
 
 1/1 caught.
+
+## TK0122: a macOS screenshot's U+202F stays inside a dropped path (2026-10-25, branch `work/TK0122-drop-macos-screenshot-path`)
+
+An unquoted dropped-path token ended at `char::is_whitespace()`, and U+202F NARROW NO-BREAK SPACE (the character before `AM`/`PM` in macOS screenshot names) is Unicode whitespace, so the token stopped inside the name and `load_dropped` returned `NotImage`. The token now ends only at ASCII whitespace (`ends_unquoted_token`), and `unescape` removes the backslash before any whitespace character. The mutation was applied by hand to `crates/radian-tui/src/mention.rs`, backed up under `.radian/mut/` and restored from that copy (never `git checkout`); the tests ran with `cargo nextest run -p radian-tui --locked --profile sandbox --lib -E 'test(mention)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0122-M1 | an unquoted token ends at `char::is_whitespace()` again (the loop condition becomes `!chars[j].is_whitespace()`) | ✅ 5 failed | `mention::tests::a_macos_screenshot_path_is_one_unquoted_token`, `a_dropped_macos_screenshot_attaches_its_image`, `a_trailing_ascii_space_is_outside_a_screenshot_path`, `any_non_ascii_whitespace_stays_inside_an_unquoted_token`, `two_dropped_paths_separated_by_an_ascii_space_stay_two` |
+
+1/1 caught. The `unescape` half is held by `a_backslash_before_the_narrow_no_break_space_is_unescaped_like_any_whitespace`: it fails when both rules are reverted to the old code (the old `unescape` kept the backslash), and stays green under TK0122-M1 alone because it is the other rule's test.

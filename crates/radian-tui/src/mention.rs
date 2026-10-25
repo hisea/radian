@@ -500,10 +500,18 @@ pub fn dropped_path(text: &str, cursor: usize) -> Option<DroppedPath> {
     Some(last)
 }
 
+/// True for the characters that end an unquoted dropped-path token: only ASCII whitespace.
+/// A macOS screenshot name holds U+202F NARROW NO-BREAK SPACE before `AM`/`PM`, which
+/// `char::is_whitespace` calls whitespace; it is part of the path.
+fn ends_unquoted_token(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r')
+}
+
 /// Every absolute path token in `text`. Terminals insert a dropped path in different shapes:
 /// backslash-escaped spaces, a single- or double-quoted path, and often a trailing space. All
 /// are recognised; relative paths are not (a dropped path is absolute). Quotes and escapes are
-/// removed from the path and included in the range.
+/// removed from the path and included in the range. An unquoted token ends only at ASCII
+/// whitespace, so a macOS screenshot's U+202F stays inside it.
 pub fn dropped_paths(text: &str) -> Vec<DroppedPath> {
     let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
@@ -529,7 +537,7 @@ pub fn dropped_paths(text: &str) -> Vec<DroppedPath> {
         } else {
             let mut j = i;
             let mut raw = String::new();
-            while j < chars.len() && !chars[j].is_whitespace() {
+            while j < chars.len() && !ends_unquoted_token(chars[j]) {
                 if chars[j] == '\\' && j + 1 < chars.len() {
                     raw.push(chars[j]);
                     raw.push(chars[j + 1]);
@@ -584,7 +592,11 @@ fn unescape(raw: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '\\' {
             match chars.next() {
-                Some(next) if matches!(next, ' ' | '\'' | '"' | '\\') => out.push(next),
+                // As a shell does, a backslash escapes any whitespace character, not only the
+                // ASCII space: a terminal may escape U+202F in a screenshot name.
+                Some(next) if next.is_whitespace() || matches!(next, '\'' | '"' | '\\') => {
+                    out.push(next)
+                }
                 Some(next) => {
                     out.push('\\');
                     out.push(next);
@@ -1035,6 +1047,91 @@ mod tests {
             assert_eq!(expansion.images[0].name, "shot one.png");
             assert!(!expansion.text.contains("shot one.png"), "{text:?}");
         }
+    }
+
+    /// macOS names a screenshot `Screenshot 2026-10-24 at 11.06.16 PM.png`, with U+202F
+    /// NARROW NO-BREAK SPACE before `AM`/`PM`, and the floating thumbnail's file lives under
+    /// `/var/folders/…/T/TemporaryItems/NSIRD_screencaptureui_<id>/`. An unquoted token ends
+    /// only at ASCII whitespace, so the name is one path.
+    const SCREENSHOT: &str = "/var/folders/5l/x/T/TemporaryItems/NSIRD_screencaptureui_ab12/Screenshot 2026-10-24 at 11.06.16\u{202F}PM.png";
+
+    fn escaped_spaces(path: &str) -> String {
+        path.replace(' ', "\\ ")
+    }
+
+    #[test]
+    fn a_macos_screenshot_path_is_one_unquoted_token() {
+        let text = escaped_spaces(SCREENSHOT);
+        let dropped = dropped_path(&text, text.chars().count()).expect("one dropped path");
+        assert_eq!(dropped.path, PathBuf::from(SCREENSHOT));
+        assert_eq!(dropped.range, 0..text.chars().count());
+        assert_eq!(dropped_paths(&text), [dropped]);
+    }
+
+    #[test]
+    fn a_backslash_before_the_narrow_no_break_space_is_unescaped_like_any_whitespace() {
+        // A terminal may escape the U+202F itself, as a shell would.
+        let text = SCREENSHOT
+            .replace('\u{202F}', "\\\u{202F}")
+            .replace(' ', "\\ ");
+        let dropped = dropped_path(&text, text.chars().count()).expect("one dropped path");
+        assert_eq!(dropped.path, PathBuf::from(SCREENSHOT));
+    }
+
+    #[test]
+    fn the_quoted_shapes_carry_a_narrow_no_break_space() {
+        for text in [
+            format!("see '{SCREENSHOT}'"),
+            format!("see \"{SCREENSHOT}\""),
+        ] {
+            let dropped = dropped_path(&text, text.chars().count())
+                .unwrap_or_else(|| panic!("a dropped path in {text:?}"));
+            assert_eq!(dropped.path, PathBuf::from(SCREENSHOT), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_ascii_space_is_outside_a_screenshot_path() {
+        let text = format!("see {} ", escaped_spaces(SCREENSHOT));
+        let dropped = dropped_path(&text, text.chars().count()).expect("one dropped path");
+        assert_eq!(dropped.path, PathBuf::from(SCREENSHOT));
+        assert_eq!(dropped.range.end, text.chars().count() - 1);
+    }
+
+    #[test]
+    fn two_dropped_paths_separated_by_an_ascii_space_stay_two() {
+        let second = SCREENSHOT
+            .replace("11.06.16\u{202F}PM.png", "9.01.02\u{202F}AM.png")
+            .replace("10-24", "10-25");
+        let text = format!("{} {}", escaped_spaces(SCREENSHOT), escaped_spaces(&second));
+        let paths = dropped_paths(&text);
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert_eq!(paths[0].path, PathBuf::from(SCREENSHOT));
+        assert_eq!(paths[1].path, PathBuf::from(second));
+    }
+
+    #[test]
+    fn any_non_ascii_whitespace_stays_inside_an_unquoted_token() {
+        // U+00A0 NO-BREAK SPACE is Unicode whitespace too; only ASCII whitespace ends a token.
+        let text = "/tmp/T/TemporaryItems/a\u{A0}b.png";
+        let dropped = dropped_path(text, text.chars().count()).expect("one dropped path");
+        assert_eq!(dropped.path, PathBuf::from(text));
+    }
+
+    #[test]
+    fn a_dropped_macos_screenshot_attaches_its_image() {
+        let workspace = TempDir::new("drop-screenshot-ws");
+        let outside = TempDir::new("drop-screenshot");
+        let name = "Screenshot 2026-10-24 at 11.06.16\u{202F}PM.png";
+        outside.write(name, png(1200, 800));
+        let text = format!(
+            "see {}",
+            escaped_spaces(&outside.path().join(name).display().to_string())
+        );
+        let expansion = expand(&text, workspace.path()).unwrap();
+        assert_eq!(expansion.images.len(), 1, "{text:?}");
+        assert_eq!(expansion.images[0].name, name);
+        assert_eq!(expansion.text, "see ");
     }
 
     #[test]
