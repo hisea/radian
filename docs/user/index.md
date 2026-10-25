@@ -25,6 +25,7 @@ Each line names one page and what it covers.
 - `arc/files`: the files arc keeps: `config.toml`, plan and task files, and the `.radian/arc/` layout.
 - `arc/mcp`: the lead's MCP server: how a lead registers it, its seven tools, and its tool errors.
 - `arc/tui`: the TUI: the plans, board, task and merge pages, every mark and key, and the owner's actions.
+- `arc/worker`: the worker: its session, the brief and limits, the checks after it exits, and another agent as the worker.
 - `keybindings`: every key in the full-screen interface, by area, and how to rebind it.
 - `sessions`: resume, list, search, fork, export, and attach to sessions.
 - `tools`: the built-in file tools, `read`'s text, directory and image branches, its limits and error codes.

@@ -2854,20 +2854,21 @@ mod tests {
     }
 
     /// Every environment variable the wrapper adds for a command worker appears in the
-    /// environment table under `## Another agent as the worker` on `arc/index.md`. The source
+    /// environment table under `## Another agent as the worker` on `arc/worker.md`. The source
     /// is `radian_arc::work::WORKER_ENV`, so a new variable fails here until the manual names
     /// it (ADR 0048 decision 7).
     #[test]
-    fn every_command_worker_variable_appears_in_arc_md() {
-        let doc = arc_md();
-        let table = arc_table(&doc, "arc/index.md", "## Another agent as the worker");
+    fn every_command_worker_variable_appears_in_arc_worker_md() {
+        let (_, doc) = radian_coding::docs::lookup_topic("arc/worker")
+            .expect("arc/worker.md is a bundled page");
+        let table = arc_table(doc, "arc/worker.md", "## Another agent as the worker");
         for name in radian_arc::work::WORKER_ENV {
             let found = table
                 .iter()
                 .any(|row| row.iter().any(|cell| cell.contains(&format!("`{name}`"))));
             assert!(
                 found,
-                "arc/index.md's command-worker table has no row for `{name}`"
+                "arc/worker.md's command-worker table has no row for `{name}`"
             );
         }
     }
