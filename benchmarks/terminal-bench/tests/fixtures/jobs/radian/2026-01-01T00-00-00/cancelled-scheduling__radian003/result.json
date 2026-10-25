@@ -1,0 +1,26 @@
+{
+  "id": "1f0a6c0e-0000-4000-8000-000000000003",
+  "task_name": "cancelled-scheduling",
+  "trial_name": "cancelled-scheduling__radian003",
+  "agent_info": {
+    "name": "radian",
+    "version": "0.2.0"
+  },
+  "agent_result": {
+    "cost_usd": null,
+    "metadata": {}
+  },
+  "verifier_result": null,
+  "exception_info": {
+    "exception_type": "CancelledError",
+    "exception_message": "trial cancelled by the operator",
+    "exception_traceback": "",
+    "occurred_at": "2026-01-01T00:21:00Z"
+  },
+  "started_at": "2026-01-01T00:20:00Z",
+  "finished_at": "2026-01-01T00:21:00Z",
+  "agent_execution": {
+    "started_at": "2026-01-01T00:20:00Z",
+    "finished_at": "2026-01-01T00:21:00Z"
+  }
+}

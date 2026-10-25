@@ -17,8 +17,10 @@ Harbor releases may rename these modules.
 | `radian_agent.py` | Harbor agent: uploads the binary + CA bundle, writes `auth.json`, runs `radian exec --output jsonl -p <instruction>` |
 | `radian_command.py` | Stdlib-only command builders (provider selection, `auth.json` rendering, static-binary check, shell quoting, redaction) |
 | `build-static.sh` | Builds the static musl binary the task containers need |
+| `metrics.py` | Stdlib-only report over finished harbor jobs: per-task matrix, per-trial rows, per-agent totals |
 | `tests/test_radian_command.py` | Builder unit tests (no Harbor dependency) |
 | `tests/test_radian_agent.py` | Agent unit tests against the real Harbor 0.24.0 package |
+| `tests/test_metrics.py` | Metrics tests on `tests/fixtures/jobs/` (one fake trial per agent kind) |
 | `pyproject.toml` | Descriptive metadata only (agent import path, Harbor pin) |
 
 ## Key design (why the score measures the agent loop)
@@ -91,6 +93,7 @@ Harbor releases may rename these modules.
 
 ```sh
 python3 benchmarks/terminal-bench/tests/test_radian_command.py   # stdlib only
+python3 benchmarks/terminal-bench/tests/test_metrics.py          # stdlib only
 <home>/.local/share/uv/tools/harbor/bin/python benchmarks/terminal-bench/tests/test_radian_command.py
 <home>/.local/share/uv/tools/harbor/bin/python benchmarks/terminal-bench/tests/test_radian_agent.py
 PYTHONPATH=benchmarks/terminal-bench <home>/.local/share/uv/tools/harbor/bin/python -c \
@@ -100,6 +103,72 @@ PYTHONPATH=benchmarks/terminal-bench <home>/.local/share/uv/tools/harbor/bin/pyt
 The agent tests import the real Harbor 0.24.0 package; the fake environment is
 only a process double for container exec/upload. Trial orchestration is proven
 by the smoke below, not by these tests.
+
+## Metrics from a finished run (stdlib only)
+
+`metrics.py` reads finished harbor jobs and prints a per-task matrix, one row
+per trial, per-agent totals, and a common-task section. It does not import
+Harbor and does not touch a container.
+
+```sh
+python3 benchmarks/terminal-bench/metrics.py /tmp/tbench-ab/jobs
+python3 benchmarks/terminal-bench/metrics.py /tmp/tbench-ab/jobs --json > metrics.json
+```
+
+`JOBS` is a jobs root (`<jobs>/<agent>/<timestamp>/<task>__<id>/`) or any
+directory above the trials. The `<agent>` level is the column label, so two
+radian builds in `radian-a/` and `radian-b/` stay separate columns even when
+Harbor's `agent_info.name` is `radian` for both. Every `result.json` below a
+root is read; a job-level `result.json` has no `task_name` and is skipped. What
+each trial contributes:
+
+| Input | Used for |
+|---|---|
+| `result.json` → `verifier_result.rewards.reward` | PASS (`>= 1`) or fail |
+| `result.json` → `exception_info.exception_type` | T/O for a `*Timeout*`; `CancelledError` excludes the trial |
+| `result.json` → `agent_execution.started_at`/`finished_at` | agent minutes |
+| `result.json` → `agent_result.cost_usd` | cost; radian falls back to journal `fee.micros`, pi/opencode to the ATIF step or final cost |
+| `agent/radian-sessions/*.jsonl` | model calls, output/reasoning tokens, >16k calls, generation/tool minutes, `Incomplete(MaxTokens)` |
+| `agent/trajectory.json` (ATIF) | model calls, output/reasoning tokens, >16k calls for pi and opencode |
+
+Columns:
+
+- `min` — `agent_execution` wall time.
+- `cost` — USD.
+- `calls` — model calls: assistant responses plus compaction calls in a radian
+  journal; ATIF `llm_call_count` (default 1) over steps that carry `metrics`.
+- `out_tok` / `reason` — reported output and reasoning tokens. `-` means no
+  record reported the counter, never 0. Radian reasoning comes from the
+  provider's `details` (`completion_tokens_details.reasoning_tokens` or
+  `output_tokens_details.thinking_tokens`); ATIF reasoning from
+  `metrics.extra.reasoning_tokens` (or a nested details object).
+- `over16k` — model calls with more than 16,000 output tokens. ATIF is
+  per-step: a producer that merges several calls into one step (pi's
+  tool-result usage) is measured on the merged count.
+- `gen_min` / `tool_min` (radian only) — from journal timestamps: a model
+  request from its boundary (tool settle, user message, turn start or previous
+  response) to the assistant response, and each `ToolExecutionStarted` →
+  `ToolExecutionSettled` pair. Parallel calls are summed, so `tool_min` can
+  exceed `min`.
+- `maxtok` (radian only) — the run ended `Incomplete(MaxTokens)`
+  (`TurnFinished {outcome: incomplete, reason: max_tokens}`), or exec exited 4
+  / the closing `Result` record named `max_tokens`.
+
+A `CancelledError` trial appears in the trial table as `skip`, is counted in
+the `excl` column, and is in no total. The matrix has one cell per task and
+agent (`PASS`/`fail`/`T/O`; repeats as `P1/2`, plus `T1` when a repeat timed
+out). The common-task section keeps only tasks for which every agent has at
+least one finished trial (not T/O, not excluded), and totals over exactly
+those tasks. `--json` prints the same report as one object (`agents`, `tasks`,
+`trials`, `matrix`, `totals`, `common_tasks`, `common_totals`); a counter no
+record reported is `null`, never 0.
+
+The fixtures under `tests/fixtures/jobs/` hold one trial per agent kind plus a
+cancelled and a timed-out trial:
+
+```sh
+python3 benchmarks/terminal-bench/tests/test_metrics.py   # stdlib only
+```
 
 ## Smoke (needs Docker + Harbor + a model key)
 

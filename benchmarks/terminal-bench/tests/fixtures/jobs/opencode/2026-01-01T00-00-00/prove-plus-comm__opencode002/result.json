@@ -1,0 +1,27 @@
+{
+  "id": "1f0a6c0e-0000-4000-8000-000000000022",
+  "task_name": "prove-plus-comm",
+  "trial_name": "prove-plus-comm__opencode002",
+  "agent_info": {
+    "name": "opencode",
+    "version": "1.0.0"
+  },
+  "agent_result": {
+    "n_input_tokens": 1000,
+    "n_output_tokens": 800,
+    "cost_usd": 0.004,
+    "metadata": {}
+  },
+  "verifier_result": {
+    "rewards": {
+      "reward": 1
+    }
+  },
+  "exception_info": null,
+  "started_at": "2026-01-01T00:10:00Z",
+  "finished_at": "2026-01-01T00:12:10Z",
+  "agent_execution": {
+    "started_at": "2026-01-01T00:10:00Z",
+    "finished_at": "2026-01-01T00:12:00Z"
+  }
+}

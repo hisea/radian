@@ -1,0 +1,6 @@
+{"schema_version":1,"session_id":"radian-prove","seq":0,"ts":"2026-01-01T00:10:00Z","event":"SessionCreated","critical":true,"data":{"workspace":"/app","config":{}}}
+{"schema_version":1,"session_id":"radian-prove","seq":1,"ts":"2026-01-01T00:10:00Z","event":"TurnStarted","critical":true,"data":{"turn_id":"t-1"}}
+{"schema_version":1,"session_id":"radian-prove","seq":2,"ts":"2026-01-01T00:10:00Z","event":"MessageAppended","critical":true,"data":{"index":0,"message":{"user":{"content":[{"text":{"text":"prove commutativity"}}]}}}}
+{"schema_version":1,"session_id":"radian-prove","seq":3,"ts":"2026-01-01T00:11:00Z","event":"MessageAppended","critical":true,"data":{"index":1,"message":{"assistant":{"content":[{"text":{"text":"Trying."}}]}}}}
+{"schema_version":1,"session_id":"radian-prove","seq":4,"ts":"2026-01-01T00:11:00Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":1200,"output":4000,"details":{"output_tokens_details":{"thinking_tokens":0}}},"fee":{"micros":3000}}}
+{"schema_version":1,"session_id":"radian-prove","seq":5,"ts":"2026-01-01T00:11:01Z","event":"TurnFinished","critical":true,"data":{"turn_id":"t-1","outcome":"incomplete","reason":"max_tokens"}}
