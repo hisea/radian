@@ -1388,6 +1388,9 @@ async fn a_pause_record_read_before_auto_turned_off_is_the_pause_reason() {
         "max_auto_rework": 2,
         "text": text,
         "at": radian_arc::store::plan_ops::utc_now(),
+        // The first of the automatic rework limit's two writes: the record announces the
+        // pause the plan write has not applied yet.
+        "pending": true,
     });
     let dir = radian_arc::store::attempt_ops::run_dir(&store, &task, 0);
     fs::create_dir_all(&dir).expect("the attempt directory is creatable");
@@ -1442,6 +1445,9 @@ async fn a_pause_record_the_baseline_read_before_auto_turned_off_is_the_pause_re
         "max_auto_rework": 2,
         "text": text,
         "at": radian_arc::store::plan_ops::utc_now(),
+        // The first of the automatic rework limit's two writes: the record announces the
+        // pause the plan write has not applied yet.
+        "pending": true,
     });
     let dir = radian_arc::store::attempt_ops::run_dir(&store, &task, 0);
     fs::create_dir_all(&dir).expect("the attempt directory is creatable");
@@ -1465,6 +1471,49 @@ async fn a_pause_record_the_baseline_read_before_auto_turned_off_is_the_pause_re
     let event = session.next_event().await;
     let content = expect_plan_event(&event, &plan, "paused", "false", "true");
     assert_eq!(content, format!("{plan} paused false -> true\n{text}"));
+
+    session.close().await;
+}
+
+#[tokio::test]
+async fn a_stale_pause_record_read_at_the_baseline_is_not_the_manual_pause_reason() {
+    let scratch = fixture("mcp-channel-stale-pause-reconnect");
+    let setup = Session::open(&scratch).await;
+    let (plan, task) = plan_with_task(&setup, "stale-reconnect").await;
+    setup.close().await;
+    let store = Store::at(scratch.repo());
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("the plan runs");
+
+    // The automatic rework limit paused the plan before the client connected, and the owner
+    // resumed it. The task did not start another attempt, so that pause's record is still
+    // beside it when the poller's baseline reads the running plan.
+    set_state(&scratch, &task, TaskState::Review, "rework_pending");
+    store
+        .change_task(&task, |task| {
+            task.auto_rework = 2;
+            Ok(())
+        })
+        .expect("the task has used its automatic reworks");
+    let stale = radian_arc::store::attempt_ops::record_auto_rework(&store, &task)
+        .expect("the automatic rework is counted")
+        .expect("the plan pauses at the limit");
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("the plan resumes");
+
+    let mut session = Session::open_flagged(&scratch, true).await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // The owner's own pause is not the automatic rework limit's: the record the baseline read
+    // belongs to the pause the client missed, so it sends no second line.
+    radian_arc::store::plan_ops::pause(&store, &plan).expect("the owner pauses the plan");
+    let event = session.next_event().await;
+    let content = expect_plan_event(&event, &plan, "paused", "false", "true");
+    assert_eq!(
+        content,
+        format!("{plan} paused false -> true"),
+        "the manual pause must not repeat the reason of {}",
+        stale.text
+    );
 
     session.close().await;
 }
