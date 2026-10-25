@@ -23,19 +23,25 @@
 //!    the `run` process that started it exits or is killed (decision 7.8).
 //!    A heartbeat thread writes `attempts/<task>/<attempt>/heartbeat.json` for a later pass
 //!    to judge liveness (decision 7.9);
-//! 5. after the child exits, read the `Result` line and the exit code, read `head_sha`,
-//!    list uncommitted and untracked files, and run the delivery checks;
-//! 6. push `work/<task>` only when the outcome is `completed` and every check passed, then
-//!    verify the remote ref with `ls-remote`;
+//! 5. after the child exits, compare the repository's git control files with the record taken
+//!    before the child started, restore them on a change, and fail the attempt (decision 7);
+//!    then read the `Result` line and the exit code, read `head_sha`, list uncommitted and
+//!    untracked files, and run the delivery checks;
+//! 6. push `work/<task>` only when the outcome is `completed`, the git control files are
+//!    unchanged, and every check passed, then verify the remote ref with `ls-remote`;
 //! 7. print one `AttemptFinished` JSON line as its last stdout line and exit with the
 //!    child's exit code (or 1 when a check failed after a `completed` child).
 //!
 //! Every git command this module runs goes through the crate's one git helper
 //! (`crate::git`): built from the shared host builder, an empty hooks path, and
 //! `GIT_CONFIG_NOSYSTEM=1`, so no file the model can write changes what the wrapper runs
-//! (ADR 0048 decision 7.3). The push credential stays in this process's environment; in v0
-//! the wrapper and the model are the same OS user, so that is not isolation.
+//! (ADR 0048 decision 7.3). That does not cover a worker that writes a filter driver or
+//! `core.fsmonitor` into `.git/config`, so the wrapper also records the repository's git
+//! control files before the worker and compares them after it exits (step 5). The push
+//! credential stays in this process's environment; in v0 the wrapper and the model are the
+//! same OS user, so that is not isolation.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -410,6 +416,10 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     notes.extend(copy_notes);
     let started_at = now();
     let deny = deny_paths(&s.arc);
+    // The repository's git control files, as they are before the worker starts (ADR 0048
+    // decision 7). The record stays in this process's memory: a worker can write the worktree
+    // and, with a wider sandbox, the git directories, so no on-disk record can be trusted.
+    let control = GitControl::record(&s.worktree, &s.clock)?;
     let mut child = spawn_child(o, &s.worktree, &deny, &result_path, &stderr_path, &brief)?;
     let pid = child.id();
     CHILD_PID.store(pid as i32, Ordering::SeqCst);
@@ -458,6 +468,50 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| "terminated".to_owned());
+
+    // ADR 0048 decisions 7 and 8: a worker that changed the repository's git control files
+    // fails the attempt, and they are put back before this wrapper runs its next git command.
+    // A record it cannot read back, or a restore that fails, stops the attempt here so no
+    // git command runs on files the wrapper could not repair.
+    let mut failure = match control.check() {
+        ControlCheck::Unchanged => None,
+        ControlCheck::Unreadable(message) => {
+            return write_finish(
+                o,
+                s,
+                Finish {
+                    base_sha: &base_sha,
+                    head_sha: None,
+                    dirty: Vec::new(),
+                    pushed: false,
+                    remote_sha: None,
+                    outcome: &outcome,
+                    exit_code,
+                    failure: Some(format!("cannot check the git control files: {message}")),
+                    notes: &notes,
+                },
+            );
+        }
+        ControlCheck::Changed(change) if change.restore_failed.is_some() => {
+            return write_finish(
+                o,
+                s,
+                Finish {
+                    base_sha: &base_sha,
+                    head_sha: None,
+                    dirty: Vec::new(),
+                    pushed: false,
+                    remote_sha: None,
+                    outcome: &outcome,
+                    exit_code,
+                    failure: Some(change.reason()),
+                    notes: &notes,
+                },
+            );
+        }
+        ControlCheck::Changed(change) => Some(change.reason()),
+    };
+
     let head_sha = match git(&s.worktree, &["rev-parse", "HEAD"], &s.clock) {
         Ok(sha) => Some(sha.trim().to_owned()).filter(|sha| !sha.is_empty()),
         Err(failure) if failure.wall => return Err(failure),
@@ -492,46 +546,49 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     )?;
 
     // The wrapper, not the model, decides whether the attempt delivered anything (ADR 0048
-    // decisions 7 and 8). Only a `completed` child with every check passed is pushed.
-    let mut failure = None;
+    // decisions 7 and 8). Only a `completed` child with every check passed is pushed; a
+    // changed git control file already gave the attempt its reason, and nothing is pushed.
     let mut pushed = false;
     let mut remote_sha: Option<String> = None;
-    if outcome != "completed" {
-        failure = Some(format!("outcome {outcome}"));
-    } else {
-        let check = check_delivery(
-            &Delivery {
-                repo: &s.repo,
-                worktree: &s.worktree,
-                branch: &s.branch,
-                base: &base_sha,
-                start: &start_sha,
-                main: &main_ref,
-                head: head_sha.as_deref(),
-                status_paths: &status_paths,
-                allow_noop: o.allow_noop,
-            },
-            &s.clock,
-        );
-        match check {
-            Err(problem) if problem.wall => return Err(problem),
-            Err(problem) => failure = Some(problem.message),
-            Ok(()) => {
-                let head = head_sha.as_deref().unwrap_or_default();
-                match push(&s.repo, &o.remote, &s.branch, &s.clock) {
-                    Err(problem) if problem.wall => return Err(problem),
-                    Err(problem) => failure = Some(problem.message),
-                    Ok(()) => {
-                        pushed = true;
-                        match remote_sha_of(&s.repo, &o.remote, &s.branch, &s.clock) {
-                            Err(problem) if problem.wall => return Err(problem),
-                            Err(problem) => failure = Some(problem.message),
-                            Ok(remote) => {
-                                if remote != head {
-                                    failure =
-                                        Some(format!("remote ref is {remote}, expected {head}"));
+    if failure.is_none() {
+        if outcome != "completed" {
+            failure = Some(format!("outcome {outcome}"));
+        } else {
+            let check = check_delivery(
+                &Delivery {
+                    repo: &s.repo,
+                    worktree: &s.worktree,
+                    branch: &s.branch,
+                    base: &base_sha,
+                    start: &start_sha,
+                    main: &main_ref,
+                    head: head_sha.as_deref(),
+                    status_paths: &status_paths,
+                    allow_noop: o.allow_noop,
+                },
+                &s.clock,
+            );
+            match check {
+                Err(problem) if problem.wall => return Err(problem),
+                Err(problem) => failure = Some(problem.message),
+                Ok(()) => {
+                    let head = head_sha.as_deref().unwrap_or_default();
+                    match push(&s.repo, &o.remote, &s.branch, &s.clock) {
+                        Err(problem) if problem.wall => return Err(problem),
+                        Err(problem) => failure = Some(problem.message),
+                        Ok(()) => {
+                            pushed = true;
+                            match remote_sha_of(&s.repo, &o.remote, &s.branch, &s.clock) {
+                                Err(problem) if problem.wall => return Err(problem),
+                                Err(problem) => failure = Some(problem.message),
+                                Ok(remote) => {
+                                    if remote != head {
+                                        failure = Some(format!(
+                                            "remote ref is {remote}, expected {head}"
+                                        ));
+                                    }
+                                    remote_sha = Some(remote);
                                 }
-                                remote_sha = Some(remote);
                             }
                         }
                     }
@@ -1062,9 +1119,14 @@ fn ensure_worktree(
                 "{start} does not exist; a first attempt starts from the remote's main branch"
             )));
         }
+        // `--no-track`: the common config is a git control file the wrapper records before each
+        // worker (ADR 0048 decision 7). Starting the branch from `origin/main` would otherwise
+        // write `[branch "<branch>"]` there, and a concurrent attempt's record would see it as
+        // the worker's change. arc never relies on the branch's upstream: every fetch and push
+        // names its remote and refspec.
         git(
             repo,
-            &["worktree", "add", "-b", branch, &path, &start],
+            &["worktree", "add", "--no-track", "-b", branch, &path, &start],
             clock,
         )?;
     }
@@ -2128,6 +2190,402 @@ fn spawn_child(
         let _ = stdin.write_all(brief.as_bytes());
     }
     Ok(child)
+}
+
+/// The repository's git control files, recorded before a worker starts and compared after it
+/// exits (ADR 0048 decisions 7 and 8). A worker that can write these files changes what every
+/// later git command runs — a hook, a filter driver or `core.fsmonitor` — so the wrapper
+/// restores them and fails the attempt.
+struct GitControl {
+    /// The common git directory (`<repository>/.git` for a normal clone).
+    common: PathBuf,
+    /// The attempt worktree's own git directory (a `worktrees/<task>` directory under the
+    /// common dir for a linked worktree).
+    git_dir: PathBuf,
+    /// Every control file that existed before the worker, and its content.
+    files: BTreeMap<PathBuf, RecordedFile>,
+}
+
+/// What a recorded control file held. Content, not time, is what the check compares (decision
+/// 7). A symbolic link is recorded by its target, so a link and a regular file at the same
+/// path are a change either way, and restoring recreates what was there. An oversized file is
+/// not read whole: it is recorded as itself, so it is a change at a path the record holds and
+/// an extra file at one it does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RecordedFile {
+    Regular(Vec<u8>),
+    Symlink(PathBuf),
+    Oversized,
+}
+
+/// What [`GitControl::check`] found (ADR 0048 decisions 7 and 8).
+enum ControlCheck {
+    /// Every recorded file is as it was and nothing new exists.
+    Unchanged,
+    /// A control file was created, removed or changed; the restore was attempted.
+    Changed(ControlChange),
+    /// The files could not be read again, so they could not be compared or restored.
+    Unreadable(String),
+}
+
+/// One check that found a change.
+struct ControlChange {
+    /// The paths that were created, removed or changed, relative to the common dir when they
+    /// lie under it.
+    paths: Vec<String>,
+    /// Why restoring them failed. The attempt then carries both reasons and runs no further
+    /// git command (ADR 0048 decisions 7 and 8).
+    restore_failed: Option<String>,
+}
+
+impl ControlChange {
+    /// The failure text `AttemptFinished` and `show` carry.
+    fn reason(&self) -> String {
+        let mut reason = if self.paths.is_empty() {
+            "the worker changed git control files".to_owned()
+        } else {
+            format!(
+                "the worker changed git control files: {}",
+                self.paths.join(", ")
+            )
+        };
+        if let Some(error) = &self.restore_failed {
+            reason.push_str(&format!("; restoring them failed: {error}"));
+        }
+        reason
+    }
+}
+
+impl GitControl {
+    /// Records the control files before the worker starts. A file the wrapper cannot read
+    /// fails the attempt before a worker runs: without a record there is nothing to compare
+    /// with or restore from.
+    fn record(worktree: &Path, clock: &Clock) -> Result<Self, Failure> {
+        let git_dir = git_directory(worktree, "--absolute-git-dir", clock)?;
+        let common = git_directory(worktree, "--git-common-dir", clock)?;
+        let files = control_files(&common, &git_dir).map_err(|error| {
+            Failure::error(format!("cannot record the git control files: {error}"))
+        })?;
+        // A file too large to read whole cannot be compared or restored. Fail before the
+        // worker starts rather than run unattended with a control file the check cannot see.
+        if let Some(path) = files
+            .iter()
+            .find_map(|(path, file)| (*file == RecordedFile::Oversized).then_some(path))
+        {
+            return Err(Failure::error(format!(
+                "cannot record the git control files: {} is larger than {CONTROL_FILE_LIMIT} bytes",
+                path.display()
+            )));
+        }
+        Ok(Self {
+            common,
+            git_dir,
+            files,
+        })
+    }
+
+    /// Compares the control files with the record and, on a change, restores them. No git
+    /// command of the wrapper runs between the worker exiting and this call.
+    fn check(&self) -> ControlCheck {
+        let current = match control_files(&self.common, &self.git_dir) {
+            Ok(files) => files,
+            Err(error) => return ControlCheck::Unreadable(error),
+        };
+        if current == self.files {
+            return ControlCheck::Unchanged;
+        }
+        let mut paths = BTreeSet::new();
+        for (path, before) in &self.files {
+            if current.get(path) != Some(before) {
+                paths.insert(shown_control_path(path, &self.common));
+            }
+        }
+        for path in current.keys() {
+            if !self.files.contains_key(path) {
+                paths.insert(shown_control_path(path, &self.common));
+            }
+        }
+        let restore_failed = self.restore(&current).err();
+        ControlCheck::Changed(ControlChange {
+            paths: paths.into_iter().collect(),
+            restore_failed,
+        })
+    }
+
+    /// Puts every recorded file back and removes every file that was not there before. It
+    /// keeps going after a failure, so one file that cannot be restored does not leave the
+    /// others as the worker left them; the errors are reported together.
+    fn restore(&self, current: &BTreeMap<PathBuf, RecordedFile>) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for (path, before) in &self.files {
+            if current.get(path) == Some(before) {
+                continue;
+            }
+            if let Err(error) = self.restore_one(path, before) {
+                errors.push(error);
+            }
+        }
+        for path in current.keys() {
+            if self.files.contains_key(path) {
+                continue;
+            }
+            // A directory is not a file that runs, and the recorded files under it are already
+            // back in place; leave it rather than remove a directory the restore just made.
+            let is_dir = fs::symlink_metadata(path)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false);
+            if is_dir {
+                continue;
+            }
+            if let Err(error) = remove_control_entry(path) {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    fn restore_one(&self, path: &Path, before: &RecordedFile) -> Result<(), String> {
+        let root = if path.starts_with(&self.common) {
+            &self.common
+        } else {
+            &self.git_dir
+        };
+        ensure_control_dirs(root, path)?;
+        remove_control_entry(path)?;
+        match before {
+            RecordedFile::Regular(bytes) => fs::write(path, bytes)
+                .map_err(|error| format!("cannot write {}: {error}", path.display())),
+            RecordedFile::Symlink(target) => write_control_symlink(target, path)
+                .map_err(|error| format!("cannot write {}: {error}", path.display())),
+            // `record` refuses an oversized file, so a record never carries one.
+            RecordedFile::Oversized => Err(format!(
+                "{} is larger than {CONTROL_FILE_LIMIT} bytes",
+                path.display()
+            )),
+        }
+    }
+}
+
+/// Resolves a git directory the wrapper asks `git rev-parse` for, relative to the worktree
+/// when git answers with a relative path.
+fn git_directory(worktree: &Path, flag: &str, clock: &Clock) -> Result<PathBuf, Failure> {
+    let text = git(worktree, &["rev-parse", flag], clock)?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(Failure::error(format!(
+            "git rev-parse {flag} named no directory"
+        )));
+    }
+    let path = Path::new(text);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        worktree.join(path)
+    };
+    Ok(fs::canonicalize(&path).unwrap_or(path))
+}
+
+/// The largest control file the wrapper reads whole. A git config and a hook are small; a
+/// larger file is never loaded into memory, so a worker cannot exhaust the wrapper with one.
+const CONTROL_FILE_LIMIT: u64 = 1024 * 1024;
+
+/// Every git control file of decision 7, keyed by path.
+fn control_files(common: &Path, git_dir: &Path) -> Result<BTreeMap<PathBuf, RecordedFile>, String> {
+    let mut files = BTreeMap::new();
+    for path in [
+        common.join("config"),
+        git_dir.join("config.worktree"),
+        common.join("config.worktree"),
+    ] {
+        if let Some(recorded) = recorded_entry(&path)? {
+            files.insert(path, recorded);
+        }
+    }
+    for dir in [common.join("hooks"), common.join("info")] {
+        record_tree(&mut files, &dir)?;
+    }
+    record_modules(&mut files, &common.join("modules"))?;
+    Ok(files)
+}
+
+/// One entry's recorded content: a regular file's bytes or a symbolic link's target. A
+/// directory, a FIFO, a device and a missing path record nothing; creating one where the
+/// wrapper recorded a file is still a change.
+fn recorded_entry(path: &Path) -> Result<Option<RecordedFile>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    let kind = metadata.file_type();
+    if kind.is_symlink() {
+        let target = fs::read_link(path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        return Ok(Some(RecordedFile::Symlink(target)));
+    }
+    if !kind.is_file() {
+        return Ok(None);
+    }
+    if metadata.len() > CONTROL_FILE_LIMIT {
+        return Ok(Some(RecordedFile::Oversized));
+    }
+    // One handle for the size check and the read, at most one byte past the limit: a file
+    // that grew after the check above is still not read into memory.
+    let file =
+        File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    (&file)
+        .take(CONTROL_FILE_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    if bytes.len() as u64 > CONTROL_FILE_LIMIT {
+        return Ok(Some(RecordedFile::Oversized));
+    }
+    Ok(Some(RecordedFile::Regular(bytes)))
+}
+
+/// Records every non-directory entry under `dir`, recursively, without following a link. A
+/// link or a file where the directory itself should be is recorded as that entry, so swapping
+/// the directory for a link is a change.
+fn record_tree(files: &mut BTreeMap<PathBuf, RecordedFile>, dir: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot read {}: {error}", dir.display())),
+    };
+    if !metadata.is_dir() {
+        if let Some(recorded) = recorded_entry(dir)? {
+            files.insert(dir.to_path_buf(), recorded);
+        }
+        return Ok(());
+    }
+    let entries =
+        fs::read_dir(dir).map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        if kind.is_dir() {
+            record_tree(files, &path)?;
+        } else if let Some(recorded) = recorded_entry(&path)? {
+            files.insert(path, recorded);
+        }
+    }
+    Ok(())
+}
+
+/// Records `config` files and `hooks/` entries anywhere under the submodule gitdirs
+/// (`<common dir>/modules/**`, nested submodules included).
+fn record_modules(
+    files: &mut BTreeMap<PathBuf, RecordedFile>,
+    modules: &Path,
+) -> Result<(), String> {
+    record_modules_tree(files, modules, false)
+}
+
+fn record_modules_tree(
+    files: &mut BTreeMap<PathBuf, RecordedFile>,
+    dir: &Path,
+    under_hooks: bool,
+) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot read {}: {error}", dir.display())),
+    };
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    let entries =
+        fs::read_dir(dir).map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        let is_hooks = entry.file_name() == std::ffi::OsStr::new("hooks");
+        if kind.is_dir() {
+            record_modules_tree(files, &path, under_hooks || is_hooks)?;
+        } else if (under_hooks || entry.file_name() == std::ffi::OsStr::new("config"))
+            && let Some(recorded) = recorded_entry(&path)?
+        {
+            files.insert(path, recorded);
+        }
+    }
+    Ok(())
+}
+
+/// A changed path as the failure text shows it: relative to the common dir when it lies under
+/// it (`config`, `hooks/pre-commit`, `worktrees/<task>/config.worktree`).
+fn shown_control_path(path: &Path, common: &Path) -> String {
+    path.strip_prefix(common)
+        .map(|relative| relative.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+/// Creates the parent directories of a restore under `root`, replacing a symbolic link or a
+/// file the worker put where a directory belongs. A restore never follows a link out of the
+/// git directory.
+fn ensure_control_dirs(root: &Path, path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let Ok(relative) = parent.strip_prefix(root) else {
+        return Ok(());
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                remove_control_entry(&current)?;
+                fs::create_dir(&current)
+                    .map_err(|error| format!("cannot create {}: {error}", current.display()))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current)
+                    .map_err(|error| format!("cannot create {}: {error}", current.display()))?;
+            }
+            Err(error) => {
+                return Err(format!("cannot read {}: {error}", current.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Removes a file, a symbolic link or a directory tree at `path`. A directory is removed
+/// deeply: a worker can put one where a recorded file was.
+fn remove_control_entry(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    let result = if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    result.map_err(|error| format!("cannot remove {}: {error}", path.display()))
+}
+
+#[cfg(unix)]
+fn write_control_symlink(target: &Path, path: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, path)
+}
+
+#[cfg(not(unix))]
+fn write_control_symlink(target: &Path, path: &Path) -> std::io::Result<()> {
+    fs::write(path, target.to_string_lossy().as_bytes())
 }
 
 /// What the delivery checks read (ADR 0048 decisions 7.4 and 8).
