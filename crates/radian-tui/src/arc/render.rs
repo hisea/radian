@@ -1127,6 +1127,10 @@ struct DiffState<'a> {
     diff_scroll: usize,
 }
 
+/// The file list's share of the diff area: at most one third of its rows, rounded down, so the
+/// selected file's frame keeps the rest (ADR 0048 decision 13).
+const FILE_LIST_DIVISOR: usize = 3;
+
 /// The file list's rows when the diff area can spare them: the list never gets fewer than this
 /// while there are that many files (ADR 0048 decision 13).
 const MIN_FILE_ROWS: usize = 3;
@@ -1168,8 +1172,8 @@ fn draw_diff(
         lines.push(rail(theme, Line::from(Span::styled(text, theme.hint))));
     }
     // After the list the frame needs five rows: the frame's bottom, a blank, the diff frame's
-    // title, at least one body row and its bottom. The list is capped at half of what is left,
-    // so the selected file's frame keeps the rest.
+    // title, at least one body row and its bottom. The list is capped at one third of what is
+    // left, so the selected file's frame keeps the rest.
     let available = remaining.saturating_sub(usize::from(source.is_some()));
     if !diff_file_list(
         lines,
@@ -1188,10 +1192,10 @@ fn draw_diff(
 
 /// The file list rows (or the one loading/error/empty line). Returns whether a diff follows.
 ///
-/// `available` is the diff area left after the frame's first rows: the list takes at most half
-/// of it (rounded down, and at least [`MIN_FILE_ROWS`] while there are that many files), so the
-/// selected file's frame keeps the rest, less its own `reserve` rows and one body row. A list
-/// that shows only part of the files ends with `files a–b of n`.
+/// `available` is the diff area left after the frame's first rows: the list takes at most one
+/// third of it (rounded down, and at least [`MIN_FILE_ROWS`] while there are that many files),
+/// so the selected file's frame keeps the rest, less its own `reserve` rows and one body row. A
+/// list that shows only part of the files ends with `files a–b of n`.
 fn diff_file_list(
     lines: &mut Vec<Line<'static>>,
     diff: &DiffState,
@@ -1229,7 +1233,7 @@ fn diff_file_list(
         lines.push(row(Line::from(Span::styled("no change yet", theme.hint))));
         return false;
     }
-    let rows = (available / 2)
+    let rows = (available / FILE_LIST_DIVISOR)
         .max(MIN_FILE_ROWS)
         .min(available.saturating_sub(reserve))
         .max(1);

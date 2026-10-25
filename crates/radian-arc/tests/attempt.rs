@@ -887,10 +887,9 @@ fn wait_for(path: &Path) -> Value {
     }
 }
 
-/// Waits until `path` exists **and has content**. The writer creates the file and then writes
-/// it, so existence alone can race a reader that parses the file.
-fn wait_for_file(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+/// Waits until `path` exists **and has content**, failing after `limit`.
+fn wait_for_file_within(path: &Path, limit: Duration) {
+    let deadline = Instant::now() + limit;
     loop {
         if let Ok(text) = std::fs::read_to_string(path)
             && !text.trim().is_empty()
@@ -899,11 +898,17 @@ fn wait_for_file(path: &Path) {
         }
         assert!(
             Instant::now() < deadline,
-            "{} never appeared with content",
+            "{} never appeared with content within {limit:?}",
             path.display()
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Waits until `path` exists **and has content**. The writer creates the file and then writes
+/// it, so existence alone can race a reader that parses the file.
+fn wait_for_file(path: &Path) {
+    wait_for_file_within(path, Duration::from_secs(60));
 }
 
 /// Runs one `radian arc …` command with a deadline, so a missing timer fails the test
@@ -949,6 +954,14 @@ fn kill(pid: u32, signal: &str) {
         .status()
         .expect("kill");
     let _ = status;
+}
+
+/// Makes `path` executable, for a fake `ps` the test puts on a child's `PATH`.
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(path).expect("the file").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("make it executable");
 }
 
 /// A stand-in wrapper for a `doing` task: a shell process that writes the attempt's
@@ -1428,7 +1441,14 @@ fn cancel_stops_a_running_attempt() {
     let mock = Mock::start(vec![Reply::SseThenHang { pieces: Vec::new() }]);
     tune(
         &repo,
-        &[("stall_timeout_secs = 900", "stall_timeout_secs = 600")],
+        &[
+            ("stall_timeout_secs = 900", "stall_timeout_secs = 600"),
+            // A worker that ignores SIGTERM is killed after this grace. The test does not
+            // need the user's ten seconds: it checks that the signal arrives, not how long a
+            // real worker would take to die. Five seconds leaves a loaded machine room to
+            // schedule the wrapper while staying far below nextest's timeout.
+            ("cancel_grace_secs = 10", "cancel_grace_secs = 5"),
+        ],
     );
     write_worker_args(&repo, mock.base_url());
 
@@ -1441,8 +1461,23 @@ fn cancel_stops_a_running_attempt() {
         "{}",
         cancel.stdout
     );
+    // The wrapper confirms the stop with `AttemptFinished`. Waiting for that record is waiting
+    // for the exact state the cancel produced; the start process then has nothing left to do.
+    wait_for_file_within(
+        &repo.run_dir(&task, 1).join("attempt_finished.json"),
+        Duration::from_secs(15),
+    );
     assert_eq!(state(&store, &task), ("failed".into(), "cancelled".into()));
-    let _ = start.wait();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while start.try_wait().expect("try_wait").is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "`radian arc start` did not end after the cancel"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let status = start.wait().expect("the start process ends");
+    assert_eq!(status.code(), Some(0), "start did not exit cleanly");
 }
 
 /// A wrapper that never writes a result (SIGKILLed after the grace period) leaves the task
@@ -1531,17 +1566,93 @@ fn a_reused_pid_with_another_start_time_is_not_signalled() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("identity.json"), identity.to_string()).unwrap();
 
-    let canceled = attempt::cancel(&store, task).expect("cancel");
-    assert_eq!(
-        (canceled.state.as_str(), canceled.phase.as_str()),
-        ("failed", "cancelled")
+    // The `ps` the cancel reads is the test's own: it reports another start time, so the
+    // comparison does not depend on whether the host's sandbox refuses `ps`.
+    let fake = repo.root.join("fake-bin");
+    std::fs::create_dir_all(&fake).expect("the fake bin directory");
+    let ps = fake.join("ps");
+    std::fs::write(&ps, "#!/bin/sh\nprintf 'Thu Jan  2 00:00:00 1970\\n'\n").expect("the fake ps");
+    make_executable(&ps);
+    let path = format!(
+        "{}:{}",
+        fake.display(),
+        std::env::var("PATH").unwrap_or_default()
     );
+    let run = repo.radian_with_env(&["arc", "cancel", task], &[("PATH", path)]);
+    assert_eq!(run.code, 0, "cancel: {}", run.stderr);
+    assert_eq!(state(&store, task), ("failed".into(), "cancelled".into()));
     assert!(
         stand_in.try_wait().expect("try_wait").is_none(),
         "the process with another start time was not signalled"
     );
     kill(pid, "-9");
     let _ = stand_in.wait();
+}
+
+/// ADR 0048 decision 9: when `ps` cannot report a process's start time (the `workspace`
+/// sandbox refuses it), the recorded pid alone is signalled. A `ps` that reports nothing makes
+/// the comparison impossible; the wrapper the record names still gets its SIGTERM and writes
+/// `AttemptFinished`, so the task ends at `failed.cancelled`.
+#[test]
+fn cancel_signals_the_recorded_wrapper_when_ps_is_unavailable() {
+    let repo = Repo::new("cancel-no-ps");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    tune(
+        &repo,
+        &[("cancel_grace_secs = 10", "cancel_grace_secs = 1")],
+    );
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = tasks[0].clone();
+    attempt_ops::claim(&store, &task).expect("claim");
+    store
+        .change_task(&task, |task| {
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("running");
+    let mut wrapper = fake_wrapper(&repo, &store, &task, 1);
+    let pid = wrapper.id();
+    // A recorded start time, the shape a wrapper that could read `ps` writes.
+    let identity = json!({
+        "attempt_id": format!("{task}-1"),
+        "token": "t",
+        "pid": pid,
+        "process_started_at": "Thu Jan  1 00:00:00 1970",
+        "wrapper_pid": pid,
+        "wrapper_process_started_at": "Thu Jan  1 00:00:00 1970",
+    });
+    let dir = repo.attempt_dir(&task, 1);
+    std::fs::create_dir_all(&dir).expect("the attempt directory");
+    std::fs::write(dir.join("identity.json"), identity.to_string()).expect("the identity record");
+
+    // The fake `ps` reports nothing (exit 1), the way `ps` does when it cannot report a start
+    // time. `PATH` keeps the normal directories so `cancel` can run git; the fake comes first,
+    // so it is the `ps` every lookup finds.
+    let fake = repo.root.join("fake-bin");
+    std::fs::create_dir_all(&fake).expect("the fake bin directory");
+    let ps = fake.join("ps");
+    std::fs::write(&ps, "#!/bin/sh\nexit 1\n").expect("the fake ps");
+    make_executable(&ps);
+    let path = format!(
+        "{}:{}",
+        fake.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = repo.radian_with_env(&["arc", "cancel", &task], &[("PATH", path)]);
+    let finished = repo
+        .run_dir(&task, 1)
+        .join("attempt_finished.json")
+        .is_file();
+    let _ = wrapper.kill();
+    let _ = wrapper.wait();
+    assert_eq!(run.code, 0, "cancel: {}", run.stderr);
+    assert!(
+        finished,
+        "the wrapper the record names was not signalled: {}",
+        run.stdout
+    );
+    assert_eq!(state(&store, &task), ("failed".into(), "cancelled".into()));
 }
 
 /// `radian arc cancel <plan>` ends every task in `todo`, `doing` or `review` at

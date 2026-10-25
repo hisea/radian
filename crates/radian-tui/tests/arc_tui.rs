@@ -1487,7 +1487,7 @@ fn list_and_body_rows(text: &str, selected: &str) -> (usize, usize, usize) {
 }
 
 #[test]
-fn the_file_list_takes_at_most_half_of_the_diff_area() {
+fn the_file_list_takes_at_most_one_third_of_the_diff_area() {
     let fixture = Fixture::new();
     let mut app = fixture.app();
     app.task_sel = fixture.pos("e");
@@ -1507,10 +1507,13 @@ fn the_file_list_takes_at_most_half_of_the_diff_area() {
         46 - 4,
         "the diff area is the body under the frame's first rows"
     );
-    assert_eq!(list_rows, 21, "half the diff area, rounded down:\n{text}");
+    assert_eq!(
+        list_rows, 14,
+        "a third of the diff area, rounded down:\n{text}"
+    );
     assert!(
-        list_rows * 2 <= diff_area,
-        "the list takes at most half: {list_rows} of {diff_area}\n{text}"
+        list_rows * 3 <= diff_area,
+        "the list takes at most a third: {list_rows} of {diff_area}\n{text}"
     );
     assert_eq!(
         body_rows,
@@ -1518,7 +1521,7 @@ fn the_file_list_takes_at_most_half_of_the_diff_area() {
         "the diff frame gets the rest:\n{text}"
     );
     assert!(
-        text.contains("files 21–40 of 40"),
+        text.contains("files 28–40 of 40"),
         "the list names the rows it shows:\n{text}"
     );
 
@@ -1530,6 +1533,17 @@ fn the_file_list_takes_at_most_half_of_the_diff_area() {
     assert!(
         !text.contains("files "),
         "a list that shows every file has no range label:\n{text}"
+    );
+
+    // A height where a third of the diff area is below the minimum: the list keeps its three
+    // rows and the selected file's frame still gets a body row.
+    let text = screen(&mut app, 120, 16);
+    let (_, list_rows, body_rows) = list_and_body_rows(&text, "file-05.txt");
+    assert_eq!(list_rows, 3, "the minimum keeps three rows:\n{text}");
+    assert_eq!(body_rows, 1, "the diff frame keeps one body row:\n{text}");
+    assert!(
+        text.contains("files 4–5 of 5"),
+        "the three rows are two files and their range label:\n{text}"
     );
 }
 

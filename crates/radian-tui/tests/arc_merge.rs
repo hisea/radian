@@ -433,7 +433,7 @@ fn every_stage_passes_with_its_commands_and_the_review_groups() {
 }
 
 #[test]
-fn the_merge_pages_file_list_takes_at_most_half_of_the_diff_area() {
+fn the_merge_pages_file_list_takes_at_most_one_third_of_the_diff_area() {
     use radian_arc::read::{DiffBase, DiffFile, DiffSource, TaskDiff};
     let fixture = Fixture::new("list", &["commands", "human"]);
     fixture.write(&mut fixture.commands(true, None));
@@ -484,14 +484,14 @@ fn the_merge_pages_file_list_takes_at_most_half_of_the_diff_area() {
         .iter()
         .filter(|line| line.contains("file-") || line.contains("files "))
         .count();
+    assert_eq!(diff_area, 19, "the diff area under the summary");
     assert_eq!(
-        list_rows,
-        diff_area / 2,
-        "the list takes half the diff area, not all of it:\n{text}"
+        list_rows, 6,
+        "a third of the diff area, rounded down:\n{text}"
     );
     assert!(
-        list_rows * 2 <= diff_area,
-        "the list takes at most half: {list_rows} of {diff_area}\n{text}"
+        list_rows * 3 <= diff_area,
+        "the list takes at most a third: {list_rows} of {diff_area}\n{text}"
     );
     assert!(
         bottom > title + 1,
