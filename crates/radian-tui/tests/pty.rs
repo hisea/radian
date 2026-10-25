@@ -259,6 +259,11 @@ fn wait_positive() -> Duration {
 /// wait *is* the assertion, so a longer window only makes every run slower.
 const WAIT_NEGATIVE: Duration = Duration::from_secs(2);
 
+/// Printed by the pty's shell after its trailing `stty -a`. The shell exits only after that, so a
+/// reader that waits for the marker knows the whole tty state was written (see
+/// [`Pty::wait_for_exit`]).
+const STTY_END: &str = "STTY-END";
+
 /// A deliberate latency bound: the test asserts that something arrives **fast**, so the wait is
 /// the measurement and stays short. `pty_attach_follow_shows_new_committed_events` pins the
 /// attach follow to "within a second" (the README hand-test note).
@@ -306,9 +311,9 @@ enum TestConfig<'a> {
 }
 
 impl Pty {
-    /// Spawns the bin under `sh -c '"$@"; echo EXITED:$?; stty -a'` so the same pty reports
-    /// the exit code and the tty state after the app exits. `Drop` kills the whole process
-    /// group (the shell and the app), never just the shell.
+    /// Spawns the bin under `sh -c '"$@"; echo EXITED:$?; stty -a; echo STTY-END'` so the same pty
+    /// reports the exit code and the tty state after the app exits. `Drop` kills the whole
+    /// process group (the shell and the app), never just the shell.
     fn spawn(args: &[&str], rows: u16, cols: u16) -> Self {
         Self::spawn_with_env(args, &[], rows, cols)
     }
@@ -389,7 +394,9 @@ impl Pty {
             .unwrap();
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.arg("-c");
-        cmd.arg(r#""$@"; echo "EXITED:$?"; stty -a"#);
+        cmd.arg(format!(
+            r#""$@"; echo "EXITED:$?"; stty -a; echo "{STTY_END}""#
+        ));
         cmd.arg("sh");
         for arg in argv {
             cmd.arg(arg);
@@ -544,13 +551,22 @@ impl Pty {
     }
 
     /// Waits without killing: on timeout the caller decides (the `Drop` impl still kills).
+    /// The wait is synchronized on [`STTY_END`], not on `try_wait` alone: the shell prints the
+    /// marker after `stty -a` and exits only then, so every byte of the tty state was written by
+    /// the time the child is gone. The reader thread may not have copied those bytes into `bytes`
+    /// yet, and one `pump` processes only what is there at that instant, so the callers' `EXITED:`
+    /// and `icanon` assertions would read a partial tail. A missing marker therefore **fails this
+    /// call** (`None`) instead of reporting the exit, and the marker wait spends the caller's
+    /// remaining `timeout` — an observed exit does not grant a fresh deadline.
     fn wait_for_exit(&mut self, timeout: Duration) -> Option<u32> {
         let deadline = Instant::now() + timeout;
         loop {
             self.pump();
             if let Ok(Some(status)) = self.child.try_wait() {
-                // Let the shell's trailing `stty -a` output arrive.
-                std::thread::sleep(Duration::from_millis(150));
+                if !self.wait_for_raw(STTY_END, deadline.saturating_duration_since(Instant::now()))
+                {
+                    return None;
+                }
                 self.pump();
                 return Some(status.exit_code());
             }
@@ -656,6 +672,44 @@ impl Pty {
     fn process_group(&self) -> Option<i32> {
         self.child.process_id().map(|pid| pid as i32)
     }
+}
+
+/// The exit wait is synchronized on [`STTY_END`], not on `try_wait` alone: when the reader has
+/// not copied the trailing `stty -a` yet, [`Pty::wait_for_exit`] must fail **at the wait** rather
+/// than report a successful exit over the partial buffer the callers' `EXITED:`/`icanon`
+/// assertions read. The child here is a shell that exits at once, and the buffer is cleared only
+/// after its whole output (marker included) was seen — exactly the state a reader delayed under
+/// load leaves behind, with nothing more to arrive.
+///
+/// Mutation: ignore `wait_for_raw`'s result → FAILED with `Some(0)` and no `STTY-END` in the
+/// buffer.
+#[test]
+fn pty_wait_for_exit_fails_when_the_stty_tail_has_not_arrived() {
+    let mut pty = Pty::spawn_argv(
+        &["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
+        &[],
+        TestConfig::Absent,
+        24,
+        80,
+    );
+    assert!(
+        pty.wait_for_raw(STTY_END, wait_positive()),
+        "the shell wrapper did not finish:\n{}",
+        pty.screen()
+    );
+    // The wrapper has exited: without job control its status is final once its last line is
+    // out. Wait for `try_wait` so the call below sees an exited child, as an early exit does.
+    let reaped = Instant::now() + wait_positive();
+    while pty.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < reaped, "the shell wrapper did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    pty.bytes.lock().unwrap().clear();
+    assert_eq!(
+        pty.wait_for_exit(Duration::from_millis(200)),
+        None,
+        "a missing `STTY-END` must fail the wait, not report the exit"
+    );
 }
 
 /// One tool call, then (for the next request) the given text.
