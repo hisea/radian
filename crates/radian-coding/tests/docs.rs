@@ -393,10 +393,26 @@ fn the_manual_names_the_image_limits_from_the_code() {
         "tools.md names the {} px scaling threshold",
         radian_coding::SCALE_NOTICE_SIDE
     );
-    // And the two error codes the image branch can return.
-    for code in ["image_too_large", "image_offset"] {
-        assert!(text.contains(code), "tools.md names `{code}`");
-    }
+    // And the error code the image branch can return.
+    assert!(
+        text.contains("image_too_large"),
+        "tools.md names `image_too_large`"
+    );
+    // A range is ignored for an image, and the manual says so instead of naming an error.
+    assert!(
+        text.contains("offset and limit ignored: an image is read whole"),
+        "tools.md names the ignore line"
+    );
+    // The `limit` minimum is conditional: it applies to text and directory reads, while an
+    // image ignores the value, so the manual never promises it unconditionally.
+    assert!(
+        text.contains("at least 1 for text and directory reads"),
+        "tools.md makes the `limit` minimum conditional"
+    );
+    assert!(
+        !text.contains("image_offset"),
+        "tools.md drops `image_offset`"
+    );
 }
 
 /// The hand-written table matches `docs/user/` on disk, including the pages in subdirectories.
