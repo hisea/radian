@@ -305,7 +305,7 @@ A `reverify` attempt is not a retry: it changes neither `retry_count` nor the li
 `start` also claims a `todo.retry_wait` task whose time has not come, without waiting for it (see [`start`](index.md#radian-arc-start-task)).
 
 Every attempt of a task runs in a worker session.
-With [`worker.rework_session`](files.md#configtoml) at `fresh` (the default) each attempt has a session of its own, `<task>-<attempt>`, and none is ever resumed; an attempt after the first gets the hand-off section (see [`start`](index.md#radian-arc-start-task)).
+With [`worker.rework_session`](files.md#configtoml) at `fresh` (the default) each attempt has a session of its own, `<task>-<attempt>`, and none is ever resumed; an attempt after the first gets the hand-off section (see [the worker](worker.md#the-session-and-the-brief)).
 With `resume` the session id is the task id: the first attempt that reaches the model creates it, and every later attempt, a retry or a rework, continues it.
 An attempt that failed before the model started (a missing credential, a worktree that could not be prepared) leaves no session, so the next attempt creates it.
 A bad `worker.exec_args` entry no longer gets that far: `start`, `run` and `confirm` refuse it before the claim.

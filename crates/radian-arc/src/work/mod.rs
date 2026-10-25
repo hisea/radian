@@ -95,6 +95,10 @@ pub struct Options {
     /// Extra `radian exec` arguments after `--` (the model route in tests: `--model`,
     /// `--base-url`).
     pub extra_args: Vec<String>,
+    /// Internal: the configured `[worker] command`, the program first and its arguments after
+    /// it (ADR 0048 decision 7). arc reads it at the claim and passes it here; unset runs
+    /// `radian exec`. Never set by a person; it is not in the manual.
+    pub command: Option<Vec<String>>,
     /// Internal: the attempt's stall limit in seconds; `0` means no limit. arc passes the
     /// task's `stall_timeout_secs`, else `[limits] stall_timeout_secs`. The wrapper enforces
     /// it, so the limit survives the `run` process that started it (ADR 0048 decision 7.8).
@@ -115,6 +119,42 @@ pub struct Options {
 const EXIT_ERROR: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 const EXIT_LOCKED: i32 = 4;
+
+/// The environment variables the wrapper adds for a command worker (ADR 0048 decision 7). One
+/// list for the wrapper and the manual's drift test. They are set with [`Command::env`] by
+/// name, so the source scan in `radian-host/tests/env_docs.rs` does not take them for inputs a
+/// person sets: they describe what the command receives, and the arc manual documents them.
+pub const WORKER_ENV: &[&str] = &[
+    "ARC_WORKTREE",
+    "ARC_TASK",
+    "ARC_ATTEMPT",
+    "ARC_SESSION",
+    "ARC_SESSION_START",
+    "ARC_GIT_DIR",
+    "ARC_GIT_COMMON_DIR",
+    "ARC_DENY_READ",
+    "ARC_STATE_DIR",
+];
+
+/// The worker a run starts: the test-only shell, the configured command, or `radian exec`
+/// (ADR 0048 decision 7). The test-only shell takes precedence, so every existing forwarding
+/// test keeps its shape.
+#[derive(Debug, Clone, Copy)]
+enum Worker<'a> {
+    Radian,
+    Command(&'a [String]),
+    Shell(&'a str),
+}
+
+fn worker_of(o: &Options) -> Worker<'_> {
+    if let Some(shell) = o.worker_command.as_deref() {
+        Worker::Shell(shell)
+    } else if let Some(command) = o.command.as_deref() {
+        Worker::Command(command)
+    } else {
+        Worker::Radian
+    }
+}
 
 /// The arc directory's entries the worker must not read (ADR 0048 decision 5): every entry
 /// except `worktrees/`, because the worker's own workspace lives there. The list is fixed, so
@@ -420,11 +460,39 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     notes.extend(copy_notes);
     let started_at = now();
     let deny = deny_paths(&s.arc);
+    // The command worker's own state, outside the worktree and kept across the task's
+    // attempts (ADR 0048 decision 7). It exists before the command starts.
+    let state_dir = s.arc.join("attempts").join(&o.task).join("state");
+    if matches!(worker_of(o), Worker::Command(_)) {
+        fs::create_dir_all(&state_dir).map_err(|error| {
+            Failure::error(format!("cannot create {}: {error}", state_dir.display()))
+        })?;
+    }
+    // What this attempt runs, for the attempt's own record (ADR 0048 decision 7).
+    let worker = match worker_of(o) {
+        Worker::Radian => json!({"kind": "radian"}),
+        Worker::Command(words) => json!({
+            "kind": "command",
+            "program": words.first().cloned().unwrap_or_default(),
+        }),
+        Worker::Shell(_) => json!({"kind": "command", "program": "sh"}),
+    };
     // The repository's git control files, as they are before the worker starts (ADR 0048
     // decision 7). The record stays in this process's memory: a worker can write the worktree
     // and, with a wider sandbox, the git directories, so no on-disk record can be trusted.
     let control = GitControl::record(&s.worktree, &s.clock)?;
-    let mut child = spawn_child(o, &s.worktree, &deny, &result_path, &stderr_path, &brief)?;
+    let mut child = spawn_child(
+        o,
+        &Spawn {
+            worktree: &s.worktree,
+            deny: &deny,
+            state_dir: &state_dir,
+            control: &control,
+            result_path: &result_path,
+            stderr_path: &stderr_path,
+            brief: &brief,
+        },
+    )?;
     let pid = child.id();
     CHILD_PID.store(pid as i32, Ordering::SeqCst);
     // A SIGTERM that arrived during the worktree setup is forwarded as soon as there is a
@@ -527,6 +595,9 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             "head_sha": head_sha,
             "started_at": started_at,
             "ended_at": ended_at,
+            // Which worker ran this attempt, so `show` and the arc TUI can tell a command
+            // worker from `radian exec` (ADR 0048 decision 7).
+            "worker": worker,
             // A line such as `worker-brief.md skipped: not UTF-8`; `show` prints it
             // (ADR 0048 decision 7). Nothing to report leaves an empty list.
             "notes": notes,
@@ -954,6 +1025,12 @@ fn validate_rest(o: &Options) -> Result<(), Failure> {
     // The session id becomes a file name in the worker's session directory, so it follows
     // the same rule `radian exec` applies to `--session-id` and `--resume`.
     radian_host::validate_session_id(&o.session).map_err(Failure::usage)?;
+    // The configured command is one program and its arguments; an empty list has no program.
+    if o.command.as_ref().is_some_and(Vec::is_empty) {
+        return Err(Failure::usage(
+            "the configured worker command is empty; its first element must be the program",
+        ));
+    }
     // The internal remote and main-branch names end up as git arguments, so keep them to
     // characters a ref name uses and refuse a leading `-` (an option in disguise).
     for (flag, value) in [("--remote", &o.remote), ("--main-branch", &o.main_branch)] {
@@ -2124,6 +2201,16 @@ enum SessionStart {
     Continue,
 }
 
+impl SessionStart {
+    /// The value a command worker receives in `ARC_SESSION_START`.
+    fn as_str(self) -> &'static str {
+        match self {
+            SessionStart::New => "new",
+            SessionStart::Continue => "resume",
+        }
+    }
+}
+
 /// What this attempt does with its session. A `resume`-mode later attempt continues the
 /// session only when its file exists: an earlier attempt that failed before the model started
 /// left none, and the next one then starts it. A session file alone never resumes, and a
@@ -2136,16 +2223,61 @@ fn session_start(resume: bool, exists: bool) -> SessionStart {
     }
 }
 
-fn spawn_child(
+/// The environment a command worker receives (ADR 0048 decision 7). A program that contains
+/// a `/` already arrives absolute (the claim resolves it); the worktree, the git directories
+/// and the state directory are made absolute here.
+fn worker_env(
     o: &Options,
     worktree: &Path,
     deny: &[PathBuf],
-    result_path: &Path,
-    stderr_path: &Path,
-    brief: &str,
-) -> Result<Child, Failure> {
-    let mut command = match &o.worker_command {
-        Some(shell) => {
+    state_dir: &Path,
+    control: &GitControl,
+    start: SessionStart,
+) -> Vec<(&'static str, String)> {
+    let absolute = |path: &Path| {
+        fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .display()
+            .to_string()
+    };
+    let deny: Vec<String> = deny.iter().map(|path| path.display().to_string()).collect();
+    vec![
+        ("ARC_WORKTREE", absolute(worktree)),
+        ("ARC_TASK", o.task.clone()),
+        ("ARC_ATTEMPT", format!("{}-{}", o.task, o.attempt)),
+        ("ARC_SESSION", o.session.clone()),
+        ("ARC_SESSION_START", start.as_str().to_owned()),
+        ("ARC_GIT_DIR", absolute(&control.git_dir)),
+        ("ARC_GIT_COMMON_DIR", absolute(&control.common)),
+        ("ARC_DENY_READ", deny.join(":")),
+        ("ARC_STATE_DIR", absolute(state_dir)),
+    ]
+}
+
+/// What one spawn needs: the paths of the attempt and the record of its git control files.
+struct Spawn<'a> {
+    worktree: &'a Path,
+    deny: &'a [PathBuf],
+    state_dir: &'a Path,
+    control: &'a GitControl,
+    result_path: &'a Path,
+    stderr_path: &'a Path,
+    brief: &'a str,
+}
+
+fn spawn_child(o: &Options, spawn: &Spawn<'_>) -> Result<Child, Failure> {
+    let Spawn {
+        worktree,
+        deny,
+        state_dir,
+        control,
+        result_path,
+        stderr_path,
+        brief,
+    } = *spawn;
+    let start = session_start(o.resume, session_exists(&o.session, &o.extra_args));
+    let mut command = match worker_of(o) {
+        Worker::Shell(shell) => {
             // Test-only (see [`Options::worker_command`]). `sh` starts in the wrapper's own
             // working directory and its background children stay in its process group, so
             // the group signal this module forwards can be observed.
@@ -2153,7 +2285,23 @@ fn spawn_child(
             command.arg("-c").arg(shell);
             command
         }
-        None => {
+        Worker::Command(words) => {
+            let Some((program, args)) = words.split_first() else {
+                return Err(Failure::usage(
+                    "the configured worker command is empty; its first element must be the \
+                     program",
+                ));
+            };
+            let mut command = Command::new(program);
+            command.args(args);
+            // The command works in the task's worktree, as `radian exec` does (decision 7).
+            command.current_dir(worktree);
+            for (name, value) in worker_env(o, worktree, deny, state_dir, control, start) {
+                command.env(name, value);
+            }
+            command
+        }
+        Worker::Radian => {
             let executable = std::env::current_exe().map_err(|error| {
                 Failure::error(format!("cannot find the current executable: {error}"))
             })?;
@@ -2162,7 +2310,7 @@ fn spawn_child(
             // `--session-id` and `--resume` are exclusive in `radian exec` (ADR 0022/0023). The
             // session is the one the claim chose: the task id with `resume`, `<task>-<attempt>`
             // with `fresh`. A `fresh` attempt is never resumed.
-            match session_start(o.resume, session_exists(&o.session, &o.extra_args)) {
+            match start {
                 SessionStart::Continue => {
                     command.arg("--resume").arg(&o.session);
                 }

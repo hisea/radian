@@ -635,10 +635,10 @@ fn one_pass(
     transitions: &mut Transitions,
     stop: Option<&AtomicBool>,
 ) -> Result<bool, Error> {
-    // Every pass that could claim a task checks the worker's command line first, so a
-    // rejected line refuses `run` before its first pass changes anything (ADR 0048
-    // decision 7).
-    crate::worker_args::check(&store.config()?.worker.exec_args)?;
+    // Every pass that could claim a task checks the worker's line first, so a rejected line or
+    // a `worker.command` program that does not resolve refuses `run` before its first pass
+    // changes anything (ADR 0048 decision 7).
+    crate::worker_args::check_config(&store.config()?, store.repo())?;
     let mut changed = false;
 
     // 1. Doing: apply a finished attempt, leave a live one alone.
@@ -1039,6 +1039,9 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
     let config = store.config()?;
     for (claim, task) in &claims {
         let spawned = crate::attempt::spawn_claim(store, claim, task, &config)?;
+        if let Some(warning) = &claim.no_cost_warning {
+            transitions.push(warning.clone());
+        }
         let mut child = spawned.child;
         std::thread::spawn(move || {
             let _ = child.wait();

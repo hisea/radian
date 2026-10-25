@@ -11,7 +11,7 @@ This build has the storage layer, the subcommands that read and write it: `init`
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and the loop.
 `radian arc serve` is the scheduling loop and `radian arc run` is one pass of it, and a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc/tui`](tui.md)).
 
-This page holds the `radian arc` commands; the scheduling loop is in [`arc/loop`](loop.md), the gate and its failures are in [`arc/gate`](gate.md), the lead's MCP server in [`arc/mcp`](mcp.md), the TUI in [`arc/tui`](tui.md), and the files arc keeps are in [`arc/files`](files.md).
+This page holds the `radian arc` commands; the scheduling loop is in [`arc/loop`](loop.md), the gate and its failures are in [`arc/gate`](gate.md), the lead's MCP server in [`arc/mcp`](mcp.md), the TUI in [`arc/tui`](tui.md), the worker in [`arc/worker`](worker.md), and the files arc keeps are in [`arc/files`](files.md).
 
 ## `radian arc`
 
@@ -114,6 +114,8 @@ Each plan's header line shows its id, `status`, `auto` level, `priority`, progre
 The progress total leaves out `failed.cancelled` tasks: one merged task and one cancelled follow-up read `1/1`, an all-cancelled plan `0/0`.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
 A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage) and what `reset-budget` sets back to `0`; its `total_cost_usd` is the same spend and is never reset.
+An attempt whose worker reported no cost (a [`worker.command`](files.md#configtoml) that writes no `cost` in its `Result`) adds nothing to either number.
+arc records that on the task as [`cost_unknown`](files.md#task-fields), and a task that carries it — or a plan with such a task — prints `unknown` instead of a number, even after a later attempt reports a cost.
 
 By default finished work is left out, so you see the work in progress:
 
@@ -140,8 +142,8 @@ When everything is hidden, that line is the whole output; nothing hidden means n
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
-The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `changed_outside_arc`, and `tasks`.
-Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `followup_pending`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
+The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `cost_unknown` (`true` when one of its tasks is), `changed_outside_arc`, and `tasks`.
+Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `followup_pending`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
 
 ## `radian arc show <ID> [--json]`
 
@@ -150,6 +152,7 @@ For a task it also prints the current attempt's notes as `attempt_note`, such as
 `show --json` carries them as `attempt_notes`, a list of strings (empty when there are none).
 
 A plan prints `cost_usd` and `total_cost_usd` beside its other fields: the first is the sum of its tasks' `cost_usd` and the number its budget compares, the second is the sum of their totals. Both are computed when the plan is read and are not stored in the plan file. A task prints both of its own numbers.
+A task whose attempt reported no cost prints `unknown` for both, and a plan with such a task prints `unknown` for both of its sums; `show --json` keeps the numbers it has and sets `cost_unknown` to `true`, so a script can tell an incomplete sum from a complete one. The state stays after a later attempt reports a cost; see [Another agent as the worker](worker.md#another-agent-as-the-worker).
 
 The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see [Plan and task files](files.md#plan-and-task-files)).
 `list --plan <id>` always reads the plan.
@@ -204,7 +207,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 
 It refuses with exit `3` when the id names both a plan and a task (see [Plan and task files](files.md#plan-and-task-files)), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
-- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `auto_rework`, `retry_count`, `followup_pending`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
+- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `followup_pending`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
 - a plan: `status`, `auto`, `priority`.
 
 A file that already matches the ledger is a no-op and prints so.
@@ -358,8 +361,10 @@ radian arc start <TASK>
 |---|---|---|
 | `<TASK>` | `ID` | The task id. Required. |
 
-Before it reconciles, claims or verifies anything, `start` parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args` (see the `worker.exec_args` row of [`config.toml`](files.md#configtoml)).
+Before it reconciles, claims or verifies anything, `start` checks the worker line (see the [`worker.exec_args` and `worker.command` rows](files.md#configtoml)).
+Without `[worker] command`, it parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args`.
 A line `radian exec` would reject, or one that repeats an argument the wrapper sets, refuses the command with exit `3` and the parser's own message, names `worker.exec_args`, claims nothing, and changes no file.
+With `[worker] command` set, arc checks instead that the program resolves (see [Another agent as the worker](worker.md#another-agent-as-the-worker)); a program that does not resolve refuses the command the same way, naming `worker.command` and the program.
 
 Before it claims anything it reconciles every task in `doing` (see [Reconcile](gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 
@@ -374,41 +379,8 @@ A claim is refused with exit `3` and changes nothing when:
 
 The claim is one transaction: the task's `attempt` goes up by one, `attempt_id` becomes `<task>-<attempt>`, a random `token` is written, and the task moves to `doing.starting`.
 arc then runs the hidden `radian arc work` wrapper as a child, with the brief on its stdin; the wrapper moves the task to `doing.running`.
-
-The worker runs in a session of its own: with [`worker.rework_session`](files.md#configtoml) at `fresh`, which is the default, each attempt gets the session `<task>-<attempt>`.
-With `resume` the task has one session instead, the task id, and every attempt after the first continues it.
-The claim records the attempt's session id in its `start.json` before the worker starts, and the wrapper records the same id in its `identity.json` and `execution.json`; `show` prints it as `session_id` from the first of those records that names one, so a running attempt's session is known from the claim on.
-A fresh attempt after the first cannot see the earlier conversation, so its stdin opens with a hand-off section, `## Where the previous attempt left off`: the newest earlier attempt's final report (cut at 8,000 characters, with a note when it is cut; a `reverify` attempt runs no worker and writes none, so the section walks back to the attempt before it and names it), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote main and the branch tip.
-The section says the full history is on the branch and to read the files rather than assume.
-The brief follows it, and a `merge-main` conflict section still comes first.
-When [`worker-brief.md`](files.md#worker-briefmd) exists, its content is the last section of every brief, so the order is: the `merge-main` conflict section, the hand-off, the task's brief, then the standing worker instructions.
-
-Before the worker starts, the wrapper runs the profile's `before_attempt` steps in the worktree (see the [`before_attempt` row](files.md#configtoml)); a first attempt's steps do nothing.
-`merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; a conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see [A conflict with main](gate.md#a-conflict-with-main)).
-A failed fetch or merge ends the attempt with git's message.
-
-The wrapper enforces the attempt's limits itself, so they hold even after the process that started the wrapper is gone:
-
-- no new line in `runs/<task>/attempts/<attempt id>/result.jsonl` for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the worker's process group;
-- `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the wrapper started does the same; this clock also bounds the wrapper's own git steps, so a fetch or a push still running at the limit is stopped the same way.
-- a fetch, a push or an `ls-remote` is also bounded by [`limits.git_remote_timeout_secs`](files.md#configtoml); whichever of it and the attempt's remaining wall time is shorter applies, and the call, with everything it started, is killed when it runs out.
-- after `[limits] cancel_grace_secs` the worker gets SIGKILL.
-
-A limit of `0` means no limit for that timer.
-The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json` (`stall` or `wall_time`), forwards SIGTERM, waits for the worker, and still writes its `AttemptFinished` record.
-`start` waits for the wrapper and applies the result; `radian arc run` does not wait (see `run`).
-
-### What the wrapper checks after the worker exits
-
-`Result.outcome` `completed` means that the run ended, not that the task is done (see the [result table](gate.md#failures-retries-and-the-budget)); the wrapper checks delivery itself before it pushes `work/<task>`, and it checks the repository's git control files before it runs any git command of its own after the worker. It requires that:
-
-- `work/<task>` exists, `head_sha` descends from `base_sha` and from the tip the attempt started on, and the worktree HEAD is on the branch;
-- the worktree has no uncommitted and no untracked files;
-- the task's own change is not empty, unless [`allow_noop`](files.md#task-fields) is set (see [An empty change](gate.md#an-empty-change));
-- the task's own change touches no path under `.radian/arc/`;
-- the repository's git control files are as the wrapper recorded them before the worker started: `<common dir>/config`, `<git dir>/config.worktree` (the worktree's own git dir), `<common dir>/config.worktree`, every file under `<common dir>/hooks/` and `<common dir>/info/`, and every `config` file and every file under `hooks/` in `<common dir>/modules/**` (submodules). A file the worker creates, removes or changes counts as a change: the wrapper compares content, not time. The record stays in the wrapper's memory, never in the worktree, and the check does not depend on the worker's sandbox. A control file larger than 1 MiB is not read whole: an attempt does not start while one of those paths is that large, and one the worker creates fails the attempt and is removed.
-
-A failed check fails the attempt with its reason in `runs/<task>/attempts/<attempt id>/attempt_finished.json`, which [`show`](#radian-arc-show-id-json) prints; nothing is pushed. The git control check also restores every recorded file to its recorded content and removes every file that was not there before, then fails the attempt with the reason `the worker changed git control files: <paths, comma-separated>`. A control file the wrapper cannot read back counts as a change and is restored the same way. When the restore itself fails, the reason carries both failures, and the wrapper runs no further git command for that attempt. The wrapper stops everything the worker left in its process group before it compares the files, so a background process the worker started cannot change one after the worker exits.
+The worker itself — the session it runs in, the brief it receives, the steps before an attempt, the limits the wrapper enforces, and the checks after it exits — is in [the worker](worker.md).
+When [`worker.command`](files.md#configtoml) is set, another agent runs in its place: see [Another agent as the worker](worker.md#another-agent-as-the-worker).
 
 When the attempt ends, arc applies the result in one transaction (the [result table](gate.md#failures-retries-and-the-budget)) and prints one line:
 
@@ -690,3 +662,4 @@ The gate stages `mutation` and `ci` are not built: verification refuses a profil
 
 - `cli` for every other `radian` command.
 - `environment` for the files radian reads, including this one.
+- `arc/worker` for the worker itself: its session, brief and limits, and another agent as the worker.

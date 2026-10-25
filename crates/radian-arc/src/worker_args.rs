@@ -1,23 +1,31 @@
-//! The worker's `radian exec` command line, checked before an attempt is claimed (ADR 0048
-//! decision 7).
+//! The worker's command line, checked before an attempt is claimed (ADR 0048 decision 7).
 //!
 //! `[worker] exec_args` used to reach a worker only after the attempt started: a wrong entry
 //! (`-m` for `--model`) made `radian exec` exit `2` at argument parsing, the attempt ended
 //! `terminated`, and every remaining attempt failed the same way. `radian arc start`,
-//! `radian arc run` and `radian arc confirm` now parse the line the worker would get — the
+//! `radian arc run` and `radian arc confirm` now check the worker line before they claim or
+//! change anything. Without `[worker] command`, they parse the line the worker would get — the
 //! wrapper's fixed arguments with placeholder values for the task and the worktree, then
 //! `exec_args`, then the prompt — with the parser the worker itself runs
-//! ([`radian_exec::Cli`]), before they claim or change anything. Parsing starts no session,
-//! calls no model and writes no file.
+//! ([`radian_exec::Cli`]). Parsing starts no session, calls no model and writes no file.
 //!
 //! A rejected line is refused (exit `3`) with the parser's own message and names
 //! `worker.exec_args`. So is a line that repeats an argument the wrapper owns
 //! ([`OWNED_EXEC_ARGS`]): the wrapper's value would otherwise be overridden, or the flag given
 //! twice.
+//!
+//! With `[worker] command` set, the `exec_args` parse is skipped and the program is checked
+//! instead: a program with a `/` is a path resolved from the repository root that must be an
+//! executable file, and any other name must be found on `PATH` as an executable file. A
+//! program that does not resolve is refused (exit `3`) with a message that names
+//! `worker.command` and the program.
+
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
 use crate::store::Error;
+use crate::store::config::Config;
 
 /// The `radian exec` arguments the wrapper fixes for every worker, with placeholder values
 /// for the session and the worktree. [`check`] parses these, then `[worker] exec_args`, then
@@ -58,6 +66,102 @@ fn line(exec_args: &[String]) -> Vec<String> {
         .chain(exec_args.iter().cloned())
         .chain(PROMPT_ARGS.iter().map(|arg| (*arg).to_owned()))
         .collect()
+}
+
+/// Checks the worker line of `config` before an attempt is claimed, a `run` pass starts a task,
+/// or a plan is confirmed (ADR 0048 decision 7).
+///
+/// # Errors
+///
+/// [`Error::Refused`] (exit `3`) when `[worker] command` is set and its program does not
+/// resolve, or when it is unset and `exec_args` repeats an argument the wrapper owns or the
+/// `radian exec` parser rejects the line. The message names `worker.command` or
+/// `worker.exec_args`. Nothing is claimed or written.
+pub fn check_config(config: &Config, repo: &Path) -> Result<(), Error> {
+    match &config.worker.command {
+        Some(command) => check_command(command, repo),
+        None => check(&config.worker.exec_args),
+    }
+}
+
+/// The program and arguments the wrapper runs, with a program that contains a `/` made
+/// absolute against the repository root: the wrapper's working directory is the worktree, so a
+/// relative path would otherwise name a different file there than the claim checked.
+pub fn resolved(command: &[String], repo: &Path) -> Vec<String> {
+    let mut command = command.to_vec();
+    if let Some(program) = command.first_mut()
+        && program.contains('/')
+        && !Path::new(program).is_absolute()
+    {
+        *program = repo.join(program.as_str()).display().to_string();
+    }
+    command
+}
+
+/// Checks that the command's program resolves (ADR 0048 decision 7).
+fn check_command(command: &[String], repo: &Path) -> Result<(), Error> {
+    let Some(program) = command.first() else {
+        return Err(Error::Refused(
+            "worker.command is empty; its first element must be the program".to_owned(),
+        ));
+    };
+    if program.contains('/') {
+        let path = Path::new(program);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            repo.join(path)
+        };
+        if !is_executable_file(&path) {
+            return Err(Error::Refused(format!(
+                "worker.command names `{program}`, which is not an executable file"
+            )));
+        }
+        return Ok(());
+    }
+    if find_on_path(program).is_none() {
+        return Err(Error::Refused(format!(
+            "worker.command names `{program}`, which is not on PATH as an executable file"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `path` is a regular file with an execute bit.
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// The first `PATH` entry that holds `name` as an executable file. An empty entry means the
+/// current directory, as `execvp` reads it.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let dir = if dir.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            dir
+        };
+        let candidate = dir.join(name);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Checks the worker's command line before an attempt is claimed, a `run` pass starts a task,
@@ -151,5 +255,91 @@ mod tests {
         check(&[]).expect("the default empty list is valid");
         check(&args(&["--model", "m", "--base-url", "http://127.0.0.1:9"]))
             .expect("a model route is valid");
+    }
+
+    #[cfg(unix)]
+    fn executable(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("the program");
+        let mut permissions = std::fs::metadata(&path).expect("the program").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("make it executable");
+        path
+    }
+
+    /// A configured program is checked where it will run: a path is an executable file, a bare
+    /// name is on `PATH` (ADR 0048 decision 7). Mutation: skip the check and a missing program
+    /// is accepted.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_program_must_resolve() {
+        let dir = crate::test_support::TempDir::named("radian-arc-worker-args");
+        let program = executable(&dir, "worker");
+        let config = |command: Vec<String>| {
+            let mut config = crate::store::config::Config::default();
+            config.worker.command = Some(command);
+            config
+        };
+        check_config(&config(vec![program.display().to_string()]), &dir)
+            .expect("an executable path passes");
+
+        let error = check_config(&config(vec!["/nonexistent/worker".to_owned()]), &dir)
+            .expect_err("a missing path is refused");
+        assert_eq!(error.exit(), Exit::State, "exit 3");
+        assert!(
+            error.message().contains("worker.command"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("/nonexistent/worker"),
+            "{}",
+            error.message()
+        );
+
+        // A regular file that is not executable is not a program.
+        let plain = dir.join("plain");
+        std::fs::write(&plain, "x").expect("the file");
+        assert!(check_config(&config(vec![plain.display().to_string()]), &dir).is_err());
+
+        // A bare name is found on the child's `PATH`; `sh` is always there.
+        check_config(&config(vec!["sh".to_owned()]), &dir).expect("a bare name on PATH passes");
+        let error = check_config(
+            &config(vec!["definitely-not-a-program-xyz".to_owned()]),
+            &dir,
+        )
+        .expect_err("a missing name is refused");
+        assert!(
+            error.message().contains("definitely-not-a-program-xyz"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("worker.command"),
+            "{}",
+            error.message()
+        );
+    }
+
+    /// A relative program with a `/` is made absolute from the repository root, because the
+    /// wrapper's working directory is the worktree (ADR 0048 decision 7).
+    #[test]
+    fn a_relative_program_path_is_resolved_from_the_repository_root() {
+        let repo = std::path::Path::new("/a/repo");
+        assert_eq!(
+            resolved(&["tools/worker".to_owned(), "--x".to_owned()], repo),
+            vec!["/a/repo/tools/worker".to_owned(), "--x".to_owned()]
+        );
+        assert_eq!(
+            resolved(&["/opt/worker".to_owned()], repo),
+            vec!["/opt/worker".to_owned()],
+            "an absolute path stays as it is"
+        );
+        assert_eq!(
+            resolved(&["worker".to_owned()], repo),
+            vec!["worker".to_owned()],
+            "a bare name is left for PATH"
+        );
     }
 }

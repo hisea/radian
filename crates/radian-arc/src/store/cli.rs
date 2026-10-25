@@ -320,7 +320,7 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
             view.plan.item.priority(),
             merged,
             total,
-            cost_text(view.total_cost_usd()),
+            plan_cost_text(view),
             view.plan.item.title,
             changed_marker(view.plan.changed_outside_arc)
         ));
@@ -441,12 +441,8 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 "max_wall_time_secs",
                 &optional_number(plan.item.max_wall_time_secs),
             );
-            field(&mut out, "cost_usd", &cost_text(view.cost_usd()));
-            field(
-                &mut out,
-                "total_cost_usd",
-                &cost_text(view.total_cost_usd()),
-            );
+            field(&mut out, "cost_usd", &plan_counted_cost_text(view));
+            field(&mut out, "total_cost_usd", &plan_cost_text(view));
             field(&mut out, "tasks", &joined(&plan.item.tasks));
             field(
                 &mut out,
@@ -488,11 +484,15 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 field(&mut out, "attempt_note", &note);
             }
             field(&mut out, "token", &optional_text(item.token.as_deref()));
-            field(&mut out, "cost_usd", &optional_cost(item.cost_usd));
+            field(&mut out, "cost_usd", &task_cost_text(item));
             field(
                 &mut out,
                 "total_cost_usd",
-                &optional_cost(item.total_cost()),
+                &if item.cost_is_unknown() {
+                    "unknown".to_owned()
+                } else {
+                    optional_cost(item.total_cost())
+                },
             );
             field(&mut out, "auto_rework", &item.auto_rework.to_string());
             field(&mut out, "retry_count", &item.retry_count.to_string());
@@ -672,6 +672,33 @@ fn optional_cost(value: Option<f64>) -> String {
     value.map(cost_text).unwrap_or_else(|| "-".to_owned())
 }
 
+/// A task's counted cost as `show` prints it: `unknown` when an attempt reported none, `-`
+/// when the task has not run, else the number.
+fn task_cost_text(task: &super::model::TaskFile) -> String {
+    if task.cost_is_unknown() {
+        return "unknown".to_owned();
+    }
+    optional_cost(task.cost_usd)
+}
+
+/// A plan's counted cost (the number its budget compares) as the text forms print it:
+/// `unknown` when one of its tasks ran without reporting a cost, else the summed total.
+fn plan_counted_cost_text(view: &PlanView) -> String {
+    if view.tasks.iter().any(|task| task.item.cost_is_unknown()) {
+        return "unknown".to_owned();
+    }
+    cost_text(view.cost_usd())
+}
+
+/// A plan's total as the text forms print it: `unknown` when one of its tasks ran without
+/// reporting a cost, else the summed total (ADR 0048 decisions 7 and 12).
+fn plan_cost_text(view: &PlanView) -> String {
+    if view.tasks.iter().any(|task| task.item.cost_is_unknown()) {
+        return "unknown".to_owned();
+    }
+    cost_text(view.total_cost_usd())
+}
+
 /// A summed cost as the text forms print it: up to six decimals, with the trailing zeros
 /// dropped. Costs are kept in micros of a US dollar, so the rounding hides the float's own
 /// noise and nothing a session reported.
@@ -702,6 +729,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "token": item.token,
         "cost_usd": item.cost_usd,
         "total_cost_usd": item.total_cost(),
+        "cost_unknown": item.cost_is_unknown(),
         "auto_rework": item.auto_rework,
         "retry_count": item.retry_count,
         "after": item.after,
@@ -738,6 +766,7 @@ fn plan_json(view: &PlanView, with_body: bool) -> serde_json::Value {
         "max_wall_time_secs": plan.max_wall_time_secs,
         "cost_usd": view.cost_usd(),
         "total_cost_usd": view.total_cost_usd(),
+        "cost_unknown": view.tasks.iter().any(|task| task.item.cost_is_unknown()),
         "tasks": view
             .tasks
             .iter()

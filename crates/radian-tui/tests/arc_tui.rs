@@ -3139,6 +3139,87 @@ fn the_plan_summary_columns_line_up_across_plans() {
     assert_eq!(cost_ends[1], cost_ends[2], "{cost_ends:?}");
 }
 
+/// A task whose attempt reported no cost is drawn as `unknown` — on its own row and in its
+/// plan's summary — and the plan never sums the other, known costs into a number that leaves
+/// it out (ADR 0048 decisions 7 and 12). Mutation: `plan_row` filters `None` costs out and
+/// sums the rest, and the row prints `—`.
+#[test]
+fn an_unknown_cost_is_drawn_as_unknown_and_never_summed() {
+    let scratch = Scratch::new("unknown-cost");
+    let store = store(&scratch.path("repo"));
+    let plan = add_plan(&store, "mixed", "the mixed plan");
+    let known = add_task(
+        &store,
+        &plan,
+        "known",
+        &[],
+        TaskState::Done,
+        "merged",
+        1,
+        Some(0.50),
+    );
+    let unknown = add_task(
+        &store,
+        &plan,
+        "unknown",
+        &[],
+        TaskState::Review,
+        "awaiting_human",
+        1,
+        None,
+    );
+    store
+        .change_task(&unknown, |task| {
+            task.cost_unknown = true;
+            Ok(())
+        })
+        .unwrap();
+    store
+        .change_plan(&plan, |plan| {
+            plan.status = "confirmed".to_owned();
+            plan.auto = "run".to_owned();
+            Ok(())
+        })
+        .unwrap();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    app.on_key(&key(KeyCode::Char('f')));
+    let text = screen(&mut app, 120, 30);
+    let rows: Vec<&str> = text.lines().collect();
+    let list_row = rows
+        .iter()
+        .position(|row| row.contains(&plan) && !row.contains('╭'))
+        .unwrap_or_else(|| panic!("no list row for {plan}:\n{text}"));
+    let summary = rows[list_row + 1];
+    assert!(
+        summary.contains("unknown"),
+        "the plan summary says unknown: {summary}\n{text}"
+    );
+    assert!(
+        !summary.contains("$0.50"),
+        "the plan summary is not the sum of the known tasks: {summary}"
+    );
+    let unknown_row = rows
+        .iter()
+        .find(|row| row.contains(&unknown))
+        .unwrap_or_else(|| panic!("no task row for {unknown}:\n{text}"));
+    assert!(
+        unknown_row.contains("unknown"),
+        "the task's own row says unknown: {unknown_row}"
+    );
+    assert!(
+        !unknown_row.contains('—'),
+        "the task's own row does not draw `—`: {unknown_row}"
+    );
+    let known_row = rows
+        .iter()
+        .find(|row| row.contains(&known))
+        .unwrap_or_else(|| panic!("no task row for {known}:\n{text}"));
+    assert!(
+        known_row.contains("$0.50"),
+        "a known cost keeps its number: {known_row}"
+    );
+}
+
 /// A cancelled plan and a draft plan draw `✕` / `◌`, carry no status prefix on the summary row,
 /// and the cancelled plan's id and summary are weak.
 #[test]

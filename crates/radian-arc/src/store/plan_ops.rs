@@ -99,10 +99,10 @@ pub fn confirm_dry_run(store: &Store, id: &str) -> Result<Confirmation, Error> {
 /// releases it without writing a plan or a task.
 fn confirm_with(store: &Store, id: &str, write: bool) -> Result<Confirmation, Error> {
     // A confirmed plan is the owner's promise that its tasks can run, and a confirmed task is
-    // the same promise for one task, so the worker's command line is checked first: a wrong
-    // `[worker] exec_args` entry leaves the plan a draft or the task proposed (ADR 0048
-    // decision 7).
-    crate::worker_args::check(&store.config()?.worker.exec_args)?;
+    // the same promise for one task, so the worker's line is checked first: a wrong
+    // `[worker] exec_args` entry, or a `[worker] command` program that does not resolve,
+    // leaves the plan a draft or the task proposed (ADR 0048 decision 7).
+    crate::worker_args::check_config(&store.config()?, store.repo())?;
     match store.resolve_kind(id)? {
         super::Kind::Plan => {
             if write {

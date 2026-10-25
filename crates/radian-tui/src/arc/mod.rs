@@ -448,13 +448,52 @@ pub enum Freshness {
     Unreadable,
 }
 
+/// One cost as a page draws it: the number a task or plan has spent, `unknown` when an
+/// attempt reported none (ADR 0048 decisions 7 and 12), or `—` when nothing has run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cost {
+    /// Nothing recorded: the task has not run.
+    None,
+    /// One of the task's attempts reported no cost, so its spend is incomplete.
+    Unknown,
+    Known(f64),
+}
+
+impl Cost {
+    /// The cost a task file records.
+    fn of(task: &TaskFile) -> Self {
+        if task.cost_is_unknown() {
+            Cost::Unknown
+        } else {
+            task.cost_usd.map_or(Cost::None, Cost::Known)
+        }
+    }
+
+    /// The cost a plan's tasks add up to: `unknown` when any one of them is unknown, `—` when
+    /// none has a cost, else the sum of the known ones.
+    fn total(tasks: &[Loaded<TaskFile>]) -> Self {
+        if tasks.iter().any(|task| task.item.cost_is_unknown()) {
+            return Cost::Unknown;
+        }
+        let mut sum = 0.0;
+        let mut any = false;
+        for task in tasks {
+            if let Some(cost) = task.item.cost_usd {
+                any = true;
+                sum += cost;
+            }
+        }
+        if any { Cost::Known(sum) } else { Cost::None }
+    }
+}
+
 /// One row of a plan's task list, whether drawn as the tree or as the flat list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskRow {
     pub id: String,
     pub phase: String,
     pub attempt: u32,
-    pub cost: Option<f64>,
+    pub cost: Cost,
     pub mark: Mark,
     /// For a `doing` task: whether its worker is alive, from the wrapper's heartbeat.
     pub freshness: Option<Freshness>,
@@ -475,7 +514,7 @@ pub struct PlanRow {
     pub status: String,
     pub priority: String,
     pub auto: String,
-    pub cost: Option<f64>,
+    pub cost: Cost,
     pub merged: usize,
     pub total: usize,
     pub mark: PlanMark,
@@ -487,7 +526,7 @@ pub struct TaskPage {
     pub id: String,
     pub title: String,
     pub phase: String,
-    pub cost: Option<f64>,
+    pub cost: Cost,
     pub plan: String,
     pub tab: TaskTab,
     /// The task file's body: the brief, rework sections included, without the hand-off a
@@ -539,7 +578,7 @@ impl TaskPage {
             id: task.id.clone(),
             title: task.title.clone(),
             phase: format!("{}.{}", task.state.as_str(), task.phase),
-            cost: task.cost_usd,
+            cost: Cost::of(task),
             plan: task.plan.clone(),
             // A task that has not run opens on its brief; the owner reads why it exists
             // before its (empty) conversation. A task with an attempt opens on the
@@ -1092,7 +1131,7 @@ impl ArcApp {
             let head_changed = page.head != task.head_sha;
             page.title = task.title.clone();
             page.phase = format!("{}.{}", task.state.as_str(), task.phase);
-            page.cost = task.cost_usd;
+            page.cost = Cost::of(&task);
             page.plan = task.plan.clone();
             page.brief = task.body.clone();
             page.head = task.head_sha.clone();
@@ -2747,18 +2786,12 @@ fn attempts_with_current(attempts: Vec<AttemptView>, attempt: u32) -> Vec<Attemp
 fn plan_row(view: &PlanView, tasks: Vec<TaskRow>) -> PlanRow {
     let (merged, total) = view.progress();
     let mark = plan_mark(view);
-    let costs: Vec<f64> = view
-        .tasks
-        .iter()
-        .filter_map(|task| task.item.cost_usd)
-        .collect();
-    let cost = (!costs.is_empty()).then(|| costs.iter().sum::<f64>());
     PlanRow {
         id: view.plan.item.id.clone(),
         status: view.plan.item.status.clone(),
         priority: view.plan.item.priority().to_owned(),
         auto: view.plan.item.auto.clone(),
-        cost,
+        cost: Cost::total(&view.tasks),
         merged,
         total,
         mark,
@@ -2899,7 +2932,7 @@ fn row(task: &TaskFile, connector: String, also_after: Vec<String>, waits: Vec<S
         id: task.id.clone(),
         phase: format!("{}.{}", task.state.as_str(), task.phase),
         attempt: task.attempt,
-        cost: task.cost_usd,
+        cost: Cost::of(task),
         mark: task_mark(task.state, &task.phase),
         freshness: None,
         connector,
@@ -2946,10 +2979,12 @@ pub fn is_diff_metadata(line: &str) -> bool {
         || line.starts_with("+++ ")
 }
 
-/// One cost, as the pages print it: `$1.23`, or `—` when nothing was recorded.
-pub fn format_cost(cost: Option<f64>) -> String {
+/// One cost, as the pages print it: `$1.23`, `unknown` when an attempt reported none, or `—`
+/// when nothing was recorded.
+pub fn format_cost(cost: Cost) -> String {
     match cost {
-        Some(cost) => format!("${cost:.2}"),
-        None => "—".to_owned(),
+        Cost::Known(cost) => format!("${cost:.2}"),
+        Cost::Unknown => "unknown".to_owned(),
+        Cost::None => "—".to_owned(),
     }
 }

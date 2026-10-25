@@ -28,6 +28,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// one, and the drift test checks that it does.
 pub const OPTIONAL_KEYS: &[&str] = &[
     "limits.max_cost_usd",
+    "worker.command",
     "gate.review.exec_args",
     "gate.review.prompt_file",
     "gate.review.first.exec_args",
@@ -201,8 +202,13 @@ impl<'de> Deserialize<'de> for ReworkSession {
 #[serde(deny_unknown_fields, default)]
 pub struct Worker {
     /// Extra `radian exec` arguments, after the wrapper's fixed ones. Empty: the worker uses
-    /// the host's normal model configuration.
+    /// the host's normal model configuration. It belongs to the `radian exec` worker line
+    /// only: a file that sets it together with [`Worker::command`] is refused.
     pub exec_args: Vec<String>,
+    /// The program and its arguments of a worker that is not `radian exec` (ADR 0048
+    /// decision 7): the first element is the program, the rest are its arguments, and no
+    /// shell is involved. `None` (the default) keeps `radian exec`. An empty array is refused.
+    pub command: Option<Vec<String>>,
     /// Whether a later attempt of a task gets a session of its own (`fresh`, the default) or
     /// continues the task's one session (`resume`).
     pub rework_session: ReworkSession,
@@ -284,6 +290,7 @@ max_gate_deaths = 2           # 0 stops at the first gate death
 [worker]
 exec_args = []                 # extra `radian exec` arguments for the worker
 rework_session = "fresh"       # `fresh`: a session per attempt; `resume`: the task's one session
+# command = ["codex", "exec"]  # not set: the worker is `radian exec`; do not combine it with exec_args
 
 [ids]
 plan_prefix = "PL"             # 1 to 4 uppercase letters; the first letters of a new plan id
@@ -319,6 +326,7 @@ key_commands = []             # what the integration stage runs on the merge can
 /// both kinds) are errors that name the offender.
 pub fn parse(text: &str) -> Result<Config, String> {
     check_review_shape(text)?;
+    check_worker_shape(text)?;
     let config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
     if config.schema_version != SCHEMA_VERSION {
         return Err(format!(
@@ -330,6 +338,23 @@ pub fn parse(text: &str) -> Result<Config, String> {
         return Err(
             "`limits.git_remote_timeout_secs` is 0; it must be 1 second or more".to_owned(),
         );
+    }
+    // A command worker is one program and its arguments, and `exec_args` describes the other
+    // worker line. Both set is ambiguous, so the file is refused by both names.
+    if let Some(command) = &config.worker.command {
+        if command.is_empty() {
+            return Err(
+                "`worker.command` is empty; its first element must be the program".to_owned(),
+            );
+        }
+        if !config.worker.exec_args.is_empty() {
+            return Err(format!(
+                "`worker.command` and `worker.exec_args` are both set; `worker.exec_args` belongs \
+                 to the `radian exec` worker line only, so set one or the other (the command is \
+                 `{}`)",
+                command[0]
+            ));
+        }
     }
     // One validation for every profile: `Profile::validate` reads the gate's one closed
     // stage list, so the parser cannot drift from it.
@@ -398,6 +423,29 @@ fn check_exec_args_shape(review: &toml::Value, key: &str) -> Result<(), String> 
             "`{key}` must be an array of strings (the `radian exec` arguments of the review \
              session)"
         ));
+    }
+    Ok(())
+}
+
+/// `worker.command` must be an array of strings before the TOML deserializer reports a
+/// position without the key. A non-array value is refused by name.
+fn check_worker_shape(text: &str) -> Result<(), String> {
+    let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
+    let Some(command) = document
+        .get("worker")
+        .and_then(|worker| worker.get("command"))
+    else {
+        return Ok(());
+    };
+    if !command
+        .as_array()
+        .is_some_and(|items| items.iter().all(toml::Value::is_str))
+    {
+        return Err(
+            "`worker.command` must be an array of strings (the program first, then its \
+             arguments)"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -689,5 +737,61 @@ mod tests {
             );
         }
         assert_eq!(ReworkSession::parse("sometimes"), None);
+    }
+
+    /// `worker.command` is optional: unset keeps `radian exec`, and a set array is the program
+    /// first and its arguments after it (ADR 0048 decisions 7 and 15).
+    #[test]
+    fn the_worker_command_is_an_optional_array_with_the_program_first() {
+        assert_eq!(Worker::default().command, None, "unset by default");
+        assert!(
+            OPTIONAL_KEYS.contains(&"worker.command"),
+            "the manual's table names it as not set"
+        );
+        let text = default_text("main");
+        assert_eq!(
+            parse(&text)
+                .expect("the default text parses")
+                .worker
+                .command,
+            None,
+            "a commented example is not a value"
+        );
+        let configured = parse(
+            "schema_version = 1\n[worker]\ncommand = [\"/usr/bin/codex\", \"exec\", \"--json\"]\n",
+        )
+        .expect("a command parses");
+        assert_eq!(
+            configured.worker.command,
+            Some(vec![
+                "/usr/bin/codex".to_owned(),
+                "exec".to_owned(),
+                "--json".to_owned()
+            ])
+        );
+    }
+
+    /// An empty command has no program, and a command beside a non-empty `exec_args` is
+    /// ambiguous: both are refused by the key they name (ADR 0048 decision 15).
+    #[test]
+    fn an_empty_command_or_one_with_exec_args_is_refused_by_name() {
+        let empty = parse("schema_version = 1\n[worker]\ncommand = []\n")
+            .expect_err("an empty command must fail");
+        assert!(empty.contains("worker.command"), "{empty}");
+        assert!(empty.contains("empty"), "{empty}");
+
+        let both = parse(
+            "schema_version = 1\n[worker]\ncommand = [\"/usr/bin/codex\"]\nexec_args = \
+             [\"--model\", \"m\"]\n",
+        )
+        .expect_err("both keys must fail");
+        assert!(both.contains("worker.command"), "{both}");
+        assert!(both.contains("worker.exec_args"), "{both}");
+        assert!(both.contains("/usr/bin/codex"), "{both}");
+
+        let shape = parse("schema_version = 1\n[worker]\ncommand = \"/usr/bin/codex\"\n")
+            .expect_err("a string is not an array");
+        assert!(shape.contains("worker.command"), "{shape}");
+        assert!(shape.contains("array of strings"), "{shape}");
     }
 }
