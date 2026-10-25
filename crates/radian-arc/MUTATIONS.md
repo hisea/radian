@@ -862,3 +862,23 @@ with `cp`, which `cmp` found identical.
 | TK0104-M3 | drop `crates/radian-tui/src/arc/` from `ARC_CODE_PREFIXES` | `run::tests::arc_code_is_the_three_path_prefixes` (`crates/radian-tui/src/arc/render.rs is arc code`) | ✅ failed |
 
 3/3 caught.
+
+## TK0107: the channel sends the owner's confirm, reject, plan confirm and pause (2026-10-25, branch `work/TK0107-channel-owner-actions`)
+
+ADR 0048 decision 11: `radian arc mcp --claude-experimental` sends a task event for the owner's
+confirm (`todo.proposed` -> `todo.ready`), for a move into `todo.ready` out of `review.*` (the
+lead's `add_rework`; the owner's reject is the `review.rework_pending` event and carries the note),
+and a plan event for `status` `draft` -> `confirmed` and for every `paused` change (`paused` is
+`auto` `off`). Each mutation was applied by hand to the committed
+`crates/radian-arc/src/mcp/mod.rs` at `f3f5ddb7`, `radian` was rebuilt for every run because the
+integration test drives the real binary, the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_mcp -E '<the test below>'`,
+and the file was restored from `.radian/mut/mcp.mod.rs.bak` with `cp`, which `cmp` found
+identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0107-M1 | `todo.proposed` is dropped from `CHANNEL_READY_FROM`, so the owner's confirm sends nothing | `arc_mcp::the_channel_reports_the_owner_confirm_and_the_rework_into_ready` (the confirm's event never arrives; `next_event` times out after 15 s) | ✅ failed |
+| TK0107-M2 | a plan event is sent when `priority` changes (the snapshot records it and `plan_transitions` emits an event for it) | `arc_mcp::the_channel_reports_the_plan_confirm_and_pause_and_stays_silent_for_the_rest` (the quiet wait receives `PL0001-owner-plan status P3 -> P1`) | ✅ failed |
+
+2/2 caught.
