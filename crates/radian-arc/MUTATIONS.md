@@ -1103,3 +1103,21 @@ radian-tui --bin radian`), and the file was restored from `.radian/mut/work.rs.o
 | TK0158-M4 | `GitControl::check` returns `Unchanged` when the scan has an unreadable path, so the restore is skipped | `work::an_unreadable_control_file_is_restored_and_fails_the_attempt`, `work::an_unreadable_hooks_directory_reports_both_reasons` | ✅ 2 failed |
 
 2/2 caught.
+
+## TK0159: a configured command as the worker (2026-10-25, branch `work/TK0159-worker-command`)
+
+ADR 0048 decisions 7, 12 and 15: `[worker] command` runs a program instead of `radian exec`,
+the claim checks that its program resolves, an attempt whose `Result` carries no `cost` adds
+nothing and cannot reach a budget, and `ARC_SESSION_START` always says which session the
+command gets. Each mutation was applied by hand to the named file, the named tests ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox ...` (after `cargo build -p
+radian-tui --bin radian`, because the integration tests run the binary), and the file was
+restored from `.radian/mutation/<file>.orig` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0159-M1 | `worker_args::check_config` skips the program check for `worker.command` (`Some(_) => Ok(())`) | `worker_args::tests::a_command_program_must_resolve`, `command_worker::a_missing_program_refuses_the_claim_by_name`, `command_worker::a_non_executable_program_refuses_the_claim` | ✅ 3 failed |
+| TK0159-M2 | `attempt_ops::attempt_cost` counts an unknown cost as known (`known: true`) | `command_worker::an_unknown_cost_does_not_stop_on_a_zero_budget` (the task paused in `todo.paused_budget` instead of retrying) | ✅ failed |
+| TK0159-M3 | `work::worker_env` drops `ARC_SESSION_START` on a `resume` attempt | `command_worker::the_command_receives_every_arc_variable_and_its_state_survives` (attempt 2's value is empty) | ✅ failed |
+
+3/3 caught.

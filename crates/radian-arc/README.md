@@ -108,11 +108,14 @@ setup, naming `radian arc init`; with setup it opens the TUI that lives in `radi
 ## Attempts
 
 `radian arc start <task>` runs one task and waits; `radian arc run` is the scheduling loop and
-uses the same attempt path. Before `start`, each `run` pass and `confirm` act, `worker_args::check`
-parses the worker's command line — the wrapper's fixed arguments with placeholder values plus
-`[worker] exec_args` — with `radian-exec`'s own parser, and refuses (exit 3) a line that does not
-parse or that repeats an argument the wrapper sets (`worker_args::OWNED_EXEC_ARGS`, the closed list
-the manual's drift test reads). Nothing is claimed, started or written by the check.
+uses the same attempt path. Before `start`, each `run` pass and `confirm` act, `worker_args::check_config`
+checks the worker line. Without `[worker] command` it parses the `radian exec` command line —
+the wrapper's fixed arguments with placeholder values plus `[worker] exec_args` — with
+`radian-exec`'s own parser, and refuses (exit 3) a line that does not parse or that repeats an
+argument the wrapper sets (`worker_args::OWNED_EXEC_ARGS`, the closed list the manual's drift
+test reads). With `[worker] command` set it skips that parse and checks that the program
+resolves instead: a path with a `/` must be an executable file and a bare name must be on
+`PATH`. Nothing is claimed, started or written by the check.
 
 `start` reconciles `doing`, releases a due retry, and claims the
 task in one transaction (`todo.ready` or `todo.retry_wait` → `doing.starting`, `attempt` + 1,
@@ -123,8 +126,11 @@ is not confirmed, an `after` task is not done, or `[limits] concurrency` tasks a
 
 It then runs the current executable as `arc work --task … --attempt … --token … --session …
 --remote … --main-branch … --stall-timeout-secs … --max-wall-time-secs …
---cancel-grace-secs … [--resume] [--allow-noop] -- <[worker] exec_args>`, with the task body
-on stdin, and moves the task to `doing.running`. The claim picks the session from
+--cancel-grace-secs … [--resume] [--allow-noop] [--command <JSON>] -- <[worker] exec_args>`,
+with the task body on stdin, and moves the task to `doing.running`. `--command` carries
+`[worker] command` as one JSON array (the program first); the wrapper then runs that program
+instead of `radian exec`, with the same brief, limits and delivery checks and the `ARC_*`
+environment of ADR 0048 decision 7. The claim picks the session from
 `[worker] rework_session`: `<task>-<attempt>` with `fresh` (the default), the task id with
 `resume`, and only the latter sets `--resume`. The wrapper, not the caller, enforces the
 attempt's limits: no growth
