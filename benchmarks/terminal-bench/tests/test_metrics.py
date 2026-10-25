@@ -260,7 +260,7 @@ class AtifTest(unittest.TestCase):
 
 
 class BoundedReadTest(unittest.TestCase):
-    """The jobs directory is input: no trial file is ever read whole."""
+    """The jobs directory is input: a journal is streamed, a JSON file is capped."""
 
     def test_trial_files_are_never_read_whole(self):
         def refuse(*args, **kwargs):
@@ -277,21 +277,6 @@ class BoundedReadTest(unittest.TestCase):
             self.assertIsNone(metrics._read_json(path, limit=16))
             self.assertEqual(metrics._read_trajectory(path, limit=16), {})
 
-    def test_only_json_files_are_bounded_by_size(self):
-        """A journal has a per-line cap, never a total-size cap."""
-        with tempfile.TemporaryDirectory() as tmp:
-            sessions = Path(tmp)
-            journal = sessions / "trial.jsonl"
-            line = '{"event":"ModelUsageRecorded","data":{"usage":{"output":10}}}\n'
-            journal.write_text(line * 4, encoding="utf-8")
-            with mock.patch.object(metrics, "MAX_JSON_BYTES", len(line) + 1):
-                # The same bytes over the JSON cap are not a JSON file...
-                self.assertIsNone(metrics._read_json(journal))
-                # ...but the journal path still reads every record in them.
-                self.assertEqual(
-                    metrics._journal_metrics(sessions)["output_tokens"], 40
-                )
-
     def test_a_long_line_is_skipped_without_being_read(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "journal.jsonl"
@@ -306,6 +291,46 @@ class BoundedReadTest(unittest.TestCase):
             self.assertEqual(
                 list(metrics._iter_lines(path)), ['{"seq":1}\n', '{"seq":2']
             )
+
+
+def read_bound_docs():
+    """The prose describing the read bounds, whitespace-normalized."""
+    readme = (Path(metrics.__file__).resolve().parent / "README.md").read_text(
+        encoding="utf-8"
+    )
+    return {
+        "benchmarks/terminal-bench/README.md": " ".join(readme.split()),
+        "metrics.py module docstring": " ".join((metrics.__doc__ or "").split()),
+    }
+
+
+class ReadBoundDocsTest(unittest.TestCase):
+    """The prose says which files are streamed and which are read whole."""
+
+    def test_no_document_claims_that_no_trial_file_is_read_whole(self):
+        # `_read_json` reads a result.json or trajectory.json whole up to the
+        # cap, so a blanket "nothing is read whole" contradicts the same text.
+        false_claims = (
+            "no trial file is read whole",
+            "no trial file is ever read whole",
+            "no trial file is loaded whole",
+            "no trial file is read in full",
+            "a trial file is never read whole",
+            "a trial file is never read in full",
+        )
+        for name, prose in read_bound_docs().items():
+            for claim in false_claims:
+                with self.subTest(doc=name, claim=claim):
+                    self.assertNotIn(claim, prose.lower())
+
+    def test_each_document_names_both_bounds_and_both_read_styles(self):
+        for name, prose in read_bound_docs().items():
+            with self.subTest(doc=name):
+                self.assertIn("MAX_LINE_CHARS", prose)
+                self.assertIn("MAX_JSON_BYTES", prose)
+                # Journals are streamed; the two JSON inputs are read whole.
+                self.assertIn("streamed", prose)
+                self.assertIn("read whole", prose)
 
 
 class ClassificationTest(unittest.TestCase):

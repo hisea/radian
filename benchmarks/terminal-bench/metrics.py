@@ -13,11 +13,11 @@ A trial whose exception is ``CancelledError`` is excluded from every total and
 counted separately. The common-task section keeps only tasks for which every
 agent has at least one finished (not timed-out, not excluded) trial.
 
-A job can hold a multi-GB journal, so no trial file is read whole: a journal or
-stdout file is streamed line by line, under a per-line cap of ``MAX_LINE_CHARS``
-(an over-long line is drained and skipped, and reading continues), with no limit
-on the file's total size. A JSON file (``result.json``, ``trajectory.json``) is
-read whole, and only when it is at most ``MAX_JSON_BYTES``; an over-limit
+A job can hold a multi-GB journal, so only the journal and stdout files are
+streamed: line by line, under a per-line cap of ``MAX_LINE_CHARS`` (an
+over-long line is drained and skipped, and reading continues), with no limit on
+the file's total size. ``result.json`` and ``trajectory.json`` are summaries and
+are read whole, but only when each is at most ``MAX_JSON_BYTES``; an over-limit
 trajectory is treated as unreadable, and its trial keeps the facts from
 ``result.json`` only.
 
