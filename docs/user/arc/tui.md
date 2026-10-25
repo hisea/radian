@@ -10,7 +10,7 @@ This page covers the TUI; the `radian arc` commands are in [`arc`](index.md), th
 
 `b` opens the board from any page, the task page included; on the board it goes back to the plans page. Outside the task page `Tab` keeps its page meaning: on the plans page it opens the selected task's page, on the board the selected card's, and on the merge page it closes it, unless a command's log is open (`Esc` closes that first). On the task page `Tab`/`Shift-Tab` cycle that page's own four tabs instead; there `m` opens the merge page. `Esc` goes back one level from whatever is innermost open, and never quits; `q` quits from everywhere but the reject note (see [Leaving and going back](#leaving-and-going-back)).
 
-The theme is the radian TUI's, from the same config file: `tui.theme`, a theme file, `[tui.colors]`, `NO_COLOR` and truecolor detection apply here too ([themes](themes.md#choosing-a-theme)). It is read when the TUI opens, so a change made while it is open shows the next time you open it, and a theme or config problem is one line in the footer with the theme the load fell back to.
+The theme is the radian TUI's, from the same config file: `tui.theme`, a theme file, `[tui.colors]`, `NO_COLOR` and truecolor detection apply here too ([themes](../themes.md#choosing-a-theme)). It is read when the TUI opens, so a change made while it is open shows the next time you open it, and a theme or config problem is one line in the footer with the theme the load fell back to.
 
 ## The loop
 

@@ -422,6 +422,59 @@ fn the_table_matches_docs_user_on_disk() {
     }
 }
 
+/// Every relative link in a manual page names a file that exists, resolved from the page
+/// that carries it: `themes.md` means `docs/user/arc/themes.md` on an arc page and
+/// `docs/user/themes.md` on a top-level one, so an arc page reaches the theme page as
+/// `../themes.md`. A target with no `.md` is not a page link: the manual shows the footer's
+/// inline-format syntax `[text](style)`.
+#[test]
+fn every_relative_link_in_the_manual_resolves() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = manifest.join("../../docs/user");
+    let mut pages: Vec<(String, String)> = Vec::new();
+    collect_pages(&dir, &dir, &mut pages);
+    let mut broken: Vec<String> = Vec::new();
+    for (name, text) in &pages {
+        let from = std::path::Path::new(name)
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        for (index, line) in text.lines().enumerate() {
+            for target in link_targets(line) {
+                let path = target.split('#').next().unwrap_or_default();
+                if path.is_empty() || path.contains("://") || !path.ends_with(".md") {
+                    continue;
+                }
+                if !dir.join(&from).join(path).is_file() {
+                    broken.push(format!(
+                        "docs/user/{name}:{} links `{target}`, which is not docs/user/{from}/{path}",
+                        index + 1,
+                        from = from.display()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "manual links do not resolve:\n{}",
+        broken.join("\n")
+    );
+}
+
+/// Every `](...)` target on one line of Markdown, in order.
+fn link_targets(line: &str) -> Vec<&str> {
+    let mut targets = Vec::new();
+    let mut rest = line;
+    while let Some(start) = rest.find("](") {
+        let after = &rest[start + 2..];
+        let end = after.find(')').unwrap_or(after.len());
+        targets.push(&after[..end]);
+        rest = &after[end..];
+    }
+    targets
+}
+
 /// Every `*.md` page under `dir`, named by its path relative to `base` with `/` separators.
 fn collect_pages(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<(String, String)>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
