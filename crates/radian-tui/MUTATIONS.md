@@ -3121,3 +3121,20 @@ mutation was applied by hand to `crates/radian-tui/src/render.rs`, backed up und
 | TK0117-M1 | the attachment row drops its prefix again: `Line::from(Span::styled(image.placeholder(), …))` with no `composer_prefix` | ✅ 2 failed | `render::a_composer_attachment_starts_in_the_text_column` (`Lines: the attachment row starts in the text column`; the box case is the same assertion after it); `render::a_composer_attachment_wider_than_the_input_is_cut_with_an_ellipsis` (`the ellipsis sits in the last cell`) |
 
 1/1 caught.
+
+## TK0119: an image's run follows the transcript area's height (2026-10-25, branch `work/TK0119-image-height-follows-screen`)
+
+An image used to occupy a fixed 12-row run (`IMAGE_HEIGHT_ROWS`). Its height is now half the
+transcript area's height, rounded down and clamped to 12..=40 (`image_height_rows` in
+`crates/radian-tui/src/media.rs`); the area height reaches every layout path (count, drawing,
+selection, find) as a parameter beside the width, and the layout cache key holds it. The
+mutations were applied by hand, backed up under `.radian/media.rs.bak` and
+`.radian/render.rs.bak`, and restored from those copies (never `git checkout`); the tests ran
+with `cargo nextest run -p radian-tui --locked --profile sandbox --lib --test image_render`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0119-M1 | drop the maximum clamp: `image_height_rows` is `half.max(IMAGE_MIN_ROWS)`, so a 100-row area reserves 50 | ✅ 4 failed | `media::tests::the_image_height_is_half_the_transcript_area` (`capped at the maximum`: 100 rows → 50); also `image_render::the_run_height_follows_the_transcript_area` (`transcript area of 100 rows`), `image_render::a_resize_recomputes_the_run_and_keeps_scrolling_exact`, and `media::tests::a_resize_recomputes_the_run_without_decoding_again` |
+| TK0119-M2 | `draw` lays out at the whole terminal height (`let height = area.height as usize`) instead of the transcript area's `chunks[0].height` | ✅ 1 failed | `image_render::the_run_follows_the_transcript_area_not_the_whole_terminal` (`the frame measured at the transcript area's height`) |
+
+2/2 caught.

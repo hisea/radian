@@ -20,6 +20,10 @@ fn ctrl(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
+/// The transcript area's height these fixtures are laid out at (ADR 0028 R10: it decides an
+/// image run's rows; the fixtures carry no images).
+const HEIGHT: usize = 24;
+
 fn modes(reasoning: ReasoningMode) -> DisplayModes {
     DisplayModes {
         reasoning,
@@ -259,6 +263,7 @@ fn a_selection_copies_the_source_it_covers() {
         &app.session.entries,
         modes(ReasoningMode::Expanded),
         60,
+        HEIGHT,
         0,
         2,
     )
@@ -267,6 +272,7 @@ fn a_selection_copies_the_source_it_covers() {
         &app.session.entries,
         modes(ReasoningMode::Expanded),
         60,
+        HEIGHT,
         0,
         9,
     )
@@ -291,6 +297,7 @@ fn find_matches_the_displayed_text() {
         &app.session.entries,
         modes(ReasoningMode::Expanded),
         60,
+        HEIGHT,
         "bold",
     );
     assert_eq!(matches.len(), 1, "the displayed word matches");
@@ -298,6 +305,7 @@ fn find_matches_the_displayed_text() {
         &app.session.entries,
         modes(ReasoningMode::Expanded),
         60,
+        HEIGHT,
         "**bold**",
     );
     assert!(matches.is_empty(), "the markup is not displayed");
@@ -314,8 +322,15 @@ fn line_count_matches_the_layout() {
     let entry = &app.session.entries[0];
     let blocks = blocks::parse_blocks(entry.text.as_str());
     for width in [60usize, 20] {
-        let count = blocks::line_count(entry, modes(ReasoningMode::Expanded), width);
-        let laid_out = blocks::layout(entry, &blocks, modes(ReasoningMode::Expanded), width).len();
+        let count = blocks::line_count(entry, modes(ReasoningMode::Expanded), width, HEIGHT);
+        let laid_out = blocks::layout(
+            entry,
+            &blocks,
+            modes(ReasoningMode::Expanded),
+            width,
+            HEIGHT,
+        )
+        .len();
         assert_eq!(count, laid_out, "width {width}");
     }
 }
@@ -354,15 +369,21 @@ fn every_cell_maps_to_its_source_offset() {
             assistant(&mut app, body);
             let modes = modes(ReasoningMode::Expanded);
             let blocks = blocks::parse_blocks(body);
-            let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
+            let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width, HEIGHT);
             let cells: usize = lines.iter().map(|line| line.chars.len()).sum();
             for cell in 0..cells {
                 let (line_index, column) = cell_of(&lines, cell).expect("a cell");
                 // `layout` is body-relative; `locate` takes screen columns (the assistant
                 // prefix is two cells).
-                let hit =
-                    select::locate_hit(&app.session.entries, modes, width, line_index, column + 2)
-                        .expect("an anchor");
+                let hit = select::locate_hit(
+                    &app.session.entries,
+                    modes,
+                    width,
+                    24,
+                    line_index,
+                    column + 2,
+                )
+                .expect("an anchor");
                 match lines[line_index].chars[column] {
                     Some(offset) => {
                         assert_eq!(
@@ -395,14 +416,16 @@ fn a_selection_across_a_soft_wrap_keeps_the_source_space() {
     app.set_transcript_width(20);
     let modes = modes(ReasoningMode::Expanded);
     let blocks = blocks::parse_blocks(body);
-    let lines = blocks::layout(&app.session.entries[0], &blocks, modes, 20);
+    let lines = blocks::layout(&app.session.entries[0], &blocks, modes, 20, HEIGHT);
     assert!(lines.len() > 1, "the paragraph wraps: {lines:?}");
     // From 'b' in "beta" to 'g' in "gamma" (display positions 6..11).
     let (sl, sc) = cell_of(&lines, 6).expect("start cell");
     let (el, ec) = cell_of(&lines, 11).expect("end cell");
-    let anchor = select::locate(&app.session.entries, modes, 20, sl, sc + 2).expect("anchor");
+    let anchor =
+        select::locate(&app.session.entries, modes, 20, HEIGHT, sl, sc + 2).expect("anchor");
     // The head is the cell after 'g': the copy then covers `beta gamma`.
-    let head = select::locate(&app.session.entries, modes, 20, el, ec + 1 + 2).expect("head");
+    let head =
+        select::locate(&app.session.entries, modes, 20, HEIGHT, el, ec + 1 + 2).expect("head");
     assert_eq!(anchor.offset, 6, "'b' is byte 6 in the source");
     assert_eq!(head.offset, 12, "the 'a' after 'g' is byte 12");
     let copied = select::logical_text(&app.session.entries, &select::Selection { anchor, head });
@@ -440,8 +463,8 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
     let _ = render(&mut app, width as u16, 12);
     let modes = app.display_modes();
     let search = blocks::search_modes(modes);
-    let folded = render::display_lines(&app.session.entries[0], modes, width).len();
-    let expanded = render::display_lines(&app.session.entries[0], search, width).len();
+    let folded = render::display_lines(&app.session.entries[0], modes, width, HEIGHT).len();
+    let expanded = render::display_lines(&app.session.entries[0], search, width, HEIGHT).len();
     assert!(folded < expanded, "folded {folded} vs expanded {expanded}");
     app.on_key(ctrl('f'));
     for c in "bold".chars() {
@@ -468,18 +491,20 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
         "the paragraph is on screen after the jump:\n{}",
         screen(&terminal)
     );
-    let lines = render::display_lines(&app.session.entries[1], modes, width);
+    let lines = render::display_lines(&app.session.entries[1], modes, width, HEIGHT);
     assert!(
         lines[m.line].contains("bold"),
         "the match is the paragraph line: {:?}",
         lines[m.line]
     );
     // The selection at that display line copies the paragraph's source (styles included).
-    let anchor = select::locate(&app.session.entries, modes, width, hit_line, 0).expect("anchor");
+    let anchor =
+        select::locate(&app.session.entries, modes, width, HEIGHT, hit_line, 0).expect("anchor");
     let head = select::locate(
         &app.session.entries,
         modes,
         width,
+        HEIGHT,
         hit_line,
         lines[m.line].chars().count() + 2,
     )
@@ -505,12 +530,13 @@ fn a_whole_line_selection_copies_the_source_line() {
         assistant(&mut app, body);
         let modes = modes(ReasoningMode::Expanded);
         let blocks = blocks::parse_blocks(body);
-        let lines = blocks::layout(&app.session.entries[0], &blocks, modes, 80);
+        let lines = blocks::layout(&app.session.entries[0], &blocks, modes, 80, HEIGHT);
         // Padding rows (if any) come along; the copy still has to be the source.
         let last = lines.len() - 1;
         let cells = lines[last].chars.len();
-        let anchor = select::locate(&app.session.entries, modes, 80, 0, 0).expect("anchor");
-        let head = select::locate(&app.session.entries, modes, 80, last, cells + 2).expect("head");
+        let anchor = select::locate(&app.session.entries, modes, 80, HEIGHT, 0, 0).expect("anchor");
+        let head =
+            select::locate(&app.session.entries, modes, 80, HEIGHT, last, cells + 2).expect("head");
         let copied =
             select::logical_text(&app.session.entries, &select::Selection { anchor, head });
         // A trailing newline in the source is a blank **edge** line, which the layout strips
@@ -542,7 +568,7 @@ fn every_displayed_source_char_is_at_its_offset() {
             assistant(&mut app, body);
             let modes = modes(ReasoningMode::Expanded);
             let blocks = blocks::parse_blocks(body);
-            let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
+            let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width, HEIGHT);
             let cells: usize = lines.iter().map(|line| line.chars.len()).sum();
             for cell in 0..cells {
                 let (line, column) = cell_of(&lines, cell).expect("a cell");
@@ -554,8 +580,9 @@ fn every_displayed_source_char_is_at_its_offset() {
                 if !display.is_alphanumeric() {
                     continue;
                 }
-                let anchor = select::locate(&app.session.entries, modes, width, line, column + 2)
-                    .expect("an anchor");
+                let anchor =
+                    select::locate(&app.session.entries, modes, width, HEIGHT, line, column + 2)
+                        .expect("an anchor");
                 assert!(
                     body[anchor.offset..].starts_with(display),
                     "body {body:?} width {width} cell {cell}: offset {} does not start with \
@@ -620,7 +647,7 @@ fn a_chinese_markdown_selection_does_not_panic() {
         let points: Vec<_> = display_cells(&app, modes, width)
             .into_iter()
             .filter_map(|(line, col)| {
-                select::locate(&app.session.entries, modes, width, line, col + 2)
+                select::locate(&app.session.entries, modes, width, HEIGHT, line, col + 2)
             })
             .collect();
         assert!(!points.is_empty(), "the body lays out at width {width}");
@@ -634,8 +661,15 @@ fn a_chinese_markdown_selection_does_not_panic() {
             ] {
                 let selection = select::Selection { anchor, head };
                 let _ = select::logical_text(&app.session.entries, &selection);
-                let _ =
-                    select::highlight_rows(&app.session.entries, modes, width, 0, 60, &selection);
+                let _ = select::highlight_rows(
+                    &app.session.entries,
+                    modes,
+                    width,
+                    HEIGHT,
+                    0,
+                    60,
+                    &selection,
+                );
             }
         }
     }
@@ -645,7 +679,7 @@ fn a_chinese_markdown_selection_does_not_panic() {
 /// last cell (the end gap) and the synthesized cells.
 fn display_cells(app: &App, modes: DisplayModes, width: usize) -> Vec<(usize, usize)> {
     let blocks = blocks::parse_blocks(&app.session.entries[0].text);
-    let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
+    let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width, HEIGHT);
     let mut out = Vec::new();
     for (line, body) in lines.iter().enumerate() {
         for column in 0..=body.chars.len() {
@@ -664,7 +698,7 @@ fn a_chinese_selection_copies_the_source() {
     let modes = modes(ReasoningMode::Expanded);
     let width = 40;
     let blocks = blocks::parse_blocks(&app.session.entries[0].text);
-    let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
+    let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width, HEIGHT);
     let line = lines
         .iter()
         .position(|l| l.text.contains("所以我逐张核对"))
@@ -677,11 +711,18 @@ fn a_chinese_selection_copies_the_source() {
         .collect();
     let first = sources[0];
     let line_width = unicode_width::UnicodeWidthStr::width(lines[line].text.as_str());
-    let anchor =
-        select::locate(&app.session.entries, modes, width, line, first + 2).expect("anchor");
+    let anchor = select::locate(&app.session.entries, modes, width, HEIGHT, line, first + 2)
+        .expect("anchor");
     // One screen column past the line's last cell: the line's end gap.
-    let head =
-        select::locate(&app.session.entries, modes, width, line, line_width + 2).expect("head");
+    let head = select::locate(
+        &app.session.entries,
+        modes,
+        width,
+        HEIGHT,
+        line,
+        line_width + 2,
+    )
+    .expect("head");
     let copied = select::logical_text(&app.session.entries, &select::Selection { anchor, head });
     assert_eq!(copied, "所以我逐张核对", "the item's source text");
 }
@@ -706,7 +747,7 @@ fn every_chinese_line_fits_the_width() {
             assistant(&mut app, body);
             let modes = modes(ReasoningMode::Expanded);
             let blocks = blocks::parse_blocks(body);
-            let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
+            let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width, HEIGHT);
             for line in &lines {
                 assert!(
                     unicode_width::UnicodeWidthStr::width(line.text.as_str()) <= width,
@@ -731,7 +772,7 @@ fn a_long_ordered_list_item_wraps_in_a_wide_window() {
         assistant(&mut app, body);
         let modes = modes(ReasoningMode::Expanded);
         let blocks = blocks::parse_blocks(body);
-        let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width);
+        let lines = blocks::layout(&app.session.entries[0], &blocks, modes, width, HEIGHT);
         for line in &lines {
             assert!(
                 unicode_width::UnicodeWidthStr::width(line.text.as_str()) <= width,

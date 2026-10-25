@@ -980,6 +980,7 @@ fn draw_brief(
         std::slice::from_ref(&entry),
         crate::tools::DisplayModes::default(),
         inner,
+        height,
         theme,
     );
     // The last page is where the frame clamps: `f` goes there, and a `k` after it moves up

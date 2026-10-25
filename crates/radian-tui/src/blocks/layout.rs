@@ -9,7 +9,10 @@ use super::*;
 /// zero). **Counts only**: no line is materialized, so the frame
 /// that measures every entry (the first one, or the first after a resize) does not allocate
 /// per entry — the virtualization budget (ADR 0028 R7) depends on this.
-pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
+///
+/// `height` is the transcript area's height (ADR 0028 R10): it decides how many rows an image
+/// run reserves, exactly as `width` decides the wrap.
+pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize, height: usize) -> usize {
     let mode = modes.reasoning;
     // The `ask_user` block is not a card: its shape follows the card's arguments and result
     // (ADR 0024), and its result entry is blank when it closes the call. Count it
@@ -18,16 +21,16 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     // lays it out from the structured data, so the count always equals the
     // drawing.
     if entry.kind == EntryKind::Context {
-        return layout(entry, &[], modes, width).len();
+        return layout(entry, &[], modes, width, height).len();
     }
     if is_ask_entry(entry) {
-        return layout(entry, &[], modes, width).len();
+        return layout(entry, &[], modes, width, height).len();
     }
     // An entry with images (ADR 0028 R10) goes through the layout: its placeholder row and
-    // the image's fixed run are part of the shape, and one function computes them for the
+    // the image's run are part of the shape, and one function computes them for the
     // count, the drawing and the text-only paths.
     if !entry.images.is_empty() {
-        return layout(entry, &[], modes, width).len();
+        return layout(entry, &[], modes, width, height).len();
     }
     if let Some(count) = cheap_count(entry, modes) {
         return count;
@@ -48,7 +51,7 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
             highlight: false,
             ..modes
         };
-        return layout(entry, &parse_blocks_for(entry, mode), plain, width).len();
+        return layout(entry, &parse_blocks_for(entry, mode), plain, width, height).len();
     }
     match entry.kind {
         EntryKind::User => {
@@ -166,9 +169,14 @@ fn tool_plan(
 }
 
 /// The cached count (the renderer's per-frame path for **every** entry, on screen or not).
-pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -> usize {
+pub fn line_count_cached(
+    entry: &mut Entry,
+    modes: DisplayModes,
+    width: usize,
+    height: usize,
+) -> usize {
     let text_len = entry.text.len();
-    let key = (width, text_len, modes, entry.fold_override);
+    let key = (width, height, text_len, modes, entry.fold_override);
     if let Some(lines) = entry
         .layout_cache
         .as_ref()
@@ -210,7 +218,7 @@ pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -
             .max(1);
         fill_md_count_cache(entry, &blocks, body_width, modes.glyphs);
     }
-    let lines = line_count(entry, modes, width);
+    let lines = line_count(entry, modes, width, height);
     entry.layout_cache = Some((key, lines));
     lines
 }
@@ -272,12 +280,19 @@ pub(crate) fn parse_blocks_for(entry: &Entry, mode: ReasoningMode) -> Vec<Block>
 
 /// Lays the entry's body out at `width`. The renderer's spans and the selection's cell →
 /// offset mapping both read these lines.
-pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize) -> Vec<BodyLine> {
+pub fn layout(
+    entry: &Entry,
+    blocks: &[Block],
+    modes: DisplayModes,
+    width: usize,
+    height: usize,
+) -> Vec<BodyLine> {
     layout_with(
         entry,
         blocks,
         modes,
         width,
+        height,
         crate::spinner::Frame::default(),
     )
 }
@@ -290,12 +305,13 @@ pub fn layout_with(
     blocks: &[Block],
     modes: DisplayModes,
     width: usize,
+    height: usize,
     spinner: crate::spinner::Frame,
 ) -> Vec<BodyLine> {
     // The container owns the spacing (ADR 0028 rule 1): a text-derived blank line
     // at an entry's start or end is stripped here, so counting, drawing, the selection mapping
     // and the search all see the same shape.
-    let mut lines = layout_unstripped(entry, blocks, modes, width, spinner);
+    let mut lines = layout_unstripped(entry, blocks, modes, width, height, spinner);
     strip_edge_blanks(&mut lines);
     // The `[interrupted]` marker is drawn on the entry's **last** line (ADR 0003, `render.rs`'s
     // `entry_lines` / `visible_lines`): an interrupted reply whose text is empty (cut off during
@@ -314,6 +330,7 @@ fn layout_unstripped(
     blocks: &[Block],
     modes: DisplayModes,
     width: usize,
+    height: usize,
     spinner: crate::spinner::Frame,
 ) -> Vec<BodyLine> {
     let mode = modes.reasoning;
@@ -349,8 +366,8 @@ fn layout_unstripped(
             // no half-cell padding and no rail. Just the wrapped text; the marker column is
             // drawn, not part of the body.
             let mut lines = prose_lines(&text, body_width);
-            // ADR 0028 R10: each image's fixed run sits directly under its placeholder line.
-            insert_user_images(&mut lines, entry, &text);
+            // ADR 0028 R10: each image's run sits directly under its placeholder line.
+            insert_user_images(&mut lines, entry, &text, height);
             lines
         }
         (EntryKind::Assistant, _) => {
@@ -508,7 +525,7 @@ fn layout_unstripped(
             let mut lines = body_plan_lines(&plan.lines, &text, body_width);
             // ADR 0028 R10: the image's placeholder row and run follow the tool body. The
             // placeholder always shows; the run only when the body is drawn in full.
-            append_tool_images(&mut lines, entry, modes);
+            append_tool_images(&mut lines, entry, modes, height);
             lines
         }
         (EntryKind::Context, _) => super::context_lines(entry, modes, width),
@@ -516,12 +533,13 @@ fn layout_unstripped(
     }
 }
 
-/// One image's fixed run of rows (ADR 0028 R10): empty, source-less rows the frame overlays
+/// One image's run of rows (ADR 0028 R10): empty, source-less rows the frame overlays
 /// the image onto. `end` is the source offset a click on the run anchors to, so a selection
-/// dragged across it neither jumps nor copies anything.
-fn image_run(index: usize, end: usize) -> Vec<BodyLine> {
+/// dragged across it neither jumps nor copies anything. `height` is the transcript area's
+/// height, which decides how many rows the run reserves.
+fn image_run(index: usize, end: usize, height: usize) -> Vec<BodyLine> {
     std::iter::repeat_with(|| BodyLine::image_row(index, end))
-        .take(usize::from(crate::media::IMAGE_HEIGHT_ROWS))
+        .take(usize::from(crate::media::image_height_rows(height)))
         .collect()
 }
 
@@ -530,7 +548,7 @@ fn image_run(index: usize, end: usize) -> Vec<BodyLine> {
 /// goes after the display line that holds the placeholder's last source character; a
 /// placeholder that cannot be located (a foreign text shape) gets its run at the end. A
 /// payload that did not decode gets no run (the placeholder line is all there is).
-fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry, text: &str) {
+fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry, text: &str, height: usize) {
     let mut search = 0usize;
     for (index, image) in entry.images.iter().enumerate() {
         let Some(found) = text[search..].find(&image.placeholder) else {
@@ -550,7 +568,7 @@ fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry, text: &str) {
             .iter()
             .rposition(|line| line.chars.contains(&Some(last)))
             .map_or(lines.len(), |at| at + 1);
-        lines.splice(after..after, image_run(index, end));
+        lines.splice(after..after, image_run(index, end, height));
     }
 }
 
@@ -558,7 +576,12 @@ fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry, text: &str) {
 /// the body is drawn in full and the payload decoded. The placeholder row is always drawn —
 /// that is what the folded block shows instead of the image, and what a broken payload shows
 /// instead of a blank hole.
-fn append_tool_images(lines: &mut Vec<BodyLine>, entry: &Entry, modes: DisplayModes) {
+fn append_tool_images(
+    lines: &mut Vec<BodyLine>,
+    entry: &Entry,
+    modes: DisplayModes,
+    height: usize,
+) {
     let visible = crate::media::rows_visible(entry, modes);
     let spans = crate::media::placeholder_spans(entry.text.len(), &entry.images);
     for ((index, image), (start, end)) in entry.images.iter().enumerate().zip(spans) {
@@ -568,7 +591,7 @@ fn append_tool_images(lines: &mut Vec<BodyLine>, entry: &Entry, modes: DisplayMo
             end,
         ));
         if visible && image.decodable {
-            lines.extend(image_run(index, end));
+            lines.extend(image_run(index, end, height));
         }
     }
 }
@@ -576,7 +599,12 @@ fn append_tool_images(lines: &mut Vec<BodyLine>, entry: &Entry, modes: DisplayMo
 /// The entry's **text** lines only (no per-char offsets): what the search matches against and
 /// what the renderer shows. Cheaper than [`layout`] because it never builds the selection
 /// mapping, and it takes the same branch structure so the two cannot disagree.
-pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<String> {
+pub fn body_text_lines(
+    entry: &Entry,
+    modes: DisplayModes,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
     let mode = modes.reasoning;
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
@@ -585,7 +613,7 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     // and the find geometry include the placeholder rows and the image runs (which are empty
     // and never match).
     if !entry.images.is_empty() {
-        return layout(entry, &parse_blocks_for(entry, mode), modes, width)
+        return layout(entry, &parse_blocks_for(entry, mode), modes, width, height)
             .into_iter()
             .map(|line| line.text)
             .collect();
@@ -600,7 +628,7 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
             highlight: false,
             ..modes
         };
-        return layout(entry, &parse_blocks_for(entry, mode), plain, width)
+        return layout(entry, &parse_blocks_for(entry, mode), plain, width, height)
             .into_iter()
             .map(|line| line.text)
             .collect();
@@ -750,14 +778,14 @@ pub(crate) fn body_text_lines_for_test(
 ) -> Vec<String> {
     let entry = Entry::new(EntryKind::ToolResult, text.to_owned());
     let _ = card;
-    body_text_lines(&entry, DisplayModes::default(), width)
+    body_text_lines(&entry, DisplayModes::default(), width, 0)
 }
 
 /// The laid-out body lines of a tool card, for tests that need the mapping.
 #[cfg(test)]
 pub(crate) fn layout_for_test(_card: &tools::ToolCard, text: &str, width: usize) -> Vec<BodyLine> {
     let entry = Entry::new(EntryKind::ToolResult, text.to_owned());
-    layout(&entry, &[], DisplayModes::default(), width)
+    layout(&entry, &[], DisplayModes::default(), width, 0)
 }
 
 #[cfg(test)]
@@ -858,8 +886,8 @@ pub(crate) mod tests {
             let entry = Entry::new(EntryKind::User, "a thin user row that wraps a little");
             for width in [8usize, 12, 30, 80] {
                 assert_eq!(
-                    line_count(&entry, modes, width),
-                    layout(&entry, &[], modes, width).len(),
+                    line_count(&entry, modes, width, 24),
+                    layout(&entry, &[], modes, width, 24).len(),
                     "user row width {width} glyphs {glyphs:?}"
                 );
             }
@@ -885,7 +913,8 @@ pub(crate) mod tests {
             .collect();
         let before = md_line_builds();
         // Height 0: measure only, no visible line is laid out.
-        let (total, lines) = crate::render::visible_lines(&mut entries, modes, 80, 0, 0, &theme);
+        let (total, lines) =
+            crate::render::visible_lines(&mut entries, modes, 80, 24, 0, 0, &theme);
         assert!(total > 0 && lines.is_empty(), "measured {total}");
         assert_eq!(
             md_line_builds(),
@@ -893,7 +922,7 @@ pub(crate) mod tests {
             "the measure pass must not lay Markdown out"
         );
         // A visible window does lay its entries out.
-        let _ = crate::render::visible_lines(&mut entries, modes, 80, 0, 20, &theme);
+        let _ = crate::render::visible_lines(&mut entries, modes, 80, 24, 0, 20, &theme);
         assert!(
             md_line_builds() > before,
             "laying a visible entry out must lay its Markdown out"
@@ -909,9 +938,9 @@ pub(crate) mod tests {
         let mut entries = vec![assistant(
             "# Title\n\nbody words that wrap over a couple of lines at this width\n\n> quote",
         )];
-        let _ = crate::render::visible_lines(&mut entries, EXPANDED, width, 0, 20, &theme);
+        let _ = crate::render::visible_lines(&mut entries, EXPANDED, width, 24, 0, 20, &theme);
         let after_first = md_line_builds();
-        let _ = crate::render::visible_lines(&mut entries, EXPANDED, width, 0, 20, &theme);
+        let _ = crate::render::visible_lines(&mut entries, EXPANDED, width, 24, 0, 20, &theme);
         assert_eq!(
             md_line_builds(),
             after_first,
@@ -932,6 +961,7 @@ pub(crate) mod tests {
             &mut entries,
             modes_with(ReasoningMode::Expanded),
             80,
+            24,
             0,
             0,
             &theme,
@@ -941,6 +971,7 @@ pub(crate) mod tests {
             &mut entries,
             modes_with(ReasoningMode::Collapsed),
             80,
+            24,
             0,
             0,
             &theme,
@@ -957,19 +988,19 @@ pub(crate) mod tests {
         // A text-derived blank line at either edge is the container's job.
         let mut text = Entry::new(EntryKind::Assistant, "\nhello\n\n");
         assert_eq!(
-            layout(&text, &parse_blocks("\nhello\n\n"), EXPANDED, 20).len(),
+            layout(&text, &parse_blocks("\nhello\n\n"), EXPANDED, 20, 24).len(),
             1
         );
-        assert_eq!(line_count(&text, EXPANDED, 20), 1);
+        assert_eq!(line_count(&text, EXPANDED, 20, 24), 1);
         assert_eq!(
-            body_text_lines(&text, EXPANDED, 20),
+            body_text_lines(&text, EXPANDED, 20, 24),
             vec!["hello".to_string()]
         );
         // The thin user row (ADR 0035) has no padding rows either: the blank edge
         // lines are stripped the same way, leaving just the text.
         text.kind = EntryKind::User;
         text.text = "\nhi\n\n".to_string();
-        let lines = layout(&text, &[], EXPANDED, 20);
+        let lines = layout(&text, &[], EXPANDED, 20, 24);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(lines[0].text, "hi");
         assert!(!lines[0].hint);
@@ -979,7 +1010,7 @@ pub(crate) mod tests {
     fn a_code_line_never_wraps_and_truncates_with_an_ellipsis() {
         let entry = assistant("```\nshort\nabc def gh ijk\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, EXPANDED, 10);
+        let lines = layout(&entry, &blocks, EXPANDED, 10, 24);
         // The top frame, the body's two rows (each `│ ` plus code) and the bottom frame.
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[0].text, "╭─────────", "the top frame, no language");
@@ -1005,7 +1036,7 @@ pub(crate) mod tests {
     fn tabs_expand_to_four_spaces_and_map_to_the_tab_offset() {
         let entry = assistant("```\na\tb\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, EXPANDED, 20);
+        let lines = layout(&entry, &blocks, EXPANDED, 20, 24);
         assert_eq!(lines[1].text, "│ a    b");
         let base = entry.text.find('a').expect("the line is in the text");
         assert_eq!(
@@ -1029,13 +1060,13 @@ pub(crate) mod tests {
         // Exactly that: it fits, so no ellipsis (the `…` costs a column).
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(20)));
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, EXPANDED, 22);
+        let lines = layout(&entry, &blocks, EXPANDED, 22, 24);
         assert_eq!(lines[1].text, format!("│ {}", "x".repeat(20)));
         assert!(!lines[1].text.contains('…'));
         // One over: it does not fit; keep width-1 and mark the cut.
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(21)));
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, EXPANDED, 22);
+        let lines = layout(&entry, &blocks, EXPANDED, 22, 24);
         assert_eq!(lines[1].text, format!("│ {}…", "x".repeat(19)));
         // The mapping still reaches the source line's end either way (the offset is into the
         // entry text, which starts with the "```\n" fence line).
@@ -1047,14 +1078,14 @@ pub(crate) mod tests {
         // 6 code columns at width 8 (inner 6): as-is.
         let entry = assistant("```\n日本語\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, EXPANDED, 8);
+        let lines = layout(&entry, &blocks, EXPANDED, 8, 24);
         assert_eq!(lines[1].text, "│ 日本語");
         // 6 code columns at width 7 (inner 5): keep 4 columns (2 wide chars) and the ellipsis.
-        let lines = layout(&entry, &blocks, EXPANDED, 7);
+        let lines = layout(&entry, &blocks, EXPANDED, 7, 24);
         assert_eq!(lines[1].text, "│ 日本…");
         assert_eq!(lines[1].chars.len(), lines[1].text.chars().count());
         // 6 code columns at width 9 (inner 7): as-is.
-        let lines = layout(&entry, &blocks, EXPANDED, 9);
+        let lines = layout(&entry, &blocks, EXPANDED, 9, 24);
         assert_eq!(lines[1].text, "│ 日本語");
     }
 
@@ -1063,7 +1094,7 @@ pub(crate) mod tests {
         let entry = assistant("```\n日本語テキスト\n```");
         let blocks = parse_blocks(&entry.text);
         // width 9 → inner 7: 日(2)本(2)語(2) = 6, テ would exceed → cut after 語.
-        let lines = layout(&entry, &blocks, EXPANDED, 9);
+        let lines = layout(&entry, &blocks, EXPANDED, 9, 24);
         assert_eq!(lines[1].text, "│ 日本語…");
     }
 
@@ -1073,7 +1104,7 @@ pub(crate) mod tests {
     fn a_code_block_draws_an_open_frame() {
         let mut entry = Entry::new(EntryKind::Assistant, "```rust\nlet x = 1;\n```\n");
         let blocks = blocks_for(&mut entry, ReasoningMode::Collapsed);
-        let lines = layout(&entry, &blocks, DisplayModes::default(), 40);
+        let lines = layout(&entry, &blocks, DisplayModes::default(), 40, 24);
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert!(
             texts[0].starts_with("╭─ rust "),
@@ -1105,7 +1136,7 @@ pub(crate) mod tests {
             glyphs: crate::footer::Glyphs::Ascii,
             ..EXPANDED
         };
-        let lines = layout(&entry, &blocks, modes, 20);
+        let lines = layout(&entry, &blocks, modes, 20, 24);
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             texts[0],
@@ -1127,11 +1158,11 @@ pub(crate) mod tests {
             crate::footer::Glyphs::Ascii,
         ] {
             let modes = DisplayModes { glyphs, ..EXPANDED };
-            let lines = layout(&entry, &[], modes, 30);
+            let lines = layout(&entry, &[], modes, 30, 24);
             assert_eq!(lines.len(), 1, "{glyphs:?}: {lines:?}");
             assert_eq!(lines[0].text, "hello");
             assert!(!lines[0].hint, "{glyphs:?}");
-            assert_eq!(line_count(&entry, modes, 30), 1, "{glyphs:?}");
+            assert_eq!(line_count(&entry, modes, 30, 24), 1, "{glyphs:?}");
         }
     }
 
@@ -1140,15 +1171,18 @@ pub(crate) mod tests {
         let mut entry = Entry::new(EntryKind::Reasoning, "one\ntwo\nthree");
         entry.live = true;
         assert_eq!(
-            line_count(&entry, modes_with(ReasoningMode::Collapsed), 40),
+            line_count(&entry, modes_with(ReasoningMode::Collapsed), 40, 24),
             1
         );
-        assert_eq!(line_count(&entry, modes_with(ReasoningMode::Hidden), 40), 0);
+        assert_eq!(
+            line_count(&entry, modes_with(ReasoningMode::Hidden), 40, 24),
+            0
+        );
         // Expanded, the channel is the header plus the three Markdown lines (ADR 0028
         // ).
-        assert_eq!(line_count(&entry, EXPANDED, 40), 4);
+        assert_eq!(line_count(&entry, EXPANDED, 40, 24), 4);
         // The collapsed placeholder carries the spinner while streaming, not the line count.
-        let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
+        let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40, 24);
         assert!(lines[0].hint, "the placeholder is a synthesized line");
         assert_eq!(
             lines[0].text,
@@ -1156,10 +1190,10 @@ pub(crate) mod tests {
         );
         // On a resumed entry (no clock) the line count shows and there is no duration.
         entry.live = false;
-        let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
+        let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40, 24);
         assert_eq!(lines[0].text, "thinking · 3 lines");
         // The expanded header is a harness line of its own; the `◻ ` is the marker column's.
-        let expanded = layout(&entry, &parse_blocks(&entry.text), EXPANDED, 40);
+        let expanded = layout(&entry, &parse_blocks(&entry.text), EXPANDED, 40, 24);
         assert_eq!(expanded.len(), 4);
         assert_eq!(expanded[0].text, "thinking");
         assert_eq!(expanded[1].text, "one");

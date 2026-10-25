@@ -652,8 +652,8 @@ fn line_count_matches_the_layout_for_a_tool_block() {
             let modes = app.display_modes();
             for entry in &app.session.entries {
                 // A tool entry has no fenced blocks (only assistant prose does).
-                let count = blocks::line_count(entry, modes, width);
-                let laid_out = blocks::layout(entry, &[], modes, width).len();
+                let count = blocks::line_count(entry, modes, width, 24);
+                let laid_out = blocks::layout(entry, &[], modes, width, 24).len();
                 assert_eq!(count, laid_out, "{fold:?} {width} {entry:?}");
             }
         }

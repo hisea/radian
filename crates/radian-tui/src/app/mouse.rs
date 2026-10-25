@@ -169,6 +169,7 @@ impl App {
             &self.session.entries,
             self.display_modes(),
             self.session.transcript_width,
+            usize::from(self.session.view_height),
             press_line,
             col as usize,
         ) else {
@@ -184,6 +185,7 @@ impl App {
                 &self.session.entries,
                 self.display_modes(),
                 self.session.transcript_width,
+                usize::from(self.session.view_height),
                 press_line,
                 col as usize,
             ) {
@@ -355,6 +357,7 @@ impl App {
             &self.session.entries,
             self.display_modes(),
             self.session.transcript_width,
+            usize::from(self.session.view_height),
             head_line,
             col as usize,
         ) else {

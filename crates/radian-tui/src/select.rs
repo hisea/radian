@@ -77,10 +77,11 @@ pub fn locate(
     entries: &[Entry],
     modes: DisplayModes,
     width: usize,
+    height: usize,
     line: usize,
     col: usize,
 ) -> Option<Anchor> {
-    locate_hit(entries, modes, width, line, col).map(|hit| hit.anchor)
+    locate_hit(entries, modes, width, height, line, col).map(|hit| hit.anchor)
 }
 
 /// [`locate`], plus whether the pointer sits on a char's cell ([`Hit`]).
@@ -88,6 +89,7 @@ pub fn locate_hit(
     entries: &[Entry],
     modes: DisplayModes,
     width: usize,
+    height: usize,
     line: usize,
     col: usize,
 ) -> Option<Hit> {
@@ -109,12 +111,14 @@ pub fn locate_hit(
             });
         }
         remaining -= gap;
-        let count = body_lines(entry, modes, width).len();
+        let count = body_lines(entry, modes, width, height).len();
         if remaining >= count {
             remaining -= count;
             continue;
         }
-        return Some(locate_in_entry(entry, modes, width, remaining, col, index));
+        return Some(locate_in_entry(
+            entry, modes, width, height, remaining, col, index,
+        ));
     }
     // Past the last entry: the end of the last one (or `None` with no transcript) — a gap.
     let last = entries.len().checked_sub(1)?;
@@ -136,11 +140,12 @@ fn locate_in_entry(
     entry: &Entry,
     modes: DisplayModes,
     width: usize,
+    height: usize,
     local_line: usize,
     col: usize,
     index: usize,
 ) -> Hit {
-    let lines = body_lines(entry, modes, width);
+    let lines = body_lines(entry, modes, width, height);
     let line = &lines[local_line.min(lines.len() - 1)];
     let prefix = marker_prefix(entry.kind).width();
     let body_col = col.saturating_sub(prefix);
@@ -190,9 +195,14 @@ fn locate_in_entry(
 
 /// The entry's laid-out body lines — the one geometry the selection mapping uses (the same
 /// [`crate::blocks::BodyLine`]s the renderer renders).
-fn body_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<crate::blocks::BodyLine> {
+fn body_lines(
+    entry: &Entry,
+    modes: DisplayModes,
+    width: usize,
+    height: usize,
+) -> Vec<crate::blocks::BodyLine> {
     let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
-    blocks::layout(entry, &blocks, modes, width)
+    blocks::layout(entry, &blocks, modes, width, height)
 }
 
 /// The char starting at `offset`, or `None` when `offset` is not a char boundary. Offsets
@@ -247,10 +257,11 @@ pub fn run_at(
     entries: &[Entry],
     modes: DisplayModes,
     width: usize,
+    height: usize,
     line: usize,
     col: usize,
 ) -> Option<(Anchor, Anchor)> {
-    let hit = locate_hit(entries, modes, width, line, col)?;
+    let hit = locate_hit(entries, modes, width, height, line, col)?;
     let anchor = hit.anchor;
     let text = selection_text(entries.get(anchor.entry)?);
     if anchor.offset >= text.len() {
@@ -337,15 +348,16 @@ pub fn highlight_rows(
     entries: &[Entry],
     modes: DisplayModes,
     width: usize,
-    scroll: usize,
     height: usize,
+    scroll: usize,
+    window: usize,
     selection: &Selection,
 ) -> Vec<Vec<(usize, usize)>> {
     let (start, end) = selection.ordered();
-    let mut out = Vec::with_capacity(height);
+    let mut out = Vec::with_capacity(window);
     let mut line = 0usize;
     for (index, entry) in entries.iter().enumerate() {
-        if out.len() >= height {
+        if out.len() >= window {
             break;
         }
         // The container's gap line before this entry: it is never highlighted (it carries no
@@ -353,25 +365,25 @@ pub fn highlight_rows(
         let gap = crate::blocks::gap_at(entries, index);
         if line + gap > scroll {
             for _ in scroll.saturating_sub(line)..gap {
-                if out.len() >= height {
+                if out.len() >= window {
                     break;
                 }
                 out.push(Vec::new());
             }
         }
         line += gap;
-        let count = body_lines(entry, modes, width).len();
+        let count = body_lines(entry, modes, width, height).len();
         let next = line + count;
         if next > scroll {
             let first = scroll.saturating_sub(line);
             for local in first..count {
-                if out.len() >= height {
+                if out.len() >= window {
                     break;
                 }
                 out.push(if index < start.entry || index > end.entry {
                     Vec::new()
                 } else {
-                    row_ranges(entry, modes, width, local, index, start, end)
+                    row_ranges(entry, modes, width, height, local, index, start, end)
                 });
             }
         }
@@ -388,13 +400,14 @@ fn row_ranges(
     entry: &Entry,
     modes: DisplayModes,
     width: usize,
+    height: usize,
     local: usize,
     index: usize,
     start: Anchor,
     end: Anchor,
 ) -> Vec<(usize, usize)> {
     let prefix = marker_prefix(entry.kind).width();
-    let lines = body_lines(entry, modes, width);
+    let lines = body_lines(entry, modes, width, height);
     let Some(line) = lines.get(local) else {
         return Vec::new();
     };
@@ -472,6 +485,35 @@ mod tests {
     };
     use crate::app::{Entry, EntryKind};
     use radian_core::{ContentPart, Message, MessageMeta};
+
+    /// The transcript area's height the test geometry is computed at. None of these fixtures
+    /// carries an image, so only the value's consistency matters (ADR 0028 R10).
+    const HEIGHT: usize = 24;
+
+    /// [`super::locate`] at the fixtures' transcript height.
+    fn locate(
+        entries: &[Entry],
+        modes: DisplayModes,
+        width: usize,
+        line: usize,
+        col: usize,
+    ) -> Option<Anchor> {
+        super::locate(entries, modes, width, HEIGHT, line, col)
+    }
+
+    /// [`super::highlight_rows`] at the fixtures' transcript height (`window` is the visible
+    /// window).
+    #[allow(clippy::too_many_arguments)]
+    fn highlight_rows(
+        entries: &[Entry],
+        modes: DisplayModes,
+        width: usize,
+        scroll: usize,
+        window: usize,
+        selection: &Selection,
+    ) -> Vec<Vec<(usize, usize)>> {
+        super::highlight_rows(entries, modes, width, HEIGHT, scroll, window, selection)
+    }
 
     /// An assistant entry (prefix `"  "`: body columns start at 2).
     fn entry(text: &str) -> Entry {

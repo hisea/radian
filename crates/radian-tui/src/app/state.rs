@@ -5,10 +5,17 @@
 
 use super::*;
 
-/// The layout cache's key (ADR 0028 R1/R6): the width, the entry's text length, the display
+/// The layout cache's key (ADR 0028 R1/R6): the width, the transcript area's height (ADR
+/// 0028 R10: an image's run follows it), the entry's text length, the display
 /// modes and the per-entry fold override. The override is part of it, so a search hit's
 /// expansion invalidates the count.
-pub(crate) type LayoutKey = (usize, usize, crate::tools::DisplayModes, Option<bool>);
+pub(crate) type LayoutKey = (
+    usize,
+    usize,
+    usize,
+    crate::tools::DisplayModes,
+    Option<bool>,
+);
 
 /// A compaction summary's display data (ADR 0028 R5). The `summary` and the verbatim user
 /// words come from the message's `origin` (ADR 0018) through Core's own readers;

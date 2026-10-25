@@ -395,6 +395,9 @@ impl AttachView {
         let width = area.width as usize;
         let height = area.height as usize;
         let theme = self.app.theme.clone();
+        // The image run follows the area's height (ADR 0028 R10), exactly as in the TUI's own
+        // frame; the width is recorded through the same call.
+        self.app.set_transcript_size(width, area.height);
         let modes = self.app.display_modes();
         // Measure first (the per-entry line counts are cached), then clamp the scroll position
         // against the real total, then cut the visible window — the order the TUI's own frame
@@ -403,6 +406,7 @@ impl AttachView {
             &mut self.app.session.entries,
             modes,
             width,
+            height,
             0,
             0,
             &theme,
@@ -413,6 +417,7 @@ impl AttachView {
             &mut self.app.session.entries,
             modes,
             width,
+            height,
             self.app.session.scroll,
             height,
             &theme,

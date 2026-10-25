@@ -1006,7 +1006,7 @@ throwaway terminal, not your working one.
    WezTerm), Terminal.app, and inside tmux/herdr, run a session and send a message with
    `@shot.png` (a real photo, not a screenshot of text); then have the model call `read` on
    an image, and press `Ctrl-O` through `errors → expanded → collapsed`.
-   *Expect*: the picture appears under its `[image: shot.png, W×H, N KB]` line, 12 rows tall,
+   *Expect*: the picture appears under its `[image: shot.png, W×H, N KB]` line, half the transcript area's height (never under 12 or over 40 rows; resize the window and watch the run follow it),
    at the right aspect ratio, never wider than the transcript; kitty/Ghostty use unicode
    placeholders that scroll and fold with the text, iTerm2/WezTerm the iTerm2 protocol,
    Terminal.app half blocks; in tmux the picture still appears after the probe turned on

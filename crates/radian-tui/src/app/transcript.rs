@@ -11,13 +11,29 @@ impl App {
     /// Records the transcript width the renderer used. A width change re-wraps the transcript,
     /// so an open find box recomputes its matches — once per resize, never per frame.
     pub fn set_transcript_width(&mut self, width: usize) {
-        if self.session.transcript_width == width {
+        self.set_transcript_size(width, self.session.view_height);
+    }
+
+    /// Records the transcript area's height (ADR 0028 R10: an image's run is half of it). A
+    /// height change changes that run, so an open find box recomputes its matches — once per
+    /// resize, never per frame, exactly as for the width.
+    pub fn set_transcript_height(&mut self, height: u16) {
+        self.set_transcript_size(self.session.transcript_width, height);
+    }
+
+    /// Records both facts about the transcript area in one step (the renderer passes them
+    /// together): one recompute per resize, whether the width, the height or both changed.
+    pub fn set_transcript_size(&mut self, width: usize, height: u16) {
+        let width_changed = self.session.transcript_width != width;
+        let height_changed = self.session.view_height != height;
+        if !width_changed && !height_changed {
             return;
         }
         self.session.transcript_width = width;
+        self.session.view_height = height;
         // The wordmark drops to its one-line fallback below a width; rebuilding is cheap and
         // only happens when the width actually changed.
-        if self.session.startup_screen.is_some() {
+        if width_changed && self.session.startup_screen.is_some() {
             self.rebuild_startup_entries();
         }
         if self.find_state().is_some() {

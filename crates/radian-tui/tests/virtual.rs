@@ -27,6 +27,10 @@ const EXPANDED: DisplayModes = DisplayModes {
     glyphs: radian_tui::footer::Glyphs::Unicode,
 };
 
+/// The transcript area's height these fixtures are laid out at (ADR 0028 R10: it decides an
+/// image run's rows; the fixtures carry no images).
+const HEIGHT: usize = 24;
+
 fn text(lines: &[Line<'static>]) -> Vec<String> {
     lines
         .iter()
@@ -84,6 +88,7 @@ fn every_window_matches_the_full_wrap() {
             &entries,
             EXPANDED,
             width,
+            HEIGHT,
             &Theme::default(),
         ));
         for height in [1usize, 5, 17] {
@@ -92,6 +97,7 @@ fn every_window_matches_the_full_wrap() {
                     &mut entries,
                     EXPANDED,
                     width,
+                    HEIGHT,
                     start,
                     height,
                     &Theme::default(),
@@ -113,19 +119,29 @@ fn every_window_matches_the_full_wrap() {
 fn a_growing_entry_is_measured_again() {
     let width = 20;
     let mut entries = mixed_entries();
-    let _ = visible_lines(&mut entries, EXPANDED, width, 0, 10, &Theme::default());
+    let _ = visible_lines(
+        &mut entries,
+        EXPANDED,
+        width,
+        HEIGHT,
+        0,
+        10,
+        &Theme::default(),
+    );
     let last = entries.len() - 1;
     entries[last].text.push_str(&" more words".repeat(30));
     let full = text(&transcript_lines(
         &entries,
         EXPANDED,
         width,
+        HEIGHT,
         &Theme::default(),
     ));
     let (total, window) = visible_lines(
         &mut entries,
         EXPANDED,
         width,
+        HEIGHT,
         full.len() - 10,
         10,
         &Theme::default(),
@@ -138,11 +154,11 @@ fn a_growing_entry_is_measured_again() {
 #[test]
 fn a_resize_is_measured_again() {
     let mut entries = mixed_entries();
-    let _ = visible_lines(&mut entries, EXPANDED, 80, 0, 10, &Theme::default());
-    let (total, _) = visible_lines(&mut entries, EXPANDED, 15, 0, 10, &Theme::default());
+    let _ = visible_lines(&mut entries, EXPANDED, 80, HEIGHT, 0, 10, &Theme::default());
+    let (total, _) = visible_lines(&mut entries, EXPANDED, 15, HEIGHT, 0, 10, &Theme::default());
     assert_eq!(
         total,
-        transcript_lines(&entries, EXPANDED, 15, &Theme::default()).len()
+        transcript_lines(&entries, EXPANDED, 15, HEIGHT, &Theme::default()).len()
     );
 }
 

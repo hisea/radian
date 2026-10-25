@@ -50,7 +50,7 @@ fn entry_line(app: &App, entry: usize) -> usize {
         };
         line += radian_tui::blocks::gap_at(&app.session.entries, index);
         if index < entry {
-            line += render::display_lines(item, EXPANDED, WIDTH).len();
+            line += render::display_lines(item, EXPANDED, WIDTH, 24).len();
         }
     }
     line
@@ -387,7 +387,8 @@ fn a_folded_tool_body_is_still_found() {
     });
     // The displayed body is folded to the preview: the marker is not among the laid-out
     // lines (`display_lines` is the display geometry the renderer uses).
-    let shown = radian_tui::render::display_lines(&app.session.entries[1], app.display_modes(), 80);
+    let shown =
+        radian_tui::render::display_lines(&app.session.entries[1], app.display_modes(), 80, 24);
     assert!(
         !shown.iter().any(|line| line.contains("need1e")),
         "folded out of the display: {shown:?}"
@@ -474,7 +475,7 @@ fn a_hit_in_a_folded_tool_body_expands_only_that_entry() {
     // The match line is on screen, centered: the jump mapped it through the display geometry.
     let display_line: usize = app.session.entries[..match_line.entry]
         .iter()
-        .map(|entry| radian_tui::render::display_lines(entry, app.display_modes(), 40).len())
+        .map(|entry| radian_tui::render::display_lines(entry, app.display_modes(), 40, 24).len())
         .sum::<usize>()
         + match_line.line;
     assert!(
