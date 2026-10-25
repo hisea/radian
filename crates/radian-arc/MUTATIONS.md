@@ -1002,3 +1002,20 @@ was restored from a copy under `.radian/mut/` with `cp`, which `cmp` found ident
 |---|---|---|---|
 | TK0126-M1 | `propose_followup` passes `false` again, so the follow-up does not allow a no-op | `review::a_merge_with_review_suggestions_proposes_one_followup_task` (`the follow-up allows a no-op`), `review::a_followup_that_adds_no_commit_passes_every_stage_and_merges` (the same assertion, before the attempt) | ✅ 2 failed |
 | TK0126-M2 | the `review` stage starts a session on an empty change (`if false` in place of the empty-diff check) | `review::a_followup_that_adds_no_commit_passes_every_stage_and_merges` (`the empty review ran no session`) | ✅ failed |
+
+## TK0127: arc proposes one follow-up per plan, not per merged task (2026-10-25, branch `work/TK0127-followup-one-per-plan`)
+
+ADR 0048 decision 10: when a plan has no open task (`todo.ready`, `doing.*` or `review.*`),
+arc proposes one follow-up for the plan, carrying the review items of every `done.merged` task
+that is not itself a follow-up and that no earlier follow-up collected, `after` those tasks in
+merge order. Each mutation was applied by hand to `crates/radian-arc/src/review/mod.rs`, the
+named test ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test review
+-E '<the test below>'`, and the file was restored from `.radian/review.mod.rs.bak` with `cp`,
+which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0127-M1 | `is_open` counts `todo.proposed` as open (`matches!(task.phase.as_str(), "ready" \| model::PROPOSED_PHASE)`) | `review::a_proposed_lead_task_does_not_hold_the_followup_back` (`the plan's follow-up`) | ✅ failed |
+| TK0127-M2 | the collected check is dropped (`has_followup` removed from the candidate filter), so a merged task is collected twice | `review::running_the_followup_check_twice_adds_one_task` (`the check is idempotent: Some(Followup { task: "TK0003-p-followups-2", ... })`) | ✅ failed |
+
+2/2 caught.

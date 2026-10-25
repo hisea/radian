@@ -46,7 +46,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   ```
 
   `summary` is 2 to 6 sentences. Each item of `blocking` and `suggestions` is an object: `text` is required, and `level`, `file` and `line` are optional. `level` is one of `critical`, `major`, `minor`. A plain string is an item with only its `text`, so a verdict written before the object form still reads.
-  `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage; the suggestions of every review round of a merged task become its follow-up task (see [The review's follow-up](#the-reviews-follow-up)).
+  `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage; the suggestions of the review rounds of a plan's merged tasks become the plan's follow-up task once the plan has no open task (see [The review's follow-up](#the-reviews-follow-up)).
   A blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items, each as `[level] path:line text` with the parts an item does not have left out. An item whose `text` starts with a tag that repeats its own level (`[major]`, any case, spaces allowed) prints the level once: the leading tag is dropped from the text. A `text` that starts with another tag keeps it, and the verdict on disk is never rewritten.
   No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
   A gate that is started again for the same attempt does not reuse a review session whose journal exists: the stage names the run `<attempt id>-review-<run>-<k>` with the smallest free `k`, writes its logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log`, and `review_session_ids` lists the ids it used, so every run's session is found.
@@ -131,7 +131,7 @@ After a rework round's report is parsed, an item is moved to `suggestions` and m
 
 A moved item keeps its `level` (`major` included), and a `major` item in a file the task's own change does not touch, or more than 3 lines from any changed line in that file, is still moved, so the rework is not sent back for a problem that predates the task; `minor` items follow the same window rules.
 The stage passes when no blocking item is left, and the verdict records how many items arc moved as `review_pre_existing`.
-The follow-up task of a merged task carries a moved item at its level (see [The review's follow-up](#the-reviews-follow-up)).
+The follow-up task of a plan carries a moved item at its level (see [The review's follow-up](#the-reviews-follow-up)).
 
 When a rework round's review still fails with blocking items and the plan's `auto` is not `off`, arc writes the next attempt's brief itself (see [A failed review](#a-failed-review)).
 
@@ -147,31 +147,40 @@ With `auto` `off`, the task stays in `review.rework_pending` and waits for you, 
 
 ### The review's follow-up
 
-When a task reaches `done.merged`, arc reads every `review` verdict of the task, oldest attempt first, and collects every `suggestions` item of every round; the items a rework round moved (marked `pre_existing`) are in `suggestions`.
+A task is **open** when it is in `todo.ready`, `doing.*` or `review.*`; a `todo.proposed`, `done.*` or `failed.*` task is not open.
+When a plan has no open task, arc collects the review suggestions of its merged tasks and proposes one follow-up task for the plan, and no more.
+arc checks after every change that can leave a plan with no open task: a merge, a `cancel`, and every scheduling pass.
+The check is idempotent: running it again adds no task.
+
+A merged task is **collected** when it is `done.merged`, is not itself a follow-up, and no earlier follow-up of the plan names it in its `after`.
+A follow-up's `after` lists the merged tasks it collected, so a task is collected at most once, and a collected task whose follow-up is later cancelled stays collected.
+A merged follow-up is never collected.
+
+For each collected task arc reads every `review` verdict of the task, oldest attempt first, and collects every `suggestions` item of every round; the items a rework round moved (marked `pre_existing`) are in `suggestions`.
 Every round is read, not only the newest: a round that failed can carry a demoted item, and a later round can pass with nothing to suggest.
 Nothing from `blocking` is collected: a merged task's blocking items were fixed or the review would not have passed, so a round that only had blocking items contributes nothing.
 
-Two items are the same when their `file`, `line` and `text` are equal after a leading tag that repeats the item's own level is removed and whitespace is collapsed; arc keeps the newest copy.
+Two items of the same merged task are the same when their `file`, `line` and `text` are equal after a leading tag that repeats the item's own level is removed and whitespace is collapsed; arc keeps the newest copy.
 An item with the same `file:line` and other text is kept as its own item.
+Items of different tasks are never merged.
 
-When at least one item is left, and `[gate.review] propose_followups` is `true` (the default), arc adds one task to the same plan, and no more:
+When at least one item is left, and `[gate.review] propose_followups` is `true` (the default), arc adds one task to the plan, and no more:
 
 - the id is the next task id;
-- the slug is `<merged task slug>-followups`, cut to the 48-character slug limit;
-- the title is `Follow-ups from <task id>'s review`;
-- its `after` is the merged task;
+- the slug is `<plan slug>-followups`, cut to the 48-character slug limit with a trailing `-` removed; when the plan already holds a task with that slug, `-2`, `-3`, … is appended within the limit;
+- the title is `Follow-ups from <plan id>'s reviews`;
+- its `after` is the collected merged tasks, in merge order;
 - its phase is `todo.proposed`, so the loop never claims it until you confirm it (see [`confirm`](index.md#radian-arc-confirm-id));
 - its `allow_noop` is `true`: its brief lets each item be left with a one-line reason, so an attempt that adds no commit may deliver nothing (see [An empty change](#an-empty-change));
 
-Its brief is fixed: one line saying the items are from the review of `<task id>`, which is now merged, and that each item is to be fixed or left with a one-line reason in the final answer; then the items grouped by the round they came from, each group headed `From review <n> (attempt <n>):`, one item per line as `[level] path:line text`; then the path of every review verdict.
+Its brief is fixed: one line saying the items are from the reviews of the plan's merged tasks and that each item is to be fixed or left with a one-line reason in the final answer; then one section per collected task, headed `From <task id>`, holding that task's items grouped by the round they came from, each group headed `From review <n> (attempt <n>):`, one item per line as `[level] path:line text`; then the path of every review verdict.
 The worker gets each verdict as a copy at `.radian/arc-verdicts/<task>/<attempt>/<file>` in its worktree, one copy for every task and attempt the brief names, and the task file keeps the absolute paths; the skip line is the same as for a review rework ([A failed review](#a-failed-review)).
 An item whose `text` starts with a tag that repeats its own level prints the level once, as in the rework reason above.
 
-A task gets at most one follow-up.
-A follow-up task gets no follow-up of its own: when the merged task's title and `after` are the ones arc gives a follow-up, arc proposes nothing, and the review's unfixed items stay in its verdict and in the task's final report.
-A task merged without a review stage, or with no item left, gets none.
+A plan whose merged tasks left no item gets no follow-up.
+A follow-up task gets no follow-up of its own: a merged follow-up is never collected, so the review's unfixed items stay in its verdict and in the task's final report.
 With `propose_followups` `false` arc adds none (see the [`propose_followups` row](files.md#configtoml)); the lead can still add a task to the plan with MCP `add_task`.
-`radian arc run` prints `<new task id> proposed (follow-ups from <task id>)`.
+`radian arc run` prints `<new task id> proposed (follow-ups from <plan id>)`.
 
 A follow-up arc cannot add (the plan's file changed outside arc) does not undo the merge: `radian arc merge` prints it as a `warning:` line after the merge, and `radian arc run` reports it in the summary.
 The plan keeps the state it had.

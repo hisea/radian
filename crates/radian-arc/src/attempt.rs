@@ -407,7 +407,15 @@ pub fn cancel_any(store: &Store, id: &str) -> Result<Cancelled, Error> {
 /// says "seen, given up". `done.*` and `failed.cancelled` are refused (exit 3).
 pub fn cancel(store: &Store, task_id: &str) -> Result<Canceled, Error> {
     let _ = reconcile(store)?;
-    cancel_task(store, task_id)
+    let canceled = cancel_task(store, task_id)?;
+    // The plan may have lost its last open task: arc proposes its review follow-up for the
+    // merged tasks' items (ADR 0048 decision 10). A plan that cannot take the task (it changed
+    // outside arc, or the task did not move all the way to `failed.cancelled`) is left as it
+    // is: the cancel stands.
+    if let Ok(loaded) = store.load_task(task_id) {
+        let _ = crate::review::propose_followup(store, &loaded.item.plan);
+    }
+    Ok(canceled)
 }
 
 /// `radian arc cancel <plan>`: end every task `cancel` accepts in a plan and the plan itself.

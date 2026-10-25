@@ -681,6 +681,10 @@ fn one_pass(
     if !stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
         changed |= start_ready(store, transitions)?;
         changed |= merge_auto(store, transitions, stop)?;
+        // 7. A plan with no open task gets one follow-up for its merged tasks' review items
+        // (ADR 0048 decision 10). The check is idempotent, and it also covers a task that
+        // reached `failed.*` without a merge or a cancel.
+        changed |= propose_followups(store, transitions)?;
     }
 
     Ok(changed)
@@ -1121,6 +1125,35 @@ fn merge_auto(
                 }
                 Err(error) => return Err(error),
             }
+        }
+    }
+    Ok(changed)
+}
+
+/// Proposes a plan's review follow-up when the plan has no open task (ADR 0048 decision 10):
+/// one `todo.proposed` task carrying the review items of the plan's merged tasks that no
+/// earlier follow-up collected. `true` when it added a task.
+///
+/// The check is idempotent, so a pass that follows one which already proposed adds nothing. A
+/// plan whose file changed outside arc is reported in the summary and left as it is.
+fn propose_followups(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
+    let mut changed = false;
+    for view in plans_in_claim_order(store)? {
+        // A plan whose file changed outside arc is not acted on; the summary's waiting list
+        // already says so.
+        if view.plan.changed_outside_arc {
+            continue;
+        }
+        match crate::review::propose_followup(store, &view.plan.item.id) {
+            Ok(Some(followup)) => {
+                transitions.push(followup.line());
+                changed = true;
+            }
+            Ok(None) => {}
+            Err(Error::ChangedOutsideArc(plan)) => transitions.note(format!(
+                "{plan} changed outside arc; run `radian arc adopt {plan}`"
+            )),
+            Err(error) => return Err(error),
         }
     }
     Ok(changed)

@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 struct Fixture {
     repo: TestRepo,
     store: Store,
+    plan: String,
     task: String,
     base: String,
 }
@@ -56,6 +57,7 @@ impl Fixture {
         Self {
             repo,
             store,
+            plan,
             task,
             base,
         }
@@ -160,6 +162,40 @@ impl Fixture {
 
     fn attempt_label(&self) -> String {
         format!("{}-1", self.task)
+    }
+
+    /// Adds a task to the confirmed plan as `todo.proposed` and confirms it at once, so it is
+    /// a `todo.ready` task of the plan.
+    fn add_ready_task(&self, slug: &str, title: &str) -> String {
+        let id = self
+            .store
+            .add_task_proposed(
+                &self.plan,
+                slug,
+                title,
+                Vec::new(),
+                false,
+                Vec::new(),
+                "the brief\n",
+            )
+            .expect("a proposed task");
+        plan_ops::confirm(&self.store, &id).expect("the owner confirms the task");
+        id
+    }
+
+    /// Adds a task to the confirmed plan and leaves it `todo.proposed`.
+    fn add_proposed_task(&self, slug: &str, title: &str) -> String {
+        self.store
+            .add_task_proposed(
+                &self.plan,
+                slug,
+                title,
+                Vec::new(),
+                false,
+                Vec::new(),
+                "the brief\n",
+            )
+            .expect("a proposed task")
     }
 
     fn verifying_with(&self, head: &str) -> review::Verified {
@@ -4054,6 +4090,43 @@ fn item(level: &str, file: &str, line: u32, text: &str) -> ReviewItem {
     }
 }
 
+/// Publishes `file` on `task`'s branch, writes a passing review that suggests `items`, verifies
+/// the task and merges it. It returns what the merge did.
+fn merge_with_suggestions(
+    fixture: &Fixture,
+    task: &str,
+    file: &str,
+    items: Vec<ReviewItem>,
+) -> review::Merged {
+    let head = fixture.publish_for(task, &fixture.base, file, &format!("{file}\n"));
+    fixture.set_verifying_for(task, &head, 1, &fixture.base);
+    write_passing_review_at(
+        fixture,
+        task,
+        &format!("{task}-1"),
+        &head,
+        suggestions(items),
+    );
+    let verified = review::verify(&fixture.store, task).expect("the verification runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    review::merge(&fixture.store, task).expect("the merge runs")
+}
+
+/// The follow-up tasks of the fixture's plan, in plan order.
+fn followups(fixture: &Fixture) -> Vec<radian_arc::store::model::TaskFile> {
+    let plan = fixture
+        .store
+        .load_plan(&fixture.plan)
+        .expect("the plan")
+        .item;
+    plan.tasks
+        .iter()
+        .filter_map(|id| fixture.store.load_task(id).ok())
+        .map(|loaded| loaded.item)
+        .filter(|task| task.title == format!("Follow-ups from {}'s reviews", fixture.plan))
+        .collect()
+}
+
 /// A merge whose review suggested an item: the plan gains one `todo.proposed` follow-up,
 /// `after` the merged task, whose brief lists the item and names the verdict.
 #[test]
@@ -4077,8 +4150,9 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
 
     let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
     assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
+    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
     let followup = merged.followup.clone().expect("a follow-up task");
-    assert_eq!(followup.from, fixture.task);
+    assert_eq!(followup.from, plan_id);
     let line = merged.line();
     let lines: Vec<&str> = line.lines().collect();
     assert!(
@@ -4087,14 +4161,10 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
     );
     assert_eq!(
         lines[1],
-        format!(
-            "{} proposed (follow-ups from {})",
-            followup.task, fixture.task
-        ),
+        format!("{} proposed (follow-ups from {})", followup.task, plan_id),
         "{line}"
     );
 
-    let plan_id = fixture.store.load_task(&fixture.task).unwrap().item.plan;
     let plan = fixture.store.load_plan(&plan_id).expect("the plan").item;
     assert_eq!(plan.status, "confirmed", "the plan stays confirmed");
     assert_eq!(plan.auto, "off", "the plan's auto level does not change");
@@ -4102,9 +4172,13 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
         plan.tasks,
         vec![fixture.task.clone(), followup.task.clone()]
     );
+    assert_eq!(
+        followup.task, "TK0002-p-followups",
+        "the next id with the plan's slug"
+    );
     assert!(
-        followup.task.starts_with("TK0002-") && followup.task.ends_with("-followups"),
-        "the next id with the merged task's slug: {}",
+        followup.task.ends_with("-followups"),
+        "the plan's follow-up: {}",
         followup.task
     );
 
@@ -4121,16 +4195,13 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
     assert_eq!(
         task.after,
         vec![fixture.task.clone()],
-        "it waits on the merge"
+        "it waits on the merged task"
     );
     assert!(
         task.allow_noop,
         "the follow-up's brief allows a no-op (ADR 0048 decision 10)"
     );
-    assert_eq!(
-        task.title,
-        format!("Follow-ups from {}'s review", fixture.task)
-    );
+    assert_eq!(task.title, format!("Follow-ups from {plan_id}'s reviews"));
     assert_eq!(task.attempt, 0);
     let (verdict_path, _) =
         review::latest_review_verdict(&fixture.store, &fixture.task).expect("the review verdict");
@@ -4140,10 +4211,13 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
         task.body
     );
     assert!(
-        task.body.contains(&format!(
-            "The items below are from the review of `{}`",
-            fixture.task
-        )),
+        task.body.contains(&format!("From {}", fixture.task)),
+        "the task's own section is in the brief: {}",
+        task.body
+    );
+    assert!(
+        task.body
+            .contains(&format!("reviews of the merged tasks of `{plan_id}`")),
         "{}",
         task.body
     );
@@ -4152,6 +4226,310 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
         "the verdict path is in the brief: {}",
         task.body
     );
+}
+
+/// A plan with an open task gets no follow-up, however many of its merged tasks suggested
+/// something (ADR 0048 decision 10): the follow-up waits for the plan to have no open task.
+#[test]
+fn a_plan_with_an_open_task_gets_no_followup() {
+    let fixture = Fixture::new("followup-plan-open");
+    fixture.add_review_stage();
+    let second = fixture.add_ready_task("second", "A second task");
+    let open = fixture.add_ready_task("open", "The open task");
+
+    let first_merge = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    );
+    assert!(
+        first_merge.followup.is_none(),
+        "an open task holds the follow-up back: {first_merge:?}"
+    );
+    let second_merge = merge_with_suggestions(
+        &fixture,
+        &second,
+        "two.txt",
+        vec![item("minor", "two.txt", 1, "second item")],
+    );
+    assert!(
+        second_merge.followup.is_none(),
+        "the open task still holds it back: {second_merge:?}"
+    );
+
+    let plan = fixture
+        .store
+        .load_plan(&fixture.plan)
+        .expect("the plan")
+        .item;
+    assert_eq!(plan.tasks, vec![fixture.task.clone(), second, open.clone()]);
+    assert!(followups(&fixture).is_empty(), "no follow-up was added");
+    let open_task = fixture.store.load_task(&open).expect("the open task").item;
+    assert_eq!(
+        (open_task.state.as_str(), open_task.phase.as_str()),
+        ("todo", "ready")
+    );
+}
+
+/// The plan's last open task merges: one follow-up carries every uncollected merged task's
+/// items, grouped by task, and its `after` lists those tasks in merge order (ADR 0048 decision
+/// 10).
+#[test]
+fn the_last_open_task_merge_proposes_one_followup_for_the_plan() {
+    let fixture = Fixture::new("followup-plan-one");
+    fixture.add_review_stage();
+    let first = fixture.task.clone();
+    let second = fixture.add_ready_task("second", "A second task");
+    let last = fixture.add_ready_task("last", "The last task");
+
+    // Merge `second` first, so merge order and the plan's task order differ.
+    let second_merge = merge_with_suggestions(
+        &fixture,
+        &second,
+        "two.txt",
+        vec![item("minor", "two.txt", 1, "second item")],
+    );
+    assert!(second_merge.followup.is_none(), "{second_merge:?}");
+    let first_merge = merge_with_suggestions(
+        &fixture,
+        &first,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    );
+    assert!(first_merge.followup.is_none(), "{first_merge:?}");
+
+    let merged = merge_with_suggestions(&fixture, &last, "three.txt", Vec::new());
+    let followup = merged.followup.clone().expect("the plan's follow-up");
+    assert_eq!(followup.from, fixture.plan);
+    assert_eq!(
+        followup.line(),
+        format!(
+            "{} proposed (follow-ups from {})",
+            followup.task, fixture.plan
+        )
+    );
+
+    let task = fixture
+        .store
+        .load_task(&followup.task)
+        .expect("the follow-up")
+        .item;
+    assert_eq!(
+        task.after,
+        vec![second.clone(), first.clone()],
+        "the merged tasks in merge order"
+    );
+    assert_eq!(
+        (task.state.as_str(), task.phase.as_str()),
+        ("todo", "proposed")
+    );
+    assert!(task.allow_noop, "the follow-up allows a no-op");
+    assert_eq!(
+        task.title,
+        format!("Follow-ups from {}'s reviews", fixture.plan)
+    );
+    assert!(
+        followup.task.ends_with("-p-followups"),
+        "the plan's slug, not a task's: {}",
+        followup.task
+    );
+
+    let lines: Vec<&str> = task.body.lines().collect();
+    let at = |text: &str| {
+        lines
+            .iter()
+            .position(|line| *line == text)
+            .unwrap_or_else(|| panic!("no line `{text}` in:\n{}", task.body))
+    };
+    let second_header = at(&format!("From {second}"));
+    let first_header = at(&format!("From {first}"));
+    assert!(
+        second_header < first_header,
+        "the sections follow merge order:\n{}",
+        task.body
+    );
+    assert!(task.body.contains("- [minor] two.txt:1 second item"));
+    assert!(task.body.contains("- [minor] one.txt:1 first item"));
+    assert!(
+        !task.body.contains(&format!("From {last}")),
+        "a merged task with no item gets no section:\n{}",
+        task.body
+    );
+}
+
+/// A task added and merged after the plan's follow-up exists is not collected by it: the next
+/// check adds a second follow-up, whose slug takes the next number and whose `after` names only
+/// the later task (ADR 0048 decision 10).
+#[test]
+fn a_task_merged_after_the_followup_gets_a_second_followup() {
+    let fixture = Fixture::new("followup-plan-second");
+    fixture.add_review_stage();
+    let first = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    )
+    .followup
+    .expect("the first follow-up")
+    .task;
+
+    let later = fixture.add_ready_task("later", "A later task");
+    let merged = merge_with_suggestions(
+        &fixture,
+        &later,
+        "later.txt",
+        vec![item("minor", "later.txt", 1, "the later item")],
+    );
+    let second = merged.followup.expect("the second follow-up").task;
+    assert_eq!(
+        second, "TK0004-p-followups-2",
+        "the next number of the plan's slug"
+    );
+    let task = fixture.store.load_task(&second).expect("the task").item;
+    assert_eq!(task.after, vec![later], "only the later task is collected");
+    assert!(
+        !task.after.contains(&fixture.task),
+        "the first follow-up's task is collected once"
+    );
+    assert!(task.body.contains("- [minor] later.txt:1 the later item"));
+    assert!(!task.body.contains("first item"), "{}", task.body);
+    assert_eq!(
+        fixture
+            .store
+            .load_task(&first)
+            .expect("the first")
+            .item
+            .phase,
+        "proposed",
+        "the first follow-up still waits for the owner"
+    );
+}
+
+/// The last open task cancelled: the cancel itself proposes the plan's follow-up, and the next
+/// scheduling pass does not add a second one (ADR 0048 decision 10).
+#[test]
+fn cancelling_the_last_open_task_proposes_the_plan_followup() {
+    let fixture = Fixture::new("followup-plan-cancel");
+    fixture.add_review_stage();
+    let open = fixture.add_ready_task("open", "The open task");
+    let merged = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    );
+    assert!(merged.followup.is_none(), "{merged:?}");
+
+    radian_arc::attempt::cancel(&fixture.store, &open).expect("the cancel runs");
+    let proposed = followups(&fixture);
+    assert_eq!(proposed.len(), 1, "the cancel proposed the follow-up");
+    assert_eq!(proposed[0].after, vec![fixture.task.clone()]);
+    assert_eq!(proposed[0].phase, "proposed");
+
+    let mut lines: Vec<String> = Vec::new();
+    radian_arc::run::run(&fixture.store, &mut |line| lines.push(line.to_owned()))
+        .expect("the pass runs");
+    assert_eq!(
+        followups(&fixture).len(),
+        1,
+        "the next pass adds no second follow-up"
+    );
+}
+
+/// The last open task reaches `failed.exhausted` without a merge or a cancel: the next
+/// scheduling pass proposes the plan's follow-up (ADR 0048 decision 10).
+#[test]
+fn a_last_open_task_that_failed_gets_the_followup_on_the_next_pass() {
+    let fixture = Fixture::new("followup-plan-failed");
+    fixture.add_review_stage();
+    let open = fixture.add_ready_task("open", "The open task");
+    let merged = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    );
+    assert!(merged.followup.is_none(), "{merged:?}");
+    fixture
+        .store
+        .change_task(&open, |task| {
+            task.state = TaskState::Failed;
+            task.phase = "exhausted".to_owned();
+            Ok(())
+        })
+        .expect("the task failed");
+
+    let mut lines: Vec<String> = Vec::new();
+    let report = radian_arc::run::run(&fixture.store, &mut |line| lines.push(line.to_owned()))
+        .expect("the pass runs");
+    let proposed = followups(&fixture);
+    assert_eq!(proposed.len(), 1, "the pass proposed one follow-up");
+    assert_eq!(proposed[0].after, vec![fixture.task.clone()]);
+    let line = format!(
+        "{} proposed (follow-ups from {})",
+        proposed[0].id, fixture.plan
+    );
+    assert!(
+        report.transitions.contains(&line),
+        "the pass did not print `{line}`: {:?}",
+        report.transitions
+    );
+}
+
+/// A lead task in `todo.proposed` is not open: it does not hold the plan's follow-up back
+/// (ADR 0048 decision 10).
+#[test]
+fn a_proposed_lead_task_does_not_hold_the_followup_back() {
+    let fixture = Fixture::new("followup-plan-proposed");
+    fixture.add_review_stage();
+    let proposed = fixture.add_proposed_task("idea", "An idea");
+    let merged = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    );
+    let followup = merged.followup.expect("the plan's follow-up");
+    assert_eq!(followup.from, fixture.plan);
+    let task = fixture.store.load_task(&proposed).expect("the idea").item;
+    assert_eq!(
+        (task.state.as_str(), task.phase.as_str()),
+        ("todo", "proposed"),
+        "the lead's task is left alone"
+    );
+}
+
+/// Running the check twice adds one task: a merged task is collected through the `after` of the
+/// follow-up that named it, so a second check finds nothing to collect (ADR 0048 decision 10).
+///
+/// Mutation: drop the collected check in `propose_followup` → the second check adds a task.
+#[test]
+fn running_the_followup_check_twice_adds_one_task() {
+    let fixture = Fixture::new("followup-plan-twice");
+    fixture.add_review_stage();
+    let first = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "one.txt",
+        vec![item("minor", "one.txt", 1, "first item")],
+    )
+    .followup
+    .expect("the first follow-up")
+    .task;
+
+    for _ in 0..2 {
+        let again =
+            review::propose_followup(&fixture.store, &fixture.plan).expect("the check runs");
+        assert!(again.is_none(), "the check is idempotent: {again:?}");
+    }
+    let plan = fixture
+        .store
+        .load_plan(&fixture.plan)
+        .expect("the plan")
+        .item;
+    assert_eq!(plan.tasks, vec![fixture.task.clone(), first]);
 }
 
 /// A follow-up's attempt that adds no commit passes the delivery check, because arc proposed

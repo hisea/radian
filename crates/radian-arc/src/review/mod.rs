@@ -245,13 +245,13 @@ impl Reverified {
     }
 }
 
-/// The follow-up task arc proposed for a merged task's review (ADR 0048 decision 10): the
-/// items every review of the task suggested, which the merge left unfixed.
+/// The follow-up task arc proposed for a plan's merged reviews (ADR 0048 decision 10): the
+/// items every review of the plan's merged tasks suggested and no earlier follow-up collected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Followup {
     /// The new task's id.
     pub task: String,
-    /// The merged task whose review's items it carries.
+    /// The plan whose merged tasks' reviews it carries.
     pub from: String,
 }
 
@@ -280,7 +280,7 @@ pub struct Merged {
     /// Set when a conflict with main wrote the next attempt's brief instead of waiting for
     /// the lead.
     pub conflict: Option<Conflict>,
-    /// The follow-up task arc proposed from the merged task's review, if any (ADR 0048
+    /// The follow-up task arc proposed for the plan's merged reviews, if any (ADR 0048
     /// decision 10).
     pub followup: Option<Followup>,
     /// Every path the task's own change touched on main, from its merge base: the loop reads
@@ -1723,134 +1723,218 @@ fn followup_items(rounds: &[FollowupRound]) -> Vec<(usize, ReviewItem)> {
     kept
 }
 
-/// The review's follow-up task of one merged task (ADR 0048 decision 10): the items every
-/// review of the task suggested — every attempt's `review` verdict, oldest first — become one
-/// `todo.proposed` task of the same plan, `after` the merged task. The `pre_existing` items
-/// are among them. Nothing from `blocking` is carried: a merged task's blocking items were
-/// fixed or the review would not have passed. Its brief lets each item be left with a reason,
-/// so it is proposed with `allow_noop`: an attempt that adds no commit may deliver nothing.
+/// One collected merged task of a plan: its review rounds and the items the follow-up carries.
+struct FollowupSource {
+    /// The merged task's id.
+    task: String,
+    /// Every review round of the task, oldest first.
+    rounds: Vec<FollowupRound>,
+    /// The kept items, each with the index of the round it came from.
+    items: Vec<(usize, ReviewItem)>,
+}
+
+/// Whether `task` counts as an open task of its plan (ADR 0048 decision 10): `todo.ready`,
+/// `doing.*` or `review.*`. A `todo.proposed` task waits for the owner, and a `done.*` or
+/// `failed.*` task is finished, so none of them holds the plan's follow-up back.
+fn is_open(task: &model::TaskFile) -> bool {
+    match task.state {
+        model::TaskState::Todo => task.phase == "ready",
+        model::TaskState::Doing | model::TaskState::Review => true,
+        model::TaskState::Done | model::TaskState::Failed => false,
+    }
+}
+
+/// The plan's review follow-up (ADR 0048 decision 10): when no task of the plan is open, the
+/// `suggestions` of every merged task that no earlier follow-up collected become one
+/// `todo.proposed` task of the plan, `after` those merged tasks in merge order. The
+/// `pre_existing` items are among them. Nothing from `blocking` is carried: a merged task's
+/// blocking items were fixed or the review would not have passed. Its brief lets each item be
+/// left with a reason, so it is proposed with `allow_noop`: an attempt that adds no commit may
+/// deliver nothing.
 ///
-/// `None` when `[gate.review] propose_followups` is `false`, when the merged task is itself a
-/// review follow-up (a follow-up gets none of its own), when the task has no review verdict,
-/// when no round suggested anything, or when the plan already holds this task's follow-up: a
-/// task gets at most one.
-fn propose_followup(store: &Store, task: &model::TaskFile) -> Result<Option<Followup>, Error> {
+/// `None` when `[gate.review] propose_followups` is `false`, when a task of the plan is open,
+/// when the plan is cancelled (it is final), when no uncollected merged task has a review
+/// verdict that suggested anything, or when the same check already ran: a task is collected at
+/// most once, through the `after` of the follow-up that collected it.
+pub fn propose_followup(store: &Store, plan_id: &str) -> Result<Option<Followup>, Error> {
     if !store.config()?.gate.review.propose_followups {
         return Ok(None);
     }
-    if is_followup(task) {
+    let loaded = store.load_plan(plan_id)?;
+    if loaded.changed_outside_arc {
+        return Err(Error::ChangedOutsideArc(plan_id.to_owned()));
+    }
+    let plan = loaded.item;
+    // A cancelled plan is final: arc adds nothing to it (ADR 0048 decision 3).
+    if store.plan_is_cancelled(plan_id)? {
         return Ok(None);
     }
-    let reviews = review_verdicts(store, &task.id)?;
-    let rounds = followup_rounds(&reviews);
-    let items = followup_items(&rounds);
-    if items.is_empty() {
+    let mut tasks: Vec<(model::TaskFile, bool)> = Vec::new();
+    for id in &plan.tasks {
+        let loaded = store.load_task(id)?;
+        tasks.push((loaded.item, loaded.changed_outside_arc));
+    }
+    if tasks.iter().any(|(task, _)| is_open(task)) {
         return Ok(None);
     }
-    let plan = store.load_plan(&task.plan)?;
-    if plan.changed_outside_arc {
-        return Err(Error::ChangedOutsideArc(task.plan.clone()));
+    let mut sources: Vec<(Option<String>, FollowupSource)> = Vec::new();
+    for (task, changed) in &tasks {
+        if *changed
+            || !task.is_merged()
+            || is_followup(task)
+            || has_followup(store, &plan, &task.id)?
+        {
+            continue;
+        }
+        let rounds = followup_rounds(&review_verdicts(store, &task.id)?);
+        let items = followup_items(&rounds);
+        if items.is_empty() {
+            continue;
+        }
+        sources.push((
+            merge_time(store, &task.id),
+            FollowupSource {
+                task: task.id.clone(),
+                rounds,
+                items,
+            },
+        ));
     }
-    if has_followup(store, &plan.item, &task.id)? {
+    // Merge order, with the plan's task order as the tie-break.
+    sources.sort_by(|(one, _), (other, _)| one.cmp(other));
+    if sources.is_empty() {
         return Ok(None);
     }
+    let sources: Vec<FollowupSource> = sources.into_iter().map(|(_, source)| source).collect();
+    let after: Vec<String> = sources.iter().map(|source| source.task.clone()).collect();
     let id = store.add_task_proposed(
-        &task.plan,
-        &followup_slug(&task.id),
-        &followup_title(&task.id),
-        vec![task.id.clone()],
+        &plan.id,
+        &followup_slug(&plan.id, &plan.tasks),
+        &followup_title(&plan.id),
+        after,
         true,
         Vec::new(),
-        &followup_brief(&task.id, &rounds, &items),
+        &followup_brief(&plan.id, &sources),
     )?;
     Ok(Some(Followup {
         task: id,
-        from: task.id.clone(),
+        from: plan.id,
     }))
 }
 
-/// Whether `task` is itself a review follow-up: its title and its one `after` entry are the
-/// ones arc gives a follow-up. It is the same test [`has_followup`] uses, so a follow-up task
-/// never gets a follow-up of its own (ADR 0048 decision 10).
-fn is_followup(task: &model::TaskFile) -> bool {
-    match task.after.as_slice() {
-        [parent] => task.title == followup_title(parent),
-        _ => false,
-    }
+/// When a merged task merged, from its newest `integration` verdict. `None` when the task has
+/// no readable integration verdict; the plan's task order then decides its place.
+fn merge_time(store: &Store, task: &str) -> Option<String> {
+    task_verdict_files(store, task)
+        .ok()?
+        .into_iter()
+        .filter(|(_, verdict)| verdict.stage == Stage::Integration)
+        .map(|(_, verdict)| verdict.ended_at)
+        .max()
 }
 
-/// Whether the plan already holds `task`'s follow-up: a task whose title and `after` are the
-/// ones arc gives it. A task gets at most one, even when a second merge path reaches the same
-/// merge.
+/// Whether `task` is itself a review follow-up of its plan: its title is the one arc gives the
+/// plan's follow-up. A merged follow-up is never collected, and a follow-up never gets a
+/// follow-up of its own (ADR 0048 decision 10).
+fn is_followup(task: &model::TaskFile) -> bool {
+    task.title == followup_title(&task.plan)
+}
+
+/// Whether a follow-up task of `plan` already collected `task`: the task's id is in the
+/// `after` list of a follow-up. A task is collected at most once, and a collected task whose
+/// follow-up is later cancelled stays collected (ADR 0048 decision 10).
 fn has_followup(store: &Store, plan: &model::PlanFile, task: &str) -> Result<bool, Error> {
     for id in &plan.tasks {
         let Ok(loaded) = store.load_task(id) else {
             continue;
         };
-        if loaded.item.title == followup_title(task) && loaded.item.after.as_slice() == [task] {
+        if is_followup(&loaded.item) && loaded.item.after.iter().any(|after| after == task) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-/// The slug of `task`'s follow-up: `<merged task slug>-followups`, cut to the 48-character
-/// slug limit, with a trailing `-` removed so the cut stays a valid slug.
-fn followup_slug(task: &str) -> String {
-    let slug = model::split_id(task)
+/// The slug of `plan`'s follow-up: `<plan slug>-followups`, cut to the 48-character slug
+/// limit, with a trailing `-` removed so the cut stays a valid slug. When a task of the plan
+/// already holds it, `-2`, `-3`, … is appended within the limit.
+fn followup_slug(plan: &str, tasks: &[String]) -> String {
+    let base = model::split_id(plan)
         .map(|(_, _, slug)| slug)
-        .unwrap_or(task);
-    let mut text: String = format!("{slug}-followups")
-        .chars()
-        .take(model::SLUG_MAX_CHARS)
+        .unwrap_or(plan);
+    let taken: Vec<&str> = tasks
+        .iter()
+        .filter_map(|id| model::split_id(id).map(|(_, _, slug)| slug))
         .collect();
-    while text.ends_with('-') {
-        text.pop();
+    let candidate = |suffix: &str| {
+        let room = model::SLUG_MAX_CHARS.saturating_sub(suffix.chars().count());
+        let mut text: String = format!("{base}-followups").chars().take(room).collect();
+        while text.ends_with('-') {
+            text.pop();
+        }
+        format!("{text}{suffix}")
+    };
+    let mut suffix = String::new();
+    let mut number = 2u32;
+    loop {
+        let slug = candidate(&suffix);
+        if !taken.contains(&slug.as_str()) {
+            return slug;
+        }
+        suffix = format!("-{number}");
+        number += 1;
     }
-    text
 }
 
-/// The title arc gives `task`'s follow-up.
-fn followup_title(task: &str) -> String {
-    format!("Follow-ups from {task}'s review")
+/// The title arc gives a plan's follow-up.
+fn followup_title(plan: &str) -> String {
+    format!("Follow-ups from {plan}'s reviews")
 }
 
-/// The fixed brief of `task`'s follow-up (ADR 0048 decision 10): the line that says where the
-/// items come from and what to do with each, the items grouped by the round they came from as
-/// `[level] path:line text`, and the path of every review verdict.
-fn followup_brief(task: &str, rounds: &[FollowupRound], items: &[(usize, ReviewItem)]) -> String {
+/// The fixed brief of `plan`'s follow-up (ADR 0048 decision 10): the line that says where the
+/// items come from and what to do with each, then one section per merged task headed
+/// `From <task id>` holding the task's items grouped by the round they came from as
+/// `[level] path:line text`, then the path of every review verdict.
+fn followup_brief(plan: &str, sources: &[FollowupSource]) -> String {
     let mut brief = format!(
-        "The items below are from the review of `{task}`, which is now merged; fix each one, \
+        "The items below are from the reviews of the merged tasks of `{plan}`; fix each one, \
          or leave it with a one-line reason in the final answer."
     );
-    for (index, round) in rounds.iter().enumerate() {
-        let group: Vec<&ReviewItem> = items
-            .iter()
-            .filter(|(from, _)| *from == index)
-            .map(|(_, item)| item)
-            .collect();
-        if group.is_empty() {
-            continue;
-        }
-        brief.push_str(&format!(
-            "\n\nFrom review {} (attempt {}):",
-            round.number, round.attempt
-        ));
-        for item in group {
-            brief.push_str(&format!("\n- {item}"));
+    for source in sources {
+        brief.push_str(&format!("\n\nFrom {}", source.task));
+        for (index, round) in source.rounds.iter().enumerate() {
+            let group: Vec<&ReviewItem> = source
+                .items
+                .iter()
+                .filter(|(from, _)| *from == index)
+                .map(|(_, item)| item)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            brief.push_str(&format!(
+                "\n\nFrom review {} (attempt {}):",
+                round.number, round.attempt
+            ));
+            for item in group {
+                brief.push_str(&format!("\n- {item}"));
+            }
         }
     }
-    let paths = rounds
+    let paths: Vec<String> = sources
         .iter()
+        .flat_map(|source| source.rounds.iter())
         .map(|round| format!("`{}`", round.path.display()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let verdict = if rounds.len() == 1 {
+        .collect();
+    let verdict = if paths.len() == 1 {
         "verdict"
     } else {
         "verdicts"
     };
-    brief.push_str(&format!("\n\nRead the {verdict} for detail: {paths}"));
+    brief.push_str(&format!(
+        "\n\nRead the {verdict} for detail: {}",
+        paths.join(", ")
+    ));
     brief
 }
 
@@ -2256,7 +2340,7 @@ fn finish_integration(
     // The merge stands whatever the follow-up does: a plan that changed outside arc leaves a
     // warning, not a failed merge.
     let followup = match store.load_task(task_id) {
-        Ok(merged) => match propose_followup(store, &merged.item) {
+        Ok(merged) => match propose_followup(store, &merged.item.plan) {
             Ok(followup) => followup,
             Err(error) => {
                 let failure = format!("cannot propose the follow-up task: {}", error.message());
@@ -3104,29 +3188,40 @@ fn remove_worktree(store: &Store, task: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// The follow-up's slug is the merged task's slug plus the marker, cut to the slug limit
-    /// and still a valid slug: the cut never leaves a trailing `-`.
+    /// The follow-up's slug is the plan's slug plus the marker, cut to the slug limit and still
+    /// a valid slug: the cut never leaves a trailing `-`. A slug the plan already holds takes
+    /// the next number.
     #[test]
-    fn the_followup_slug_carries_the_merged_slug_and_stays_a_slug() {
-        assert_eq!(followup_slug("TK0001-work"), "work-followups");
+    fn the_followup_slug_carries_the_plan_slug_and_stays_a_slug() {
+        assert_eq!(followup_slug("PL0001-work", &[]), "work-followups");
         let longest = "a".repeat(model::SLUG_MAX_CHARS);
-        let cut = followup_slug(&format!("TK0002-{longest}"));
+        let cut = followup_slug(&format!("PL0002-{longest}"), &[]);
         assert_eq!(cut, longest, "the marker is cut off first: {cut}");
         assert!(model::valid_slug(&cut), "{cut}");
         let shorter = "a".repeat(model::SLUG_MAX_CHARS - 1);
-        let cut = followup_slug(&format!("TK0003-{shorter}"));
+        let cut = followup_slug(&format!("PL0003-{shorter}"), &[]);
         assert_eq!(cut, shorter, "the bare `-` at the cut is removed: {cut}");
         assert!(model::valid_slug(&cut), "{cut}");
+        let taken = vec![
+            "TK0001-work-followups".to_owned(),
+            "TK0002-work-followups-2".to_owned(),
+        ];
         assert_eq!(
-            followup_title("TK0001-work"),
-            "Follow-ups from TK0001-work's review"
+            followup_slug("PL0001-work", &taken),
+            "work-followups-3",
+            "a slug the plan holds takes the next number"
+        );
+        assert_eq!(
+            followup_title("PL0001-work"),
+            "Follow-ups from PL0001-work's reviews"
         );
     }
 
-    /// The brief has the fixed form: the one line, the items grouped by their round as
-    /// `[level] path:line text`, and the verdict path.
+    /// The brief has the fixed form: the one line, one section per merged task headed `From
+    /// <task id>`, the items grouped by their round as `[level] path:line text`, and every
+    /// verdict path.
     #[test]
-    fn the_followup_brief_names_the_task_the_items_and_the_verdict() {
+    fn the_followup_brief_names_the_plan_the_tasks_the_items_and_the_verdicts() {
         let item = ReviewItem {
             level: Some("minor".to_owned()),
             file: Some("a.rs".to_owned()),
@@ -3140,15 +3235,18 @@ mod tests {
             path: PathBuf::from("/r/verdicts/review.json"),
             items: vec![item.clone()],
         }];
-        let items = vec![(0, item)];
-        let brief = followup_brief("TK0001-work", &rounds, &items);
+        let sources = vec![FollowupSource {
+            task: "TK0001-work".to_owned(),
+            rounds,
+            items: vec![(0, item)],
+        }];
+        let brief = followup_brief("PL0001-p", &sources);
         assert!(
-            brief.contains(
-                "The items below are from the review of `TK0001-work`, which is now merged"
-            ),
+            brief.contains("reviews of the merged tasks of `PL0001-p`"),
             "{brief}"
         );
         assert!(brief.contains("one-line reason"), "{brief}");
+        assert!(brief.contains("From TK0001-work"), "{brief}");
         assert!(brief.contains("From review 1 (attempt 2):"), "{brief}");
         assert!(
             brief

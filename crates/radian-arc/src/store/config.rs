@@ -297,7 +297,7 @@ command_timeout_secs = 3600
 # exec_args = ["--model", "m"]   # not set: the same as [worker] exec_args
 timeout_secs = 900              # wall-time limit of one review session; 0 waits forever
 concurrency = 2                 # how many review sessions run at once in this repository; 1 or more
-propose_followups = true        # add the review's follow-up task when a task merges
+propose_followups = true        # add the plan's review follow-up once it has no open task
 # prompt_file = "review.md"      # not set: the built-in prompt only
 
 [gate.review.first]

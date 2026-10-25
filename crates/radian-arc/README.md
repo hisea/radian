@@ -571,18 +571,22 @@ force. A main that moved after integration, or a rejected push, makes it integra
 (one round per pass in the loop; at most three runs per `radian arc merge` command). On
 success the task is `done.merged` and its worktree is removed; the branch stays.
 
-`finish_integration` then asks `review::propose_followup` for the task's review follow-up (ADR
-0048 decision 10): it reads every `review` verdict of the task, oldest attempt first, and
-collects every round's `suggestions` (the moved `pre_existing` items among them), never a
-`blocking` item, so a round that only had blocking items contributes nothing. Repeats are
-dropped: two items are the same when their `file`, `line` and `text` match after a leading tag
-that repeats the item's own level is removed and whitespace is collapsed, and the newest copy
-is kept. The rest become one `todo.proposed` task of the same plan, `after` the merged task,
-when `[gate.review] propose_followups` is true and the plan does not already hold it; its brief
-groups the items by the round they came from (`From review <n> (attempt <n>):`) and names the
-path of every review verdict. A task that is itself a review follow-up gets none of its own;
-its review's unfixed items stay in its verdict and in the task's final report. A failure to add
-the follow-up is a warning after the merge, not a failed merge.
+`finish_integration` then asks `review::propose_followup` for the plan's review follow-up (ADR
+0048 decision 10): when no task of the plan is open (`todo.ready`, `doing.*` or `review.*`), it
+reads every `review` verdict of every merged task the plan has and no earlier follow-up
+collected, oldest attempt first, and collects every round's `suggestions` (the moved
+`pre_existing` items among them), never a `blocking` item, so a round that only had blocking
+items contributes nothing. Repeats within one task are dropped: two items are the same when
+their `file`, `line` and `text` match after a leading tag that repeats the item's own level is
+removed and whitespace is collapsed, and the newest copy is kept. The rest become one
+`todo.proposed` task of the plan, `after` the collected tasks in merge order, when
+`[gate.review] propose_followups` is true; its brief groups each task's items by the round they
+came from (`From <task id>`, then `From review <n> (attempt <n>):`) and names the path of every
+review verdict. A task is collected at most once, through the `after` of the follow-up that
+collected it, so the check is idempotent; a `cancel` and every scheduling pass run it too. A
+merged task that is itself a review follow-up is never collected and gets none of its own; its
+review's unfixed items stay in its verdict and in the task's final report. A failure to add the
+follow-up is a warning after the merge, not a failed merge.
 
 `merge_step` reads `runs/<task>/gate.json` for a finished integration, and a
 `review.ready_to_merge` task finishes the newest passing integration verdict for its head.

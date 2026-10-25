@@ -224,8 +224,8 @@ pub struct ReviewConfig {
     pub prompt_file: Option<String>,
     /// Wall-time limit of one review session, in seconds. `0` waits forever.
     pub timeout_secs: u64,
-    /// Whether arc proposes the review's follow-up task when a task merges (ADR 0048
-    /// decision 10). `true` by default; `false` turns the follow-up off.
+    /// Whether arc proposes the plan's review follow-up task once the plan has no open task
+    /// (ADR 0048 decision 10). `true` by default; `false` turns the follow-up off.
     pub propose_followups: bool,
     /// How many review sessions may run at once in the repository. `1` or more.
     pub concurrency: u32,

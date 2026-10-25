@@ -41,7 +41,7 @@ A key you leave out takes its default.
 | `gate.review.first.timeout_secs` | integer | not set: `gate.review.timeout_secs` | seconds; `1` or more | The wall-time limit of one first-review session. Unset, the first review uses `gate.review.timeout_secs`. |
 | `gate.review.prompt_file` | string | not set: only the built-in prompt | a path relative to the repository root, without `..` | Appended to the built-in review prompt when the `review` stage runs. |
 | `gate.review.timeout_secs` | integer | `900` | seconds; `0` waits forever | The wall-time limit of one review session. |
-| `gate.review.propose_followups` | boolean | `true` | `true`, `false` | When a task merges: `true` lets arc add one `todo.proposed` task with the items every review round of the task suggested but the merge left unfixed (see [The review's follow-up](gate.md#the-reviews-follow-up)); `false` turns it off. The lead's MCP `add_task` on a confirmed plan is not affected. |
+| `gate.review.propose_followups` | boolean | `true` | `true`, `false` | When a plan has no open task: `true` lets arc add one `todo.proposed` task with the items every review round of the plan's merged tasks suggested but no earlier follow-up collected (see [The review's follow-up](gate.md#the-reviews-follow-up)); `false` turns it off. The lead's MCP `add_task` on a confirmed plan is not affected. |
 | `gate.profiles` | table | one `default` section | One section per profile name | When a gate runs. |
 | `gate.profiles.<name>.stages` | array of tables | `[{ stage = "commands", required = true }, { stage = "human", required = true }]` | `stage` is `commands`, `mutation`, `review`, `ci`, or `human`; `required` is `true` or `false` and defaults to `true` | When a gate runs. The list's order is the round's order; when it lists both `commands` and `review`, those two start at the same time and the round is decided in the list's order ([the gate run](gate.md#the-gate-run)). `integration` is not a profile stage: it always runs at merge. |
 | `gate.profiles.<name>.commands` | array of strings | `[]` | Shell command lines | The `commands` stage runs them in order on its own checkout. |
@@ -169,7 +169,7 @@ The MCP `update_task` tool replaces the original brief and keeps every rework se
 
 A new task is `todo` / `ready`.
 A `todo` / `retry_wait` task is claimed at once by `radian arc start`, without waiting for its `retry_at`; the scheduling loop waits for `retry_at` (see [`radian arc start`](index.md#radian-arc-start-task)).
-A task the lead adds to a confirmed plan (MCP `add_task`) or arc proposes from a merged task's review is `todo` / `proposed`: the scheduling loop never claims it and `start` refuses it until you run `radian arc confirm <task>`.
+A task the lead adds to a confirmed plan (MCP `add_task`) or arc proposes as the plan's review follow-up is `todo` / `proposed`: the scheduling loop never claims it and `start` refuses it until you run `radian arc confirm <task>`.
 A plan is done when all of its tasks are merged; `done` is not a stored plan status.
 A `cancelled` plan is final: `radian arc cancel <plan>` sets it after ending every task `cancel` accepts in the plan (see [`radian arc cancel`](index.md#radian-arc-cancel-id)).
 No command confirms it, adds a task to it, changes its `auto` or `priority`, resets its budget, or starts, reverifies or gates its tasks, and `list` hides it unless `--all`.
