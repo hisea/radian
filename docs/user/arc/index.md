@@ -114,6 +114,7 @@ Each plan's header line shows its id, `status`, `auto` level, `priority`, progre
 The progress total leaves out `failed.cancelled` tasks: one merged task and one cancelled follow-up read `1/1`, an all-cancelled plan `0/0`.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
 A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage) and what `reset-budget` sets back to `0`; its `total_cost_usd` is the same spend and is never reset.
+An attempt whose worker reported no cost (a [`worker.command`](files.md#configtoml) that writes no `cost` in its `Result`) adds nothing to either number, and a plan with such a task prints `total_cost_usd: unknown` on its header line.
 
 By default finished work is left out, so you see the work in progress:
 
@@ -150,6 +151,7 @@ For a task it also prints the current attempt's notes as `attempt_note`, such as
 `show --json` carries them as `attempt_notes`, a list of strings (empty when there are none).
 
 A plan prints `cost_usd` and `total_cost_usd` beside its other fields: the first is the sum of its tasks' `cost_usd` and the number its budget compares, the second is the sum of their totals. Both are computed when the plan is read and are not stored in the plan file. A task prints both of its own numbers.
+A task whose attempt reported no cost prints `unknown` for both when it has no known cost at all, and `null` in `show --json`, as does a plan whose total leaves such a task out; see [Another agent as the worker](#another-agent-as-the-worker).
 
 The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see [Plan and task files](files.md#plan-and-task-files)).
 `list --plan <id>` always reads the plan.
@@ -358,8 +360,10 @@ radian arc start <TASK>
 |---|---|---|
 | `<TASK>` | `ID` | The task id. Required. |
 
-Before it reconciles, claims or verifies anything, `start` parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args` (see the `worker.exec_args` row of [`config.toml`](files.md#configtoml)).
+Before it reconciles, claims or verifies anything, `start` checks the worker line (see the [`worker.exec_args` and `worker.command` rows](files.md#configtoml)).
+Without `[worker] command`, it parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args`.
 A line `radian exec` would reject, or one that repeats an argument the wrapper sets, refuses the command with exit `3` and the parser's own message, names `worker.exec_args`, claims nothing, and changes no file.
+With `[worker] command` set, arc checks instead that the program resolves (see [Another agent as the worker](#another-agent-as-the-worker)); a program that does not resolve refuses the command the same way, naming `worker.command` and the program.
 
 Before it claims anything it reconciles every task in `doing` (see [Reconcile](gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 
@@ -435,6 +439,91 @@ When verification cannot run (a moved branch, a stage this build does not have),
 
 `start` exits `0` when the task left `doing`, `1` when it is still in `doing` after the attempt (or on an internal error), `3` when the claim is refused or verification refuses, and `4` when another process holds `state.lock`.
 `start` waits for the wrapper, so it exits only after the attempt ends; `radian arc run` does not wait.
+
+## Another agent as the worker
+
+`[worker] command` replaces the `radian exec` worker with one program of your choice for every attempt of every task ([`worker.command`](files.md#configtoml)).
+The array's first element is the program and the rest are its arguments; there is no shell in between, so a pipeline or a variable belongs in a script you pass as the program.
+Unset, the worker is `radian exec` and nothing on this page applies.
+
+The program runs in the task's worktree, gets the same brief on stdin as a `radian exec` worker (the conflict section, the hand-off, the task body, then [`worker-brief.md`](files.md#worker-briefmd)), and its stdout goes to `runs/<task>/attempts/<attempt id>/result.jsonl` and its stderr to `stderr.log`.
+The wrapper gives it its own process group and enforces the attempt's limits itself, exactly as it does for `radian exec`: no new stdout line for [`stall_timeout_secs`](files.md#task-fields), `max_wall_time_secs` in total, the cancel grace period after SIGTERM.
+After it exits the wrapper runs the same git control-file check, [delivery check](#what-the-wrapper-checks-after-the-worker-exits), push and records; nothing about those changes.
+
+### The environment
+
+The wrapper adds these variables to the program's environment; they describe the attempt and are never read by radian itself.
+
+| Variable | Value |
+|---|---|
+| `ARC_WORKTREE` | The attempt's worktree, absolute. The program's working directory. |
+| `ARC_TASK` | The task id, such as `TK0001-work`. |
+| `ARC_ATTEMPT` | The attempt id, `<task>-<n>`. |
+| `ARC_SESSION` | The session id the claim chose (`<task>-<attempt>` with `rework_session = "fresh"`, the task id with `resume`). |
+| `ARC_SESSION_START` | `new` or `resume`: `resume` on a `resume`-mode attempt whose session file exists, `new` on every other attempt. Always set. |
+| `ARC_GIT_DIR` | `git rev-parse --absolute-git-dir` in the worktree. |
+| `ARC_GIT_COMMON_DIR` | The absolute common git directory. A linked worktree's objects and refs live there, so give it to a sandboxed agent as writable if the agent must commit. |
+| `ARC_DENY_READ` | The paths the wrapper would pass to `radian exec` as `--deny-read`, joined with `:`. A hint for your own sandbox, not a rule radian enforces on the command. |
+| `ARC_STATE_DIR` | An absolute directory outside the worktree, `attempts/<task>/state/`, kept across the task's attempts. The command may keep its own state there, for example a session map. |
+
+### The stdout contract
+
+The program writes JSON lines to stdout.
+The last line whose `type` is `Result` decides the attempt, exactly as it does for `radian exec`:
+
+- `outcome` `"completed"` passes, and any other value fails the attempt with that outcome;
+- no `Result` line at all fails it as `terminated`;
+- `text` (a string) is the attempt's final report; the next fresh attempt's hand-off section reads it;
+- `cost` is optional and has the shape `radian exec` writes (`{"micros": <integer>, "incomplete": <boolean>, "estimated": <boolean>}`). Without it the attempt's cost is unknown: it adds nothing to the task's or the plan's cost total, a budget never stops on it, and `show`, `list` and the arc TUI show it as unknown. A `cost` that is `null`, or that carries no `micros`, is a reported zero, the shape `radian exec` writes when it recorded no fee. When a claim starts a command worker for a task or plan that has a cost limit, `start`, `run` and `serve` print one line for the attempt: `<task>: worker.command reports no cost; the cost limit does not apply`.
+
+The command writes no `Result` line on a crash, and the attempt then fails as `terminated`, as a crashed `radian exec` does.
+
+### What the command must do itself
+
+arc checks the result, not the work: the program must commit its change on the branch, leave the worktree clean, and print the `Result` line.
+A dirty or untracked file, no commit past the base, a commit that touches `.radian/arc/`, or a change to the repository's git control files fails the attempt exactly as it fails a `radian exec` worker.
+
+### The differences from the `radian exec` worker
+
+- **`--deny-read` does not reach it.** radian does not sandbox the command, so what it reads is up to its own sandbox: the arc store and `~/.radian/credentials` are readable unless the command's own sandbox denies them. `ARC_DENY_READ` carries the paths the wrapper would deny so your program can deny them itself.
+- **Its sandbox is its own.** radian cannot select a profile or a tier for it. A sandboxed agent needs `ARC_WORKTREE` writable and, to commit, `ARC_GIT_COMMON_DIR` writable as well.
+- **The cost limit does not apply.** A budget can never stop a command worker, because arc does not know its cost unless the command reports one. The one warning line above says so once per attempt.
+
+### A complete Codex example
+
+The example was checked against `codex-cli 0.159.1`.
+It passes Codex's JSON events to stdout unchanged and then prints one `Result` line: `completed` when `codex exec` exits `0`, `error` otherwise, with `text` the content of the `-o` file, JSON-escaped by `jq -Rs`.
+
+```sh
+#!/bin/sh
+# radian arc command worker: codex exec (checked with codex-cli 0.159.1)
+set -e
+text='""'
+status=0
+codex exec --json -C "$ARC_WORKTREE" -s workspace-write \
+  --add-dir "$ARC_GIT_COMMON_DIR" \
+  -o "$ARC_STATE_DIR/last-message.txt" - || status=$?
+if [ -f "$ARC_STATE_DIR/last-message.txt" ]; then
+  text=$(jq -Rs . < "$ARC_STATE_DIR/last-message.txt")
+fi
+if [ "$status" -eq 0 ]; then
+  outcome=completed
+else
+  outcome=error
+fi
+printf '{"type":"Result","outcome":"%s","text":%s}\n' "$outcome" "$text"
+```
+
+Save it as an executable file and set both keys:
+
+```toml
+[worker]
+command = ["/absolute/path/to/codex-worker.sh"]
+rework_session = "fresh"
+```
+
+`codex exec resume` has no `-C`, `-s` or `--add-dir` in `0.159.1`, so the example always starts a new Codex session: keep `rework_session = "fresh"`, which is the default.
+The wrapper's hand-off section still carries the previous attempt's report, and `ARC_STATE_DIR` is where the script can keep a session map of its own.
 
 ## `radian arc cancel <ID>`
 
