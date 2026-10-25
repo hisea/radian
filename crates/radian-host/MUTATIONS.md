@@ -1450,3 +1450,18 @@ confirmed byte-identical with `diff -q`.
 | TK0170-M1 | `OPENCODE_GO_OPENAI_BASE` points at the old `https://opencode.ai/inference/go/openai/v1` | ✅ 6 failed | `provider::tests::a_route_picks_the_adapter_base_url_and_headers`, `provider::tests::an_explicit_base_url_survives_the_default_moving`, `provider::tests::opencode_go_maps_models_to_the_three_protocols`, `provider::tests::the_catalogs_api_field_is_never_used_for_the_endpoint`, `provider::tests::the_bundled_snapshot_decides_the_protocol_with_no_cache`, and `opencode_go_models::the_opencode_go_builtins_match_upstream` |
 
 1/1 caught.
+
+## TK0172: reasoning replay falls back to the bundled snapshot (2026-10-25)
+
+Worktree `.radian/arc/worktrees/TK0172-reasoning-replay-snapshot-fallback`, branch
+`work/TK0172-reasoning-replay-snapshot-fallback`. The mutation makes
+`catalog::catalog_reasoning_replay` cache-only again (`read_cache(&cache_path())?`), restores from
+`.radian/catalog.rs.bak2` with `cp` (never `git checkout`), and runs
+`cargo nextest run -p radian-host --locked --profile sandbox --test reasoning_replay --test
+reasoning_replay_no_cache --no-fail-fast`. The restore was checked with `diff -q` (empty).
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| TK0172-M1 | `catalog_reasoning_replay` returns `None` without a cache (reads `read_cache(&cache_path())` only, no bundled-snapshot fallback) | ✅ 1 failed (rc=100) | `reasoning_replay_no_cache::with_no_cache_the_bundled_snapshot_decides_reasoning_replay` (`assertion left == right` at "with no cache, the bundled snapshot still decides replay"; the cache-backed `reasoning_replay::the_catalog_and_a_named_override_decide_reasoning_replay` still passes, as it should) |
+
+1/1 caught.

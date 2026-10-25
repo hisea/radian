@@ -1029,13 +1029,24 @@ fn read_cache(path: &Path) -> Option<(Catalog, Duration)> {
     Some((catalog, age))
 }
 
-/// The catalog's reasoning-replay field for `(provider, model)`, read from the local cache
-/// (ADR 0014 R5). `None` when the cache is missing, the entry is absent, or the
-/// entry declares a field Radian does not replay. Offline, like the budget resolver: a switch
-/// never fetches.
+/// The catalog a route's per-process facts (reasoning replay, image support) are read from:
+/// the local cache when it parses, else the **bundled snapshot** — ADR 0018's order and the
+/// same source [`protocol_catalog`] gives a route (ADR 0014 R5, ADR 0026). Never the network.
+/// Parsed once per process: the `read` tool asks about images on every call and a route
+/// switch asks about reasoning replay, so the 5 MB cache is not re-parsed each time. On a
+/// first run the startup fetch can land after the first lookup; the snapshot then answers,
+/// which ADR 0018 allows as the last source.
+fn route_catalog() -> &'static Catalog {
+    static CATALOG: OnceLock<Catalog> = OnceLock::new();
+    CATALOG.get_or_init(protocol_catalog)
+}
+
+/// The catalog's reasoning-replay field for `(provider, model)` (ADR 0014 R5), read from the
+/// local cache, else the bundled snapshot — the same order as [`protocol_catalog`]. `None`
+/// when neither catalog carries the entry, or the entry declares a field Radian does not
+/// replay. Offline, like the budget resolver: a switch never fetches.
 pub fn catalog_reasoning_replay(provider: &str, model: &str) -> Option<String> {
-    let (catalog, _) = read_cache(&cache_path())?;
-    catalog.reasoning_replay(provider, model)
+    route_catalog().reasoning_replay(provider, model)
 }
 
 /// Writes the cache atomically with owner-only permissions. The temp name is unique per write
@@ -1078,13 +1089,10 @@ fn parse_modalities_input(model: &Value) -> Option<Vec<String>> {
 }
 
 /// Whether the **current** route takes images, from the local catalog (cache, else the bundled
-/// snapshot), never the network. The protocol catalog is parsed once per process: the `read`
-/// tool asks this on every call, and a route switch does not change the catalog file.
-/// A model the catalog does not carry (including a custom provider) counts as taking images.
+/// snapshot), never the network (ADR 0018). A model the catalog does not carry (including a
+/// custom provider) counts as taking images.
 pub fn route_takes_images(provider: &str, model: &str) -> bool {
-    static CATALOG: OnceLock<Catalog> = OnceLock::new();
-    CATALOG
-        .get_or_init(protocol_catalog)
+    route_catalog()
         .takes_images(provider, model)
         .unwrap_or(true)
 }

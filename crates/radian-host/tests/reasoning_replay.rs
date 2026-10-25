@@ -1,5 +1,6 @@
 //! Reasoning replay resolution (ADR 0014 R5): for a built-in provider the catalog's
-//! `interleaved` field decides, and a `[providers.<id>]` declaration overrides it.
+//! `interleaved` field decides — the local cache when it parses, even where it differs from
+//! the bundled snapshot (ADR 0018's order) — and a `[providers.<id>]` declaration overrides it.
 //!
 //! `RADIAN_HOME` is process-wide, so this binary deliberately holds exactly one test: nothing
 //! else in it can race the environment.
@@ -35,6 +36,8 @@ fn the_catalog_and_a_named_override_decide_reasoning_replay() {
         r#"{
             "opencode-go": {"models": {
                 "deepseek-v4.1-flash": {"limit": {"context": 1000000}, "interleaved": {"field": "reasoning_content"}},
+                "glm-5.2": {"limit": {"context": 5}, "interleaved": true},
+                "alt": {"limit": {"context": 5}, "interleaved": {"field": "reasoning"}},
                 "plain": {"limit": {"context": 5}}
             }}
         }"#,
@@ -50,6 +53,14 @@ fn the_catalog_and_a_named_override_decide_reasoning_replay() {
         Some("reasoning_content")
     );
     assert_eq!(resolve_reasoning_replay(&builtin, "plain"), None);
+    // The cache wins over the bundled snapshot: the snapshot marks `glm-5.2` with
+    // `{"field": "reasoning_content"}`, and this cache says a bare `true`, which is not
+    // replayed. A model the snapshot does not carry is read from the cache too.
+    assert_eq!(resolve_reasoning_replay(&builtin, "glm-5.2"), None);
+    assert_eq!(
+        resolve_reasoning_replay(&builtin, "alt").as_deref(),
+        Some("reasoning")
+    );
     assert!(route_replays_reasoning(
         "opencode-go",
         "deepseek-v4.1-flash",

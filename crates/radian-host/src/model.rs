@@ -465,8 +465,9 @@ pub fn compaction_settings_for_route(
 }
 
 /// The reasoning-replay field for a route (ADR 0014 R5): the `[providers.<id>]`
-/// override when the provider is named, else the catalog's `interleaved` field. `None` means
-/// the model does not require replay, or declares a field Radian does not replay (e.g.
+/// override when the provider is named, else the catalog's `interleaved` field — the local
+/// cache when it parses, else the bundled snapshot (ADR 0018's order; ADR 0014 R5). `None`
+/// means the model does not require replay, or declares a field Radian does not replay (e.g.
 /// `reasoning_details`).
 pub fn resolve_reasoning_replay(provider: &crate::ProviderRef, model: &str) -> Option<String> {
     if let crate::ProviderRef::Named(named) = provider
@@ -481,10 +482,10 @@ pub fn resolve_reasoning_replay(provider: &crate::ProviderRef, model: &str) -> O
 }
 
 /// Whether a route replays reasoning, resolved by provider **name** (ADR 0014 R5):
-/// the `[providers.<name>]` override, else the catalog's `interleaved` field. This is what the
-/// per-route budget resolver uses, so the estimate counts the reasoning the request really
-/// carries. A name reachable only through `auth.json`'s `env` has no declaration here and no
-/// catalog entry, so it does not replay.
+/// the `[providers.<name>]` override, else the catalog's `interleaved` field (cache, else the
+/// bundled snapshot). This is what the per-route budget resolver uses, so the estimate counts
+/// the reasoning the request really carries. A name reachable only through `auth.json`'s `env`
+/// has no declaration here and no catalog entry, so it does not replay.
 pub fn route_replays_reasoning(
     provider_name: &str,
     model: &str,
