@@ -801,6 +801,58 @@ pub struct ResultLine {
     pub failed: bool,
 }
 
+/// What the arc TUI reads from `config.toml` when it opens (brief TK0087): the theme the
+/// radian TUI would draw with, and the lines to show once in the footer.
+#[derive(Debug, Clone)]
+pub struct OpenTheme {
+    /// The theme to draw with. The loader's theme for an empty configuration when the config
+    /// cannot be read (mono under `NO_COLOR`, else built-in dark for the terminal's depth).
+    pub theme: Theme,
+    /// One line per problem: why the config could not be read, an unknown theme file, or a bad
+    /// `[tui.colors]` color. Shown as the footer's one result line when the TUI opens.
+    pub warnings: Vec<String>,
+}
+
+/// Resolves the arc TUI's theme from the same `config.toml` and with the same
+/// [`crate::theme::load`] call the radian TUI uses (brief TK0087): `tui.theme`, a theme file
+/// under `themes_dir`, `[tui.colors]`, `NO_COLOR` and truecolor detection all behave the same.
+///
+/// `config_path` is the already-resolved path, so the radian TUI's precedence holds:
+/// the arc TUI passes [`radian_host::config::resolved_path`] (`RADIAN_CONFIG`, then
+/// `~/.radian/config/config.toml`), while a test injects a file instead of the environment. A
+/// missing file is the empty configuration, exactly as it is for the radian TUI; a file that
+/// cannot be read or parsed is read as the empty configuration with the reader's reason as the
+/// first warning, so the TUI never stops and `NO_COLOR` and truecolor detection still apply
+/// exactly as they do for a readable file (ADR 0029 decision 7: `NO_COLOR` wins).
+pub fn open_theme(
+    config_path: Option<&Path>,
+    no_color: bool,
+    truecolor: bool,
+    themes_dir: Option<&Path>,
+) -> OpenTheme {
+    let (config, error) = match radian_host::config::load_path(config_path) {
+        Ok(config) => (config, None),
+        // A file that cannot be read is no configuration at all, never a bypass of the theme
+        // loader: an unreadable config under `NO_COLOR` still opens in mono, and a terminal
+        // without truecolor still gets the 256-color palette.
+        Err(error) => (
+            radian_host::config::Config::default(),
+            Some(error.to_string()),
+        ),
+    };
+    let (theme, mut warnings) = crate::theme::load(
+        config.tui.theme.as_deref(),
+        no_color,
+        truecolor,
+        themes_dir,
+        &config.tui.colors,
+    );
+    if let Some(error) = error {
+        warnings.insert(0, error);
+    }
+    OpenTheme { theme, warnings }
+}
+
 /// The arc TUI's state.
 pub struct ArcApp {
     pub store: Store,
@@ -883,8 +935,34 @@ impl ArcApp {
     }
 
     /// [`ArcApp::open`] with an explicit session directory (tests, and a caller that already
-    /// resolved it).
+    /// resolved it). The theme stays [`Theme::default`]; use [`ArcApp::with_theme`] for the one
+    /// the config resolved.
     pub fn with_session_dir(store: Store, session_dir: Option<PathBuf>) -> Self {
+        Self::with_session_dir_and_theme(store, session_dir, Theme::default())
+    }
+
+    /// [`ArcApp::open`] with `theme`, the theme the config resolved at open (brief TK0087).
+    pub fn with_theme(store: Store, theme: Theme) -> Self {
+        let session_dir = radian_host::session_dir(None).ok();
+        Self::with_session_dir_and_theme(store, session_dir, theme)
+    }
+
+    /// [`ArcApp::with_theme`] plus [`open_theme`]'s warnings as the footer's one result line,
+    /// the way an owner action's message is shown. The lines are joined with `; ` because the
+    /// footer has one result line; an empty list leaves the footer as it was.
+    pub fn open_with_theme(store: Store, open: OpenTheme) -> Self {
+        let mut app = Self::with_theme(store, open.theme);
+        if !open.warnings.is_empty() {
+            app.set_result(open.warnings.join("; "), true);
+        }
+        app
+    }
+
+    fn with_session_dir_and_theme(
+        store: Store,
+        session_dir: Option<PathBuf>,
+        theme: Theme,
+    ) -> Self {
         let mut app = Self {
             store,
             session_dir,
@@ -920,7 +998,7 @@ impl ArcApp {
             log_open: false,
             log_scroll: 0,
             log_rows: 1,
-            theme: Theme::default(),
+            theme,
             notice: None,
         };
         app.refresh();
@@ -1674,6 +1752,22 @@ impl ArcApp {
         self.result = Some(ResultLine { text, failed });
     }
 
+    /// Adds `text` to the footer's result line instead of replacing it: the open-time theme
+    /// warning is shown when the TUI opens, and a loop start that fails before the first frame
+    /// must not hide it (brief TK0087). The footer has one line, so the two are joined with
+    /// `; `, the separator [`ArcApp::open_with_theme`] uses for several warnings; a line that
+    /// already failed stays failed.
+    pub fn add_result(&mut self, text: String, failed: bool) {
+        match &mut self.result {
+            Some(line) => {
+                line.text.push_str("; ");
+                line.text.push_str(&text);
+                line.failed |= failed;
+            }
+            None => self.set_result(text, failed),
+        }
+    }
+
     /// The first line the log view draws: the first line of its last page while the stored
     /// index is at the end, else the stored line, clamped to a page that fits.
     fn log_start(&self) -> usize {
@@ -2379,7 +2473,8 @@ impl ArcApp {
         self.float = Some(Float::Confirm { message, action });
     }
 
-    /// The keys a float takes: `y`/`n` for a confirmation, typing/Enter/Esc for the reject note.
+    /// The keys a float takes: `y`/`n` for a confirmation, typing/Enter for the reject note.
+    /// `Esc` never reaches here: [`Self::go_back`] closes the float first.
     fn on_float_key(&mut self, key: &KeyEvent) -> ArcKey {
         let Some(float) = self.float.clone() else {
             return ArcKey::Ignored;

@@ -682,12 +682,13 @@ fn plan_frame_lines(
 }
 
 /// One task row's fixed column widths, computed once for the plan from the rows it draws
-/// (ADR 0048 decision 11): the id block (`connector + mark + id`), `state.phase`, `#n` and
-/// the cost. Every row starts `state.phase`, `#n`, the cost and the trailing text at the same
-/// column, whatever its depth; the id gets what is left of the id block.
+/// (ADR 0048 decision 11): the id block (`connector + mark + id` and the one space before the
+/// phase), `state.phase`, `#n` and the cost. Every row starts `state.phase`, `#n`, the cost and
+/// the trailing text at the same column, whatever its depth; the id gets what is left of the id
+/// block, minus that space.
 struct TaskColumns {
-    /// The connector, the mark and the id together. A deeper connector leaves the id less
-    /// room, so it is cut with `…`.
+    /// The connector, the mark, the id and the one space before `state.phase`. A deeper
+    /// connector leaves the id less room, so it is cut with `…` and the space stays.
     id: usize,
     phase: usize,
     attempt: usize,
@@ -695,8 +696,10 @@ struct TaskColumns {
 }
 
 fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
-    // The id block is `connector + mark + id`: the mark glyph and its one space are 2 cells.
+    // The id block is `connector + mark + id` and one trailing space: the mark glyph and its
+    // one space are 2 cells, and the trailing space is the gap before `state.phase`.
     let mark = 2;
+    let gap = 1;
     let lead_max = tasks
         .iter()
         .map(|task| task.connector.width() + mark)
@@ -704,7 +707,7 @@ fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
         .unwrap_or(mark);
     let id_max = tasks
         .iter()
-        .map(|task| task.connector.width() + mark + task.id.width())
+        .map(|task| task.connector.width() + mark + task.id.width() + gap)
         .max()
         .unwrap_or(16);
     let phase_max = tasks
@@ -723,9 +726,10 @@ fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
         .max()
         .unwrap_or(1);
     let mut phase = (phase_max + 2).clamp(10, 25);
-    // Never shrink the id block below the deepest connector's own width plus one id cell, so
-    // a deep row still shows a cut id rather than losing the column.
-    let min_id = (lead_max + 1).max(12);
+    // Never shrink the id block below the deepest connector's own width plus one id cell and
+    // the space before the phase, so a deep row still shows a cut id and its gap rather than
+    // losing the column.
+    let min_id = (lead_max + 1 + gap).max(12);
     let mut id = id_max.clamp(12, 34).max(min_id);
     // The cursor is always 2 cells (its cell on every row, selected or not), so the columns
     // hold on the row the cursor is on too. The `waits`/`also after` tail takes whatever is
@@ -770,7 +774,9 @@ fn task_row_line(
         format!("{} ", task.mark.glyph()),
         task.mark.style(theme),
     ));
-    let id = fit(&task.id, columns.id.saturating_sub(lead));
+    // The id block keeps its last cell for the space before the phase, so the id is cut one
+    // cell earlier and the padding always leaves that cell.
+    let id = fit(&task.id, columns.id.saturating_sub(lead + 1));
     let id_used = id.width();
     spans.push(Span::styled(id, theme.text));
     spans.push(Span::raw(
@@ -1121,6 +1127,10 @@ struct DiffState<'a> {
     diff_scroll: usize,
 }
 
+/// The file list's share of the diff area: at most one third of its rows, rounded down, so the
+/// selected file's frame keeps the rest (ADR 0048 decision 13).
+const FILE_LIST_DIVISOR: usize = 3;
+
 /// The file list's rows when the diff area can spare them: the list never gets fewer than this
 /// while there are that many files (ADR 0048 decision 13).
 const MIN_FILE_ROWS: usize = 3;
@@ -1162,8 +1172,8 @@ fn draw_diff(
         lines.push(rail(theme, Line::from(Span::styled(text, theme.hint))));
     }
     // After the list the frame needs five rows: the frame's bottom, a blank, the diff frame's
-    // title, at least one body row and its bottom. The list is capped at half of what is left,
-    // so the selected file's frame keeps the rest.
+    // title, at least one body row and its bottom. The list is capped at one third of what is
+    // left, so the selected file's frame keeps the rest.
     let available = remaining.saturating_sub(usize::from(source.is_some()));
     if !diff_file_list(
         lines,
@@ -1182,10 +1192,10 @@ fn draw_diff(
 
 /// The file list rows (or the one loading/error/empty line). Returns whether a diff follows.
 ///
-/// `available` is the diff area left after the frame's first rows: the list takes at most half
-/// of it (rounded down, and at least [`MIN_FILE_ROWS`] while there are that many files), so the
-/// selected file's frame keeps the rest, less its own `reserve` rows and one body row. A list
-/// that shows only part of the files ends with `files a–b of n`.
+/// `available` is the diff area left after the frame's first rows: the list takes at most one
+/// third of it (rounded down, and at least [`MIN_FILE_ROWS`] while there are that many files),
+/// so the selected file's frame keeps the rest, less its own `reserve` rows and one body row. A
+/// list that shows only part of the files ends with `files a–b of n`.
 fn diff_file_list(
     lines: &mut Vec<Line<'static>>,
     diff: &DiffState,
@@ -1223,7 +1233,7 @@ fn diff_file_list(
         lines.push(row(Line::from(Span::styled("no change yet", theme.hint))));
         return false;
     }
-    let rows = (available / 2)
+    let rows = (available / FILE_LIST_DIVISOR)
         .max(MIN_FILE_ROWS)
         .min(available.saturating_sub(reserve))
         .max(1);
@@ -1775,7 +1785,8 @@ fn draw_loop_log(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
     let height = area.height as usize;
     let inner = width.saturating_sub(4);
     // The frame's top and bottom lines leave the body this many rows; they are all drawn, so
-    // the frame fills the area whether the log has two lines or five hundred.
+    // the frame fills the area whether the log has two lines or five hundred. A body of one row
+    // has no room for both, and keeps the tail (see the clamp below).
     let rows = height.saturating_sub(2);
     app.log_rows = rows.max(1);
     let mut lines = Vec::with_capacity(height);
@@ -1803,6 +1814,16 @@ fn draw_loop_log(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
         }
     }
     lines.push(frame_bottom(&theme));
+    // The last row is always the frame's tail, the way the task and merge pages draw theirs: a
+    // body too short for a top line, its rows and the tail loses the log's rows first and then
+    // its top line, never the bottom. At the shortest body `draw` accepts (one row) the tail is
+    // the whole view.
+    if lines.len() > height {
+        lines.truncate(height);
+        if let Some(last) = lines.last_mut() {
+            *last = frame_bottom(&theme);
+        }
+    }
     draw_lines(frame, area, lines);
 }
 
