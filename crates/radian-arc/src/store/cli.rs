@@ -927,7 +927,8 @@ fn reverify(task: &str) -> Result<u8, Error> {
     Ok(Exit::Ok.code())
 }
 
-/// `radian arc cancel <id>`: stop a task, or end every open task of a plan and the plan.
+/// `radian arc cancel <id>`: stop a task, or end every task `cancel` accepts in a plan and the
+/// plan.
 fn cancel(id: &str) -> Result<u8, Error> {
     let store = open()?;
     let canceled = crate::attempt::cancel_any(&store, id)?;

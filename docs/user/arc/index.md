@@ -426,7 +426,7 @@ When verification cannot run (a moved branch, a stage this build does not have),
 
 ## `radian arc cancel <ID>`
 
-`cancel` stops one task, or ends every open task of a plan and the plan itself.
+`cancel` ends one task, or ends every task it accepts in a plan and the plan itself.
 It is your action (there is no MCP tool for it), and it reconciles `doing` tasks first, as `start` does.
 
 | Argument | Value | What it does |
@@ -441,9 +441,15 @@ It is your action (there is no MCP tool for it), and it reconciles `doing` tasks
 | `doing`, starting or running | SIGTERM to the wrapper, then SIGKILL after `[limits] cancel_grace_secs`; when the wrapper's `AttemptFinished` arrives the task goes to `failed.cancelled`; when it never arrives the task goes to `doing.reconciling` |
 | `doing.reconciling` | checks the wrapper's pid and start time; signals it if it is still that process; moves the task to `failed.cancelled` |
 | `review` (any phase) | stops a gate that is running for the task, then moves the task to `failed.cancelled` |
-| `done`, `failed` | refused with exit `3` |
+| `failed.exhausted`, `failed.irrecoverable` | moves the task to `failed.cancelled`: you are saying "seen, given up". A stale gate record or lock, if one exists, is checked and stopped the way a `review` task's gate is; no other process runs for the task. |
+| `done` (any phase), `failed.cancelled` | refused with exit `3`, with a message that lists the phases `cancel` accepts |
+
+A task that ran out of attempts (`failed.exhausted`) or cannot continue (`failed.irrecoverable`) has no worker, so `cancel` only moves it to `failed.cancelled`.
+The task's attempt history, its attempt id, its verdicts and its `total_cost_usd` stay as they are; only the phase changes.
+A `done.merged` task and a task already at `failed.cancelled` are refused.
 
 When a gate is running for a `review` task (its `runs/<task>/gate.json` record is `started` or `running`), `cancel` signals the gate process the same way a scheduling-loop stop does: SIGTERM, `[limits] cancel_grace_secs`, then SIGKILL, and the gate's record becomes `interrupted`.
+A `failed.exhausted` or `failed.irrecoverable` task has no gate of its own, but a stale record or lock from an earlier attempt is handled by the same process check: `cancel` signals only the process the record names, and only while it is still that process.
 The task moves only after the gate is stopped.
 
 The wrapper's pid and its start time both come from the attempt record, so a pid the operating system reused is never signalled.
@@ -454,9 +460,11 @@ The wrapper's pid and its start time both come from the attempt record, so a pid
 A plan id runs these steps in this order:
 
 1. the plan's `auto` becomes `off`;
-2. every task of the plan in `todo`, `doing` or `review` is cancelled by the task form's rules;
-3. a task in `done` or `failed` is left as it is;
+2. every task of the plan in `todo`, `doing` or `review`, and every task at `failed.exhausted` or `failed.irrecoverable`, is cancelled by the task form's rules;
+3. a task in `done` or `failed.cancelled` is left as it is;
 4. the plan's `status` becomes `cancelled`.
+
+A plan cancelled this way has every task it could act on at `done.merged` or `failed.cancelled` — a task file that changed outside arc is left as it is — so a plan whose only non-merged task was exhausted reads finished (`✓`) after the cancel, when at least one task merged.
 
 A task a gate is running for is stopped as the task form stops it.
 If a task's cancel leaves it `doing.reconciling`, the plan still becomes `cancelled`; the next `radian arc run` pass ends the task at `failed.cancelled`, after the same process check the task form makes (see [Reconcile](gate.md#reconcile)).
@@ -477,7 +485,7 @@ A cancelled plan is final.
 `radian arc run` never claims, gates or merges its tasks, and the summary does not list it as waiting.
 `list` hides it unless `--all`, and `show <plan>` and `show <task>` still read it and its tasks.
 
-`cancel` exits `0` when it stopped the task or plan or left a task `doing.reconciling`, `1` when the id names nothing, `3` for a refused state or an id that names both a plan and a task, and `4` when another process holds `state.lock`.
+`cancel` exits `0` when it ended the task or plan or left a task `doing.reconciling`, `1` when the id names nothing, `3` for a refused state or an id that names both a plan and a task, and `4` when another process holds `state.lock`.
 
 ## `radian arc reset-budget <ID>`
 

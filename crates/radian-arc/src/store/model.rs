@@ -400,6 +400,18 @@ impl TaskFile {
         self.state == TaskState::Failed && self.phase == "cancelled"
     }
 
+    /// Whether the owner's `cancel` accepts the task (ADR 0048 decision 9): a `todo`, `doing`
+    /// or `review` task, or one that ran out of attempts (`failed.exhausted`) or cannot continue
+    /// (`failed.irrecoverable`). `done.*` and `failed.cancelled` are refused. The task form and
+    /// the plan form of `cancel`, and the arc TUI's key, all read this one rule.
+    pub fn is_cancellable(&self) -> bool {
+        match self.state {
+            TaskState::Todo | TaskState::Doing | TaskState::Review => true,
+            TaskState::Failed => matches!(self.phase.as_str(), "exhausted" | "irrecoverable"),
+            TaskState::Done => false,
+        }
+    }
+
     /// The task's running total: its stored `total_cost_usd`, or its `cost_usd` for a file
     /// written before the field existed (ADR 0048 decision 12).
     pub fn running_total(&self) -> f64 {

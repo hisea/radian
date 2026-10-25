@@ -1507,6 +1507,20 @@ impl ArcApp {
         }
     }
 
+    /// Whether `x` can act on the focused item (ADR 0048 §11): a task `cancel` accepts, or a
+    /// plan that is not cancelled. The footer's `x` hint is faint while this is false, and the
+    /// key opens no float.
+    pub fn cancel_enabled(&self) -> bool {
+        match self.focus {
+            Focus::Plans => self
+                .selected_plan()
+                .is_some_and(|view| !view.is_cancelled()),
+            Focus::Tasks => self
+                .selected_task()
+                .is_some_and(|task| task.item.is_cancellable()),
+        }
+    }
+
     /// Why the selected task cannot start now, or `None` when it can. The footer's `s` hint is
     /// weak while this names something, and pressing `s` shows the same line (ADR 0048 §6:
     /// only a `todo.ready` task whose `after` tasks are merged, in a confirmed plan, starts).
@@ -2015,8 +2029,12 @@ impl ArcApp {
                 ArcKey::Redraw
             }
             KeyCode::Char('x') => {
-                // `x` always asks first, the way the merge page's `M` does (ADR 0048 §11);
-                // the CLI's own refusal is what a done task or a cancelled plan gets.
+                // `x` asks first, the way the merge page's `M` does (ADR 0048 §11), and acts
+                // only on a task `cancel` accepts or a plan that is not cancelled. The
+                // confirmation counts every task the plan form will end.
+                if !self.cancel_enabled() {
+                    return ArcKey::Ignored;
+                }
                 let (message, action) = match self.focus {
                     Focus::Tasks => {
                         let Some(task) = self.selected_task() else {
@@ -2030,19 +2048,13 @@ impl ArcApp {
                             return ArcKey::Ignored;
                         };
                         let id = view.plan.item.id.clone();
-                        let open = view
+                        let tasks = view
                             .tasks
                             .iter()
-                            .filter(|task| {
-                                !task.changed_outside_arc
-                                    && matches!(
-                                        task.item.state,
-                                        TaskState::Todo | TaskState::Doing | TaskState::Review
-                                    )
-                            })
+                            .filter(|task| !task.changed_outside_arc && task.item.is_cancellable())
                             .count();
                         (
-                            format!("cancel plan {id} and its {open} open tasks?"),
+                            format!("cancel plan {id} and its {tasks} tasks?"),
                             actions::Action::Cancel(id),
                         )
                     }
@@ -2180,6 +2192,12 @@ impl ArcApp {
         self.card_plan_task(&id)
     }
 
+    /// The selected finished row's plan and task.
+    fn board_done_card(&self) -> Option<(&PlanView, &TaskFile)> {
+        let id = self.board.selected_done()?.id.clone();
+        self.card_plan_task(&id)
+    }
+
     /// The board's keys. The owner's keys act on the selected card with the plans page's rules,
     /// floats and footer lines (ADR 0048 §11).
     fn on_board_key(&mut self, key: &KeyEvent) -> ArcKey {
@@ -2195,6 +2213,20 @@ impl ArcApp {
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     self.board.move_done(-1);
+                    ArcKey::Redraw
+                }
+                KeyCode::Char('x') => {
+                    let Some((_, task)) = self.board_done_card() else {
+                        return ArcKey::Ignored;
+                    };
+                    if !task.is_cancellable() {
+                        return ArcKey::Ignored;
+                    }
+                    let id = task.id.clone();
+                    self.float = Some(Float::Confirm {
+                        message: format!("cancel {id} ?"),
+                        action: actions::Action::Cancel(id),
+                    });
                     ArcKey::Redraw
                 }
                 KeyCode::Enter | KeyCode::Tab => {
@@ -2283,6 +2315,9 @@ impl ArcApp {
                 let Some((_, task)) = self.board_card() else {
                     return ArcKey::Ignored;
                 };
+                if !task.is_cancellable() {
+                    return ArcKey::Ignored;
+                }
                 let id = task.id.clone();
                 self.float = Some(Float::Confirm {
                     message: format!("cancel {id} ?"),
