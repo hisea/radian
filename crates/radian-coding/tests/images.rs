@@ -63,6 +63,12 @@ async fn read_of_a_png_returns_the_text_line_and_the_image_part() {
         other => panic!("expected the image part, got {other:?}"),
     }
     assert_eq!(output.structured.as_ref().unwrap()["image"]["width"], 1200);
+    // A plain read adds no ignore line.
+    assert!(
+        !text(&output).contains("ignored"),
+        "no range was given: {}",
+        text(&output)
+    );
 }
 
 #[tokio::test]
@@ -121,16 +127,52 @@ async fn the_byte_and_pixel_limits_are_image_too_large() {
 }
 
 #[tokio::test]
-async fn offset_or_limit_on_an_image_is_image_offset() {
+async fn offset_and_limit_on_an_image_are_ignored_and_said_once() {
     let (_dir, root) = workspace("read-offset");
-    std::fs::write(root.join("shot.png"), png(10, 10)).unwrap();
+    let bytes = png(10, 10);
+    std::fs::write(root.join("shot.png"), &bytes).unwrap();
     for arguments in [
+        json!({"path": "shot.png", "offset": 2, "limit": 2}),
         json!({"path": "shot.png", "offset": 2}),
         json!({"path": "shot.png", "limit": 2}),
+        // A range value that a text read refuses is ignored too: an image has no range.
+        json!({"path": "shot.png", "offset": 0}),
+        json!({"path": "shot.png", "limit": 0}),
     ] {
-        let failure = call(&tools(&root), "read", arguments).await.unwrap_err();
-        assert_eq!(failure.code, "image_offset", "{failure:?}");
+        let output = call(&tools(&root), "read", arguments.clone())
+            .await
+            .unwrap_or_else(|failure| panic!("{arguments}: {failure:?}"));
+        assert_eq!(output.content.len(), 2, "{arguments}: {:?}", output.content);
+        assert_eq!(
+            text(&output),
+            "Read image file [image/png] 10×10\noffset and limit ignored: an image is read whole",
+            "{arguments}"
+        );
+        match &output.content[1] {
+            ContentPart::Image {
+                mime_type, data, ..
+            } => {
+                assert_eq!(mime_type, "image/png");
+                assert_eq!(data, &radian_coding::image::base64_encode(&bytes));
+            }
+            other => panic!("{arguments}: expected the image part, got {other:?}"),
+        }
     }
+}
+
+#[tokio::test]
+async fn a_text_file_keeps_its_offset_and_limit_without_the_ignore_line() {
+    let (_dir, root) = workspace("read-offset-text");
+    std::fs::write(root.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+    let output = call(
+        &tools(&root),
+        "read",
+        json!({"path": "notes.txt", "offset": 2, "limit": 1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&output), "2: two\n[truncated: continue with offset=3]");
+    assert!(!text(&output).contains("ignored"), "{}", text(&output));
 }
 
 #[tokio::test]

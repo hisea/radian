@@ -765,3 +765,17 @@ that copy (never `git checkout`), and the named test ran alone with
 | TK0089-M3 | `DOCS` drops the `arc/gate.md` row | ✅ 1 failed | `radian-coding::docs::the_table_matches_docs_user_on_disk` (disk 28 pages vs table 27) |
 
 2/2 caught.
+
+## `read` of an image ignores `offset` and `limit` (2026-10-24, branch `work/TK0118-read-image-ignores-range`)
+
+Base: the branch's code commit. The mutation was applied by hand to
+`crates/radian-coding/src/read.rs`, backed up under `.radian/read.rs.orig` and restored from
+that copy (never `git checkout`), confirmed byte-identical with `diff -q`; the named test
+ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test images -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0118-M1 | return the old refusal again (`if offset_given || limit_given` → `image_offset`) | ✅ 1 failed | `offset_and_limit_on_an_image_are_ignored_and_said_once` (the `offset`+`limit` call failed with `image_offset`) |
+
+1/1 caught.

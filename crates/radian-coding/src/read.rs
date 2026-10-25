@@ -40,14 +40,13 @@ pub(crate) fn schema() -> serde_json::Value {
             "offset": {
                 "type": "integer",
                 "description": "First line to read (1-based). Default: 1. Negative counts from the end. \
-                                Not for an image: the error is `image_offset`."
+                                Ignored for an image."
             },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
                 "description": "Maximum lines to read. For a directory, it caps entries \
-                                instead. Default: 500. Maximum: 5000. Not for an image: the \
-                                error is `image_offset`."
+                                instead. Default: 500. Maximum: 5000. Ignored for an image."
             }
         },
         "required": ["path"],
@@ -65,7 +64,7 @@ pub(crate) fn spec() -> ToolSpec {
                       to get a later part. An image (PNG, JPEG, GIF or WebP, judged by its \
                       magic number, never its extension) returns a text line and the image \
                       itself; images are limited to 5 MiB and 8000 px per side (`image_too_large` \
-                      when over), and `offset` or `limit` on one is the error `image_offset`."
+                      when over). An image is read whole: `offset` and `limit` are ignored."
             .into(),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
@@ -204,32 +203,16 @@ pub(crate) async fn run(
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
     let args: ReadArgs = args::parse("read", &schema(), arguments)?;
-    let offset = args.offset.unwrap_or(1);
-    if offset == 0 {
-        return Err(args::invalid("read", arguments, ["`offset` must not be 0"]));
-    }
-    let limit = match args.limit {
-        Some(n) if n < 1 => {
-            return Err(args::invalid(
-                "read",
-                arguments,
-                ["`limit` must be at least 1"],
-            ));
-        }
-        Some(n) => Some(n as usize),
-        None => None,
-    };
-
     let scan = BlockingRead {
         root: root.clone(),
         limits: *limits,
         image_support: image_support.clone(),
         path: args.path,
-        offset,
-        limit,
+        offset: args.offset,
+        limit: args.limit,
         max_bytes: args.max_bytes,
-        offset_given: args.offset.is_some(),
         max_bytes_given: args.max_bytes.is_some(),
+        arguments: arguments.clone(),
     };
     // The opens, the read and the listing below are synchronous and never yield, so they
     // run on the blocking pool: `read` calls batched in one Core task overlap instead of
@@ -253,11 +236,38 @@ struct BlockingRead {
     limits: Limits,
     image_support: ImageSupport,
     path: String,
-    offset: i64,
-    limit: Option<usize>,
+    offset: Option<i64>,
+    limit: Option<i64>,
     max_bytes: Option<u64>,
-    offset_given: bool,
     max_bytes_given: bool,
+    /// The raw arguments, for the `invalid_arguments` echo when a range is checked.
+    arguments: serde_json::Value,
+}
+
+/// The text, directory and manual branches use `offset` and `limit`. An image has no range,
+/// so it is never checked: the checks live here instead of in `run`, after the image branch
+/// has had its say (ADR 0028 R10).
+fn validated_range(
+    offset: Option<i64>,
+    limit: Option<i64>,
+    arguments: &serde_json::Value,
+) -> Result<(i64, Option<usize>), ToolFailure> {
+    let offset = offset.unwrap_or(1);
+    if offset == 0 {
+        return Err(args::invalid("read", arguments, ["`offset` must not be 0"]));
+    }
+    let limit = match limit {
+        Some(n) if n < 1 => {
+            return Err(args::invalid(
+                "read",
+                arguments,
+                ["`limit` must be at least 1"],
+            ));
+        }
+        Some(n) => Some(n as usize),
+        None => None,
+    };
+    Ok((offset, limit))
 }
 
 fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
@@ -269,8 +279,8 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
         offset,
         limit,
         max_bytes,
-        offset_given,
         max_bytes_given,
+        arguments,
     } = scan;
     let limits = &limits;
     // A directory path lists it (ADR 0043 decision 1): the old `list` output, with
@@ -279,7 +289,8 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
     // through the root's directory fd and listed through that fd (ADR 0039 decision 2).
     // The bundled manual root (`radian://docs/`) has no fd and is listed from memory.
     if crate::docs::is_root(&path) {
-        return run_docs_dir(limits, &path, limit, offset_given, max_bytes_given);
+        let (_, limit) = validated_range(offset, limit, &arguments)?;
+        return run_docs_dir(limits, &path, limit, offset.is_some(), max_bytes_given);
     }
     // A bundled-manual directory (`radian://docs/arc` or `radian://docs/arc/`) reads its
     // `index.md`; a page path passes through unchanged.
@@ -289,7 +300,15 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
         path
     };
     if let Ok(dir) = root.open_dir(&path) {
-        return crate::list::run_dir(limits, &path, &dir, limit, offset_given, max_bytes_given);
+        let (_, limit) = validated_range(offset, limit, &arguments)?;
+        return crate::list::run_dir(
+            limits,
+            &path,
+            &dir,
+            limit,
+            offset.is_some(),
+            max_bytes_given,
+        );
     }
     // ADR 0039 decision 2: the file is opened through the root's directory fd, one
     // `openat(O_NOFOLLOW)` per component; it is never re-opened by path after a check.
@@ -326,12 +345,13 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
                 &mut reader,
                 &path,
                 total,
-                offset_given,
+                offset.is_some(),
                 limit.is_some(),
                 &image_support,
             )? {
                 return Ok(image_output);
             }
+            let (offset, limit) = validated_range(offset, limit, &arguments)?;
             finish_read(&mut reader, &path, total, budget, offset, limit)
         }
         crate::workspace::OpenedSource::Embedded(bytes) => {
@@ -340,12 +360,13 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
                 &mut reader,
                 &path,
                 total,
-                offset_given,
+                offset.is_some(),
                 limit.is_some(),
                 &image_support,
             )? {
                 return Ok(image_output);
             }
+            let (offset, limit) = validated_range(offset, limit, &arguments)?;
             finish_read(&mut reader, &path, total, budget, offset, limit)
         }
     }
@@ -354,7 +375,8 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
 /// The image branch: when the leading bytes carry an accepted image magic number, the whole
 /// file is read (bounded by [`MAX_IMAGE_BYTES`]) and turned into the text line plus, unless
 /// the current model is known blind, the image part. `Ok(None)` means "not an image: read it
-/// as text". `offset` and `limit` are file arguments with no meaning for an image.
+/// as text". `offset` and `limit` are file arguments with no meaning for an image: they are
+/// ignored, and when either was given the text part says so (ADR 0028 R10).
 fn read_image<R: BufRead + Read>(
     reader: &mut R,
     path: &str,
@@ -370,12 +392,6 @@ fn read_image<R: BufRead + Read>(
     let Some(_kind) = kind else {
         return Ok(None);
     };
-    if offset_given || limit_given {
-        return Err(fail(
-            "image_offset",
-            format!("`{path}` is an image; `offset` and `limit` apply to text only"),
-        ));
-    }
     if total > MAX_IMAGE_BYTES {
         return Err(fail(
             "image_too_large",
@@ -405,10 +421,11 @@ fn read_image<R: BufRead + Read>(
         ImageError::NotImage => fail("not_utf8", format!("`{path}`: {error}")),
     })?;
     let supports_images = image_support();
-    let mut content = vec![ContentPart::text(image::read_description(
-        &loaded,
-        supports_images,
-    ))];
+    let mut description = image::read_description(&loaded, supports_images);
+    if offset_given || limit_given {
+        description.push_str("\noffset and limit ignored: an image is read whole");
+    }
+    let mut content = vec![ContentPart::text(description)];
     if supports_images {
         content.push(loaded.part());
     }
