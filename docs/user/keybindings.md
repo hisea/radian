@@ -71,7 +71,7 @@ and its default keys.
 | `complete` | `tab` | Complete what is at the cursor. On a `/` line it completes the command tree. Otherwise it completes the `@` file reference. While a menu is up it accepts the highlighted row. |
 | `find` | `ctrl-f` | Open the in-transcript search box. Pressed again while the box is open, it moves to the earlier match. |
 | `toggle_reasoning` | `ctrl-t` | Fold or unfold the thinking blocks. |
-| `toggle_tool_output` | `ctrl-o` | Expand or fold the tool result bodies. |
+| `toggle_tool_output` | `ctrl-o` | Expand or fold the text of a tool result's body. Images draw whatever the fold. |
 | `paste_image` | `ctrl-v` | Attach an image from the system clipboard. Radian reads the clipboard itself and turns the pixels into an image part in memory. When the clipboard holds no image, the key does nothing. Over a limit, the unusable-attachment notice names the limit. |
 
 Type any other printable character to insert it. Paste inserts at the cursor

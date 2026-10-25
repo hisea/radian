@@ -22,9 +22,6 @@ use radian_core::ContentPart;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 
-use crate::app::{Entry, EntryKind};
-use crate::tools::{DisplayModes, ToolFold};
-
 /// The least number of transcript rows one image occupies (ADR 0028 R10): half the transcript
 /// area's height, rounded down, but never less than this, so a short terminal still shows a
 /// picture.
@@ -155,16 +152,6 @@ pub fn placeholder_spans(text_len: usize, images: &[EntryImage]) -> Vec<(usize, 
         spans.push((start, cursor));
     }
     spans
-}
-
-/// Whether a tool result's image rows draw (ADR 0028 R10): when its body is drawn in full —
-/// expanded, or a failed result, whose body is never folded (ADR 0028 R4). A user message has
-/// no fold, so its images always draw.
-pub fn rows_visible(entry: &Entry, modes: DisplayModes) -> bool {
-    if entry.kind != EntryKind::ToolResult {
-        return true;
-    }
-    entry.is_error || crate::blocks::expanded(entry, modes.tools.fold == ToolFold::Expanded)
 }
 
 /// The image's width in columns: its aspect ratio at `rows` rows, from the terminal's cell

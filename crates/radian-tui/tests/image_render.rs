@@ -1,5 +1,6 @@
-//! Transcript images (ADR 0028 R10): the fixed row run under the placeholder line, the fold
-//! rule, and the promise that selection, copy and search never see the image itself.
+//! Transcript images (ADR 0028 R10): the fixed row run under the placeholder line, the rule
+//! that it draws under every fold, and the promise that selection, copy and search never see
+//! the image itself.
 
 use radian_core::{ContentPart, Message, MessageMeta, ToolResult};
 use radian_tui::app::{App, EntryKind};
@@ -77,6 +78,33 @@ fn tool_app() -> App {
         meta: MessageMeta::default(),
     });
     app
+}
+
+/// A tool result whose text is `lines` one-row lines, followed by `parts` (images). A generic
+/// tool (no call paired), so the fold applies to the text body exactly as it does for a real
+/// one.
+fn tool_result_app(lines: usize, parts: Vec<ContentPart>) -> App {
+    let text = (1..=lines)
+        .map(|n| format!("row {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut content = vec![ContentPart::text(text)];
+    content.extend(parts);
+    let mut app = App::new("m", "s");
+    app.push_message(&Message::Tool {
+        result: ToolResult::success("c1".to_owned(), content),
+        meta: MessageMeta::default(),
+    });
+    app
+}
+
+/// The non-empty body text rows a layout draws (the synthesized placeholder rows are `hint`).
+fn text_rows(lines: &[radian_tui::blocks::BodyLine]) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|line| line.image.is_none() && !line.hint && !line.text.is_empty())
+        .map(|line| line.text.clone())
+        .collect()
 }
 
 fn image_entry(app: &App) -> &radian_tui::Entry {
@@ -183,44 +211,148 @@ fn the_window_reports_a_run_only_when_the_whole_run_is_visible() {
     assert!(runs.is_empty(), "a clipped run is not drawn");
 }
 
-/// ADR 0028 R10's fold rule: a tool result's placeholder row always shows; the run only when
-/// the body is drawn in full. (A user message has no fold, so its run always shows — the test
-/// above.)
+/// ADR 0028 R10 (TK0120): a tool result's image draws whatever the fold. Each placeholder row
+/// is followed by its run under `collapsed`, `errors` and `expanded`; the fold still governs
+/// the **text**: `collapsed` hides every body row, `errors` keeps the last preview rows, and
+/// `expanded` draws them all. Counting and drawing agree in each case.
 #[test]
-fn a_folded_tool_result_shows_the_placeholder_but_not_the_image() {
-    let app = tool_app();
+fn a_tool_result_image_draws_under_every_fold() {
+    let app = tool_result_app(8, vec![image_part("shot.gif")]);
     let entry = image_entry(&app);
+    let placeholder = entry.images[0].placeholder.clone();
 
-    let collapsed = blocks::layout(entry, &[], modes(ToolFold::Collapsed), 80, HEIGHT);
-    let texts: Vec<&str> = collapsed.iter().map(|line| line.text.as_str()).collect();
-    assert!(
-        texts
+    for (fold, want_text) in [
+        (ToolFold::Collapsed, Vec::new()),
+        (
+            ToolFold::Errors,
+            (4..=8).map(|n| format!("row {n}")).collect::<Vec<_>>(),
+        ),
+        (
+            ToolFold::Expanded,
+            (1..=8).map(|n| format!("row {n}")).collect::<Vec<_>>(),
+        ),
+    ] {
+        let all = modes(fold);
+        let lines = blocks::layout(entry, &[], all, 80, HEIGHT);
+        let at = lines
             .iter()
-            .any(|text| text.starts_with("[image: shot.gif")),
-        "the placeholder stays in the folded block: {texts:?}"
-    );
-    assert!(
-        collapsed.iter().all(|line| line.image.is_none()),
-        "the folded block draws no image rows: {texts:?}"
-    );
-    assert_eq!(collapsed.len(), 1, "only the placeholder row: {texts:?}");
+            .position(|line| line.text == placeholder)
+            .unwrap_or_else(|| panic!("the placeholder row under {fold:?}: {lines:?}"));
+        let run: Vec<&radian_tui::blocks::BodyLine> =
+            lines.iter().filter(|line| line.image.is_some()).collect();
+        assert_eq!(run.len(), run_rows(), "the run draws under {fold:?}");
+        assert!(
+            run.iter().all(|line| line.image == Some(0)),
+            "the run belongs to the image: {lines:?}"
+        );
+        assert_eq!(
+            lines[at + 1].image,
+            Some(0),
+            "the run starts directly under the placeholder under {fold:?}: {lines:?}"
+        );
+        // The fold still hides text: the drawn text rows are exactly the rows the fold keeps.
+        assert_eq!(text_rows(&lines), want_text, "the text rows under {fold:?}");
+        // The count and the text-only path see the same shape as the drawing.
+        assert_eq!(
+            blocks::line_count(entry, all, 80, HEIGHT),
+            lines.len(),
+            "the count equals the drawing under {fold:?}"
+        );
+        assert_eq!(
+            blocks::body_text_lines(entry, all, 80, HEIGHT).len(),
+            lines.len(),
+            "the text-only view equals the drawing under {fold:?}"
+        );
+    }
+}
 
-    let expanded = blocks::layout(entry, &[], modes(ToolFold::Expanded), 80, HEIGHT);
-    let rows = expanded.iter().filter(|line| line.image.is_some()).count();
-    assert_eq!(rows, run_rows());
-    assert!(
-        expanded
+/// ADR 0028 R10 (TK0120): two images keep their order under every fold — each placeholder row
+/// is followed by its own run, and the first image's run ends under its own placeholder.
+#[test]
+fn two_tool_images_keep_their_order_under_a_fold() {
+    let app = tool_result_app(2, vec![image_part("one.gif"), image_part("two.gif")]);
+    let entry = image_entry(&app);
+    assert_eq!(entry.images.len(), 2);
+    assert_ne!(entry.images[0].placeholder, entry.images[1].placeholder);
+
+    for fold in [ToolFold::Collapsed, ToolFold::Errors, ToolFold::Expanded] {
+        let all = modes(fold);
+        let lines = blocks::layout(entry, &[], all, 80, HEIGHT);
+        let one = lines
             .iter()
-            .any(|line| line.text.starts_with("[image: shot.gif")),
-        "the placeholder stays above the run"
-    );
+            .position(|line| line.text == entry.images[0].placeholder)
+            .unwrap_or_else(|| panic!("the first placeholder under {fold:?}: {lines:?}"));
+        let two = lines
+            .iter()
+            .position(|line| line.text == entry.images[1].placeholder)
+            .unwrap_or_else(|| panic!("the second placeholder under {fold:?}: {lines:?}"));
+        assert!(one < two, "the images keep their order under {fold:?}");
+        assert_eq!(lines[one + 1].image, Some(0), "under the first placeholder");
+        assert_eq!(
+            lines[one + run_rows()].image,
+            Some(0),
+            "the first run's last row under {fold:?}: {lines:?}"
+        );
+        assert_eq!(
+            lines[one + run_rows() + 1].text,
+            entry.images[1].placeholder,
+            "the second placeholder follows the first run under {fold:?}: {lines:?}"
+        );
+        assert_eq!(
+            lines[two + 1].image,
+            Some(1),
+            "under the second placeholder"
+        );
+        assert_eq!(
+            blocks::line_count(entry, all, 80, HEIGHT),
+            lines.len(),
+            "the count equals the drawing under {fold:?}"
+        );
+    }
+}
 
-    // The default `errors` fold is folded for a successful result.
-    let errors = blocks::layout(entry, &[], modes(ToolFold::Errors), 80, HEIGHT);
-    assert!(errors.iter().all(|line| line.image.is_none()), "{errors:?}");
+/// ADR 0028 R10 (TK0120): a payload that does not decode draws only its placeholder row, under
+/// every fold — the fold is not what decides it, and no blank hole is left.
+#[test]
+fn a_broken_tool_image_draws_only_its_placeholder_under_a_fold() {
+    let mut broken = image_part("broken.gif");
+    if let ContentPart::Image { data, .. } = &mut broken {
+        *data = "not base64 at all".to_owned();
+    }
+    let app = tool_result_app(8, vec![broken]);
+    let entry = image_entry(&app);
+    assert!(!entry.images[0].decodable, "the payload is broken");
 
-    // A failed result's body is never folded (ADR 0028 R4), so its image draws under every
-    // fold.
+    for fold in [ToolFold::Collapsed, ToolFold::Errors, ToolFold::Expanded] {
+        let all = modes(fold);
+        let lines = blocks::layout(entry, &[], all, 80, HEIGHT);
+        assert!(
+            lines.iter().all(|line| line.image.is_none()),
+            "a failed decode reserves no run under {fold:?}: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.text == entry.images[0].placeholder),
+            "the placeholder stays under {fold:?}: {lines:?}"
+        );
+        assert_eq!(
+            blocks::line_count(entry, all, 80, HEIGHT),
+            lines.len(),
+            "the count equals the drawing under {fold:?}"
+        );
+        assert_eq!(
+            blocks::body_text_lines(entry, all, 80, HEIGHT).len(),
+            lines.len(),
+            "the text-only view equals the drawing under {fold:?}"
+        );
+    }
+}
+
+/// ADR 0028 R4 / R10: a failed result's body is never folded, so its text and its image rows
+/// draw under every fold (unchanged by TK0120).
+#[test]
+fn a_failed_tool_result_draws_its_image_under_every_fold() {
     let mut failed = ToolResult::success(
         "c2".to_owned(),
         vec![

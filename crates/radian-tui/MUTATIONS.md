@@ -3147,3 +3147,19 @@ with `cargo nextest run -p radian-tui --locked --profile sandbox --lib --test im
 | TK0119-M2 | `draw` lays out at the whole terminal height (`let height = area.height as usize`) instead of the transcript area's `chunks[0].height` | ✅ 1 failed | `image_render::the_run_follows_the_transcript_area_not_the_whole_terminal` (`the frame measured at the transcript area's height`) |
 
 2/2 caught.
+
+## TK0120: a tool result's images draw whatever the fold (2026-10-25, branch `work/TK0120-tool-images-draw-folded`)
+
+ADR 0028 R10's fold bullet changed: a tool result's images used to draw only when the body was
+drawn in full, so the default `errors` fold left a `read` image invisible behind its placeholder.
+`append_tool_images` now follows every placeholder row with its run whatever the fold, and the
+fold keeps governing the body's text only; `media::rows_visible` (the old fold gate) is gone.
+The mutation was applied by hand to `crates/radian-tui/src/blocks/layout.rs`, backed up under
+`.radian/layout.rs.bak` and restored from that copy (never `git checkout`); the tests ran with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test image_render`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0120-M1 | `append_tool_images` hides the image rows when the body is folded again (`if image.decodable && visible`, `visible` = `entry.is_error \|\| expanded(entry, fold == Expanded)`) | ✅ 2 failed | `a_tool_result_image_draws_under_every_fold` (`the run draws under Collapsed`); `two_tool_images_keep_their_order_under_a_fold` (`under the first placeholder`) |
+
+1/1 caught.

@@ -234,9 +234,11 @@ Inside tmux or herdr it turns on `allow-passthrough` for the current pane
 Press `Ctrl-P` and read the `images:` line of the startup information to see the protocol and
 the cell size in use.
 
-A tool result's image draws only when the tool body is drawn in full (the `expanded` setting,
-`Ctrl-O`, or a failed call, whose body is never folded). With the body folded, only the
-`[image: …]` line shows.
+A tool result's image draws whatever the fold: under `expanded`, `errors` and `collapsed`, for a
+successful or a failed call, each `[image: …]` line is followed by its picture. The fold still
+governs the result's text: a folded body hides its text lines, and the `[image: …]` lines and
+their pictures take the place the folded body's text would have, directly under the tool's
+first line, in the order the images appear in the result.
 Your own messages have no fold, so their images always draw.
 Selecting and copying across an image copies the `[image: …]` line, never the picture;
 `Ctrl-F` searches the line, not the pixels.

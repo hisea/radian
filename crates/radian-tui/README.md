@@ -681,7 +681,7 @@ The transcript owns its scrolling:
 | 15 | `--mcp-config` mounts the fixture; its tool runs through the approval dialog; the status bar shows the connected servers/tools; the startup notice names the MCP sandbox gap | `tests/pty.rs` |
 | 16 | the status bar shows the tier, reported usage (or `none`) and the MCP counts; a 60-column terminal drops the long segments and marks it | `tests/status.rs` |
 | 17 | `--version` prints `<program> <CARGO_PKG_VERSION>` and exits 0 without entering the terminal | `tests/version.rs` |
-| 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept; an image attaches as a part and shows `[image: name, W×H, N KB]` (also after a journal round trip), a dropped absolute path becomes an attachment outside the workspace too, and Backspace removes it; the image draws in a fixed 12-row run under the placeholder, the run is hidden under a folded tool body, selection/search see only the placeholder, and a broken image keeps the placeholder alone | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs`, `tests/images.rs`, `tests/image_render.rs`, `src/media.rs` |
+| 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept; an image attaches as a part and shows `[image: name, W×H, N KB]` (also after a journal round trip), a dropped absolute path becomes an attachment outside the workspace too, and Backspace removes it; the image draws in a fixed 12-row run under the placeholder, the run draws under every fold, selection/search see only the placeholder, and a broken image keeps the placeholder alone | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs`, `tests/images.rs`, `tests/image_render.rs`, `src/media.rs` |
 | 19 | `--pick` lists this workspace's sessions, filters, full-text searches, resumes the choice (the next request carries its history), `n` starts new, `Esc` exits 0 with no session file; `/sessions` lists a copyable `--resume`; `/export` writes and refuses to overwrite without `--force` | `tests/pty.rs`, `tests/sessions.rs` (host) |
 | 20 | Ctrl-C: idle with text, the first press clears it into the history (not a quit); idle and empty, the first press only shows `Press Ctrl-C again to quit` and a second inside 2 s quits with the exit line; a key in between, or the window closing, disarms | `tests/quit.rs`, `tests/pty.rs` |
 | 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |
@@ -1011,9 +1011,9 @@ throwaway terminal, not your working one.
    placeholders that scroll and fold with the text, iTerm2/WezTerm the iTerm2 protocol,
    Terminal.app half blocks; in tmux the picture still appears after the probe turned on
    `allow-passthrough` for the pane. The user message's image always draws; the `read`
-   result's image draws only when the body does (a successful result under the default
-   `errors` fold shows the placeholder line only; `Ctrl-O` expands the body and the image; a
-   failed call, whose body is never folded, always draws it).
+   result's image draws under every fold too (a successful result under the default `errors`
+   setting and under `collapsed` shows the placeholder line and the picture; `Ctrl-O` folds
+   only the text; a failed call, whose body is never folded, draws both as well).
    *Look*: are the image rows aligned with the text column (not the marker column), is the
    placeholder line legible above it, does a partly scrolled image disappear cleanly rather
    than shear, and does `Ctrl-P`'s `images:` line name the protocol you expected?

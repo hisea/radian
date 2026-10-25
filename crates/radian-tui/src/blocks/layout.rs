@@ -523,9 +523,10 @@ fn layout_unstripped(
                 entry.fold_override,
             );
             let mut lines = body_plan_lines(&plan.lines, &text, body_width);
-            // ADR 0028 R10: the image's placeholder row and run follow the tool body. The
-            // placeholder always shows; the run only when the body is drawn in full.
-            append_tool_images(&mut lines, entry, modes, height);
+            // ADR 0028 R10: the image's placeholder row and run follow the tool body. The fold
+            // governs the body's **text** only: the placeholder rows and their runs draw under
+            // every fold setting.
+            append_tool_images(&mut lines, entry, height);
             lines
         }
         (EntryKind::Context, _) => super::context_lines(entry, modes, width),
@@ -572,17 +573,12 @@ fn insert_user_images(lines: &mut Vec<BodyLine>, entry: &Entry, text: &str, heig
     }
 }
 
-/// A tool result's image rows (ADR 0028 R10): each image's placeholder row, then its run when
-/// the body is drawn in full and the payload decoded. The placeholder row is always drawn —
-/// that is what the folded block shows instead of the image, and what a broken payload shows
-/// instead of a blank hole.
-fn append_tool_images(
-    lines: &mut Vec<BodyLine>,
-    entry: &Entry,
-    modes: DisplayModes,
-    height: usize,
-) {
-    let visible = crate::media::rows_visible(entry, modes);
+/// A tool result's image rows (ADR 0028 R10): each image's placeholder row, then its run. They
+/// draw under **every** fold (the fold governs the result's text only), placed after whatever
+/// text the fold leaves — directly under the head row when it hides the whole body. The
+/// placeholder row is always drawn; a payload that did not decode gets it alone, instead of a
+/// blank hole.
+fn append_tool_images(lines: &mut Vec<BodyLine>, entry: &Entry, height: usize) {
     let spans = crate::media::placeholder_spans(entry.text.len(), &entry.images);
     for ((index, image), (start, end)) in entry.images.iter().enumerate().zip(spans) {
         lines.push(BodyLine::image_placeholder(
@@ -590,7 +586,7 @@ fn append_tool_images(
             start,
             end,
         ));
-        if visible && image.decodable {
+        if image.decodable {
             lines.extend(image_run(index, end, height));
         }
     }
