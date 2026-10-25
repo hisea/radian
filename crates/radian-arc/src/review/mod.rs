@@ -1185,6 +1185,16 @@ pub fn auto_reverify_pending(store: &Store, task_id: &str) -> bool {
     (record.reverified.len() as u64) < u64::from(max)
 }
 
+/// Whether `stage` failed with `reason` in a way a reverify can re-run: the `commands` stage
+/// or the integration stage, with a command that failed or ran past its timeout. One list
+/// serves the scheduling loop's automatic reverify and the owner's `radian arc reverify`
+/// (ADR 0048 decisions 9 and 11).
+#[must_use]
+pub fn reverifiable_failure(stage: &str, reason: &str) -> bool {
+    [Stage::Commands.as_str(), Stage::Integration.as_str()].contains(&stage)
+        && AUTO_REVERIFY_REASONS.contains(&reason)
+}
+
 /// The main sha the failing verdict of `task`'s current attempt recorded, when the failure is
 /// one a moved main can fix (ADR 0048 decision 9): a `commands` or integration stage that
 /// failed with `command_failed` or `timeout`. `None` for every other reason, and for a reason
@@ -1211,9 +1221,7 @@ fn recorded_failure_main(store: &Store, task: &model::TaskFile) -> Result<Option
         .get("reason")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let fixable = [Stage::Commands.as_str(), Stage::Integration.as_str()].contains(&stage)
-        && AUTO_REVERIFY_REASONS.contains(&reason);
-    if !fixable {
+    if !reverifiable_failure(stage, reason) {
         return Ok(None);
     }
     let Some(verdict_file) = value.get("verdict").and_then(Value::as_str) else {
