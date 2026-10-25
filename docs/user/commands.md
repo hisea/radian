@@ -223,7 +223,8 @@ status bar), rounded down, and never less than 12 or more than 40 rows.
 Its width follows the image's shape at your terminal's cell size,
 and an image wider than the transcript is scaled down to its width; it then draws shorter than
 its run, at the top, with blank rows below.
-Resizing the terminal recomputes both; the image is not decoded again.
+Resizing the terminal recomputes both; a resize itself never decodes a cached image again,
+though an image the cache has already dropped is decoded once when it next draws (see below).
 Kitty and Ghostty use the kitty graphics protocol, iTerm2 and WezTerm the iTerm2 protocol, and
 foot and xterm sixel. Terminal.app, Alacritty, Konsole, Warp and a terminal that answers
 nothing use half-block characters.
