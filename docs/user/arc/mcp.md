@@ -62,7 +62,7 @@ A `server/discover` request is answered with the unsupported-protocol-version er
 That is what makes Claude Code register the server as a channel: a revision at or after `2026-07-28` cannot carry channel messages.
 
 The server reads every plan and its tasks once after the handshake.
-That read is the baseline and sends nothing, so a task that already is `review.awaiting_human` when the session opens is not reported.
+That read is the baseline and sends nothing, so a task that already is `review.awaiting_human` when the session opens is not reported, and neither is a plan that appears already confirmed.
 It then reads every plan and its tasks again every 5 seconds, with the read-only store call `list` uses, and takes no lock.
 A read that fails (a file changed outside arc, a parse error, a lock it cannot get) sends nothing that round and tries again next round; it never ends the server and prints nothing.
 
@@ -70,12 +70,22 @@ One event is sent per task whose `state.phase` differs from the previous read an
 
 `todo.proposed`, `review.awaiting_human`, `review.rework_pending`, `done.merged`, `failed.exhausted`, `failed.cancelled`, `failed.irrecoverable`.
 
+A move into `todo.ready` sends one too, from one of these previous phases: `todo.proposed` (your `radian arc confirm <task>`) and `review.*` (your reject, or the lead's `add_rework`; the poller cannot tell the two apart, and both are worth a turn).
+A reject keeps the task in `review.rework_pending`, so its event is that one and its second line is the note (see [`reject`](index.md#radian-arc-reject-task---note-text)).
+A rework arc writes itself (a conflict with main, or a review that failed with blocking items) is not your action: its rework heading carries a suffix and the move sends nothing.
+
 A task that is new since the previous read counts as a transition from nothing.
-Every other change (`doing.*`, `review.verifying`, `review.integrating`, `todo.ready`, a title edit) sends nothing: each event costs the lead a model turn.
+Every other change (`doing.*`, `review.verifying`, `review.integrating`, a `todo.retry_wait` or `todo.paused_budget` task that became `todo.ready`, a title edit) sends nothing: each event costs the lead a model turn.
+
+A plan sends one event per field whose value differs from the previous read, over these fields: `status` and `paused`.
+
+- `status` is sent only for `draft` to `confirmed`. A plan that returns to `draft` with a change record sends nothing.
+- `paused` is `true` when the plan's `auto` is `off`, and the event is sent in both directions. `radian arc pause` and the automatic rework limit (`auto` goes to `off`) send the pause; the next level that is not `off` sends the resume. `auto` is the only field `list --json` exposes for this, so a level change from `run` to `merge` sends nothing, and so does a change of `priority` or a title.
+- A plan that is new since the previous read sends nothing for either field, and a cancelled plan sends no plan event at all: it is final.
 
 The notification's method is `notifications/claude/channel`.
-`content` is one line `<task id> <previous state.phase or "new"> -> <state.phase>`, then, when the task has a `rework_reason` (the same text `show --json` gives, a reject note included), a second line with it.
-`meta` has exactly these keys, and every value is a string:
+A task event's `content` is one line `<task id> <previous state.phase or "new"> -> <state.phase>`, then, when the task has a `rework_reason` (the same text `show --json` gives, a reject note included), a second line with it.
+A task event's `meta` has exactly these keys, and every value is a string:
 
 | Key | Value |
 |---|---|
@@ -85,6 +95,17 @@ The notification's method is `notifications/claude/channel`.
 | `phase` | the new `phase` |
 | `previous` | the previous `state.phase`, or `new` |
 
+A plan event's `content` is one line `<plan id> <field> <previous> -> <value>`, for example `PL0044-x status draft -> confirmed` or `PL0044-x paused false -> true`, then, when the store records a pause reason (the automatic rework limit's text), a second line with it.
+A plan event's `meta` has exactly these keys, and every value is a string:
+
+| Key | Value |
+|---|---|
+| `plan` | the plan id |
+| `field` | `status` or `paused` |
+| `previous` | the previous value: the status text, or `false`/`true` for `paused` |
+| `value` | the new value |
+
+A plan event has no `task` key, so a reader tells it from a task event.
 A meta key stays letters and underscores; Claude Code drops a key with any other character.
 The channel is one-way: there is no tool to reply to an event, and there is still no tool to confirm, start, merge, reject, approve, or change the auto level.
 The poller stops when the client closes the connection.

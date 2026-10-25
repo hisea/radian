@@ -336,6 +336,50 @@ fn expect_event(
     content
 }
 
+/// Asserts one channel plan event and returns its content. A plan event carries `plan`,
+/// `field`, `previous` and `value`, and no `task` key, so a reader can tell it from a task
+/// event.
+fn expect_plan_event(
+    notification: &CustomNotification,
+    plan: &str,
+    field: &str,
+    previous: &str,
+    value: &str,
+) -> String {
+    assert_eq!(
+        notification.method,
+        radian_arc::mcp::CHANNEL_METHOD,
+        "the event method is the channel's"
+    );
+    let params = notification.params.as_ref().expect("the event has params");
+    let content = params["content"]
+        .as_str()
+        .expect("the event content is a string")
+        .to_owned();
+    let meta = params["meta"].as_object().expect("the meta is an object");
+    let mut keys: Vec<&str> = meta.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["field", "plan", "previous", "value"],
+        "the meta has exactly the four plan keys and no task: {meta:?}"
+    );
+    for (key, value) in meta {
+        assert!(value.is_string(), "meta `{key}` is a string: {value}");
+    }
+    assert_eq!(meta["plan"].as_str(), Some(plan), "{meta:?}");
+    assert_eq!(meta["field"].as_str(), Some(field), "{meta:?}");
+    assert_eq!(meta["previous"].as_str(), Some(previous), "{meta:?}");
+    assert_eq!(meta["value"].as_str(), Some(value), "{meta:?}");
+    let first = content.lines().next().unwrap_or_default();
+    assert_eq!(
+        first,
+        format!("{plan} {field} {previous} -> {value}"),
+        "the content's first line: {content:?}"
+    );
+    content
+}
+
 /// One raw JSON-RPC line to a fresh `radian arc mcp` process, and the one line it answers.
 /// A raw probe is how the bootstrap `server/discover` path is tested: the typed client does
 /// not send it.
@@ -952,8 +996,13 @@ async fn the_channel_reports_the_tracked_transitions_and_stays_silent_for_the_re
         "review.awaiting_human",
     );
 
-    // A task added to a confirmed plan is a transition from nothing.
+    // A task added to a confirmed plan is a transition from nothing. The confirm itself is
+    // the plan's `status` event, sent before the task is added.
     radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+    let event = session.next_event().await;
+    let content = expect_plan_event(&event, &plan, "status", "draft", "confirmed");
+    assert_eq!(content, format!("{plan} status draft -> confirmed"));
+
     let added = session
         .ok(
             "add_task",
@@ -1011,6 +1060,179 @@ async fn a_task_file_the_poller_cannot_parse_sends_nothing_and_the_next_transiti
         "done",
         "merged",
         "review.awaiting_human",
+    );
+
+    session.close().await;
+}
+
+#[tokio::test]
+async fn the_channel_reports_the_owner_confirm_and_the_rework_into_ready() {
+    let scratch = fixture("mcp-channel-owner-task");
+
+    // The first task is `todo.ready` and the second is `todo.proposed`: the plan is confirmed
+    // before the second task is added, and both are in place when the channel opens.
+    let setup = Session::open(&scratch).await;
+    let (plan, first) = plan_with_task(&setup, "owner-task").await;
+    let store = Store::at(scratch.repo());
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+    let second = setup
+        .ok(
+            "add_task",
+            json!({
+                "plan": plan,
+                "slug": "second",
+                "title": "the proposed task",
+                "brief": "the proposed brief",
+            }),
+        )
+        .await["id"]
+        .as_str()
+        .expect("a task id")
+        .to_owned();
+    setup.close().await;
+
+    let mut session = Session::open_flagged(&scratch, true).await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // A title edit changes no phase and sends nothing.
+    session
+        .ok(
+            "update_task",
+            json!({"task": first, "title": "a better title"}),
+        )
+        .await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // The owner's confirm of a proposed task: a transition into a phase that does not send by
+    // itself, with the same shape as every task event.
+    radian_arc::store::plan_ops::confirm(&store, &second).expect("the task is confirmed");
+    let event = session.next_event().await;
+    let content = expect_event(&event, &second, &plan, "todo", "ready", "todo.proposed");
+    assert_eq!(content, format!("{second} todo.proposed -> todo.ready"));
+
+    // A task that leaves review for work is sent: the owner's reject moves to
+    // `review.rework_pending` (and its note), and the lead's `add_rework` is the same kind of
+    // move into `todo.ready`.
+    set_state(&scratch, &first, TaskState::Review, "rework_pending");
+    let event = session.next_event().await;
+    expect_event(
+        &event,
+        &first,
+        &plan,
+        "review",
+        "rework_pending",
+        "todo.ready",
+    );
+
+    radian_arc::store::plan_ops::add_rework(&store, &first, "a rework")
+        .expect("the lead adds a rework");
+    let event = session.next_event().await;
+    let content = expect_event(
+        &event,
+        &first,
+        &plan,
+        "todo",
+        "ready",
+        "review.rework_pending",
+    );
+    assert_eq!(
+        content,
+        format!("{first} review.rework_pending -> todo.ready")
+    );
+
+    // A conflict rework arc writes itself is not an owner action: its heading says so and the
+    // move sends nothing.
+    set_state(&scratch, &first, TaskState::Review, "rework_pending");
+    let event = session.next_event().await;
+    expect_event(
+        &event,
+        &first,
+        &plan,
+        "review",
+        "rework_pending",
+        "todo.ready",
+    );
+    radian_arc::store::plan_ops::add_rework_with(
+        &store,
+        &first,
+        "the conflict with main",
+        radian_arc::store::plan_ops::CONFLICT_REWORK_SUFFIX,
+    )
+    .expect("arc writes the conflict rework");
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    session.close().await;
+}
+
+#[tokio::test]
+async fn the_channel_reports_the_plan_confirm_and_pause_and_stays_silent_for_the_rest() {
+    let scratch = fixture("mcp-channel-plan");
+    let setup = Session::open(&scratch).await;
+    let (plan, task) = plan_with_task(&setup, "owner-plan").await;
+    setup.close().await;
+    let store = Store::at(scratch.repo());
+
+    let mut session = Session::open_flagged(&scratch, true).await;
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // A title edit and a priority change are not sent.
+    radian_arc::store::plan_ops::update_plan(&store, &plan, Some("Another plan"), None, None)
+        .expect("the draft title changes");
+    radian_arc::store::plan_ops::set_priority(&store, &plan, "P1").expect("the priority changes");
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // The owner confirms the plan: the plan's `status` event, with no `task` key.
+    radian_arc::store::plan_ops::confirm(&store, &plan).expect("the plan is confirmed");
+    let event = session.next_event().await;
+    let content = expect_plan_event(&event, &plan, "status", "draft", "confirmed");
+    assert_eq!(content, format!("{plan} status draft -> confirmed"));
+
+    // A confirmed plan starts at `auto` `off`: its first level that is not `off` is the
+    // resume.
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("the plan runs");
+    let event = session.next_event().await;
+    expect_plan_event(&event, &plan, "paused", "true", "false");
+
+    // A change between two levels that are not `off` is not a pause.
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "merge").expect("the plan merges");
+    session.no_event_for(Duration::from_secs(11)).await;
+
+    // `radian arc pause` sets `auto` to `off` and records no reason.
+    radian_arc::store::plan_ops::pause(&store, &plan).expect("the plan pauses");
+    let event = session.next_event().await;
+    let content = expect_plan_event(&event, &plan, "paused", "false", "true");
+    assert!(!content.contains('\n'), "no reason: {content:?}");
+
+    // The next level resumes it.
+    radian_arc::store::plan_ops::set_auto(&store, &plan, "run").expect("the plan runs again");
+    let event = session.next_event().await;
+    expect_plan_event(&event, &plan, "paused", "true", "false");
+
+    // The automatic rework limit pauses the plan and records the reason beside the task.
+    set_state(&scratch, &task, TaskState::Review, "rework_pending");
+    let event = session.next_event().await;
+    expect_event(
+        &event,
+        &task,
+        &plan,
+        "review",
+        "rework_pending",
+        "todo.ready",
+    );
+    store
+        .change_task(&task, |task| {
+            task.auto_rework = 2;
+            Ok(())
+        })
+        .expect("the task has used its automatic reworks");
+    let paused = radian_arc::store::attempt_ops::record_auto_rework(&store, &task)
+        .expect("the automatic rework is counted")
+        .expect("the plan pauses at the limit");
+    let event = session.next_event().await;
+    let content = expect_plan_event(&event, &plan, "paused", "false", "true");
+    assert_eq!(
+        content,
+        format!("{plan} paused false -> true\n{}", paused.text)
     );
 
     session.close().await;
