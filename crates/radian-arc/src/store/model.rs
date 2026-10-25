@@ -359,6 +359,12 @@ pub struct TaskFile {
     /// `review` stages. `reset-budget` does not change it. A file written before the field
     /// existed reads as its `cost_usd` until the next write (ADR 0048 decision 12).
     pub total_cost_usd: Option<f64>,
+    /// Whether one of the task's attempts reported no cost, so `cost_usd`, `total_cost_usd`
+    /// and the plan's sums over them are incomplete: arc shows them as unknown (ADR 0048
+    /// decisions 7 and 12). The field records the fact across later attempts that do report a
+    /// cost; absent reads `false`, and a file written before the field existed still counts an
+    /// attempt that ran and left no cost at all.
+    pub cost_unknown: bool,
     /// How many reworks arc counted while the plan's `auto` level was not `off`
     /// (`[limits] max_auto_rework`).
     pub auto_rework: u32,
@@ -440,6 +446,14 @@ impl TaskFile {
         self.total_cost_usd.or(self.cost_usd)
     }
 
+    /// Whether the task's cost totals leave an attempt out: one of its attempts ended without
+    /// reporting a cost, so `show`, `list` and the arc TUI print `unknown` for the task and for
+    /// every plan of it (ADR 0048 decisions 7 and 12). The attempt still running has no cost
+    /// yet, and that is not an unknown report: only the end of an attempt sets the field.
+    pub fn cost_is_unknown(&self) -> bool {
+        self.cost_unknown
+    }
+
     /// Adds one attempt's or one review stage's cost to both counters. The first write of a
     /// file that has no `total_cost_usd` starts the total from its `cost_usd`.
     pub fn add_cost(&mut self, cost: f64) {
@@ -473,6 +487,7 @@ impl TaskFile {
             token: None,
             cost_usd: None,
             total_cost_usd: None,
+            cost_unknown: false,
             auto_rework: 0,
             retry_count: 0,
             allow_noop,
@@ -516,6 +531,9 @@ impl TaskFile {
         }
         if let Some(cost) = self.total_cost_usd {
             out.push_str(&format!("total_cost_usd: {cost}\n"));
+        }
+        if self.cost_unknown {
+            out.push_str("cost_unknown: true\n");
         }
         if self.auto_rework > 0 {
             out.push_str(&format!("auto_rework: {}\n", self.auto_rework));
@@ -610,6 +628,7 @@ impl TaskFile {
         let token = fields.optional_string("token")?;
         let cost_usd = fields.optional_f64("cost_usd")?;
         let total_cost_usd = fields.optional_f64("total_cost_usd")?;
+        let cost_unknown = fields.optional_bool("cost_unknown")?.unwrap_or(false);
         let auto_rework = fields.optional_u32("auto_rework")?.unwrap_or(0);
         let retry_count = fields.optional_u32("retry_count")?.unwrap_or(0);
         let allow_noop = fields.optional_bool("allow_noop")?.unwrap_or(false);
@@ -654,6 +673,7 @@ impl TaskFile {
             token,
             cost_usd,
             total_cost_usd,
+            cost_unknown,
             auto_rework,
             retry_count,
             allow_noop,
@@ -844,6 +864,7 @@ mod tests {
             token: Some("a-token".to_owned()),
             cost_usd: Some(1.25),
             total_cost_usd: Some(1.5),
+            cost_unknown: true,
             auto_rework: 2,
             retry_count: 1,
             allow_noop: true,
@@ -956,6 +977,33 @@ mod tests {
             TaskFile::from_text(&task.to_text())
                 .expect("the field reads")
                 .followup_pending
+        );
+    }
+
+    /// `cost_unknown` is optional and survives a later known charge: a task whose first
+    /// attempt reported no cost keeps showing its spend as unknown even after an attempt that
+    /// did (ADR 0048 decisions 7 and 12). Only the end of an attempt sets it, so a task whose
+    /// attempt is still running has no cost and is not unknown.
+    #[test]
+    fn an_absent_cost_unknown_reads_false_and_is_sticky() {
+        let mut task = sample_task();
+        task.cost_unknown = false;
+        let text = task.to_text();
+        assert!(!text.contains("cost_unknown:"), "{text}");
+        let mut read = TaskFile::from_text(&text).expect("an older file reads");
+        assert!(!read.cost_is_unknown());
+        read.cost_unknown = true;
+        assert!(read.to_text().contains("cost_unknown: true"));
+        read.add_cost(0.5);
+        assert!(read.cost_is_unknown(), "a later known charge keeps it");
+        let mut running = sample_task();
+        running.attempt = 1;
+        running.cost_usd = None;
+        running.total_cost_usd = None;
+        running.cost_unknown = false;
+        assert!(
+            !running.cost_is_unknown(),
+            "an attempt that has not ended reported nothing yet"
         );
     }
 

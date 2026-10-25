@@ -1121,3 +1121,24 @@ restored from `.radian/mutation/<file>.orig` with `cp`, which `cmp` found identi
 | TK0159-M3 | `work::worker_env` drops `ARC_SESSION_START` on a `resume` attempt | `command_worker::the_command_receives_every_arc_variable_and_its_state_survives` (attempt 2's value is empty) | ✅ failed |
 
 3/3 caught.
+
+## TK0159 rework: an unknown cost stays unknown (2026-10-25, branch `work/TK0159-worker-command`)
+
+The review found that the unknown state was inferred only from `attempt > 0 &&
+cost_usd.is_none()`, so the first later attempt or review charge that called `add_cost` turned the
+task's and its plan's totals into numbers, and the TUI filtered the unknown cost out of the plan
+sum outright. ADR 0048 decisions 5, 7 and 12: an attempt that ends without a `cost` is recorded on
+the task field `cost_unknown`, which no later charge and no `reset-budget` clears, and every
+display (the `show` and `list` text, the JSON, the plans page, the task page and the board)
+prints `unknown` whenever a constituent attempt is unknown. Each mutation was applied by hand,
+the named tests ran with `cargo nextest run ... --profile sandbox`, and the file was restored
+from `.radian/mutation/<file>.orig` with `cp`, which `cmp` found identical. The M4 run rebuilt
+`radian` with `cargo build -p radian-tui --bin radian` because the arc integration tests refuse a
+binary older than its sources.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0159-M4 | `attempt_ops::apply_attempt` drops `task.cost_unknown = true`, so an unknown attempt leaves no marker | `command_worker::an_unknown_cost_stays_unknown_after_a_later_known_charge`, `command_worker::a_command_without_a_cost_adds_nothing_and_warns_once` | ✅ 2 failed |
+| TK0159-M5 | `arc::Cost::of`/`Cost::total` read `cost_usd` only and sum the other tasks, so the TUI draws `—` and a plan total | `arc_tui::an_unknown_cost_is_drawn_as_unknown_and_never_summed` | ✅ failed |
+
+2/2 caught.

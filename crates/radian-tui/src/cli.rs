@@ -3097,6 +3097,7 @@ mod tests {
             token: Some("a-token".to_owned()),
             cost_usd: Some(0.5),
             total_cost_usd: Some(0.75),
+            cost_unknown: true,
             auto_rework: 2,
             retry_count: 1,
             allow_noop: false,

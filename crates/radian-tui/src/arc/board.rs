@@ -35,7 +35,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use super::render::{frame_bottom, frame_top, rail_with, scroll_top};
-use super::{ArcApp, Mark, format_cost, task_mark};
+use super::{ArcApp, Cost, Mark, format_cost, task_mark};
 use crate::theme::Theme;
 
 /// The columns, left to right.
@@ -103,7 +103,7 @@ pub struct BoardCard {
     pub plan: String,
     pub phase: String,
     pub attempt: u32,
-    pub cost: Option<f64>,
+    pub cost: Cost,
     /// The state mark the card would draw outside `needs you`.
     pub mark: Mark,
     /// The card is in `needs you`: it draws the `!` mark instead of the state mark.
@@ -401,7 +401,7 @@ fn card(store: &Store, task: &TaskFile, column: usize) -> BoardCard {
         plan: task.plan.clone(),
         phase: task.phase.clone(),
         attempt: task.attempt,
-        cost: task.cost_usd,
+        cost: Cost::of(task),
         mark: task_mark(task.state, &task.phase),
         needs_you: column == NEEDS_YOU,
         doing: task.state == TaskState::Doing,

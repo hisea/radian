@@ -114,7 +114,8 @@ Each plan's header line shows its id, `status`, `auto` level, `priority`, progre
 The progress total leaves out `failed.cancelled` tasks: one merged task and one cancelled follow-up read `1/1`, an all-cancelled plan `0/0`.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
 A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage) and what `reset-budget` sets back to `0`; its `total_cost_usd` is the same spend and is never reset.
-An attempt whose worker reported no cost (a [`worker.command`](files.md#configtoml) that writes no `cost` in its `Result`) adds nothing to either number, and a plan with such a task prints `total_cost_usd: unknown` on its header line.
+An attempt whose worker reported no cost (a [`worker.command`](files.md#configtoml) that writes no `cost` in its `Result`) adds nothing to either number.
+arc records that on the task as [`cost_unknown`](files.md#task-fields), and a task that carries it — or a plan with such a task — prints `unknown` instead of a number, even after a later attempt reports a cost.
 
 By default finished work is left out, so you see the work in progress:
 
@@ -141,8 +142,8 @@ When everything is hidden, that line is the whole output; nothing hidden means n
 
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
-The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `changed_outside_arc`, and `tasks`.
-Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `followup_pending`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
+The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `cost_unknown` (`true` when one of its tasks is), `changed_outside_arc`, and `tasks`.
+Each task object holds `id`, `plan`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `followup_pending`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
 
 ## `radian arc show <ID> [--json]`
 
@@ -151,7 +152,7 @@ For a task it also prints the current attempt's notes as `attempt_note`, such as
 `show --json` carries them as `attempt_notes`, a list of strings (empty when there are none).
 
 A plan prints `cost_usd` and `total_cost_usd` beside its other fields: the first is the sum of its tasks' `cost_usd` and the number its budget compares, the second is the sum of their totals. Both are computed when the plan is read and are not stored in the plan file. A task prints both of its own numbers.
-A task whose attempt reported no cost prints `unknown` for both when it has no known cost at all, and `null` in `show --json`, as does a plan whose total leaves such a task out; see [Another agent as the worker](worker.md#another-agent-as-the-worker).
+A task whose attempt reported no cost prints `unknown` for both, and a plan with such a task prints `unknown` for both of its sums; `show --json` keeps the numbers it has and sets `cost_unknown` to `true`, so a script can tell an incomplete sum from a complete one. The state stays after a later attempt reports a cost; see [Another agent as the worker](worker.md#another-agent-as-the-worker).
 
 The id names one plan or task. An id that names both a plan and a task is refused with exit `3`, naming both files (see [Plan and task files](files.md#plan-and-task-files)).
 `list --plan <id>` always reads the plan.
@@ -206,7 +207,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 
 It refuses with exit `3` when the id names both a plan and a task (see [Plan and task files](files.md#plan-and-task-files)), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
-- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `auto_rework`, `retry_count`, `followup_pending`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
+- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `followup_pending`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
 - a plan: `status`, `auto`, `priority`.
 
 A file that already matches the ledger is a no-op and prints so.

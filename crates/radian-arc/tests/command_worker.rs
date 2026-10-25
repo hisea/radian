@@ -484,6 +484,73 @@ fn a_command_without_a_cost_adds_nothing_and_warns_once() {
     );
 }
 
+/// An unknown cost that an earlier attempt left stays unknown after a later attempt reports
+/// one: the task and the plan keep showing `unknown` instead of a number that leaves the first
+/// attempt out. Mutation: infer the unknown state only from `attempt > 0 && cost_usd.is_none()`
+/// → the later known charge hides it and every display prints a number.
+#[test]
+fn an_unknown_cost_stays_unknown_after_a_later_known_charge() {
+    let repo = Repo::new("command-unknown-stays");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "command");
+    let task = add_task(&store, &plan, "mixed-cost");
+    plan_ops::confirm(&store, &plan).expect("confirm the plan");
+    // Attempt 1 reports no cost, attempt 2 reports one.
+    let worker = script(
+        &repo,
+        "command-worker-mixed-cost",
+        &format!(
+            "{PROLOGUE}if [ \"$n\" = 1 ]; then\n  printf '{{\"type\":\"Result\",\"outcome\":\
+             \"completed\",\"text\":\"one\"}}\\n'\nelse\n  printf '{{\"type\":\"Result\",\
+             \"outcome\":\"completed\",\"text\":\"two\",\"cost\":{{\"micros\":2500}}}}\\n'\nfi\n"
+        ),
+    );
+    set_command(&repo, &[worker.to_str().expect("a path")]);
+
+    let first = repo.radian(&["arc", "start", task.as_str()]);
+    assert_eq!(first.code, 0, "start failed: {}", first.stderr);
+    plan_ops::add_rework(&store, &task, "one more round").expect("the rework");
+    let second = repo.radian(&["arc", "start", task.as_str()]);
+    assert_eq!(second.code, 0, "second start failed: {}", second.stderr);
+
+    let task_file = store.load_task(&task).expect("the task").item;
+    assert_eq!(
+        task_file.cost_usd,
+        Some(0.0025),
+        "the known attempt is charged"
+    );
+
+    let shown = repo.radian(&["arc", "show", task.as_str(), "--json"]);
+    let shown: Value = serde_json::from_str(&shown.stdout).expect("show --json");
+    assert_eq!(shown["cost_unknown"], json!(true), "{shown}");
+    let text = repo.radian(&["arc", "show", task.as_str()]);
+    assert!(
+        text.stdout.contains("cost_usd: unknown"),
+        "the task's counted cost is unknown:\n{}",
+        text.stdout
+    );
+    assert!(
+        text.stdout.contains("total_cost_usd: unknown"),
+        "the task's total is unknown:\n{}",
+        text.stdout
+    );
+    let plan_text = repo.radian(&["arc", "show", plan.as_str()]);
+    assert!(
+        plan_text.stdout.contains("cost_usd: unknown"),
+        "the plan's counted cost is unknown:\n{}",
+        plan_text.stdout
+    );
+    let list = repo.radian(&["arc", "list"]);
+    assert!(
+        list.stdout.contains("total_cost_usd: unknown"),
+        "the plan's total is unknown:\n{}",
+        list.stdout
+    );
+    let list_json = repo.radian(&["arc", "list", "--json"]);
+    let list_json: Value = serde_json::from_str(&list_json.stdout).expect("list --json");
+    assert_eq!(list_json[0]["cost_unknown"], json!(true), "{list_json}");
+}
+
 /// An unknown cost never reaches a task budget, even one of `0`: the attempt retries instead
 /// of pausing. Mutation: count the unknown cost as zero → `0 >= 0` pauses the task.
 #[test]

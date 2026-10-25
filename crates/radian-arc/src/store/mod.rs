@@ -1378,6 +1378,9 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             if last.total_cost_usd != current.total_cost_usd {
                 touched.push("total_cost_usd");
             }
+            if last.cost_unknown != current.cost_unknown {
+                touched.push("cost_unknown");
+            }
             if last.auto_rework != current.auto_rework {
                 touched.push("auto_rework");
             }

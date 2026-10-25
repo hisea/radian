@@ -441,7 +441,7 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 "max_wall_time_secs",
                 &optional_number(plan.item.max_wall_time_secs),
             );
-            field(&mut out, "cost_usd", &cost_text(view.cost_usd()));
+            field(&mut out, "cost_usd", &plan_counted_cost_text(view));
             field(&mut out, "total_cost_usd", &plan_cost_text(view));
             field(&mut out, "tasks", &joined(&plan.item.tasks));
             field(
@@ -488,7 +488,7 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
             field(
                 &mut out,
                 "total_cost_usd",
-                &if cost_unknown(item) {
+                &if item.cost_is_unknown() {
                     "unknown".to_owned()
                 } else {
                     optional_cost(item.total_cost())
@@ -672,26 +672,28 @@ fn optional_cost(value: Option<f64>) -> String {
     value.map(cost_text).unwrap_or_else(|| "-".to_owned())
 }
 
-/// Whether a task's counted cost is unknown: it has run an attempt that reported no `cost` and
-/// has no known cost to show (ADR 0048 decisions 7 and 12). A task that has not run has no
-/// cost either, and that is not an unknown report.
-fn cost_unknown(task: &super::model::TaskFile) -> bool {
-    task.attempt > 0 && task.cost_usd.is_none()
-}
-
-/// A task's counted cost as `show` prints it: `unknown` when a command worker reported none,
-/// `-` when the task has not run, else the number.
+/// A task's counted cost as `show` prints it: `unknown` when an attempt reported none, `-`
+/// when the task has not run, else the number.
 fn task_cost_text(task: &super::model::TaskFile) -> String {
-    if cost_unknown(task) {
+    if task.cost_is_unknown() {
         return "unknown".to_owned();
     }
     optional_cost(task.cost_usd)
 }
 
+/// A plan's counted cost (the number its budget compares) as the text forms print it:
+/// `unknown` when one of its tasks ran without reporting a cost, else the summed total.
+fn plan_counted_cost_text(view: &PlanView) -> String {
+    if view.tasks.iter().any(|task| task.item.cost_is_unknown()) {
+        return "unknown".to_owned();
+    }
+    cost_text(view.cost_usd())
+}
+
 /// A plan's total as the text forms print it: `unknown` when one of its tasks ran without
 /// reporting a cost, else the summed total (ADR 0048 decisions 7 and 12).
 fn plan_cost_text(view: &PlanView) -> String {
-    if view.tasks.iter().any(|task| cost_unknown(&task.item)) {
+    if view.tasks.iter().any(|task| task.item.cost_is_unknown()) {
         return "unknown".to_owned();
     }
     cost_text(view.total_cost_usd())
@@ -727,6 +729,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "token": item.token,
         "cost_usd": item.cost_usd,
         "total_cost_usd": item.total_cost(),
+        "cost_unknown": item.cost_is_unknown(),
         "auto_rework": item.auto_rework,
         "retry_count": item.retry_count,
         "after": item.after,
@@ -763,6 +766,7 @@ fn plan_json(view: &PlanView, with_body: bool) -> serde_json::Value {
         "max_wall_time_secs": plan.max_wall_time_secs,
         "cost_usd": view.cost_usd(),
         "total_cost_usd": view.total_cost_usd(),
+        "cost_unknown": view.tasks.iter().any(|task| task.item.cost_is_unknown()),
         "tasks": view
             .tasks
             .iter()

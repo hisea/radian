@@ -804,9 +804,13 @@ pub fn apply(
         });
         // Every applied attempt adds its cost to the task's counters (decision 12): the
         // budget counter and the total that `reset-budget` leaves alone. An unknown cost (a
-        // command worker that reported none) adds nothing and cannot reach a budget.
+        // command worker that reported none) adds nothing, cannot reach a budget, and marks
+        // the task's totals as incomplete for good: a later attempt that does report a cost
+        // must not turn them into numbers that leave this one out.
         if cost.known {
             task.add_cost(cost.cost_usd);
+        } else {
+            task.cost_unknown = true;
         }
         let reached_verification = matches!(next, Next::Verifying);
         let mut retry_at = None;
