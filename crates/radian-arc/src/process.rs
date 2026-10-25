@@ -1,8 +1,11 @@
 //! Process identity and signals (ADR 0048 decisions 4 and 9).
 //!
 //! A pid alone is not an identity: the operating system reuses one. An attempt record keeps
-//! the process's **start time** as well (`ps -o lstart=`), and every signal arc sends checks
-//! both, so a reused pid is never signalled.
+//! the process's **start time** as well (`ps -o lstart=`), and a signal arc sends compares
+//! both, so a reused pid is not signalled. That check needs `ps` to answer: where it cannot
+//! report a start time (the `workspace` sandbox refuses it), the pid alone decides, as ADR
+//! 0048 decision 9 requires, so a live process at the recorded pid is signalled rather than
+//! assumed gone.
 //!
 //! The start time is the `ps` spelling, recorded verbatim: it is compared with the same
 //! command's output later, never parsed into a date.

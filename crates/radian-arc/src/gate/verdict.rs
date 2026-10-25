@@ -69,7 +69,8 @@ pub struct ReviewItem {
     /// What is wrong.
     pub text: String,
     /// arc, not the session, set this: a rework round moved the item out of `blocking`
-    /// because the rework did not touch it.
+    /// because it is not near a line the task's own change added or changed, nor near a
+    /// blocking item of the previous review.
     pub pre_existing: bool,
 }
 
@@ -300,8 +301,7 @@ pub struct Verdict {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cost_micros: Option<u64>,
     /// A `review` verdict of a rework round only: how many blocking items arc moved to
-    /// `suggestions` because the rework did not touch them (ADR 0048 decision 10). Absent on a
-    /// first review.
+    /// `suggestions` as `pre_existing` (ADR 0048 decision 10). Absent on a first review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_pre_existing: Option<u32>,
     /// A `review` verdict only: the settings the session ran with and the keys they came from

@@ -281,8 +281,10 @@ impl ReviewRun<'_> {
                 break;
             }
             if let Some(found) = report.as_mut() {
-                // A rework round's report is judged by arc, not by the session: an item the
-                // rework did not touch does not block (ADR 0048 decision 10).
+                // A rework round's report is judged by arc, not by the session: an item blocks
+                // only when it is near a line the task's own change added or changed (the whole
+                // task, not just the rework's increment), near a blocking item of the previous
+                // review, critical, or without a `file` or a `line` (ADR 0048 decision 10).
                 if let Some(round) = &round {
                     pre_existing = Some(round.mark_pre_existing(found));
                 }
