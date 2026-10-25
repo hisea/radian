@@ -54,12 +54,13 @@
 | `arc.md` | in-progress（切片 1–7 已落地） | 0032、0043、0044、0038、0020、0024、0013、0037、0022 | 替代 herdr 的派发与闸门：文件 backlog 单写者、一次性 worker、固定 sha 的 gate；产品形态为三界面 app 加 plan 层与全自动 |
 | `arc-gate-batch.md` | decided（排在 `arc-landing.md` 之后） | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
 | `arc-reviewer-profiles.md` | decided | 0048 | reviewer profile（模型、prompt 写审查范围、时限、`fix_level`，第一轮可另设模型与时限）；只审 diff，返工轮只审增量和上轮问题，`pre_existing` 由 arc 按改动行机械判定、不打回；问题分 `critical`/`major`/`minor` 并附校准例子，用户选修到哪级，task 可覆盖；review 与 commands 并行，review 失败由 arc 自动写返工；没修的问题变成 `todo.proposed` 收尾 task，新增 task 级 `confirm` |
-| `arc-serve.md` | idea | 0048、0013、0032、0034、0006、0028、0045、0043 | 远程客户端（iOS / desktop）：runner 抽库，三个壳持 `runner.lock`；serve 只听 loopback，HTTP + SSE，会话投影成 block；状态迁移钩子推 APNs，payload 只带 id 与 phase；iOS 永远 client，desktop 可 host 可 client |
+| `arc-serve.md` | decided（钩子排在 `arc-landing.md` 之后） | 0048、0013、0020、0008、0034 | 远程客户端的服务端：一个 hub 管本机登记的所有仓库，不持 `runner.lock`，owner 动作走 CLI 库函数与 `state.lock`；只听 loopback，token 必须；`/v1/` 读接口与 `list`/`show --json` 同构，加报告、verdict、diff；SSE 事件只是提示；通知走 `[hooks]` 加 `after_awaiting_human`/`after_proposed`，radian 不发推送；v1 不看实时会话 |
+| `arc-ios.md` | idea | 0048、0034 | 原生 SwiftUI 客户端，只连 hub；扫码配对、Keychain 存 token；v1 列表、详情、diff 与八个 owner 动作，不看实时会话；锁屏通知走 Bark/ntfy 钩子跳 app 的 URL scheme；待决：仓库位置、分发、最低版本 |
 | `session-arc-page.md` | idea | 0048、0023、0027、0035 | 会话 TUI 里 `/arc` 切到 arc 的 plans/task/merge 页面，不退出会话；读当前项目的 `.radian/arc/`，审批弹窗仍在最上层，owner 动作与 `radian arc` 相同，模型一侧调不到 |
 | `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 | `hooks-stop-and-feedback.md` | idea | 0045、0037、0017、0012、0046 | `Stop` stdin 加 `stop_hook_active`/`background_tasks`/`session_crons`；`additionalContext` 非错误反馈与 `PostToolUse` `updatedToolOutput`；续跑计数在工具调用后清零、滑窗留作硬顶；`args` exec 形式与每次运行一行耗时 |
 | `hooks-async.md` | idea | 0045、0037、0011、0046 | `async: true` 的 hook 接到后台 job 上：exit 0 的 `additionalContext` 走 `inject`，`asyncRewake` 退出 2 走 `followup` 计一次 wake；post-edit 测试不再拖慢回合 |
-| `hooks-permission-request.md` | idea | 0045、0012、0043、0048、0024、0011 | `PermissionRequest` 事件让脚本回答 ask（只回答 ask，不扩权）；headless worker 与 arc 的审批出口，`addRules` 到 `session` 记住选择；与 `subagent-ask-forwarding.md`、`arc-serve.md` 第 3 条同一需求 |
+| `hooks-permission-request.md` | idea | 0045、0012、0043、0048、0024、0011 | `PermissionRequest` 事件让脚本回答 ask（只回答 ask，不扩权）；headless worker 与 arc 的审批出口，`addRules` 到 `session` 记住选择；与 `subagent-ask-forwarding.md`、`arc-serve.md` 第 4 条同一需求 |
 | `hooks-lifecycle-events.md` | idea | 0045、0011、0036、0018、0021、0034、0017、0013 | 五个生命周期事件按用例逐个加：`UserPromptSubmit`、`SessionStart`、`Notification`（只两个 matcher）、`PreCompact`/`PostCompact`、`StopFailure`；研究笔记 `research/2026-10-24-claude-code-hooks.md` 含不采纳项 |
 
 只占索引行（暂无文件；来源都是总报告 `research/2026-10-18-area-deep-dive/README.md`）：
