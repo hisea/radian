@@ -17,6 +17,7 @@
 //! small trait: a test injects pixels without a real clipboard, and the system implementation
 //! is `arboard` (macOS NSPasteboard, Linux X11 and Wayland, Windows).
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use image::ImageEncoder;
@@ -34,6 +35,10 @@ pub enum Content {
         height: u32,
         pixels: Vec<u8>,
     },
+    /// An image whose dimensions are over the shared per-side limit. The reader reports it
+    /// before it copies the pixels: the buffer can be borrowed, and `into_owned` would clone
+    /// every byte of an image that is refused anyway.
+    OverLimit { width: u32, height: u32 },
     /// No image. An empty clipboard and a text-only one both end here: Ctrl-V does what it did
     /// before (nothing in the composer) and no attachment appears.
     NoImage,
@@ -56,25 +61,45 @@ impl Reader for System {
         let Ok(image) = clipboard.get_image() else {
             return Content::NoImage;
         };
-        let (Ok(width), Ok(height)) = (u32::try_from(image.width), u32::try_from(image.height))
-        else {
-            return Content::NoImage;
-        };
-        let Some(expected) = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-        else {
-            return Content::NoImage;
-        };
-        if image.bytes.len() != expected {
-            return Content::NoImage;
-        }
-        Content::Rgba {
-            width,
-            height,
-            pixels: image.bytes.into_owned(),
-        }
+        from_image(image.width, image.height, image.bytes)
     }
+}
+
+/// Turns `arboard`'s pixels into [`Content`] without copying a buffer that is refused anyway.
+/// The platform may hand the pixels out **borrowed**, so `into_owned` clones all of them; the
+/// per-side check therefore runs before that call, on the dimensions alone (an 8001×8000
+/// paste is refused without a ~256 MiB copy).
+fn from_image(width: usize, height: usize, pixels: Cow<'_, [u8]>) -> Content {
+    let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
+        return Content::NoImage;
+    };
+    if over_side(width, height) {
+        return Content::OverLimit { width, height };
+    }
+    let Some(expected) = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return Content::NoImage;
+    };
+    if pixels.len() != expected {
+        return Content::NoImage;
+    }
+    Content::Rgba {
+        width,
+        height,
+        pixels: pixels.into_owned(),
+    }
+}
+
+/// Whether a clipboard image's own shape is over the shared per-side limit.
+fn over_side(width: u32, height: u32) -> bool {
+    width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE
+}
+
+/// The shared pipeline's reason, so the notice names exactly what `@` names.
+fn too_many_pixels(width: u32, height: u32) -> String {
+    ImageError::TooManyPixels { width, height }.to_string()
 }
 
 /// The default reader: the system clipboard.
@@ -96,19 +121,21 @@ pub enum Outcome {
 
 /// Reads once and turns an image into the shared image part. Called by the event loop.
 pub fn read(reader: &dyn Reader) -> Outcome {
-    let Content::Rgba {
-        width,
-        height,
-        pixels,
-    } = reader.read()
-    else {
-        return Outcome::NoImage;
+    let (width, height, pixels) = match reader.read() {
+        Content::NoImage => return Outcome::NoImage,
+        Content::OverLimit { width, height } => {
+            return Outcome::Unusable(too_many_pixels(width, height));
+        }
+        Content::Rgba {
+            width,
+            height,
+            pixels,
+        } => (width, height, pixels),
     };
-    // The per-side limit is checked on the clipboard's own dimensions, before the pixels are
-    // moved, copied or encoded: an over-limit paste must not reach the encoder at all. The
-    // reason is the shared pipeline's, so the notice names the limit exactly as `@` does.
-    if width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {
-        return Outcome::Unusable(ImageError::TooManyPixels { width, height }.to_string());
+    // The system reader already refused an over-limit shape before copying its pixels; this
+    // keeps an injected reader honest on the same terms, before its pixels reach the encoder.
+    if over_side(width, height) {
+        return Outcome::Unusable(too_many_pixels(width, height));
     }
     match encode_png(width, height, pixels) {
         Ok(png) => match radian_coding::image::load(CLIPBOARD_NAME, &png) {
@@ -179,7 +206,42 @@ impl std::io::Write for Bounded {
 
 #[cfg(test)]
 mod tests {
+    use std::alloc::{GlobalAlloc, Layout, System as AllocSystem};
+    use std::cell::Cell;
+
     use super::*;
+
+    // The pre-copy test measures what this thread allocated while the reader looked at an
+    // over-limit buffer. A thread-local counter leaves tests running in parallel (the lib test
+    // binary) out of the window; nextest gives each test its own process anyway.
+    thread_local! {
+        static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct Counting;
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _ = ALLOCATED.try_with(|bytes| bytes.set(bytes.get() + layout.size()));
+            unsafe { AllocSystem.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { AllocSystem.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let _ = ALLOCATED.try_with(|bytes| bytes.set(bytes.get() + new_size));
+            unsafe { AllocSystem.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    fn allocated_bytes() -> usize {
+        ALLOCATED.with(Cell::get)
+    }
 
     /// A fixed RGBA image; no real clipboard is touched.
     struct Fake(Content);
@@ -272,6 +334,37 @@ mod tests {
         let outcome = read(&Fake(noise(1400, 1400)));
         assert!(
             matches!(&outcome, Outcome::Unusable(reason) if reason.contains("5 MiB") && reason.contains("encoded")),
+            "{outcome:?}"
+        );
+    }
+
+    /// `arboard` can hand its pixels out borrowed, so `into_owned` copies all of them. An image
+    /// over the per-side limit must be refused from its dimensions alone: a 4 MiB borrow that
+    /// names 8001×1 stays untouched, and the reason is the shared one `@` reports.
+    #[test]
+    fn an_over_limit_buffer_is_refused_before_it_is_copied() {
+        let borrowed = vec![0u8; 4 * 1024 * 1024];
+        let before = allocated_bytes();
+        let content = from_image(
+            radian_coding::MAX_IMAGE_SIDE as usize + 1,
+            1,
+            Cow::Borrowed(borrowed.as_slice()),
+        );
+        let copied = allocated_bytes().saturating_sub(before);
+        assert_eq!(
+            content,
+            Content::OverLimit {
+                width: radian_coding::MAX_IMAGE_SIDE + 1,
+                height: 1
+            }
+        );
+        assert!(
+            copied < 64 * 1024,
+            "the pixels were copied before the limit check: {copied} bytes allocated"
+        );
+        let outcome = read(&Fake(content));
+        assert!(
+            matches!(&outcome, Outcome::Unusable(reason) if reason.contains("8000")),
             "{outcome:?}"
         );
     }

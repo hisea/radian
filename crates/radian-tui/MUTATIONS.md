@@ -3069,3 +3069,20 @@ with `cargo nextest run -p radian-tui --locked --profile sandbox --test clipboar
 | TK0015-M3 | `key_input` returns `PasteImage` for Ctrl-V before the keymap, and the default key row is deleted (hard-coded instead of bound) | ✅ 1 failed | `clipboard::the_rebound_key_pastes_and_the_old_one_no_longer_does` (`Ctrl-V must not paste after the rebind: [ReadClipboard]`) |
 
 3/3 caught.
+
+## TK0015 rework 3: an over-limit clipboard buffer is refused before it is copied (2026-10-24)
+
+`arboard` may hand the pixels out borrowed; `System::read` passed `image.bytes.into_owned()`
+to the pipeline before the per-side limit was checked, so an 8001×8000 paste cloned ~256 MiB
+only to be refused. The dimension check now runs in `clipboard::from_image` before
+`into_owned`, and `Content::OverLimit` carries the shape to `clipboard::read`, which reports
+the shared `ImageError::TooManyPixels` reason. Mutation applied by hand to
+`crates/radian-tui/src/clipboard.rs`, backed up under `.radian/backup/` and restored from that
+copy (never `git checkout`); the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --lib -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0015-M4 | `clipboard::from_image` converts the pixels with `into_owned()` before the per-side check, so an over-limit borrowed buffer is copied and only then refused | ✅ 1 failed | `clipboard::tests::an_over_limit_buffer_is_refused_before_it_is_copied` (`the pixels were copied before the limit check: 4194304 bytes allocated`) |
+
+1/1 caught.
