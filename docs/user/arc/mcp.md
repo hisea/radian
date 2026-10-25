@@ -70,7 +70,7 @@ One event is sent per task whose `state.phase` differs from the previous read an
 
 `todo.proposed`, `review.awaiting_human`, `review.rework_pending`, `done.merged`, `failed.exhausted`, `failed.cancelled`, `failed.irrecoverable`.
 
-A move into `todo.ready` sends one too, from one of these previous phases: `todo.proposed` (your `radian arc confirm <task>`) and `review.*` (your reject, or the lead's `add_rework`; the poller cannot tell the two apart, and both are worth a turn).
+A move into `todo.ready` sends one too, from one of these previous phases: `todo.proposed` (your `radian arc confirm <task>`) and `review.*` (the lead's `add_rework`).
 A reject keeps the task in `review.rework_pending`, so its event is that one and its second line is the note (see [`reject`](index.md#radian-arc-reject-task-note-text)).
 A rework arc writes itself (a conflict with main, or a review that failed with blocking items) is not your action: its rework heading carries a suffix and the move sends nothing.
 
@@ -95,7 +95,7 @@ A task event's `meta` has exactly these keys, and every value is a string:
 | `phase` | the new `phase` |
 | `previous` | the previous `state.phase`, or `new` |
 
-A plan event's `content` is one line `<plan id> <field> <previous> -> <value>`, for example `PL0044-x status draft -> confirmed` or `PL0044-x paused false -> true`, then, when the pause is the automatic rework limit's, a second line with the reason it recorded. That record stays on the task's attempt after you resume, so only a record that is new since the previous read is that pause's reason: your own `radian arc pause` sends no second line.
+A plan event's `content` is one line `<plan id> <field> <previous> -> <value>`, for example `PL0044-x status draft -> confirmed` or `PL0044-x paused false -> true`, then, when the pause is the automatic rework limit's, a second line with the reason it recorded. That record stays on the task's attempt after you resume, so only a record that belongs to this pause is its reason: a record an earlier read found while the plan was paused, or the baseline read found, is not, and your own `radian arc pause` sends no second line. The automatic rework limit writes the record before it sets `auto` to `off`, so a read between those two writes does not take it from the pause that follows.
 A plan event's `meta` has exactly these keys, and every value is a string:
 
 | Key | Value |

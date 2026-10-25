@@ -882,3 +882,21 @@ identical.
 | TK0107-M2 | a plan event is sent when `priority` changes (the snapshot records it and `plan_transitions` emits an event for it) | `arc_mcp::the_channel_reports_the_plan_confirm_and_pause_and_stays_silent_for_the_rest` (the quiet wait receives `PL0001-owner-plan status P3 -> P1`) | ✅ failed |
 
 2/2 caught.
+
+## TK0115: the channel keeps the pause reason a read saw before `auto` turned off (2026-10-24, branch `work/TK0115-channel-owner-actions-followups`)
+
+ADR 0048 decision 11: the automatic rework limit writes `paused.json` and then sets the plan's
+`auto` to `off` in a second write. A poller read between the two writes finds the record on a
+plan that still runs; the paused read after it must still report the record as that pause's
+reason, while a record an earlier pause left stays out of a later manual pause. The mutation was
+applied by hand to the working `crates/radian-arc/src/mcp/mod.rs`, `radian` was rebuilt because
+the integration test drives the real binary, the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test arc_mcp -E '<the test
+below>'`, and the file was restored from `.radian/mut/mcp.mod.rs.bak` with `cp`, which `cmp`
+found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0115-M1 | `carry_pause_records` is not called, so a record a read finds while the plan still runs becomes the previous read's record and suppresses the pause's reason | `arc_mcp::a_pause_record_read_before_auto_turned_off_is_the_pause_reason` (the pause event arrived with no second line: `PL0001-pause-race paused false -> true`) | ✅ failed |
+
+1/1 caught.

@@ -65,9 +65,10 @@ pub const CHANNEL_PHASES: &[&str] = &[
 ];
 
 /// The previous phases whose move into `todo.ready` also sends a task event: the owner's
-/// confirm of a proposed task, and a task that left a `review.*` phase (the owner's reject, or
-/// the lead's `add_rework`). An entry that ends in `.*` is a prefix. This is the second closed
-/// task list the manual's drift test reads.
+/// confirm of a proposed task, and the lead's `add_rework` of a task in a `review.*` phase. The
+/// owner's reject is not one of these: it moves the task to `review.rework_pending`, which
+/// [`CHANNEL_PHASES`] sends with the note as its second line. An entry that ends in `.*` is a
+/// prefix. This is the second closed task list the manual's drift test reads.
 pub const CHANNEL_READY_FROM: &[&str] = &["todo.proposed", "review.*"];
 
 /// The plan fields that cost the lead a turn when they change: the plan's `status`, and
@@ -350,8 +351,9 @@ struct TaskSnapshot {
 
 /// One plan as the previous poll read it. `paused` is a `confirmed` plan whose `auto` is
 /// `off`: a `draft` plan waits for the owner's confirm and is not paused. `pause_record` is
-/// the newest record the automatic rework limit left for the plan, whether the plan is paused
-/// now or not.
+/// the record that belongs to the plan's current or most recent pause: the one a read found
+/// while the plan was paused, or the one the plan's first read found. A read that finds the
+/// plan not paused keeps the previous one (see [`carry_pause_records`]).
 #[derive(Debug, Clone)]
 struct PlanSnapshot {
     status: String,
@@ -429,8 +431,8 @@ fn snapshot(store: &Store) -> Result<Snapshot, Error> {
 /// The newest `paused.json` record the automatic rework limit left for `plan` on one of its
 /// tasks' current attempts: the record's identity and its `text` (decision 12). `radian arc
 /// pause` records none. The record stays on its attempt after the owner resumes, so a caller
-/// compares the identity with the previous read's before it trusts the text as this pause's
-/// reason; another task's older record is not this pause's reason either.
+/// compares it with the record that belongs to the previous pause before it trusts the text
+/// as this pause's reason; another task's older record is not this pause's reason either.
 fn pause_record(
     store: &Store,
     plan: &str,
@@ -585,11 +587,27 @@ fn plan_transitions(
     events
 }
 
-/// The reason line of a pause event: the text of a `paused.json` record that appeared since the
-/// previous read. The automatic rework limit writes the record and sets `auto` to `off` in the
-/// same write, so a new record is this pause's cause. A record from an earlier pause stays on
-/// its attempt after the owner resumes, and another task's record may be older still; neither
-/// is this pause's reason.
+/// Carries each plan's pause record into the new read while the plan is not paused. The
+/// automatic rework limit writes the record and then sets `auto` to `off` in a second write, so
+/// a read between the two finds the new record on a plan that is still running. That read must
+/// not count as having seen the record: the next read, which sees the pause, still reports it
+/// as the pause's reason. A read that finds the plan paused keeps the record it found.
+fn carry_pause_records(
+    previous: &BTreeMap<String, PlanSnapshot>,
+    current: &mut BTreeMap<String, PlanSnapshot>,
+) {
+    for (plan_id, plan) in current.iter_mut().filter(|(_, plan)| !plan.paused) {
+        if let Some(before) = previous.get(plan_id) {
+            plan.pause_record = before.pause_record.clone();
+        }
+    }
+}
+
+/// The reason line of a pause event: the text of the record that caused this pause. The
+/// automatic rework limit writes the record just before it sets `auto` to `off`, so the record
+/// the paused read finds is this pause's cause. A record from an earlier pause stays on its
+/// attempt after the owner resumes; [`carry_pause_records`] keeps it as the previous read's
+/// record, so a later `radian arc pause` sends no second line.
 fn pause_reason(before: &PlanSnapshot, plan: &PlanSnapshot) -> Option<String> {
     if !plan.paused {
         return None;
@@ -680,8 +698,9 @@ async fn send(peer: &Peer<RoleServer>, params: Value) {
 async fn poll(store: Store, peer: Peer<RoleServer>) {
     let mut previous: Option<Snapshot> = None;
     loop {
-        if let Ok(current) = snapshot(&store) {
+        if let Ok(mut current) = snapshot(&store) {
             if let Some(before) = &previous {
+                carry_pause_records(&before.plans, &mut current.plans);
                 for (task_id, task, phase) in task_transitions(&before.tasks, &current.tasks) {
                     send_event(&store, &peer, &task_id, &task, &phase).await;
                 }
@@ -881,6 +900,43 @@ mod tests {
             assert_eq!(result.is_error, Some(false), "{value}");
             assert_eq!(text_of(&result), value.to_string(), "{value}");
         }
+    }
+
+    #[test]
+    fn a_pause_record_seen_while_the_plan_still_ran_is_kept_for_its_pause() {
+        let record = "the plan paused: task TK0001-a used 3 automatic reworks";
+        let plan = |paused: bool, record: Option<&str>| {
+            BTreeMap::from([(
+                "PL0001-a".to_owned(),
+                PlanSnapshot {
+                    status: "confirmed".to_owned(),
+                    paused,
+                    cancelled: false,
+                    pause_record: record.map(|text| PauseRecord {
+                        id: "TK0001-a@0@2026-01-01T00:00:00Z".to_owned(),
+                        text: text.to_owned(),
+                    }),
+                },
+            )])
+        };
+
+        // The automatic rework limit writes the record first and sets `auto` to `off` in a
+        // second write. The read in that window finds the record on a plan that is not paused;
+        // the paused read after it must still report the record as the pause's reason.
+        let before = plan(false, None);
+        let mut racing = plan(false, Some(record));
+        carry_pause_records(&before, &mut racing);
+        let paused = plan(true, Some(record));
+        let events = plan_transitions(&racing, &paused);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].1.field, "paused");
+        assert_eq!(events[0].1.reason.as_deref(), Some(record));
+
+        // A pause the poller already reported is not repeated by a later manual pause: the
+        // record carried out of the resume is the one the previous pause had.
+        let resumed = plan(false, Some(record));
+        let manual = plan(true, Some(record));
+        assert_eq!(plan_transitions(&resumed, &manual)[0].1.reason, None);
     }
 
     /// The text blocks of a result, joined as a client reads them.
