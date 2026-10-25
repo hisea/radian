@@ -3053,15 +3053,19 @@ under `.radian/mut/` and restored from that copy (never `git checkout`); the tes
 
 A clipboard paste reads `arboard`'s RGBA pixels, encodes them to PNG in memory, and runs them
 through the same `radian_coding::image::load` pipeline `@` and a dropped path use; the action is
-the rebindable `paste_image`. Each mutation was applied by hand to `crates/radian-tui/src/clipboard.rs`
-or `src/app/update.rs` + `src/keys.rs`, backed up under `.radian/backup/` and restored from that
-copy (never `git checkout`). The named test ran alone, with
-`cargo nextest run -p radian-tui --locked --profile sandbox --test clipboard -E 'test(<name>)'`.
+the rebindable `paste_image`. The per-side limit is checked on the clipboard's own RGBA shape
+before the pixels are moved or encoded, and the encoder writes through a sink that stops at the
+shared 5 MiB limit, so an over-limit paste is refused without a pixel copy or a huge encoded
+buffer; accepted bytes still go through `image::load`. Each mutation was applied by hand to
+`crates/radian-tui/src/clipboard.rs` or `src/app/update.rs` + `src/keys.rs`, backed up under
+`.radian/backup/` and restored from that copy (never `git checkout`). The named test ran alone,
+with `cargo nextest run -p radian-tui --locked --profile sandbox --test clipboard -E 'test(<name>)'`
+(unit tests: `--lib -E 'test(clipboard)'`).
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| TK0015-M1 | `clipboard::read` writes the PNG to `std::env::temp_dir()/radian-clipboard-<pid>.png` and reads it back instead of keeping the bytes in memory | ✅ 1 failed | `clipboard::the_clipboard_image_never_touches_the_disk` (`nothing is written under the system temp dir`) |
-| TK0015-M2 | `clipboard::read` builds `LoadedImage` itself from the PNG bytes, skipping `image::load`'s magic-number and limit checks | ✅ 1 failed | `clipboard::an_over_limit_clipboard_image_is_unusable` (an `Image` where `Unusable` was expected) |
+| TK0015-M1 | `clipboard::read` writes the PNG to `std::env::temp_dir()/radian-clipboard-<pid>.png` and reads it back instead of keeping the bytes in memory | ✅ 1 failed | `clipboard::the_clipboard_image_never_touches_the_disk` (the isolated temp dir gained `radian-clipboard-37981.png`) |
+| TK0015-M2 | `clipboard::read` skips every limit: no dimension pre-check, an unbounded encoder, and `LoadedImage` built straight from the PNG bytes, skipping `image::load` | ✅ 4 failed | `clipboard::an_over_limit_clipboard_image_is_unusable` (an `Image` where `Unusable` was expected), `clipboard::tests::an_over_limit_image_is_unusable`, `clipboard::tests::an_over_limit_dimension_is_refused_before_the_pixels_are_touched` (the reason named the pixels, not 8000), `clipboard::tests::an_incompressible_image_is_refused_while_it_is_encoded` (an `Image` where the 5 MiB refusal was expected) |
 | TK0015-M3 | `key_input` returns `PasteImage` for Ctrl-V before the keymap, and the default key row is deleted (hard-coded instead of bound) | ✅ 1 failed | `clipboard::the_rebound_key_pastes_and_the_old_one_no_longer_does` (`Ctrl-V must not paste after the rebind: [ReadClipboard]`) |
 
 3/3 caught.

@@ -110,20 +110,34 @@ fn listing(dir: &Path) -> Vec<String> {
     names
 }
 
-/// Clipboard-named entries under the system temp dir. Radian writes none; no scratch
-/// directory above carries that word, and unrelated temp files cannot match, so this is
-/// stable under a parallel test run.
-fn clipboard_temp_entries() -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(std::env::temp_dir())
-        .map(|read| {
-            read.flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .filter(|name| name.to_lowercase().contains("clipboard"))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
+/// The marker that tells the re-run test it is the isolated child: the parent writes it into
+/// the child's `TMPDIR`, so it exists only there.
+const CHILD_MARKER: &str = ".radian-paste-child";
+
+/// The complete contents of `dir`, recursively, as sorted relative paths. This is not a name
+/// filter: a regression that writes any temp file at all, under any name, changes the list.
+fn tree(dir: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            out.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            if path.is_dir() {
+                walk(&path, root, out);
+            }
+        }
+    }
+    let mut entries = Vec::new();
+    walk(dir, dir, &mut entries);
+    entries.sort();
+    entries
 }
 
 #[test]
@@ -280,10 +294,43 @@ fn the_rebound_key_pastes_and_the_old_one_no_longer_does() {
 
 #[test]
 fn the_clipboard_image_never_touches_the_disk() {
-    let workspace = TempDir::new("disk");
-    let mut app = app_with(workspace.path(), rgba(40, 30));
-    let workspace_before = listing(workspace.path());
-    let clipboard_before = clipboard_temp_entries();
+    let temp = std::env::temp_dir();
+    if !temp.join(CHILD_MARKER).exists() {
+        // This test compares the **whole** temp dir, so it must be its only user: it re-runs
+        // itself in a child process whose TMPDIR is a private empty directory. Setting TMPDIR
+        // here would be process-wide and would race every other test in this binary (and every
+        // other crate's tests in the workspace run).
+        let root = TempDir::new("isolated");
+        let child_temp = root.path().join("tmp");
+        std::fs::create_dir_all(&child_temp).unwrap();
+        std::fs::write(child_temp.join(CHILD_MARKER), b"").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("the_clipboard_image_never_touches_the_disk")
+            .env("TMPDIR", &child_temp)
+            .output()
+            .expect("the test binary re-runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "the isolated child failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // A renamed test would make libtest match nothing and still exit 0.
+        assert!(
+            stdout.contains("1 passed"),
+            "the child must run the test itself:\n{stdout}"
+        );
+        return;
+    }
+
+    // Child: its TMPDIR holds only the marker and this workspace, so the whole-directory
+    // comparison is stable even under a parallel run.
+    let workspace = temp.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut app = app_with(&workspace, rgba(40, 30));
+    let temp_before = tree(&temp);
+    let workspace_before = listing(&workspace);
 
     let effects = app.on_key(ctrl_v()).effects;
     assert!(
@@ -299,26 +346,23 @@ fn the_clipboard_image_never_touches_the_disk() {
         Effect::ExpandMentions { text } => text.clone(),
         other => panic!("expected an @ expansion, got {other:?}"),
     };
-    let expansion = radian_tui::mention::expand(&text, workspace.path()).unwrap();
+    let expansion = radian_tui::mention::expand(&text, &workspace).unwrap();
     let effects = app.update(Input::MentionsExpanded(Ok(expansion))).effects;
     assert!(
         matches!(effects.first(), Some(Effect::SendFollowup(_))),
         "{effects:?}"
     );
 
+    // Every entry under the temp dir, not just the clipboard-named ones: the workspace is one of
+    // them, so this covers both directories the slice names.
     assert_eq!(
-        listing(workspace.path()),
-        workspace_before,
-        "nothing is written into the workspace"
-    );
-    assert_eq!(
-        clipboard_temp_entries(),
-        clipboard_before,
+        tree(&temp),
+        temp_before,
         "nothing is written under the system temp dir"
     );
-    assert!(
-        clipboard_temp_entries().is_empty(),
-        "no clipboard temp file: {:?}",
-        clipboard_temp_entries()
+    assert_eq!(
+        listing(&workspace),
+        workspace_before,
+        "nothing is written into the workspace"
     );
 }
