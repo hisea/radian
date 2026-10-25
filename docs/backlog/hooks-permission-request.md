@@ -2,7 +2,7 @@
 
 - 状态：idea
 - 涉及 ADR：0045（§1 事件子集、§4 hook 排在权限之后）、0012（P1 hook 不扩权、P2/P3 决定顺序）、0043（1a.7 子进程的 ask 按拒绝处理）、0048（arc worker 是 headless `radian exec`）、0024（结构化用户交互）、0011（`System` 来源）
-- 来源：`research/2026-10-24-claude-code-hooks.md`；Claude Code hooks 参考页 `PermissionRequest` 一节；`subagent-ask-forwarding.md` 与 `arc-serve.md` 第 3 条（通知钩子）的同一需求
+- 来源：`research/2026-10-24-claude-code-hooks.md`；Claude Code hooks 参考页 `PermissionRequest` 一节；`subagent-ask-forwarding.md` 与 `arc-serve.md` 第 4 条（通知钩子）的同一需求
 
 ## 背景
 
@@ -19,7 +19,7 @@ Claude Code 的 `PermissionRequest` hook 在**即将弹权限提示**时触发�
 - stdin：工具名、`tool_input`、权限层给出的建议规则（Claude 的 `permission_suggestions`）；radian 的权限规则语法（`permissions.md`）直接作为建议值。
 - 两层（项目、用户）都配了时的顺序：项目先、用户后与 0045 §1 一致；第一个给出 `decision` 的生效，还是 `deny` 优先。
 - 与 `subagent-ask-forwarding.md` 的关系：hook 命令可以是"向父会话的 control 口发问并等答复"的脚本，那条 backlog 的 durable 事件方案是否因此降级为 idea。
-- 与 `arc-serve.md` 第 3 条的关系：同一个 hook 命令可以推到手机再等回答，超时按拒绝。
+- 与 `arc-serve.md` 第 4 条的关系：同一个 hook 命令可以推到手机再等回答，超时按拒绝。
 - hook 超时与非零退出：按 0017 §4 失败关闭等于拒绝，与今天一致；是否要和 Claude 一样"exit 2 且无 `decision` 对象时流程不变（继续弹提示）"。
 
 ## 验收
