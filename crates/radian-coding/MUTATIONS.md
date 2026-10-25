@@ -779,3 +779,18 @@ ran alone with
 | TK0118-M1 | return the old refusal again (`if offset_given || limit_given` → `image_offset`) | ✅ 1 failed | `offset_and_limit_on_an_image_are_ignored_and_said_once` (the `offset`+`limit` call failed with `image_offset`) |
 
 1/1 caught.
+
+## a composer attachment name's control characters (2026-10-25, branch `work/TK0123-composer-attachment-align-followups`)
+
+A dropped image's source name is a file name, and a file system allows a control character in
+one. `[image: <name>, W×H, N KB]` is one display row (ADR 0028 R5), so `image::placeholder` shows
+each control character as a space. The mutation was applied by hand to
+`crates/radian-coding/src/image.rs`, backed up under `.radian/image.rs.orig` and restored from
+that copy (never `git checkout`), confirmed byte-identical with `cmp`; each named test ran alone
+with `cargo nextest run -p <crate> --locked --profile sandbox`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0123-M1 | `placeholder` formats the source name unchanged (drop the control-character → space map) | ✅ 2 failed | `radian-coding image::tests::a_control_character_in_the_source_name_stays_on_one_line` (`"[image: bad\nname\r\t.png, 10×10, 1 KB]"`); `radian-tui::render a_composer_attachment_name_with_a_line_break_stays_on_one_row` (`Lines: the control characters became spaces`) |
+
+1/1 caught.
