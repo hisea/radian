@@ -292,6 +292,53 @@ fn a_resume_claim_makes_the_task_session_known_before_the_worker_ends() {
     assert_eq!(value["session_id"], json!(task));
 }
 
+/// ADR 0048 decision 4: the claim writes the worker it decided on to `start.json`, so a reader
+/// can tell a command worker from `radian exec` before the wrapper has written any record, and a
+/// later `[worker] command` change cannot re-classify the attempt.
+///
+/// Mutation: the claim omits `worker` from `start.json`.
+#[test]
+fn a_claim_records_the_worker_it_decided_on() {
+    let (repo, store) = setup("claim-worker");
+    tune(&repo, &[("concurrency = 1", "concurrency = 2")]);
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["radian", "command"]);
+    let start = |task: &str| -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(
+                attempt_ops::attempt_dir(&store, task, 1).join(attempt_ops::START_FILE),
+            )
+            .expect("start.json"),
+        )
+        .expect("start.json parses")
+    };
+
+    attempt_ops::claim(&store, &tasks[0]).expect("the first claim");
+    assert_eq!(
+        start(&tasks[0])["worker"],
+        json!({"kind": "radian"}),
+        "the default worker is `radian exec`"
+    );
+
+    // The key takes effect at the next claim: this attempt is the command worker, and the
+    // program is recorded as the wrapper will run it (a path with a `/` made absolute).
+    tune(
+        &repo,
+        &[(
+            "# command = [\"codex\", \"exec\"]",
+            "command = [\"tools/codex\"]",
+        )],
+    );
+    attempt_ops::claim(&store, &tasks[1]).expect("the second claim");
+    assert_eq!(
+        start(&tasks[1])["worker"],
+        json!({
+            "kind": "command",
+            "program": repo.clone.join("tools/codex").display().to_string(),
+        }),
+        "the claim names the command worker the wrapper will start"
+    );
+}
+
 /// The wrapper writes `identity.json` when it spawns the worker and `execution.json` only when
 /// it ends. A reader with no `execution.json` answers from `identity.json`, and an
 /// `execution.json` that exists wins over it (ADR 0048 decision 4).

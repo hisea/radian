@@ -515,6 +515,10 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             "wrapper_pid": s.wrapper_pid,
             "wrapper_process_started_at": wrapper_started_at,
             "session_id": o.session,
+            // The worker this attempt started, so a reader can classify a running attempt
+            // without reading `config.toml`, which may have changed since the claim
+            // (ADR 0048 decision 4).
+            "worker": worker.clone(),
             "worktree": s.worktree.display().to_string(),
             "branch": s.branch,
             "started_at": started_at,

@@ -58,6 +58,9 @@ A reader takes the first of those records that names one: `execution.json`, then
 With `worker.rework_session = "fresh"` it is `<task>-<attempt>`; with `resume` it is the task id.
 `radian arc show` prints it as `session_id` (known from the claim on, not only after the attempt ends), and `radian attach <session id>` opens that session's journal.
 
+The same records name the worker the attempt runs: the claim writes the worker it decided on (the `worker` field; `worker.command` takes effect at the next claim), and the wrapper writes the worker it started when it spawns it and when it ends.
+A reader takes the first of those records that names one, in the same order, so a running attempt keeps its kind when `config.toml` changes; the arc TUI's conversation tab uses that record, not the current configuration, to choose between a journal and a command worker's stdout.
+
 Every review run of an attempt has a session of its own, named `<attempt id>-review-<run>`.
 When a journal of that name already exists (a gate was started again for the same attempt), the stage uses `<attempt id>-review-<run>-<k>` with the smallest free `k` and writes the run's logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log` under the attempt's `logs/`; the review verdict's `review_session_ids` lists the ids it used.
 

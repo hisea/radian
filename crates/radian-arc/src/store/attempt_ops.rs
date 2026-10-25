@@ -25,10 +25,11 @@ use crate::store::config::ReworkSession;
 pub const ATTEMPT_FINISHED_FILE: &str = "attempt_finished.json";
 /// The wrapper's last-written end record, in the host-local attempt directory.
 pub const STATUS_FILE: &str = "status.json";
-/// The claim's host-local start record: the attempt id, token, `started_at` and the session id
-/// the claim decided on. A reconcile uses `started_at` to judge a wrapper that has not written
-/// its first heartbeat yet; `show` and the arc TUI use `session_id` to open the worker's journal
-/// before the wrapper writes `identity.json` or `execution.json`.
+/// The claim's host-local start record: the attempt id, token, `started_at`, the session id
+/// and the worker the claim decided on. A reconcile uses `started_at` to judge a wrapper that
+/// has not written its first heartbeat yet; `show` and the arc TUI use `session_id` to open the
+/// worker's journal, and `worker` to classify the attempt, before the wrapper writes
+/// `identity.json` or `execution.json`.
 pub const START_FILE: &str = "start.json";
 /// Why the wrapper was signalled (`cancel`, `stall`, `wall_time`).
 pub const SIGNAL_FILE: &str = "signal.json";
@@ -442,6 +443,19 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         ReworkSession::Resume => task_id.to_owned(),
     };
     let resume = number > 1 && config.worker.rework_session == ReworkSession::Resume;
+    // The worker this attempt runs, decided here because `[worker] command` takes effect at
+    // the next claim. The wrapper is started with the same command on its hidden flag, so a
+    // reader can tell a command worker from `radian exec` from the claim on (decision 4).
+    let worker = match &config.worker.command {
+        Some(words) => {
+            let resolved = crate::worker_args::resolved(words, store.repo());
+            json!({
+                "kind": "command",
+                "program": resolved.first().cloned().unwrap_or_default(),
+            })
+        }
+        None => json!({"kind": "radian"}),
+    };
     // A command worker reports no cost, so a task or plan cost limit cannot stop it. The
     // warning is printed once per attempt by `start`, `run` and `serve` (ADR 0048 decisions
     // 7 and 12).
@@ -470,8 +484,10 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         "started_at": super::plan_ops::utc_now(),
         // The session the claim decided on, so `show` and the arc TUI can open a running
         // worker's journal before the wrapper has written `identity.json` or
-        // `execution.json` (ADR 0048 decision 4).
+        // `execution.json` (ADR 0048 decision 4). The worker is here for the same reason: a
+        // later configuration change must not re-classify a running attempt.
         "session_id": session_id,
+        "worker": worker,
     });
     let text = serde_json::to_string_pretty(&record)
         .map_err(|error| Error::Failed(format!("cannot encode the start record: {error}")))?;

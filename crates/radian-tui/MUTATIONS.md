@@ -3194,11 +3194,19 @@ records; a `radian exec` attempt keeps the attach view. The mutations were appli
 'test(a_summary_is_found_at_the_top_level_before_one_level_down) |
 test(the_conversation_tab_shows_a_command_workers_stdout) |
 test(the_conversation_tab_follows_a_command_workers_growing_stdout) |
-test(the_conversation_tab_renders_the_selected_attempts_worker_journal)'`.
+test(the_conversation_tab_renders_the_selected_attempts_worker_journal) |
+test(a_config_change_does_not_turn_a_running_radian_attempt_into_stdout) |
+test(a_running_command_attempt_shows_its_stdout_though_the_config_is_unset) |
+test(arc::stdout)')`.
+The rework's two checks (the bounded read and the per-attempt worker record) used backups in the
+same directory, `.radian/mut/stdout.rs.final` and `.radian/mut/mod.rs.final`, and each was
+restored with `cmp` identical to its copy.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0160-M1 | skip the one-level-down summary lookup: `first_summary` keeps only the top-level pass | ✅ 2 failed | `arc::stdout::tests::a_summary_is_found_at_the_top_level_before_one_level_down` (`left: None`, `right: Some("nested")`); `the_conversation_tab_shows_a_command_workers_stdout` (the `item.completed` row printed `{"item":…}` instead of `the agent's answer`) |
 | TK0160-M2 | treat a command attempt as a radian session: `refresh_journal` takes `command = None`, so the tab looks for a session journal | ✅ 2 failed | `the_conversation_tab_shows_a_command_workers_stdout` (the title and rows are missing); `the_conversation_tab_follows_a_command_workers_growing_stdout` (the growing line never appears); `the_conversation_tab_renders_the_selected_attempts_worker_journal` stayed green, so a `radian exec` attempt is unchanged |
+| TK0160-M3 | classify a running attempt from the configuration again: `command_worker` reads `execution.json` only, else `[worker] command` when a `result.jsonl` exists | ✅ 2 failed | `a_config_change_does_not_turn_a_running_radian_attempt_into_stdout` (the journal is replaced by the stdout title); `a_running_command_attempt_shows_its_stdout_though_the_config_is_unset` (the stdout title and row are missing) |
+| TK0160-M4 | read the whole appended range at once, keep every line, and keep an unterminated line in full | ✅ 2 failed | `a_large_stdout_keeps_only_its_newest_rows` (`left: 131172, right: 4096`, "the rows are bounded"); `a_line_longer_than_the_cap_keeps_only_its_prefix` (`left: 8692, right: 8192`) |
 
-2/2 caught.
+4/4 caught.

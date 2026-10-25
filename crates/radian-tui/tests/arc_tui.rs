@@ -2529,6 +2529,100 @@ fn the_conversation_tab_follows_a_command_workers_growing_stdout() {
     );
 }
 
+/// A configuration change while an attempt runs does not switch its conversation's source: the
+/// worker is a property of the attempt (ADR 0048 decision 4). A running `radian exec` attempt
+/// keeps its journal even when `[worker] command` is set, though its `result.jsonl` exists too
+/// (that is where `radian exec` writes its own event stream).
+///
+/// Mutation: classify a running attempt from the current `[worker] command` setting.
+#[test]
+fn a_config_change_does_not_turn_a_running_radian_attempt_into_stdout() {
+    let fixture = Fixture::new();
+    let task = fixture.id("g").to_owned();
+    let sessions = fixture.scratch.path("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = format!("{task}-1");
+    // The wrapper is running a `radian exec` worker: `identity.json` names it.
+    write_identity_worker(&fixture, &task, 1, &session, json!({"kind": "radian"}));
+    write_journal(&sessions, &session, "the worker said hello", "and replied");
+    let run = radian_arc::store::attempt_ops::run_dir(&fixture.store, &task, 1);
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("result.jsonl"),
+        "{\"type\":\"Result\",\"outcome\":\"completed\",\"text\":\"a raw line\"}\n",
+    )
+    .unwrap();
+    // The owner now sets a command worker for the next claim; this attempt keeps its own.
+    set_worker_command(&fixture, &["codex"]);
+
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), Some(sessions));
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("g");
+    app.open_task();
+    let text = screen(&mut app, 120, 30);
+    assert!(
+        text.contains("the worker said hello"),
+        "the journal is shown:\n{text}"
+    );
+    assert!(
+        !text.contains("codex stdout"),
+        "a `radian exec` attempt has no stdout tab:\n{text}"
+    );
+    assert!(
+        !text.contains("a raw line"),
+        "its `result.jsonl` is not drawn as rows:\n{text}"
+    );
+}
+
+/// The claim writes the worker it decided on to `start.json`, so a running command attempt's
+/// stdout is shown before the wrapper has written any record, even when `[worker] command` has
+/// been unset since the claim (ADR 0048 decision 4).
+///
+/// Mutation: classify a running attempt from the current `[worker] command` setting.
+#[test]
+fn a_running_command_attempt_shows_its_stdout_though_the_config_is_unset() {
+    let fixture = Fixture::new();
+    let task = fixture.id("g").to_owned();
+    let session = format!("{task}-1");
+    write_start_worker(
+        &fixture,
+        &task,
+        1,
+        &session,
+        json!({"kind": "command", "program": "codex"}),
+    );
+    let run = radian_arc::store::attempt_ops::run_dir(&fixture.store, &task, 1);
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("result.jsonl"),
+        "{\"type\":\"item.completed\",\"item\":{\"text\":\"the agent's answer\"}}\n",
+    )
+    .unwrap();
+    // The fixture's config has no `[worker] command`, as if it had been unset after the claim.
+
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), None);
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("g");
+    app.open_task();
+    let text = screen(&mut app, 120, 30);
+    assert!(
+        text.contains("conversation · codex stdout"),
+        "the title names the claim's program:\n{text}"
+    );
+    assert!(
+        text.contains("the agent's answer"),
+        "the stdout is shown while the attempt runs:\n{text}"
+    );
+}
+
 /// The task frame's state alone does not say whether a `doing` worker is alive (ADR 0048
 /// decisions 7.9 and 9): the row adds the heartbeat's age, `stalled?` past the stall window,
 /// `starting` before the first beat, and `loop stopped` when nothing holds `runner.lock`.
@@ -2710,6 +2804,70 @@ fn write_start(fixture: &Fixture, task: &str, attempt: u32, session: &str) {
         json!({ "session_id": session }).to_string(),
     )
     .unwrap();
+}
+
+/// The claim's `start.json` with the worker the claim decided on (ADR 0048 decision 4).
+fn write_start_worker(
+    fixture: &Fixture,
+    task: &str,
+    attempt: u32,
+    session: &str,
+    worker: serde_json::Value,
+) {
+    write_worker_record(
+        fixture,
+        task,
+        attempt,
+        radian_arc::store::attempt_ops::START_FILE,
+        session,
+        worker,
+    );
+}
+
+/// The wrapper's `identity.json` for a running attempt, naming the worker it started.
+fn write_identity_worker(
+    fixture: &Fixture,
+    task: &str,
+    attempt: u32,
+    session: &str,
+    worker: serde_json::Value,
+) {
+    write_worker_record(fixture, task, attempt, "identity.json", session, worker);
+}
+
+fn write_worker_record(
+    fixture: &Fixture,
+    task: &str,
+    attempt: u32,
+    name: &str,
+    session: &str,
+    worker: serde_json::Value,
+) {
+    let dir = radian_arc::store::attempt_ops::attempt_dir(&fixture.store, task, attempt);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(name),
+        json!({ "session_id": session, "worker": worker }).to_string(),
+    )
+    .unwrap();
+}
+
+/// Sets `[worker] command` in the fixture's `config.toml` after the store was created, as an
+/// owner editing the file while an attempt runs would.
+fn set_worker_command(fixture: &Fixture, command: &[&str]) {
+    let path = fixture.scratch.path("repo/.radian/arc/config.toml");
+    let words = command
+        .iter()
+        .map(|word| format!("\"{word}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let before = fs::read_to_string(&path).unwrap();
+    let after = before.replace(
+        "# command = [\"codex\", \"exec\"]",
+        &format!("command = [{words}]"),
+    );
+    assert_ne!(before, after, "the default config names the commented key");
+    fs::write(&path, after).unwrap();
 }
 
 /// The wrapper's heartbeat, with the given last beat.

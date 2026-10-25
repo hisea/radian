@@ -1142,3 +1142,20 @@ binary older than its sources.
 | TK0159-M5 | `arc::Cost::of`/`Cost::total` read `cost_usd` only and sum the other tasks, so the TUI draws `—` and a plan total | `arc_tui::an_unknown_cost_is_drawn_as_unknown_and_never_summed` | ✅ failed |
 
 2/2 caught.
+
+## TK0160: the claim and the wrapper record the worker (2026-10-25, branch `work/TK0160-tui-command-worker-log`)
+
+ADR 0048 decision 4: the claim writes the worker it decided on to `start.json`, and the wrapper
+writes the worker it started to `identity.json` as well as `execution.json`, so the arc TUI
+classifies a running attempt from its own records instead of `config.toml`, which may have
+changed since the claim. Each mutation was applied by hand to the named file, the named tests ran
+with `cargo nextest run -p radian-arc --locked --profile sandbox --test ...` (after `cargo build
+-p radian-tui --bin radian`, because the integration tests run the binary), and the file was
+restored from `.radian/mut/<file>.final` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0160-M5 | the claim omits `worker` from `start.json` | `attempt::a_claim_records_the_worker_it_decided_on` (`left: Null`, `right: {"kind": "radian"}`) | ✅ failed |
+| TK0160-M6 | the wrapper omits `worker` from `identity.json` | `work::the_happy_path_commits_pushes_and_records_the_attempt`, `command_worker::a_command_worker_that_commits_and_completes_passes_and_its_text_reaches_the_hand_off` | ✅ 2 failed |
+
+2/2 caught.

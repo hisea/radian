@@ -2802,40 +2802,39 @@ impl ArcApp {
     }
 }
 
-/// The program of the command worker that ran, or is running, one attempt, when the attempt is
-/// not a `radian exec` attempt (ADR 0048 decisions 7 and 13).
+/// The program of the command worker that ran, or is running, one attempt; `None` when the
+/// attempt's worker is `radian exec` (ADR 0048 decisions 4, 7 and 13).
 ///
-/// The wrapper writes `execution.json` when the worker exits, and that record names the worker;
-/// while an attempt still runs there is no record yet, and then the configured `[worker] command`
-/// names it — but only when the attempt has a `result.jsonl`, the file the wrapper creates for a
-/// worker it started. A worker-less `reverify` attempt writes none and stays a journal attempt.
+/// The attempt's own records decide, never the current configuration: the claim writes the
+/// worker it decided on to `start.json` (the key takes effect at the next claim), the wrapper
+/// writes the worker it started to `identity.json`, and its end record `execution.json` names it
+/// too. A reader takes the first record that names a worker, so a `[worker] command` change
+/// while an attempt runs cannot switch the tab between its journal and its stdout.
 fn command_worker(store: &Store, task: &str, attempt: u32) -> Option<String> {
-    let dir = radian_arc::store::attempt_ops::run_dir(store, task, attempt);
-    match std::fs::read_to_string(dir.join("execution.json")) {
-        Ok(text) => {
-            // The record decides: one that names `radian` (or predates the `worker` field) is
-            // not a command worker, whatever the config says now.
-            let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-            let worker = value.get("worker")?;
-            if worker.get("kind").and_then(serde_json::Value::as_str) != Some("command") {
-                return None;
-            }
-            Some(
-                worker
-                    .get("program")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            )
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if !dir.join("result.jsonl").is_file() {
-                return None;
-            }
-            store.config().ok()?.worker.command?.first().cloned()
-        }
-        Err(_) => None,
-    }
+    let run = radian_arc::store::attempt_ops::run_dir(store, task, attempt);
+    let attempt_dir = radian_arc::store::attempt_ops::attempt_dir(store, task, attempt);
+    let worker = [
+        run.join("execution.json"),
+        attempt_dir.join("identity.json"),
+        attempt_dir.join(radian_arc::store::attempt_ops::START_FILE),
+    ]
+    .into_iter()
+    .find_map(|path| worker_in(&path))?;
+    (worker.get("kind").and_then(serde_json::Value::as_str) == Some("command")).then(|| {
+        worker
+            .get("program")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    })
+}
+
+/// The `worker` object one attempt record names, when the record exists and parses. A record
+/// that predates the field answers `None`, so the next record in the order decides.
+fn worker_in(path: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("worker").cloned()
 }
 
 /// The attempt rows a page shows: the run directories' attempts, or — for a task whose run

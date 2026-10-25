@@ -142,6 +142,13 @@ fn a_command_worker_that_commits_and_completes_passes_and_its_text_reaches_the_h
         json!({"kind": "command", "program": worker.to_str().unwrap()}),
         "the attempt records which worker ran"
     );
+    let identity: Value =
+        serde_json::from_str(&read(&repo.attempt_dir(&task, 1).join("identity.json")))
+            .expect("identity.json");
+    assert_eq!(
+        identity["worker"], execution["worker"],
+        "the wrapper's identity record names the same worker from the start"
+    );
 
     // A rework runs a second fresh attempt: its stdin carries the first attempt's report.
     plan_ops::add_rework(&store, &task, "one more round").expect("the rework");
