@@ -14173,6 +14173,63 @@ async fn pty_arc_opens_switches_pages_and_quits() {
     stop_arc_loop(&repo);
 }
 
+/// A panicked owner action still replies: the footer shows the failure, the spinner stops, the
+/// next page key is handled, and the panic hook writes no report to stderr while the alternate
+/// screen is up (its bytes reach the pty and would print over the UI).
+///
+/// `RADIAN_ARC_PANIC_ACTION` is the test seam that makes the action worker panic
+/// (`src/cli/arc.rs`); it is test-only and undocumented, like `--panic-in-driver`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_arc_a_panicked_action_still_replies_and_leaves_the_tui_responsive() {
+    let scratch = TempDir::new("arc-action-panic");
+    let repo = scratch.path().join("repo");
+    arc_test_repo(&repo);
+    let mut pty = Pty::spawn_in(
+        &["arc"],
+        &[("RADIAN_ARC_PANIC_ACTION", "1")],
+        &repo,
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("PLANS", wait_positive()),
+        "the plans page is not on screen:\n{}",
+        pty.screen()
+    );
+    // `c` confirms the draft plan; its worker panics instead.
+    pty.send(b"c");
+    assert!(
+        pty.wait_for_screen(
+            "confirm failed: it panicked (arc action worker panic test)",
+            wait_positive()
+        ),
+        "the panicked action left no footer line:\n{}",
+        pty.screen()
+    );
+    // The hook's report would read `thread '<unnamed>' panicked at ...`; the footer's own line
+    // does not contain those words.
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        !raw.contains("panicked at"),
+        "the panic hook wrote its report over the alternate screen:\n{raw}"
+    );
+    // `pending` would swallow this key: the board must open.
+    pty.send(b"b");
+    assert!(
+        pty.wait_for_screen("all plans", wait_positive()),
+        "the TUI stayed stuck after the panic:\n{}",
+        pty.screen()
+    );
+    pty.send(b"q");
+    assert_eq!(
+        pty.wait_for_exit(wait_positive()),
+        Some(0),
+        "q must quit the arc view:\n{}",
+        pty.screen()
+    );
+    stop_arc_loop(&repo);
+}
+
 /// The owner acts from the TUI: `m` opens the merge page of a `review.awaiting_human` task,
 /// `M` asks for confirmation, and `y` merges through the library — the footer then shows
 /// `done.merged` and the remote main holds the task's commit.

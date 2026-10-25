@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use radian_tui::arc::loop_log::LoopLogTail;
 use radian_tui::arc::looping::{self, LoopStarter};
 use radian_tui::arc::{ArcApp, ArcKey, actions, render};
+use ratatui::layout::Rect;
 
 use super::*;
 
@@ -25,7 +26,61 @@ const ARC_POLL: Duration = Duration::from_millis(100);
 /// How often an action in flight redraws its spinner (ADR 0027: a rotating frame every 250 ms).
 const ARC_SPINNER: Duration = Duration::from_millis(250);
 
-/// One worker-thread reply.
+/// One worker thread's reply: what its body produced, and whether a panic was caught before
+/// it could.
+///
+/// `panicked` makes the loop clear the screen before the next frame: a caught panic must not
+/// leave anything it printed on the alternate screen.
+struct WorkerReply {
+    reply: GitReply,
+    panicked: bool,
+}
+
+/// Runs one worker thread's body with its panic caught, and always sends a reply.
+///
+/// The loop learns that a worker finished only from the reply on `tx`: an owner action's
+/// `pending`, a log's `log_pending`, a diff's or merge's request and the header's
+/// `main_pending` are cleared by that reply and by nothing else. A thread that panicked before
+/// its last statement would leave one of them set for the rest of the session — with `pending`
+/// set every page key is ignored and the spinner never stops — so all five spawns run through
+/// here.
+///
+/// `on_panic` builds the reply that thread would otherwise have sent: the failure value in the
+/// reply's own shape, carrying the panic message.
+fn spawn_reply<F, P>(tx: mpsc::Sender<WorkerReply>, body: F, on_panic: P)
+where
+    F: FnOnce() -> GitReply + Send + 'static,
+    P: FnOnce(&str) -> GitReply + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let reply = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+            Ok(reply) => WorkerReply {
+                reply,
+                panicked: false,
+            },
+            Err(payload) => WorkerReply {
+                reply: on_panic(&panic_message(payload.as_ref())),
+                panicked: true,
+            },
+        };
+        // The loop may have left (a signal, a closed terminal): the reply is then dropped.
+        let _ = tx.send(reply);
+    });
+}
+
+/// The text of a caught panic payload. `panic!` produces a `&str` or a `String`; anything else
+/// is named rather than guessed.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "a panic with no message".to_owned()
+    }
+}
+
+/// One worker-thread reply's value.
 enum GitReply {
     /// The remote main's short sha (`None` when the ref does not exist).
     Main(Option<String>),
@@ -87,6 +142,11 @@ pub(super) fn run_arc() -> ExitCode {
     }
     looping::install_stop_handler();
     app.set_loop_status(starter.status());
+    // Test seam (like `--panic-in-driver`): with `RADIAN_ARC_PANIC_ACTION` set, every owner
+    // action's worker panics instead of running its library call, so the pty suite can check
+    // that a panicked worker still replies and leaves the TUI responsive. Test-only: the
+    // manual does not document it and radian never sets it itself.
+    let panic_action = std::env::var_os("RADIAN_ARC_PANIC_ACTION").is_some();
     let (tx, rx) = mpsc::channel();
     let mut main_pending = false;
     let mut main_at = None;
@@ -95,6 +155,9 @@ pub(super) fn run_arc() -> ExitCode {
     let mut spinner_at = Instant::now();
     let mut refresh_at = Instant::now() + ARC_REFRESH;
     let mut dirty = true;
+    // The next frame must repaint every cell: a worker panicked and may have printed over the
+    // alternate screen.
+    let mut full_redraw = false;
     loop {
         // SIGTERM closes the TUI, and nothing else: the loop it started keeps running in its
         // own session.
@@ -103,7 +166,13 @@ pub(super) fn run_arc() -> ExitCode {
         }
         // Replies from the git workers: a stale diff (another task or attempt) is dropped by
         // the app.
-        while let Ok(reply) = rx.try_recv() {
+        while let Ok(WorkerReply { reply, panicked }) = rx.try_recv() {
+            if panicked {
+                // The caught panic's reply is a normal failure value; the screen is cleared
+                // below so nothing the panic printed stays behind.
+                full_redraw = true;
+                dirty = true;
+            }
             match reply {
                 GitReply::Main(sha) => {
                     app.apply_main(sha);
@@ -144,6 +213,15 @@ pub(super) fn run_arc() -> ExitCode {
         }
         app.apply_pending_scroll();
         if dirty {
+            if full_redraw {
+                // Clear the screen and reset the frame buffer (`resize` with the area the
+                // terminal already has), so the next draw writes every cell instead of only
+                // the ones that changed since the previous frame.
+                if let Ok(size) = terminal.size() {
+                    let _ = terminal.resize(Rect::new(0, 0, size.width, size.height));
+                }
+                full_redraw = false;
+            }
             if terminal
                 .draw(|frame| render::draw(frame, &mut app))
                 .is_err()
@@ -161,21 +239,39 @@ pub(super) fn run_arc() -> ExitCode {
         if let Some(action) = app.take_action() {
             spinner_at = Instant::now();
             let store = app.store.clone();
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let outcome = actions::run(&action, &store, &actions::Library);
-                let _ = tx.send(GitReply::Action(outcome));
-            });
+            let label = action.label();
+            spawn_reply(
+                tx.clone(),
+                move || {
+                    if panic_action {
+                        panic!("arc action worker panic test");
+                    }
+                    GitReply::Action(actions::run(&action, &store, &actions::Library))
+                },
+                move |message| {
+                    GitReply::Action(actions::Outcome {
+                        ok: false,
+                        text: format!("{label} failed: it panicked ({message})"),
+                    })
+                },
+            );
             dirty = true;
         }
         // A command's log is read on a worker thread, from its end and bounded: a big log
         // never blocks the frame or loads whole into memory.
         if let Some(request) = app.take_log_request() {
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let result = radian_tui::arc::read_log_tail(&request.path);
-                let _ = tx.send(GitReply::Log { request, result });
-            });
+            let reply_request = request.clone();
+            spawn_reply(
+                tx.clone(),
+                move || {
+                    let result = radian_tui::arc::read_log_tail(&request.path);
+                    GitReply::Log { request, result }
+                },
+                move |message| GitReply::Log {
+                    request: reply_request,
+                    result: Err(format!("it panicked: {message}")),
+                },
+            );
             dirty = true;
         }
         // The header's remote main: once at start, then every refresh. Never on the draw
@@ -183,11 +279,14 @@ pub(super) fn run_arc() -> ExitCode {
         if !main_pending && main_at.is_none_or(|at: Instant| at.elapsed() >= ARC_REFRESH) {
             main_pending = true;
             let store = app.store.clone();
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let sha = radian_arc::read::remote_main_short(&store).ok().flatten();
-                let _ = tx.send(GitReply::Main(sha));
-            });
+            spawn_reply(
+                tx.clone(),
+                move || {
+                    let sha = radian_arc::read::remote_main_short(&store).ok().flatten();
+                    GitReply::Main(sha)
+                },
+                |_| GitReply::Main(None),
+            );
         }
         // The diff: the task page's selected attempt, or the merge page's. A request per
         // attempt, off the UI thread. A switch while one is in flight starts the new
@@ -198,17 +297,25 @@ pub(super) fn run_arc() -> ExitCode {
             app.mark_diff_loading((id.clone(), attempt));
             diff_pending = Some((id.clone(), attempt));
             let store = app.store.clone();
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let result =
-                    radian_arc::read::task_diff(&store, &id, (attempt > 0).then_some(attempt))
-                        .map_err(|error| error.message());
-                let _ = tx.send(GitReply::Diff {
-                    id,
+            let reply_id = id.clone();
+            spawn_reply(
+                tx.clone(),
+                move || {
+                    let result =
+                        radian_arc::read::task_diff(&store, &id, (attempt > 0).then_some(attempt))
+                            .map_err(|error| error.message());
+                    GitReply::Diff {
+                        id,
+                        attempt,
+                        result,
+                    }
+                },
+                move |message| GitReply::Diff {
+                    id: reply_id,
                     attempt,
-                    result,
-                });
-            });
+                    result: Err(format!("it panicked: {message}")),
+                },
+            );
             dirty = true;
         }
         // The merge page's stage rows, review and commits. The gate lock tells the view which
@@ -219,16 +326,23 @@ pub(super) fn run_arc() -> ExitCode {
             app.mark_merge_loading();
             merge_pending = Some(id.clone());
             let store = app.store.clone();
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let running = radian_arc::gate::background::running(&store, &id);
-                let result = radian_arc::read::merge_view(&store, &id, running)
-                    .map_err(|error| error.message());
-                let _ = tx.send(GitReply::Merge {
-                    id,
-                    result: Box::new(result),
-                });
-            });
+            let reply_id = id.clone();
+            spawn_reply(
+                tx.clone(),
+                move || {
+                    let running = radian_arc::gate::background::running(&store, &id);
+                    let result = radian_arc::read::merge_view(&store, &id, running)
+                        .map_err(|error| error.message());
+                    GitReply::Merge {
+                        id,
+                        result: Box::new(result),
+                    }
+                },
+                move |message| GitReply::Merge {
+                    id: reply_id,
+                    result: Box::new(Err(format!("it panicked: {message}"))),
+                },
+            );
             dirty = true;
         }
         let wait = ARC_POLL.min(refresh_at.saturating_duration_since(Instant::now()));
@@ -268,4 +382,132 @@ pub(super) fn run_arc() -> ExitCode {
     drop(starter);
     guard.restore();
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use radian_tui::arc::Page;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// A fresh arc store in a temp directory that removes itself.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "radian-arc-worker-{label}-{}-{n}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join(".radian/arc")).expect("the scratch dir is created");
+            std::fs::write(
+                dir.join(".radian/arc/config.toml"),
+                radian_arc::store::config::default_text("main"),
+            )
+            .expect("arc's config is written");
+            Self(dir)
+        }
+
+        fn store(&self) -> radian_arc::store::Store {
+            radian_arc::store::Store::at(&self.0)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The helper is what makes the reply unconditional: a body that panics still sends the
+    /// failure value its caller built, marked as a panic.
+    ///
+    /// The panic is real and the default hook prints its one line; the test harness captures it.
+    #[test]
+    fn a_panicking_worker_still_sends_its_failure_reply() {
+        let (tx, rx) = mpsc::channel();
+        spawn_reply(
+            tx,
+            || panic!("worker panic"),
+            |message| {
+                GitReply::Action(actions::Outcome {
+                    ok: false,
+                    text: format!("merge failed: it panicked ({message})"),
+                })
+            },
+        );
+        let reply = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a panicked worker still replies");
+        assert!(reply.panicked);
+        let GitReply::Action(outcome) = reply.reply else {
+            panic!("the failure value is the action's Outcome");
+        };
+        assert!(!outcome.ok);
+        assert_eq!(outcome.text, "merge failed: it panicked (worker panic)");
+    }
+
+    /// A panicked owner action must not leave `pending` set: the reply is a failed `Outcome`,
+    /// `finish_action` stops the spinner, and the very next page key is handled (with `pending`
+    /// set `on_key` returns `Ignored`).
+    ///
+    /// The panic is real and the default hook prints its one line; the test harness captures it.
+    #[test]
+    fn a_panicked_action_clears_pending_and_the_next_page_key_is_handled() {
+        let scratch = Scratch::new("action-panic");
+        let mut app = ArcApp::with_session_dir(scratch.store(), None);
+        app.queue_action(actions::Action::Confirm("PL0001-x".to_owned()));
+        let action = app.take_action().expect("the action is queued");
+        assert!(
+            app.pending.is_some(),
+            "the spinner runs while it is in flight"
+        );
+
+        let label = action.label();
+        let (tx, rx) = mpsc::channel();
+        spawn_reply(
+            tx,
+            move || {
+                // The action is moved in and never run: the panic is the point.
+                drop(action);
+                panic!("the action runner panicked");
+            },
+            move |message| {
+                GitReply::Action(actions::Outcome {
+                    ok: false,
+                    text: format!("{label} failed: it panicked ({message})"),
+                })
+            },
+        );
+        let reply = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a panicked action still replies");
+        assert!(reply.panicked);
+        let GitReply::Action(outcome) = reply.reply else {
+            panic!("the failure value is the action's Outcome");
+        };
+        app.finish_action(outcome);
+        assert!(app.pending.is_none(), "the spinner must stop");
+        let result = app.result.as_ref().expect("the failure line is kept");
+        assert!(result.failed);
+        assert!(
+            result
+                .text
+                .contains("confirm failed: it panicked (the action runner panicked)"),
+            "{}",
+            result.text
+        );
+
+        assert_eq!(app.on_key(&key(KeyCode::Char('b'))), ArcKey::Redraw);
+        assert_eq!(app.page, Page::Board, "the page key was handled");
+    }
 }
