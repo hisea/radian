@@ -216,8 +216,12 @@ See `tools` for the `read` tool's image branch, its two error codes and its limi
 
 An image in your message or in a `read` result draws in the transcript where the terminal can
 draw it. The `[image: <name>, W×H, N KB]` line stays directly above the picture.
-The picture occupies 12 rows. Its width follows the image's shape at your terminal's cell size,
-and an image wider than the transcript is scaled down to its width.
+The picture's height is half the transcript area's height (the rows above the composer and the
+status bar), rounded down, and never less than 12 or more than 40 rows.
+Its width follows the image's shape at your terminal's cell size,
+and an image wider than the transcript is scaled down to its width; it then draws shorter than
+its run, at the top, with blank rows below.
+Resizing the terminal recomputes both; the image is not decoded again.
 Kitty and Ghostty use the kitty graphics protocol, iTerm2 and WezTerm the iTerm2 protocol, and
 foot and xterm sixel. Terminal.app, Alacritty, Konsole, Warp and a terminal that answers
 nothing use half-block characters.
