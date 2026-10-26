@@ -1,9 +1,12 @@
 #!/bin/bash
 # System-prompt A/B: one radian binary, `<role>` default vs `<role>` from a file, same run.
 # Usage: bash benchmarks/terminal-bench/ab/ab-system.sh <label> <radian-bin-name> <role-file>
-# Same 10 tasks and model as ab.sh; -k ${AB_K:-3}, -n ${AB_N:-3} per arm.
-# Output: $HOME/tb2/jobs/<label>/{base,concise}/ and $HOME/tb2/jobs/<label>/done; the binary
-# is $HOME/tb2/bin/<name>. PYTHONPATH comes from this script's own checkout.
+# Same task set (AB_TASKS, default ab3) and model as ab.sh; -k ${AB_K:-3},
+# -n ${AB_N:-3} per arm. The list the run uses is written to <label>/tasks.txt.
+# Output: $HOME/tb2/jobs/<label>/{base,concise}/ and $HOME/tb2/jobs/<label>/done;
+# the binary is $HOME/tb2/bin/<name>. PYTHONPATH comes from this script's own checkout.
+# AB_TEST_SKIP_LOADAVG is test-only: tests/test_ab_scripts.py sets it so the
+# sampler (which reads /proc/loadavg) does not start.
 set -euo pipefail
 label=${1:?label}; b=${2:?bin}; role=${3:?role file}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -12,15 +15,20 @@ PP=$TB_DIR:$HERE
 export PATH="$HOME/.local/bin:$PATH"
 KEY=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.radian/credentials/auth.json")))["opencode-go"]["key"])')
 export RADIAN_BENCH_API_KEY="$KEY"; unset KEY
+TASK_LIST=$(python3 "$HERE/task_set.py" resolve "${AB_TASKS:-ab3}" "$HERE/tasks") || exit 1
+TASKS=()
+while IFS= read -r task; do TASKS+=("$task"); done <<< "$TASK_LIST"
 out=$HOME/tb2/jobs/$label; mkdir -p "$out"; cp "$role" "$out/role.txt"
+printf '%s\n' "${TASKS[@]}" > "$out/tasks.txt"
 M=opencode-go/deepseek-v4.1-flash
-TASKS=(llm-inference-batching-scheduler largest-eigenval write-compressor reshard-c4-data torch-tensor-parallelism
-       password-recovery break-filter-js-from-html portfolio-optimization gpt2-codegolf merge-diff-arc-agi-task)
 I=(); for t in "${TASKS[@]}"; do I+=(-i "$t"); done
 COMMON=(-d terminal-bench@2.0 -m $M -n "${AB_N:-3}" -k "${AB_K:-3}" -y "${I[@]}")
 BIN=$HOME/tb2/bin/$b; SHA=$(cut -d' ' -f1 "$BIN.sha256")
-( while true; do echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $(cut -d' ' -f1-3 /proc/loadavg)" >> "$out/loadavg.log"; sleep 30; done ) &
-sampler=$!
+sampler=
+if [ -z "${AB_TEST_SKIP_LOADAVG:-}" ]; then
+  ( while true; do echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $(cut -d' ' -f1-3 /proc/loadavg)" >> "$out/loadavg.log"; sleep 30; done ) &
+  sampler=$!
+fi
 pids=()
 # The caller may have RADIAN_AB_SYSTEM_FILE exported; the base arm must not inherit it.
 for arm in base concise; do
@@ -31,5 +39,5 @@ for arm in base concise; do
   pids+=($!)
 done
 for p in "${pids[@]}"; do wait "$p" || true; done
-kill "$sampler"
+if [ -n "$sampler" ]; then kill "$sampler"; fi
 echo "all done: $out"

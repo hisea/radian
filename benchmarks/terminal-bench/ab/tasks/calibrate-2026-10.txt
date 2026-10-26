@@ -1,0 +1,17 @@
+# One calibration run: the five tasks that separated the agents, plus ten
+# medium-difficulty candidates. The default set is chosen from its results.
+largest-eigenval
+llm-inference-batching-scheduler
+merge-diff-arc-agi-task
+torch-tensor-parallelism
+write-compressor
+kv-store-grpc
+custom-memory-heap-crash
+db-wal-recovery
+regex-log
+sqlite-db-truncate
+build-cython-ext
+query-optimize
+adaptive-rejection-sampler
+git-multibranch
+extract-elf
