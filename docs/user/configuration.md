@@ -85,6 +85,8 @@ The key is stored under the same name in `auth.json`, so each endpoint has its o
 
 The name uses letters, digits, `-`, and `_` only, and must not shadow a built-in provider.
 Unknown keys under a name are skipped and named.
+
+Without `reasoning_replay`, a route's replay field comes from the model catalog's `interleaved` entry for its provider name and model id. That covers a built-in provider, and a named provider whose name a catalog provider also uses (for example `[providers.opencode]`); a named provider no catalog provider shares replays nothing, as does a model the catalog does not carry. The catalog is the local cache when it parses, else the bundled snapshot. A field Radian cannot replay counts as no replay.
 See `providers` for login and routing.
 
 ```toml

@@ -37,6 +37,8 @@ Both adapters ignore `reasoning` when they build request bodies by default: hist
 - `{"field": "reasoning_content"}` or another plain-text field (`reasoning`, `reasoning_text`) sets it as `reasoning_replay`;
 - `{"field": "reasoning_details"}` (a structured array with a different shape) or a bare `true` means **no** pass-back. `--verbose` and diagnostics state the reason (unsupported, not supported).
 
+The `interleaved` value is read from the catalog in ADR 0018's order: the local cache when it parses, else the bundled snapshot, never the network.
+
 `[providers.<id>]` accepts `reasoning_replay = "reasoning_content"` or `false` to override the catalog. `--offline-catalog` or a wrong catalog entry still leaves a way out.
 
 ### R6: Passed-back reasoning counts toward the context budget

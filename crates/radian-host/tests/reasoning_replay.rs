@@ -1,5 +1,7 @@
-//! Reasoning replay resolution (ADR 0014 R5): for a built-in provider the catalog's
-//! `interleaved` field decides, and a `[providers.<id>]` declaration overrides it.
+//! Reasoning replay resolution (ADR 0014 R5): the catalog's `interleaved` field decides,
+//! keyed by provider name and model — a built-in provider, or a named provider that shares a
+//! catalog provider's name — from the local cache when it parses, even where it differs from
+//! the bundled snapshot (ADR 0018's order), and a `[providers.<id>]` declaration overrides it.
 //!
 //! `RADIAN_HOME` is process-wide, so this binary deliberately holds exactly one test: nothing
 //! else in it can race the environment.
@@ -35,7 +37,12 @@ fn the_catalog_and_a_named_override_decide_reasoning_replay() {
         r#"{
             "opencode-go": {"models": {
                 "deepseek-v4.1-flash": {"limit": {"context": 1000000}, "interleaved": {"field": "reasoning_content"}},
+                "glm-5.2": {"limit": {"context": 5}, "interleaved": true},
+                "alt": {"limit": {"context": 5}, "interleaved": {"field": "reasoning"}},
                 "plain": {"limit": {"context": 5}}
+            }},
+            "opencode": {"models": {
+                "deepseek-v4.1-flash": {"limit": {"context": 5}, "interleaved": {"field": "reasoning"}}
             }}
         }"#,
     )
@@ -50,6 +57,14 @@ fn the_catalog_and_a_named_override_decide_reasoning_replay() {
         Some("reasoning_content")
     );
     assert_eq!(resolve_reasoning_replay(&builtin, "plain"), None);
+    // The cache wins over the bundled snapshot: the snapshot marks `glm-5.2` with
+    // `{"field": "reasoning_content"}`, and this cache says a bare `true`, which is not
+    // replayed. A model the snapshot does not carry is read from the cache too.
+    assert_eq!(resolve_reasoning_replay(&builtin, "glm-5.2"), None);
+    assert_eq!(
+        resolve_reasoning_replay(&builtin, "alt").as_deref(),
+        Some("reasoning")
+    );
     assert!(route_replays_reasoning(
         "opencode-go",
         "deepseek-v4.1-flash",
@@ -60,6 +75,21 @@ fn the_catalog_and_a_named_override_decide_reasoning_replay() {
         "plain",
         &BTreeMap::new()
     ));
+
+    // A named provider with no override is read from the catalog by its **name** too (ADR 0026
+    // D10: `None` falls through to the catalog). `opencode` is a catalog provider, not a
+    // built-in descriptor, so a `[providers.opencode]` route sees this cache's entry (the
+    // snapshot marks the same model `reasoning_content`).
+    let named_no_override = ProviderRef::Named(radian_host::NamedProvider {
+        name: "opencode".into(),
+        protocol: Protocol::OpenAiCompatible,
+        base_url: "https://acme.example/v1".into(),
+        reasoning_replay: None,
+    });
+    assert_eq!(
+        resolve_reasoning_replay(&named_no_override, "deepseek-v4.1-flash").as_deref(),
+        Some("reasoning")
+    );
 
     // A named provider's declaration overrides the catalog, in both directions.
     let mut on = BTreeMap::new();
