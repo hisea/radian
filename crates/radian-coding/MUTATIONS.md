@@ -825,3 +825,23 @@ unit test with `cargo nextest run -p radian-coding --locked --profile sandbox --
 | TK0175-M3 | `Descendants::signal` drops the start-time check (`if entry.in_session { continue; }`) | ✅ 1 failed | `shell::tests::a_collected_pid_with_a_changed_start_time_is_not_signalled` (`a pid whose start time changed must not be signalled`) |
 
 3/3 caught.
+
+## a stop's pid list is sized in pids (2026-10-26, branch `work/TK0175-stop-descendant-tree`, review fix 1)
+
+`proc_listallpids(NULL, 0)` answers a **pid count**, and the tree walk's enumeration read that
+answer as a **byte count**, so on a machine with more than about 340 processes the pid list was
+truncated — and a leader or its `setsid` descendant missing from the list is never walked and
+survives the stop. The fix sizes the buffer in `pid_t` slots and doubles it when a fill uses every
+slot; `all_processes` and `session_members` now share that one enumeration. The mutation put the
+reviewed bug back (slots from `needed / size_of::<pid_t>() + HEADROOM` and the first fill kept, no
+retry). It was applied by hand to `crates/radian-coding/src/shell.rs`, backed up under
+`.radian/shell.rs.orig`, and restored by reverting the two edited spots (never `git checkout`),
+confirmed with `git diff` to hold only the intended change. The test ran with
+`cargo nextest run -p radian-coding --locked --profile sandbox --lib -E
+'test(the_pid_list_is_not_truncated)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0175-M4 | `all_pids` sizes its buffer from the size query as bytes (`needed / size_of::<pid_t>() + HEADROOM`) and keeps the first fill (no retry) | ✅ 1 failed | `shell::tests::the_pid_list_is_not_truncated` (`the kernel reports 953 pids, the enumeration found 302`) |
+
+1/1 caught.

@@ -139,28 +139,37 @@ fn group_of(pid: i32) -> Option<i32> {
 #[cfg(target_os = "macos")]
 fn session_members(sid: i32) -> Vec<i32> {
     use std::mem::size_of;
-    let mut out = Vec::new();
+    // `proc_listallpids(NULL, 0)` answers a **pid count**, not a byte count, while its fill call
+    // takes a byte length: sizing the buffer from the first answer in bytes truncates the list.
     // SAFETY: the size query writes nothing; the fill call is given the buffer and its length.
     let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if needed <= 0 {
-        return out;
+        return Vec::new();
     }
-    let mut pids = vec![0 as libc::c_int; needed as usize / size_of::<libc::c_int>() + 64];
-    let written = unsafe {
-        libc::proc_listallpids(
-            pids.as_mut_ptr().cast(),
-            (pids.len() * size_of::<libc::c_int>()) as libc::c_int,
-        )
-    };
-    if written <= 0 {
-        return out;
-    }
-    for &pid in &pids[..(written as usize).min(pids.len())] {
-        if pid > 0 && session_of(pid) == Some(sid) {
-            out.push(pid);
+    let mut slots = needed as usize + 64;
+    let pids = loop {
+        let mut pids = vec![0 as libc::c_int; slots];
+        let written = unsafe {
+            libc::proc_listallpids(
+                pids.as_mut_ptr().cast(),
+                (pids.len() * size_of::<libc::c_int>()) as libc::c_int,
+            )
+        };
+        if written <= 0 {
+            return Vec::new();
         }
-    }
-    out
+        let written = (written as usize).min(pids.len());
+        if written < pids.len() {
+            pids.truncate(written);
+            break pids;
+        }
+        // The kernel filled every slot, so the list may be truncated: grow and ask again.
+        slots *= 2;
+    };
+    pids.iter()
+        .filter(|&&pid| pid > 0 && session_of(pid) == Some(sid))
+        .copied()
+        .collect()
 }
 
 /// Every process in session `sid`, from `/proc`.

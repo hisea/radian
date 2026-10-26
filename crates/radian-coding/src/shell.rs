@@ -1369,33 +1369,56 @@ struct ProcessInfo {
 /// enumeration returns nothing, and [`signal_session`]'s group signal is then all there is.
 #[cfg(target_os = "macos")]
 fn all_processes() -> Vec<ProcessInfo> {
+    all_pids()
+        .into_iter()
+        .filter(|&pid| pid > 0)
+        .filter_map(|pid| process_info(pid as u32))
+        .collect()
+}
+
+/// Every pid the kernel can enumerate, from libproc.
+///
+/// `proc_listallpids(NULL, 0)` answers the **number of pids**, not a byte count (measured on
+/// macOS 27: a machine with about 930 processes answers 932), while its fill call takes the
+/// buffer length in **bytes**. The buffer is therefore sized in `pid_t` slots with headroom for
+/// processes started between the two calls — sizing it from the first answer in bytes would hold
+/// a quarter of the processes and silently truncate the list. A fill that used every slot may
+/// have been truncated, so it retries with a larger buffer.
+#[cfg(target_os = "macos")]
+fn all_pids() -> Vec<libc::pid_t> {
     use std::mem::size_of;
-    let mut out = Vec::new();
-    // `proc_listallpids(NULL, 0)` returns the buffer size in bytes; with a buffer it returns the
-    // number of pids it wrote into it (measured on macOS 27).
-    // SAFETY: the size query writes nothing; the fill call is handed the buffer and its length.
+    /// Slots above the size query's answer, for processes started before the fill.
+    const HEADROOM: usize = 64;
+    /// A truncated answer that keeps filling the buffer grows it up to this many slots (4 MiB)
+    /// and is then accepted truncated rather than growing without bound.
+    const MAX_SLOTS: usize = 1 << 20;
+    // SAFETY: the size query writes nothing.
     let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if needed <= 0 {
-        return out;
+        return Vec::new();
     }
-    let mut pids = vec![0 as libc::c_int; needed as usize / size_of::<libc::c_int>() + 64];
-    let written = unsafe {
-        libc::proc_listallpids(
-            pids.as_mut_ptr().cast(),
-            (pids.len() * size_of::<libc::c_int>()) as libc::c_int,
-        )
-    };
-    if written <= 0 {
-        return out;
-    }
-    for &pid in &pids[..(written as usize).min(pids.len())] {
-        if pid > 0
-            && let Some(info) = process_info(pid as u32)
-        {
-            out.push(info);
+    let mut slots = needed as usize + HEADROOM;
+    loop {
+        let mut pids = vec![0 as libc::pid_t; slots];
+        // SAFETY: `pids` is `slots` initialized `pid_t`s and `bytes` is exactly its byte length.
+        let written = unsafe {
+            libc::proc_listallpids(
+                pids.as_mut_ptr().cast(),
+                (pids.len() * size_of::<libc::pid_t>()) as libc::c_int,
+            )
+        };
+        if written <= 0 {
+            return Vec::new();
         }
+        // `written` is a pid count; clamping keeps the slice in bounds even if an SDK counted
+        // something else.
+        let written = (written as usize).min(pids.len());
+        if written < pids.len() || slots >= MAX_SLOTS {
+            pids.truncate(written);
+            return pids;
+        }
+        slots = (slots * 2).min(MAX_SLOTS);
     }
-    out
 }
 
 /// One process's parent, start time and session, from libproc.
@@ -1495,33 +1518,11 @@ fn process_start(_pid: u32) -> Option<u64> {
 /// group signal is then all there is.
 #[cfg(target_os = "macos")]
 fn session_members(sid: u32) -> Vec<u32> {
-    use std::mem::size_of;
-    let mut out = Vec::new();
-    // `proc_listallpids(NULL, 0)` returns the buffer size in bytes; with a buffer it returns the
-    // number of pids it wrote into it (measured on macOS 27).
-    // SAFETY: the size query writes nothing; the fill call is handed the buffer and its length.
-    let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if needed <= 0 {
-        return out;
-    }
-    let mut pids = vec![0 as libc::c_int; needed as usize / size_of::<libc::c_int>() + 64];
-    let written = unsafe {
-        libc::proc_listallpids(
-            pids.as_mut_ptr().cast(),
-            (pids.len() * size_of::<libc::c_int>()) as libc::c_int,
-        )
-    };
-    if written <= 0 {
-        return out;
-    }
-    // `written` is a pid count; clamping keeps the slice in bounds even if an SDK counted
-    // something else, and a zero entry is skipped either way.
-    for &pid in &pids[..(written as usize).min(pids.len())] {
-        if pid > 0 && process_session(pid as u32) == Some(sid) {
-            out.push(pid as u32);
-        }
-    }
-    out
+    all_pids()
+        .into_iter()
+        .filter(|&pid| pid > 0 && process_session(pid as u32) == Some(sid))
+        .map(|pid| pid as u32)
+        .collect()
 }
 
 /// `getsid(2)`: the session a live process is in, or `None` if it is gone. Measured on macOS 27:
@@ -1963,5 +1964,25 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
         assert!(!status.success(), "SIGKILL must have ended the child");
+    }
+
+    /// `proc_listallpids(NULL, 0)` answers a **pid count**, not a byte count: a buffer sized from
+    /// it as bytes holds a quarter of the processes the kernel reports, and a truncated list can
+    /// omit the leader or the `setsid` descendant a stop has to reach. [`all_processes`] is
+    /// shorter than the pid list by design (a process whose `PROC_PIDTBSDINFO` read fails is
+    /// skipped), so the assertion is on the pid list itself. The tolerance covers processes that
+    /// exit between the enumeration and the size query.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_pid_list_is_not_truncated() {
+        let pids = all_pids();
+        // SAFETY: the size query writes nothing.
+        let reported = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        assert!(reported > 0, "proc_listallpids reported no processes");
+        assert!(
+            pids.len() + 64 >= reported as usize,
+            "the kernel reports {reported} pids, the enumeration found {}",
+            pids.len()
+        );
     }
 }
