@@ -18,9 +18,10 @@
 //! **unreaped** while its session is reserved, and every signal is sent under the `reaped`
 //! mutex, so a session id can never be reused under a kill. A stop signals the leader's whole
 //! **session**, not only its process group (a child that calls `setpgid`, like GNU `timeout`,
-//! leaves the group but keeps the session): stopping a job sends SIGTERM, then SIGKILL after
-//! [`KILL_GRACE`]; a natural exit, a timeout or a session-end cleanup stops the whole session
-//! the same way. Killing never touches the `.out` file.
+//! leaves the group but keeps the session), and the descendant tree across sessions that the
+//! first signal collects (`crate::shell::Descendants`, ADR 0037 §7): stopping a job sends
+//! SIGTERM, then SIGKILL after [`KILL_GRACE`]; a natural exit, a timeout or a session-end
+//! cleanup stops the whole session the same way. Killing never touches the `.out` file.
 //!
 //! Slice 3 will subscribe to settled jobs through [`Jobs::subscribe`]; this slice does not
 //! wire the inbox.
@@ -572,9 +573,9 @@ impl Jobs {
         ))
     }
 
-    /// Session end: SIGKILL every running job's whole session. No file I/O (ADR 0037
-    /// decision 6), so it is safe on the panic path; the supervisor reaps each leader and
-    /// settles the state.
+    /// Session end: SIGKILL every running job's whole session and its descendant tree. No write
+    /// and no file opened (ADR 0037 decision 6), so it is safe on the panic path; the supervisor
+    /// reaps each leader and settles the state.
     ///
     /// A session-exit cleanup is a **kill**: it marks `termination = Killed` so the settle is
     /// `killed` and `notify: false` (ADR 0037 decision 4: a session-exit settle is not
@@ -593,7 +594,7 @@ impl Jobs {
                 cell.termination = Some(Termination::Killed);
                 (cell.sid, Arc::clone(&cell.reaped))
             };
-            signal_if_reserved(sid, SIGKILL, &reaped);
+            signal_if_reserved(sid, SIGKILL, &reaped, None);
         }
     }
 
@@ -690,7 +691,8 @@ impl Jobs {
 
 impl Drop for Jobs {
     /// The safety net for a session that is dropped without `close` (a panic unwind, an early
-    /// return): kill every running session. Session-wide signals only, no file I/O.
+    /// return): kill every running session and its descendant tree. Signals and process reads
+    /// only, nothing written and no file opened.
     fn drop(&mut self) {
         self.kill_all();
     }
@@ -923,8 +925,8 @@ fn status_signal(_status: ExitStatus) -> i32 {
     -1
 }
 
-/// Marks a running job as killed/timed out and stops its session: SIGTERM, then SIGKILL after
-/// [`KILL_GRACE`]. A no-op on an already-settled job.
+/// Marks a running job as killed/timed out and stops its session and its descendant tree:
+/// SIGTERM, then SIGKILL after [`KILL_GRACE`]. A no-op on an already-settled job.
 fn terminate(cell: &Arc<Mutex<JobCell>>, kind: Termination) {
     let (sid, reaped) = {
         let mut cell = lock(cell);
@@ -934,11 +936,13 @@ fn terminate(cell: &Arc<Mutex<JobCell>>, kind: Termination) {
         cell.termination = Some(kind);
         (cell.sid, Arc::clone(&cell.reaped))
     };
-    signal_if_reserved(sid, SIGTERM, &reaped);
+    // The set the SIGTERM collects goes to the SIGKILL pass: a descendant whose parent died on
+    // the SIGTERM is a child of pid 1 by then, and a fresh walk finds nothing (ADR 0037 §7).
+    let tree = signal_if_reserved(sid, SIGTERM, &reaped, None);
     let reaped = Arc::clone(&reaped);
     thread::spawn(move || {
         thread::sleep(KILL_GRACE);
-        signal_if_reserved(sid, SIGKILL, &reaped);
+        signal_if_reserved(sid, SIGKILL, &reaped, Some(&tree));
     });
 }
 

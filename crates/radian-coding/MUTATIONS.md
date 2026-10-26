@@ -824,3 +824,43 @@ that name it describe the rule before this task.
 | TK0176-M3 | drop the workspace-remainder route in `resolve_read`, so an absolute path under the root takes the `full`-tier outside route | ✅ 4 failed | `a_deny_set_file_inside_the_workspace_behaves_as_its_relative_path` (refused as denied, while the relative spelling reads); `an_absolute_workspace_path_still_refuses_a_symlink_component` (the full-tier round returned `SENTINEL-CONTENT` through `realpath`); `every_file_tool_takes_an_absolute_path_under_the_root_in_both_spellings` (the workspace tier refused the path); `the_root_itself_as_an_absolute_path_lists_and_searches_the_workspace` |
 
 3/3 caught.
+## a stop reaches descendants that started their own session (2026-10-26, branch `work/TK0175-stop-descendant-tree`)
+
+A stop now collects the leader's descendant tree across sessions (`Descendants` in
+`crates/radian-coding/src/shell.rs`) and signals it with the session; the grace paths pass the
+set their SIGTERM collected to their SIGKILL pass. Each mutation was applied by hand to
+`crates/radian-coding/src/shell.rs`, backed up under `.radian/shell.rs.orig` and then undone
+either from that copy (M1, M2) or by reverting the one edited line (M3, so the test improvements
+made in the same file after the backup stayed), never with `git checkout`; the file was
+confirmed by `diff` to hold only the intended change. The integration tests ran with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test job_setsid_child` and the
+unit test with `cargo nextest run -p radian-coding --locked --profile sandbox --lib -E
+'test(a_collected_pid_with_a_changed_start_time_is_not_signalled)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0175-M1 | `Supervised::stop` signals only the session (`signal_session(self.pid, SIGTERM)`, an empty tree for the SIGKILL pass): no walk on the foreground timeout/cancel path | ✅ 2 failed | `a_foreground_timeout_reaches_a_child_that_started_its_own_session` (the `sleep` child survived the timeout); `a_foreground_timeout_reaches_an_ignoring_child_after_its_parent_died` (the child outlived the SIGKILL pass) |
+| TK0175-M2 | the SIGKILL pass starts from an empty set (`let mut tree = Descendants::default()`), so it has only a fresh walk, not the set collected at SIGTERM | ✅ 2 failed | `a_foreground_timeout_reaches_an_ignoring_child_after_its_parent_died`; `job_kill_reaches_a_child_that_started_its_own_session` (the ignoring child, a child of pid 1 by the SIGKILL pass, survived) |
+| TK0175-M3 | `Descendants::signal` drops the start-time check (`if entry.in_session { continue; }`) | ✅ 1 failed | `shell::tests::a_collected_pid_with_a_changed_start_time_is_not_signalled` (`a pid whose start time changed must not be signalled`) |
+
+3/3 caught.
+
+## a stop's pid list is sized in pids (2026-10-26, branch `work/TK0175-stop-descendant-tree`, review fix 1)
+
+`proc_listallpids(NULL, 0)` answers a **pid count**, and the tree walk's enumeration read that
+answer as a **byte count**, so on a machine with more than about 340 processes the pid list was
+truncated — and a leader or its `setsid` descendant missing from the list is never walked and
+survives the stop. The fix sizes the buffer in `pid_t` slots and doubles it when a fill uses every
+slot; `all_processes` and `session_members` now share that one enumeration. The mutation put the
+reviewed bug back (slots from `needed / size_of::<pid_t>() + HEADROOM` and the first fill kept, no
+retry). It was applied by hand to `crates/radian-coding/src/shell.rs`, backed up under
+`.radian/shell.rs.orig`, and restored by reverting the two edited spots (never `git checkout`),
+confirmed with `git diff` to hold only the intended change. The test ran with
+`cargo nextest run -p radian-coding --locked --profile sandbox --lib -E
+'test(the_pid_list_is_not_truncated)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0175-M4 | `all_pids` sizes its buffer from the size query as bytes (`needed / size_of::<pid_t>() + HEADROOM`) and keeps the first fill (no retry) | ✅ 1 failed | `shell::tests::the_pid_list_is_not_truncated` (`the kernel reports 953 pids, the enumeration found 302`) |
+
+1/1 caught.
