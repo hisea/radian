@@ -549,11 +549,52 @@ fn adopt_accepts_a_hand_edited_flow_before_the_first_attempt() {
 
 /// A task whose flow was removed from `config.toml` is not claimed: it stays `todo.ready`,
 /// the loop and `confirm --dry-run` name the task and the missing flow, and `list` and
-/// `show` print no slot reason, because a missing flow is not a full limit.
+/// `show` print no slot reason, because a missing flow is not a full limit — not even while
+/// `[limits] concurrency` is full from another flow's running task.
 #[test]
 fn a_task_whose_flow_was_removed_stays_ready_and_says_so() {
     let (repo, store) = setup("flows-removed");
-    add_flows(&repo, "[flows.codex]\nexec_args = []\n");
+    let worker = script(
+        &repo,
+        "waiting-worker",
+        &waiting_body(&repo.root, &repo.root),
+    );
+    add_flows(
+        &repo,
+        &format!(
+            "[flows.codex]\nexec_args = []\n\n\
+             [flows.spare]\nexec_args = []\n\n\
+             [flows.hold]\ncommand = [\"{}\"]\nconcurrency = 1\n",
+            worker.display()
+        ),
+    );
+    // One running task of a defined flow fills `[limits] concurrency` (1), so the ordinary
+    // limit calculation would name a slot for any other ready task.
+    let hold = store
+        .add_plan("hold", "Hold", "the holding request")
+        .unwrap();
+    let holder = add_flow_task(&store, &hold, "hold-one", "hold");
+    plan_ops::confirm(&store, &hold).expect("confirm");
+    plan_ops::set_auto(&store, &hold, "run").expect("auto run");
+    let started = repo.radian(&["arc", "run"]);
+    assert_eq!(
+        started.code, 0,
+        "the holding task starts: {}",
+        started.stderr
+    );
+    assert!(
+        started
+            .stdout
+            .contains(&format!("{holder}-1 started -> doing.running")),
+        "the holding task starts: {}",
+        started.stdout
+    );
+    wait_until(
+        Duration::from_secs(60),
+        "the holding worker to start",
+        || repo.root.join(format!("started-{holder}")).exists(),
+    );
+
     let plan = store.add_plan("plan", "Plan", "request").unwrap();
     let task = store
         .add_task_with_flow(
@@ -567,6 +608,9 @@ fn a_task_whose_flow_was_removed_stays_ready_and_says_so() {
             Some("codex"),
         )
         .unwrap();
+    // A ready task whose own flow has room: with `[limits] concurrency` full it names the
+    // shared limit, which proves the limit really is full for the assertions below.
+    let spare = add_flow_task(&store, &plan, "spare", "spare");
     plan_ops::confirm(&store, &plan).expect("confirm");
     // A proposed task with the flow, added before the section disappears.
     let proposed = store
@@ -636,8 +680,21 @@ fn a_task_whose_flow_was_removed_stays_ready_and_says_so() {
 
     // `list`'s task line and `show`'s `queue_reason` name a slot only when a full limit holds
     // the task (ADR 0048 decision 13): a missing flow is not a limit, so neither prints one.
+    // The plan runs, and the holding task keeps `[limits] concurrency` full, so the ordinary
+    // calculation would name the shared limit for any other ready task.
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
     let list = repo.radian(&["arc", "list"]);
     assert_eq!(list.code, 0, "list: {}", list.stderr);
+    let spare_line = list
+        .stdout
+        .lines()
+        .find(|line| line.contains(spare.as_str()))
+        .unwrap_or_else(|| panic!("`{spare}` is listed: {}", list.stdout));
+    assert!(
+        spare_line.contains("(waiting for a free concurrency slot)"),
+        "the shared limit is full: {}",
+        list.stdout
+    );
     let line = list
         .stdout
         .lines()
@@ -660,6 +717,9 @@ fn a_task_whose_flow_was_removed_stays_ready_and_says_so() {
         "`show` names no slot: {}",
         show.stdout
     );
+
+    release(&repo, &holder);
+    wait_for_end(&repo, &holder);
 }
 
 /// Adds an `image` and a `code` flow, each running the same waiting command worker.
