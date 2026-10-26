@@ -4,10 +4,10 @@
 //! Split from `lib.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 
 use std::io::IsTerminal;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use radian_core::{EventSink, TurnOptions};
+use radian_core::{EventSink, ModelError, TurnOptions};
 use radian_host::SessionFacade;
 use radian_permissions::{Approver, AuditSink};
 use tokio::sync::{Notify, mpsc};
@@ -21,6 +21,38 @@ use super::trust::trust_prompt;
 use super::turn::{LoopDone, Run, interactive_loop, one_shot};
 use super::ui::{LineHub, Ui};
 use super::{Cli, Setup, SetupError};
+
+/// The exec host's runtime-event sink. It prints a failed turn's masked message as before and
+/// keeps the structured `ModelError` of the latest turn that started, for the `Result` record
+/// (ADR 0044 §2b). A `TurnStarted` clears it, so only the run's final turn can contribute;
+/// a hook error reports no model error and leaves the field out.
+struct ExecRuntimeEvents {
+    secrets: Arc<Vec<String>>,
+    last_model_error: Arc<Mutex<Option<ModelError>>>,
+}
+
+impl radian_runtime::RuntimeEvents for ExecRuntimeEvents {
+    fn on_runtime_event(&self, event: &radian_session::RuntimeEvent) {
+        match event {
+            radian_session::RuntimeEvent::TurnFailed { message, .. } => {
+                let message = redact(message, &self.secrets);
+                eprintln!("radian: {message}");
+                // ADR 0018's fallback: a recognizable context overflow gets one extra line.
+                if radian_host::is_context_overflow(&message) {
+                    eprintln!("radian: {}", radian_host::CONTEXT_OVERFLOW_HELP);
+                }
+            }
+            radian_session::RuntimeEvent::TurnStarted { .. } => {
+                *self.last_model_error.lock().unwrap() = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn on_model_error(&self, error: &ModelError) {
+        *self.last_model_error.lock().unwrap() = Some(error.clone());
+    }
+}
 
 pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> {
     let interactive = cli.prompt.is_none();
@@ -109,17 +141,13 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     let projection = Arc::new(radian_host::SessionProjection::new());
     let signals = spawn_signals();
     let driver_ended = Arc::new(Notify::new());
-    let runtime_events_inner = {
+    // The last turn's structured model error, for the `Result` record (ADR 0044 §2b).
+    let last_model_error: Arc<Mutex<Option<ModelError>>> = Arc::new(Mutex::new(None));
+    let runtime_events_inner: Arc<dyn radian_runtime::RuntimeEvents> = {
         let secrets = Arc::new(setup.secrets.clone());
-        Arc::new(move |event: &radian_session::RuntimeEvent| {
-            if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
-                let message = redact(message, &secrets);
-                eprintln!("radian: {message}");
-                // ADR 0018's fallback: a recognizable context overflow gets one extra line.
-                if radian_host::is_context_overflow(&message) {
-                    eprintln!("radian: {}", radian_host::CONTEXT_OVERFLOW_HELP);
-                }
-            }
+        Arc::new(ExecRuntimeEvents {
+            secrets,
+            last_model_error: Arc::clone(&last_model_error),
         })
     };
 
@@ -540,6 +568,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
             &summary,
             &run_summary,
             jsonl_cost_estimated,
+            last_model_error.lock().unwrap().as_ref(),
         );
         let _ = std::io::Write::write_all(&mut std::io::stdout().lock(), &line);
     }

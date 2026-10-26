@@ -918,11 +918,19 @@ def check_fixture(name, exp):
 
 
 # `radian exec --output jsonl` 的 closing `Result` 记录（ADR 0044 §2）：它不是 journal 行，
-# 没有信封七字段，单独校验。`exec-result.jsonl` 恰好两行，以 LF 结尾：一行无 resume
-#（`run_*` 与累计组字节相同），一行有 resume（`run_*` 只是本次运行）。
+# 没有信封七字段，单独校验。`exec-result.jsonl` 以 LF 结尾：两行基础场景（一行无 resume，
+# `run_*` 与累计组字节相同；一行有 resume，`run_*` 只是本次运行），第三行可选，是失败的
+# `model_error` 场景（ADR 0044 §2b），只有失败行能带 `model_error`。
 RESULT_FIELDS = {
     "type", "session_id", "outcome", "exit_code", "stop_reason",
     "turns", "usage", "cost", "run_turns", "run_usage", "run_cost", "text",
+}
+RESULT_OPTIONAL_FIELDS = {"model_error"}
+RESULT_MODEL_ERROR_FIELDS = {"kind", "status", "retry_after_secs"}
+# ADR 0044 §2b 的 closed set，与 `radian_core::MODEL_ERROR_KINDS` 一致。
+RESULT_MODEL_ERROR_KINDS = {
+    "transport", "protocol", "unavailable", "usage_limit",
+    "context_overflow", "empty_response",
 }
 RESULT_OUTCOMES = {
     "completed", "refused", "budget_exceeded", "failed",
@@ -936,10 +944,12 @@ RESULT_USAGE_KEYS = {"input", "output", "cache_read", "cache_write"}
 
 
 def check_one_result(ev, label):
-    if not isinstance(ev, dict) or set(ev) != RESULT_FIELDS:
+    if not isinstance(ev, dict):
+        raise Corruption(f"{label}: Result 不是对象: {type(ev)}")
+    if set(ev) - RESULT_FIELDS - RESULT_OPTIONAL_FIELDS or not RESULT_FIELDS <= set(ev):
         raise Corruption(
-            f"{label}: 字段集合不是 Result 的十二个字段: "
-            f"{sorted(ev) if isinstance(ev, dict) else type(ev)}"
+            f"{label}: 字段集合不是 Result 的十二个字段（只允许可选的 model_error）: "
+            f"{sorted(ev)}"
         )
     if ev["type"] != "Result":
         raise Corruption(f"{label}: type {ev['type']!r} != 'Result'")
@@ -947,6 +957,26 @@ def check_one_result(ev, label):
         raise Corruption(f"{label}: session_id 必须是非空字符串")
     if ev["outcome"] not in RESULT_OUTCOMES:
         raise Corruption(f"{label}: outcome {ev['outcome']!r} 不在 ADR 0044 §2 的集合")
+    if "model_error" in ev:
+        # ADR 0044 §2b：只有失败的 turn 才带该字段，且它三个成员齐全（缺失用 null）。
+        if ev["outcome"] != "failed":
+            raise Corruption(f"{label}: 只有 failed 的 Result 能带 model_error")
+        me = ev["model_error"]
+        if not isinstance(me, dict) or set(me) != RESULT_MODEL_ERROR_FIELDS:
+            raise Corruption(f"{label}: model_error 字段必须是 kind/status/retry_after_secs")
+        if me["kind"] not in RESULT_MODEL_ERROR_KINDS:
+            raise Corruption(f"{label}: model_error.kind {me['kind']!r} 不在 closed set")
+        status = me["status"]
+        if status is not None and (
+            not isinstance(status, int) or isinstance(status, bool)
+            or not 100 <= status <= 599
+        ):
+            raise Corruption(f"{label}: model_error.status 不是 100..599 的整数或 null")
+        secs = me["retry_after_secs"]
+        if secs is not None and (
+            not isinstance(secs, int) or isinstance(secs, bool) or secs < 0
+        ):
+            raise Corruption(f"{label}: model_error.retry_after_secs 不是非负整数或 null")
     if not isinstance(ev["exit_code"], int) or isinstance(ev["exit_code"], bool):
         raise Corruption(f"{label}: exit_code 不是整数")
     reason = ev["stop_reason"]
@@ -1003,8 +1033,11 @@ def check_result_fixture(name):
     if not raw.endswith(b"\n"):
         raise Corruption(f"{name}: 文件不以 LF 结尾")
     lines = [l for l in raw.split(b"\n") if l != b""]
-    if len(lines) != 2:
-        raise Corruption(f"{name}: 期望恰好两行 Result 记录（无 resume + 有 resume），得到 {len(lines)} 行")
+    if len(lines) not in (2, 3):
+        raise Corruption(
+            f"{name}: 期望 2 或 3 行 Result 记录（无 resume + 有 resume，可选的 model_error 失败行），"
+            f"得到 {len(lines)} 行"
+        )
     try:
         first = json.loads(lines[0])
         second = json.loads(lines[1])
@@ -1012,6 +1045,10 @@ def check_result_fixture(name):
         raise Corruption(f"{name}: JSON 解析失败: {e}") from None
     check_one_result(first, f"{name} line 1")
     check_one_result(second, f"{name} line 2")
+    # 完成的行不能带 model_error（ADR 0044 §2b：其它结局一律没有该字段）。
+    for i, ev in ((1, first), (2, second)):
+        if "model_error" in ev:
+            raise Corruption(f"{name} line {i}: 完成的行不能带 model_error")
     # 第一行无 resume：两组字节相同（`run_*` 与累计组相等）。
     if not (
         first["run_turns"] == first["turns"]
@@ -1033,7 +1070,16 @@ def check_result_fixture(name):
             raise Corruption(f"{name} line 2: 有 resume 且含旧记录时 cost.estimated 必须为 true")
         if second["run_cost"].get("estimated") is not False:
             raise Corruption(f"{name} line 2: run_cost.estimated 必须为 false（本轮费用是现算的）")
-    return f"PASS {name}: Result 记录形状正确（无 resume + 有 resume 各一行）"
+    if len(lines) == 3:
+        # ADR 0044 §2b：一行失败的 model_error 场景。
+        try:
+            third = json.loads(lines[2])
+        except json.JSONDecodeError as e:
+            raise Corruption(f"{name} line 3: JSON 解析失败: {e}") from None
+        check_one_result(third, f"{name} line 3")
+        if third["outcome"] != "failed" or "model_error" not in third:
+            raise Corruption(f"{name} line 3: 期望一行带 model_error 的失败 Result")
+    return f"PASS {name}: Result 记录形状正确（无 resume + 有 resume，可选的 model_error 失败行）"
 
 
 RESULT_FIXTURES = ["exec-result.jsonl"]

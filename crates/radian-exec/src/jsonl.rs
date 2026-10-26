@@ -9,8 +9,9 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 
-use radian_core::{CancelReason, IncompleteReason, RunStatus};
+use radian_core::{CancelReason, IncompleteReason, ModelError, RunStatus};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// The machine-readable output mode. Only `jsonl` exists: one JSON object per stdout line.
@@ -306,13 +307,15 @@ fn assistant_text(content: &[serde_json::Value]) -> String {
 /// the resume re-pricing writes no journal record (it only folds in memory before the tee
 /// is installed), so the suffix never holds a re-priced old record — its fees are
 /// contemporary. The wake-budget ending adds `unhandled_job_notices`; every other ending
-/// omits it, so their field set is the fixture's field set.
+/// omits it, so their field set is the fixture's field set. `model_error` is present only
+/// when the run ended because a turn failed on a `ModelError` (ADR 0044 §2b).
 pub(crate) fn result_line(
     session_id: &str,
     end: &ExecEnd,
     summary: &JournalSummary,
     run_summary: &JournalSummary,
     cost_estimated: bool,
+    model_error: Option<&ModelError>,
 ) -> Vec<u8> {
     let (outcome, exit_code, reason) = end.result_fields();
     let mut usage = serde_json::Map::new();
@@ -365,6 +368,11 @@ pub(crate) fn result_line(
         "run_cost": run_cost,
         "text": summary.last_text,
     });
+    if let Some(error) = model_error
+        && outcome == "failed"
+    {
+        result["model_error"] = model_error_value(error);
+    }
     if let Some(unhandled) = end.unhandled_job_notices() {
         result["unhandled_job_notices"] = unhandled.into();
     }
@@ -378,6 +386,33 @@ pub(crate) fn result_line(
         .expect("a Result line is plain JSON and cannot fail to serialize");
     bytes.push(b'\n');
     bytes
+}
+
+/// The `model_error` object of a `Result` record (ADR 0044 §2b). `kind` is the variant's own
+/// closed-set name; `status` and `retry_after_secs` are `null` when the variant carries none.
+/// No message text is copied.
+pub(crate) fn model_error_value(error: &ModelError) -> serde_json::Value {
+    let status = match error {
+        ModelError::Unavailable { status, .. } => *status,
+        _ => None,
+    };
+    let retry_after = match error {
+        ModelError::Unavailable { retry_after, .. } => *retry_after,
+        // A used-up plan window is not retried, but its reset wait is what a caller needs to
+        // wait out before sending the same request again.
+        ModelError::UsageLimit { resets_in, .. } => *resets_in,
+        _ => None,
+    };
+    serde_json::json!({
+        "kind": error.kind(),
+        "status": status,
+        "retry_after_secs": retry_after.map(ceil_seconds),
+    })
+}
+
+/// Whole seconds, rounded up: a 500 ms wait is one second, not zero.
+fn ceil_seconds(duration: Duration) -> u64 {
+    duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
 }
 
 /// Prints the journal prefix lines, then every teed line, on one task, so a blocked stdout
@@ -602,6 +637,7 @@ mod tests {
             &summary,
             &run_summary,
             true,
+            None,
         );
         let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(
@@ -689,7 +725,14 @@ mod tests {
             last_text: "stuck".to_owned(),
             ..JournalSummary::default()
         };
-        let line = result_line("sid", &end, &summary, &JournalSummary::default(), false);
+        let line = result_line(
+            "sid",
+            &end,
+            &summary,
+            &JournalSummary::default(),
+            false,
+            None,
+        );
         let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(
             value,
@@ -720,7 +763,14 @@ mod tests {
         assert_eq!(end.lost_notices(), Some(1));
         assert_eq!(end.unhandled_job_notices(), None);
         assert_eq!(end.unhandled_stop_notices(), None);
-        let line = result_line("sid", &end, &summary, &JournalSummary::default(), false);
+        let line = result_line(
+            "sid",
+            &end,
+            &summary,
+            &JournalSummary::default(),
+            false,
+            None,
+        );
         let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(
             value.get("lost_notices"),
@@ -743,7 +793,14 @@ mod tests {
             unhandled_stop: 1,
         };
         assert_eq!(end.unhandled_stop_notices(), Some(1));
-        let line = result_line("sid", &end, &summary, &JournalSummary::default(), false);
+        let line = result_line(
+            "sid",
+            &end,
+            &summary,
+            &JournalSummary::default(),
+            false,
+            None,
+        );
         let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
         assert_eq!(
             value.get("unhandled_job_notices"),
@@ -755,6 +812,175 @@ mod tests {
             Some(&serde_json::json!(1)),
             "{value}"
         );
+    }
+
+    /// The `model_error` object (ADR 0044 §2b): one kind per variant, the HTTP status only with
+    /// `Unavailable`, and the wait from `Unavailable.retry_after` or `UsageLimit.resets_in`,
+    /// rounded up to whole seconds. Mutation: read `retry_after` only (ignoring `resets_in`) →
+    /// the usage-limit expectation fails; use `as_secs` (truncating) → the 500 ms case fails.
+    #[test]
+    fn the_model_error_field_carries_kind_status_and_wait() {
+        let cases = [
+            (
+                ModelError::Transport("network down".into()),
+                serde_json::json!({"kind": "transport", "status": null, "retry_after_secs": null}),
+            ),
+            (
+                ModelError::Protocol("HTTP 400: bad request".into()),
+                serde_json::json!({"kind": "protocol", "status": null, "retry_after_secs": null}),
+            ),
+            (
+                ModelError::Unavailable {
+                    message: "HTTP 429".into(),
+                    retry_after: Some(Duration::from_secs(30)),
+                    status: Some(429),
+                },
+                serde_json::json!({
+                    "kind": "unavailable",
+                    "status": 429,
+                    "retry_after_secs": 30,
+                }),
+            ),
+            (
+                ModelError::Unavailable {
+                    message: "the provider is overloaded".into(),
+                    retry_after: None,
+                    status: None,
+                },
+                serde_json::json!({
+                    "kind": "unavailable",
+                    "status": null,
+                    "retry_after_secs": null,
+                }),
+            ),
+            (
+                ModelError::UsageLimit {
+                    message: "HTTP 429: the plan window is used up".into(),
+                    resets_in: Some(Duration::from_secs(6240)),
+                },
+                serde_json::json!({
+                    "kind": "usage_limit",
+                    "status": null,
+                    "retry_after_secs": 6240,
+                }),
+            ),
+            (
+                ModelError::UsageLimit {
+                    message: "HTTP 429: the plan window is used up".into(),
+                    resets_in: Some(Duration::from_millis(1_500)),
+                },
+                serde_json::json!({
+                    "kind": "usage_limit",
+                    "status": null,
+                    "retry_after_secs": 2,
+                }),
+            ),
+            (
+                ModelError::ContextOverflow("HTTP 400: prompt is too long".into()),
+                serde_json::json!({
+                    "kind": "context_overflow",
+                    "status": null,
+                    "retry_after_secs": null,
+                }),
+            ),
+            (
+                ModelError::EmptyResponse,
+                serde_json::json!({
+                    "kind": "empty_response",
+                    "status": null,
+                    "retry_after_secs": null,
+                }),
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(model_error_value(&error), expected, "kind for {error}");
+        }
+        // A sub-second wait still reports one second, never zero.
+        assert_eq!(
+            model_error_value(&ModelError::Unavailable {
+                message: "HTTP 503".into(),
+                retry_after: Some(Duration::from_millis(500)),
+                status: Some(503),
+            }),
+            serde_json::json!({
+                "kind": "unavailable",
+                "status": 503,
+                "retry_after_secs": 1,
+            })
+        );
+    }
+
+    /// `model_error` appears only on a failed run whose turn carried a `ModelError.` Mutation:
+    /// drop the field from the writer → the failed case fails; emit it on every ending → the
+    /// completed, cancelled and no-error expectations fail.
+    #[test]
+    fn the_result_line_carries_model_error_only_on_a_failed_model_error() {
+        let error = ModelError::UsageLimit {
+            message: "HTTP 429: the plan window is used up".into(),
+            resets_in: Some(Duration::from_secs(6240)),
+        };
+        let failed = result_line(
+            "sid",
+            &ExecEnd::Status(Some(RunStatus::Failed)),
+            &JournalSummary::default(),
+            &JournalSummary::default(),
+            false,
+            Some(&error),
+        );
+        let value: serde_json::Value = serde_json::from_slice(&failed).unwrap();
+        assert_eq!(
+            value.get("model_error"),
+            Some(&serde_json::json!({
+                "kind": "usage_limit",
+                "status": null,
+                "retry_after_secs": 6240,
+            })),
+            "{value}"
+        );
+
+        for (end, name) in [
+            (ExecEnd::Status(Some(RunStatus::Completed)), "completed"),
+            (
+                ExecEnd::Status(Some(RunStatus::Cancelled(CancelReason::Requested))),
+                "cancelled",
+            ),
+            (ExecEnd::Status(Some(RunStatus::Failed)), "no error"),
+        ] {
+            let error = (name != "no error").then_some(&error);
+            let line = result_line(
+                "sid",
+                &end,
+                &JournalSummary::default(),
+                &JournalSummary::default(),
+                false,
+                error,
+            );
+            let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+            assert!(
+                value.get("model_error").is_none(),
+                "{name} carries no model_error: {value}"
+            );
+        }
+    }
+
+    /// Every `model_error.kind` value the serializer can write is named in the manual. The
+    /// source is `radian_core::MODEL_ERROR_KINDS`, the same list `kind()` and the serializer
+    /// read, so a new variant fails here until `docs/user/cli.md` documents its value.
+    #[test]
+    fn every_model_error_kind_appears_in_the_manual() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cli_md = std::fs::read_to_string(manifest.join("../../docs/user/cli.md"))
+            .expect("docs/user/cli.md exists");
+        assert!(
+            cli_md.contains("`model_error`"),
+            "cli.md must document the Result field by name"
+        );
+        for kind in radian_core::MODEL_ERROR_KINDS {
+            assert!(
+                cli_md.contains(&format!("`{kind}`")),
+                "kind `{kind}` is missing from docs/user/cli.md"
+            );
+        }
     }
 
     /// A live line is exactly `live` + the journal's `event`/`data` shape.
