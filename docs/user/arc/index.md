@@ -439,7 +439,7 @@ It is your action (there is no MCP tool for it), and it reconciles `doing` tasks
 | The task is | What `cancel` does |
 |---|---|
 | `todo` (any phase) | moves it to `failed.cancelled` |
-| `doing`, starting or running | SIGTERM to the wrapper, then SIGKILL after `[limits] cancel_grace_secs`; when the wrapper's `AttemptFinished` arrives the task goes to `failed.cancelled`; when it never arrives the task goes to `doing.reconciling` |
+| `doing`, starting or running | SIGTERM to the wrapper, then SIGKILL after `[limits] cancel_grace_secs` plus a one-second window for the wrapper to reap what it stopped and write its record; when the wrapper's `AttemptFinished` arrives the task goes to `failed.cancelled`; when it never arrives the task goes to `doing.reconciling` |
 | `doing.reconciling` | checks the wrapper's pid and start time; signals it if it is still that process; moves the task to `failed.cancelled` |
 | `review` (any phase) | stops a gate that is running for the task, then moves the task to `failed.cancelled` |
 | `failed.exhausted`, `failed.irrecoverable` | moves the task to `failed.cancelled`: you are saying "seen, given up". A stale gate record or lock, if one exists, is checked and stopped the way a `review` task's gate is; no other process runs for the task. |

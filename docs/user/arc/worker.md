@@ -48,10 +48,11 @@ The wrapper enforces the attempt's limits itself, so they hold even after the pr
 - no new line in `runs/<task>/attempts/<attempt id>/result.jsonl` for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the worker's process group;
 - `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the wrapper started does the same; this clock also bounds the wrapper's own git steps, so a fetch or a push still running at the limit is stopped the same way.
 - a fetch, a push or an `ls-remote` is also bounded by [`limits.git_remote_timeout_secs`](files.md#configtoml); whichever of it and the attempt's remaining wall time is shorter applies, and the call, with everything it started, is killed when it runs out.
-- after `[limits] cancel_grace_secs` the worker gets SIGKILL.
+- after `[limits] cancel_grace_secs` the worker gets SIGKILL; a `before_attempt` command's group gets the same when a stop reaches it while it runs (see [The steps before an attempt](#the-steps-before-an-attempt)).
 
 A limit of `0` means no limit for that timer.
 The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json` (`stall` or `wall_time`), forwards SIGTERM, waits for the worker, and still writes its `AttemptFinished` record.
+On a cancel the wrapper is itself killed only after the grace and one more second, the window in which it reaps what it stopped and writes that record; the grace is never shortened to make room for the record.
 `start` waits for the wrapper and applies the result; `radian arc run` does not wait (see `run`).
 
 ## What the wrapper checks after the worker exits
