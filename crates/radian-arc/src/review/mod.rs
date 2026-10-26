@@ -408,6 +408,24 @@ pub struct Verification {
 /// The task is not `review.verifying`, it has no `head_sha`, the remote moved, a listed
 /// stage is not built in this build, or `config.toml` could not be read.
 pub fn plan_verification(store: &Store, task_id: &str) -> Result<Verification, Error> {
+    plan_verification_with(store, task_id, None)
+}
+
+/// [`plan_verification`] for a gate that already started: `planned` is the profile the gate
+/// recorded in its `done` record. It is used in place of the flow's `gate_profile` now, so a
+/// flow or profile that changed while the gate ran cannot change how its verdicts are judged
+/// (ADR 0048 decisions 10 and 15). The task and branch checks still run: a moved branch or a
+/// task file changed outside arc is refused as for a fresh plan.
+///
+/// # Errors
+///
+/// As [`plan_verification`]. With a recorded profile, a flow the file no longer defines is not
+/// an error.
+fn plan_verification_with(
+    store: &Store,
+    task_id: &str,
+    planned: Option<&crate::gate::background::PlannedProfile>,
+) -> Result<Verification, Error> {
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {
         return Err(Error::ChangedOutsideArc(task_id.to_owned()));
@@ -429,16 +447,26 @@ pub fn plan_verification(store: &Store, task_id: &str) -> Result<Verification, E
     let config = store.config()?;
     let (remote, main_branch) = store.repository_names()?;
     let main_ref = format!("refs/remotes/{remote}/{main_branch}");
-    let flow = task
-        .flow
-        .as_deref()
-        .unwrap_or(crate::store::config::DEFAULT_FLOW);
-    let (profile_name, profile) = config
-        .task_gate_profile(&task.id, flow)
-        .map_err(Error::Failed)?;
-    let profile = profile.clone();
-    let profile_name = profile_name.to_owned();
-    let extra = extra_stages(&task);
+    // A gate that already ran keeps the profile it recorded, even when its flow, its
+    // `gate_profile`, or the profile itself changed since (ADR 0048 decisions 10 and 15).
+    let (profile_name, profile, stages) = match planned {
+        Some(planned) => (
+            planned.name.clone(),
+            planned.profile.clone(),
+            planned.stages.clone(),
+        ),
+        None => {
+            let flow = task
+                .flow
+                .as_deref()
+                .unwrap_or(crate::store::config::DEFAULT_FLOW);
+            let (profile_name, profile) = config
+                .task_gate_profile(&task.id, flow)
+                .map_err(Error::Failed)?;
+            let stages = effective_stages(profile, &extra_stages(&task));
+            (profile_name.to_owned(), profile.clone(), stages)
+        }
+    };
 
     // The pushed branch is the truth: `verified_sha` is the `head_sha` the remote has.
     let remote_sha = remote_work_sha(store.repo(), &remote, task_id)?;
@@ -455,7 +483,6 @@ pub fn plan_verification(store: &Store, task_id: &str) -> Result<Verification, E
         return Err(Error::Refused(reason.text()));
     }
 
-    let stages = effective_stages(&profile, &extra);
     if let Some(spec) = stages
         .iter()
         .find(|spec| spec.stage != Stage::Human && !BUILT_STAGES.contains(&spec.stage))
@@ -913,13 +940,15 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
     })
 }
 
-/// Applies the verdicts a background gate left for a `review.verifying` task: re-reads the
-/// plan, then moves the task as [`finish_verification`] does. The state moves here, in a pass
-/// that holds `runner.lock`, never in the gate process.
+/// Applies the verdicts a background gate left for a `review.verifying` task: checks the task
+/// and its branch again, then moves the task as [`finish_verification`] does. The state moves
+/// here, in a pass that holds `runner.lock`, never in the gate process.
 ///
 /// `planned` is the profile the gate recorded in its `done` record. A gate that already started
 /// keeps the profile it started with: when `config.toml` changed while it ran, the verdicts are
-/// judged by that profile and not by the flow's profile now (ADR 0048 decisions 10 and 15).
+/// judged by that profile and not by the flow's profile now. The task's flow is not resolved
+/// again then, so a flow the file no longer defines does not fail the application (ADR 0048
+/// decisions 10 and 15).
 ///
 /// # Errors
 ///
@@ -930,12 +959,7 @@ pub fn apply_verification(
     task_id: &str,
     planned: Option<&crate::gate::background::PlannedProfile>,
 ) -> Result<Verified, Error> {
-    let mut plan = plan_verification(store, task_id)?;
-    if let Some(planned) = planned {
-        plan.profile = planned.profile.clone();
-        plan.profile_name = planned.name.clone();
-        plan.stages = planned.stages.clone();
-    }
+    let plan = plan_verification_with(store, task_id, planned)?;
     finish_verification(store, &plan)
 }
 

@@ -467,6 +467,84 @@ fn a_started_gate_keeps_the_profile_it_ran_under() {
     );
 }
 
+/// A flow removed after the task's gate started still applies the verdicts: the configuration
+/// stays valid (the implicit `default` flow is added), and the pass judges the completed gate
+/// by the profile it recorded, not by a flow that no longer exists.
+#[test]
+fn a_flow_removed_after_the_gate_started_still_applies_its_verdicts() {
+    let repo = Repo::new("gate-profile-flow-removed-after-start");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    append_config(
+        &store,
+        "[gate.profiles.art]\n\
+         stages = [{ stage = \"commands\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         commands = [\"true\"]\n\
+         \n\
+         [flows.art]\n\
+         gate_profile = \"art\"\n",
+    );
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task_with_flow(
+            &plan,
+            "art",
+            "Art",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "brief\n",
+            Some("art"),
+        )
+        .expect("add the art task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let base = repo.main_sha();
+    let branch = format!("work/{task}");
+    repo.git(&["checkout", "-B", &branch, &base]);
+    write(&repo.clone.join("art.txt"), "art\n");
+    repo.git(&["add", "art.txt"]);
+    repo.git(&["commit", "-m", "art"]);
+    repo.git(&["push", "origin", &branch]);
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    set_verifying(&store, &task, &head, &base);
+
+    // The gate runs to completion under `flows.art` and records its profile.
+    let gate = repo.radian(&["arc", "gate", "--task", &task]);
+    assert_eq!(gate.code, 0, "gate: {}", gate.stderr);
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(store.root().join("runs").join(&task).join("gate.json"))
+            .expect("the gate record"),
+    )
+    .expect("gate.json reads");
+    assert_eq!(record["status"], "done");
+    assert_eq!(record["profile"]["name"], "art");
+
+    // The flow is gone before the pass applies the verdicts. The file is valid: the implicit
+    // `default` flow replaces it.
+    tune(&store, "[flows.art]\ngate_profile = \"art\"\n", "");
+    assert!(
+        !fs::read_to_string(store.root().join("config.toml"))
+            .expect("config.toml")
+            .contains("[flows.art]")
+    );
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    let task_now = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        (task_now.state.as_str(), task_now.phase.as_str()),
+        ("review", "awaiting_human"),
+        "the applied gate: {run:?}"
+    );
+    assert_eq!(
+        verdict_names(&store, &task),
+        vec!["commands.json".to_owned()],
+        "the gate ran again under the implicit default flow"
+    );
+}
+
 // ---- `before_attempt` follows the flow's profile ------------------------------------
 
 /// One attempt of `task` in `flow`, with a test-only worker that does nothing.
