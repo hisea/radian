@@ -8,7 +8,10 @@
 //! depth and is never run without one — see `src/shell.rs` for what the sandbox does and does
 //! not enforce.
 //!
-//! - paths are workspace-relative; absolute paths and `..` escapes are refused;
+//! - a workspace path is a relative path, or an absolute path inside the workspace root in
+//!   either of its two spellings (ADR 0039 decision 6); an absolute path outside it and any
+//!   `..` escape are refused. The absolute spelling of a workspace path takes exactly the
+//!   checks a relative one gets;
 //! - `read` additionally reads the bundled manual (`radian://docs/`); `read`, `grep` and `glob` additionally read read-only roots outside the
 //!   workspace (ADR 0039): the cargo registry sources, `$CARGO_HOME/registry/src`,
 //!   every toolchain's `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`, and each discovered

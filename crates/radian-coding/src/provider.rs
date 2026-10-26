@@ -352,8 +352,8 @@ impl CodingSession {
         &self.jobs
     }
 
-    /// Session end (ADR 0037 decision 6): kill the whole session of every running job. No file
-    /// I/O, so the panic path may call it too.
+    /// Session end (ADR 0037 decision 6): kill the whole session of every running job and its
+    /// descendant tree. Signals and process reads only, so the panic path may call it too.
     pub fn shutdown_jobs(&self) {
         self.jobs.kill_all();
     }
