@@ -192,6 +192,60 @@ const STAGE_ORDER: [Stage; 6] = [
     Stage::Integration,
 ];
 
+/// One flow as the arc TUI's overview draws it: how many of its tasks are in `doing`, and how
+/// many its `concurrency` lets run at once (ADR 0048 decisions 13 and 15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowLoad {
+    pub name: String,
+    /// The repository's tasks of this flow in `doing`.
+    pub running: u32,
+    /// `flows.<name>.concurrency`.
+    pub concurrency: u32,
+}
+
+/// The repository's flows, in name order, when `config.toml` defines a flow other than
+/// `default`; `None` when it does not. The rule is `radian arc list`'s flow column's: a
+/// repository with no flow besides `default` shows no flow anywhere, so it renders exactly as
+/// it did before flows existed. The counts are the repository's `doing` tasks, the ones the
+/// queue reasons read.
+///
+/// # Errors
+///
+/// The configuration or a task file cannot be read.
+pub fn flows(store: &Store) -> Result<Option<Vec<FlowLoad>>, Error> {
+    let config = store.config()?;
+    if !config
+        .flows
+        .keys()
+        .any(|name| name != crate::store::config::DEFAULT_FLOW)
+    {
+        return Ok(None);
+    }
+    let counts = crate::run::queue_doing_counts(store)?;
+    Ok(Some(
+        config
+            .flows
+            .iter()
+            .map(|(name, flow)| FlowLoad {
+                name: name.clone(),
+                running: u32::try_from(counts.in_flow(name)).unwrap_or(u32::MAX),
+                concurrency: flow.concurrency,
+            })
+            .collect(),
+    ))
+}
+
+/// The slot each ready task waits for now, in `radian arc show`'s words: the same function the
+/// task line and `show`'s `queue_reason` field use, so the TUI never re-words a reason
+/// (ADR 0048 decision 13).
+///
+/// # Errors
+///
+/// The configuration, a task file or a plan file cannot be read.
+pub fn queue_reasons(store: &Store) -> Result<std::collections::BTreeMap<String, String>, Error> {
+    crate::store::cli::queue_reasons(store)
+}
+
 /// The short (8-character) sha of the configured remote's main branch. `None` when the
 /// remote-tracking ref does not exist; the header then shows `—`.
 ///

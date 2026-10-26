@@ -692,6 +692,8 @@ struct TaskColumns {
     /// The connector, the mark, the id and the one space before `state.phase`. A deeper
     /// connector leaves the id less room, so it is cut with `…` and the space stays.
     id: usize,
+    /// The flow column's width, `0` when the repository draws no flow column.
+    flow: usize,
     phase: usize,
     attempt: usize,
     cost: usize,
@@ -712,6 +714,13 @@ fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
         .map(|task| task.connector.width() + mark + task.id.width() + gap)
         .max()
         .unwrap_or(16);
+    // A flow column is drawn only when a row has a flow (the repository defines one besides
+    // `default`); its width is the widest name in the plan, so every phase starts at one cell.
+    let flow_max = tasks
+        .iter()
+        .map(|task| task.flow.as_ref().map_or(0, |flow| flow.width()))
+        .max()
+        .unwrap_or(0);
     let phase_max = tasks
         .iter()
         .map(|task| task.phase.width())
@@ -736,7 +745,8 @@ fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
     // The cursor is always 2 cells (its cell on every row, selected or not), so the columns
     // hold on the row the cursor is on too. The `waits`/`also after` tail takes whatever is
     // left; a narrow page clips it rather than shortening the fixed columns.
-    let needed = |id: usize, phase: usize| 2 + id + 1 + phase + 1 + attempt + 1 + cost;
+    let flow_cells = if flow_max > 0 { flow_max + 1 } else { 0 };
+    let needed = |id: usize, phase: usize| 2 + id + flow_cells + 1 + phase + 1 + attempt + 1 + cost;
     while needed(id, phase) > content && phase > 10 {
         phase -= 1;
     }
@@ -745,6 +755,7 @@ fn task_columns(tasks: &[TaskRow], content: usize) -> TaskColumns {
     }
     TaskColumns {
         id,
+        flow: flow_max,
         phase,
         attempt,
         cost,
@@ -784,6 +795,17 @@ fn task_row_line(
     spans.push(Span::raw(
         " ".repeat(columns.id.saturating_sub(lead + id_used)),
     ));
+    // The flow column, when the repository defines a flow besides `default`: every row in the
+    // plan names its flow, padded so `state.phase` keeps one column. The column's own width
+    // already carries the space that follows it.
+    if columns.flow > 0 {
+        let flow = fit(task.flow.as_deref().unwrap_or_default(), columns.flow);
+        let flow_used = flow.width();
+        spans.push(Span::styled(flow, theme.tier));
+        spans.push(Span::raw(
+            " ".repeat(columns.flow.saturating_sub(flow_used) + 1),
+        ));
+    }
     let phase = fit(&task.phase, columns.phase);
     let phase_used = phase.width();
     spans.push(Span::styled(phase, task.mark.style(theme)));
@@ -858,6 +880,11 @@ fn extra_text(task: &TaskRow) -> String {
     if !task.after.is_empty() {
         parts.push(format!("after {}", task.after.join(", ")));
     }
+    // The queue reason in `radian arc list`'s and `show`'s own words: the TUI never re-words
+    // which limit holds a ready task (ADR 0048 decisions 11 and 13).
+    if let Some(reason) = &task.reason {
+        parts.push(format!("({reason})"));
+    }
     parts.join("  ")
 }
 
@@ -871,9 +898,10 @@ fn draw_task(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
             return;
         };
         let label = format!(
-            "{} {} · attempt {} · {} · plan {}",
+            "{} {} · flow {} · attempt {} · {} · plan {}",
             page.id,
             page.phase,
+            page.flow,
             page.attempt
                 .map(|attempt| attempt.to_string())
                 .unwrap_or_else(|| "—".to_owned()),

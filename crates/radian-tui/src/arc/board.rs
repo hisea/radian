@@ -554,8 +554,14 @@ fn draw_groups(
             lines.push(Line::default());
         }
         let selected = (app.board.column == *group).then_some(app.board.row);
-        let (group_lines, selected_at) =
-            group_lines(*group, &app.board.columns[*group], width, selected, theme);
+        let (group_lines, selected_at) = group_lines(
+            *group,
+            &app.board.columns[*group],
+            width,
+            selected,
+            theme,
+            app.flows.as_deref(),
+        );
         if let Some(at) = selected_at {
             selected_line = Some(lines.len() + at);
         }
@@ -591,10 +597,28 @@ fn group_lines(
     width: usize,
     selected: Option<usize>,
     theme: &Theme,
+    flows: Option<&[read::FlowLoad]>,
 ) -> (Vec<Line<'static>>, Option<usize>) {
     // The frame's rail takes the first two cells of its width; the rest is the row's content.
     let inner = width.saturating_sub(4);
-    let label = format!("{} {}", COLUMN_HEADINGS[group], cards.len());
+    let mut label = format!("{} {}", COLUMN_HEADINGS[group], cards.len());
+    // The DOING group is the overview of what runs: when the repository defines more than one
+    // flow, each flow with running tasks follows the total as `<name> <running>/<concurrency>`
+    // (ADR 0048 decision 11). The counts are the repository's `doing` tasks, the ones the
+    // queue reasons read, so a full flow explains why a ready task belongs to no card.
+    if group == DOING
+        && let Some(flows) = flows
+    {
+        let running: Vec<String> = flows
+            .iter()
+            .filter(|flow| flow.running > 0)
+            .map(|flow| format!("{} {}/{}", flow.name, flow.running, flow.concurrency))
+            .collect();
+        if !running.is_empty() {
+            label.push_str(" · ");
+            label.push_str(&running.join(" · "));
+        }
+    }
     let mut lines = vec![frame_top(width, &label, theme)];
     if cards.is_empty() {
         lines.push(framed(

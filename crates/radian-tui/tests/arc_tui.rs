@@ -1906,7 +1906,7 @@ fn the_task_page_has_the_frame_the_tabs_and_the_attempt_selector() {
     let id = fixture.id("e");
     for needle in [
         &format!(
-            "{id} review.awaiting_human · attempt 2 · $0.23 · plan {}",
+            "{id} review.awaiting_human · flow default · attempt 2 · $0.23 · plan {}",
             fixture.plan
         ),
         "the e task",

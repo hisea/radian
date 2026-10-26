@@ -11,7 +11,7 @@ This build has the storage layer, the subcommands that read and write it: `init`
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and the loop.
 `radian arc serve` is the scheduling loop and `radian arc run` is one pass of it, and a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc/tui`](tui.md)).
 
-This page holds the `radian arc` commands; the scheduling loop is in [`arc/loop`](loop.md), the gate and its failures are in [`arc/gate`](gate.md), the lead's MCP server in [`arc/mcp`](mcp.md), the TUI in [`arc/tui`](tui.md), the worker in [`arc/worker`](worker.md), and the files arc keeps are in [`arc/files`](files.md).
+This page holds the `radian arc` commands; the scheduling loop is in [`arc/loop`](loop.md), the gate and its failures are in [`arc/gate`](gate.md), the lead's MCP server in [`arc/mcp`](mcp.md), the TUI in [`arc/tui`](tui.md), the flows that give tasks their worker and gate in [`arc/flows`](flows.md), the worker in [`arc/worker`](worker.md), and the files arc keeps are in [`arc/files`](files.md).
 
 ## `radian arc`
 

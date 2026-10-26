@@ -4,6 +4,7 @@
 //! acts on the store and prints its result lives here, so `radian-tui`'s command file stays
 //! a thin call and the same behavior is reachable from a test without a terminal.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 
 use serde_json::json;
@@ -329,6 +330,27 @@ impl<'a> QueueState<'a> {
     ) -> Option<String> {
         crate::run::slot_wait_reason(self.store, &self.config, &self.counts, plan, task)
     }
+}
+
+/// Every task a full limit holds now, with the reason `show` prints for it — the same words
+/// the task line of `list` ends with (`waiting for a free <flow> slot`, else `waiting for a
+/// free concurrency slot`) — read once for the whole store. The arc TUI draws these on the
+/// plan rows, so it never re-words a queue reason (ADR 0048 decisions 11 and 13).
+///
+/// # Errors
+///
+/// The configuration, a task file or a plan file cannot be read.
+pub fn queue_reasons(store: &Store) -> Result<BTreeMap<String, String>, Error> {
+    let queue = QueueState::read(store)?;
+    let mut reasons = BTreeMap::new();
+    for view in store.plans()? {
+        for task in &view.tasks {
+            if let Some(reason) = queue.reason(&view.plan, task) {
+                reasons.insert(task.item.id.clone(), reason);
+            }
+        }
+    }
+    Ok(reasons)
 }
 
 /// The reason `show` gives one task, best-effort: `show` prints every field even when the

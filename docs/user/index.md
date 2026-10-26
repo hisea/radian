@@ -23,6 +23,7 @@ Each line names one page and what it covers.
 - `arc/gate`: the gate: verification stages, the review stage, failures, retries, the budget, and reconcile.
 - `arc/loop`: the scheduling loop: one pass, `loop.log`, `serve`, and its signals.
 - `arc/files`: the files arc keeps: `config.toml`, plan and task files, and the `.radian/arc/` layout.
+- `arc/flows`: what a flow is, a two-flow example, how a task picks one, the two concurrency limits, and binary deliverables.
 - `arc/mcp`: the lead's MCP server: how a lead registers it, its seven tools, and its tool errors.
 - `arc/tui`: the TUI: the plans, board, task and merge pages, every mark and key, and the owner's actions.
 - `arc/worker`: the worker: its session, the brief and limits, the checks after it exits, and another agent as the worker.

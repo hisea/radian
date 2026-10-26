@@ -26,10 +26,12 @@ pub mod render;
 pub mod stdout;
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use radian_arc::read::{AttemptView, CommandView, MergeView, TaskDiff};
+use radian_arc::store::config::DEFAULT_FLOW;
 use radian_arc::store::model::{
     PLAN_PRIORITIES, PROPOSED_PHASE, TaskFile, TaskState, claim_order, priority_rank,
 };
@@ -497,6 +499,13 @@ pub struct TaskRow {
     pub attempt: u32,
     pub cost: Cost,
     pub mark: Mark,
+    /// The task's flow, in its own column, only when the repository defines a flow other than
+    /// `default` (the rule `radian arc list`'s flow column uses). `None` draws no column.
+    pub flow: Option<String>,
+    /// The slot the task waits for now, in `radian arc show`'s words (`waiting for a free
+    /// <flow> slot`, else `waiting for a free concurrency slot`); `None` when no limit holds
+    /// it. Read through `radian_arc::read::queue_reasons`, never re-worded here.
+    pub reason: Option<String>,
     /// For a `doing` task: whether its worker is alive, from the wrapper's heartbeat.
     pub freshness: Option<Freshness>,
     /// The tree connector (`""` for a root, `"├─"`, `"└─"`, or a deeper prefix).
@@ -528,6 +537,9 @@ pub struct TaskPage {
     pub id: String,
     pub title: String,
     pub phase: String,
+    /// The task's flow: its `flow` field, `default` when it has none. Always named in the
+    /// frame label, whatever the repository defines (ADR 0048 decision 11).
+    pub flow: String,
     pub cost: Cost,
     pub plan: String,
     pub tab: TaskTab,
@@ -583,6 +595,7 @@ impl TaskPage {
             id: task.id.clone(),
             title: task.title.clone(),
             phase: format!("{}.{}", task.state.as_str(), task.phase),
+            flow: task.flow.clone().unwrap_or_else(|| DEFAULT_FLOW.to_owned()),
             cost: Cost::of(task),
             plan: task.plan.clone(),
             // A task that has not run opens on its brief; the owner reads why it exists
@@ -928,6 +941,13 @@ pub struct ArcApp {
     all_plans: Vec<PlanView>,
     /// How many plans the current view hides.
     pub hidden: usize,
+    /// The repository's flows when it defines one besides `default`, each with its running
+    /// tasks and its `concurrency`; `None` draws no flow column and no per-flow counts (the
+    /// rule `radian arc list`'s flow column uses).
+    pub flows: Option<Vec<radian_arc::read::FlowLoad>>,
+    /// The slot each task waits for now, in `radian arc show`'s words, keyed by task id,
+    /// read through `radian_arc::read::queue_reasons` on every refresh.
+    pub queue_reasons: BTreeMap<String, String>,
     /// The plans page's view; `f` cycles it, and it is not saved.
     pub filter: PlanFilter,
     /// The plans list's order; `o` cycles it, and it is not saved.
@@ -1033,6 +1053,8 @@ impl ArcApp {
             plans: Vec::new(),
             all_plans: Vec::new(),
             hidden: 0,
+            flows: None,
+            queue_reasons: BTreeMap::new(),
             filter: PlanFilter::default(),
             order: PlanOrder::default(),
             plan_sel: 0,
@@ -1091,6 +1113,15 @@ impl ArcApp {
                 return true;
             }
         }
+        // The flows and the queue reasons the rows draw, read once per refresh: a task's flow
+        // gets a column only when the repository defines one besides `default`, and a waiting
+        // reason is `show`'s own words (ADR 0048 decision 11).
+        if let Ok(flows) = radian_arc::read::flows(&self.store) {
+            self.flows = flows;
+        }
+        if let Ok(reasons) = radian_arc::read::queue_reasons(&self.store) {
+            self.queue_reasons = reasons;
+        }
         self.rebuild_visible(selected_plan.as_deref());
         // The view is kept, so a plan can leave it during a re-read: when the selected plan
         // changed, the task selection resets; otherwise the selected task stays.
@@ -1137,6 +1168,7 @@ impl ArcApp {
             let head_changed = page.head != task.head_sha;
             page.title = task.title.clone();
             page.phase = format!("{}.{}", task.state.as_str(), task.phase);
+            page.flow = task.flow.clone().unwrap_or_else(|| DEFAULT_FLOW.to_owned());
             page.cost = Cost::of(&task);
             page.plan = task.plan.clone();
             page.brief = task.body.clone();
@@ -1335,11 +1367,19 @@ impl ArcApp {
             .config()
             .map(|config| config.limits.stall_timeout_secs)
             .unwrap_or(0);
+        let show_flow = self.flows.is_some();
         for row in &mut rows {
             let Some(task) = view.tasks.iter().find(|task| task.item.id == row.id) else {
                 continue;
             };
             row.freshness = freshness(&self.store, &task.item, default_stall);
+            row.flow = show_flow.then(|| {
+                task.item
+                    .flow
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_FLOW.to_owned())
+            });
+            row.reason = self.queue_reasons.get(&row.id).cloned();
         }
         rows
     }
@@ -3004,6 +3044,10 @@ fn row(task: &TaskFile, connector: String, also_after: Vec<String>, waits: Vec<S
         attempt: task.attempt,
         cost: Cost::of(task),
         mark: task_mark(task.state, &task.phase),
+        // The flow column and the queue reason are decided per plan by
+        // [`ArcApp::task_rows`], which reads the repository's flows and `show`'s reasons.
+        flow: None,
+        reason: None,
         freshness: None,
         connector,
         also_after,

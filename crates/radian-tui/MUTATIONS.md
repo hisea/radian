@@ -3226,3 +3226,19 @@ to `crates/radian-tui/src/arc/stdout.rs`, ran with `cargo nextest run -p radian-
 | TK0163-M3 | `StdoutView::poll` ignores the file identity (`let replaced = false;`) | `arc::stdout::tests::a_replaced_file_starts_over_when_it_is_not_shorter` | ✅ failed |
 
 1/1 caught.
+
+## TK0167: the TUI shows a task's flow (2026-10-26, branch `work/TK0167-tui-shows-flow`)
+
+The arc TUI draws a task's flow column when the repository defines a flow besides `default`,
+the waiting reason `radian arc show` prints, the task page's `flow` field and the board's
+per-flow running counts. Each mutation was applied by hand to
+`crates/radian-tui/src/arc/{mod,render}.rs`, backed up under `.radian/mut/` and restored from
+those copies (never `git checkout`); the tests ran with `cargo nextest run -p radian-tui
+--locked --profile sandbox --test arc_flows`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0167-M1 | show the flow column with no flow other than `default`: `let show_flow = true;` in `task_rows` | ✅ failed | `arc_flows::a_repository_without_flows_renders_as_before` (its rows carry `default` and the page draws a flow word) |
+| TK0167-M2 | render a hard-coded `(waiting for a free concurrency slot)` for every reason in `extra_text` | ✅ failed | `arc_flows::two_flows_show_the_column_the_field_the_reason_and_the_counts` (a full `code` and `image` flow show the shared reason instead of `waiting for a free code slot` / `waiting for a free image slot`) |
+
+2/2 caught.
