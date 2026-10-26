@@ -1131,6 +1131,135 @@ fn list_and_show_name_the_shared_limit_when_the_flow_has_room() {
     wait_for_end(&repo, &first);
 }
 
+/// A file changed outside arc is refused by the scheduler whatever the limits say, so neither
+/// `list` nor `show` names a slot that is not what holds the task: a ready task whose own file
+/// changed, and a ready task whose plan changed, get no slot reason and a `null`
+/// `queue_reason`, while the same state without the change names the full flow.
+#[test]
+fn a_changed_outside_arc_file_names_no_slot() {
+    let (repo, store) = setup("flows-concurrency-changed");
+    let worker = script(
+        &repo,
+        "waiting-worker",
+        &waiting_body(&repo.root, &repo.root),
+    );
+    two_flows(&repo, &worker, 1, 1);
+    tune(&repo, "concurrency = 1", "concurrency = 2");
+    let plan = store.add_plan("plan", "Plan", "request").unwrap();
+    let first = add_flow_task(&store, &plan, "code-one", "code");
+    let second = add_flow_task(&store, &plan, "code-two", "code");
+    // A second plan, so the plan's own changed marker can be the reason on its own.
+    let other = store
+        .add_plan("other", "Other", "the other request")
+        .unwrap();
+    let third = add_flow_task(&store, &other, "code-three", "code");
+    for id in [&plan, &other] {
+        plan_ops::confirm(&store, id).expect("confirm");
+        plan_ops::set_auto(&store, id, "run").expect("auto run");
+    }
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    wait_until(Duration::from_secs(60), "the code worker to start", || {
+        repo.root.join(format!("started-{first}")).exists()
+    });
+
+    // Before any file changes outside arc, `code` is full and both later tasks say so.
+    let list = repo.radian(&["arc", "list"]);
+    assert_eq!(list.code, 0, "list: {}", list.stderr);
+    for id in [&second, &third] {
+        let line = list
+            .stdout
+            .lines()
+            .find(|line| line.contains(id.as_str()))
+            .unwrap_or_else(|| panic!("`{id}` is listed: {}", list.stdout));
+        assert!(
+            line.contains("(waiting for a free code slot)"),
+            "`{id}` waits for the full flow: {}",
+            list.stdout
+        );
+    }
+
+    // Edit the task file and the other plan file outside arc.
+    let task_path = repo.arc().join("tasks").join(format!("{second}.md"));
+    let text = fs::read_to_string(&task_path).expect("the task reads");
+    fs::write(&task_path, text.replacen("A task", "An edited task", 1)).expect("edit the task");
+    let plan_path = repo.arc().join("plans").join(format!("{other}.md"));
+    let text = fs::read_to_string(&plan_path).expect("the plan reads");
+    fs::write(
+        &plan_path,
+        text.replacen("the other request", "an edited request", 1),
+    )
+    .expect("edit the plan");
+    assert!(
+        store.load_task(&second).expect("reads").changed_outside_arc,
+        "the task edit is seen"
+    );
+    assert!(
+        store.load_plan(&other).expect("reads").changed_outside_arc,
+        "the plan edit is seen"
+    );
+
+    let list = repo.radian(&["arc", "list"]);
+    assert_eq!(list.code, 0, "list: {}", list.stderr);
+    for id in [&second, &third] {
+        let line = list
+            .stdout
+            .lines()
+            .find(|line| line.contains(id.as_str()))
+            .unwrap_or_else(|| panic!("`{id}` is listed: {}", list.stdout));
+        assert!(
+            !line.contains("waiting for a free"),
+            "`{id}` changed outside arc, so no slot holds it: {}",
+            list.stdout
+        );
+    }
+    assert!(
+        list.stdout.contains("(changed outside arc)"),
+        "the changed marker is what holds them: {}",
+        list.stdout
+    );
+
+    let list_json = repo.radian(&["arc", "list", "--json"]);
+    assert_eq!(list_json.code, 0, "list --json: {}", list_json.stderr);
+    let value: Value = serde_json::from_str(&list_json.stdout).expect("list --json parses");
+    let tasks: Vec<&Value> = value
+        .as_array()
+        .expect("the plans")
+        .iter()
+        .flat_map(|plan| plan["tasks"].as_array().expect("the plan's tasks"))
+        .collect();
+    for id in [&second, &third] {
+        let task = tasks
+            .iter()
+            .find(|task| task["id"] == json!(id.as_str()))
+            .unwrap_or_else(|| panic!("`{id}` is in list --json: {value}"));
+        assert_eq!(task["queue_reason"], Value::Null, "{value}");
+    }
+
+    for id in [&second, &third] {
+        let show = repo.radian(&["arc", "show", id.as_str()]);
+        assert_eq!(show.code, 0, "show: {}", show.stderr);
+        assert!(
+            show.stdout.contains("queue_reason: -"),
+            "`{id}` names no slot: {}",
+            show.stdout
+        );
+        assert!(
+            !show.stdout.contains("waiting for a free"),
+            "`{id}` names no slot: {}",
+            show.stdout
+        );
+        let show_json = repo.radian(&["arc", "show", id.as_str(), "--json"]);
+        assert_eq!(show_json.code, 0, "show --json: {}", show_json.stderr);
+        let value: Value = serde_json::from_str(&show_json.stdout).expect("show --json parses");
+        assert_eq!(value["queue_reason"], Value::Null, "{value}");
+    }
+
+    release(&repo, &first);
+    wait_for_end(&repo, &first);
+}
+
 /// The manual names every new config key with the code's default, and the task table names
 /// `flow`.
 #[test]

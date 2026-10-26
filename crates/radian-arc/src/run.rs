@@ -47,7 +47,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::store::attempt_ops::{self, Claim};
 use crate::store::model::{self, TaskState};
-use crate::store::{Error, PlanView, RUNNER_LOCK, Store, plan_ops};
+use crate::store::{Error, Loaded, PlanView, RUNNER_LOCK, Store, plan_ops};
 
 /// A hard stop on the pass count. Every pass that continues changes at least one task; this
 /// only keeps a store that something else keeps rewriting from looping forever.
@@ -1268,15 +1268,25 @@ pub(crate) fn filled_limit_reason(
 
 /// Why `radian arc list` and `radian arc show` name a slot for a `todo.ready` task: the same
 /// words the loop's summary uses, only when a limit is what holds the task now. `None` when
-/// the task is in another state, its plan is paused, an `after` task has not merged, its flow
-/// is missing, or both limits have room (ADR 0048 decision 13).
+/// the task is in another state, its own file or its plan changed outside arc, its plan is
+/// paused, an `after` task has not merged, its flow is missing, or both limits have room
+/// (ADR 0048 decision 13).
+///
+/// A file that changed outside arc is refused by the scheduler itself (it is not claimed
+/// whatever the limits say), so a slot is not what holds it: the task line's and the plan
+/// header's `changed outside arc` marker is.
 pub(crate) fn slot_wait_reason(
     store: &Store,
     config: &crate::store::config::Config,
     counts: &attempt_ops::DoingCounts,
-    plan: &model::PlanFile,
-    task: &model::TaskFile,
+    plan: &Loaded<model::PlanFile>,
+    task: &Loaded<model::TaskFile>,
 ) -> Option<String> {
+    if task.changed_outside_arc || plan.changed_outside_arc {
+        return None;
+    }
+    let plan = &plan.item;
+    let task = &task.item;
     if task.state != TaskState::Todo || task.phase != "ready" {
         return None;
     }

@@ -1252,3 +1252,19 @@ change. The sources were restored from copies under `.radian/mut/` with `cp` and
 | TK0165-M5 | `flows_configured` is again inferred from the deserialized map (`!config.flows.is_empty()`), so a bare `[flows]` table keeps old scheduling | `store::config::tests::a_bare_flows_table_holds_the_default_flow_to_its_concurrency` (`config.flows_configured` is false) | ✅ failed |
 
 2/2 caught.
+
+## TK0165 rework 2: a changed-outside-arc file names no slot (2026-10-26, branch `work/TK0165-per-flow-concurrency`)
+
+The review found that `list` and `show` named a full slot for a `todo.ready` task the
+scheduler refuses because its own file or its plan changed outside arc. `slot_wait_reason` now
+answers `None` for either marker (ADR 0048 decision 13). The mutation was applied by hand to
+`crates/radian-arc/src/run.rs`. The test ran with `cargo nextest run -p radian-arc --test flows
+--locked --profile sandbox` after `cargo build -p radian-tui --bin radian` (it drives the
+binary). The source was restored from `.radian/mut/run.rs.m6` with `cp` and compared with
+`cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0165-M6 | `slot_wait_reason` drops the `changed_outside_arc` check, so a changed task or plan still names the full slot | `flows::a_changed_outside_arc_file_names_no_slot` (`(waiting for a free code slot)` on an edited task's line) | ✅ failed |
+
+1/1 caught.

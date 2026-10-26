@@ -324,8 +324,8 @@ impl<'a> QueueState<'a> {
     /// limit holds it.
     fn reason(
         &self,
-        plan: &super::model::PlanFile,
-        task: &super::model::TaskFile,
+        plan: &Loaded<super::model::PlanFile>,
+        task: &Loaded<super::model::TaskFile>,
     ) -> Option<String> {
         crate::run::slot_wait_reason(self.store, &self.config, &self.counts, plan, task)
     }
@@ -333,10 +333,10 @@ impl<'a> QueueState<'a> {
 
 /// The reason `show` gives one task, best-effort: `show` prints every field even when the
 /// store cannot read its config or a `doing` task file, so a store that cannot is no reason.
-fn show_task_queue_reason(store: &Store, task: &super::model::TaskFile) -> Option<String> {
-    let plan = store.load_plan(&task.plan).ok()?;
+fn show_task_queue_reason(store: &Store, task: &Loaded<super::model::TaskFile>) -> Option<String> {
+    let plan = store.load_plan(&task.item.plan).ok()?;
     let queue = QueueState::read(store).ok()?;
-    queue.reason(&plan.item, task)
+    queue.reason(&plan, task)
 }
 
 /// The text `radian arc list` prints (ADR 0048 decision 1, `list`). Unless `all`, a task in
@@ -439,7 +439,7 @@ fn render(
             // A ready task that a full limit holds says which one, in the loop summary's
             // words (ADR 0048 decision 13): `list` names the reason the same way `run` does.
             let waiting = queue
-                .and_then(|queue| queue.reason(&view.plan.item, &task.item))
+                .and_then(|queue| queue.reason(&view.plan, task))
                 .map(|reason| format!("  ({reason})"))
                 .unwrap_or_default();
             out.push_str(&format!(
@@ -584,7 +584,7 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
             field(
                 &mut out,
                 "queue_reason",
-                &optional_text(show_task_queue_reason(store, item).as_deref()),
+                &optional_text(show_task_queue_reason(store, task).as_deref()),
             );
             field(&mut out, "attempt", &item.attempt.to_string());
             field(
@@ -899,7 +899,7 @@ fn plan_json(queue: Option<&QueueState>, view: &PlanView, with_body: bool) -> se
             // A task's own body is only in `show <task> --json`; the plan's JSON names the
             // tasks, it does not repeat every brief.
             .map(|task| {
-                let reason = queue.and_then(|queue| queue.reason(&view.plan.item, &task.item));
+                let reason = queue.and_then(|queue| queue.reason(&view.plan, task));
                 task_json(task, false, reason)
             })
             .collect::<Vec<_>>(),
@@ -1226,7 +1226,7 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
             plan_json(queue.as_ref(), &view, true)
         }
         Item::Task(task) => {
-            let mut value = task_json(&task, true, show_task_queue_reason(store, &task.item));
+            let mut value = task_json(&task, true, show_task_queue_reason(store, &task));
             let chain = super::chain::chain(store, &task.item.id)?;
             let review = crate::review::latest_review_verdict(store, &task.item.id);
             if let Some(object) = value.as_object_mut() {
