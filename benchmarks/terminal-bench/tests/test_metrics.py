@@ -73,6 +73,18 @@ def write_trial(
     return trial_dir
 
 
+class RescanCounter(list):
+    """A trial list that counts how many times its elements are iterated."""
+
+    def __init__(self, trials):
+        super().__init__(trials)
+        self.scans = 0
+
+    def __iter__(self):
+        self.scans += 1
+        return super().__iter__()
+
+
 class FixtureReportTest(unittest.TestCase):
     def setUp(self):
         self.report = metrics.build_report([JOBS])
@@ -530,6 +542,20 @@ class IntervalOutputTest(unittest.TestCase):
                 self.assertIn("cost_per_pass", totals)
         self.assertEqual(report["intervals"]["resamples"], 2000)
         self.assertEqual(report["intervals"]["seed"], 0)
+
+
+class IntervalCostTest(unittest.TestCase):
+    def test_the_bootstrap_does_not_rescan_the_trials_on_every_draw(self):
+        trials = metrics.collect([ANALYSIS])
+        agents = ["base", "tall"]
+        common = metrics.common_tasks(trials, agents)
+        self.assertEqual(len(common), 3)
+        counted = RescanCounter(trials)
+        metrics.intervals(counted, agents, common, "base")
+        # A rescan per (draw, agent, task) would iterate the whole list
+        # BOOTSTRAP_RESAMPLES * len(common) * len(agents) times. Indexing the
+        # non-excluded trials once keeps this to a couple of passes.
+        self.assertLess(counted.scans, metrics.BOOTSTRAP_RESAMPLES)
 
 
 class BoundedReadTest(unittest.TestCase):

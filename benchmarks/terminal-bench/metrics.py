@@ -766,6 +766,13 @@ def intervals(
         result["note"] = INTERVAL_MIN_TASKS_NOTE
         return result
     rng = random.Random(BOOTSTRAP_SEED)
+    # Index the non-excluded trials once by agent and task. Looking them up per
+    # (draw, agent, task) would rescan the whole trial list
+    # BOOTSTRAP_RESAMPLES * len(common) * agents times.
+    indexed: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for trial in trials:
+        if not trial["excluded"]:
+            indexed.setdefault((trial["agent"], trial["task"]), []).append(trial)
     for agent in non_baseline:
         gen_tok: list[float] = []
         cost: list[float] = []
@@ -778,7 +785,7 @@ def intervals(
             }
             for task in drawn:
                 for who in (baseline, agent):
-                    on_task = _included(trials, who, task)
+                    on_task = indexed.get((who, task), [])
                     for trial in (rng.choice(on_task) for _ in on_task):
                         accumulator = accumulators[who]
                         if trial["generated_tokens"] is not None:
