@@ -225,10 +225,12 @@ pub(crate) trait ShellWatch {
 
 /// Runs one `sh -c` line in `dir`, stdout and stderr into `log`, in its own process group.
 /// `timeout` of zero waits forever; a timeout kills the whole group, so no child the command
-/// started outlives the step. `envs` are added on top of the wrapper's own environment; the
-/// gate stages pass none, the wrapper's `before_attempt` commands pass the `ARC_*` values a
-/// command worker gets (ADR 0048 decisions 7 and 10). `watch` is the caller's stop path: it
-/// receives the command's process group and is asked whether a stop was requested.
+/// started outlives the step. A stop from `watch` also reaches the whole group: the command's
+/// own shell exiting on SIGTERM does not end the stop while one of its children still runs.
+/// `envs` are added on top of the wrapper's own environment; the gate stages pass none, the
+/// wrapper's `before_attempt` commands pass the `ARC_*` values a command worker gets (ADR
+/// 0048 decisions 7 and 10). `watch` is the caller's stop path: it receives the command's
+/// process group and is asked whether a stop was requested.
 pub(crate) fn run_shell(
     dir: &Path,
     line: &str,
@@ -286,10 +288,32 @@ pub(crate) fn run_shell(
     let mut stop_sent: Option<Instant> = None;
     let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
     let (status, timed_out) = loop {
-        if let Some(status) = child.try_wait().map_err(|source| GateError::Io {
+        // Peek at the exit without reaping it where the platform can: while the child is a
+        // zombie its process-group id stays reserved, so a stop can still reach whatever the
+        // command left in its group (ADR 0048 decisions 7 and 9).
+        #[cfg(unix)]
+        let exited = process::exited_status(pid).map_err(|source| GateError::Io {
             path: dir.to_path_buf(),
             source,
-        })? {
+        })?;
+        #[cfg(not(unix))]
+        let exited = child.try_wait().map_err(|source| GateError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        if exited.is_some() {
+            // The shell of a stopped command may exit on SIGTERM while a child it started
+            // ignores it, and it can exit before this loop observes the stop. Nothing the
+            // command started outlives the stop: kill the rest of the group before the zombie
+            // is reaped and its group id can name another.
+            #[cfg(unix)]
+            if watch.is_some_and(|watch| watch.stopping()) && process::group_has_live_member(pid) {
+                process::signal_group(pid, process::SIGKILL);
+            }
+            let status = child.wait().map_err(|source| GateError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })?;
             break (status, false);
         }
         #[cfg(unix)]
