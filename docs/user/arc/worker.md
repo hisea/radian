@@ -59,11 +59,12 @@ A repository can then run, say, image tasks through a Codex script and code task
 [flows.codex]
 command = ["/absolute/path/to/codex-worker.sh"]
 
-[flows.code]
+[flows.default]
 exec_args = ["--model", "some-model", "--system-file", ".radian/arc/code.md"]
 ```
 
-A task with `flow = "codex"` starts the script; a task with `flow = "code"` — or no `flow` at all — starts `radian exec` with that flow's arguments.
+A task with `flow = "codex"` starts the script; a task with no `flow` uses `default`, here `radian exec` with those arguments.
+Without a `[flows.default]` section, `default` comes from the `[worker]` keys ([the flow rows](files.md#configtoml)).
 `[worker] rework_session` is a `[worker]` key, not a flow key, and it applies to every flow.
 The rest of this section describes the command worker; it applies to a flow's `command` exactly as it did to `[worker] command`.
 The array's first element is the program and the rest are its arguments; there is no shell in between, so a pipeline or a variable belongs in a script you pass as the program.
