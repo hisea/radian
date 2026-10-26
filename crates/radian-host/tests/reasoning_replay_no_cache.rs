@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use radian_host::{
-    Protocol, ProviderRef, ReasoningReplayOverride, RouteContext, descriptor,
+    Protocol, ProviderDecl, ProviderRef, ReasoningReplayOverride, RouteContext, descriptor,
     resolve_reasoning_replay, route_replays_reasoning,
 };
 
@@ -28,16 +28,16 @@ fn scratch() -> common::TempDir {
     dir
 }
 
-/// A usable `api_key` entry, so the switch path's `args_for` does not refuse the route
+/// The `api_key` entries, so the switch path's `args_for` does not refuse the route
 /// (ADR 0026 D6); the store refuses a group/world-readable file.
-fn write_auth(home: &Path, name: &str) {
+fn write_auth(home: &Path, names: &[&str]) {
     std::fs::create_dir_all(home.join("credentials")).unwrap();
     let path = home.join("credentials/auth.json");
-    std::fs::write(
-        &path,
-        format!(r#"{{"{name}": {{"type": "api_key", "key": "test-key"}}}}"#),
-    )
-    .unwrap();
+    let entries: Vec<String> = names
+        .iter()
+        .map(|name| format!(r#""{name}": {{"type": "api_key", "key": "test-key"}}"#))
+        .collect();
+    std::fs::write(&path, format!("{{{}}}", entries.join(","))).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -53,7 +53,7 @@ fn write_auth(home: &Path, name: &str) {
 #[test]
 fn with_no_cache_the_bundled_snapshot_decides_reasoning_replay() {
     let home = scratch();
-    write_auth(&home, "opencode-go");
+    write_auth(&home, &["opencode-go", "opencode"]);
     // SAFETY: this test binary has exactly one test.
     unsafe { std::env::set_var("RADIAN_HOME", &home) };
 
@@ -107,6 +107,72 @@ fn with_no_cache_the_bundled_snapshot_decides_reasoning_replay() {
             "the budget's answer must match the request's field for {model}"
         );
     }
+
+    // A named provider with no `reasoning_replay` resolves through the catalog by its **name**
+    // too, not only a built-in (ADR 0026 D10: `None` falls through to the catalog). A custom
+    // endpoint may be named after a catalog provider (`opencode` is not a built-in descriptor),
+    // and with no cache the bundled snapshot answers for it exactly as for a built-in.
+    let named_ref = |name: &str| {
+        ProviderRef::Named(radian_host::NamedProvider {
+            name: name.into(),
+            protocol: Protocol::OpenAiCompatible,
+            base_url: "https://acme.example/v1".into(),
+            reasoning_replay: None,
+        })
+    };
+    assert_eq!(
+        resolve_reasoning_replay(&named_ref("opencode"), "deepseek-v4.1-flash").as_deref(),
+        Some("reasoning_content"),
+        "a named provider with no override reads the snapshot by its name"
+    );
+    assert_eq!(
+        resolve_reasoning_replay(&named_ref("opencode"), "gpt-5.6-luna"),
+        None
+    );
+    assert_eq!(
+        resolve_reasoning_replay(&named_ref("acme"), "deepseek-v4.1-flash"),
+        None,
+        "a name no catalog provider shares replays nothing"
+    );
+
+    // The same route through the config map and the request builder: what the budget counts is
+    // what the request carries (ADR 0014 R6).
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "opencode".to_owned(),
+        ProviderDecl {
+            kind: "openai-compatible".into(),
+            base_url: "https://acme.example/v1".into(),
+            reasoning_replay: None,
+        },
+    );
+    assert!(route_replays_reasoning(
+        "opencode",
+        "deepseek-v4.1-flash",
+        &providers
+    ));
+    assert!(!route_replays_reasoning(
+        "opencode",
+        "gpt-5.6-luna",
+        &providers
+    ));
+    let named_ctx = RouteContext {
+        providers: providers.clone(),
+        session_id: "no-cache-named".to_owned(),
+        user_headers: Vec::new(),
+        include_usage: None,
+        max_tokens: 4096,
+        thinking: "medium".to_owned(),
+        thinking_budget: None,
+    };
+    assert_eq!(
+        named_ctx
+            .args_for("opencode", "deepseek-v4.1-flash", None)
+            .unwrap()
+            .reasoning_replay
+            .as_deref(),
+        Some("reasoning_content")
+    );
 
     // The `[providers.<id>]` override is still first, ahead of the snapshot, in both directions.
     // The name matches a built-in so the snapshot has an entry for the same (provider, model):
