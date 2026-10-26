@@ -46,6 +46,10 @@ use crate::store::{Error, Loaded, Store, model};
 pub const REVIEW_FILE: &str = "review.json";
 /// The owner's reject note, in the attempt's run directory.
 pub const REJECT_FILE: &str = "reject.md";
+/// The gate profile a verification of an attempt ran under, next to its verdicts. A later
+/// merge of that attempt reads it, so the approval and the integration judge the verdicts by
+/// the profile that produced them after `gate.json` is gone (ADR 0048 decisions 10 and 15).
+pub const PROFILE_FILE: &str = "profile.json";
 /// How many integration runs one `merge` command may make after main moved.
 pub const MAX_INTEGRATION_ROUNDS: u32 = 3;
 /// The stages this build can run in verification. A listed stage outside it refuses with
@@ -914,6 +918,19 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
         )));
     }
     let digest = verification_digest(&verdicts, &plan.head);
+    // The attempt keeps the profile this verification ran under. `gate.json` is cleared once
+    // the pass applies it, and a later merge of the attempt must still judge its verdicts by
+    // the profile that produced them (ADR 0048 decisions 10 and 15).
+    write_attempt_profile(
+        store,
+        &task.id,
+        &plan.label,
+        &crate::gate::background::PlannedProfile {
+            name: plan.profile_name.clone(),
+            profile: plan.profile.clone(),
+            stages: plan.stages.clone(),
+        },
+    )?;
     store.change_task(&task.id, |task| {
         task.state = model::TaskState::Review;
         task.phase = "awaiting_human".to_owned();
@@ -961,6 +978,50 @@ pub fn apply_verification(
 ) -> Result<Verified, Error> {
     let plan = plan_verification_with(store, task_id, planned)?;
     finish_verification(store, &plan)
+}
+
+/// The path of an attempt's profile record.
+fn attempt_profile_path(store: &Store, task: &str, attempt: &str) -> Result<PathBuf, Error> {
+    Ok(attempt_dir(store.repo(), task, attempt)
+        .map_err(gate_error)?
+        .join(PROFILE_FILE))
+}
+
+/// Writes the profile a verification of `attempt` ran under, for the merge of the same
+/// attempt (ADR 0048 decisions 10 and 15).
+///
+/// # Errors
+///
+/// The file could not be encoded or written.
+fn write_attempt_profile(
+    store: &Store,
+    task: &str,
+    attempt: &str,
+    profile: &crate::gate::background::PlannedProfile,
+) -> Result<(), Error> {
+    let path = attempt_profile_path(store, task, attempt)?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
+    }
+    let text = serde_json::to_string_pretty(profile)
+        .map_err(|error| Error::Failed(format!("cannot encode {}: {error}", path.display())))?;
+    fs::write(&path, format!("{text}\n"))
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
+}
+
+/// The profile a verification of `attempt` ran under, when it left one. A verification from
+/// before the record existed has none, and its merge resolves the flow's profile as before
+/// (ADR 0048 decisions 10 and 15).
+#[must_use]
+pub(crate) fn attempt_profile(
+    store: &Store,
+    task: &str,
+    attempt: &str,
+) -> Option<crate::gate::background::PlannedProfile> {
+    let path = attempt_profile_path(store, task, attempt).ok()?;
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// `radian arc reverify <task>`: claim a new attempt without a worker and verify it at once
@@ -2142,18 +2203,27 @@ fn prepare_merge(
             "`verified_sha` {verified} is not `head_sha` {head}; verify the task again"
         )));
     }
-    let config = store.config()?;
     let (remote, main_branch) = store.repository_names()?;
     let main_ref = format!("refs/remotes/{remote}/{main_branch}");
-    let flow = task
-        .flow
-        .as_deref()
-        .unwrap_or(crate::store::config::DEFAULT_FLOW);
-    let (profile_name, profile) = config
-        .task_gate_profile(task_id, flow)
-        .map_err(Error::Failed)?;
-    let profile_name = profile_name.to_owned();
-    let profile = profile.clone();
+    // The attempt keeps the profile its gate ran under: a flow removed, or a `gate_profile`
+    // that changed, since the gate ran does not change the approval or the integration of its
+    // verdicts (ADR 0048 decisions 10 and 15). A verification from before the record existed
+    // resolves the current profile as before.
+    let (profile_name, profile, stages) = match attempt_profile(store, task_id, &label) {
+        Some(recorded) => (recorded.name, recorded.profile, recorded.stages),
+        None => {
+            let config = store.config()?;
+            let flow = task
+                .flow
+                .as_deref()
+                .unwrap_or(crate::store::config::DEFAULT_FLOW);
+            let (profile_name, profile) = config
+                .task_gate_profile(task_id, flow)
+                .map_err(Error::Failed)?;
+            let stages = effective_stages(profile, &extra_stages(&task));
+            (profile_name.to_owned(), profile.clone(), stages)
+        }
+    };
 
     // The branch as it is now: a move invalidates every verdict and the approval.
     let remote_sha = remote_work_sha(store.repo(), &remote, task_id)?;
@@ -2197,7 +2267,7 @@ fn prepare_merge(
     }
 
     if task.phase == "awaiting_human" {
-        if !required_stages_passed(store, task_id, &head)? {
+        if !required_stages_passed(store, task_id, &head, &stages)? {
             let reason = Reason::new(
                 "merge",
                 None,
@@ -2286,14 +2356,21 @@ pub fn gate_integration(store: &Store, task_id: &str) -> Result<String, Error> {
     let config = store.config()?;
     let (remote, main_branch) = store.repository_names()?;
     let main_ref = format!("refs/remotes/{remote}/{main_branch}");
-    let flow = task
-        .flow
-        .as_deref()
-        .unwrap_or(crate::store::config::DEFAULT_FLOW);
-    let (profile_name, profile) = config
-        .task_gate_profile(task_id, flow)
-        .map_err(Error::Failed)?;
-    let profile_name = profile_name.to_owned();
+    // As the approval: the integration of an attempt runs with the profile its verification
+    // ran under, not with a flow profile that changed since (ADR 0048 decisions 10 and 15).
+    let (profile_name, profile) = match attempt_profile(store, task_id, &label) {
+        Some(recorded) => (recorded.name, recorded.profile),
+        None => {
+            let flow = task
+                .flow
+                .as_deref()
+                .unwrap_or(crate::store::config::DEFAULT_FLOW);
+            let (profile_name, profile) = config
+                .task_gate_profile(task_id, flow)
+                .map_err(Error::Failed)?;
+            (profile_name.to_owned(), profile.clone())
+        }
+    };
     let integration_label = next_integration_label(store, task_id, &label)?;
     IntegrationRun {
         repository: store.repo(),
@@ -2943,36 +3020,27 @@ pub fn reject(store: &Store, task_id: &str, note: &str) -> Result<Rejected, Erro
 
 // ---- reasons and verdicts ------------------------------------------------------------
 
-/// Whether every required stage of the task's effective profile passed for `head`. This is
-/// the owner's part of an approval (ADR 0048 decisions 11 and 12): a merge binds to the
-/// verified sha and the digest only when the gate really passed every required stage.
-fn required_stages_passed(store: &Store, task_id: &str, head: &str) -> Result<bool, Error> {
-    let task = store.load_task(task_id)?.item;
-    let config = store.config()?;
-    let flow = task
-        .flow
-        .as_deref()
-        .unwrap_or(crate::store::config::DEFAULT_FLOW);
-    let Ok((_, profile)) = config.task_gate_profile(task_id, flow) else {
-        return Ok(false);
+/// Whether every required stage of the profile a verification ran under passed for `head`.
+/// This is the owner's part of an approval (ADR 0048 decisions 11 and 12): a merge binds to the
+/// verified sha and the digest only when the gate really passed every required stage. `stages`
+/// are the effective stages the gate ran, recorded with the attempt: the flow's profile and
+/// the task's `extra_stages` at the time of the gate run (decision 10).
+fn required_stages_passed(
+    store: &Store,
+    task_id: &str,
+    head: &str,
+    stages: &[StageSpec],
+) -> Result<bool, Error> {
+    let profile = crate::gate::Profile {
+        stages: stages
+            .iter()
+            .copied()
+            .filter(|spec| spec.stage != Stage::Human)
+            .collect(),
+        ..crate::gate::Profile::default()
     };
-    let profile = profile.clone();
-    let extra = extra_stages(&task);
     let verdicts = task_verdicts(store, task_id)?;
-    let mut check_profile = profile;
-    check_profile
-        .stages
-        .retain(|spec| spec.stage != Stage::Human);
-    let check_extra: Vec<StageSpec> = extra
-        .into_iter()
-        .filter(|spec| spec.stage != Stage::Human)
-        .collect();
-    Ok(required_passed(
-        &check_profile,
-        &check_extra,
-        &verdicts,
-        head,
-    ))
+    Ok(required_passed(&profile, &[], &verdicts, head))
 }
 
 /// What `show` prints for a task in `review.verifying` or `review.rework_pending`: the

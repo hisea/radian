@@ -894,8 +894,10 @@ fn recorded_reason(fixture: &Fixture, attempt: u32) -> Value {
 fn reverify_accepts_an_integration_command_failure() {
     let fixture = Fixture::new("reverify-integration-command");
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
-    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    // The integration of an attempt runs with the profile its verification ran under, so the
+    // failing key command is part of that profile before the gate runs.
     fixture.key_commands(&["false"]);
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
     let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
     assert_eq!(
         (merged.state, merged.phase.as_str()),
@@ -944,9 +946,12 @@ fn reverify_accepts_an_integration_command_failure() {
 fn reverify_accepts_an_integration_timeout() {
     let fixture = Fixture::new("reverify-integration-timeout");
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    // The integration of an attempt runs with the profile its verification ran under, so the
+    // timing-out key command is part of that profile before the gate runs; the timeout itself
+    // is read when the integration runs.
+    fixture.key_commands(&["sleep 5"]);
     assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
     fixture.tune("command_timeout_secs = 3600", "command_timeout_secs = 1");
-    fixture.key_commands(&["sleep 5"]);
     let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
     assert_eq!(
         (merged.state, merged.phase.as_str()),
@@ -1237,8 +1242,6 @@ fn merge_with_main_moved_pushes_a_merge_commit() {
 #[test]
 fn merge_integrates_again_when_main_moves_during_the_integration() {
     let fixture = Fixture::new("merge-during");
-    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
-    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
     let marker = fixture.repo.repo.with_file_name("moved-marker");
     let command = format!(
         "if [ ! -f {marker} ]; then touch {marker}; \
@@ -1246,7 +1249,10 @@ fn merge_integrates_again_when_main_moves_during_the_integration() {
          && git push origin HEAD:refs/heads/main; fi",
         marker = marker.display()
     );
+    // The integration of an attempt runs with the profile its verification ran under.
     fixture.key_commands(&[command.as_str()]);
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
 
     let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
     assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));
@@ -1884,7 +1890,6 @@ fn a_changed_verdict_file_invalidates_the_approval() {
 fn a_main_that_keeps_moving_is_never_overwritten() {
     let fixture = Fixture::new("merge-no-force");
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
-    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
     fixture.repo.git(&[
         "config",
         "remote.origin.fetch",
@@ -1897,7 +1902,9 @@ fn a_main_that_keeps_moving_is_never_overwritten() {
          && echo moved >> {}",
         marker.display()
     );
+    // The integration of an attempt runs with the profile its verification ran under.
     fixture.key_commands(&[command.as_str()]);
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
 
     let error = review::merge(&fixture.store, &fixture.task).expect_err("the merge refuses");
     assert_eq!(error.exit(), Exit::State);
@@ -5614,6 +5621,15 @@ fn merge_across_a_switch_change(from: &str, to: &str, label: &str) -> (bool, Opt
     fixture.add_review_stage();
     let switch = |value: &str| format!("propose_followups = {value}");
     fixture.tune(&switch("true"), &switch(from));
+    let config = fixture.store.root().join("config.toml");
+    let at_write = fixture
+        .repo
+        .repo
+        .with_file_name(format!("{label}-at-write.toml"));
+    // The integration of an attempt runs with the profile its verification ran under, so the
+    // key command that installs the new setting is part of that profile before the gate runs.
+    let copy = format!("cp '{}' '{}'", at_write.display(), config.display());
+    fixture.key_commands(&[copy.as_str()]);
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
     let fake = FakeReview::new(
         &format!("{label}-fake"),
@@ -5628,18 +5644,11 @@ fn merge_across_a_switch_change(from: &str, to: &str, label: &str) -> (bool, Opt
         fixture.verifying_with_review(&head, fake.program()).phase,
         "awaiting_human"
     );
-    let config = fixture.store.root().join("config.toml");
-    let at_write = fixture
-        .repo
-        .repo
-        .with_file_name(format!("{label}-at-write.toml"));
     let switched =
         fs::read_to_string(&config)
             .expect("config.toml")
             .replacen(&switch(from), &switch(to), 1);
     fs::write(&at_write, switched).expect("the config at the write");
-    let copy = format!("cp '{}' '{}'", at_write.display(), config.display());
-    fixture.key_commands(&[copy.as_str()]);
 
     let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
     assert_eq!((merged.state, merged.phase.as_str()), ("done", "merged"));

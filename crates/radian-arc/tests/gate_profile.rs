@@ -253,6 +253,73 @@ fn the_background_integration_uses_the_tasks_profile() {
     assert_eq!(integration.commands.len(), 1);
 }
 
+/// The background integration reads the profile the attempt's verification ran under, not the
+/// flow's profile after a change: the started gate's `key_commands` run on the candidate.
+#[test]
+fn a_background_integration_keeps_the_verifications_profile() {
+    let (repo, store) = setup("gate-profile-integration-changed");
+    append_config(
+        &store,
+        "[gate.profiles.image]\n\
+         stages = [{ stage = \"review\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         key_commands = [\"true\"]\n\
+         \n\
+         [gate.profiles.after]\n\
+         stages = [{ stage = \"review\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         \n\
+         [flows.image]\n\
+         gate_profile = \"image\"\n",
+    );
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let image = store
+        .add_task_with_flow(
+            &plan,
+            "image",
+            "Image",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "brief\n",
+            Some("image"),
+        )
+        .expect("add the image task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let base = repo.rev("main");
+    let head = publish(&repo, &image, &base, "image.txt", "image\n");
+    set_verifying(&store, &image, &head, &base);
+    let fake = FakeReview::new(
+        "gate-profile-image-integration-changed",
+        &[review_message("the image change is fine", &[], &[])],
+        0,
+    );
+    review::verify_with(&store, &image, Some(fake.program())).expect("the image gate runs");
+
+    tune(
+        &store,
+        "gate_profile = \"image\"",
+        "gate_profile = \"after\"",
+    );
+    store
+        .change_task(&image, |task| {
+            task.phase = "integrating".to_owned();
+            Ok(())
+        })
+        .expect("the task is integrating");
+    let label = review::gate_integration(&store, &image).expect("the background integration runs");
+    let integration = Verdict::read(
+        &verdict_path(store.repo(), &image, &label, Stage::Integration)
+            .expect("the integration verdict path"),
+    )
+    .expect("the integration verdict reads");
+    assert!(integration.is_pass(), "{:?}", integration.reason);
+    assert_eq!(integration.profile.as_deref(), Some("image"));
+    assert_eq!(integration.commands.len(), 1);
+}
+
 /// A repository with no `[flows]` table keeps gating with `gate.profile`, including a
 /// profile that is not `default`.
 #[test]
@@ -543,6 +610,177 @@ fn a_flow_removed_after_the_gate_started_still_applies_its_verdicts() {
         vec!["commands.json".to_owned()],
         "the gate ran again under the implicit default flow"
     );
+}
+
+/// A flow whose `gate_profile` changes after a completed gate is applied still merges that
+/// gate's verdicts: the acceptance and the integration run with the profile the verification
+/// ran under, not the one the flow names now (ADR 0048 decisions 10 and 15).
+#[test]
+fn a_changed_flow_profile_still_merges_the_started_gates_verdicts() {
+    let repo = Repo::new("gate-profile-changed-after-apply");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    append_config(
+        &store,
+        "[gate.profiles.running]\n\
+         stages = [{ stage = \"commands\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         commands = [\"true\"]\n\
+         key_commands = [\"true\"]\n\
+         \n\
+         [gate.profiles.after]\n\
+         stages = [{ stage = \"review\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         \n\
+         [flows.art]\n\
+         gate_profile = \"running\"\n",
+    );
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task_with_flow(
+            &plan,
+            "art",
+            "Art",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "brief\n",
+            Some("art"),
+        )
+        .expect("add the art task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let base = repo.main_sha();
+    let branch = format!("work/{task}");
+    repo.git(&["checkout", "-B", &branch, &base]);
+    write(&repo.clone.join("art.txt"), "art\n");
+    repo.git(&["add", "art.txt"]);
+    repo.git(&["commit", "-m", "art"]);
+    repo.git(&["push", "origin", &branch]);
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    set_verifying(&store, &task, &head, &base);
+
+    let gate = repo.radian(&["arc", "gate", "--task", &task]);
+    assert_eq!(gate.code, 0, "gate: {}", gate.stderr);
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    let applied = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        (applied.state.as_str(), applied.phase.as_str()),
+        ("review", "awaiting_human"),
+        "the applied gate: {run:?}"
+    );
+
+    // The flow now names a `review`-only profile, after the gate was applied.
+    tune(
+        &store,
+        "gate_profile = \"running\"",
+        "gate_profile = \"after\"",
+    );
+    let merged = repo.radian(&["arc", "merge", &task]);
+    assert_eq!(
+        merged.code, 0,
+        "merge: {}\n{}",
+        merged.stdout, merged.stderr
+    );
+    assert!(merged.stdout.contains("done.merged"), "{}", merged.stdout);
+    let integration = Verdict::read(
+        &verdict_path(
+            store.repo(),
+            &task,
+            &format!("{task}-1"),
+            Stage::Integration,
+        )
+        .expect("the integration verdict path"),
+    )
+    .expect("the integration verdict reads");
+    assert!(integration.is_pass(), "{:?}", integration.reason);
+    assert_eq!(integration.profile.as_deref(), Some("running"));
+    assert_eq!(
+        integration.commands.len(),
+        1,
+        "the started gate's profile `key_commands` ran on the merge candidate"
+    );
+}
+
+/// A flow removed after a completed gate is applied still merges that gate's verdicts: the
+/// acceptance and the integration do not resolve the task's now-missing flow.
+#[test]
+fn a_flow_removed_after_apply_still_merges_the_started_gates_verdicts() {
+    let repo = Repo::new("gate-profile-flow-removed-after-apply");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    append_config(
+        &store,
+        "[gate.profiles.art]\n\
+         stages = [{ stage = \"commands\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         commands = [\"true\"]\n\
+         key_commands = [\"true\"]\n\
+         \n\
+         [flows.art]\n\
+         gate_profile = \"art\"\n",
+    );
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task_with_flow(
+            &plan,
+            "art",
+            "Art",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "brief\n",
+            Some("art"),
+        )
+        .expect("add the art task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let base = repo.main_sha();
+    let branch = format!("work/{task}");
+    repo.git(&["checkout", "-B", &branch, &base]);
+    write(&repo.clone.join("art.txt"), "art\n");
+    repo.git(&["add", "art.txt"]);
+    repo.git(&["commit", "-m", "art"]);
+    repo.git(&["push", "origin", &branch]);
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    set_verifying(&store, &task, &head, &base);
+
+    let gate = repo.radian(&["arc", "gate", "--task", &task]);
+    assert_eq!(gate.code, 0, "gate: {}", gate.stderr);
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    let applied = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        (applied.state.as_str(), applied.phase.as_str()),
+        ("review", "awaiting_human"),
+        "the applied gate: {run:?}"
+    );
+
+    // The flow is gone; the file stays valid through the implicit `default` flow.
+    tune(&store, "[flows.art]\ngate_profile = \"art\"\n", "");
+    let merged = repo.radian(&["arc", "merge", &task]);
+    assert_eq!(
+        merged.code, 0,
+        "merge: {}\n{}",
+        merged.stdout, merged.stderr
+    );
+    assert!(merged.stdout.contains("done.merged"), "{}", merged.stdout);
+    let integration = Verdict::read(
+        &verdict_path(
+            store.repo(),
+            &task,
+            &format!("{task}-1"),
+            Stage::Integration,
+        )
+        .expect("the integration verdict path"),
+    )
+    .expect("the integration verdict reads");
+    assert!(integration.is_pass(), "{:?}", integration.reason);
+    assert_eq!(integration.profile.as_deref(), Some("art"));
+    assert_eq!(integration.commands.len(), 1);
 }
 
 // ---- `before_attempt` follows the flow's profile ------------------------------------

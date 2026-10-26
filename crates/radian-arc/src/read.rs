@@ -796,6 +796,10 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
         .task_gate_profile(&item.id, flow)
         .ok()
         .map(|(_, profile)| profile.clone());
+    // A verification records the profile it ran under with its attempt. When it did, that is
+    // the profile this view shows, even after the flow or its `gate_profile` changed (ADR 0048
+    // decisions 10 and 15); otherwise the current profile is the best answer.
+    let recorded = crate::review::attempt_profile(store, &item.id, &label);
     // The effective stages are the profile's plus the task's `extra_stages` (every name was
     // checked when the task file was read).
     let extra: Vec<Stage> = item
@@ -810,10 +814,15 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
         .collect();
     let in_profile = |stage: Stage| {
         stage == Stage::Integration
-            || extra.contains(&stage)
-            || profile
-                .as_ref()
-                .is_some_and(|profile| profile.stages.iter().any(|spec| spec.stage == stage))
+            || match &recorded {
+                Some(recorded) => recorded.stages.iter().any(|spec| spec.stage == stage),
+                None => {
+                    extra.contains(&stage)
+                        || profile.as_ref().is_some_and(|profile| {
+                            profile.stages.iter().any(|spec| spec.stage == stage)
+                        })
+                }
+            }
     };
     let review_stage = in_profile(Stage::Review);
 

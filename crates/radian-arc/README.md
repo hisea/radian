@@ -502,7 +502,10 @@ two start at the same time and the round's outcome follows the list's order (`co
 first); every other stage runs in the list's order. This build runs `commands` and `review`; a
 profile or task that lists `mutation` or `ci` is refused with `stage <name> is not built yet`
 and the task stays in `review.verifying`. An existing verdict for the current attempt and
-stage is reused, so a gate that died between stages resumes.
+stage is reused, so a gate that died between stages resumes. A passing verification writes the
+profile it ran under (its name, stages, `commands` and `key_commands`) to the attempt's
+`profile.json`, next to the verdicts; the approval and the integration of that attempt read it
+instead of resolving the flow again.
 
 `review` (`ReviewRun`) is a read-only session on the same candidate. It runs at the same time
 as `commands` and before `human`; a profile that lists both must list `commands` first. Up to
@@ -572,9 +575,12 @@ nothing, and is not an automatic rework.
 the recorded one. A changed digest returns the task to `review.verifying` with the reason,
 like a moved branch, so `run` or `start` verifies it again. `prepare_merge` writes the owner's
 `human` pass verdict (`approver` absent, or `auto` when the loop approves) and moves to
-`review.integrating`; then `radian arc merge` runs `IntegrationRun` with the profile's
-`key_commands` and finishes the push in the same command, while `review::merge_step` starts
-the integration in a background gate and the next pass calls `finish_integration`. Either
+`review.integrating`; then `radian arc merge` runs `IntegrationRun` with the `key_commands` of
+the profile the attempt's verification recorded in `profile.json` and finishes the push in the
+same command, while `review::merge_step` starts the integration in a background gate and the
+next pass calls `finish_integration`. A flow removed or a `gate_profile` changed after the gate
+ran therefore changes neither the approval's required stages nor the integration; only a
+verification from before the record existed resolves the flow's current profile. Either
 path moves to `review.ready_to_merge` and pushes `<candidate>:refs/heads/<main>` without
 force. A main that moved after integration, or a rejected push, makes it integrate again
 (one round per pass in the loop; at most three runs per `radian arc merge` command). On

@@ -1305,3 +1305,22 @@ sources were restored from copies under `.radian/mut/` with `cp` and compared wi
 | TK0166-M4 | the gate omits the planned profile from its `done` record | `gate_profile::a_started_gate_keeps_the_profile_it_ran_under` (`record["profile"]["name"]` is `Null`, not `"running"`) | ✅ failed |
 
 2/2 caught.
+
+## TK0166 rework 4: the attempt keeps its profile through the approval and the integration (2026-10-26, branch `work/TK0166-per-flow-gate-profile`)
+
+The review found that `prepare_merge` resolved the flow's `gate_profile` again after the
+verdicts were applied: a removed flow failed `arc merge`, and a profile changed from
+`commands` to `review` judged the old verdicts by the new requirement. A verification now
+writes the profile it ran under to the attempt's `profile.json`, and the approval, the
+required-stage check and the integration of that attempt read it. Each mutation was applied
+by hand to `crates/radian-arc/src/review/mod.rs`. The named tests ran with `cargo nextest run
+-p radian-arc --locked --profile sandbox --test gate_profile`, and M5's test drives the
+binary, so it needed `cargo build -p radian-tui --bin radian` after the mutation. The source
+was restored from `.radian/mut/review_mod.rs` with `cp` and compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0166-M5 | `prepare_merge` ignores the attempt's recorded profile and resolves the flow's `gate_profile` again (the pre-rework `match`) | `gate_profile::a_changed_flow_profile_still_merges_the_started_gates_verdicts` (`arc merge` exits 3: `every required stage must pass`); `gate_profile::a_flow_removed_after_apply_still_merges_the_started_gates_verdicts` (exit 1: the file defines no `art` flow) | ✅ 2 failed |
+| TK0166-M6 | `gate_integration` ignores the attempt's recorded profile and resolves the flow's `gate_profile` again | `gate_profile::a_background_integration_keeps_the_verifications_profile` (the verdict names `after`, not `image`) | ✅ failed |
+
+2/2 caught.
