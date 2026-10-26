@@ -1287,4 +1287,261 @@ fn the_manual_names_the_flow_keys_and_the_task_field() {
             .any(|row| row.first().is_some_and(|cell| cell == "`flow`")),
         "the task fields table has no `flow` row: {task_fields:?}"
     );
+    assert_eq!(default_cell("flows.<name>.allow_noop"), "`false`");
+    let allow_noop = task_fields
+        .iter()
+        .find(|row| row.first().is_some_and(|cell| cell == "`allow_noop`"))
+        .unwrap_or_else(|| {
+            panic!("the task fields table has no `allow_noop` row: {task_fields:?}")
+        });
+    assert!(
+        allow_noop
+            .iter()
+            .any(|cell| cell.contains("flows.<name>.allow_noop")),
+        "the task field's row names the flow's value it falls back to: {allow_noop:?}"
+    );
+    let index = std::fs::read_to_string(manifest.join("../../docs/user/arc/index.md"))
+        .expect("docs/user/arc/index.md");
+    let source_line = index
+        .lines()
+        .find(|line| line.contains("`allow_noop_source` is"))
+        .expect("arc/index.md explains `allow_noop_source`");
+    for source in radian_arc::store::model::ALLOW_NOOP_SOURCES {
+        assert!(
+            source_line.contains(&format!("`{source}`")),
+            "arc/index.md names the source `{source}`: {source_line}"
+        );
+    }
+}
+
+/// `model_args` as the inside of a TOML array of strings.
+fn toml_strings(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| format!("\"{arg}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A task without its own `allow_noop` takes its flow's `true`: an attempt that adds no commit
+/// passes the delivery check, reaches `review.awaiting_human`, and the task file stays without
+/// the field (ADR 0048 decisions 8 and 15).
+///
+/// Mutation TK0168-M1: the task's unset value reads as `false` instead of the flow's.
+#[test]
+fn a_flow_allow_noop_lets_a_task_without_the_field_deliver_nothing() {
+    let (repo, store) = setup("flows-noop-flow");
+    let mock = Mock::start(vec![text_reply("nothing to do")]);
+    add_flows(
+        &repo,
+        &format!(
+            "[flows.quiet]\nexec_args = [{}]\nallow_noop = true\n",
+            toml_strings(&model_args(mock.base_url()))
+        ),
+    );
+    let plan = store.add_plan("plan", "Plan", "request").unwrap();
+    let task = store
+        .add_task_opt(
+            &plan,
+            "quiet",
+            "Quiet",
+            vec![],
+            None,
+            vec![],
+            "brief\n",
+            Some("quiet"),
+        )
+        .unwrap();
+    plan_ops::confirm(&store, &plan).expect("confirm");
+
+    let run = repo.radian(&["arc", "start", &task]);
+    assert_eq!(run.code, 0, "start: {}", run.stderr);
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "awaiting_human".to_owned()),
+        "{}",
+        run.stdout
+    );
+    let path = repo.clone.join(format!(".radian/arc/tasks/{task}.md"));
+    let file = fs::read_to_string(&path).unwrap();
+    assert!(
+        !file.contains("allow_noop:"),
+        "the field stays absent:\n{file}"
+    );
+
+    let shown: Value =
+        serde_json::from_str(&repo.radian(&["arc", "show", &task, "--json"]).stdout).unwrap();
+    assert_eq!(shown["allow_noop"], json!(true), "{shown}");
+    assert_eq!(shown["allow_noop_source"], json!("flow"), "{shown}");
+    let text = repo.radian(&["arc", "show", &task]);
+    assert!(text.stdout.contains("allow_noop: true"), "{}", text.stdout);
+    assert!(
+        text.stdout.contains("allow_noop_source: flow"),
+        "{}",
+        text.stdout
+    );
+}
+
+/// The same permissive flow with a task that sets `allow_noop: false`: the task's own value
+/// wins, so an empty attempt fails the delivery check and waits for rework.
+///
+/// Mutation TK0168-M2: the flow's value overrides an explicit task `false`.
+#[test]
+fn an_explicit_task_false_beats_a_permissive_flow() {
+    let (repo, store) = setup("flows-noop-explicit");
+    let mock = Mock::start(vec![text_reply("nothing to do")]);
+    add_flows(
+        &repo,
+        &format!(
+            "[flows.quiet]\nexec_args = [{}]\nallow_noop = true\n",
+            toml_strings(&model_args(mock.base_url()))
+        ),
+    );
+    let plan = store.add_plan("plan", "Plan", "request").unwrap();
+    let task = store
+        .add_task_opt(
+            &plan,
+            "loud",
+            "Loud",
+            vec![],
+            Some(false),
+            vec![],
+            "brief\n",
+            Some("quiet"),
+        )
+        .unwrap();
+    plan_ops::confirm(&store, &plan).expect("confirm");
+
+    let run = repo.radian(&["arc", "start", &task]);
+    assert_eq!(run.code, 0, "start: {}", run.stderr);
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "rework_pending".to_owned()),
+        "{}",
+        run.stdout
+    );
+    assert!(run.stdout.contains("no change"), "{}", run.stdout);
+    let result = record(&repo.run_dir(&task, 1), "attempt_result.json");
+    assert_eq!(result["class"], json!("verification"), "{result}");
+
+    let path = repo.clone.join(format!(".radian/arc/tasks/{task}.md"));
+    let file = fs::read_to_string(&path).unwrap();
+    assert!(file.contains("allow_noop: false"), "{file}");
+    let shown: Value =
+        serde_json::from_str(&repo.radian(&["arc", "show", &task, "--json"]).stdout).unwrap();
+    assert_eq!(shown["allow_noop"], json!(false), "{shown}");
+    assert_eq!(shown["allow_noop_source"], json!("task"), "{shown}");
+}
+
+/// A task file an earlier arc wrote carries `allow_noop: false`: it reads as the task's own
+/// explicit `false`, not as "not set", and a later write keeps the line (ADR 0048 decision 5).
+#[test]
+fn an_old_task_file_keeps_its_explicit_false() {
+    let (repo, store) = setup("flows-noop-old");
+    let plan = store.add_plan("plan", "Plan", "request").unwrap();
+    let task = store
+        .add_task_opt(&plan, "old", "Old", vec![], None, vec![], "brief\n", None)
+        .unwrap();
+    let path = repo.clone.join(format!(".radian/arc/tasks/{task}.md"));
+    let file = fs::read_to_string(&path).unwrap();
+    assert!(!file.contains("allow_noop:"), "{file}");
+    // What an older build wrote: the field present and `false`.
+    let old = file.replace("---\n", "---\nallow_noop: false\n");
+    fs::write(&path, &old).unwrap();
+    store.adopt(&task).expect("adopt the old file");
+
+    let loaded = store.load_task(&task).unwrap().item;
+    assert_eq!(loaded.allow_noop, Some(false), "the field stays explicit");
+    assert_eq!(loaded.allow_noop_source(), "task");
+    plan_ops::update_task(&store, &task, Some("Old, renamed"), None, None, None, None)
+        .expect("update the title");
+    let rewritten = fs::read_to_string(&path).unwrap();
+    assert!(
+        rewritten.contains("allow_noop: false"),
+        "a later write keeps the explicit false:\n{rewritten}"
+    );
+}
+
+/// The lead's MCP `add_task` without `allow_noop` writes no field, so the task uses its flow's
+/// value (ADR 0048 decisions 8, 11 and 15).
+#[test]
+fn the_mcp_add_task_without_allow_noop_writes_no_field() {
+    let (repo, store) = setup("flows-noop-mcp");
+    let plan = store.add_plan("plan", "Plan", "request").unwrap();
+    let server = ArcServer::new(store.clone());
+    let added = server
+        .dispatch(
+            "add_task",
+            json!({"plan": plan, "slug": "quiet", "title": "Quiet", "brief": "b"})
+                .as_object()
+                .cloned(),
+        )
+        .expect("add_task");
+    let task = added["id"].as_str().expect("an id").to_owned();
+    let path = repo.clone.join(format!(".radian/arc/tasks/{task}.md"));
+    let file = fs::read_to_string(&path).unwrap();
+    assert!(
+        !file.contains("allow_noop:"),
+        "the argument is absent, so the field is:\n{file}"
+    );
+    let shown: Value =
+        serde_json::from_str(&repo.radian(&["arc", "show", &task, "--json"]).stdout).unwrap();
+    assert_eq!(shown["allow_noop"], json!(false), "{shown}");
+    assert_eq!(shown["allow_noop_source"], json!("flow"), "{shown}");
+}
+
+/// A repository without `[flows]` keeps today's behavior: the implicit `default` flow's
+/// `allow_noop` is `false`, a task without the field uses it, and `add_task` still writes the
+/// explicit value a caller gives (ADR 0048 decisions 8 and 15).
+#[test]
+fn a_repository_without_flows_uses_the_default_flows_false() {
+    let (repo, store) = setup("flows-noop-none");
+    assert!(!store.config().unwrap().flows_configured);
+    let plan = store.add_plan("plan", "Plan", "request").unwrap();
+    let inherited = store
+        .add_task_opt(
+            &plan,
+            "inherited",
+            "Inherited",
+            vec![],
+            None,
+            vec![],
+            "brief\n",
+            None,
+        )
+        .unwrap();
+    let explicit = store
+        .add_task(
+            &plan,
+            "explicit",
+            "Explicit",
+            vec![],
+            true,
+            vec![],
+            "brief\n",
+        )
+        .unwrap();
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let claim = radian_arc::store::attempt_ops::claim(&store, &inherited).expect("the claim");
+    assert!(
+        !claim.allow_noop,
+        "the default flow's allow_noop is false, as before"
+    );
+
+    let path = repo.clone.join(format!(".radian/arc/tasks/{inherited}.md"));
+    assert!(!fs::read_to_string(&path).unwrap().contains("allow_noop:"));
+    let shown: Value =
+        serde_json::from_str(&repo.radian(&["arc", "show", &inherited, "--json"]).stdout).unwrap();
+    assert_eq!(shown["allow_noop"], json!(false), "{shown}");
+    assert_eq!(shown["allow_noop_source"], json!("flow"), "{shown}");
+
+    let explicit_file = repo.clone.join(format!(".radian/arc/tasks/{explicit}.md"));
+    assert!(
+        fs::read_to_string(&explicit_file)
+            .unwrap()
+            .contains("allow_noop: true")
+    );
+    let shown: Value =
+        serde_json::from_str(&repo.radian(&["arc", "show", &explicit, "--json"]).stdout).unwrap();
+    assert_eq!(shown["allow_noop"], json!(true), "{shown}");
+    assert_eq!(shown["allow_noop_source"], json!("task"), "{shown}");
 }

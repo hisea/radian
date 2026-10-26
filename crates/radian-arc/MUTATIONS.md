@@ -1324,3 +1324,30 @@ was restored from `.radian/mut/review_mod.rs` with `cp` and compared with `cmp`.
 | TK0166-M6 | `gate_integration` ignores the attempt's recorded profile and resolves the flow's `gate_profile` again | `gate_profile::a_background_integration_keeps_the_verifications_profile` (the verdict names `after`, not `image`) | ✅ failed |
 
 2/2 caught.
+
+## TK0168: a task's `allow_noop` defaults from its flow (2026-10-26, branch `work/TK0168-flow-allow-noop-default`)
+
+A task's `allow_noop` is now `Option<bool>`: an absent field takes its flow's
+`flows.<name>.allow_noop`, and an explicit `true` or `false` stays the task's own. The claim
+resolves the value through `TaskFile::effective_allow_noop`, so the delivery check of each
+attempt reads it. Each mutation was applied by hand to
+`crates/radian-arc/src/store/model.rs`, the two binaries were rebuilt with
+`cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture`, and the named
+test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test flows`. The source was
+restored from `.radian/mut/model.rs` with `cp` and compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0168-M1 | an unset `allow_noop` reads as `false` instead of its flow's value (`effective_allow_noop` uses `unwrap_or(false)`) | `flows::a_flow_allow_noop_lets_a_task_without_the_field_deliver_nothing` (the empty attempt ends `review.rework_pending` with `no change`, not `review.awaiting_human`) | ✅ failed |
+| TK0168-M2 | the flow's value overrides an explicit task `false` (`effective_allow_noop` returns the flow's value alone) | `flows::an_explicit_task_false_beats_a_permissive_flow` (the empty attempt reaches `review.awaiting_human` instead of `review.rework_pending`) | ✅ failed |
+
+2/2 caught.
+
+The same run also checked the file-writing tests against the old shape: making
+`TaskFile::new` write `Some(false)` for an absent value (an older build always wrote the
+field) failed all four tests that read the task file:
+`a_flow_allow_noop_lets_a_task_without_the_field_deliver_nothing`,
+`an_old_task_file_keeps_its_explicit_false`,
+`the_mcp_add_task_without_allow_noop_writes_no_field` and
+`a_repository_without_flows_uses_the_default_flows_false`.

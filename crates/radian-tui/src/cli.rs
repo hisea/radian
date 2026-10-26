@@ -759,9 +759,10 @@ enum ArcAddCommand {
         /// A task this one waits for: a task of the same plan, or a done task. Repeat it.
         #[arg(long = "after", value_name = "ID")]
         after: Vec<String>,
-        /// The task may deliver no change on purpose.
-        #[arg(long)]
-        allow_noop: bool,
+        /// The task may deliver no change on purpose. Without the flag the task uses its
+        /// flow's [flows.<name>] allow_noop; `--allow-noop` alone means `true`.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        allow_noop: Option<bool>,
         /// An extra gate stage to run for this task. Repeat it.
         #[arg(
             long = "stage",
@@ -3113,7 +3114,7 @@ mod tests {
             cost_unknown: true,
             auto_rework: 2,
             retry_count: 1,
-            allow_noop: false,
+            allow_noop: Some(false),
             followup_pending: true,
             extra_stages: vec!["mutation".to_owned()],
             max_attempts: Some(2),

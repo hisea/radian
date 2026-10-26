@@ -30,6 +30,17 @@ pub const PLAN_PRIORITIES: &[&str] = &["P0", "P1", "P2", "P3", "P4", "P5"];
 /// field existed, which arc writes back unchanged until the owner changes the priority.
 pub const DEFAULT_PRIORITY: &str = "P3";
 
+/// The source of a task's effective `allow_noop`: the task file carries the field.
+pub const ALLOW_NOOP_TASK: &str = "task";
+
+/// The source of a task's effective `allow_noop`: the field is absent, so the value is the
+/// task's flow's.
+pub const ALLOW_NOOP_FLOW: &str = "flow";
+
+/// The two sources of a task's effective `allow_noop`, in the order `show` documents them
+/// (ADR 0048 decisions 8 and 15). One list: the code, the manual and its drift test read it.
+pub const ALLOW_NOOP_SOURCES: &[&str] = &[ALLOW_NOOP_TASK, ALLOW_NOOP_FLOW];
+
 /// Where `priority` sits in [`PLAN_PRIORITIES`]: `0` for `P0`, the highest. A value the list
 /// does not hold sorts last (a stored file is checked when it is read).
 pub fn priority_rank(priority: &str) -> usize {
@@ -374,7 +385,11 @@ pub struct TaskFile {
     /// counts this, not the attempt number; a lead or review rework sets it back to `0`, and a
     /// conflict rework keeps it.
     pub retry_count: u32,
-    pub allow_noop: bool,
+    /// The task's own `allow_noop`: `Some` when its file carries the field, `None` when it does
+    /// not, so the task uses its flow's `flows.<name>.allow_noop` (ADR 0048 decisions 8 and
+    /// 15). A file written by an earlier build carries `allow_noop: false`, which stays an
+    /// explicit `false`.
+    pub allow_noop: Option<bool>,
     /// Whether the task merged under the review follow-up rule: arc writes it when the task
     /// reaches `done.merged` while `[gate.review] propose_followups` is `true` and the task is
     /// not itself a follow-up (ADR 0048 decision 10). Only a task that carries it is
@@ -456,6 +471,26 @@ impl TaskFile {
         self.cost_unknown
     }
 
+    /// The task's `allow_noop` as the delivery check reads it: its own value when its file
+    /// carries one, else its flow's `flows.<name>.allow_noop` (ADR 0048 decisions 8 and 15).
+    /// A flow the file does not define contributes `false`; the claim refuses such a task
+    /// before any attempt runs.
+    pub fn effective_allow_noop(&self, config: &super::config::Config) -> bool {
+        self.allow_noop.unwrap_or_else(|| {
+            config.flow_allow_noop(self.flow.as_deref().unwrap_or(super::config::DEFAULT_FLOW))
+        })
+    }
+
+    /// Where [`TaskFile::effective_allow_noop`] came from: `task` when the task file carries
+    /// the field, `flow` when it does not.
+    pub fn allow_noop_source(&self) -> &'static str {
+        if self.allow_noop.is_some() {
+            ALLOW_NOOP_TASK
+        } else {
+            ALLOW_NOOP_FLOW
+        }
+    }
+
     /// Adds one attempt's or one review stage's cost to both counters. The first write of a
     /// file that has no `total_cost_usd` starts the total from its `cost_usd`.
     pub fn add_cost(&mut self, cost: f64) {
@@ -471,7 +506,7 @@ impl TaskFile {
         plan: String,
         title: String,
         after: Vec<String>,
-        allow_noop: bool,
+        allow_noop: Option<bool>,
         extra_stages: Vec<String>,
         brief: &str,
     ) -> Self {
@@ -547,7 +582,9 @@ impl TaskFile {
         if self.retry_count > 0 {
             out.push_str(&format!("retry_count: {}\n", self.retry_count));
         }
-        out.push_str(&format!("allow_noop: {}\n", self.allow_noop));
+        if let Some(allow_noop) = self.allow_noop {
+            out.push_str(&format!("allow_noop: {allow_noop}\n"));
+        }
         if self.followup_pending {
             out.push_str("followup_pending: true\n");
         }
@@ -638,7 +675,7 @@ impl TaskFile {
         let cost_unknown = fields.optional_bool("cost_unknown")?.unwrap_or(false);
         let auto_rework = fields.optional_u32("auto_rework")?.unwrap_or(0);
         let retry_count = fields.optional_u32("retry_count")?.unwrap_or(0);
-        let allow_noop = fields.optional_bool("allow_noop")?.unwrap_or(false);
+        let allow_noop = fields.optional_bool("allow_noop")?;
         let followup_pending = fields.optional_bool("followup_pending")?.unwrap_or(false);
         let extra_stages = fields.optional_list("extra_stages")?;
         for stage in &extra_stages {
@@ -876,7 +913,7 @@ mod tests {
             cost_unknown: true,
             auto_rework: 2,
             retry_count: 1,
-            allow_noop: true,
+            allow_noop: Some(true),
             followup_pending: true,
             extra_stages: vec!["mutation".to_owned(), "review".to_owned()],
             max_attempts: Some(2),
@@ -1026,7 +1063,7 @@ mod tests {
             "PL0001-a".into(),
             "A".into(),
             Vec::new(),
-            false,
+            Some(false),
             Vec::new(),
             "the brief\n",
         );

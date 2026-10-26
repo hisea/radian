@@ -421,7 +421,7 @@ pub fn update_task_with_flow(
             changed.push("after");
         }
         if let Some(allow_noop) = allow_noop {
-            task_file.allow_noop = allow_noop;
+            task_file.allow_noop = Some(allow_noop);
             changed.push("allow_noop");
         }
         if let Some(stages) = extra_stages {

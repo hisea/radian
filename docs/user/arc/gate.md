@@ -104,7 +104,7 @@ A task whose brief allows it, such as the review's follow-up, may deliver nothin
 - `human` is your approval and does not change: it still binds to `verified_sha` and `verdict_set_digest`.
 - `integration` merges the empty change onto the current main (the candidate is the remote main when main moved) and runs the profile's `key_commands` on it as usual.
 
-`allow_noop` is the task field that lets a worker deliver no commit (see [Task fields](files.md#task-fields)).
+A task's `allow_noop` is its own value when its file carries one, else its flow's [`flows.<name>.allow_noop`](files.md#configtoml); the delivery check of each attempt reads it, at the attempt's claim (see [Task fields](files.md#task-fields)).
 
 `list` and `show` do not use the network: they do not check the remote and cannot see a branch that moved after the gate.
 `merge` checks the remote before it acts.

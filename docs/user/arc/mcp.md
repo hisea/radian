@@ -127,9 +127,9 @@ Claude Code ignores the flag in a non-interactive `-p` session, so the events re
 | Tool | Parameters | Result |
 |---|---|---|
 | `add_plan` | `slug` (string, required), `title` (string, required), `request` (string, required) | `{"id": "<plan id>"}` |
-| `add_task` | `plan` (string, required), `slug` (string, required), `title` (string, required), `brief` (string, required), `after` (list of ids, optional), `allow_noop` (boolean, optional, default `false`), `extra_stages` (list of stage names, optional), `flow` (string, optional, default `default`) | `{"id": "<task id>"}` |
+| `add_task` | `plan` (string, required), `slug` (string, required), `title` (string, required), `brief` (string, required), `after` (list of ids, optional), `allow_noop` (boolean, optional; absent: the task's flow's `flows.<name>.allow_noop`, else `false`), `extra_stages` (list of stage names, optional), `flow` (string, optional, default `default`) | `{"id": "<task id>"}` |
 | `update_plan` | `plan` (string, required), `title` (string, optional), `request` (string, optional), `change_record` (string, optional) | the plan, as `radian arc show <plan> --json` |
-| `update_task` | `task` (string, required), `title` (string, optional, non-empty), `brief` (string, optional, non-empty), `after` (list of ids, optional), `allow_noop` (boolean, optional), `extra_stages` (list of stage names, optional), `flow` (string, optional) | the task, as `radian arc show <task> --json` |
+| `update_task` | `task` (string, required), `title` (string, optional, non-empty), `brief` (string, optional, non-empty), `after` (list of ids, optional), `allow_noop` (boolean, optional; an explicit value overrides the flow's), `extra_stages` (list of stage names, optional), `flow` (string, optional) | the task, as `radian arc show <task> --json` |
 | `add_rework` | `task` (string, required), `brief` (string, required) | the task, as `radian arc show <task> --json` |
 | `list` | `plan` (string, optional: only this plan) | the JSON array `radian arc list --json` prints |
 | `show` | `id` (string, required) | the JSON object `radian arc show --json` prints, a task's `waits_on`, `blocks`, `never_runs` and `cycle` included |

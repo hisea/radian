@@ -670,6 +670,8 @@ impl Store {
 
     /// Appends one task to a plan, in one transaction: the task file, its ledger entry, and
     /// the plan's `tasks` list. `radian arc add task` uses this: a confirmed plan gets no task.
+    /// It writes the task's `allow_noop` explicitly; [`Store::add_task_opt`] keeps it unset
+    /// when the caller does not give one.
     #[allow(clippy::too_many_arguments)]
     pub fn add_task(
         &self,
@@ -681,12 +683,12 @@ impl Store {
         extra_stages: Vec<String>,
         brief: &str,
     ) -> Result<String, Error> {
-        self.add_task_with_flow(
+        self.add_task_opt(
             plan_id,
             slug,
             title,
             after,
-            allow_noop,
+            Some(allow_noop),
             extra_stages,
             brief,
             None,
@@ -704,6 +706,33 @@ impl Store {
         title: &str,
         after: Vec<String>,
         allow_noop: bool,
+        extra_stages: Vec<String>,
+        brief: &str,
+        flow: Option<&str>,
+    ) -> Result<String, Error> {
+        self.add_task_opt(
+            plan_id,
+            slug,
+            title,
+            after,
+            Some(allow_noop),
+            extra_stages,
+            brief,
+            flow,
+        )
+    }
+
+    /// [`Store::add_task_with_flow`] with the task's own `allow_noop` kept apart from "not
+    /// set": `Some` writes the field, `None` leaves it out so the task uses its flow's
+    /// `flows.<name>.allow_noop` (ADR 0048 decisions 8 and 15).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_task_opt(
+        &self,
+        plan_id: &str,
+        slug: &str,
+        title: &str,
+        after: Vec<String>,
+        allow_noop: Option<bool>,
         extra_stages: Vec<String>,
         brief: &str,
         flow: Option<&str>,
@@ -735,12 +764,12 @@ impl Store {
         extra_stages: Vec<String>,
         brief: &str,
     ) -> Result<String, Error> {
-        self.add_task_proposed_with_flow(
+        self.add_task_proposed_opt(
             plan_id,
             slug,
             title,
             after,
-            allow_noop,
+            Some(allow_noop),
             extra_stages,
             brief,
             None,
@@ -756,6 +785,32 @@ impl Store {
         title: &str,
         after: Vec<String>,
         allow_noop: bool,
+        extra_stages: Vec<String>,
+        brief: &str,
+        flow: Option<&str>,
+    ) -> Result<String, Error> {
+        self.add_task_proposed_opt(
+            plan_id,
+            slug,
+            title,
+            after,
+            Some(allow_noop),
+            extra_stages,
+            brief,
+            flow,
+        )
+    }
+
+    /// [`Store::add_task_proposed_with_flow`] with the task's own `allow_noop` kept apart
+    /// from "not set" (ADR 0048 decisions 8 and 15).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_task_proposed_opt(
+        &self,
+        plan_id: &str,
+        slug: &str,
+        title: &str,
+        after: Vec<String>,
+        allow_noop: Option<bool>,
         extra_stages: Vec<String>,
         brief: &str,
         flow: Option<&str>,
@@ -782,7 +837,7 @@ impl Store {
         slug: &str,
         title: &str,
         after: Vec<String>,
-        allow_noop: bool,
+        allow_noop: Option<bool>,
         extra_stages: Vec<String>,
         brief: &str,
         allow_confirmed: bool,
@@ -871,7 +926,7 @@ impl Store {
             &slug,
             &title,
             after,
-            allow_noop,
+            Some(allow_noop),
             extra_stages,
             &brief,
             true,
@@ -889,7 +944,7 @@ impl Store {
         slug: &str,
         title: &str,
         after: Vec<String>,
-        allow_noop: bool,
+        allow_noop: Option<bool>,
         extra_stages: Vec<String>,
         brief: &str,
         allow_confirmed: bool,

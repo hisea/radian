@@ -106,7 +106,7 @@ pub const TOOLS: &[ToolDef] = &[
     },
     "allow_noop": {
       "type": "boolean",
-      "description": "The task may deliver no change on purpose. Default: false."
+      "description": "The task may deliver no change on purpose. Absent: the task uses its flow's [flows.<name>] allow_noop (default false)."
     },
     "extra_stages": {
       "type": "array",
@@ -177,7 +177,7 @@ pub const TOOLS: &[ToolDef] = &[
     },
     "allow_noop": {
       "type": "boolean",
-      "description": "Whether the task may deliver no change on purpose."
+      "description": "Whether the task may deliver no change on purpose. An explicit value overrides its flow's allow_noop."
     },
     "extra_stages": {
       "type": "array",

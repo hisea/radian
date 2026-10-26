@@ -387,7 +387,7 @@ fn an_id_that_names_both_a_plan_and_a_task_is_refused() {
         id.clone(),
         "T".to_owned(),
         Vec::new(),
-        false,
+        Some(false),
         Vec::new(),
         "brief",
     );
@@ -636,7 +636,7 @@ fn after_may_name_a_task_of_the_plan_or_a_done_task() {
         .expect("a task of the same plan is a valid dependency");
     let task = store.load_task(&added).unwrap().item;
     assert_eq!(task.after, vec![first]);
-    assert!(task.allow_noop);
+    assert_eq!(task.allow_noop, Some(true));
     assert_eq!(task.extra_stages, vec!["mutation".to_owned()]);
 
     // Another plan's task that is not done: refused.

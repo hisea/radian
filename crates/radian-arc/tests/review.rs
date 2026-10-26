@@ -4145,7 +4145,7 @@ fn followups(fixture: &Fixture) -> Vec<radian_arc::store::model::TaskFile> {
         .map(|loaded| loaded.item)
         .filter(|task| {
             task.title == title
-                && task.allow_noop
+                && task.allow_noop == Some(true)
                 && !task.after.is_empty()
                 && task.body.lines().next() == Some(opening.as_str())
         })
@@ -4222,8 +4222,9 @@ fn a_merge_with_review_suggestions_proposes_one_followup_task() {
         vec![fixture.task.clone()],
         "it waits on the merged task"
     );
-    assert!(
+    assert_eq!(
         task.allow_noop,
+        Some(true),
         "the follow-up's brief allows a no-op (ADR 0048 decision 10)"
     );
     assert_eq!(task.title, format!("Follow-ups from {plan_id}'s reviews"));
@@ -4349,7 +4350,7 @@ fn the_last_open_task_merge_proposes_one_followup_for_the_plan() {
         (task.state.as_str(), task.phase.as_str()),
         ("todo", "proposed")
     );
-    assert!(task.allow_noop, "the follow-up allows a no-op");
+    assert_eq!(task.allow_noop, Some(true), "the follow-up allows a no-op");
     assert_eq!(
         task.title,
         format!("Follow-ups from {}'s reviews", fixture.plan)
@@ -4846,7 +4847,11 @@ fn a_followup_that_adds_no_commit_passes_every_stage_and_merges() {
         .expect("a follow-up task")
         .task;
     let proposed = store.load_task(&followup).expect("the follow-up").item;
-    assert!(proposed.allow_noop, "the follow-up allows a no-op");
+    assert_eq!(
+        proposed.allow_noop,
+        Some(true),
+        "the follow-up allows a no-op"
+    );
     assert_eq!(fake.count(), 1, "the first review ran one session");
 
     // The owner confirms the follow-up, and its attempt adds no commit at all.

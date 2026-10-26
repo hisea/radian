@@ -227,7 +227,7 @@ fn every_field_changes_and_is_recorded() {
         loaded.item.body
     );
     assert_eq!(loaded.item.after, vec![dependency]);
-    assert!(loaded.item.allow_noop);
+    assert_eq!(loaded.item.allow_noop, Some(true));
     assert_eq!(loaded.item.extra_stages, vec!["mutation".to_owned()]);
 }
 

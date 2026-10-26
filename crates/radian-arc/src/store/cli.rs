@@ -52,7 +52,7 @@ pub enum Command {
         slug: String,
         title: String,
         after: Vec<String>,
-        allow_noop: bool,
+        allow_noop: Option<bool>,
         stages: Vec<String>,
         flow: Option<String>,
     },
@@ -249,13 +249,13 @@ fn add_task(
     slug: &str,
     title: &str,
     after: &[String],
-    allow_noop: bool,
+    allow_noop: Option<bool>,
     stages: &[String],
     flow: Option<&str>,
 ) -> Result<String, Error> {
     let store = open()?;
     let brief = stdin_text()?;
-    let id = store.add_task_with_flow(
+    let id = store.add_task_opt(
         plan,
         slug,
         title,
@@ -569,6 +569,7 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
         }
         Item::Task(task) => {
             let item = &task.item;
+            let config = store.config()?;
             out.push_str(&format!("task {}\n", item.id));
             field(&mut out, "plan", &item.plan);
             field(
@@ -638,7 +639,12 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 "supersedes",
                 &item.supersedes.clone().unwrap_or_else(|| "-".to_owned()),
             );
-            field(&mut out, "allow_noop", &item.allow_noop.to_string());
+            field(
+                &mut out,
+                "allow_noop",
+                &item.effective_allow_noop(&config).to_string(),
+            );
+            field(&mut out, "allow_noop_source", item.allow_noop_source());
             field(
                 &mut out,
                 "followup_pending",
@@ -845,6 +851,7 @@ fn cost_text(cost: f64) -> String {
 
 fn task_json(
     task: &Loaded<super::model::TaskFile>,
+    config: &super::config::Config,
     with_body: bool,
     queue_reason: Option<String>,
 ) -> serde_json::Value {
@@ -867,7 +874,8 @@ fn task_json(
         "after": item.after,
         "flow": item.flow.clone().unwrap_or_else(|| DEFAULT_FLOW.to_owned()),
         "supersedes": item.supersedes,
-        "allow_noop": item.allow_noop,
+        "allow_noop": item.effective_allow_noop(config),
+        "allow_noop_source": item.allow_noop_source(),
         "followup_pending": item.followup_pending,
         "extra_stages": item.extra_stages,
         "max_attempts": item.max_attempts,
@@ -887,7 +895,12 @@ fn task_json(
     value
 }
 
-fn plan_json(queue: Option<&QueueState>, view: &PlanView, with_body: bool) -> serde_json::Value {
+fn plan_json(
+    queue: Option<&QueueState>,
+    view: &PlanView,
+    config: &super::config::Config,
+    with_body: bool,
+) -> serde_json::Value {
     let plan = &view.plan.item;
     let mut value = json!({
         "id": plan.id,
@@ -907,7 +920,7 @@ fn plan_json(queue: Option<&QueueState>, view: &PlanView, with_body: bool) -> se
             // tasks, it does not repeat every brief.
             .map(|task| {
                 let reason = queue.and_then(|queue| queue.reason(&view.plan, task));
-                task_json(task, false, reason)
+                task_json(task, config, false, reason)
             })
             .collect::<Vec<_>>(),
         "changed_outside_arc": view.plan.changed_outside_arc,
@@ -1217,23 +1230,25 @@ pub fn list_json(store: &Store, plan: Option<&str>, all: bool) -> Result<serde_j
             views
         }
     };
+    let config = store.config()?;
     Ok(serde_json::Value::Array(
         views
             .iter()
-            .map(|view| plan_json(Some(&queue), view, false))
+            .map(|view| plan_json(Some(&queue), view, &config, false))
             .collect(),
     ))
 }
 
 /// `radian arc show --json`'s document, for the CLI and the MCP `show` tool.
 pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
+    let config = store.config()?;
     Ok(match store.show(id)? {
         Item::Plan(view) => {
             let queue = QueueState::read(store).ok();
-            plan_json(queue.as_ref(), &view, true)
+            plan_json(queue.as_ref(), &view, &config, true)
         }
         Item::Task(task) => {
-            let mut value = task_json(&task, true, show_task_queue_reason(store, &task));
+            let mut value = task_json(&task, &config, true, show_task_queue_reason(store, &task));
             let chain = super::chain::chain(store, &task.item.id)?;
             let review = crate::review::latest_review_verdict(store, &task.item.id);
             if let Some(object) = value.as_object_mut() {

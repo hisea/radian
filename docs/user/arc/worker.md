@@ -43,7 +43,7 @@ The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json`
 
 - `work/<task>` exists, `head_sha` descends from `base_sha` and from the tip the attempt started on, and the worktree HEAD is on the branch;
 - the worktree has no uncommitted and no untracked files;
-- the task's own change is not empty, unless [`allow_noop`](files.md#task-fields) is set (see [An empty change](gate.md#an-empty-change));
+- the task's own change is not empty, unless [`allow_noop`](files.md#task-fields) is on: the task's own value when its file carries one, else its flow's `flows.<name>.allow_noop` (see [An empty change](gate.md#an-empty-change));
 - the task's own change touches no path under `.radian/arc/`;
 - the repository's git control files are as the wrapper recorded them before the worker started: `<common dir>/config`, `<git dir>/config.worktree` (the worktree's own git dir), `<common dir>/config.worktree`, every file under `<common dir>/hooks/` and `<common dir>/info/`, and every `config` file and every file under `hooks/` in `<common dir>/modules/**` (submodules). A file the worker creates, removes or changes counts as a change: the wrapper compares content, not time. The record stays in the wrapper's memory, never in the worktree, and the check does not depend on the worker's sandbox. A control file larger than 1 MiB is not read whole: an attempt does not start while one of those paths is that large, and one the worker creates fails the attempt and is removed.
 

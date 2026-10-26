@@ -1929,7 +1929,7 @@ fn is_followup(task: &model::TaskFile) -> bool {
     let opening = followup_brief_opening(&task.plan);
     let per_plan = task.title == followup_title(&task.plan)
         && followup_slug_matches(&task.plan, &task.id)
-        && task.allow_noop
+        && task.allow_noop == Some(true)
         && !task.after.is_empty()
         && task.body.lines().next() == Some(opening.as_str());
     // An old per-task follow-up had no `allow_noop` test and no fixed brief line, only its

@@ -572,7 +572,7 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         token,
         resume,
         session_id,
-        allow_noop: task.allow_noop,
+        allow_noop: task.effective_allow_noop(&config),
         brief: task.body.clone(),
         worker,
         no_cost_warning,

@@ -135,13 +135,13 @@ impl ArcServer {
                 let title = args.required_string("title")?;
                 let brief = args.required_string("brief")?;
                 let after = args.optional_strings("after")?;
-                let allow_noop = args.optional_bool("allow_noop")?;
+                let allow_noop = args.optional_flag("allow_noop")?;
                 let extra_stages = args.optional_strings("extra_stages")?;
                 let flow = args.optional_string("flow")?;
                 args.finish()?;
                 let id = self
                     .store
-                    .add_task_proposed_with_flow(
+                    .add_task_proposed_opt(
                         &plan,
                         &slug,
                         &title,
@@ -826,11 +826,6 @@ impl Args {
         }
     }
 
-    fn optional_bool(&mut self, key: &str) -> Result<bool, String> {
-        Ok(self.optional_flag(key)?.unwrap_or(false))
-    }
-
-    /// [`Args::optional_bool`] that keeps `false` apart from an absent argument.
     fn optional_flag(&mut self, key: &str) -> Result<Option<bool>, String> {
         match self.take(key) {
             Some(Value::Bool(value)) => Ok(Some(value)),
@@ -890,7 +885,7 @@ mod tests {
         let mut args = args_of(json!({"after": "TK0001-a"}));
         assert!(args.optional_strings("after").is_err());
         let mut args = args_of(json!({"allow_noop": "yes"}));
-        assert!(args.optional_bool("allow_noop").is_err());
+        assert!(args.optional_flag("allow_noop").is_err());
     }
 
     #[test]
@@ -908,7 +903,7 @@ mod tests {
     fn a_null_is_the_same_as_absent() {
         let mut args = args_of(json!({"after": null, "allow_noop": null}));
         assert_eq!(args.optional_strings("after"), Ok(Vec::new()));
-        assert!(!args.optional_bool("allow_noop").expect("absent"));
+        assert_eq!(args.optional_flag("allow_noop"), Ok(None));
         assert_eq!(args.finish(), Ok(()));
     }
 

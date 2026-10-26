@@ -117,6 +117,13 @@ impl Config {
         }
     }
 
+    /// The value a task of `flow` uses when its own `allow_noop` is absent: the flow's
+    /// `allow_noop`, or `false` for a flow the file does not define (ADR 0048 decisions 8 and
+    /// 15). A task that names no flow uses the implicit `default` flow.
+    pub fn flow_allow_noop(&self, flow: &str) -> bool {
+        self.flows.get(flow).is_some_and(|flow| flow.allow_noop)
+    }
+
     /// The gate profile a task of `flow` runs, and its name: the flow's `gate_profile`,
     /// resolved to `gate.profile` for a file without `[flows]` (ADR 0048 decisions 10 and 15).
     ///
@@ -313,6 +320,9 @@ pub struct Flow {
     /// of `gate.profile`; the key is parsed and validated, and a gate run of a task of this
     /// flow resolves it (ADR 0048 decisions 10 and 15).
     pub gate_profile: Option<String>,
+    /// The value a task of this flow uses at its delivery check when the task's own
+    /// `allow_noop` is absent; an explicit task value wins (ADR 0048 decisions 8 and 15).
+    pub allow_noop: bool,
 }
 
 impl Default for Flow {
@@ -322,18 +332,21 @@ impl Default for Flow {
             command: None,
             concurrency: DEFAULT_FLOW_CONCURRENCY,
             gate_profile: None,
+            allow_noop: false,
         }
     }
 }
 
 impl Flow {
-    /// The `default` flow built from today's global keys: the worker line and the gate profile.
+    /// The `default` flow built from today's global keys: the worker line, the gate profile,
+    /// concurrency `1`, and `allow_noop` `false`.
     fn from_worker(worker: &Worker, gate_profile: &str) -> Self {
         Self {
             exec_args: worker.exec_args.clone(),
             command: worker.command.clone(),
             concurrency: DEFAULT_FLOW_CONCURRENCY,
             gate_profile: Some(gate_profile.to_owned()),
+            allow_noop: false,
         }
     }
 
@@ -1181,6 +1194,23 @@ mod tests {
         assert_eq!(flow.exec_args, Vec::<String>::new());
         assert_eq!(flow.command, None);
         assert_eq!(flow.concurrency, DEFAULT_FLOW_CONCURRENCY);
+        assert!(!flow.allow_noop);
+    }
+
+    /// `flows.<name>.allow_noop` is a boolean, `false` when its section leaves it out, and the
+    /// implicit `default` flow of a file without `[flows]` has `false` (ADR 0048 decisions 8
+    /// and 15). A flow the file does not define contributes `false`.
+    #[test]
+    fn a_flows_allow_noop_defaults_to_false_and_parses() {
+        let config = parse("schema_version = 1\n[flows.art]\nallow_noop = true\n")
+            .expect("a flow with allow_noop");
+        assert!(config.flow_allow_noop("art"));
+        assert!(!config.flow_allow_noop(DEFAULT_FLOW));
+        assert!(!config.flow_allow_noop("missing"));
+
+        let without = parse("schema_version = 1\n").expect("a file without [flows]");
+        assert!(!without.flow_allow_noop(DEFAULT_FLOW));
+        assert!(!Config::default().flow_allow_noop(DEFAULT_FLOW));
     }
 
     /// A task's gate profile is its flow's `gate_profile`; a repository without `[flows]`

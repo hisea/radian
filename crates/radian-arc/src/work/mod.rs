@@ -83,7 +83,8 @@ pub struct Options {
     /// also the mode's signal here.
     pub resume: bool,
     /// Let a branch with no change past `base_sha` pass the delivery check (ADR 0048
-    /// decision 8: a brief can allow a no-op).
+    /// decision 8). The claim resolves this to the task's effective `allow_noop`: its own
+    /// value when its file carries one, else its flow's `flows.<name>.allow_noop`.
     pub allow_noop: bool,
     /// The remote the wrapper fetches the main branch from and pushes `work/<task>` to.
     /// Internal: `arc` sets it from the repository configuration (default `origin`); a
