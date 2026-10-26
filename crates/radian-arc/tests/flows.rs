@@ -460,6 +460,28 @@ fn a_broken_flow_config_is_refused_by_name() {
     }
 }
 
+/// `adopt` accepts a hand-edited flow that names a defined flow while the task has had no
+/// attempt, and reads it back.
+#[test]
+fn adopt_accepts_a_hand_edited_flow_before_the_first_attempt() {
+    let (repo, store) = setup("flows-adopt");
+    add_flows(&repo, "[flows.codex]\nexec_args = []\n");
+    let plan = store.add_plan("plan", "Plan", "request").unwrap();
+    let task = store
+        .add_task(&plan, "one", "One", vec![], false, vec![], "brief\n")
+        .unwrap();
+    let path = repo.clone.join(format!(".radian/arc/tasks/{task}.md"));
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, text.replace("---\n", "---\nflow: codex\n")).unwrap();
+    store
+        .adopt(&task)
+        .expect("adopt accepts the hand-edited flow");
+    assert_eq!(
+        store.load_task(&task).unwrap().item.flow.as_deref(),
+        Some("codex")
+    );
+}
+
 /// A task whose flow was removed from `config.toml` is not claimed: it stays `todo.ready`,
 /// the loop names the task and the missing flow, and so does its queue reason.
 #[test]
@@ -480,7 +502,20 @@ fn a_task_whose_flow_was_removed_stays_ready_and_says_so() {
         )
         .unwrap();
     plan_ops::confirm(&store, &plan).expect("confirm");
-    // Remove the flow the task names.
+    // A proposed task with the flow, added before the section disappears.
+    let proposed = store
+        .add_task_proposed_with_flow(
+            &plan,
+            "two",
+            "Two",
+            vec![],
+            false,
+            vec![],
+            "brief\n",
+            Some("codex"),
+        )
+        .unwrap();
+    // Remove the flow the tasks name.
     tune(&repo, "[flows.codex]\nexec_args = []\n", "");
 
     let run = repo.radian(&["arc", "start", &task]);
@@ -518,6 +553,20 @@ fn a_task_whose_flow_was_removed_stays_ready_and_says_so() {
         "{reason}"
     );
     assert!(reason.contains("does not define"), "{reason}");
+
+    // A proposed task with the same removed flow shows the same reason on its queue line.
+    let dry = repo.radian(&["arc", "confirm", "--dry-run", &proposed]);
+    assert_eq!(dry.code, 0, "dry run: {}", dry.stderr);
+    assert!(
+        dry.stdout.contains(&proposed) && dry.stdout.contains("codex"),
+        "the queue line names the task and the missing flow: {}",
+        dry.stdout
+    );
+    assert!(
+        dry.stdout.contains("does not define"),
+        "the queue reason says the flow is missing: {}",
+        dry.stdout
+    );
 }
 
 /// The manual names every new config key with the code's default, and the task table names
