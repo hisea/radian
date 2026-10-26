@@ -1179,3 +1179,22 @@ applied by hand to the named file, the named tests ran with `cargo nextest run -
 | TK0163-M2 | `spawn_claim_with` builds the worker from the later configuration's `exec_args` instead of `claim.worker` | `attempt::tests::the_wrapper_starts_the_worker_the_claim_recorded` (the recorder sees `-- --model later` and no `--command`) | ✅ failed |
 
 2/2 caught.
+
+## TK0177: arc's own fetches into one repository take turns (2026-10-26, branch `work/TK0177-serialize-repo-fetches`)
+
+ADR 0048 decision 10: every fetch arc runs holds the exclusive `flock` on
+`<git common dir>/radian-arc-fetch.lock`, resolved with `git rev-parse --git-common-dir`, so
+two arc processes and two worktrees of one repository never race git's compare-and-swap update
+of `refs/remotes/<remote>/<branch>`. Waiting for the lock counts against `[limits]
+git_remote_timeout_secs`, and a wait that runs out fails with a line that names the lock. Each
+mutation was applied by hand to `crates/radian-arc/src/git.rs`, the matching tests ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test fetch_lock --no-fail-fast`,
+and the file was restored from a copy under `.radian/mut/` with `cp`, which `cmp` found
+identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0177-M1 | `fetch` skips the lock (`FetchLock::acquire` is not called) | `fetch_lock::concurrent_fetches_through_the_helper_into_one_repository_all_succeed` (`fetch 1 through the lock`: a racer lost the ref update), and the two tests that hold the lock | ✅ 3 failed |
+| TK0177-M2 | the lock file lives in the worktree's own git dir (`fetch_lock_path` runs `rev-parse --absolute-git-dir`) | `fetch_lock::a_linked_worktree_shares_the_repositorys_fetch_lock` (`left: …/repo/.git/radian-arc-fetch.lock`, `right: …/repo/.git/worktrees/linked/radian-arc-fetch.lock`) | ✅ failed |
+
+2/2 caught.
