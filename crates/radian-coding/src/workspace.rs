@@ -193,11 +193,7 @@ impl WorkspaceRoot {
     /// remainder then goes through exactly the checks a relative path gets.
     fn workspace_remainder(&self, user: &str) -> Option<PathBuf> {
         let path = Path::new(user);
-        if !path.is_absolute()
-            || path
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
-        {
+        if !path.is_absolute() || has_parent_dir(path) {
             return None;
         }
         let spellings = std::iter::once(&self.root).chain(self.given.iter());
@@ -389,6 +385,15 @@ impl WorkspaceRoot {
             ));
         }
         if is_absolute_or_home(user) {
+            // ADR 0039 decision 6: an absolute path that holds `..` is refused in every tier,
+            // before any conversion. It must never be normalised away and read through the
+            // read-only-root or `full`-tier outside route.
+            if Path::new(user).is_absolute() && has_parent_dir(Path::new(user)) {
+                return Err(fail(
+                    CODE_OUTSIDE,
+                    format!("`{user}` escapes the workspace (`..` is refused)"),
+                ));
+            }
             // ADR 0039 decision 6: an absolute path under the workspace root in either
             // spelling is a workspace path. It takes the workspace route — the same checks a
             // relative path gets, and relative output naming — not the read-only-root or
@@ -828,6 +833,13 @@ fn docs_missing_failure(user: &str) -> ToolFailure {
             docs::names().join(", ")
         ),
     )
+}
+
+/// Whether `path` holds a `..` component. An absolute path that does is refused before any
+/// conversion or normalisation (ADR 0039 decision 6), in every tier.
+fn has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 /// Whether the model wrote `user` as an absolute path or with `~` (the spellings a read-only

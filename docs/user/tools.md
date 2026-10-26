@@ -18,7 +18,7 @@ see `permissions` for the exact rule.
 
 | Argument | Type | Default | What it does |
 |---|---|---|---|
-| `path` | string, required | — | A file, a directory, or an image. Workspace-relative, or absolute inside the workspace; absolute or `~` for a read-only root. |
+| `path` | string, required | — | A file, a directory, or an image. A workspace path, as `permissions` defines it; absolute or `~` for a read-only root. |
 | `max_bytes` | integer, 1 to 1048576 | `65536` | Maximum bytes of text to read. |
 | `offset` | integer, 1-based, negative counts from the end | `1` | First text line to read. |
 | `limit` | integer, at least 1 for text and directory reads | `500` | Maximum text lines to read. For a directory it caps entries instead, up to `5000`. Ignored for an image. |

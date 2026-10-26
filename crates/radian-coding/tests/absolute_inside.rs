@@ -305,6 +305,48 @@ async fn an_absolute_workspace_path_with_a_parent_component_is_refused() {
     );
 }
 
+#[tokio::test]
+async fn an_absolute_path_with_a_parent_component_is_refused_in_the_full_tier() {
+    let fx = fixture("abs-dotdot-full");
+    let outside = common::sentinel_outside(&fx.dir);
+    std::fs::create_dir_all(fx.canonical.join("sub")).unwrap();
+    std::fs::write(fx.canonical.join("a.txt"), "INSIDE").unwrap();
+    // The `full` tier would read both an absolute path that normalises back inside the
+    // workspace and one that normalises out of it; neither may reach the outside route.
+    let tools = full_tools(&fx.given, DenySet::empty());
+
+    let [given, canonical] = fx.spellings("");
+    let escapes = [
+        format!("{given}/sub/../a.txt"),
+        format!("{canonical}/sub/../a.txt"),
+        format!("{given}/../outside/sentinel.txt"),
+        format!("{canonical}/../outside/sentinel.txt"),
+    ];
+    for path in &escapes {
+        for (name, arguments) in [
+            ("read", json!({"path": path})),
+            ("grep", json!({"pattern": "SENTINEL|INSIDE", "path": path})),
+            ("glob", json!({"pattern": "**/*", "path": path})),
+        ] {
+            let failure = call(&tools, name, arguments).await.unwrap_err();
+            assert_eq!(
+                failure.code, "path_outside_workspace",
+                "{name} on {path}: `..` is refused before any conversion in the full tier, \
+                 got {failure:?}"
+            );
+            assert!(
+                !failure.message.contains("SENTINEL-CONTENT")
+                    && !failure.message.contains("INSIDE"),
+                "{name} on {path}: the target was read: {failure:?}"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+        "SENTINEL-CONTENT"
+    );
+}
+
 // ---------- the workspace's own symlink rule still applies ----------
 
 #[tokio::test]

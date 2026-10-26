@@ -864,3 +864,21 @@ confirmed with `git diff` to hold only the intended change. The test ran with
 | TK0175-M4 | `all_pids` sizes its buffer from the size query as bytes (`needed / size_of::<pid_t>() + HEADROOM`) and keeps the first fill (no retry) | ✅ 1 failed | `shell::tests::the_pid_list_is_not_truncated` (`the kernel reports 953 pids, the enumeration found 302`) |
 
 1/1 caught.
+
+## an absolute path inside the workspace: the `..` refusal comes before any route (2026-10-26, branch `work/TK0176-absolute-path-inside-workspace`, review fix 1)
+
+The review found that the `full` tier normalised an absolute path holding `..` after declining the
+workspace conversion, so `read`/`grep`/`glob` on `<workspace>/sub/../a.txt`, or on
+`<workspace>/../outside/sentinel.txt`, took the outside route and read the target. `resolve_read`
+now refuses an absolute path with a `ParentDir` component in every tier, before the read-only-root
+lookup and the `full`-tier outside route (`has_parent_dir` is shared with `workspace_remainder`, so
+the conversion and the refusal agree on what `..` is). The mutation deleted that refusal, putting
+the reviewed flow back. It was applied by hand to `crates/radian-coding/src/workspace.rs`, backed
+up under `.radian/workspace.rs.rework.orig` and restored from that copy (never `git checkout`),
+confirmed byte-identical with `shasum -a 256`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0176-M4 | `resolve_read` drops the early absolute-`..` refusal, so the path reaches `normalise_absolute` and the `full`-tier outside route | ✅ 1 failed | `absolute_inside::an_absolute_path_with_a_parent_component_is_refused_in_the_full_tier` (`read` on `<workspace>/sub/../a.txt` returned `1: INSIDE` instead of refusing) |
+
+1/1 caught.
