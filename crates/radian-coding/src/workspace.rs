@@ -33,10 +33,16 @@ pub enum WorkspaceError {
 /// swaps on `/access`, so the file tools read the current tier at every call, not the
 /// startup one. `read`/`grep`/`glob` resolve an absolute or `~` path against the roots in
 /// both tiers, and against any other path in the `full` tier except the deny set; every
-/// other tool uses the workspace only.
+/// other tool uses the workspace only. An absolute path under the workspace root, in either
+/// spelling, is the workspace-relative path (ADR 0039 decision 6).
 #[derive(Clone)]
 pub struct WorkspaceRoot {
+    /// The canonical workspace root (what the directory fd points at).
     root: PathBuf,
+    /// The workspace path as the host gave it, lexically normalised, when it differs from
+    /// [`Self::root`]: the second spelling an absolute workspace path may use (ADR 0039
+    /// decision 6), as `/tmp/ws` beside the canonical `/private/tmp/ws` on macOS.
+    given: Option<PathBuf>,
     dir: Arc<RootDir>,
     read_roots: Arc<ReadRoots>,
     /// The `full`-tier deny set: the sandbox's deny-read entries plus the host's denied
@@ -143,8 +149,10 @@ impl WorkspaceRoot {
             path: PathBuf::from("/"),
             source,
         })?;
+        let given = normalise_absolute(&path).filter(|given| given != &canonical);
         Ok(Self {
             root: canonical,
+            given,
             dir: Arc::new(dir),
             read_roots: Arc::new(read_roots),
             deny: Arc::new(deny),
@@ -166,8 +174,8 @@ impl WorkspaceRoot {
         &self.root
     }
 
-    /// Checks a workspace-relative path for a host tool that needs the same boundary the file
-    /// tools use: no absolute path, no `..`, no symlink in any
+    /// Checks a workspace path (relative, or absolute inside the workspace) for a host tool
+    /// that needs the same boundary the file tools use: no `..`, no symlink in any
     /// component (the parents are walked by fd; the leaf is `lstat`ed, never opened). Returns
     /// the path under the canonical root, or the reason as text. The leaf need not exist.
     pub fn resolve_in_workspace(&self, user: &str) -> Result<PathBuf, String> {
@@ -177,18 +185,57 @@ impl WorkspaceRoot {
         Ok(self.root.join(relative))
     }
 
-    /// Rejects absolute paths and Windows prefixes before any filesystem access, then joins
-    /// the workspace-relative path onto the root. Lexical only: the fd walk does the rest.
-    /// The bundled manual (`radian://`) is read-only and never a workspace path.
+    /// The workspace-relative remainder of an absolute path under the workspace root, in
+    /// either spelling (the canonical root or the path the host gave, ADR 0039 decision 6).
+    /// The prefix test compares path components, so `/app2/x` is not under `/app`; the root
+    /// itself (`/app`, `/app/`) is `.`. `None` for a path that is not absolute, holds `..`
+    /// (refused before any conversion), or is under neither spelling. Lexical only: the
+    /// remainder then goes through exactly the checks a relative path gets.
+    fn workspace_remainder(&self, user: &str) -> Option<PathBuf> {
+        let path = Path::new(user);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return None;
+        }
+        let spellings = std::iter::once(&self.root).chain(self.given.iter());
+        for spelling in spellings {
+            if let Ok(remainder) = path.strip_prefix(spelling) {
+                return Some(remainder.to_path_buf());
+            }
+        }
+        None
+    }
+
+    /// The path the workspace checks run on: an absolute path under the workspace root in
+    /// either spelling becomes its workspace-relative remainder (ADR 0039 decision 6); every
+    /// other path, `..` included, is returned as written.
+    fn workspace_relative(&self, user: &str) -> PathBuf {
+        self.workspace_remainder(user)
+            .unwrap_or_else(|| PathBuf::from(user))
+    }
+
+    /// Rejects absolute paths outside the workspace and Windows prefixes before any filesystem
+    /// access, then joins the workspace-relative path onto the root. An absolute path under
+    /// the workspace root in either spelling is first rewritten to its remainder (ADR 0039
+    /// decision 6); one that holds `..` is refused as before, before any conversion. Lexical
+    /// only: the fd walk does the rest. The bundled manual (`radian://`) is read-only and
+    /// never a workspace path.
     fn joined(&self, user: &str) -> Result<PathBuf, ToolFailure> {
         if docs::is_virtual(user) {
             return Err(docs_write_failure(user));
         }
-        let relative = Path::new(user);
+        let relative = self.workspace_relative(user);
         if relative.is_absolute() {
             return Err(fail(
                 CODE_OUTSIDE,
-                format!("`{user}` is an absolute path; only workspace-relative paths are allowed"),
+                format!(
+                    "`{user}` is an absolute path outside the workspace; use a workspace-relative \
+                     path or an absolute path inside `{}`",
+                    self.root.display()
+                ),
             ));
         }
         // Reject `..` before touching the filesystem rather than relying on the walk to
@@ -202,7 +249,7 @@ impl WorkspaceRoot {
         }) {
             return Err(fail(
                 CODE_OUTSIDE,
-                format!("`{user}` escapes the workspace (absolute paths and `..` are refused)"),
+                format!("`{user}` escapes the workspace (`..` is refused)"),
             ));
         }
         Ok(self.root.join(relative))
@@ -211,14 +258,15 @@ impl WorkspaceRoot {
     /// The lexical check only, as a relative path (`.` and empty components dropped).
     fn checked_relative(&self, user: &str) -> Result<PathBuf, ToolFailure> {
         self.joined(user)?;
-        safe_fs::components(Path::new(user))
+        safe_fs::components(&self.workspace_relative(user))
             .map(|parts| parts.iter().collect())
             .map_err(|error| self.map_error(user, error))
     }
 
-    /// Opens `user` for reading through the fd walk and reports what it is. A relative path
-    /// is workspace-relative; an absolute or `~` path is resolved against the read-only roots
-    /// (ADR 0039) and refused when it is under none of them — except in the `full` tier,
+    /// Opens `user` for reading through the fd walk and reports what it is. A relative path,
+    /// and an absolute path inside the workspace in either spelling (ADR 0039 decision 6), is
+    /// workspace-relative; any other absolute or `~` path is resolved against the read-only
+    /// roots (ADR 0039) and refused when it is under none of them — except in the `full` tier,
     /// where any other absolute or `~` path reads too, unless the deny set denies it.
     /// `radian://docs/`
     /// names the bundled manual and is read from memory. Any symlink component
@@ -317,10 +365,12 @@ impl WorkspaceRoot {
     /// Resolves a read tool's `path` to the bundled manual, the workspace, one of the
     /// read-only roots, or — in the `full` tier — any other absolute or `~` path outside the
     /// deny set (ADR 0039 decision 4). `radian://docs/` is checked before the
-    /// absolute/`~` check. A relative path is workspace-relative and keeps the existing
-    /// checks; an absolute path, or one written with `~`, is refused outside the roots in
-    /// the `workspace` tier (the refusal lists the readable roots, now including skill
-    /// directories), and `realpath`ed and deny-checked in the `full` tier.
+    /// absolute/`~` check. An absolute path under the workspace root in either spelling is a
+    /// workspace path and takes the workspace route (ADR 0039 decision 6), never the outside
+    /// one. A relative path is workspace-relative and keeps the existing checks; an absolute
+    /// path, or one written with `~`, that is under no root is refused in the `workspace`
+    /// tier (the refusal lists the readable roots, now including skill directories), and
+    /// `realpath`ed and deny-checked in the `full` tier.
     fn resolve_read(&self, user: &str) -> Result<Resolved, ToolFailure> {
         if docs::is_root(user) {
             return Ok(Resolved::Embedded { page: None });
@@ -339,6 +389,13 @@ impl WorkspaceRoot {
             ));
         }
         if is_absolute_or_home(user) {
+            // ADR 0039 decision 6: an absolute path under the workspace root in either
+            // spelling is a workspace path. It takes the workspace route — the same checks a
+            // relative path gets, and relative output naming — not the read-only-root or
+            // `full`-tier outside route.
+            if self.workspace_remainder(user).is_some() {
+                return Ok(Resolved::Workspace(self.checked_relative(user)?));
+            }
             let candidate = expand_home(user)
                 .and_then(|path| normalise_absolute(&path))
                 .ok_or_else(|| outside_read_failure(user, &self.skill_dirs()))?;
@@ -421,7 +478,7 @@ impl WorkspaceRoot {
         }
     }
 
-    /// Opens a workspace-relative path for reading (the existing boundary, unchanged).
+    /// Opens a workspace-relative path for reading (the fd walk, unchanged).
     fn open_workspace_file(&self, user: &str, relative: &Path) -> Result<OpenedFile, ToolFailure> {
         let file = self
             .dir
@@ -430,7 +487,7 @@ impl WorkspaceRoot {
         opened_file(user, file, true)
     }
 
-    /// Opens a workspace-relative directory (the existing boundary, unchanged).
+    /// Opens a workspace-relative directory (the fd walk, unchanged).
     fn open_workspace_dir(&self, user: &str, relative: &Path) -> Result<File, ToolFailure> {
         self.dir
             .dir(relative)
@@ -570,8 +627,10 @@ impl WorkspaceRoot {
 
     /// The path of a directory the `shell` tool will spawn a child in: walked by fd (no
     /// symlink in any component, must be a directory), then returned under the canonical root
-    /// for the spawn. The spawn itself is by path — the sandbox policy, not this check, is what
-    /// confines the child; this keeps a link out of the `cwd` argument.
+    /// for the spawn. An absolute path under the workspace root takes the same rewrite as every
+    /// other workspace path (ADR 0039 decision 6). The spawn itself is by path — the sandbox
+    /// policy, not this check, is what confines the child; this keeps a link out of the `cwd`
+    /// argument.
     pub(crate) fn checked_dir_path(&self, user: &str) -> Result<PathBuf, ToolFailure> {
         let relative = self.checked_relative(user)?;
         let _dir = self.open_workspace_dir(user, &relative)?;
@@ -584,8 +643,9 @@ impl WorkspaceRoot {
     ///
     /// Only the requested file's directory is listed, through the fd walk, so a suggestion can
     /// never point outside the workspace (a symlinked directory yields nothing). A path that
-    /// is absolute, holds `..`, or names something in a directory that does not exist yields
-    /// nothing.
+    /// holds `..` or names something in a directory that does not exist yields nothing; an
+    /// absolute path inside the workspace is rewritten like every other workspace path
+    /// (ADR 0039 decision 6), an absolute path outside it yields nothing.
     pub(crate) fn suggest_similar(&self, user: &str, limit: usize) -> Vec<String> {
         let Ok(relative) = self.checked_relative(user) else {
             return Vec::new();
@@ -645,11 +705,14 @@ impl WorkspaceRoot {
         match error {
             SafeFsError::Absolute => fail(
                 CODE_OUTSIDE,
-                format!("`{user}` is an absolute path; only workspace-relative paths are allowed"),
+                format!(
+                    "`{user}` is an absolute path; the file tools take a workspace path \
+                     relative or absolute inside the workspace"
+                ),
             ),
             SafeFsError::ParentDir => fail(
                 CODE_OUTSIDE,
-                format!("`{user}` escapes the workspace (absolute paths and `..` are refused)"),
+                format!("`{user}` escapes the workspace (`..` is refused)"),
             ),
             SafeFsError::Symlink {
                 component,
@@ -750,7 +813,8 @@ fn docs_write_failure(user: &str) -> ToolFailure {
         CODE_OUTSIDE,
         format!(
             "`{user}` is in the bundled manual (`radian://docs/`), which is read-only; \
-             `write` and `patch` only write workspace-relative paths"
+             `write` and `patch` only write workspace paths (relative or absolute inside the \
+             workspace)"
         ),
     )
 }

@@ -26,9 +26,10 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "path": {
                 "type": "string",
-                "description": "File, directory or image to read. Workspace-relative, or absolute \
-                                or `~`: roots (registry, toolchain, skill dirs) read in both \
-                                tiers; `full` reads other paths too, except the deny set. \
+                "description": "File, directory or image to read. Workspace-relative, or \
+                                absolute inside the workspace; absolute or `~` also reads roots \
+                                (registry, toolchain, skill dirs) in both tiers; `full` reads \
+                                other paths too, except the deny set. \
                                 Manual: `radian://docs/<page>.md`."
             },
             "max_bytes": {

@@ -96,9 +96,9 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "cwd": {
                 "type": "string",
-                "description": "Directory to run in. Use a workspace-relative path. Default: \
-                                the workspace root. The tool refuses absolute paths, `..`, and \
-                                symlinks out of the workspace."
+                "description": "Directory to run in. Use a workspace-relative path, or an \
+                                absolute path inside the workspace. Default: the workspace root. \
+                                The tool refuses `..` and symlinks out of the workspace."
             },
             "max_output_bytes": {
                 "type": "integer",

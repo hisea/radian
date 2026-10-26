@@ -26,11 +26,13 @@ pub(crate) fn schema() -> serde_json::Value {
             "path": {
                 "type": "string",
                 "description": "Directory or file to search under. Default: the workspace \
-                                root. A read-only absolute or `~` directory under a read-only \
-                                root (cargo registry or Rust toolchain sources, or a discovered \
+                                root. A workspace-relative path, or an absolute path inside the \
+                                workspace, searches the workspace and gives relative results. \
+                                A read-only absolute or `~` directory under a read-only root \
+                                (cargo registry or Rust toolchain sources, or a discovered \
                                 skill's directory) is also accepted; in the `full` tier any other \
                                 absolute or `~` path is searched too, except the sandbox's deny \
-                                set. Its results are absolute."
+                                set, and its results are absolute."
             },
             "max_results": {
                 "type": "integer",

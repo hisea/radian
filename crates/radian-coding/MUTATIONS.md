@@ -804,3 +804,23 @@ The foreground stop path now SIGTERMs the session, waits up to the shared `KILL_
 | TK0174-M1 | `Supervised::stop` sends SIGKILL at once instead of SIGTERM (`signal_if_reserved(self.pid, SIGKILL, &reaped)`) | ✅ 4 failed | `a_timeout_sigterms_before_it_kills` (exit code null, signal 9, no `trapped.marker`); `a_timeout_kills_after_the_grace_when_sigterm_is_ignored` (SIGKILL at 1.03 s); `a_cancellation_sigterms_before_it_kills`; `a_cancellation_kills_after_the_grace_when_sigterm_is_ignored` |
 
 1/1 caught.
+
+## an absolute path inside the workspace (2026-10-26, branch `work/TK0176-absolute-path-inside-workspace`)
+
+The rule (ADR 0039 decision 6): an absolute path under the workspace root, in either spelling
+(the given one and the canonical one), is the workspace-relative remainder and takes exactly
+the checks a relative path gets. Each mutation was applied by hand to
+`crates/radian-coding/src/workspace.rs`, backed up under `.radian/workspace.rs.orig` and
+restored from that copy (never `git checkout`), confirmed byte-identical with `shasum -a 256`;
+`cargo nextest run -p radian-coding --locked --profile sandbox --no-fail-fast` ran the named
+binaries (`--test absolute_inside`, plus `--test escaping` for M1). This change inverted the
+old `escaping::an_absolute_path_inside_the_workspace_is_still_refused`, so the earlier rows
+that name it describe the rule before this task.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0176-M1 | compare string bytes instead of path components (`text.strip_prefix(prefix)` in `workspace_remainder`) | ✅ 2 failed | `a_sibling_that_only_shares_a_string_prefix_is_not_under_the_root` (`/…/ws2/secret.txt` was rewritten to `2/secret.txt` and read instead of refused); also `escaping::a_sibling_whose_name_extends_the_root_is_refused` |
+| TK0176-M2 | convert only the given spelling, not the canonical one (`self.given.as_ref().unwrap_or(&self.root)`) | ✅ 4 failed | `every_file_tool_takes_an_absolute_path_under_the_root_in_both_spellings` (the canonical round was refused); `the_root_itself_as_an_absolute_path_lists_and_searches_the_workspace`; `an_absolute_workspace_path_still_refuses_a_symlink_component` (the canonical spelling took the outside route and read the sentinel); `a_deny_set_file_inside_the_workspace_behaves_as_its_relative_path` |
+| TK0176-M3 | drop the workspace-remainder route in `resolve_read`, so an absolute path under the root takes the `full`-tier outside route | ✅ 4 failed | `a_deny_set_file_inside_the_workspace_behaves_as_its_relative_path` (refused as denied, while the relative spelling reads); `an_absolute_workspace_path_still_refuses_a_symlink_component` (the full-tier round returned `SENTINEL-CONTENT` through `realpath`); `every_file_tool_takes_an_absolute_path_under_the_root_in_both_spellings` (the workspace tier refused the path); `the_root_itself_as_an_absolute_path_lists_and_searches_the_workspace` |
+
+3/3 caught.
