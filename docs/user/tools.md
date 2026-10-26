@@ -8,8 +8,8 @@ The model calls built-in tools for files, search and commands.
 Every tool name, argument and result is visible in the transcript.
 `read`, `write`, `patch`, `glob` and `grep` work inside the workspace;
 `read`, `grep` and `glob` also read the read-only roots described in `permissions`.
-A workspace path is a relative path, or an absolute path inside the workspace in either spelling of the root;
-see `permissions` for that rule.
+A workspace path is a relative path, or an absolute path inside the workspace;
+see `permissions` for the exact rule.
 `shell` and `job` exist only when the session has a sandbox.
 
 ## `read`
@@ -63,8 +63,8 @@ A model that is not in the catalog, or whose entry has no input modalities, is t
 ### Read roots
 
 The same path rules apply to text and images.
-A relative path, or an absolute path inside the workspace, is a workspace path.
+See `permissions` for which paths count as workspace paths.
 Absolute and `~` paths read the cargo registry sources, the toolchain source trees, each skill's own directory, and this manual.
 In the `full` tier they also read any other path except the deny set.
 `write`, `patch` and shell working directories never leave the workspace.
-See `permissions` for the workspace path rule, the tiers and the deny set.
+See `permissions` for the tiers and the deny set.
