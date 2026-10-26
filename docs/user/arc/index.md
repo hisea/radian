@@ -118,7 +118,7 @@ Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>
 When the repository defines a flow other than `default`, each task line also shows the task's flow in its own column, right after the id; a task without a `flow` field prints `default`.
 A repository whose `config.toml` has no `[flows]` table prints no flow column.
 A `todo.ready` task that the next pass would not claim because a limit is full ends its line with `(waiting for a free <flow> slot)`, or with `(waiting for a free concurrency slot)` when the repository total is full and the task's flow has room; when both are full the flow's reason wins (see [the queue reason](#trying-it-first-dry-run)).
-A task held by an `after` task that has not merged, by a plan whose `auto` is `off`, or by a flow `config.toml` does not define gets no such reason.
+A task held by an `after` task that has not merged, by a plan whose `auto` is `off`, by a flow `config.toml` does not define, or by its own file or its plan having changed outside arc gets no such reason.
 A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage) and what `reset-budget` sets back to `0`; its `total_cost_usd` is the same spend and is never reset.
 An attempt whose worker reported no cost (a [`worker.command`](files.md#configtoml) that writes no `cost` in its `Result`) adds nothing to either number.
 arc records that on the task as [`cost_unknown`](files.md#task-fields), and a task that carries it — or a plan with such a task — prints `unknown` instead of a number, even after a later attempt reports a cost.
@@ -157,7 +157,7 @@ Each task object holds `id`, `plan`, `flow`, `title`, `state`, `phase`, `queue_r
 
 Prints one plan or task: every field, whether it changed outside arc, then its body.
 For a task it also prints the current attempt's notes as `attempt_note`, such as `worker-brief.md skipped: not UTF-8` (see [the worker brief](files.md#worker-briefmd)).
-A task prints `queue_reason` after `phase`: the slot the next pass would not claim it for, in the words `list` prints, or `-` when no limit holds it.
+A task prints `queue_reason` after `phase`: the slot the next pass would not claim it for, in the words `list` prints, or `-` when no limit holds it (a task or plan that changed outside arc included).
 `show --json` carries the notes as `attempt_notes`, a list of strings (empty when there are none).
 
 A plan prints `cost_usd` and `total_cost_usd` beside its other fields: the first is the sum of its tasks' `cost_usd` and the number its budget compares, the second is the sum of their totals. Both are computed when the plan is read and are not stored in the plan file. A task prints both of its own numbers.
