@@ -117,7 +117,7 @@ The progress total leaves out `failed.cancelled` tasks: one merged task and one 
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
 When the repository defines a flow other than `default`, each task line also shows the task's flow in its own column, right after the id; a task without a `flow` field prints `default`.
 A repository whose `config.toml` has no `[flows]` table prints no flow column.
-A `todo.ready` task that the next pass would not claim because a limit is full ends its line with `(waiting for a free <flow> slot)`, or with `(waiting for a free concurrency slot)` when the repository total is full and the task's flow has room; when both are full the flow's reason wins (see [the queue reason](#trying-it-first---dry-run)).
+A `todo.ready` task that the next pass would not claim because a limit is full ends its line with `(waiting for a free <flow> slot)`, or with `(waiting for a free concurrency slot)` when the repository total is full and the task's flow has room; when both are full the flow's reason wins (see [the queue reason](#trying-it-first-dry-run)).
 A task held by an `after` task that has not merged, by a plan whose `auto` is `off`, or by a flow `config.toml` does not define gets no such reason.
 A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage) and what `reset-budget` sets back to `0`; its `total_cost_usd` is the same spend and is never reset.
 An attempt whose worker reported no cost (a [`worker.command`](files.md#configtoml) that writes no `cost` in its `Result`) adds nothing to either number.
