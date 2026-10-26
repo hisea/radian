@@ -10,6 +10,7 @@
 //! `start.json` is written by the claim, `signal.json` by whoever signals the wrapper, and
 //! `attempt_result.json` is arc's own record of what it applied.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -396,7 +397,8 @@ pub fn write_signal(store: &Store, task: &str, attempt: u32, class: Class) -> Re
 /// `retry_at`, because the backoff exists for the scheduling loop (decision 9).
 ///
 /// Refused (exit 3) when the task is in any other state or phase, its plan is not `confirmed`,
-/// an `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
+/// an `after` task is not `done`, its flow is full, or `[limits] concurrency` tasks are already
+/// in `doing`.
 pub fn claim(store: &Store, task_id: &str) -> Result<Claim, Error> {
     claim_by(store, task_id, ClaimBy::Owner)
 }
@@ -417,7 +419,8 @@ pub enum ClaimBy {
 /// [`Claim`] with the caller's [`ClaimBy`] rules (decision 9).
 ///
 /// Refused (exit 3) when the task is in any other state or phase, its plan is not `confirmed`,
-/// an `after` task is not `done`, or `[limits] concurrency` tasks are already in `doing`.
+/// an `after` task is not `done`, its flow is full, or `[limits] concurrency` tasks are already
+/// in `doing`.
 pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Error> {
     let _lock = store.lock_state()?;
     let loaded = store.load_task(task_id)?;
@@ -474,7 +477,22 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
             task_id, flow_name,
         )));
     };
-    let running = count_doing(store)?;
+    // Both limits apply (ADR 0048 decision 13): the task's own flow may not be full, and the
+    // repository total may not be full. The flow's refusal comes first, so a full flow names
+    // its own limit even when the total is full too; a file without `[flows]` has no flow
+    // limit and keeps today's refusal.
+    let counts = doing_counts(store)?;
+    if let Some(limit) = config.flow_concurrency(flow_name) {
+        let limit = u64::from(limit.max(1));
+        if counts.in_flow(flow_name) >= limit {
+            return Err(Error::Refused(format!(
+                "{} task(s) of flow `{flow_name}` are in `doing` and \
+                 `flows.{flow_name}.concurrency` is {limit}",
+                counts.in_flow(flow_name)
+            )));
+        }
+    }
+    let running = counts.total;
     if running >= u64::from(config.limits.concurrency) {
         return Err(Error::Refused(format!(
             "{running} task(s) are in `doing` and `limits.concurrency` is {}",
@@ -760,15 +778,47 @@ fn write_reverify_result(
         .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
 }
 
-/// How many tasks are in `doing`.
-fn count_doing(store: &Store) -> Result<u64, Error> {
-    let mut count = 0;
+/// How many tasks are in `doing`: the repository total, and how many belong to each flow. A
+/// claim compares the total with `[limits] concurrency` and the flow's own count with
+/// `[flows.<name>] concurrency` (ADR 0048 decision 13).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct DoingCounts {
+    /// Every task in `doing`.
+    pub total: u64,
+    /// The `doing` tasks of each flow name.
+    by_flow: BTreeMap<String, u64>,
+}
+
+impl DoingCounts {
+    /// How many `doing` tasks belong to `flow`.
+    pub(crate) fn in_flow(&self, flow: &str) -> u64 {
+        self.by_flow.get(flow).copied().unwrap_or(0)
+    }
+
+    /// Counts one more task of `flow`.
+    pub(crate) fn add(&mut self, flow: &str) {
+        self.total += 1;
+        *self.by_flow.entry(flow.to_owned()).or_insert(0) += 1;
+    }
+}
+
+/// Counts the tasks in `doing`, by flow. A `doing` task's flow is its `flow` field, `default`
+/// when absent; it is fixed for the attempt's life because the field can change only before
+/// the first attempt (ADR 0048 decision 6).
+///
+/// # Errors
+///
+/// A task file that cannot be read. The claim and a scheduling pass both read every file, so a
+/// claim never counts a `doing` task it could not see.
+pub(crate) fn doing_counts(store: &Store) -> Result<DoingCounts, Error> {
+    let mut counts = DoingCounts::default();
     for id in store.task_ids()? {
-        if store.load_task(&id)?.item.state == TaskState::Doing {
-            count += 1;
+        let task = store.load_task(&id)?.item;
+        if task.state == TaskState::Doing {
+            counts.add(task.flow.as_deref().unwrap_or(super::config::DEFAULT_FLOW));
         }
     }
-    Ok(count)
+    Ok(counts)
 }
 
 /// A random token: 16 bytes from the OS, hex. `/dev/urandom` is the only entropy source arc

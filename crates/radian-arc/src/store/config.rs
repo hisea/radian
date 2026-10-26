@@ -74,6 +74,11 @@ pub struct Config {
     pub ids: Ids,
     #[serde(default = "default_gate")]
     pub gate: GateConfig,
+    /// Whether the file wrote a `[flows]` table. A file that did not keeps no per-flow
+    /// concurrency for its implicit `default` flow, so it schedules as it did before flows
+    /// existed (ADR 0048 decision 13). Set when the file is parsed, never read from it.
+    #[serde(skip)]
+    pub flows_configured: bool,
 }
 
 impl Default for Config {
@@ -92,6 +97,22 @@ impl Default for Config {
             flows,
             ids: Ids::default(),
             gate,
+            flows_configured: false,
+        }
+    }
+}
+
+impl Config {
+    /// The concurrency this flow's own `doing` tasks are held to, or `None` when it has no
+    /// per-flow limit. A file that writes no `[flows]` table has none: its implicit `default`
+    /// flow's tasks count against [`Limits::concurrency`] alone, so it schedules as it did
+    /// before flows existed. Once the file writes a flow, every flow it holds is held to its
+    /// `concurrency`, the implicit `default` flow included (ADR 0048 decision 13).
+    pub fn flow_concurrency(&self, name: &str) -> Option<u32> {
+        if self.flows_configured {
+            self.flows.get(name).map(|flow| flow.concurrency)
+        } else {
+            None
         }
     }
 }
@@ -120,7 +141,8 @@ impl Default for Repository {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Limits {
-    /// How many tasks run at once.
+    /// How many tasks may be in `doing` at once across every flow, next to each flow's own
+    /// `concurrency` (ADR 0048 decision 13).
     pub concurrency: u32,
     /// How many retries one task gets since its last lead or review rework before it is
     /// `failed.exhausted`. A conflict rework keeps the count.
@@ -257,8 +279,9 @@ pub struct Flow {
     /// is the program, the rest are its arguments, and no shell is involved. `None` keeps
     /// `radian exec` with this flow's `exec_args`. An empty array is refused.
     pub command: Option<Vec<String>>,
-    /// How many tasks of this flow may run at once. Parsed and validated, but every task still
-    /// counts against `[limits] concurrency`.
+    /// How many tasks of this flow may be in `doing` at once. The implicit `default` flow of a
+    /// file without `[flows]` has no limit of its own and counts against `[limits] concurrency`
+    /// alone (ADR 0048 decision 13).
     pub concurrency: u32,
     /// The `[gate.profiles.<name>]` section this flow uses by default. Unset, it is the value
     /// of `gate.profile`; the key is parsed and validated, and every task's gate still uses
@@ -432,6 +455,10 @@ pub fn parse(text: &str) -> Result<Config, String> {
     check_worker_shape(text)?;
     check_flows_shape(text)?;
     let mut config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
+    // `check_flows` inserts the implicit `default` flow, so the file's own table is read here:
+    // a file without `[flows]` keeps old scheduling, and one with a flow is held to each flow's
+    // concurrency (ADR 0048 decision 13).
+    config.flows_configured = !config.flows.is_empty();
     if config.schema_version != SCHEMA_VERSION {
         return Err(format!(
             "unsupported schema_version {} (this build reads {SCHEMA_VERSION})",

@@ -28,7 +28,7 @@ One pass repeats until a pass changes nothing, in this order:
 2. move every `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`;
 3. re-verify, by itself, a task a `commands` or integration command failure blocked, once main moved (see [A command failure and a moved main](gate.md#a-command-failure-and-a-moved-main)): claim a new attempt without a worker. The two guards of that path apply, and an automatic reverify is not a retry: it does not count toward `max_attempts` or `auto_rework`;
 4. for every task in `review.verifying` (every plan, including a task that a moved branch or a changed digest sent back, and one step 3 just claimed): apply the verdicts a background gate left, or start its gate in the background;
-5. for each confirmed plan at `auto` `run` or `merge`, claim every `todo.ready` task whose `after` tasks are merged, up to `[limits] concurrency` attempts in flight, and start each wrapper without waiting for it;
+5. for each confirmed plan at `auto` `run` or `merge`, claim every `todo.ready` task whose `after` tasks are merged, within its flow's [`flows.<name>.concurrency`](files.md#configtoml) and up to [`limits.concurrency`](files.md#configtoml) attempts in flight, and start each wrapper without waiting for it. A ready task whose flow is full is skipped, so a task of another flow further down the claim order is claimed in the same pass;
 6. for each plan at `auto` `merge`, approve a verified task and start its integration in the background, or finish an integration a gate left.
    `run` writes the same `human` pass verdict `radian arc merge` writes, with `approver` `auto` in it.
 
@@ -64,6 +64,7 @@ PL0001-plan (auto run)
 ```
 
 A pass that wrote no transition line starts its summary with `no transition`.
+A ready task whose flow is full says `waiting for a free <flow> slot` (for example `waiting for a free image slot`); a full [`limits.concurrency`](files.md#configtoml) says `waiting for a free concurrency slot`, and the flow's reason wins when both are full. A file without `[flows]` keeps the shared reason.
 A file that changed outside arc is skipped and named in the summary; it does not stop the loop.
 A plan whose budget or automatic-rework limit paused it is named with its reason.
 

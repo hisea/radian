@@ -15,8 +15,9 @@
 //!    gate left; this is also how a task a moved branch or a changed digest sent back reaches
 //!    `review.awaiting_human` again;
 //! 5. for every confirmed plan at `auto` `run` or `merge`, claim each `todo.ready` task whose
-//!    `after` tasks are merged, up to `[limits] concurrency` attempts in flight at once, and
-//!    start its wrapper without waiting for it;
+//!    `after` tasks are merged, within its flow's `[flows.<name>] concurrency` and up to
+//!    `[limits] concurrency` attempts in flight at once, and start its wrapper without waiting
+//!    for it;
 //! 6. for every plan at `auto` `merge`, approve a verified task and start its integration
 //!    gate, or finish the integration a gate left.
 //!
@@ -985,18 +986,20 @@ fn verifying_tasks(store: &Store) -> Result<Vec<String>, Error> {
 
 /// Claims and runs ready tasks of plans at `auto` `run` or `merge`, in claim order: the plan's
 /// priority, then the plan id, then the task order. Priority picks who gets a free slot; it
-/// never preempts an attempt that is already running. `true` when it ran at least one attempt.
+/// never preempts an attempt that is already running. Both the task's flow's own `concurrency`
+/// and `[limits] concurrency` must have room (ADR 0048 decision 13); a full flow's task is
+/// skipped, so it does not block a later task of another flow. `true` when it ran at least one
+/// attempt.
 fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
     let config = store.config()?;
     let concurrency = u64::from(config.limits.concurrency.max(1));
-    let doing = count_doing(store)?;
-    if doing >= concurrency {
+    let mut doing = attempt_ops::doing_counts(store)?;
+    if doing.total >= concurrency {
         return Ok(false);
     }
-    let mut slots = concurrency - doing;
     let mut claims: Vec<(Claim, model::TaskFile)> = Vec::new();
     for view in plans_in_claim_order(store)? {
-        if slots == 0 {
+        if doing.total >= concurrency {
             break;
         }
         if view.plan.changed_outside_arc
@@ -1006,7 +1009,7 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
             continue;
         }
         for task in &view.tasks {
-            if slots == 0 {
+            if doing.total >= concurrency {
                 break;
             }
             if task.changed_outside_arc
@@ -1016,10 +1019,22 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
             {
                 continue;
             }
+            let flow = task
+                .item
+                .flow
+                .as_deref()
+                .unwrap_or(crate::store::config::DEFAULT_FLOW);
+            // A full flow is skipped, not a reason to end the pass: a task of another flow
+            // further down the claim order may still have room.
+            if let Some(limit) = config.flow_concurrency(flow)
+                && doing.in_flow(flow) >= u64::from(limit.max(1))
+            {
+                continue;
+            }
             match attempt_ops::claim_by(store, &task.item.id, attempt_ops::ClaimBy::SchedulingLoop)
             {
                 Ok(claim) => {
-                    slots -= 1;
+                    doing.add(flow);
                     claims.push((claim, task.item.clone()));
                 }
                 // The claim refused: another writer took the slot or the task moved. The
@@ -1185,34 +1200,51 @@ fn after_merged(store: &Store, task: &model::TaskFile) -> Result<bool, Error> {
     Ok(true)
 }
 
-/// Whether a scheduling pass would find a free concurrency slot right now: `confirm
-/// --dry-run` says a ready task waits when it would have none.
+/// Whether a scheduling pass could claim `task` right now: both its flow's own `concurrency`
+/// and `[limits] concurrency` must have room (ADR 0048 decision 13). `confirm --dry-run` says a
+/// ready task waits when it would have none.
 ///
 /// A task file that does not read is not a running task here: a dry run must refuse exactly
 /// as the real confirm does, and the real confirm never reads an unrelated task file.
-pub(crate) fn free_concurrency_slot(store: &Store) -> Result<bool, Error> {
-    let concurrency = u64::from(store.config()?.limits.concurrency.max(1));
-    let mut doing = 0;
-    for id in store.task_ids()? {
-        if store
-            .load_task(&id)
-            .is_ok_and(|loaded| loaded.item.state == TaskState::Doing)
-        {
-            doing += 1;
-        }
+pub(crate) fn free_concurrency_slot(store: &Store, task: &model::TaskFile) -> Result<bool, Error> {
+    let config = store.config()?;
+    let flow = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    let (doing, in_flow) = queue_doing_counts(store, flow)?;
+    if let Some(limit) = config.flow_concurrency(flow)
+        && in_flow >= u64::from(limit.max(1))
+    {
+        return Ok(false);
     }
-    Ok(doing < concurrency)
+    Ok(doing < u64::from(config.limits.concurrency.max(1)))
 }
 
-/// How many tasks are in `doing`.
-fn count_doing(store: &Store) -> Result<u64, Error> {
-    let mut count = 0;
+/// Counts the tasks in `doing`, the repository total and `flow`'s own, for the queue reasons
+/// (ADR 0048 decision 13). A task file that does not read is not counted: the queue is a
+/// display, and a dry run must not fail on an unrelated broken file. A real claim reads every
+/// file ([`attempt_ops::doing_counts`]).
+fn queue_doing_counts(store: &Store, flow: &str) -> Result<(u64, u64), Error> {
+    let mut doing = 0;
+    let mut in_flow = 0;
     for id in store.task_ids()? {
-        if store.load_task(&id)?.item.state == TaskState::Doing {
-            count += 1;
+        if let Ok(loaded) = store.load_task(&id)
+            && loaded.item.state == TaskState::Doing
+        {
+            doing += 1;
+            if loaded
+                .item
+                .flow
+                .as_deref()
+                .unwrap_or(crate::store::config::DEFAULT_FLOW)
+                == flow
+            {
+                in_flow += 1;
+            }
         }
     }
-    Ok(count)
+    Ok((doing, in_flow))
 }
 
 /// The final summary: for each plan and task that is not merged, what it waits on. Plans are
@@ -1284,7 +1316,7 @@ pub fn waiting_reason(
                     .map(String::as_str)
                     .collect();
                 if missing.is_empty() {
-                    "waiting for a free concurrency slot".to_owned()
+                    concurrency_reason(store, item)?
                 } else {
                     format!("waiting for {} to merge", missing.join(", "))
                 }
@@ -1324,6 +1356,25 @@ pub fn waiting_reason(
         (TaskState::Done, phase) => format!("done.{phase}"),
     };
     Ok(reason)
+}
+
+/// Why a ready task waits for a slot: its flow's own limit when that is full (for example
+/// `waiting for a free image slot`), else the repository-wide `waiting for a free concurrency
+/// slot`. When both are full, the flow's reason wins (ADR 0048 decision 13). A file without
+/// `[flows]` has no per-flow limit, so it keeps the old text.
+fn concurrency_reason(store: &Store, task: &model::TaskFile) -> Result<String, Error> {
+    let config = store.config()?;
+    let flow = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    if let Some(limit) = config.flow_concurrency(flow) {
+        let (_, in_flow) = queue_doing_counts(store, flow)?;
+        if in_flow >= u64::from(limit.max(1)) {
+            return Ok(format!("waiting for a free {flow} slot"));
+        }
+    }
+    Ok("waiting for a free concurrency slot".to_owned())
 }
 
 #[cfg(test)]

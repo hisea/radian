@@ -920,7 +920,8 @@ fn warning_lines(store: &Store, tasks: &[String]) -> Result<Vec<String>, Error> 
 
 /// Why the next scheduling pass would not claim a task that is `todo.ready` now, in the words
 /// `radian arc run`'s summary uses: its plan's `auto` is `off`, an `after` task has not
-/// merged, or every concurrency slot is taken. `None` when nothing stands in the way.
+/// merged, or its flow or the repository has no free concurrency slot. `None` when nothing
+/// stands in the way.
 fn queue_reason(store: &Store, id: &str) -> Result<Option<String>, Error> {
     let task = store.load_task(id)?.item;
     let plan = store.load_plan(&task.plan)?.item;
@@ -938,7 +939,11 @@ fn queue_reason(store: &Store, id: &str) -> Result<Option<String>, Error> {
         let name = task.flow.as_deref().unwrap_or(super::config::DEFAULT_FLOW);
         !config.flows.contains_key(name)
     };
-    if plan.auto == "off" || blocked || flow_missing || !crate::run::free_concurrency_slot(store)? {
+    if plan.auto == "off"
+        || blocked
+        || flow_missing
+        || !crate::run::free_concurrency_slot(store, &ready)?
+    {
         Ok(Some(crate::run::waiting_reason(store, &plan, &ready)?))
     } else {
         Ok(None)

@@ -1215,3 +1215,22 @@ identical to the commit.
 | TK0164-M3 | `check_flows` accepts `[flows.default]` together with `[worker] command` | `flows::a_broken_flow_config_is_refused_by_name` (`the config is refused` parsed the file) | ✅ failed |
 
 3/3 caught.
+
+## TK0165: `[flows.<name>] concurrency` beside `[limits] concurrency` (2026-10-26, branch `work/TK0165-per-flow-concurrency`)
+
+ADR 0048 decision 13: a claim needs room in its own flow's `concurrency` and in the
+repository-wide `[limits] concurrency`; a full flow is skipped, not waited on, and the queue
+reason names the full limit. Each mutation was applied by hand to the named file. The named
+tests ran with `cargo nextest run -p radian-arc --test flows --locked --profile sandbox`, after
+`cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` (they drive the
+binary). The sources were restored from copies under `.radian/mut/` with `cp` and compared with
+`cmp`. A control run with `Config::flow_concurrency` returning `None` (the old code, which
+ignored the flow limit) failed all five new tests.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0165-M1 | every flow count is the repository total (`DoingCounts::in_flow` and `queue_doing_counts` count all `doing` tasks) | `flows::a_full_flow_skips_its_later_task_with_the_flows_reason`, `flows::one_total_slot_names_the_shared_limit_or_the_full_flow`, `flows::a_full_flow_does_not_block_another_flows_later_task` (the second code task's flow never frees, and a free flow names the total) | ✅ 3 failed |
+| TK0165-M2 | the pass breaks at the first full flow instead of skipping it (`start_ready`'s flow-full branch `break`s) | `flows::a_full_flow_does_not_block_another_flows_later_task` (the later code task never starts) | ✅ failed |
+| TK0165-M3 | the total limit is dropped when the flow has a free slot (`start_ready` and `claim_by` lose the `doing.total` check) | `flows::one_total_slot_names_the_shared_limit_or_the_full_flow`, `flows::a_full_flow_does_not_block_another_flows_later_task` (two tasks start with one total slot) | ✅ 2 failed |
+
+3/3 caught.

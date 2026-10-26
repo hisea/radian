@@ -258,7 +258,8 @@ On success it prints these lines and exits `0`:
 - a `never runs: <id> <state>.<phase>` line for each such task whose chain cannot finish (the same test as `show`'s `never_runs`), and a `cycle: <id> -> … -> <id>` line for a cycle;
 - one `<id> queue: <n> of <m> todo.ready` line per such task: its place among every `todo.ready` task plus itself, in claim order (the plan's `priority`, the plan id, the task's order in the plan). A `todo.ready` task no plan lists, possible only through an adopted plan edit, sorts last.
 
-When the next pass would not claim the task, the queue line ends with the reason in parentheses, in the words `radian arc run`'s summary uses: `(waiting for <id> to merge)`, `(waiting for a free concurrency slot)`, or ``(waiting for you to start it (`auto` is `off`))``.
+When the next pass would not claim the task, the queue line ends with the reason in parentheses, in the words `radian arc run`'s summary uses: `(waiting for <id> to merge)`, `(waiting for a free <flow> slot)`, `(waiting for a free concurrency slot)`, or ``(waiting for you to start it (`auto` is `off`))``.
+The flow reason appears when the task's flow has its [`concurrency`](files.md#configtoml) tasks in `doing` (for example `(waiting for a free image slot)`); the shared reason appears when [`limits.concurrency`](files.md#configtoml) is full, and the flow's reason wins when both are full.
 The place is where the task would stand at that moment, not a promise: another task may be claimed or merged before it.
 
 ```text
@@ -330,7 +331,7 @@ radian arc priority <PLAN> <PRIORITY>
 | `P5` | The lowest. |
 
 A task has no priority of its own: it follows its plan, in its plan's task order and `after` list.
-`priority` only decides which plan gets the next free `[limits] concurrency` slot; it never preempts an attempt that is already running, so a change takes effect at the next pass that has a free slot (see [`run`](#radian-arc-run)).
+`priority` only decides which plan gets the next free concurrency slot, the task's flow's or the repository's; it never preempts an attempt that is already running, so a change takes effect at the next pass that has a free slot (see [`run`](#radian-arc-run)).
 The plan's state does not matter: a `draft` plan can be set too.
 `list`, `show`, and the MCP `list` and `show` tools print the plan's priority.
 
@@ -380,7 +381,10 @@ A claim is refused with exit `3` and changes nothing when:
 - the task is not `todo.ready` or `todo.retry_wait`; a `todo.proposed` task names its phase and waits for `radian arc confirm`, and `todo.paused_budget` and every `failed.*` phase are refused;
 - its plan is not `confirmed`; a `cancelled` plan is refused, naming its status;
 - an `after` task is not `done`;
-- `[limits] concurrency` tasks are already in `doing`.
+- its flow already has [`flows.<flow>.concurrency`](files.md#configtoml) tasks in `doing`;
+- [`limits.concurrency`](files.md#configtoml) tasks are already in `doing`.
+
+The refusal names the full limit and its count: `flows.<name>.concurrency` or `limits.concurrency`. When both are full, it names the flow's limit.
 
 The claim is one transaction: the task's `attempt` goes up by one, `attempt_id` becomes `<task>-<attempt>`, a random `token` is written, and the task moves to `doing.starting`.
 arc then runs the hidden `radian arc work` wrapper as a child, with the brief on its stdin; the wrapper moves the task to `doing.running`.
