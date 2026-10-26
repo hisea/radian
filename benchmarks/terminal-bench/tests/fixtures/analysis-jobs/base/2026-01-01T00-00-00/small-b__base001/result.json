@@ -1,0 +1,25 @@
+{
+  "id": "fixture-base-small-b__base001",
+  "task_name": "small-b",
+  "trial_name": "small-b__base001",
+  "agent_info": {
+    "name": "pi",
+    "version": "0.85.1"
+  },
+  "agent_result": {
+    "cost_usd": 0.04,
+    "metadata": {}
+  },
+  "verifier_result": {
+    "rewards": {
+      "reward": 0.0
+    }
+  },
+  "exception_info": null,
+  "started_at": "2026-01-01T00:00:00Z",
+  "finished_at": "2026-01-01T00:01:00Z",
+  "agent_execution": {
+    "started_at": "2026-01-01T00:00:00Z",
+    "finished_at": "2026-01-01T00:01:00Z"
+  }
+}

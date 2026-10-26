@@ -1,0 +1,25 @@
+{
+  "id": "fixture-tall-dominant__tall001",
+  "task_name": "dominant",
+  "trial_name": "dominant__tall001",
+  "agent_info": {
+    "name": "pi",
+    "version": "0.85.1"
+  },
+  "agent_result": {
+    "cost_usd": 0.02,
+    "metadata": {}
+  },
+  "verifier_result": {
+    "rewards": {
+      "reward": 1.0
+    }
+  },
+  "exception_info": null,
+  "started_at": "2026-01-01T00:00:00Z",
+  "finished_at": "2026-01-01T00:01:00Z",
+  "agent_execution": {
+    "started_at": "2026-01-01T00:00:00Z",
+    "finished_at": "2026-01-01T00:01:00Z"
+  }
+}

@@ -23,6 +23,10 @@ JOBS = Path(__file__).resolve().parent / "fixtures" / "jobs"
 # One trial per producer for the `gen_tok` rule, including an ATIF producer that
 # has no rule. Kept apart from `jobs/` so its expected values stay unchanged.
 GEN_TOK_JOBS = Path(__file__).resolve().parent / "fixtures" / "gen-tok-jobs"
+# Three common tasks where one task carries the whole gen_tok/cost difference,
+# with three trials of that task for `tall`. `base` and `tall` are the labels;
+# both trials were produced by pi, so the ATIF `gen_tok` rule applies.
+ANALYSIS = Path(__file__).resolve().parent / "fixtures" / "analysis-jobs"
 
 
 def find(report, agent, task):
@@ -357,6 +361,175 @@ class GeneratedTokensTest(unittest.TestCase):
         self.assertEqual(metrics.GENERATED_RULES["radian"], "includes_reasoning")
         self.assertEqual(metrics.GENERATED_RULES["pi"], "includes_reasoning")
         self.assertEqual(metrics.GENERATED_RULES["opencode"], "excludes_reasoning")
+
+
+class AnalysisFixtureTest(unittest.TestCase):
+    """SPREAD, LEAVE-ONE-TASK-OUT, cost/pass and INTERVALS on a known fixture."""
+
+    def setUp(self):
+        self.report = metrics.build_report([ANALYSIS])
+
+    def test_baseline_defaults_to_the_first_agent_in_report_order(self):
+        self.assertEqual(self.report["agents"], ["base", "tall"])
+        self.assertEqual(self.report["baseline"], "base")
+
+    def test_spread_reports_min_median_max_for_three_trials(self):
+        cell = self.report["spread"]["cells"]["dominant"]["tall"]
+        self.assertEqual((cell["min"], cell["median"], cell["max"]), (300, 500, 700))
+        self.assertEqual(cell["trials"], 3)
+        single = self.report["spread"]["cells"]["small-a"]["tall"]
+        self.assertEqual(
+            (single["min"], single["median"], single["max"]), (100, 100, 100)
+        )
+        text = metrics.format_report(self.report)
+        self.assertIn("300/500/700", text)
+
+    def test_spread_ratio_sums_an_agents_trials_of_the_task(self):
+        # tall: 300 + 500 + 700; base: 100 on the same task.
+        self.assertAlmostEqual(self.report["spread"]["ratios"]["dominant"]["tall"], 15.0)
+        self.assertAlmostEqual(self.report["spread"]["ratios"]["small-a"]["tall"], 1.0)
+
+    def test_cost_per_pass_is_cost_over_passes(self):
+        base = self.report["common_totals"]["base"]
+        tall = self.report["common_totals"]["tall"]
+        self.assertAlmostEqual(base["cost_usd"], 0.07)
+        self.assertEqual(base["pass"], 2)
+        self.assertAlmostEqual(base["cost_per_pass"], 0.035)
+        self.assertAlmostEqual(tall["cost_usd"], 0.12)
+        self.assertEqual(tall["pass"], 4)
+        self.assertAlmostEqual(tall["cost_per_pass"], 0.03)
+        self.assertIn("cost_per_pass", metrics.format_report(self.report))
+
+    def test_cost_per_pass_is_missing_without_a_pass_or_cost(self):
+        # opencode passed no trial in the common task, so its cost/pass is `-`.
+        text = metrics.format_report(metrics.build_report([JOBS]))
+        self.assertIn("cost_per_pass", text)
+        self.assertIsNone(
+            metrics.summarize(
+                [
+                    {
+                        "excluded": False,
+                        "result": "fail",
+                        "cost_usd": 1.0,
+                        "minutes": None,
+                        "model_calls": None,
+                        "output_tokens": None,
+                        "generated_tokens": None,
+                        "reasoning_tokens": None,
+                        "over_16k_calls": None,
+                        "generation_minutes": None,
+                        "tool_minutes": None,
+                        "max_tokens": None,
+                    }
+                ]
+            )["cost_per_pass"]
+        )
+
+    def test_leave_one_out_marks_the_task_that_carries_the_difference(self):
+        rows = self.report["leave_one_out"]["rows"]
+        self.assertIsNone(rows[0]["task"])  # the (none) row comes first
+        self.assertAlmostEqual(rows[0]["gen_tok"]["tall"], 1700 / 300)
+        self.assertAlmostEqual(rows[0]["cost"]["tall"], 0.12 / 0.07)
+        without_dominant = next(row for row in rows if row["task"] == "dominant")
+        # Without the task that carries the whole difference both ratios are 1.
+        self.assertAlmostEqual(without_dominant["gen_tok"]["tall"], 1.0)
+        self.assertAlmostEqual(without_dominant["cost"]["tall"], 1.0)
+        self.assertEqual(self.report["leave_one_out"]["marked"], "dominant")
+        self.assertIn("dominant*", metrics.format_report(self.report))
+
+    def test_the_none_row_equals_the_common_task_totals_ratio(self):
+        rows = self.report["leave_one_out"]["rows"]
+        tall = self.report["common_totals"]["tall"]["generated_tokens"]
+        base = self.report["common_totals"]["base"]["generated_tokens"]
+        self.assertAlmostEqual(rows[0]["gen_tok"]["tall"], tall / base)
+        cost_ratio = (
+            self.report["common_totals"]["tall"]["cost_usd"]
+            / self.report["common_totals"]["base"]["cost_usd"]
+        )
+        self.assertAlmostEqual(rows[0]["cost"]["tall"], cost_ratio)
+
+    def test_interval_for_a_task_carrying_the_difference_holds_one(self):
+        # Three common tasks: tall's gen_tok is 15x base on `dominant` and equal
+        # on the other two. `dominant` is absent from (2/3)**3 = 8/27 (~30%) of
+        # the task resamples, above the 2.5% tail, and then every gen_tok and
+        # cost ratio is exactly 1.0. The 2.5th percentile is therefore 1.0 and
+        # both ratio intervals hold 1.0: the difference is inconclusive.
+        intervals = self.report["intervals"]
+        gen_tok = intervals["agents"]["tall"]["gen_tok"]
+        cost = intervals["agents"]["tall"]["cost"]
+        self.assertEqual(gen_tok["low"], 1.0)
+        self.assertGreater(gen_tok["high"], 1.0)
+        self.assertTrue(gen_tok["inconclusive"])
+        self.assertEqual(cost["low"], 1.0)
+        self.assertTrue(cost["inconclusive"])
+        # The pass difference is in percentage points, not a fraction, and its
+        # interval here reaches 100 pp.
+        pass_rate = intervals["agents"]["tall"]["pass_rate"]
+        self.assertGreater(pass_rate["high"], 1.0)
+        self.assertTrue(pass_rate["inconclusive"])
+        self.assertIn("inconclusive", metrics.format_report(self.report))
+
+
+class BaselineOptionTest(unittest.TestCase):
+    def test_a_known_baseline_flips_every_ratio(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = metrics.main(
+                ["--json", "--baseline", "tall", str(ANALYSIS)]
+            )
+        self.assertEqual(status, 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["baseline"], "tall")
+        self.assertAlmostEqual(
+            report["leave_one_out"]["rows"][0]["gen_tok"]["base"], 300 / 1700
+        )
+        self.assertEqual(report["spread"]["ratios"]["dominant"]["base"], 100 / 1500)
+
+    def test_an_unknown_baseline_is_a_usage_error_that_lists_the_agents(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                metrics.main(["--baseline", "nope", str(ANALYSIS)])
+        self.assertEqual(raised.exception.code, 2)
+        message = stderr.getvalue()
+        self.assertIn("nope", message)
+        self.assertIn("base", message)
+        self.assertIn("tall", message)
+
+
+class IntervalOutputTest(unittest.TestCase):
+    def test_fewer_than_three_common_tasks_prints_one_line(self):
+        report = metrics.build_report([JOBS])
+        self.assertEqual(len(report["common_tasks"]), 1)
+        self.assertEqual(report["intervals"]["note"], metrics.INTERVAL_MIN_TASKS_NOTE)
+        text = metrics.format_report(report)
+        self.assertIn("the interval needs at least 3 common tasks", text)
+        self.assertNotIn("gen_tok ratio", text)
+
+    def test_bootstrap_output_is_identical_across_two_runs(self):
+        runs = []
+        for _ in range(2):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = metrics.main(["--json", str(ANALYSIS)])
+            self.assertEqual(status, 0)
+            runs.append(json.loads(output.getvalue()))
+        self.assertEqual(runs[0]["intervals"], runs[1]["intervals"])
+        self.assertEqual(runs[0], runs[1])
+
+    def test_json_carries_the_analysis_and_cost_per_pass(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = metrics.main(["--json", str(ANALYSIS)])
+        self.assertEqual(status, 0)
+        report = json.loads(output.getvalue())
+        for key in ("baseline", "spread", "leave_one_out", "intervals"):
+            self.assertIn(key, report)
+        for section in ("totals", "common_totals"):
+            for totals in report[section].values():
+                self.assertIn("cost_per_pass", totals)
+        self.assertEqual(report["intervals"]["resamples"], 2000)
+        self.assertEqual(report["intervals"]["seed"], 0)
 
 
 class BoundedReadTest(unittest.TestCase):

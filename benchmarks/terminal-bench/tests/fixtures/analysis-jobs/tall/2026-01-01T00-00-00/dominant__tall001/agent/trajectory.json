@@ -1,0 +1,18 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "agent": {
+    "name": "pi",
+    "version": "0.85.1"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "agent",
+      "llm_call_count": 1,
+      "metrics": {
+        "completion_tokens": 300,
+        "cost_usd": 0.02
+      }
+    }
+  ]
+}

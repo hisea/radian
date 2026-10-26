@@ -17,10 +17,10 @@ Harbor releases may rename these modules.
 | `radian_agent.py` | Harbor agent: uploads the binary + CA bundle, writes `auth.json`, runs `radian exec --output jsonl -p <instruction>` |
 | `radian_command.py` | Stdlib-only command builders (provider selection, `auth.json` rendering, static-binary check, shell quoting, redaction) |
 | `build-static.sh` | Builds the static musl binary the task containers need |
-| `metrics.py` | Stdlib-only report over finished harbor jobs: per-task matrix, per-trial rows, per-agent totals |
+| `metrics.py` | Stdlib-only report over finished harbor jobs: per-task matrix, per-trial rows, per-agent totals, spread, leave-one-out and intervals |
 | `tests/test_radian_command.py` | Builder unit tests (no Harbor dependency) |
 | `tests/test_radian_agent.py` | Agent unit tests against the real Harbor 0.24.0 package |
-| `tests/test_metrics.py` | Metrics tests on `tests/fixtures/jobs/` (one fake trial per agent kind) and `tests/fixtures/gen-tok-jobs/` (the `gen_tok` rules); `metrics.py --self-test` runs them |
+| `tests/test_metrics.py` | Metrics tests on `tests/fixtures/jobs/` (one fake trial per agent kind), `tests/fixtures/gen-tok-jobs/` (the `gen_tok` rules) and `tests/fixtures/analysis-jobs/` (spread, leave-one-out, intervals); `metrics.py --self-test` runs them |
 | `pyproject.toml` | Descriptive metadata only (agent import path, Harbor pin) |
 
 ## Key design (why the score measures the agent loop)
@@ -113,12 +113,14 @@ by the smoke below, not by these tests.
 ## Metrics from a finished run (stdlib only)
 
 `metrics.py` reads finished harbor jobs and prints a per-task matrix, one row
-per trial, per-agent totals, and a common-task section. It does not import
-Harbor and does not touch a container.
+per trial, per-agent totals, a common-task section, and the spread,
+leave-one-out and interval sections. It does not import Harbor and does not
+touch a container.
 
 ```sh
 python3 benchmarks/terminal-bench/metrics.py /tmp/tbench-ab/jobs
 python3 benchmarks/terminal-bench/metrics.py /tmp/tbench-ab/jobs --json > metrics.json
+python3 benchmarks/terminal-bench/metrics.py /tmp/tbench-ab/jobs --baseline radian-a
 ```
 
 `JOBS` is a jobs root (`<jobs>/<agent>/<timestamp>/<task>__<id>/`) or any
@@ -171,6 +173,9 @@ Columns:
 - `maxtok` (radian only) — the run ended `Incomplete(MaxTokens)`
   (`TurnFinished {outcome: incomplete, reason: max_tokens}`), or exec exited 4
   / the closing `Result` record named `max_tokens`.
+- `cost_per_pass` (totals only) — `cost / pass`; `-` when the agent passed no
+  trial or no record reported its cost. It is in both `AGENT TOTALS` and
+  `COMMON-TASK TOTALS`, and in each JSON totals entry.
 
 A `CancelledError` trial appears in the trial table as `skip`, is counted in
 the `excl` column, and is in no total. The matrix has one cell per task and
@@ -184,6 +189,61 @@ those tasks. `--json` prints the same report as one object (`agents`, `tasks`,
 (`totals`, `common_totals`) carries `generated_tokens` as its sum.
 `gen_unknown_agents` lists the ATIF producer names with no generated-token
 rule; the trial row that hit one carries its name in `unruled_producer`.
+
+### Spread, leave-one-out and intervals
+
+The matrix and totals say what each agent spent. Three more sections say
+whether a difference is real or carried by one task. All of them use the common
+tasks and the same non-excluded trials as `COMMON-TASK TOTALS`; timed-out
+trials count there as they do in the totals.
+
+`--baseline <agent>` chooses the agent every ratio divides by (`agent /
+baseline`). The default is the first agent in the report's agent order (`agents`
+is sorted). An unknown name is a usage error: the command exits 2 and prints
+the agents that are in the report.
+
+`SPREAD` has one row per common task and one column per agent holding that
+agent's `min/median/max` `gen_tok` over the task's trials. `-` means no trial of
+that agent on the task reported `gen_tok`. The median is the middle value, or
+the mean of the two middle values for an even trial count, printed without a
+decimal when it is whole. Each non-baseline agent then gets a ratio column: the
+task's summed `gen_tok` for that agent divided by the baseline's.
+
+`LEAVE-ONE-TASK-OUT` has one row per common task plus a first `(none)` row for
+all common tasks. Each non-baseline agent gets a summed `gen_tok` ratio and a
+summed `cost` ratio against the baseline over the common tasks *without* the
+row's task. The row whose removal moves a ratio furthest from the `(none)` row
+is marked `*`; "furthest" is the largest absolute change in any of those
+ratios. The `(none)` row is therefore the ratio of the two agents'
+`COMMON-TASK TOTALS`, and a `*` marks the task whose removal moves a ratio
+furthest, i.e. the task that carries most of the difference.
+
+`INTERVALS` is a task-level bootstrap for each non-baseline agent against the
+baseline. It resamples the common tasks with replacement, and inside each drawn
+task resamples each agent's trials of that task with replacement; a resample
+that draws a task more than once contributes its resampled trials that many
+times. Each resample gives the `gen_tok` ratio, the `cost` ratio, and the
+pass-rate difference in percentage points (agent minus baseline; a timed-out
+trial is not a pass, as in the totals). It takes 2000 resamples from
+`random.Random(0)`, so the same trials print the same interval, and reports the
+2.5th and 97.5th percentiles by linear interpolation between closest ranks. A
+resample that has no reported `gen_tok` or cost on either side gives no ratio
+and is left out of that ratio's percentiles. A ratio interval that holds 1.0,
+or a difference interval that holds 0, is labelled `inconclusive`. With fewer
+than 3 common tasks the table is replaced by one line saying the interval
+needs at least 3 common tasks.
+
+`--json` also carries `baseline`, `spread` (per task: each agent's
+`min`/`median`/`max`/`trials` or `null`, and the ratios), `leave_one_out` (the
+rows, the marked task or `null`), and `intervals` (the resample count, seed,
+percentiles, baseline, common-task count, a `note` when there are too few
+tasks, and per non-baseline agent the `gen_tok`, `cost` and `pass_rate`
+interval objects with `low`, `high` and `inconclusive`).
+
+A total without these sections is not evidence of an effect: a difference one
+task carries, one inside an agent's own per-task spread, or one whose interval
+holds 1.0 (or whose pass difference holds 0) is not a difference the trials
+support.
 
 Journals and `radian-stdout.txt` are the only files streamed: a long run's
 journal can be many GB, so it is read line by line under a per-line cap of
@@ -199,8 +259,10 @@ report can read, so it is skipped like a missing one.
 
 The fixtures under `tests/fixtures/jobs/` hold one trial per agent kind plus a
 cancelled and a timed-out trial; `tests/fixtures/gen-tok-jobs/` holds one trial
-per `gen_tok` rule (including an ATIF producer with none). The commands to run
-their tests are in
+per `gen_tok` rule (including an ATIF producer with none);
+`tests/fixtures/analysis-jobs/` holds two agents over three common tasks, where
+one task carries the whole difference and one task has three trials. The
+commands to run their tests are in
 [Unit tests](#unit-tests-no-harbor-run-no-model-no-docker) above.
 
 ## Smoke (needs Docker + Harbor + a model key)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-task and per-agent metrics from finished Harbor job directories.
 
-    python3 benchmarks/terminal-bench/metrics.py JOBS [JOBS ...] [--json]
+    python3 benchmarks/terminal-bench/metrics.py JOBS [JOBS ...] [--json] [--baseline AGENT]
 
 `JOBS` is a jobs directory (``<jobs>/<agent>/<timestamp>/<task>__<id>/``) or any
 directory above its trials. Every trial is read from its ``result.json``. A
@@ -14,7 +14,12 @@ across agents.
 
 A trial whose exception is ``CancelledError`` is excluded from every total and
 counted separately. The common-task section keeps only tasks for which every
-agent has at least one finished (not timed-out, not excluded) trial.
+agent has at least one finished (not timed-out, not excluded) trial. The
+``SPREAD``, ``LEAVE-ONE-TASK-OUT`` and ``INTERVALS`` sections use exactly those
+common tasks and non-excluded trials. They show one agent's own per-task
+spread, which task carries a total's difference, and whether a ratio or pass
+difference is larger than the resampling noise. ``--baseline`` names the agent
+every ratio divides by; it defaults to the first agent in the report.
 
 A job can hold a multi-GB journal, so only the journal and stdout files are
 streamed: line by line, under a per-line cap of ``MAX_LINE_CHARS`` (an
@@ -33,6 +38,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import random
+import statistics
 import sys
 from collections.abc import Iterable, Iterator
 from datetime import datetime
@@ -49,6 +57,14 @@ OVER_16K_TOKENS = 16_000
 # near 64 KiB (a base64 image is at most ~7 MB), so a 16 MiB line is generous.
 MAX_LINE_CHARS = 16 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
+
+# The task-level bootstrap behind INTERVALS. A fixed seed and a fixed number of
+# resamples make the printed interval reproducible from the same trials.
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 0
+INTERVAL_PERCENTILES = (2.5, 97.5)
+INTERVAL_MIN_TASKS = 3
+INTERVAL_MIN_TASKS_NOTE = "the interval needs at least 3 common tasks"
 
 # Reasoning lives in a provider-shaped usage sub-object. Radian keeps the
 # provider's own object in `details`; ATIF producers put it in `metrics.extra`.
@@ -527,6 +543,10 @@ def summarize(trials: list[dict[str, Any]]) -> dict[str, Any]:
             totals["max_tokens_trials"] = _add(
                 totals["max_tokens_trials"], int(trial["max_tokens"])
             )
+    cost = totals["cost_usd"]
+    totals["cost_per_pass"] = (
+        cost / totals["pass"] if cost is not None and totals["pass"] else None
+    )
     return totals
 
 
@@ -556,9 +576,253 @@ def common_tasks(trials: list[dict[str, Any]], agents: list[str]) -> list[str]:
     return common
 
 
-def build_report(jobs: Iterable[str | Path]) -> dict[str, Any]:
+def _included(
+    trials: list[dict[str, Any]], agent: str, task: str | None = None
+) -> list[dict[str, Any]]:
+    """The non-excluded trials of one agent (and task): the trials totals use."""
+    return [
+        trial
+        for trial in trials
+        if not trial["excluded"]
+        and trial["agent"] == agent
+        and (task is None or trial["task"] == task)
+    ]
+
+
+def _sum_reported(trials: list[dict[str, Any]], key: str) -> float | int | None:
+    """The sum of a counter over the trials that reported it, or None."""
+    values = [trial[key] for trial in trials if trial[key] is not None]
+    return sum(values) if values else None
+
+
+def _ratio(agent_value: Any, baseline_value: Any) -> float | None:
+    """`agent / baseline`, or None when either side is unknown or zero."""
+    if agent_value is None or baseline_value is None or baseline_value == 0:
+        return None
+    return agent_value / baseline_value
+
+
+def spread(
+    trials: list[dict[str, Any]],
+    agents: list[str],
+    common: list[str],
+    baseline: str | None,
+) -> dict[str, Any]:
+    """Per common task: each agent's gen_tok min/median/max, and the ratios."""
+    cells: dict[str, dict[str, dict[str, Any] | None]] = {}
+    ratios: dict[str, dict[str, float | None]] = {}
+    for task in common:
+        cells[task] = {}
+        for agent in agents:
+            values = sorted(
+                trial["generated_tokens"]
+                for trial in _included(trials, agent, task)
+                if trial["generated_tokens"] is not None
+            )
+            cells[task][agent] = (
+                {
+                    "min": values[0],
+                    "median": statistics.median(values),
+                    "max": values[-1],
+                    "trials": len(values),
+                }
+                if values
+                else None
+            )
+        base_sum = _sum_reported(
+            _included(trials, baseline, task) if baseline is not None else [],
+            "generated_tokens",
+        )
+        ratios[task] = {
+            agent: _ratio(
+                _sum_reported(_included(trials, agent, task), "generated_tokens"),
+                base_sum,
+            )
+            for agent in agents
+            if agent != baseline
+        }
+    return {
+        "tasks": common,
+        "agents": agents,
+        "cells": cells,
+        "ratios": ratios,
+        "baseline": baseline,
+    }
+
+
+def _furthest_row(rows: list[dict[str, Any]], agents: list[str]) -> str | None:
+    """The removed task whose row moves a ratio furthest from the first row."""
+    if not rows:
+        return None
+    none_row = rows[0]
+    marked = None
+    furthest = None
+    for row in rows[1:]:
+        moved = None
+        for metric in ("gen_tok", "cost"):
+            for agent in agents:
+                before = none_row[metric].get(agent)
+                after = row[metric].get(agent)
+                if before is None or after is None:
+                    continue
+                distance = abs(after - before)
+                moved = distance if moved is None else max(moved, distance)
+        if moved is not None and (furthest is None or moved > furthest):
+            furthest = moved
+            marked = row["task"]
+    return marked
+
+
+def leave_one_out(
+    trials: list[dict[str, Any]],
+    agents: list[str],
+    common: list[str],
+    baseline: str | None,
+) -> dict[str, Any]:
+    """Summed gen_tok and cost ratios over the common tasks without each task."""
+    non_baseline = [agent for agent in agents if agent != baseline]
+    base_trials = (
+        _included(trials, baseline) if baseline is not None else []
+    )
+    rows: list[dict[str, Any]] = []
+    for removed in [None, *common]:
+        tasks = {task for task in common if task != removed}
+        selected = {
+            agent: [trial for trial in _included(trials, agent) if trial["task"] in tasks]
+            for agent in non_baseline
+        }
+        base_selected = [
+            trial for trial in base_trials if trial["task"] in tasks
+        ]
+        rows.append(
+            {
+                "task": removed,
+                "gen_tok": {
+                    agent: _ratio(
+                        _sum_reported(selected[agent], "generated_tokens"),
+                        _sum_reported(base_selected, "generated_tokens"),
+                    )
+                    for agent in non_baseline
+                },
+                "cost": {
+                    agent: _ratio(
+                        _sum_reported(selected[agent], "cost_usd"),
+                        _sum_reported(base_selected, "cost_usd"),
+                    )
+                    for agent in non_baseline
+                },
+            }
+        )
+    return {
+        "rows": rows,
+        "marked": _furthest_row(rows, non_baseline),
+        "agents": non_baseline,
+        "baseline": baseline,
+    }
+
+
+def _percentile(values: list[float], percent: float) -> float | None:
+    """A percentile by linear interpolation between closest ranks."""
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percent / 100.0
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+
+def _interval(values: list[float], center: float) -> dict[str, Any]:
+    """The 2.5th-97.5th percentile interval and whether it holds `center`."""
+    if not values:
+        return {"low": None, "high": None, "inconclusive": None}
+    low = _percentile(values, INTERVAL_PERCENTILES[0])
+    high = _percentile(values, INTERVAL_PERCENTILES[1])
+    return {"low": low, "high": high, "inconclusive": low <= center <= high}
+
+
+def intervals(
+    trials: list[dict[str, Any]],
+    agents: list[str],
+    common: list[str],
+    baseline: str | None,
+) -> dict[str, Any]:
+    """A task-level bootstrap of the gen_tok/cost ratios and pass difference."""
+    non_baseline = [agent for agent in agents if agent != baseline]
+    result: dict[str, Any] = {
+        "resamples": BOOTSTRAP_RESAMPLES,
+        "seed": BOOTSTRAP_SEED,
+        "percentiles": list(INTERVAL_PERCENTILES),
+        "baseline": baseline,
+        "common_tasks": len(common),
+        "note": None,
+        "agents": {},
+    }
+    if len(common) < INTERVAL_MIN_TASKS:
+        result["note"] = INTERVAL_MIN_TASKS_NOTE
+        return result
+    rng = random.Random(BOOTSTRAP_SEED)
+    for agent in non_baseline:
+        gen_tok: list[float] = []
+        cost: list[float] = []
+        pass_rate: list[float] = []
+        for _ in range(BOOTSTRAP_RESAMPLES):
+            drawn = [rng.choice(common) for _ in common]
+            accumulators = {
+                who: {"gen_tok": None, "cost": None, "pass": 0, "trials": 0}
+                for who in (baseline, agent)
+            }
+            for task in drawn:
+                for who in (baseline, agent):
+                    on_task = _included(trials, who, task)
+                    for trial in (rng.choice(on_task) for _ in on_task):
+                        accumulator = accumulators[who]
+                        if trial["generated_tokens"] is not None:
+                            accumulator["gen_tok"] = _add(
+                                accumulator["gen_tok"], trial["generated_tokens"]
+                            )
+                        if trial["cost_usd"] is not None:
+                            accumulator["cost"] = _add(
+                                accumulator["cost"], trial["cost_usd"]
+                            )
+                        accumulator["pass"] += trial["result"] == "PASS"
+                        accumulator["trials"] += 1
+            base = accumulators[baseline]
+            other = accumulators[agent]
+            ratio = _ratio(other["gen_tok"], base["gen_tok"])
+            if ratio is not None:
+                gen_tok.append(ratio)
+            ratio = _ratio(other["cost"], base["cost"])
+            if ratio is not None:
+                cost.append(ratio)
+            if base["trials"] and other["trials"]:
+                pass_rate.append(
+                    (
+                        other["pass"] / other["trials"]
+                        - base["pass"] / base["trials"]
+                    )
+                    * 100.0
+                )
+        result["agents"][agent] = {
+            "gen_tok": _interval(gen_tok, 1.0),
+            "cost": _interval(cost, 1.0),
+            "pass_rate": _interval(pass_rate, 0.0),
+        }
+    return result
+
+
+def build_report(jobs: Iterable[str | Path], baseline: str | None = None) -> dict[str, Any]:
     trials = collect(jobs)
     agents = sorted({trial["agent"] for trial in trials})
+    if baseline is not None and baseline not in agents:
+        available = ", ".join(agents) if agents else "none"
+        raise ValueError(f"unknown baseline agent {baseline!r}; agents: {available}")
+    if baseline is None:
+        baseline = agents[0] if agents else None
     # A task known only from an excluded trial has no comparable result.
     tasks = sorted({trial["task"] for trial in trials if not trial["excluded"]})
     matrix: dict[str, dict[str, dict[str, int] | None]] = {}
@@ -570,6 +834,7 @@ def build_report(jobs: Iterable[str | Path]) -> dict[str, Any]:
     common = common_tasks(trials, agents)
     return {
         "agents": agents,
+        "baseline": baseline,
         "tasks": tasks,
         "trials": trials,
         "matrix": matrix,
@@ -588,6 +853,9 @@ def build_report(jobs: Iterable[str | Path]) -> dict[str, Any]:
             )
             for agent in agents
         },
+        "spread": spread(trials, agents, common, baseline),
+        "leave_one_out": leave_one_out(trials, agents, common, baseline),
+        "intervals": intervals(trials, agents, common, baseline),
     }
 
 
@@ -688,6 +956,7 @@ def format_report(report: dict[str, Any]) -> str:
                 str(totals[agent]["excluded"]),
                 _show(totals[agent]["minutes"], ".1f"),
                 _show(totals[agent]["cost_usd"], ".4f"),
+                _show(totals[agent]["cost_per_pass"], ".4f"),
                 _show(totals[agent]["model_calls"], ",d"),
                 _show(totals[agent]["output_tokens"], ",d"),
                 _show(totals[agent]["reasoning_tokens"], ",d"),
@@ -709,6 +978,7 @@ def format_report(report: dict[str, Any]) -> str:
                 "excl",
                 "min",
                 "cost",
+                "cost_per_pass",
                 "calls",
                 "out_tok",
                 "reason",
@@ -734,7 +1004,121 @@ def format_report(report: dict[str, Any]) -> str:
     )
     if common:
         blocks.append(totals_table("COMMON-TASK TOTALS", report["common_totals"]))
+    blocks.extend(_analysis_blocks(report))
     return "\n\n".join(blocks)
+
+
+def _number_text(value: Any) -> str:
+    """An integer-ish count without a decimal; a fraction with one place."""
+    if value is None:
+        return "-"
+    if float(value).is_integer():
+        return f"{int(value):,d}"
+    return f"{value:,.1f}"
+
+
+def _spread_text(cell: dict[str, Any] | None) -> str:
+    if cell is None:
+        return "-"
+    return "/".join(
+        _number_text(cell[key]) for key in ("min", "median", "max")
+    )
+
+
+def _ratio_text(value: float | None) -> str:
+    return "-" if value is None else f"{value:.2f}"
+
+
+def _analysis_blocks(report: dict[str, Any]) -> list[str]:
+    """The SPREAD, LEAVE-ONE-TASK-OUT and INTERVALS sections."""
+    agents: list[str] = report["agents"]
+    baseline = report["baseline"]
+    non_baseline = [agent for agent in agents if agent != baseline]
+    blocks: list[str] = []
+
+    spread_data = report["spread"]
+    spread_headers = [
+        "task",
+        *agents,
+        *(f"{agent}/{baseline}" for agent in non_baseline),
+    ]
+    spread_rows = [
+        [
+            task,
+            *(_spread_text(spread_data["cells"][task][agent]) for agent in agents),
+            *(_ratio_text(spread_data["ratios"][task][agent]) for agent in non_baseline),
+        ]
+        for task in spread_data["tasks"]
+    ]
+    spread_title = "SPREAD (gen_tok min/median/max per task"
+    if non_baseline:
+        spread_title += f"; ratio = agent/{baseline}"
+    blocks.append(spread_title + ")\n" + _table(spread_headers, spread_rows))
+
+    leave_data = report["leave_one_out"]
+    leave_headers = [
+        "task",
+        *(
+            cell
+            for agent in non_baseline
+            for cell in (f"{agent} gen_tok", f"{agent} cost")
+        ),
+    ]
+    leave_rows = []
+    for row in leave_data["rows"]:
+        label = "(none)" if row["task"] is None else row["task"]
+        if row["task"] is not None and row["task"] == leave_data["marked"]:
+            label += "*"
+        cells = [label]
+        for agent in non_baseline:
+            cells.extend(
+                [
+                    _ratio_text(row["gen_tok"][agent]),
+                    _ratio_text(row["cost"][agent]),
+                ]
+            )
+        leave_rows.append(cells)
+    leave_title = (
+        "LEAVE-ONE-TASK-OUT (summed ratio against the baseline without the "
+        "row's task"
+    )
+    if non_baseline:
+        leave_title += (
+            f"; * moves a ratio furthest from (none); ratio = agent/{baseline}"
+        )
+    blocks.append(leave_title + ")\n" + _table(leave_headers, leave_rows))
+
+    interval_data = report["intervals"]
+    if interval_data["note"]:
+        blocks.append("INTERVALS: " + interval_data["note"])
+        return blocks
+    metrics_rows = (
+        ("gen_tok ratio", "gen_tok", ".2f"),
+        ("cost ratio", "cost", ".2f"),
+        ("pass diff (pp)", "pass_rate", ".1f"),
+    )
+    interval_rows = []
+    for agent in non_baseline:
+        for label, key, spec in metrics_rows:
+            interval = interval_data["agents"][agent][key]
+            note = "inconclusive" if interval["inconclusive"] else ""
+            interval_rows.append(
+                [
+                    agent,
+                    label,
+                    _show(interval["low"], spec),
+                    _show(interval["high"], spec),
+                    note,
+                ]
+            )
+    low, high = interval_data["percentiles"]
+    blocks.append(
+        "INTERVALS (task-level bootstrap, "
+        f"{interval_data['resamples']} resamples, seed {interval_data['seed']}, "
+        f"{low}-{high} percentiles)\n"
+        + _table(["agent", "metric", "low", "high", "note"], interval_rows)
+    )
+    return blocks
 
 
 def _self_test() -> int:
@@ -759,6 +1143,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
     parser.add_argument(
+        "--baseline",
+        metavar="AGENT",
+        help="agent every ratio divides by (default: the first agent in the report)",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="run tests/test_metrics.py on the fixture jobs and exit",
@@ -768,7 +1157,10 @@ def main(argv: list[str] | None = None) -> int:
         return _self_test()
     if not args.jobs:
         parser.error("JOBS is required unless --self-test is given")
-    report = build_report(args.jobs)
+    try:
+        report = build_report(args.jobs, baseline=args.baseline)
+    except ValueError as error:
+        parser.error(str(error))
     if args.json:
         print(json.dumps(report, indent=2))
     elif not report["trials"]:
