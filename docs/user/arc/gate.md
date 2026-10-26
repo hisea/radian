@@ -17,7 +17,8 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   When it differs, arc records the reason in the attempt's `review.json` and the task stays in `review.verifying`; `show` prints the reason.
   The fetch is a git call that talks to a remote, so [`limits.git_remote_timeout_secs`](files.md#configtoml) bounds it; a fetch that runs out fails the gate with `git fetch timed out after <n> s`.
   arc's own fetches into a repository take turns on a lock in its git common dir (see [`radian arc init`](index.md#radian-arc-init-track)); a fetch that waits for the lock past the same limit fails with a line that names the lock. A `git fetch` you run yourself is not serialized by it.
-- The stages are the configured profile's (`gate.profile`, then `gate.profiles.<name>.stages`), in order, plus the task's `extra_stages`.
+- The stages are the task's profile's (`gate.profiles.<name>.stages`), in order, plus the task's `extra_stages`.
+  A task's profile is its flow's [`flows.<name>.gate_profile`](files.md#configtoml); a repository without `[flows]` uses `gate.profile`.
   `human` is your approval and does not run here.
   When the profile lists both `commands` and `review`, those two start at the same time; every other stage keeps its order.
 - Every stage runs against the verification candidate, in its own checkout under `.radian/arc/gates/<stage>/`.
@@ -26,7 +27,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   The merge uses arc's own commit identity, so the same inputs build the same tree.
   `verified_sha` stays the task's commit: the approval, the digest and `merge` bind to it, and the candidate is evidence only.
   A stage's commands run in order and stop at the first failure; each has its own log and the profile's timeout.
-- A verification stage's verdict records `sha` (the task's `verified_sha`), `main_sha` (the remote main the candidate was built on) and `candidate_sha` (the commit the stage ran on; absent when the merge conflicted).
+- A verification stage's verdict records `sha` (the task's `verified_sha`), `main_sha` (the remote main the candidate was built on), `candidate_sha` (the commit the stage ran on; absent when the merge conflicted) and `profile` (the profile the stage ran under).
 - A merge conflict is a failed stage: the verdict's reason is `conflict`, its `conflict_paths` lists the paths, the task goes to `review.rework_pending`, and `show` prints `conflict: <paths>`.
   Nothing is pushed.
 - `review` is a read-only radian session, not the worker session.
@@ -51,7 +52,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   A blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items, each as `[level] path:line text` with the parts an item does not have left out. An item whose `text` starts with a tag that repeats its own level (`[major]`, any case, spaces allowed) prints the level once: the leading tag is dropped from the text. A `text` that starts with another tag keeps it, and the verdict on disk is never rewritten.
   No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
   A gate that is started again for the same attempt does not reuse a review session whose journal exists: the stage names the run `<attempt id>-review-<run>-<k>` with the smallest free `k`, writes its logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log`, and `review_session_ids` lists the ids it used, so every run's session is found.
-  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros`, `review_settings` (`round`, `first` or `rework`; the `exec_args` source key; `timeout_secs` and the key it came from) and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha` and `candidate_sha`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
+  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros`, `review_settings` (`round`, `first` or `rework`; the `exec_args` source key; `timeout_secs` and the key it came from) and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha`, `candidate_sha` and `profile`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
 - `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), and `review_timeout` (the last run hit `[gate.review] timeout_secs`).
 - When the profile lists both `commands` and `review`, the round's outcome follows the profile order.
   A `commands` failure decides it with the commands reason, even when the review passed or failed too: the review verdict is still written, its cost counts, `show` lists its items, and arc writes no automatic review rework for that round.

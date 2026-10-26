@@ -1268,3 +1268,20 @@ binary). The source was restored from `.radian/mut/run.rs.m6` with `cp` and comp
 | TK0165-M6 | `slot_wait_reason` drops the `changed_outside_arc` check, so a changed task or plan still names the full slot | `flows::a_changed_outside_arc_file_names_no_slot` (`(waiting for a free code slot)` on an edited task's line) | ✅ failed |
 
 1/1 caught.
+
+## TK0166: the gate and `before_attempt` follow `[flows.<name>] gate_profile` (2026-10-26, branch `work/TK0166-per-flow-gate-profile`)
+
+ADR 0048 decisions 10 and 15: a task's gate profile is its flow's `gate_profile` — the stages,
+their `required` values, the profile's `commands` and `key_commands`, the acceptance rules, the
+task's `extra_stages` on top, and the profile's `before_attempt` steps that the wrapper runs.
+Each mutation was applied by hand to the named file. The named tests ran with `cargo nextest
+run -p radian-arc --locked --profile sandbox --test gate_profile`; the wrapper test drives the
+binary, so it needed `cargo build -p radian-tui --bin radian` after the mutation. The sources
+were restored from copies under `.radian/mut/` with `cp` and compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0166-M1 | `review::plan_verification` reads `gate.profile` instead of the task's flow's `gate_profile` (the image task's gate runs the default profile's `commands`) | `gate_profile::each_flow_gates_with_its_own_profile` (the image verdict directory holds `commands.json`, not `review.json`); `gate_profile::a_removed_flow_fails_the_gate_naming_the_flow` (the gate falls back to `gate.profile` and passes) | ✅ 2 failed |
+| TK0166-M2 | the wrapper takes `before_attempt` from `gate.profile` instead of the task's flow's `gate_profile` (`work/mod.rs`) | `gate_profile::a_rework_runs_only_its_flows_before_attempt_steps` (the quiet flow's rework merges main: `the quiet flow ran a step`) | ✅ failed |
+
+2/2 caught.

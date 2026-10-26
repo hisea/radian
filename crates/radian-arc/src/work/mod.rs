@@ -1333,7 +1333,7 @@ fn before_attempt(o: &Options, s: &Setup, created: bool) -> Result<Option<String
         return Ok(None);
     }
     let mut conflict = None;
-    for step in before_attempt_steps(&s.repo)? {
+    for step in before_attempt_steps(&s.repo, &o.task, &o.flow)? {
         if step == crate::gate::MERGE_MAIN
             && let Some(found) = merge_main(&s.repo, &s.worktree, o, &s.branch, &s.clock)?
         {
@@ -1343,21 +1343,22 @@ fn before_attempt(o: &Options, s: &Setup, created: bool) -> Result<Option<String
     Ok(conflict)
 }
 
-/// The selected profile's `before_attempt` steps. A repository arc is not set up in has no
-/// profile, so no step runs there, the same way the remote and main flags fall back to the git
-/// defaults. A `config.toml` that does not parse fails the attempt instead of being ignored:
-/// a skipped merge would reach the gate as a conflict (ADR 0048 decisions 7 and 10).
-fn before_attempt_steps(repo: &Path) -> Result<Vec<String>, Failure> {
+/// The task's profile's `before_attempt` steps (ADR 0048 decisions 7, 10 and 15): the flow's
+/// `gate_profile`, else `gate.profile`. A repository arc is not set up in has no profile, so no
+/// step runs there, the same way the remote and main flags fall back to the git defaults. A
+/// `config.toml` that does not parse fails the attempt instead of being ignored, and so does a
+/// flow or profile the file no longer defines: a skipped merge would reach the gate as a
+/// conflict, or run the wrong profile's steps.
+fn before_attempt_steps(repo: &Path, task: &str, flow: &str) -> Result<Vec<String>, Failure> {
     match crate::store::Store::open(repo) {
         Ok(store) => {
             let config = store
                 .config()
                 .map_err(|error| Failure::error(error.message()))?;
-            Ok(config
-                .gate
-                .selected_profile()
-                .map(|profile| profile.before_attempt.clone())
-                .unwrap_or_default())
+            let (_, profile) = config
+                .task_gate_profile(task, flow)
+                .map_err(Failure::error)?;
+            Ok(profile.before_attempt.clone())
         }
         Err(crate::store::Error::NotInitialized) => Ok(Vec::new()),
         Err(error) => Err(Failure::error(error.message())),

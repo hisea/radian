@@ -30,6 +30,7 @@ fn integration_with_main_unchanged_gives_candidate_head() {
         base_sha: &base,
         main_ref: "refs/remotes/origin/main",
         key_commands: &key_commands,
+        profile: "default",
         timeout: Duration::from_secs(30),
     };
 
@@ -72,6 +73,7 @@ fn integration_with_main_moved_merges_and_runs_key_commands_on_the_merge() {
         base_sha: &base,
         main_ref: "refs/remotes/origin/main",
         key_commands: &key_commands,
+        profile: "default",
         timeout: Duration::from_secs(30),
     };
 
@@ -129,6 +131,7 @@ fn a_conflict_gives_a_fail_verdict_with_the_path() {
         base_sha: &base,
         main_ref: "refs/remotes/origin/main",
         key_commands: &[],
+        profile: "default",
         timeout: Duration::from_secs(30),
     };
 
@@ -160,6 +163,7 @@ fn merge_ready_is_false_after_main_moves_again() {
         base_sha: &base,
         main_ref: "refs/remotes/origin/main",
         key_commands: &["true".to_string()],
+        profile: "default",
         timeout: Duration::from_secs(30),
     };
     let verdict = run.run().unwrap();
@@ -201,6 +205,7 @@ fn integration_uses_the_named_remote() {
         base_sha: &base,
         main_ref,
         key_commands: &key_commands,
+        profile: "default",
         timeout: Duration::from_secs(30),
     };
 
@@ -245,6 +250,7 @@ fn two_integration_runs_never_overlap() {
                 base_sha: &base_sha,
                 main_ref: "refs/remotes/origin/main",
                 key_commands: &key_commands,
+                profile: "default",
                 timeout: Duration::from_secs(30),
             }
             .run()

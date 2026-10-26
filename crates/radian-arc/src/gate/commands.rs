@@ -42,6 +42,8 @@ pub struct CommandRun<'a> {
     pub main_ref: &'a str,
     /// The profile's acceptance command lines.
     pub commands: &'a [String],
+    /// The gate profile the stage runs under, for the verdict (ADR 0048 decisions 10 and 15).
+    pub profile: &'a str,
     /// Per-command timeout.
     pub timeout: Duration,
 }
@@ -99,6 +101,7 @@ impl CommandRun<'_> {
             review_cost_micros: None,
             review_pre_existing: None,
             review_settings: None,
+            profile: Some(self.profile.to_owned()),
         };
         verdict.write_new(&verdict_path(
             self.repository,

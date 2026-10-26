@@ -387,6 +387,8 @@ pub struct Verification {
     pub main_ref: String,
     /// The effective profile.
     pub profile: crate::gate::Profile,
+    /// The name of the effective profile, which every verdict records.
+    pub profile_name: String,
     /// The effective stages, in order (the profile's plus the task's extra stages).
     pub stages: Vec<StageSpec>,
     /// `config.toml`, for the stage timeouts and the review route.
@@ -427,12 +429,15 @@ pub fn plan_verification(store: &Store, task_id: &str) -> Result<Verification, E
     let config = store.config()?;
     let (remote, main_branch) = store.repository_names()?;
     let main_ref = format!("refs/remotes/{remote}/{main_branch}");
-    let profile = config.gate.selected_profile().cloned().ok_or_else(|| {
-        Error::Failed(format!(
-            "gate.profile is `{}` but no such profile exists",
-            config.gate.profile
-        ))
-    })?;
+    let flow = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    let (profile_name, profile) = config
+        .task_gate_profile(&task.id, flow)
+        .map_err(Error::Failed)?;
+    let profile = profile.clone();
+    let profile_name = profile_name.to_owned();
     let extra = extra_stages(&task);
 
     // The pushed branch is the truth: `verified_sha` is the `head_sha` the remote has.
@@ -471,6 +476,7 @@ pub fn plan_verification(store: &Store, task_id: &str) -> Result<Verification, E
         remote,
         main_ref,
         profile,
+        profile_name,
         stages,
         config,
         inputs,
@@ -723,6 +729,7 @@ fn run_stage(
             sha: &plan.head,
             main_ref: &plan.main_ref,
             commands: &plan.profile.commands,
+            profile: &plan.profile_name,
             timeout: plan.config.gate.command_timeout(),
         }
         .run()
@@ -776,6 +783,7 @@ fn run_stage(
                 brief: &task.body,
                 main_ref: &plan.main_ref,
                 exec_args: choice.exec_args,
+                profile: &plan.profile_name,
                 concurrency: review.concurrency,
                 settings,
                 prompt_file: prompt_file.as_deref(),
@@ -1429,7 +1437,11 @@ fn conflict_auto_rework(
         return Ok(None);
     }
     let config = store.config()?;
-    let Some(profile) = config.gate.selected_profile() else {
+    let flow = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    let Ok((_, profile)) = config.task_gate_profile(&task.id, flow) else {
         return Ok(None);
     };
     if !profile.runs_merge_main() {
@@ -2052,6 +2064,8 @@ pub struct MergeContext {
     pub main_branch: String,
     pub main_ref: String,
     pub profile: crate::gate::Profile,
+    /// The name of the profile, which every integration verdict records.
+    pub profile_name: String,
 }
 
 /// Checks the approval's preconditions, writes the approval when the task is
@@ -2103,6 +2117,15 @@ fn prepare_merge(
     let config = store.config()?;
     let (remote, main_branch) = store.repository_names()?;
     let main_ref = format!("refs/remotes/{remote}/{main_branch}");
+    let flow = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    let (profile_name, profile) = config
+        .task_gate_profile(task_id, flow)
+        .map_err(Error::Failed)?;
+    let profile_name = profile_name.to_owned();
+    let profile = profile.clone();
 
     // The branch as it is now: a move invalidates every verdict and the approval.
     let remote_sha = remote_work_sha(store.repo(), &remote, task_id)?;
@@ -2155,7 +2178,7 @@ fn prepare_merge(
             reason.record(store, task_id, &label);
             return Err(Error::Refused(reason.text()));
         }
-        approve(store, task_id, &label, &head, approver)?;
+        approve(store, task_id, &label, &head, approver, &profile_name)?;
         store.change_task(task_id, |task| {
             if task.state == model::TaskState::Review && task.phase == "awaiting_human" {
                 task.phase = "integrating".to_owned();
@@ -2169,12 +2192,6 @@ fn prepare_merge(
         .clone()
         .filter(|sha| !sha.is_empty())
         .ok_or_else(|| Error::Refused(format!("task `{task_id}` has no `base_sha`")))?;
-    let profile = config.gate.selected_profile().cloned().ok_or_else(|| {
-        Error::Failed(format!(
-            "gate.profile is `{}` but no such profile exists",
-            config.gate.profile
-        ))
-    })?;
     Ok(MergeContext {
         task_id: task_id.to_owned(),
         label,
@@ -2184,6 +2201,7 @@ fn prepare_merge(
         main_branch,
         main_ref,
         profile,
+        profile_name,
     })
 }
 
@@ -2199,6 +2217,7 @@ fn run_integration(store: &Store, context: &MergeContext, label: &str) -> Result
         base_sha: &context.base,
         main_ref: &context.main_ref,
         key_commands: &context.profile.key_commands,
+        profile: &context.profile_name,
         timeout: config.gate.command_timeout(),
     }
     .run()
@@ -2239,12 +2258,14 @@ pub fn gate_integration(store: &Store, task_id: &str) -> Result<String, Error> {
     let config = store.config()?;
     let (remote, main_branch) = store.repository_names()?;
     let main_ref = format!("refs/remotes/{remote}/{main_branch}");
-    let profile = config.gate.selected_profile().cloned().ok_or_else(|| {
-        Error::Failed(format!(
-            "gate.profile is `{}` but no such profile exists",
-            config.gate.profile
-        ))
-    })?;
+    let flow = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    let (profile_name, profile) = config
+        .task_gate_profile(task_id, flow)
+        .map_err(Error::Failed)?;
+    let profile_name = profile_name.to_owned();
     let integration_label = next_integration_label(store, task_id, &label)?;
     IntegrationRun {
         repository: store.repo(),
@@ -2255,6 +2276,7 @@ pub fn gate_integration(store: &Store, task_id: &str) -> Result<String, Error> {
         base_sha: &base,
         main_ref: &main_ref,
         key_commands: &profile.key_commands,
+        profile: &profile_name,
         timeout: config.gate.command_timeout(),
     }
     .run()
@@ -2722,6 +2744,7 @@ fn approve(
     label: &str,
     sha: &str,
     approver: Option<&str>,
+    profile: &str,
 ) -> Result<(), Error> {
     let path = verdict_path(store.repo(), task, label, Stage::Human).map_err(gate_error)?;
     if path.is_file() {
@@ -2738,6 +2761,10 @@ fn approve(
         Some(approver) => Verdict::approved_by(sha, approver),
         None => Verdict::human(sha, true, None),
     };
+    let mut verdict = verdict;
+    // The owner's approval is a verdict like every other one: it names the profile the task's
+    // gate runs under (ADR 0048 decisions 10 and 15).
+    verdict.profile = Some(profile.to_owned());
     verdict.write_new(&path).map_err(gate_error)
 }
 
@@ -2894,9 +2921,14 @@ pub fn reject(store: &Store, task_id: &str, note: &str) -> Result<Rejected, Erro
 fn required_stages_passed(store: &Store, task_id: &str, head: &str) -> Result<bool, Error> {
     let task = store.load_task(task_id)?.item;
     let config = store.config()?;
-    let Some(profile) = config.gate.selected_profile().cloned() else {
+    let flow = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    let Ok((_, profile)) = config.task_gate_profile(task_id, flow) else {
         return Ok(false);
     };
+    let profile = profile.clone();
     let extra = extra_stages(&task);
     let verdicts = task_verdicts(store, task_id)?;
     let mut check_profile = profile;
@@ -3055,6 +3087,19 @@ pub fn latest_review_verdict(store: &Store, task: &str) -> Option<(PathBuf, Verd
         .ok()?
         .into_iter()
         .rfind(|(_, verdict)| verdict.stage == Stage::Review)
+}
+
+/// The newest profile any verdict of `task` records: the profile its gate ran under. A verdict
+/// written before the field existed records none, so an older verdict that does is used
+/// (ADR 0048 decisions 10 and 15).
+#[must_use]
+pub fn latest_gate_profile(store: &Store, task: &str) -> Option<String> {
+    task_verdict_files(store, task)
+        .ok()?
+        .into_iter()
+        .filter(|(_, verdict)| verdict.profile.is_some())
+        .max_by(|(_, one), (_, other)| one.ended_at.cmp(&other.ended_at))
+        .and_then(|(_, verdict)| verdict.profile)
 }
 
 /// The task's newest `review` verdict from an attempt other than `label`, with its path: the

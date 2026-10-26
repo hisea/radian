@@ -209,6 +209,8 @@ pub struct ReviewRun<'a> {
     pub main_ref: &'a str,
     /// The model route: the stage's own `radian exec` arguments before them.
     pub exec_args: &'a [String],
+    /// The gate profile the stage runs under, for the verdict (ADR 0048 decisions 10 and 15).
+    pub profile: &'a str,
     /// How many review sessions may run at once in the repository (ADR 0048 decision 10).
     pub concurrency: u32,
     /// The settings this session runs with, for the verdict (ADR 0048 decision 10).
@@ -348,6 +350,7 @@ impl ReviewRun<'_> {
             review_cost_micros: cost,
             review_pre_existing: pre_existing,
             review_settings: Some(self.settings.clone()),
+            profile: Some(self.profile.to_owned()),
         };
         verdict.write_new(&verdict_path(
             self.repository,
@@ -1608,6 +1611,7 @@ mod tests {
             brief: "the brief",
             main_ref: "refs/remotes/origin/main",
             exec_args,
+            profile: "default",
             concurrency: 1,
             settings: ReviewSettings {
                 round: "first".to_owned(),

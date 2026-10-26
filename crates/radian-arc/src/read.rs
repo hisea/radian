@@ -788,7 +788,14 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
     let label = format!("{}-{}", item.id, item.attempt);
 
     let config = store.config()?;
-    let profile = config.gate.selected_profile().cloned();
+    let flow = item
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    let profile = config
+        .task_gate_profile(&item.id, flow)
+        .ok()
+        .map(|(_, profile)| profile.clone());
     // The effective stages are the profile's plus the task's `extra_stages` (every name was
     // checked when the task file was read).
     let extra: Vec<Stage> = item

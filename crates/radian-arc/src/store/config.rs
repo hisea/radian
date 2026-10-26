@@ -116,6 +116,31 @@ impl Config {
             None
         }
     }
+
+    /// The gate profile a task of `flow` runs, and its name: the flow's `gate_profile`,
+    /// resolved to `gate.profile` for a file without `[flows]` (ADR 0048 decisions 10 and 15).
+    ///
+    /// # Errors
+    ///
+    /// The file defines no flow `flow`, or its `gate_profile` names no
+    /// `[gate.profiles.<name>]` section. The message names the task, the flow and the profile.
+    pub fn task_gate_profile<'a>(
+        &'a self,
+        task: &str,
+        flow: &str,
+    ) -> Result<(&'a str, &'a Profile), String> {
+        let Some(flow_config) = self.flows.get(flow) else {
+            return Err(missing_flow_reason(task, flow));
+        };
+        let name = flow_config.gate_profile(&self.gate.profile);
+        let Some(profile) = self.gate.profiles.get(name) else {
+            return Err(format!(
+                "task `{task}` uses flow `{flow}`, whose `flows.{flow}.gate_profile` is \
+                 `{name}` but no such profile exists"
+            ));
+        };
+        Ok((name, profile))
+    }
 }
 
 /// `[repository]`: what `init` found.
@@ -285,8 +310,8 @@ pub struct Flow {
     /// alone (ADR 0048 decision 13).
     pub concurrency: u32,
     /// The `[gate.profiles.<name>]` section this flow uses by default. Unset, it is the value
-    /// of `gate.profile`; the key is parsed and validated, and every task's gate still uses
-    /// `gate.profile`.
+    /// of `gate.profile`; the key is parsed and validated, and a gate run of a task of this
+    /// flow resolves it (ADR 0048 decisions 10 and 15).
     pub gate_profile: Option<String>,
 }
 
@@ -1156,5 +1181,68 @@ mod tests {
         assert_eq!(flow.exec_args, Vec::<String>::new());
         assert_eq!(flow.command, None);
         assert_eq!(flow.concurrency, DEFAULT_FLOW_CONCURRENCY);
+    }
+
+    /// A task's gate profile is its flow's `gate_profile`; a repository without `[flows]`
+    /// resolves `gate.profile`. A flow the file does not define, and a flow whose
+    /// `gate_profile` names no section, are refused with a message naming the flow.
+    #[test]
+    fn a_tasks_gate_profile_is_its_flows() {
+        let text = "schema_version = 1\n\
+                    [gate.profiles.default]\n\
+                    stages = [{ stage = \"commands\", required = true }]\n\
+                    [gate.profiles.strict]\n\
+                    stages = [{ stage = \"review\", required = true }]\n\
+                    [flows.art]\ngate_profile = \"strict\"\n\
+                    [flows.plain]\n";
+        let config = parse(text).expect("two flows and two profiles");
+        let (name, profile) = config
+            .task_gate_profile("TK0001-a", "art")
+            .expect("the flow's profile");
+        assert_eq!(name, "strict");
+        assert_eq!(profile.stages[0].stage, Stage::Review);
+        assert_eq!(
+            config
+                .task_gate_profile("TK0002-b", "plain")
+                .expect("the flow inherits `gate.profile`")
+                .0,
+            "default"
+        );
+
+        // A repository without `[flows]`: its implicit `default` flow resolves `gate.profile`.
+        let without =
+            parse("schema_version = 1\n[gate.profiles.default]\nstages = []\n").expect("no flows");
+        assert_eq!(
+            without
+                .task_gate_profile("TK0001-a", DEFAULT_FLOW)
+                .expect("the implicit default flow")
+                .0,
+            "default"
+        );
+
+        let missing_flow = without
+            .task_gate_profile("TK0001-a", "art")
+            .expect_err("the file defines no `art` flow");
+        for needle in ["TK0001-a", "art", "does not define"] {
+            assert!(missing_flow.contains(needle), "{missing_flow}");
+        }
+
+        // A flow whose `gate_profile` names no section cannot be parsed, so the resolver is fed
+        // a hand-built config: the message keeps today's missing-profile text and names the
+        // flow and its key.
+        let mut broken = Config::default();
+        broken.flows.insert(
+            "art".to_owned(),
+            Flow {
+                gate_profile: Some("gone".to_owned()),
+                ..Flow::default()
+            },
+        );
+        let error = broken
+            .task_gate_profile("TK0001-a", "art")
+            .expect_err("the profile does not exist");
+        for needle in ["flows.art.gate_profile", "gone", "no such profile exists"] {
+            assert!(error.contains(needle), "{error}");
+        }
     }
 }

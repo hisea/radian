@@ -308,6 +308,10 @@ pub struct Verdict {
     /// (ADR 0048 decision 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_settings: Option<ReviewSettings>,
+    /// The gate profile the stage ran under (ADR 0048 decisions 10 and 15). Absent on a
+    /// verdict written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 impl Verdict {
@@ -341,6 +345,7 @@ impl Verdict {
             review_cost_micros: None,
             review_pre_existing: None,
             review_settings: None,
+            profile: None,
         }
     }
 

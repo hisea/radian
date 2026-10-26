@@ -316,6 +316,7 @@ fn write_verdict(
         review_cost_micros: None,
         review_pre_existing: None,
         review_settings: None,
+        profile: Some("default".to_owned()),
     };
     if stage == Stage::Review && !detail.pass && detail.reason == Some("review_output") {
         // An unusable report left no parsed findings.

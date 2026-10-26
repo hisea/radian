@@ -26,6 +26,7 @@ fn a_passing_profile_runs_every_command_in_order() {
         attempt: "TK0001-pass-1",
         sha: &head,
         commands: &commands,
+        profile: "default",
         timeout: Duration::from_secs(30),
     };
 
@@ -62,6 +63,7 @@ fn a_failing_command_stops_the_stage() {
         attempt: "TK0001-fail-1",
         sha: &head,
         commands: &commands,
+        profile: "default",
         timeout: Duration::from_secs(30),
     };
 
@@ -92,6 +94,7 @@ fn a_timeout_kills_the_sleep_and_records_it() {
         attempt: "TK0001-timeout-1",
         sha: &head,
         commands: &commands,
+        profile: "default",
         timeout: Duration::from_secs(1),
     };
 
@@ -138,6 +141,7 @@ fn two_exclusive_stages_in_two_threads_never_overlap() {
                 attempt,
                 sha: &sha,
                 commands: &commands,
+                profile: "default",
                 timeout: Duration::from_secs(30),
             }
             .run()
@@ -176,6 +180,7 @@ fn a_commands_stage_waits_for_the_exclusive_lock() {
             attempt: "TK0001-waits-1",
             sha: &sha,
             commands: &commands,
+            profile: "default",
             timeout: Duration::from_secs(30),
         }
         .run()
@@ -206,6 +211,7 @@ fn a_timeout_kills_the_whole_command_group() {
         attempt: "TK0001-group-1",
         sha: &head,
         commands: &commands,
+        profile: "default",
         timeout: Duration::from_secs(1),
     };
 
@@ -233,6 +239,7 @@ fn a_verdict_cannot_be_written_twice() {
         attempt: "TK0001-twice-1",
         sha: &head,
         commands: &commands,
+        profile: "default",
         timeout: Duration::from_secs(30),
     };
 

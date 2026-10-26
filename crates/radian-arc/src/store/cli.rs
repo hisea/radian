@@ -576,6 +576,13 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 "flow",
                 item.flow.as_deref().unwrap_or(DEFAULT_FLOW),
             );
+            // The profile the newest verdict was made under (ADR 0048 decisions 10 and 15):
+            // the profile the task's gate ran, not the one the next gate would run.
+            field(
+                &mut out,
+                "gate_profile",
+                &optional_text(crate::review::latest_gate_profile(store, &item.id).as_deref()),
+            );
             field(&mut out, "title", &item.title);
             field(&mut out, "state", item.state.as_str());
             field(&mut out, "phase", &item.phase);
@@ -1260,6 +1267,10 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
                 object.insert(
                     "rework_reason".to_owned(),
                     json!(crate::review::rework_reason(store, &task.item)),
+                );
+                object.insert(
+                    "gate_profile".to_owned(),
+                    json!(crate::review::latest_gate_profile(store, &task.item.id)),
                 );
                 // The newest review verdict's findings (ADR 0048 decision 10): `review` is
                 // `null` until a review ran, and stays `null` when its output was unusable.

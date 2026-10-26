@@ -4053,6 +4053,7 @@ fn write_passing_review_at(
         review_cost_micros: None,
         review_pre_existing: None,
         review_settings: None,
+        profile: Some("default".to_owned()),
     }
     .write_new(&path)
     .expect("the review verdict is written once");
