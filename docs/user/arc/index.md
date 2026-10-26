@@ -116,7 +116,9 @@ Each plan's header line shows its id, `status`, `auto` level, `priority`, progre
 The progress total leaves out `failed.cancelled` tasks: one merged task and one cancelled follow-up read `1/1`, an all-cancelled plan `0/0`.
 Each task line shows `state.phase`, the attempt number, and `retry at <UTC time>` when the task has a `retry_at`.
 When the repository defines a flow other than `default`, each task line also shows the task's flow in its own column, right after the id; a task without a `flow` field prints `default`.
-A repository whose `config.toml` has no `[flows]` table therefore prints exactly the lines it always did.
+A repository whose `config.toml` has no `[flows]` table prints no flow column.
+A `todo.ready` task that the next pass would not claim because a limit is full ends its line with `(waiting for a free <flow> slot)`, or with `(waiting for a free concurrency slot)` when the repository total is full and the task's flow has room; when both are full the flow's reason wins (see [the queue reason](#trying-it-first---dry-run)).
+A task held by an `after` task that has not merged, by a plan whose `auto` is `off`, or by a flow `config.toml` does not define gets no such reason.
 A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage) and what `reset-budget` sets back to `0`; its `total_cost_usd` is the same spend and is never reset.
 An attempt whose worker reported no cost (a [`worker.command`](files.md#configtoml) that writes no `cost` in its `Result`) adds nothing to either number.
 arc records that on the task as [`cost_unknown`](files.md#task-fields), and a task that carries it — or a plan with such a task — prints `unknown` instead of a number, even after a later attempt reports a cost.
@@ -147,14 +149,16 @@ When everything is hidden, that line is the whole output; nothing hidden means n
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
 The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `cost_unknown` (`true` when one of its tasks is), `changed_outside_arc`, and `tasks`.
-Each task object holds `id`, `plan`, `flow`, `title`, `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `followup_pending`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
+Each task object holds `id`, `plan`, `flow`, `title`, `state`, `phase`, `queue_reason`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `followup_pending`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
 `flow` is the task's flow name, and `default` when its file has no `flow` field.
+`queue_reason` is the slot reason the task line prints (`waiting for a free <flow> slot` or `waiting for a free concurrency slot`), or `null` when no limit holds the task.
 
 ## `radian arc show <ID> [--json]`
 
 Prints one plan or task: every field, whether it changed outside arc, then its body.
 For a task it also prints the current attempt's notes as `attempt_note`, such as `worker-brief.md skipped: not UTF-8` (see [the worker brief](files.md#worker-briefmd)).
-`show --json` carries them as `attempt_notes`, a list of strings (empty when there are none).
+A task prints `queue_reason` after `phase`: the slot the next pass would not claim it for, in the words `list` prints, or `-` when no limit holds it.
+`show --json` carries the notes as `attempt_notes`, a list of strings (empty when there are none).
 
 A plan prints `cost_usd` and `total_cost_usd` beside its other fields: the first is the sum of its tasks' `cost_usd` and the number its budget compares, the second is the sum of their totals. Both are computed when the plan is read and are not stored in the plan file. A task prints both of its own numbers.
 A task whose attempt reported no cost prints `unknown` for both, and a plan with such a task prints `unknown` for both of its sums; `show --json` keeps the numbers it has and sets `cost_unknown` to `true`, so a script can tell an incomplete sum from a complete one. The state stays after a later attempt reports a cost; see [Another agent as the worker](worker.md#another-agent-as-the-worker).
@@ -170,7 +174,7 @@ The id names one plan or task. An id that names both a plan and a task is refuse
 |---|---|---|
 | `--json` | — | Print one JSON object instead of fields. |
 
-The object holds the same keys as in `list --json`, plus `body`, `session_id`, `rework_reason`, the `after` chain's `waits_on`, `blocks`, `never_runs` and `cycle` (see [the `after` chain](#the-after-chain)), and the newest review verdict's `review`, `review_verdict`, `review_session_ids`, `review_cost_micros` and `review_settings`.
+The object holds the same keys as in `list --json` (`queue_reason` included), plus `body`, `session_id`, `rework_reason`, the `after` chain's `waits_on`, `blocks`, `never_runs` and `cycle` (see [the `after` chain](#the-after-chain)), and the newest review verdict's `review`, `review_verdict`, `review_session_ids`, `review_cost_micros` and `review_settings`.
 An unset field is `null`; `session_id` is the current attempt's worker session id, from its `execution.json`, else its `identity.json`, else the claim's `start.json`, and `null` only when none of them names one; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a gate that died after it started, a reject note, the automatic rework limit that paused the plan, a conflict that reached `limits.max_conflict_rework`, or an automatic reverify count that is used up).
 `review` is `{"summary", "blocking", "suggestions", "verified"}` from the newest `review` verdict, or `null`; each item of `blocking` and `suggestions` is an object with `text` and, when it has them, `level`, `file`, `line` and `pre_existing` (see [the review stage](gate.md#the-gate-run)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none); `review_settings` is `{"round", "exec_args", "timeout_secs", "timeout"}` (the round `first` or `rework`, the config key the session's arguments came from, its wall-time limit in seconds and the key that limit came from), or `null`.
 For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_blocking`, `review_suggestions`, `review_verified`, `review_session_ids`, `review_cost_micros`, and `review_round`, `review_exec_args`, `review_timeout_secs` and `review_timeout`.
