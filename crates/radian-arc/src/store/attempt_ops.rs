@@ -150,6 +150,32 @@ fn outcome_class(outcome: &str, wrapper_exit: Option<i32>) -> Class {
     }
 }
 
+/// The worker line one attempt runs, decided once when the attempt is claimed (ADR 0048
+/// decision 4). The claim records it in `start.json` and starts the wrapper from the same value,
+/// so a later change to `config.toml` cannot make the record and the launched worker disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerLine {
+    /// `radian exec`, with the `[worker] exec_args` from the claim's configuration snapshot.
+    Radian { exec_args: Vec<String> },
+    /// `[worker] command`, with a program that contains a `/` made absolute from the repository
+    /// root.
+    Command { command: Vec<String> },
+}
+
+impl WorkerLine {
+    /// The `worker` record `start.json` carries.
+    #[must_use]
+    pub fn record(&self) -> Value {
+        match self {
+            WorkerLine::Radian { .. } => json!({"kind": "radian"}),
+            WorkerLine::Command { command } => json!({
+                "kind": "command",
+                "program": command.first().cloned().unwrap_or_default(),
+            }),
+        }
+    }
+}
+
 /// What one claim created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
@@ -166,6 +192,9 @@ pub struct Claim {
     pub allow_noop: bool,
     /// The task body: the brief and every rework section.
     pub brief: String,
+    /// The worker this attempt runs, from the same configuration snapshot as its `start.json`
+    /// record. The wrapper starts from this value, never from a later configuration read.
+    pub worker: WorkerLine,
     /// The one line a claim prints when it starts a command worker for a task or plan with a
     /// cost limit: `<task>: worker.command reports no cost; the cost limit does not apply`
     /// (ADR 0048 decisions 7 and 12).
@@ -444,17 +473,16 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
     };
     let resume = number > 1 && config.worker.rework_session == ReworkSession::Resume;
     // The worker this attempt runs, decided here because `[worker] command` takes effect at
-    // the next claim. The wrapper is started with the same command on its hidden flag, so a
-    // reader can tell a command worker from `radian exec` from the claim on (decision 4).
+    // the next claim. The wrapper is started with the same value, so a reader can tell a
+    // command worker from `radian exec` from the claim on, and a later `config.toml` change
+    // cannot make the record and the launched worker disagree (decision 4).
     let worker = match &config.worker.command {
-        Some(words) => {
-            let resolved = crate::worker_args::resolved(words, store.repo());
-            json!({
-                "kind": "command",
-                "program": resolved.first().cloned().unwrap_or_default(),
-            })
-        }
-        None => json!({"kind": "radian"}),
+        Some(words) => WorkerLine::Command {
+            command: crate::worker_args::resolved(words, store.repo()),
+        },
+        None => WorkerLine::Radian {
+            exec_args: config.worker.exec_args.clone(),
+        },
     };
     // A command worker reports no cost, so a task or plan cost limit cannot stop it. The
     // warning is printed once per attempt by `start`, `run` and `serve` (ADR 0048 decisions
@@ -487,7 +515,7 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         // `execution.json` (ADR 0048 decision 4). The worker is here for the same reason: a
         // later configuration change must not re-classify a running attempt.
         "session_id": session_id,
-        "worker": worker,
+        "worker": worker.record(),
     });
     let text = serde_json::to_string_pretty(&record)
         .map_err(|error| Error::Failed(format!("cannot encode the start record: {error}")))?;
@@ -506,6 +534,7 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         session_id,
         allow_noop: task.allow_noop,
         brief: task.body.clone(),
+        worker,
         no_cost_warning,
     })
 }

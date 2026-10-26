@@ -1159,3 +1159,23 @@ restored from `.radian/mut/<file>.final` with `cp`, which `cmp` found identical.
 | TK0160-M6 | the wrapper omits `worker` from `identity.json` | `work::the_happy_path_commits_pushes_and_records_the_attempt`, `command_worker::a_command_worker_that_commits_and_completes_passes_and_its_text_reaches_the_hand_off` | ✅ 2 failed |
 
 2/2 caught.
+
+## TK0163: the worker's process group and the claim's worker (2026-10-25, branch `work/TK0163-arc-worker-command-followups`)
+
+The review found that `monitor_child` reaped the direct child before `stop_group` signalled its
+process group, so a reused group id could name an unrelated group, and that `spawn_claim` still
+started the worker from a later configuration read even though `start.json` recorded the claim's
+worker. ADR 0048 decisions 4, 7 and 8: the wrapper peeks at the child's exit with `waitid` and
+`WNOWAIT`, keeps the zombie so the group id stays reserved, stops the group's live members, and
+returns the status without reaping; the wrapper's hidden `--command`/`exec_args` come from the
+claim's one `WorkerLine`, never from a configuration read after the claim. Each mutation was
+applied by hand to the named file, the named tests ran with `cargo nextest run -p radian-arc
+--locked --profile sandbox --lib -E '<the test below>'`, and the file was restored from
+`.radian/mut/<file>.orig` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0163-M1 | `process::exited_status` drops `WNOWAIT`, so `waitid` reaps the child | `process::tests::an_exited_child_is_seen_before_it_is_reaped` (the `try_wait` after the peek has no status) | ✅ failed |
+| TK0163-M2 | `spawn_claim_with` builds the worker from the later configuration's `exec_args` instead of `claim.worker` | `attempt::tests::the_wrapper_starts_the_worker_the_claim_recorded` (the recorder sees `-- --model later` and no `--command`) | ✅ failed |
+
+2/2 caught.

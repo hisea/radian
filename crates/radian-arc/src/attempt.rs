@@ -17,7 +17,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::process;
-use crate::store::attempt_ops::{self, Applied, Claim, Class};
+use crate::store::attempt_ops::{self, Applied, Claim, Class, WorkerLine};
 use crate::store::{Error, Store, model};
 
 pub use crate::store::attempt_ops::FAILURE_CLASSES;
@@ -176,6 +176,20 @@ pub fn spawn_claim(
     task: &model::TaskFile,
     config: &crate::store::config::Config,
 ) -> Result<Spawned, Error> {
+    let executable = std::env::current_exe()
+        .map_err(|error| Error::Failed(format!("cannot find the current executable: {error}")))?;
+    spawn_claim_with(store, claim, task, config, &executable)
+}
+
+/// [`spawn_claim`] with the wrapper executable named, so a test can start a recorder in its
+/// place and read the arguments the claim produced.
+fn spawn_claim_with(
+    store: &Store,
+    claim: &Claim,
+    task: &model::TaskFile,
+    config: &crate::store::config::Config,
+    executable: &std::path::Path,
+) -> Result<Spawned, Error> {
     let task_id = claim.task.as_str();
     let (remote, main_branch) = store.repository_names()?;
     let run_dir = attempt_ops::run_dir(store, task_id, claim.attempt);
@@ -184,8 +198,6 @@ pub fn spawn_claim(
     let stdout_path = run_dir.join("wrapper.stdout.log");
     let stderr_path = run_dir.join("wrapper.stderr.log");
 
-    let executable = std::env::current_exe()
-        .map_err(|error| Error::Failed(format!("cannot find the current executable: {error}")))?;
     let mut command = Command::new(executable);
     command
         .arg("arc")
@@ -216,17 +228,10 @@ pub fn spawn_claim(
         .arg(limits.wall.as_secs().to_string())
         .arg("--cancel-grace-secs")
         .arg(limits.grace.as_secs().to_string());
-    // The configured command worker, one JSON array on a hidden flag: the wrapper runs it
-    // instead of `radian exec` (ADR 0048 decision 7). The program is made absolute here, at
-    // the claim, so a path with a `/` means the same file in the wrapper's worktree.
-    if let Some(words) = &config.worker.command {
-        let worker = crate::worker_args::resolved(words, store.repo());
-        let json = serde_json::to_string(&worker)
-            .map_err(|error| Error::Failed(format!("cannot encode worker.command: {error}")))?;
-        command.arg("--command").arg(json);
-    }
-    command.arg("--");
-    command.args(&config.worker.exec_args);
+    // The configured command worker or the `radian exec` arguments, from the claim's one
+    // immutable worker line: a config change after the claim cannot start a different worker
+    // than `start.json` records (ADR 0048 decisions 4 and 7).
+    add_worker_args(&mut command, &claim.worker)?;
     let stdout = File::create(&stdout_path).map_err(|error| {
         Error::Failed(format!("cannot create {}: {error}", stdout_path.display()))
     })?;
@@ -270,6 +275,25 @@ pub fn spawn_claim(
         return Err(error);
     }
     Ok(Spawned { child })
+}
+
+/// Adds the worker arguments to the wrapper's command: one JSON array on the hidden `--command`
+/// flag for a command worker, or the `radian exec` extra arguments after `--`. Both come from the
+/// claim's [`WorkerLine`], never from a configuration read after the claim.
+fn add_worker_args(command: &mut Command, worker: &WorkerLine) -> Result<(), Error> {
+    match worker {
+        WorkerLine::Command { command: words } => {
+            let json = serde_json::to_string(words)
+                .map_err(|error| Error::Failed(format!("cannot encode worker.command: {error}")))?;
+            command.arg("--command").arg(json);
+        }
+        WorkerLine::Radian { .. } => {}
+    }
+    command.arg("--");
+    if let WorkerLine::Radian { exec_args } = worker {
+        command.args(exec_args);
+    }
+    Ok(())
 }
 
 /// Reads what a finished wrapper left and applies it in one transaction (decision 9).
@@ -847,6 +871,96 @@ mod tests {
     fn state(store: &Store, task: &str) -> (String, String) {
         let task = store.load_task(task).expect("the task reads").item;
         (task.state.as_str().to_owned(), task.phase)
+    }
+
+    /// The wrapper's worker arguments come from the claim's immutable [`WorkerLine`], not from
+    /// the configuration the caller happened to pass: a `config.toml` change between the load
+    /// that precedes the claim and the claim itself cannot make `start.json` and the launched
+    /// worker disagree (ADR 0048 decision 4).
+    ///
+    /// The claim is made with `worker.command` set; the config passed to the spawn has no
+    /// command and another `exec_args`. The recorder must still see the claim's command.
+    #[cfg(unix)]
+    #[test]
+    fn the_wrapper_starts_the_worker_the_claim_recorded() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (dir, store) = store();
+        std::fs::create_dir_all(dir.path().join("tools")).expect("the tools directory");
+        let program = dir.path().join("tools/worker");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").expect("the program");
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        std::fs::write(
+            store.root().join(crate::store::CONFIG_FILE),
+            config::default_text("main").replace(
+                "# command = [\"codex\", \"exec\"]",
+                "command = [\"tools/worker\"]",
+            ),
+        )
+        .expect("config with a command");
+        let plan = store.add_plan("plan", "A plan", "the request\n").unwrap();
+        let task_id = store
+            .add_task(
+                &plan,
+                "work",
+                "A task",
+                Vec::new(),
+                false,
+                Vec::new(),
+                "brief\n",
+            )
+            .unwrap();
+        crate::store::plan_ops::confirm(&store, &plan).expect("confirm");
+        let claim = attempt_ops::claim(&store, &task_id).expect("claim");
+        let WorkerLine::Command { command } = &claim.worker else {
+            panic!("the claim recorded the configured command");
+        };
+        assert_eq!(
+            command,
+            &vec![dir.path().join("tools/worker").display().to_string()],
+            "the claim resolved the program from the repository root"
+        );
+
+        // The configuration a different reader loaded afterwards: no command, other args.
+        let mut later = config::Config::default();
+        later.worker.exec_args = vec!["--model".to_owned(), "later".to_owned()];
+
+        let recorded = dir.path().join("wrapper-args.txt");
+        let recorder = dir.path().join("recorder.sh");
+        std::fs::write(
+            &recorder,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 0\n",
+                recorded.display()
+            ),
+        )
+        .expect("the recorder");
+        let mut permissions = std::fs::metadata(&recorder).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&recorder, permissions).unwrap();
+
+        let task = store.load_task(&task_id).unwrap().item;
+        let mut spawned =
+            spawn_claim_with(&store, &claim, &task, &later, &recorder).expect("the wrapper starts");
+        let _ = spawned.child.wait();
+
+        let text = std::fs::read_to_string(&recorded).expect("the recorder wrote its arguments");
+        let args: Vec<&str> = text.lines().collect();
+        let at = args
+            .iter()
+            .position(|arg| *arg == "--command")
+            .expect("the claim's command is on the wrapper line");
+        assert_eq!(
+            args[at + 1],
+            serde_json::to_string(command).unwrap(),
+            "the wrapper is started with the claim's command"
+        );
+        assert!(
+            !args.contains(&"--model"),
+            "the later configuration did not reach the wrapper: {args:?}"
+        );
     }
 
     /// The `todo` branch writes `failed.cancelled` under the transaction's lock and only while

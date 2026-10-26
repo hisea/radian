@@ -72,7 +72,7 @@ The wrapper adds these variables to the program's environment; they describe the
 | `ARC_SESSION` | The session id the claim chose (`<task>-<attempt>` with `rework_session = "fresh"`, the task id with `resume`). |
 | `ARC_SESSION_START` | `new` or `resume`: `resume` on a `resume`-mode attempt whose session file exists, `new` on every other attempt. Always set. |
 | `ARC_GIT_DIR` | `git rev-parse --absolute-git-dir` in the worktree. |
-| `ARC_GIT_COMMON_DIR` | The absolute common git directory. A linked worktree's objects and refs live there, so give it to a sandboxed agent as writable if the agent must commit. |
+| `ARC_GIT_COMMON_DIR` | The absolute common git directory. A linked worktree's objects and refs live there. A sandboxed agent that commits from inside its own sandbox needs it writable; Codex's `workspace-write` keeps `.git` read-only even when it is given, so the example below commits outside the sandbox instead. |
 | `ARC_DENY_READ` | The paths the wrapper would pass to `radian exec` as `--deny-read`, joined with `:`. A hint for your own sandbox, not a rule radian enforces on the command. |
 | `ARC_STATE_DIR` | An absolute directory outside the worktree, `attempts/<task>/state/`, kept across the task's attempts. The command may keep its own state there, for example a session map. |
 
@@ -96,27 +96,37 @@ A dirty or untracked file, no commit past the base, a commit that touches `.radi
 ### The differences from the `radian exec` worker
 
 - **`--deny-read` does not reach it.** radian does not sandbox the command, so what it reads is up to its own sandbox: the arc store and `~/.radian/credentials` are readable unless the command's own sandbox denies them. `ARC_DENY_READ` carries the paths the wrapper would deny so your program can deny them itself.
-- **Its sandbox is its own.** radian cannot select a profile or a tier for it. A sandboxed agent needs `ARC_WORKTREE` writable and, to commit, `ARC_GIT_COMMON_DIR` writable as well.
+- **Its sandbox is its own.** radian cannot select a profile or a tier for it. A sandboxed agent needs `ARC_WORKTREE` writable. One that commits from inside its sandbox also needs `ARC_GIT_COMMON_DIR` writable; Codex's `workspace-write` does not allow that, so the example below has Codex leave the commit to the script.
 - **The cost limit does not apply.** A budget can never stop a command worker, because arc does not know its cost unless the command reports one. The one warning line above says so once per attempt.
 
 ### A complete Codex example
 
-The example was checked against `codex-cli 0.159.1`.
-It passes Codex's JSON events to stdout unchanged and then prints one `Result` line: `completed` when `codex exec` exits `0`, `error` otherwise, with `text` the content of the `-o` file, JSON-escaped by `jq -Rs`.
+The commit-outside-the-sandbox flow in this example was checked against `codex-cli 0.159.1` in a real task run.
+It passes Codex's JSON events to stdout unchanged and then prints one `Result` line: `completed` when `codex exec` and the script's commit both succeed, `error` otherwise, with `text` the content of the `-o` file, JSON-escaped by `jq -Rs`.
+
+Codex's `workspace-write` sandbox keeps the repository's `.git` read-only, even when `--add-dir "$ARC_GIT_COMMON_DIR"` is given, so `git commit` inside Codex fails on `.git/worktrees/<task>/index.lock` with `Operation not permitted`.
+The script therefore tells Codex not to commit and commits outside the sandbox once `codex exec` exits `0`.
+Codex's sandbox also refuses some destructive commands such as `rm -f`, so a brief that needs files deleted should expect Codex to decline or do the deletion another way.
 
 ```sh
 #!/bin/sh
-# radian arc command worker: codex exec (checked with codex-cli 0.159.1)
+# radian arc command worker: codex exec (commit-outside-the-sandbox flow checked with codex-cli 0.159.1)
 set -e
 text='""'
 status=0
-codex exec --json -C "$ARC_WORKTREE" -s workspace-write \
-  --add-dir "$ARC_GIT_COMMON_DIR" \
-  -o "$ARC_STATE_DIR/last-message.txt" - || status=$?
+# Codex's sandbox keeps `.git` read-only: the brief tells it not to commit, and the
+# script commits outside the sandbox after `codex exec` succeeds.
+{ printf '%s\n\n' 'Do not run git add or git commit; this worker script commits your changes.'; cat; } \
+  | codex exec --json -C "$ARC_WORKTREE" -s workspace-write \
+      -o "$ARC_STATE_DIR/last-message.txt" - || status=$?
 if [ -f "$ARC_STATE_DIR/last-message.txt" ]; then
   text=$(jq -Rs . < "$ARC_STATE_DIR/last-message.txt")
 fi
 if [ "$status" -eq 0 ]; then
+  if [ -n "$(git -C "$ARC_WORKTREE" status --porcelain)" ]; then
+    git -C "$ARC_WORKTREE" add -A
+    git -C "$ARC_WORKTREE" commit -m "$ARC_TASK: the worker's change" >/dev/null
+  fi
   outcome=completed
 else
   outcome=error
@@ -132,6 +142,6 @@ command = ["/absolute/path/to/codex-worker.sh"]
 rework_session = "fresh"
 ```
 
-`codex exec resume` has no `-C`, `-s` or `--add-dir` in `0.159.1`, so the example always starts a new Codex session: keep `rework_session = "fresh"`, which is the default.
+`codex exec resume` has no `-C` or `-s` in `0.159.1`, so the example always starts a new Codex session: keep `rework_session = "fresh"`, which is the default.
 The wrapper's hand-off section still carries the previous attempt's report, and `ARC_STATE_DIR` is where the script can keep a session map of its own.
 

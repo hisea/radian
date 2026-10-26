@@ -897,14 +897,20 @@ fn monitor_child(
     let mut signalled = false;
     let mut kill_at: Option<Instant> = None;
     loop {
-        if let Some(status) = child
-            .try_wait()
+        // `exited_status` peeks without reaping. The zombie keeps the process-group id
+        // reserved, so neither `stop_group` nor the stop handler can signal a group that a
+        // reused id names (ADR 0048 decisions 7 and 8).
+        if let Some(status) = process::exited_status(child.id())
             .map_err(|error| Failure::error(format!("cannot wait for the worker: {error}")))?
         {
             // The direct child is gone, but a background process it left in its own process
             // group is not necessarily: it could change a git control file after this exit
             // and before the wrapper compares them, or after the attempt ends. Nothing the
-            // worker started runs from this point (ADR 0048 decisions 7 and 8).
+            // worker started runs from this point (ADR 0048 decisions 7 and 8). The stop
+            // handler is told there is no child first. The zombie is deliberately left for
+            // this process's own exit: while it remains, the group id cannot name another
+            // group.
+            CHILD_PID.store(0, Ordering::SeqCst);
             stop_group(child.id(), limits.grace);
             return Ok(status);
         }
@@ -945,16 +951,18 @@ fn monitor_child(
 }
 
 /// Stops everything the worker left in its process group after the direct child exits: SIGTERM,
-/// then SIGKILL once `grace` runs out, the same way a cancel stops it. The probe with signal 0
-/// ends the wait as soon as the group is empty, which is the normal case (ADR 0048 decisions 7
-/// and 8).
+/// then SIGKILL once `grace` runs out, the same way a cancel stops it. The caller has observed
+/// the direct child's exit without reaping it, so the zombie still holds the group id: no
+/// signal here can reach a reused group. The probe ends the wait as soon as the group has no
+/// live member, which is the normal case (ADR 0048 decisions 7 and 8).
 fn stop_group(pgid: u32, grace: Duration) {
-    if !process::signal_group(pgid, process::SIGTERM) {
+    if !process::group_has_live_member(pgid) {
         return;
     }
+    process::signal_group(pgid, process::SIGTERM);
     let deadline = Instant::now() + grace;
     loop {
-        if !process::signal_group(pgid, 0) {
+        if !process::group_has_live_member(pgid) {
             return;
         }
         if Instant::now() >= deadline {
@@ -966,7 +974,7 @@ fn stop_group(pgid: u32, grace: Duration) {
     // A killed process can stay a zombie for a moment until its parent reaps it. Wait a
     // bounded time, so the check after this does not race the group's last entry.
     let deadline = Instant::now() + GROUP_REAP;
-    while process::signal_group(pgid, 0) {
+    while process::group_has_live_member(pgid) {
         if Instant::now() >= deadline {
             return;
         }
