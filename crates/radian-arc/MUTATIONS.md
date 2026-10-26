@@ -1368,8 +1368,15 @@ compared with `cmp`.
 | TK0169-M1 | the wrapper skips a command entry when this attempt created the worktree (`work/mod.rs`: `run_before_command` runs only when `!created`) | `before_attempt::a_command_runs_on_a_first_attempt_and_the_worker_sees_its_file` (no `generated.txt`, no log); also `a_failing_command_ends_the_attempt_before_the_worker`, `a_timeout_kills_the_commands_process_group` and `a_command_that_edits_git_config_fails_the_control_check` (the worker starts on a first attempt) | ✅ 4 failed |
 | TK0169-M2 | a non-zero exit does not end the attempt: `run_before_command` logs it and goes on (`work/mod.rs`) | `before_attempt::a_failing_command_ends_the_attempt_before_the_worker` (`worker-ran` exists) | ✅ failed |
 | TK0169-M3 | a timeout kills only the command's own pid with `kill(2)` instead of its process group (`gate/commands.rs`, `run_shell`) | `before_attempt::a_timeout_kills_the_commands_process_group` (the `sleep` child 78679 was still alive) | ✅ failed |
-| TK0169-M4 | a cancel's stop gives the command the whole configured grace, as a plain SIGTERM does (`work/mod.rs`, `CommandStop::grace` returns `self.grace` with no reserve) | `before_attempt::a_term_ignoring_group_is_killed_before_the_cancel_kills_the_wrapper` (the wrapper was still running when the cancel's grace ran out, so the cancel SIGKILLed it first) | ✅ failed |
+| TK0169-M4 | a cancel takes the record window out of the command's grace again (`work/mod.rs`, `CommandStop::grace` returns `self.grace.saturating_sub(Duration::from_secs(1))` when `signal.json` exists) | `before_attempt::a_one_second_cancel_grace_is_not_shortened_by_the_record_reserve` (the group was SIGKILLed on the wrapper's first poll; it is gone at the test's 400 ms check) | ✅ failed |
 | TK0169-M5 | the loop reaps the shell with `try_wait` and returns as soon as it exits, without killing what it left in the group (`gate/commands.rs`, `run_shell`) | `before_attempt::a_stop_kills_what_the_commands_shell_leaves_in_its_group` (pid 90564 still slept after the wrapper exited) | ✅ failed |
+| TK0169-M6 | `cancel` SIGKILLs the wrapper at the grace, with no record window (the `CANCEL_RECORD_RESERVE` wait dropped from `attempt::cancel_running`) | `attempt::a_cancel_waits_a_record_window_after_the_grace` (a stand-in that writes its record 0.5 s after the grace is killed first: `doing.reconciling`, no record) | ✅ failed |
 
-5/5 caught.
+The rework round after M4–M5 removed `STOP_RESERVE`: the configured grace now always belongs to the
+command's group, and `cancel` reserves its own window (`attempt::CANCEL_RECORD_RESERVE`) for the
+wrapper's record instead of shortening it. M4 is the reverse mutation of that code, caught by the
+new small-grace test; M6 pins the reserve on the `cancel` side and runs with `--test attempt`
+instead of `--test before_attempt`. M1–M3 are unchanged.
+
+6/6 caught.
 
