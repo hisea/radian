@@ -320,7 +320,7 @@ fn a_claim_records_the_worker_it_decided_on() {
     );
     assert_eq!(
         start(&tasks[0])["worker"],
-        json!({"kind": "radian"}),
+        json!({"kind": "radian", "flow": "default"}),
         "the default worker is `radian exec`"
     );
 
@@ -343,6 +343,7 @@ fn a_claim_records_the_worker_it_decided_on() {
         second.worker,
         WorkerLine::Command {
             command: vec![repo.clone.join("tools/codex").display().to_string()],
+            flow: "default".to_owned(),
         },
         "the claim carries the resolved command the wrapper starts"
     );
@@ -350,6 +351,7 @@ fn a_claim_records_the_worker_it_decided_on() {
         start(&tasks[1])["worker"],
         json!({
             "kind": "command",
+            "flow": "default",
             "program": repo.clone.join("tools/codex").display().to_string(),
         }),
         "the claim names the command worker the wrapper will start"

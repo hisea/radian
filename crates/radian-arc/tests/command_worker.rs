@@ -139,7 +139,7 @@ fn a_command_worker_that_commits_and_completes_passes_and_its_text_reaches_the_h
             .expect("execution.json");
     assert_eq!(
         execution["worker"],
-        json!({"kind": "command", "program": worker.to_str().unwrap()}),
+        json!({"kind": "command", "flow": "default", "program": worker.to_str().unwrap()}),
         "the attempt records which worker ran"
     );
     let identity: Value =

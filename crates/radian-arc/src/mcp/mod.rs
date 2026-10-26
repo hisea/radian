@@ -137,10 +137,11 @@ impl ArcServer {
                 let after = args.optional_strings("after")?;
                 let allow_noop = args.optional_bool("allow_noop")?;
                 let extra_stages = args.optional_strings("extra_stages")?;
+                let flow = args.optional_string("flow")?;
                 args.finish()?;
                 let id = self
                     .store
-                    .add_task_proposed(
+                    .add_task_proposed_with_flow(
                         &plan,
                         &slug,
                         &title,
@@ -148,6 +149,7 @@ impl ArcServer {
                         allow_noop,
                         extra_stages,
                         &brief,
+                        flow.as_deref(),
                     )
                     .map_err(reason)?;
                 Ok(json!({ "id": id }))
@@ -175,8 +177,9 @@ impl ArcServer {
                 let after = args.optional_strings_opt("after")?;
                 let allow_noop = args.optional_flag("allow_noop")?;
                 let extra_stages = args.optional_strings_opt("extra_stages")?;
+                let flow = args.optional_string("flow")?;
                 args.finish()?;
-                store::plan_ops::update_task(
+                store::plan_ops::update_task_with_flow(
                     &self.store,
                     &task,
                     title.as_deref(),
@@ -184,6 +187,7 @@ impl ArcServer {
                     after,
                     allow_noop,
                     extra_stages,
+                    flow.as_deref(),
                 )
                 .map_err(reason)?;
                 store::cli::show_json(&self.store, &task).map_err(reason)

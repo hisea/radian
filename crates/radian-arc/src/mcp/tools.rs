@@ -115,6 +115,10 @@ pub const TOOLS: &[ToolDef] = &[
         "enum": ["commands", "mutation", "review", "ci", "human"]
       },
       "description": "Gate stages this task adds to the plan's profile. Default: none."
+    },
+    "flow": {
+      "type": "string",
+      "description": "The [flows.<name>] section whose worker every attempt starts. It must name a flow in config.toml. Default: default."
     }
   },
   "required": ["plan", "slug", "title", "brief"],
@@ -182,6 +186,10 @@ pub const TOOLS: &[ToolDef] = &[
         "enum": ["commands", "mutation", "review", "ci", "human"]
       },
       "description": "Gate stages this task adds to the plan's profile."
+    },
+    "flow": {
+      "type": "string",
+      "description": "The [flows.<name>] section whose worker every attempt starts. It must name a flow in config.toml, and it can change only while the task has had no attempt."
     }
   },
   "required": ["task"],
@@ -301,7 +309,7 @@ mod tests {
             .map(|(name, _)| name.as_str())
             .collect();
         assert_eq!(required, vec!["brief", "plan", "slug", "title"]);
-        for optional in ["after", "allow_noop", "extra_stages"] {
+        for optional in ["after", "allow_noop", "extra_stages", "flow"] {
             assert!(
                 parameters
                     .iter()
@@ -323,6 +331,7 @@ mod tests {
                 ("allow_noop".to_owned(), false),
                 ("brief".to_owned(), false),
                 ("extra_stages".to_owned(), false),
+                ("flow".to_owned(), false),
                 ("task".to_owned(), true),
                 ("title".to_owned(), false),
             ]

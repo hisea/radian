@@ -346,6 +346,9 @@ pub struct TaskFile {
     pub phase: String,
     /// Tasks that must be merged before this one starts.
     pub after: Vec<String>,
+    /// The `[flows.<name>]` section whose worker every attempt starts (ADR 0048 decision 15).
+    /// `None` is a file without the field, which reads as [`crate::store::config::DEFAULT_FLOW`].
+    pub flow: Option<String>,
     pub supersedes: Option<String>,
     pub attempt: u32,
     /// The current attempt's id, `<task>-<attempt>`, written by the claim.
@@ -480,6 +483,7 @@ impl TaskFile {
             state: TaskState::Todo,
             phase: "ready".to_owned(),
             after,
+            flow: None,
             supersedes: None,
             attempt: 0,
             attempt_id: None,
@@ -515,6 +519,9 @@ impl TaskFile {
         out.push_str(&format!("state: {}\n", self.state.as_str()));
         out.push_str(&format!("phase: {}\n", self.phase));
         out.push_str(&frontmatter::list_field("after", &self.after));
+        if let Some(flow) = &self.flow {
+            out.push_str(&format!("flow: {}\n", frontmatter::scalar(flow)));
+        }
         if let Some(id) = &self.supersedes {
             out.push_str(&format!("supersedes: {}\n", frontmatter::scalar(id)));
         }
@@ -621,6 +628,7 @@ impl TaskFile {
             ));
         }
         let after = fields.optional_list("after")?;
+        let flow = fields.optional_string("flow")?;
         let supersedes = fields.optional_string("supersedes")?;
         let attempt = fields.optional_u32("attempt")?.unwrap_or(0);
         let attempt_id = fields.optional_string("attempt_id")?;
@@ -666,6 +674,7 @@ impl TaskFile {
             state,
             phase,
             after,
+            flow,
             supersedes,
             attempt,
             attempt_id,
@@ -857,6 +866,7 @@ mod tests {
             state: TaskState::Review,
             phase: "awaiting_human".to_owned(),
             after: vec!["TK0001-one".to_owned()],
+            flow: Some("default".to_owned()),
             supersedes: Some("TK0009-old".to_owned()),
             attempt: 2,
             attempt_id: Some("TK0002-two-2".to_owned()),

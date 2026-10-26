@@ -557,6 +557,10 @@ enum ArcCommand {
         /// manual.
         #[arg(long, value_name = "JSON", hide = true)]
         command: Option<String>,
+        /// Internal: the task's flow, the name the attempt's records carry. arc passes the
+        /// flow the claim resolved. Not in the manual.
+        #[arg(long, value_name = "NAME", hide = true)]
+        flow: Option<String>,
         /// Test-only: run this shell command as the worker instead of `radian exec`.
         /// The wrapper's forwarding test starts a plain process with a child of its own.
         #[arg(long, value_name = "SHELL-COMMAND", hide = true)]
@@ -767,6 +771,10 @@ enum ArcAddCommand {
             )
         )]
         stages: Vec<String>,
+        /// The flow whose worker runs every attempt of this task: a [flows.<name>] section
+        /// of config.toml. Default: default.
+        #[arg(long, value_name = "NAME")]
+        flow: Option<String>,
     },
 }
 
@@ -789,6 +797,7 @@ impl ArcCommand {
                         after,
                         allow_noop,
                         stages,
+                        flow,
                     },
             } => ArcRun::AddTask {
                 plan,
@@ -797,6 +806,7 @@ impl ArcCommand {
                 after,
                 allow_noop,
                 stages,
+                flow,
             },
             ArcCommand::List { plan, all, json } => ArcRun::List { plan, all, json },
             ArcCommand::Show { id, json } => ArcRun::Show { id, json },
@@ -844,6 +854,7 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
             main_branch,
             extra,
             command,
+            flow,
             worker_command,
             stall_timeout_secs,
             max_wall_time_secs,
@@ -874,6 +885,7 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
                 main_branch,
                 extra_args: extra,
                 command,
+                flow: flow.unwrap_or_else(|| radian_arc::store::config::DEFAULT_FLOW.to_owned()),
                 worker_command,
                 stall_timeout_secs: stall_timeout_secs.unwrap_or(0),
                 max_wall_time_secs: max_wall_time_secs.unwrap_or(0),
@@ -3091,6 +3103,7 @@ mod tests {
             state: TaskState::Todo,
             phase: "ready".to_owned(),
             after: vec!["0002-c".to_owned()],
+            flow: Some("default".to_owned()),
             supersedes: Some("0003-d".to_owned()),
             attempt: 0,
             attempt_id: Some("0001-b-1".to_owned()),

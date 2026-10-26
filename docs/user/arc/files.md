@@ -30,7 +30,11 @@ A key you leave out takes its default.
 | `limits.max_gate_deaths` | integer | `2` | 0 or more; `0` stops at the first death | When a background gate wrote `running` and then died for the same attempt and inputs: how many deaths it gets before the record becomes `died` and no gate starts for those inputs. The gate is started `1 + max_gate_deaths` times at most. A gate the scheduling loop stopped itself is `interrupted`, not a death (see [the gate run](gate.md#the-gate-run)). |
 | `worker.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | Before `start`, each `run` pass and `confirm` act, the line the worker would get is parsed with the `radian exec` parser; a rejected line exits `3`. Every attempt: the arguments go to the worker after the wrapper's fixed ones. Empty means the worker uses the host's normal model configuration. It belongs to the `radian exec` worker line only: setting it together with a non-empty `worker.command` is a config error that names both keys. |
 | `worker.command` | array of strings | not set: the worker is `radian exec` | The program first, then its arguments; no shell | The worker that runs an attempt, instead of `radian exec` (see [Another agent as the worker](worker.md#another-agent-as-the-worker)). Unset keeps `radian exec` exactly as before. An empty array is a config error. A program that contains a `/` is a path, resolved from the repository root; any other name is looked up on `PATH`. A program that is not an executable file, or a bare name that is not on `PATH`, refuses `start`, `run` and `confirm` with exit `3`, naming `worker.command` and the program. The key takes effect at the next claim. |
-| `worker.rework_session` | string | `"fresh"` | `fresh`, `resume` | The session each worker attempt runs in. `fresh`: every attempt, a retry or a rework, starts a session of its own, `<task>-<attempt>`, and an attempt after the first gets a hand-off section in front of the brief ([what a rework receives](worker.md#the-session-and-the-brief)). `resume`: one session per task, whose id is the task id, created by the first attempt that reaches the model and continued by every later one. A change takes effect at the next attempt. |
+| `worker.rework_session` | string | `"fresh"` | `fresh`, `resume` | The session each worker attempt runs in. `fresh`: every attempt, a retry or a rework, starts a session of its own, `<task>-<attempt>`, and an attempt after the first gets a hand-off section in front of the brief ([what a rework receives](worker.md#the-session-and-the-brief)). `resume`: one session per task, whose id is the task id, created by the first attempt that reaches the model and continued by every later one. A change takes effect at the next attempt. It is a `[worker]` key, so it applies to every flow. |
+| `flows.<name>.exec_args` | array of strings | `[]` | any `radian exec` argument except `--profile`, `--workspace`, `--session-id`, `--resume`, `--output`, `--yes`, `-p` | The extra `radian exec` arguments of this flow, after the wrapper's fixed ones. A task whose `flow` is `<name>` starts `radian exec` with them on every attempt. The line is parsed before `start`, each `run` pass and `confirm`; a rejected line exits `3`, naming `flows.<name>.exec_args`. Setting it together with a non-empty `flows.<name>.command` is a config error that names both keys. Takes effect at the next claim. |
+| `flows.<name>.command` | array of strings | not set: this flow runs `radian exec` | The program first, then its arguments; no shell | The worker of this flow instead of `radian exec` (see [Another agent as the worker](worker.md#another-agent-as-the-worker)). An empty array is a config error. A program that contains a `/` is a path, resolved from the repository root; any other name is looked up on `PATH`. A program that is not an executable file, or a bare name that is not on `PATH`, refuses `start`, `run` and `confirm` with exit `3`, naming `flows.<name>.command` and the program. Takes effect at the next claim. |
+| `flows.<name>.concurrency` | integer | `1` | `1` or more | Accepted and validated, and it has no effect: every task still counts against [`limits.concurrency`](#configtoml), whether its flow sets this key or not. |
+| `flows.<name>.gate_profile` | string | `"default"` (the value of `gate.profile`) | The name of one `[gate.profiles.<name>]` section | Accepted and validated when the file is read; a name with no section is a config error. It has no effect: every task's gate still uses `gate.profile`. |
 | `ids.plan_prefix` | string | `"PL"` | 1 to 4 ASCII uppercase letters; must differ from `ids.task_prefix` | When a plan id is created. |
 | `ids.task_prefix` | string | `"TK"` | 1 to 4 ASCII uppercase letters; must differ from `ids.plan_prefix` | When a task id is created. |
 | `gate.profile` | string | `"default"` | The name of one `[gate.profiles.<name>]` section | When a gate runs. |
@@ -53,13 +57,28 @@ A key you leave out takes its default.
 A stage may be listed once per profile: a profile that lists a stage twice, or that lists `integration`, is refused by name.
 A per-task field of the same name overrides a `[limits]` value for that task; a plan budget adds to the task budgets.
 
+### Flows
+
+`[flows.<name>]` is one named bundle of worker settings.
+A name is 1 to 32 characters from `a-z`, `0-9` and `-`, with no leading or trailing `-`; any other name is refused when the file is read.
+The `default` flow always exists:
+
+- with no `[flows.default]` section, it is built from today's keys: `worker.command`, `worker.exec_args`, `gate.profile`, and concurrency `1`;
+- with `[flows.default]`, the flow's own keys are its worker, and a non-empty `worker.command` or `worker.exec_args` beside it is a config error that names both keys, because one setting lives in one place.
+
+A task without a `flow` field uses `default`.
+`worker.rework_session` stays a `[worker]` key and applies to every flow.
+A file with no `[flows]` table behaves as it did before flows existed, except that an attempt's records name the flow `default`.
+The `review` stage is unchanged: every task's review still uses `[gate.review]` and runs `radian exec`, whatever the flow.
+
 An attempt's worker session id is decided by its claim, which writes it to `attempts/<task>/<attempt>/start.json`; the wrapper writes the session it used to `identity.json` when it spawns the worker and to `execution.json` when it ends.
 A reader takes the first of those records that names one: `execution.json`, then `identity.json`, then `start.json`.
 With `worker.rework_session = "fresh"` it is `<task>-<attempt>`; with `resume` it is the task id.
 `radian arc show` prints it as `session_id` (known from the claim on, not only after the attempt ends), and `radian attach <session id>` opens that session's journal.
 
-The same records name the worker the attempt runs: the claim writes the worker it decided on (the `worker` field; `worker.command` takes effect at the next claim), and the wrapper writes the worker it started when it spawns it and when it ends.
-A reader takes the first of those records that names one, in the same order, so a running attempt keeps its kind when `config.toml` changes; the arc TUI's conversation tab uses that record, not the current configuration, to choose between a journal and a command worker's stdout.
+The same records name the worker the attempt runs: the claim writes the worker it decided on (the `worker` field; a flow's worker takes effect at the next claim), and the wrapper writes the worker it started when it spawns it and when it ends.
+Each record's `worker` object carries `kind` (`radian` or `command`) and `flow` (the task's flow, `default` when its file has no `flow` field); a command worker also carries `program`.
+A reader takes the first of those records that names one, in the same order, so a running attempt keeps its kind and flow when `config.toml` changes; the arc TUI's conversation tab uses that record, not the current configuration, to choose between a journal and a command worker's stdout.
 
 Every review run of an attempt has a session of its own, named `<attempt id>-review-<run>`.
 When a journal of that name already exists (a gate was started again for the same attempt), the stage uses `<attempt id>-review-<run>-<k>` with the smallest free `k` and writes the run's logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log` under the attempt's `logs/`; the review verdict's `review_session_ids` lists the ids it used.
@@ -137,6 +156,7 @@ A cancelled plan takes no change record: it is final.
 | `state` | string | yes | `todo`, `doing`, `review`, `done`, `failed` |
 | `phase` | string | yes | one of the phases of the task's state, in the table below |
 | `after` | list of ids | yes | tasks that must be merged first (`[]` when there are none) |
+| `flow` | string | no | the name of one `[flows.<name>]` section; absent reads `default`. It can change only while `attempt` is `0` (`update_task`, `adopt`); after the first attempt a change is refused and a new task is the way to run a different worker. |
 | `supersedes` | string | no | the id of a task this one replaces |
 | `attempt` | integer | yes | 0 or more; `0` when the task is new |
 | `attempt_id` | string | no | the current attempt's `<task>-<n>`, written by the claim |

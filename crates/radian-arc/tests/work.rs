@@ -195,7 +195,7 @@ fn the_happy_path_commits_pushes_and_records_the_attempt() {
     assert_eq!(identity["session_id"], json!("TK0001-happy"));
     assert_eq!(
         identity["worker"],
-        json!({"kind": "radian"}),
+        json!({"kind": "radian", "flow": "default"}),
         "the wrapper's identity record names the worker from the start"
     );
     assert_eq!(identity["branch"], json!("work/TK0001-happy"));

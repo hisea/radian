@@ -155,23 +155,35 @@ fn outcome_class(outcome: &str, wrapper_exit: Option<i32>) -> Class {
 /// so a later change to `config.toml` cannot make the record and the launched worker disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerLine {
-    /// `radian exec`, with the `[worker] exec_args` from the claim's configuration snapshot.
-    Radian { exec_args: Vec<String> },
-    /// `[worker] command`, with a program that contains a `/` made absolute from the repository
-    /// root.
-    Command { command: Vec<String> },
+    /// `radian exec`, with the flow's `exec_args` from the claim's configuration snapshot.
+    Radian {
+        exec_args: Vec<String>,
+        flow: String,
+    },
+    /// The flow's `command`, with a program that contains a `/` made absolute from the
+    /// repository root.
+    Command { command: Vec<String>, flow: String },
 }
 
 impl WorkerLine {
-    /// The `worker` record `start.json` carries.
+    /// The `worker` record `start.json` carries, with the flow the attempt starts from.
     #[must_use]
     pub fn record(&self) -> Value {
         match self {
-            WorkerLine::Radian { .. } => json!({"kind": "radian"}),
-            WorkerLine::Command { command } => json!({
+            WorkerLine::Radian { flow, .. } => json!({"kind": "radian", "flow": flow}),
+            WorkerLine::Command { command, flow } => json!({
                 "kind": "command",
+                "flow": flow,
                 "program": command.first().cloned().unwrap_or_default(),
             }),
+        }
+    }
+
+    /// The flow whose worker this attempt runs.
+    #[must_use]
+    pub fn flow(&self) -> &str {
+        match self {
+            WorkerLine::Radian { flow, .. } | WorkerLine::Command { flow, .. } => flow,
         }
     }
 }
@@ -454,6 +466,14 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         }
     }
     let config = store.config()?;
+    // The task's flow decides the worker (ADR 0048 decisions 7 and 15). A flow the file no
+    // longer defines leaves the task where it is: the claim writes nothing.
+    let flow_name = task.flow.as_deref().unwrap_or(super::config::DEFAULT_FLOW);
+    let Some(flow) = config.flows.get(flow_name) else {
+        return Err(Error::Refused(super::config::missing_flow_reason(
+            task_id, flow_name,
+        )));
+    };
     let running = count_doing(store)?;
     if running >= u64::from(config.limits.concurrency) {
         return Err(Error::Refused(format!(
@@ -472,16 +492,18 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         ReworkSession::Resume => task_id.to_owned(),
     };
     let resume = number > 1 && config.worker.rework_session == ReworkSession::Resume;
-    // The worker this attempt runs, decided here because `[worker] command` takes effect at
-    // the next claim. The wrapper is started with the same value, so a reader can tell a
-    // command worker from `radian exec` from the claim on, and a later `config.toml` change
-    // cannot make the record and the launched worker disagree (decision 4).
-    let worker = match &config.worker.command {
+    // The worker this attempt runs, decided here because a flow's worker takes effect at the
+    // next claim. The wrapper is started with the same value, so a reader can tell a command
+    // worker from `radian exec` from the claim on, and a later `config.toml` change cannot make
+    // the record and the launched worker disagree (decision 4).
+    let worker = match &flow.command {
         Some(words) => WorkerLine::Command {
             command: crate::worker_args::resolved(words, store.repo()),
+            flow: flow_name.to_owned(),
         },
         None => WorkerLine::Radian {
-            exec_args: config.worker.exec_args.clone(),
+            exec_args: flow.exec_args.clone(),
+            flow: flow_name.to_owned(),
         },
     };
     // A command worker reports no cost, so a task or plan cost limit cannot stop it. The
@@ -489,7 +511,7 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
     // 7 and 12).
     let cost_limited = task.max_cost_usd.or(config.limits.max_cost_usd).is_some()
         || plan.item.max_cost_usd.is_some();
-    let no_cost_warning = (config.worker.command.is_some() && cost_limited).then(|| {
+    let no_cost_warning = (flow.command.is_some() && cost_limited).then(|| {
         format!("{task_id}: worker.command reports no cost; the cost limit does not apply")
     });
     task.attempt = number;

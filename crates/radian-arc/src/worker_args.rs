@@ -69,18 +69,35 @@ fn line(exec_args: &[String]) -> Vec<String> {
 }
 
 /// Checks the worker line of `config` before an attempt is claimed, a `run` pass starts a task,
-/// or a plan is confirmed (ADR 0048 decision 7).
+/// or a plan is confirmed (ADR 0048 decisions 7 and 15).
+///
+/// The `[worker]` keys are checked as they always were, and then every `[flows.<name>]`
+/// worker is checked the same way: a flow's `command` program must resolve, and its
+/// `exec_args` must be a `radian exec` argument list without an argument the wrapper owns.
 ///
 /// # Errors
 ///
-/// [`Error::Refused`] (exit `3`) when `[worker] command` is set and its program does not
-/// resolve, or when it is unset and `exec_args` repeats an argument the wrapper owns or the
-/// `radian exec` parser rejects the line. The message names `worker.command` or
-/// `worker.exec_args`. Nothing is claimed or written.
+/// [`Error::Refused`] (exit `3`) when a `[worker]` or flow `command` program does not
+/// resolve, or when an `exec_args` repeats an argument the wrapper owns or the `radian exec`
+/// parser rejects the line. The message names `worker.command`, `worker.exec_args`,
+/// `flows.<name>.command` or `flows.<name>.exec_args`. Nothing is claimed or written.
 pub fn check_config(config: &Config, repo: &Path) -> Result<(), Error> {
     match &config.worker.command {
-        Some(command) => check_command(command, repo),
-        None => check(&config.worker.exec_args),
+        Some(command) => check_command("worker.command", command, repo)?,
+        None => check_named("worker.exec_args", &config.worker.exec_args)?,
+    }
+    for (name, flow) in &config.flows {
+        check_flow(name, flow, repo)?;
+    }
+    Ok(())
+}
+
+/// Checks one flow's worker: its `command` program resolves, or its `exec_args` is a valid
+/// `radian exec` argument list (ADR 0048 decision 15). The error names the flow's keys.
+pub fn check_flow(name: &str, flow: &crate::store::config::Flow, repo: &Path) -> Result<(), Error> {
+    match &flow.command {
+        Some(command) => check_command(&format!("flows.{name}.command"), command, repo),
+        None => check_named(&format!("flows.{name}.exec_args"), &flow.exec_args),
     }
 }
 
@@ -98,12 +115,13 @@ pub fn resolved(command: &[String], repo: &Path) -> Vec<String> {
     command
 }
 
-/// Checks that the command's program resolves (ADR 0048 decision 7).
-fn check_command(command: &[String], repo: &Path) -> Result<(), Error> {
+/// Checks that the command's program resolves (ADR 0048 decision 7). `key` names the config
+/// key the error is about (`worker.command` or `flows.<name>.command`).
+fn check_command(key: &str, command: &[String], repo: &Path) -> Result<(), Error> {
     let Some(program) = command.first() else {
-        return Err(Error::Refused(
-            "worker.command is empty; its first element must be the program".to_owned(),
-        ));
+        return Err(Error::Refused(format!(
+            "{key} is empty; its first element must be the program"
+        )));
     };
     if program.contains('/') {
         let path = Path::new(program);
@@ -114,14 +132,14 @@ fn check_command(command: &[String], repo: &Path) -> Result<(), Error> {
         };
         if !is_executable_file(&path) {
             return Err(Error::Refused(format!(
-                "worker.command names `{program}`, which is not an executable file"
+                "{key} names `{program}`, which is not an executable file"
             )));
         }
         return Ok(());
     }
     if find_on_path(program).is_none() {
         return Err(Error::Refused(format!(
-            "worker.command names `{program}`, which is not on PATH as an executable file"
+            "{key} names `{program}`, which is not on PATH as an executable file"
         )));
     }
     Ok(())
@@ -173,15 +191,21 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 /// when the `radian exec` parser rejects the line. The message names `worker.exec_args` and,
 /// for a parse failure, carries the parser's own text. Nothing is claimed or written.
 pub fn check(exec_args: &[String]) -> Result<(), Error> {
+    check_named("worker.exec_args", exec_args)
+}
+
+/// [`check`] with the config key the error names: `worker.exec_args` for `[worker]`, or
+/// `flows.<name>.exec_args` for a flow (ADR 0048 decision 15).
+fn check_named(key: &str, exec_args: &[String]) -> Result<(), Error> {
     if let Some(owned) = exec_args.iter().find_map(|arg| owned_name(arg)) {
         return Err(Error::Refused(format!(
-            "worker.exec_args must not repeat `{owned}`: the wrapper sets it on the worker's \
+            "{key} must not repeat `{owned}`: the wrapper sets it on the worker's \
              `radian exec` line, so a value here would override the wrapper's"
         )));
     }
     radian_exec::Cli::try_parse_from(line(exec_args)).map_err(|error| {
         Error::Refused(format!(
-            "worker.exec_args is not a `radian exec` argument list: {}",
+            "{key} is not a `radian exec` argument list: {}",
             error.to_string().trim_end()
         ))
     })?;

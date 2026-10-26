@@ -681,6 +681,33 @@ impl Store {
         extra_stages: Vec<String>,
         brief: &str,
     ) -> Result<String, Error> {
+        self.add_task_with_flow(
+            plan_id,
+            slug,
+            title,
+            after,
+            allow_noop,
+            extra_stages,
+            brief,
+            None,
+        )
+    }
+
+    /// [`Store::add_task`] with the task's `flow`: the `[flows.<name>]` section every attempt
+    /// starts from (ADR 0048 decision 15). `None` leaves the field out, so the task reads as
+    /// `default`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_task_with_flow(
+        &self,
+        plan_id: &str,
+        slug: &str,
+        title: &str,
+        after: Vec<String>,
+        allow_noop: bool,
+        extra_stages: Vec<String>,
+        brief: &str,
+        flow: Option<&str>,
+    ) -> Result<String, Error> {
         self.add_task_in(
             plan_id,
             slug,
@@ -690,6 +717,7 @@ impl Store {
             extra_stages,
             brief,
             false,
+            flow,
         )
     }
 
@@ -707,6 +735,31 @@ impl Store {
         extra_stages: Vec<String>,
         brief: &str,
     ) -> Result<String, Error> {
+        self.add_task_proposed_with_flow(
+            plan_id,
+            slug,
+            title,
+            after,
+            allow_noop,
+            extra_stages,
+            brief,
+            None,
+        )
+    }
+
+    /// [`Store::add_task_proposed`] with the task's `flow` (ADR 0048 decisions 11 and 15).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_task_proposed_with_flow(
+        &self,
+        plan_id: &str,
+        slug: &str,
+        title: &str,
+        after: Vec<String>,
+        allow_noop: bool,
+        extra_stages: Vec<String>,
+        brief: &str,
+        flow: Option<&str>,
+    ) -> Result<String, Error> {
         self.add_task_in(
             plan_id,
             slug,
@@ -716,6 +769,7 @@ impl Store {
             extra_stages,
             brief,
             true,
+            flow,
         )
     }
 
@@ -732,10 +786,12 @@ impl Store {
         extra_stages: Vec<String>,
         brief: &str,
         allow_confirmed: bool,
+        flow: Option<&str>,
     ) -> Result<String, Error> {
         check_new(slug, title)?;
         check_id(plan_id)?;
         check_stages(&extra_stages)?;
+        check_flow(self, flow)?;
         let _lock = self.lock_state()?;
         let plan = self.load_plan(plan_id)?;
         require_unchanged(plan_id, plan.changed_outside_arc)?;
@@ -751,6 +807,7 @@ impl Store {
             extra_stages,
             brief,
             allow_confirmed,
+            flow.map(str::to_owned),
         )
     }
 
@@ -818,6 +875,7 @@ impl Store {
             extra_stages,
             &brief,
             true,
+            None,
         )
         .map(Some)
     }
@@ -835,6 +893,7 @@ impl Store {
         extra_stages: Vec<String>,
         brief: &str,
         allow_confirmed: bool,
+        flow: Option<String>,
     ) -> Result<String, Error> {
         check_new(slug, title)?;
         check_stages(&extra_stages)?;
@@ -860,6 +919,7 @@ impl Store {
             extra_stages,
             brief,
         );
+        task.flow = flow;
         if proposed {
             task.phase = model::PROPOSED_PHASE.to_owned();
         }
@@ -974,6 +1034,9 @@ impl Store {
             ))
         })?;
         let touched = protected_changes(kind, &last, &raw)?;
+        if kind == Kind::Task {
+            self.check_adopted_flow(&last, &raw)?;
+        }
         if !touched.is_empty() {
             return Err(Error::Refused(format!(
                 "`{id}` changed outside arc in {}; only the owner may change those fields",
@@ -1265,6 +1328,48 @@ fn require_unchanged(id: &str, changed: bool) -> Result<(), Error> {
         return Err(Error::ChangedOutsideArc(id.to_owned()));
     }
     Ok(())
+}
+
+/// The `flow` rule `add_task`, `update_task` and `adopt` share (ADR 0048 decision 15): a
+/// value names a `[flows.<name>]` section the file defines, and a task's flow changes only
+/// while no attempt has run. `None` is a task that keeps the field out and reads `default`,
+/// which always exists.
+pub(crate) fn check_flow(store: &Store, flow: Option<&str>) -> Result<(), Error> {
+    let Some(flow) = flow else {
+        return Ok(());
+    };
+    let config = store.config()?;
+    if config.flows.contains_key(flow) {
+        return Ok(());
+    }
+    Err(Error::Refused(config::unknown_flow_message(flow, &config)))
+}
+
+impl Store {
+    /// The task checks `adopt` makes on a hand-edited `flow` (ADR 0048 decision 15): the name
+    /// must exist, and the field may change only while the task has had no attempt.
+    fn check_adopted_flow(&self, last: &str, current: &str) -> Result<(), Error> {
+        let last = model::TaskFile::from_text(last).map_err(|message| {
+            Error::Failed(format!(
+                "the recorded task version does not parse: {message}"
+            ))
+        })?;
+        let current = model::TaskFile::from_text(current)
+            .map_err(|message| Error::Failed(format!("the task file does not parse: {message}")))?;
+        let flow = current.flow.as_deref().unwrap_or(config::DEFAULT_FLOW);
+        let config = self.config()?;
+        if !config.flows.contains_key(flow) {
+            return Err(Error::Refused(config::unknown_flow_message(flow, &config)));
+        }
+        if current.flow != last.flow && current.attempt != 0 {
+            return Err(Error::Refused(format!(
+                "task `{}` has {} attempt(s); a task's flow is fixed after its first attempt, \
+                 so add a new task instead",
+                current.id, current.attempt
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The `after` rules `add_task` and `update_task` share (ADR 0048 decision 11): every id is

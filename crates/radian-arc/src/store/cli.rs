@@ -8,6 +8,7 @@ use std::io::Read;
 
 use serde_json::json;
 
+use super::config::DEFAULT_FLOW;
 use super::{Error, Exit, Item, Loaded, PlanView, Store};
 
 /// The subcommands this build has, in the order `radian arc` lists them.
@@ -53,6 +54,7 @@ pub enum Command {
         after: Vec<String>,
         allow_noop: bool,
         stages: Vec<String>,
+        flow: Option<String>,
     },
     /// `radian arc list [--plan <id>] [--all] [--json]`. `--all` does not change the JSON.
     List {
@@ -110,7 +112,17 @@ pub fn run(command: &Command) -> u8 {
             after,
             allow_noop,
             stages,
-        } => add_task(plan, slug, title, after, *allow_noop, stages).map(emit),
+            flow,
+        } => add_task(
+            plan,
+            slug,
+            title,
+            after,
+            *allow_noop,
+            stages,
+            flow.as_deref(),
+        )
+        .map(emit),
         Command::List { plan, all, json } => list(plan.as_deref(), *all, *json).map(emit),
         Command::Show { id, json } => show(id, *json).map(emit),
         Command::Adopt { id } => adopt(id).map(emit),
@@ -239,10 +251,11 @@ fn add_task(
     after: &[String],
     allow_noop: bool,
     stages: &[String],
+    flow: Option<&str>,
 ) -> Result<String, Error> {
     let store = open()?;
     let brief = stdin_text()?;
-    let id = store.add_task(
+    let id = store.add_task_with_flow(
         plan,
         slug,
         title,
@@ -250,6 +263,7 @@ fn add_task(
         allow_noop,
         stages.to_vec(),
         &brief,
+        flow,
     )?;
     Ok(format!("{id}\n"))
 }
@@ -266,13 +280,24 @@ fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_owned())
         ));
     }
+    // A task's flow gets a column only when the repository defines one besides `default`:
+    // a repository without `[flows]` prints the line it always printed (ADR 0048 decision 15).
+    let show_flow = store
+        .config()?
+        .flows
+        .keys()
+        .any(|name| name != DEFAULT_FLOW);
     match plan {
-        Some(id) => Ok(list_plan_text(&store.plan_view(id)?, all)),
+        Some(id) => Ok(list_plan_text_with_flows(
+            &store.plan_view(id)?,
+            all,
+            show_flow,
+        )),
         None => {
             // Claim order, the order `run` serves tasks in: the plan's priority, then its id.
             let mut views = store.plans()?;
             views.sort_by(|one, other| super::model::claim_order(&one.plan.item, &other.plan.item));
-            Ok(list_text(&views, all))
+            Ok(list_text_with_flows(&views, all, show_flow))
         }
     }
 }
@@ -280,21 +305,32 @@ fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
 /// The text `radian arc list` prints (ADR 0048 decision 1, `list`). Unless `all`, a task in
 /// `done.merged`, a finished plan, and a cancelled plan are left out, and the last line counts
 /// what was left out. A plan with no tasks is shown too. Every other state, `failed.*`
-/// included, stays visible.
+/// included, stays visible. No flow column: [`list_text_with_flows`] adds it.
 pub fn list_text(views: &[PlanView], all: bool) -> String {
-    render(views, all, false)
+    render(views, all, false, false)
+}
+
+/// [`list_text`] with the flow column, which `radian arc list` shows only when the repository
+/// defines a flow other than `default`.
+pub fn list_text_with_flows(views: &[PlanView], all: bool, show_flow: bool) -> String {
+    render(views, all, false, show_flow)
 }
 
 /// The text `radian arc list --plan <id>` prints: the plan the user named is always shown,
 /// with an empty task list when it is finished, so the user sees that it exists. Its merged
 /// tasks follow the default filter.
 pub fn list_plan_text(view: &PlanView, all: bool) -> String {
-    render(std::slice::from_ref(view), all, true)
+    render(std::slice::from_ref(view), all, true, false)
+}
+
+/// [`list_plan_text`] with the flow column.
+pub fn list_plan_text_with_flows(view: &PlanView, all: bool, show_flow: bool) -> String {
+    render(std::slice::from_ref(view), all, true, show_flow)
 }
 
 /// `named` keeps a finished or cancelled plan's header line: `--plan` asked for that plan by
 /// name.
-fn render(views: &[PlanView], all: bool, named: bool) -> String {
+fn render(views: &[PlanView], all: bool, named: bool, show_flow: bool) -> String {
     let mut out = String::new();
     let mut hidden_plans = 0usize;
     let mut hidden_cancelled = 0usize;
@@ -335,8 +371,13 @@ fn render(views: &[PlanView], all: bool, named: bool) -> String {
                 .as_deref()
                 .map(|at| format!("  retry at {at}"))
                 .unwrap_or_default();
+            let flow = if show_flow {
+                format!("  {}", task.item.flow.as_deref().unwrap_or(DEFAULT_FLOW))
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "  {}  {}.{}  attempt {}  {}{}{}\n",
+                "  {}{flow}  {}.{}  attempt {}  {}{}{}\n",
                 task.item.id,
                 task.item.state.as_str(),
                 task.item.phase,
@@ -463,6 +504,11 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
             let item = &task.item;
             out.push_str(&format!("task {}\n", item.id));
             field(&mut out, "plan", &item.plan);
+            field(
+                &mut out,
+                "flow",
+                item.flow.as_deref().unwrap_or(DEFAULT_FLOW),
+            );
             field(&mut out, "title", &item.title);
             field(&mut out, "state", item.state.as_str());
             field(&mut out, "phase", &item.phase);
@@ -733,6 +779,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "auto_rework": item.auto_rework,
         "retry_count": item.retry_count,
         "after": item.after,
+        "flow": item.flow.clone().unwrap_or_else(|| DEFAULT_FLOW.to_owned()),
         "supersedes": item.supersedes,
         "allow_noop": item.allow_noop,
         "followup_pending": item.followup_pending,
@@ -886,7 +933,12 @@ fn queue_reason(store: &Store, id: &str) -> Result<Option<String>, Error> {
             .load_task(dependency)
             .is_ok_and(|loaded| loaded.item.is_merged())
     });
-    if plan.auto == "off" || blocked || !crate::run::free_concurrency_slot(store)? {
+    let flow_missing = {
+        let config = store.config()?;
+        let name = task.flow.as_deref().unwrap_or(super::config::DEFAULT_FLOW);
+        !config.flows.contains_key(name)
+    };
+    if plan.auto == "off" || blocked || flow_missing || !crate::run::free_concurrency_slot(store)? {
         Ok(Some(crate::run::waiting_reason(store, &plan, &ready)?))
     } else {
         Ok(None)

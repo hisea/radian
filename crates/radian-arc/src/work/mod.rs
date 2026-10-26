@@ -99,6 +99,9 @@ pub struct Options {
     /// it (ADR 0048 decision 7). arc reads it at the claim and passes it here; unset runs
     /// `radian exec`. Never set by a person; it is not in the manual.
     pub command: Option<Vec<String>>,
+    /// Internal: the task's flow, the name the attempt's records carry (ADR 0048 decision 15).
+    /// arc passes the flow the claim resolved; a person does not set it.
+    pub flow: String,
     /// Internal: the attempt's stall limit in seconds; `0` means no limit. arc passes the
     /// task's `stall_timeout_secs`, else `[limits] stall_timeout_secs`. The wrapper enforces
     /// it, so the limit survives the `run` process that started it (ADR 0048 decision 7.8).
@@ -470,12 +473,13 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     }
     // What this attempt runs, for the attempt's own record (ADR 0048 decision 7).
     let worker = match worker_of(o) {
-        Worker::Radian => json!({"kind": "radian"}),
+        Worker::Radian => json!({"kind": "radian", "flow": o.flow}),
         Worker::Command(words) => json!({
             "kind": "command",
+            "flow": o.flow,
             "program": words.first().cloned().unwrap_or_default(),
         }),
-        Worker::Shell(_) => json!({"kind": "command", "program": "sh"}),
+        Worker::Shell(_) => json!({"kind": "command", "flow": o.flow, "program": "sh"}),
     };
     // The repository's git control files, as they are before the worker starts (ADR 0048
     // decision 7). The record stays in this process's memory: a worker can write the worktree

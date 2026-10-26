@@ -22,7 +22,7 @@
 //!   `todo.ready`.
 
 use super::model::{self, TaskState};
-use super::{Error, Store, check_after, check_stages, check_title};
+use super::{Error, Store, check_after, check_flow, check_stages, check_title};
 
 /// The heading change records are appended under.
 pub const CHANGE_RECORDS_HEADING: &str = "## Change records";
@@ -335,15 +335,41 @@ pub fn update_task(
     allow_noop: Option<bool>,
     extra_stages: Option<Vec<String>>,
 ) -> Result<(), Error> {
+    update_task_with_flow(
+        store,
+        task,
+        title,
+        brief,
+        after,
+        allow_noop,
+        extra_stages,
+        None,
+    )
+}
+
+/// [`update_task`] with the task's `flow` (ADR 0048 decision 15). A flow changes only while
+/// the task has had no attempt; after that, a new task is the way to run a different worker.
+#[allow(clippy::too_many_arguments)]
+pub fn update_task_with_flow(
+    store: &Store,
+    task: &str,
+    title: Option<&str>,
+    brief: Option<&str>,
+    after: Option<Vec<String>>,
+    allow_noop: Option<bool>,
+    extra_stages: Option<Vec<String>>,
+    flow: Option<&str>,
+) -> Result<(), Error> {
     if title.is_none()
         && brief.is_none()
         && after.is_none()
         && allow_noop.is_none()
         && extra_stages.is_none()
+        && flow.is_none()
     {
         return Err(Error::Usage(
-            "nothing to update: give a title, a brief, an after list, allow_noop or \
-             extra_stages"
+            "nothing to update: give a title, a brief, an after list, allow_noop, \
+             extra_stages or flow"
                 .to_owned(),
         ));
     }
@@ -358,6 +384,7 @@ pub fn update_task(
     if let Some(stages) = &extra_stages {
         check_stages(stages)?;
     }
+    check_flow(store, flow)?;
     // A cancelled plan is final: its tasks take no change either. The one question every
     // command asks: the plan's `status`, or its tasks all `failed.cancelled`.
     store.refuse_cancelled(&store.load_task(task)?.item.plan)?;
@@ -400,6 +427,23 @@ pub fn update_task(
         if let Some(stages) = extra_stages {
             task_file.extra_stages = stages;
             changed.push("extra_stages");
+        }
+        if let Some(flow) = flow {
+            let current = task_file
+                .flow
+                .as_deref()
+                .unwrap_or(super::config::DEFAULT_FLOW);
+            if current != flow {
+                if task_file.attempt != 0 {
+                    return Err(Error::Refused(format!(
+                        "task `{}` has {} attempt(s); a task's flow is fixed after its first \
+                         attempt, so add a new task instead",
+                        task_file.id, task_file.attempt
+                    )));
+                }
+                task_file.flow = Some(flow.to_owned());
+                changed.push("flow");
+            }
         }
         append_task_change(&mut task_file.body, &now, &changed);
         Ok(())

@@ -50,6 +50,8 @@ rmcp = { version = "=3.5.1", default-features = false, features = ["server", "tr
 tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util", "time"] }
 
 [dev-dependencies]
+# The manual's drift reader: the flow keys and the task `flow` row are checked against the page.
+radian-coding = { path = "../radian-coding", features = ["testing"] }
 # The mock model `radian arc work` runs against in `tests/work.rs`.
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 # The tests drive the asynchronous MCP server and the mock model's tokio tasks.
