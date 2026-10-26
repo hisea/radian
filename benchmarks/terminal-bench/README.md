@@ -5,6 +5,12 @@ puts the current commit's `radian` binary into task containers and scores it.
 It is **not** part of the Rust workspace and adds no Python dependency beyond
 Harbor itself (the adapter and its command tests are stdlib-only).
 
+The scripts that run the side-by-side A/B comparisons from a host live in
+[`ab/`](ab/README.md): radian builds against each other, against pi and
+opencode, and one binary with and without a system-prompt file. That page
+documents each script, its arguments, its environment variables and the job
+layout.
+
 Pinned Harbor release: **0.24.0** (see `pyproject.toml`
 `[tool.radian-bench]`). The adapter speaks the 0.24.0 agent API
 (`harbor.agents.model_connection`, `harbor.agents.installed.base`); newer
