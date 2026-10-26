@@ -103,7 +103,7 @@ The estimate counts ASCII bytes divided by 4, rounded up, plus one token per non
 | Command | Syntax | What it does |
 |---|---|---|
 | `/jobs` | `/jobs` (alone) | Open the inspector's jobs page. Lists the running background jobs in registry order. Applies at once. |
-| `/jobs` | `/jobs kill <id\|all>` | Stop one background job or every running job. Sends SIGTERM to the process group, then SIGKILL after 2 seconds. The model gets a completion message on the busy or idle lane. Example: `/jobs kill all`. Related: `/panel`. |
+| `/jobs` | `/jobs kill <id\|all>` | Stop one background job or every running job. `kill <id>` sends SIGTERM to the job's whole session, then SIGKILL after 3 seconds. `kill all` sends SIGKILL to every running job's whole session at once. The model gets a completion message on the busy or idle lane. Example: `/jobs kill all`. Related: `/panel`. |
 | `/tools` | `/tools` (no arguments) | Open the inspector's tools page. Applies at once. |
 | `/mcp` | `/mcp` (no arguments) | Open the inspector's MCP page. It lists the servers and their tools. Applies at once. Related: `mcp.md`. |
 | `/hooks` | `/hooks` (no arguments) | Open the inspector's hooks page. It lists each configured entry and whether its matcher compiles. Applies at once. Related: `hooks.md`. |

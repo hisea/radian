@@ -619,7 +619,7 @@ impl LoopContext<'_> {
                     radian_tui::command::JobsRequest::Kill(id) => {
                         match self.session.kill_job(&id) {
                             Ok(()) => {
-                                vec![format!("stopping {id} (SIGTERM, then SIGKILL after 2s)")]
+                                vec![format!("stopping {id} (SIGTERM, then SIGKILL after 3s)")]
                             }
                             Err(error) => vec![error],
                         }

@@ -418,6 +418,195 @@ async fn cancellation_kills_the_whole_process_group() {
     );
 }
 
+// ---------- 5. the stop grace: SIGTERM first, SIGKILL after 3 s (ADR 0037 §7) ----------
+
+/// Installs a SIGTERM trap that writes a marker and exits 0, then waits forever. A stop that
+/// sends SIGKILL first (the old foreground path) never runs the trap, so the marker proves the
+/// grace.
+const TRAPS_TERM: &str = "trap 'echo trapped > trapped.marker; exit 0' TERM; \
+                          echo $$ > leader.pid; sleep 600";
+
+/// Ignores SIGTERM and keeps running, so only the SIGKILL after the grace ends it.
+const IGNORES_TERM: &str = "trap '' TERM; echo $$ > leader.pid; \
+                            while :; do sleep 0.05; done";
+
+/// A timeout SIGTERMs first: a command that traps SIGTERM exits cleanly and its trap ran, so it
+/// is not SIGKILLed. The old path killed the session at once and the marker was never written.
+#[tokio::test]
+async fn a_timeout_sigterms_before_it_kills() {
+    let dir = TempDir::new("shell-timeout-sigterm");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({"command": TRAPS_TERM, "timeout_secs": 1}),
+    )
+    .await
+    .unwrap();
+
+    let structured = structured(&output);
+    assert_eq!(structured["timed_out"], json!(true), "{structured}");
+    assert_eq!(
+        structured["exit_code"],
+        json!(0),
+        "the trap exited cleanly, so the command was not SIGKILLed: {structured}"
+    );
+    assert_eq!(structured["signal"], json!(null), "{structured}");
+    assert!(
+        root.join("trapped.marker").exists(),
+        "the SIGTERM trap must have run before the grace ended"
+    );
+    let text = output_text(&output);
+    assert!(
+        text.contains("SIGTERM") && text.contains("SIGKILL 3 s later"),
+        "the timeout result states the signal order and grace: {text}"
+    );
+}
+
+/// A timeout SIGKILLs after the grace a command that ignores SIGTERM: the leader is killed by
+/// signal 9, only after the 3 s grace.
+#[tokio::test]
+async fn a_timeout_kills_after_the_grace_when_sigterm_is_ignored() {
+    let dir = TempDir::new("shell-timeout-sigkill");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+
+    let started = Instant::now();
+    let output = call(
+        &tools,
+        "shell",
+        json!({"command": IGNORES_TERM, "timeout_secs": 1}),
+    )
+    .await
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    let structured = structured(&output);
+    assert_eq!(structured["timed_out"], json!(true), "{structured}");
+    assert_eq!(
+        structured["signal"],
+        json!(libc::SIGKILL),
+        "the leader must die by SIGKILL: {structured}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(2_900),
+        "SIGKILL came before the 3 s grace: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "the stop overran its bounds: {elapsed:?}"
+    );
+    let leader = read_pid(&root, "leader.pid");
+    assert!(
+        gone_within(leader, Duration::from_secs(10)).await,
+        "the shell (pid {leader}) survived the timeout"
+    );
+    assert!(!group_alive(leader), "group {leader} still has members");
+}
+
+/// A cancellation SIGTERMs first too: the trapped command exits cleanly and writes its marker.
+#[tokio::test]
+async fn a_cancellation_sigterms_before_it_kills() {
+    let dir = TempDir::new("shell-cancel-sigterm");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let token = CancellationToken::new();
+
+    let run = call_cancellable(
+        &tools,
+        "shell",
+        json!({"command": TRAPS_TERM, "timeout_secs": 600}),
+        token.clone(),
+    );
+    let cancel = async {
+        // `leader.pid` is written after the trap is installed, so the trap is ready.
+        wait_until("the command to install its trap", || {
+            std::fs::read_to_string(root.join("leader.pid"))
+                .ok()
+                .is_some_and(|pid| pid.trim().parse::<u32>().is_ok())
+        })
+        .await;
+        token.cancel();
+    };
+    let (result, ()) = tokio::join!(run, cancel);
+    let output = result.unwrap();
+
+    let structured = structured(&output);
+    assert_eq!(structured["cancelled"], json!(true), "{structured}");
+    assert_eq!(
+        structured["exit_code"],
+        json!(0),
+        "the trap exited cleanly, so the command was not SIGKILLed: {structured}"
+    );
+    assert!(
+        root.join("trapped.marker").exists(),
+        "the SIGTERM trap must have run before the grace ended"
+    );
+    let text = output_text(&output);
+    assert!(
+        text.contains("SIGTERM") && text.contains("SIGKILL 3 s later"),
+        "the cancellation result states the signal order and grace: {text}"
+    );
+}
+
+/// A cancellation SIGKILLs after the grace a command that ignores SIGTERM.
+#[tokio::test]
+async fn a_cancellation_kills_after_the_grace_when_sigterm_is_ignored() {
+    let dir = TempDir::new("shell-cancel-sigkill");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let token = CancellationToken::new();
+
+    let run = call_cancellable(
+        &tools,
+        "shell",
+        json!({"command": IGNORES_TERM, "timeout_secs": 600}),
+        token.clone(),
+    );
+    let cancel = async {
+        wait_until("the command to install its trap", || {
+            std::fs::read_to_string(root.join("leader.pid"))
+                .ok()
+                .is_some_and(|pid| pid.trim().parse::<u32>().is_ok())
+        })
+        .await;
+        let cancelled_at = Instant::now();
+        token.cancel();
+        cancelled_at
+    };
+    let (result, cancelled_at) = tokio::join!(run, cancel);
+    let output = result.unwrap();
+    let elapsed = cancelled_at.elapsed();
+
+    let structured = structured(&output);
+    assert_eq!(structured["cancelled"], json!(true), "{structured}");
+    assert_eq!(
+        structured["signal"],
+        json!(libc::SIGKILL),
+        "the leader must die by SIGKILL: {structured}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(2_900),
+        "SIGKILL came before the 3 s grace: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "the stop overran its bounds: {elapsed:?}"
+    );
+    let leader = read_pid(&root, "leader.pid");
+    assert!(
+        gone_within(leader, Duration::from_secs(10)).await,
+        "the shell (pid {leader}) survived the cancellation"
+    );
+    assert!(!group_alive(leader), "group {leader} still has members");
+}
+
 // ---------- 6. output cap ----------
 
 /// A clamp note is about the request, not command stderr: it sits in the marker block before

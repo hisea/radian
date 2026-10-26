@@ -53,8 +53,13 @@ use crate::workspace::WorkspaceRoot;
 /// the session, and it keeps that from hanging the tool.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
-/// How long the tool waits for the supervisor to reap the killed leader. SIGKILL is
-/// immediate; the bound only covers thread scheduling.
+/// SIGTERM first, then SIGKILL after this grace (ADR 0037 §7). Every stop path that honours
+/// the grace uses this one constant: `job kill`, `/jobs kill`, and the foreground timeout and
+/// cancellation.
+pub(crate) const KILL_GRACE: Duration = Duration::from_secs(3);
+
+/// How long the tool waits for the supervisor to reap the killed leader. After the grace,
+/// SIGKILL is immediate; the bound only covers thread scheduling.
 const REAP_GRACE: Duration = Duration::from_secs(10);
 
 /// The `shell` input schema for `mode`. `FullAccess` has no sandbox, so the advertised
@@ -634,7 +639,7 @@ async fn execute_built(
     }
 
     if kill {
-        supervised.kill_tree();
+        supervised.stop().await;
     }
     supervised.wait_done(REAP_GRACE).await;
 
@@ -874,9 +879,8 @@ impl Default for Outcome {
 
 /// A child in its own process group. The supervisor thread waits for the leader to exit
 /// *without* reaping it, kills its whole session while the leader is still a zombie (so the
-/// session id cannot have been reused), then reaps and drains. [`Supervised::kill_tree`] takes
-/// the same lock, so a timeout or cancellation can only signal a session that is still
-/// reserved.
+/// session id cannot have been reused), then reaps and drains. [`Supervised::stop`] takes the
+/// same lock, so a timeout or cancellation can only signal a session that is still reserved.
 pub(crate) struct Supervised {
     pub(crate) pid: u32,
     pub(crate) reaped: Arc<Mutex<bool>>,
@@ -988,12 +992,21 @@ impl Supervised {
         self.done.changed().await.is_ok()
     }
 
-    /// Kills the whole session unless the leader has already been reaped.
-    fn kill_tree(&self) {
-        let guard = lock(&self.reaped);
-        if !*guard {
-            kill_group(self.pid);
-        }
+    /// Stops the session after a timeout or a cancellation: SIGTERM first, then SIGKILL after
+    /// [`KILL_GRACE`] to whatever is left (ADR 0037 §7). This is the job path's signalling
+    /// code: each signal is sent only while the leader is unreaped, and the wait leaves it
+    /// unreaped so its session id stays reserved.
+    async fn stop(&self) {
+        let reaped = Arc::clone(&self.reaped);
+        signal_if_reserved(self.pid, SIGTERM, &reaped);
+        let pid = self.pid;
+        // `waitid(WNOWAIT)` blocks; keep it off the async worker. If the leader exits within
+        // the grace, the supervisor's own session kill cleans up what it left behind.
+        let _ = tokio::task::spawn_blocking(move || {
+            wait_for_exit(pid, KILL_GRACE);
+            signal_if_reserved(pid, SIGKILL, &reaped);
+        })
+        .await;
     }
 
     async fn wait_done(&mut self, grace: Duration) {
@@ -1337,6 +1350,17 @@ fn session_members(_sid: u32) -> Vec<u32> {
     Vec::new()
 }
 
+/// Sends `signal` to the whole session of `sid` only while the leader is still unreaped,
+/// holding the same lock the supervisor holds across its kill-and-reap, so a reused session id
+/// is never signalled (ADR 0037 §7's pid-reuse guard). Shared by the job stop paths and the
+/// foreground timeout/cancel path.
+pub(crate) fn signal_if_reserved(sid: u32, signal: i32, reaped: &Mutex<bool>) {
+    let guard = lock(reaped);
+    if !*guard {
+        signal_session(sid, signal);
+    }
+}
+
 /// Sends SIGKILL to every process of session `pid`. Unix only in practice; other platforms have
 /// no verified backend for the enforced modes.
 fn kill_group(pid: u32) {
@@ -1386,13 +1410,18 @@ fn report(
     }
     if outcome.timed_out {
         text.push_str(&format!(
-            "[timed out after {timeout:?}; the whole process group was killed. Re-run with a \
-             larger `timeout_secs` (up to 600) or with `background: true` and read the result \
-             with `job`.\n"
+            "[timed out after {timeout:?}; the command's whole process group was sent SIGTERM, \
+             then SIGKILL {} s later if it had not exited. Re-run with a larger `timeout_secs` \
+             (up to 600) or with `background: true` and read the result with `job`.\n",
+            KILL_GRACE.as_secs()
         ));
     }
     if outcome.cancelled {
-        text.push_str("[cancelled; the whole process group was killed]\n");
+        text.push_str(&format!(
+            "[cancelled; the command's whole process group was sent SIGTERM, then SIGKILL {} s \
+             later if it had not exited]\n",
+            KILL_GRACE.as_secs()
+        ));
     }
     // A clamp is a note about the request, not command stderr: it belongs in the marker block
     // before `exit code:` with `[timed out after …]` and `[cancelled …]`, and it names both
