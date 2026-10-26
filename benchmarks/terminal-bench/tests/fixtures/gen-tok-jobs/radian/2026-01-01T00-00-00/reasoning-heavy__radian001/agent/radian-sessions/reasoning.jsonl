@@ -1,0 +1,6 @@
+{"schema_version":1,"session_id":"radian-reasoning-heavy","seq":0,"ts":"2026-01-01T00:00:00Z","event":"SessionCreated","critical":true,"data":{"workspace":"/app","config":{}}}
+{"schema_version":1,"session_id":"radian-reasoning-heavy","seq":1,"ts":"2026-01-01T00:00:00Z","event":"TurnStarted","critical":true,"data":{"turn_id":"t-1"}}
+{"schema_version":1,"session_id":"radian-reasoning-heavy","seq":2,"ts":"2026-01-01T00:00:00Z","event":"MessageAppended","critical":true,"data":{"index":0,"message":{"user":{"content":[{"text":{"text":"think hard"}}]}}}}
+{"schema_version":1,"session_id":"radian-reasoning-heavy","seq":3,"ts":"2026-01-01T00:00:30Z","event":"MessageAppended","critical":true,"data":{"index":1,"message":{"assistant":{"content":[{"text":{"text":"Done."}}]}}}}
+{"schema_version":1,"session_id":"radian-reasoning-heavy","seq":4,"ts":"2026-01-01T00:00:30Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":700,"output":2392,"details":{"completion_tokens_details":{"reasoning_tokens":2154}}},"fee":{"micros":4000}}}
+{"schema_version":1,"session_id":"radian-reasoning-heavy","seq":5,"ts":"2026-01-01T00:00:31Z","event":"TurnFinished","critical":true,"data":{"turn_id":"t-1","outcome":"completed"}}

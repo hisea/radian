@@ -1,0 +1,39 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "trajectory_id": "pi-reasoning-heavy",
+  "session_id": "pi-reasoning-heavy",
+  "agent": {
+    "name": "pi",
+    "version": "1.4.0",
+    "model_name": "opencode-go/deepseek-v4.1-flash"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "think hard"
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-01-01T00:00:20Z",
+      "source": "agent",
+      "model_name": "opencode-go/deepseek-v4.1-flash",
+      "message": "Done.",
+      "llm_call_count": 1,
+      "metrics": {
+        "prompt_tokens": 700,
+        "completion_tokens": 521,
+        "cost_usd": 0.006,
+        "extra": {
+          "reasoning_tokens": 420
+        }
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 700,
+    "total_completion_tokens": 521,
+    "total_cost_usd": 0.006,
+    "total_steps": 2
+  }
+}

@@ -20,7 +20,7 @@ Harbor releases may rename these modules.
 | `metrics.py` | Stdlib-only report over finished harbor jobs: per-task matrix, per-trial rows, per-agent totals |
 | `tests/test_radian_command.py` | Builder unit tests (no Harbor dependency) |
 | `tests/test_radian_agent.py` | Agent unit tests against the real Harbor 0.24.0 package |
-| `tests/test_metrics.py` | Metrics tests on `tests/fixtures/jobs/` (one fake trial per agent kind); `metrics.py --self-test` runs them |
+| `tests/test_metrics.py` | Metrics tests on `tests/fixtures/jobs/` (one fake trial per agent kind) and `tests/fixtures/gen-tok-jobs/` (the `gen_tok` rules); `metrics.py --self-test` runs them |
 | `pyproject.toml` | Descriptive metadata only (agent import path, Harbor pin) |
 
 ## Key design (why the score measures the agent loop)
@@ -135,8 +135,8 @@ each trial contributes:
 | `result.json` → `exception_info.exception_type` | T/O for a `*Timeout*`; `CancelledError` excludes the trial |
 | `result.json` → `agent_execution.started_at`/`finished_at` | agent minutes |
 | `result.json` → `agent_result.cost_usd` | cost; radian falls back to journal `fee.micros`, pi/opencode to the ATIF step or final cost |
-| `agent/radian-sessions/*.jsonl` | model calls, output/reasoning tokens, >16k calls, generation/tool minutes, `Incomplete(MaxTokens)` |
-| `agent/trajectory.json` (ATIF) | model calls, output/reasoning tokens, >16k calls for pi and opencode |
+| `agent/radian-sessions/*.jsonl` | model calls, output/reasoning/generated tokens, >16k calls, generation/tool minutes, `Incomplete(MaxTokens)` |
+| `agent/trajectory.json` (ATIF) | model calls, output/reasoning/generated tokens, >16k calls for pi and opencode |
 
 Columns:
 
@@ -144,11 +144,22 @@ Columns:
 - `cost` — USD.
 - `calls` — model calls: assistant responses plus compaction calls in a radian
   journal; ATIF `llm_call_count` (default 1) over steps that carry `metrics`.
-- `out_tok` / `reason` — reported output and reasoning tokens. `-` means no
-  record reported the counter, never 0. Radian reasoning comes from the
-  provider's `details` (`completion_tokens_details.reasoning_tokens` or
+- `out_tok` / `reason` — reported output and reasoning tokens, raw and
+  unchanged. `-` means no record reported the counter, never 0. Radian
+  reasoning comes from the provider's `details`
+  (`completion_tokens_details.reasoning_tokens` or
   `output_tokens_details.thinking_tokens`); ATIF reasoning from
   `metrics.extra.reasoning_tokens` (or a nested details object).
+- `gen_tok` — visible output plus reasoning, so the column means the same thing
+  for every agent. The rule comes from a table in `metrics.py`, never a guess
+  from the numbers: a radian journal's `usage.output` already counts reasoning
+  (`gen_tok = out_tok`); pi 1.4.0's `completion_tokens` counts reasoning
+  (`gen_tok = out_tok`); opencode 1.19.4's `completion_tokens` excludes it
+  (`gen_tok = out_tok + reason` per step, and a step that reports no reasoning
+  count adds its completion only). An ATIF producer not in the table gets `-`,
+  and the report names it once under `AGENT TOTALS`. `out_tok` is therefore not
+  comparable across agents — an opencode trial's own output count leaves
+  reasoning out — while `gen_tok` is.
 - `over16k` — model calls with more than 16,000 output tokens. ATIF is
   per-step: a producer that merges several calls into one step (pi's
   tool-result usage) is measured on the merged count.
@@ -167,8 +178,12 @@ agent (`PASS`/`fail`/`T/O`; repeats as `P1/2`, plus `T1` when a repeat timed
 out). The common-task section keeps only tasks for which every agent has at
 least one finished trial (not T/O, not excluded), and totals over exactly
 those tasks. `--json` prints the same report as one object (`agents`, `tasks`,
-`trials`, `matrix`, `totals`, `common_tasks`, `common_totals`); a counter no
-record reported is `null`, never 0.
+`trials`, `matrix`, `gen_unknown_agents`, `totals`, `common_tasks`,
+`common_totals`); a counter no record reported is `null`, never 0.
+`trials[].generated_tokens` is the row's `gen_tok`, and each totals object
+(`totals`, `common_totals`) carries `generated_tokens` as its sum.
+`gen_unknown_agents` lists the ATIF producer names with no generated-token
+rule; the trial row that hit one carries its name in `unruled_producer`.
 
 Journals and `radian-stdout.txt` are the only files streamed: a long run's
 journal can be many GB, so it is read line by line under a per-line cap of
@@ -183,7 +198,9 @@ trajectory would have supplied. An over-limit `result.json` is not a trial the
 report can read, so it is skipped like a missing one.
 
 The fixtures under `tests/fixtures/jobs/` hold one trial per agent kind plus a
-cancelled and a timed-out trial; the commands to run their tests are in
+cancelled and a timed-out trial; `tests/fixtures/gen-tok-jobs/` holds one trial
+per `gen_tok` rule (including an ATIF producer with none). The commands to run
+their tests are in
 [Unit tests](#unit-tests-no-harbor-run-no-model-no-docker) above.
 
 ## Smoke (needs Docker + Harbor + a model key)

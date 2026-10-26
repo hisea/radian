@@ -20,6 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import metrics  # noqa: E402
 
 JOBS = Path(__file__).resolve().parent / "fixtures" / "jobs"
+# One trial per producer for the `gen_tok` rule, including an ATIF producer that
+# has no rule. Kept apart from `jobs/` so its expected values stay unchanged.
+GEN_TOK_JOBS = Path(__file__).resolve().parent / "fixtures" / "gen-tok-jobs"
 
 
 def find(report, agent, task):
@@ -95,6 +98,7 @@ class FixtureReportTest(unittest.TestCase):
         self.assertAlmostEqual(radian["cost_usd"], 0.0155)
         self.assertEqual(radian["model_calls"], 3)
         self.assertEqual(radian["output_tokens"], 21_500)
+        self.assertEqual(radian["generated_tokens"], 21_500)
         self.assertEqual(radian["reasoning_tokens"], 1_300)
         self.assertEqual(radian["over_16k_calls"], 1)
         self.assertAlmostEqual(radian["generation_minutes"], 1.0 + 40.0 / 60.0)
@@ -105,6 +109,7 @@ class FixtureReportTest(unittest.TestCase):
         self.assertEqual((pi["trials"], pi["pass"], pi["timeout"]), (2, 1, 1))
         self.assertEqual(pi["model_calls"], 3)
         self.assertEqual(pi["output_tokens"], 20_600)
+        self.assertEqual(pi["generated_tokens"], 20_600)
         self.assertEqual(pi["reasoning_tokens"], 420)
         self.assertEqual(pi["over_16k_calls"], 1)
         self.assertIsNone(pi["max_tokens_trials"])
@@ -115,6 +120,7 @@ class FixtureReportTest(unittest.TestCase):
             (opencode["trials"], opencode["pass"], opencode["fail"]), (2, 1, 1)
         )
         self.assertEqual(opencode["output_tokens"], 1_200)
+        self.assertEqual(opencode["generated_tokens"], 1_250)
         self.assertEqual(opencode["reasoning_tokens"], 50)
 
     def test_common_tasks_need_every_agent_to_finish(self):
@@ -257,6 +263,100 @@ class AtifTest(unittest.TestCase):
         self.assertIsNone(metrics_["model_calls"])
         self.assertEqual(metrics_["output_tokens"], 42)
         self.assertAlmostEqual(metrics_["cost_usd"], 0.5)
+
+
+class GeneratedTokensTest(unittest.TestCase):
+    """`gen_tok` = visible output plus reasoning, by the per-producer rule."""
+
+    def setUp(self):
+        self.report = metrics.build_report([GEN_TOK_JOBS])
+
+    def test_opencode_adds_its_reasoning_to_the_completion_count(self):
+        trial = find(self.report, "opencode", "reasoning-heavy")
+        self.assertEqual(trial["output_tokens"], 78)
+        self.assertEqual(trial["reasoning_tokens"], 992)
+        # The step's reasoning is larger than its completion count: the rule,
+        # not the numbers, decides that opencode's count excludes reasoning.
+        self.assertEqual(trial["generated_tokens"], 78 + 992)
+
+    def test_pi_output_already_counts_reasoning(self):
+        trial = find(self.report, "pi", "reasoning-heavy")
+        self.assertEqual(trial["output_tokens"], 521)
+        self.assertEqual(trial["reasoning_tokens"], 420)
+        self.assertEqual(trial["generated_tokens"], 521)
+
+    def test_radian_journal_output_already_counts_reasoning(self):
+        trial = find(self.report, "radian", "reasoning-heavy")
+        self.assertEqual(trial["output_tokens"], 2_392)
+        self.assertEqual(trial["reasoning_tokens"], 2_154)
+        self.assertEqual(trial["generated_tokens"], 2_392)
+
+    def test_an_unruled_atif_producer_is_unknown_and_named_once(self):
+        trial = find(self.report, "mystery", "reasoning-heavy")
+        self.assertEqual(trial["output_tokens"], 100)
+        self.assertIsNone(trial["generated_tokens"])
+        # The producer's own name, not the directory label.
+        self.assertEqual(self.report["gen_unknown_agents"], ["mystery-agent"])
+        text = metrics.format_report(self.report)
+        self.assertEqual(text.count("mystery-agent"), 1)
+        self.assertIn("gen_tok has no rule for: mystery-agent", text)
+        self.assertEqual(metrics.format_report(metrics.build_report([JOBS])).count("no rule"), 0)
+
+    def test_totals_add_generated_tokens_across_trials(self):
+        self.assertEqual(self.report["totals"]["opencode"]["generated_tokens"], 1_070)
+        self.assertEqual(self.report["totals"]["pi"]["generated_tokens"], 521)
+        self.assertEqual(self.report["totals"]["radian"]["generated_tokens"], 2_392)
+        self.assertIsNone(self.report["totals"]["mystery"]["generated_tokens"])
+        self.assertEqual(
+            self.report["common_totals"]["opencode"]["generated_tokens"], 1_070
+        )
+
+    def test_a_step_without_reasoning_adds_its_completion_only(self):
+        trajectory = {
+            "agent": {"name": "opencode"},
+            "steps": [
+                {"metrics": {"completion_tokens": 10}},
+                {
+                    "metrics": {
+                        "completion_tokens": 5,
+                        "extra": {"reasoning_tokens": 7},
+                    }
+                },
+            ],
+        }
+        self.assertEqual(metrics._trajectory_metrics(trajectory)["generated_tokens"], 22)
+
+    def test_no_completion_count_leaves_generated_unknown(self):
+        trajectory = {
+            "agent": {"name": "opencode"},
+            "steps": [{"metrics": {"prompt_tokens": 3}}],
+        }
+        self.assertIsNone(metrics._trajectory_metrics(trajectory)["generated_tokens"])
+
+    def test_final_metrics_give_generated_tokens_only_when_the_output_includes_reasoning(
+        self,
+    ):
+        pi = metrics._trajectory_metrics(
+            {
+                "agent": {"name": "pi"},
+                "steps": [],
+                "final_metrics": {"total_completion_tokens": 42},
+            }
+        )
+        self.assertEqual(pi["generated_tokens"], 42)
+        opencode = metrics._trajectory_metrics(
+            {
+                "agent": {"name": "opencode"},
+                "steps": [],
+                "final_metrics": {"total_completion_tokens": 42},
+            }
+        )
+        self.assertIsNone(opencode["generated_tokens"])
+
+    def test_the_rule_table_names_the_journal_and_both_atif_producers(self):
+        self.assertEqual(metrics.GENERATED_RULES["radian"], "includes_reasoning")
+        self.assertEqual(metrics.GENERATED_RULES["pi"], "includes_reasoning")
+        self.assertEqual(metrics.GENERATED_RULES["opencode"], "excludes_reasoning")
 
 
 class BoundedReadTest(unittest.TestCase):
@@ -406,6 +506,32 @@ class CommandLineTest(unittest.TestCase):
         report = json.loads(output.getvalue())
         self.assertEqual(report["common_tasks"], ["fix-git"])
         self.assertEqual(len(report["trials"]), 7)
+
+    def test_json_has_generated_tokens_for_trials_and_totals(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = metrics.main(["--json", str(GEN_TOK_JOBS)])
+        self.assertEqual(status, 0)
+        report = json.loads(output.getvalue())
+        for trial in report["trials"]:
+            self.assertIn("generated_tokens", trial)
+        for section in ("totals", "common_totals"):
+            for totals in report[section].values():
+                self.assertIn("generated_tokens", totals)
+        self.assertEqual(report["gen_unknown_agents"], ["mystery-agent"])
+
+    def test_text_output_has_a_gen_tok_column(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = metrics.main([str(JOBS)])
+        self.assertEqual(status, 0)
+        headings = [
+            line
+            for line in output.getvalue().splitlines()
+            if "out_tok" in line and "gen_tok" in line
+        ]
+        # TRIALS, AGENT TOTALS and COMMON-TASK TOTALS each carry the column.
+        self.assertEqual(len(headings), 3)
 
     def test_text_output_has_every_section(self):
         output = io.StringIO()

@@ -1,0 +1,31 @@
+{
+  "id": "1f0a6c0e-0000-4000-8000-000000000043",
+  "task_name": "reasoning-heavy",
+  "trial_name": "reasoning-heavy__radian001",
+  "agent_info": {
+    "name": "radian",
+    "version": "0.2.0"
+  },
+  "agent_result": {
+    "n_input_tokens": 700,
+    "n_output_tokens": 2392,
+    "cost_usd": null,
+    "metadata": {
+      "agent": "radian",
+      "exit_code": 0,
+      "stop_reason": "completed"
+    }
+  },
+  "verifier_result": {
+    "rewards": {
+      "reward": 1.0
+    }
+  },
+  "exception_info": null,
+  "started_at": "2026-01-01T00:00:00Z",
+  "finished_at": "2026-01-01T00:03:10Z",
+  "agent_execution": {
+    "started_at": "2026-01-01T00:00:00Z",
+    "finished_at": "2026-01-01T00:03:00Z"
+  }
+}

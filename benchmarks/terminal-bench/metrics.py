@@ -8,6 +8,9 @@ directory above its trials. Every trial is read from its ``result.json``. A
 radian trial's ``agent/radian-sessions/*.jsonl`` journal adds generation/tool
 minutes and the MaxTokens outcome; a pi/opencode trial's
 ``agent/trajectory.json`` (ATIF) adds the per-call token metrics they report.
+The reported output and reasoning counts stay raw; ``generated_tokens`` (visible
+output plus reasoning) follows a per-producer rule, so it means the same thing
+across agents.
 
 A trial whose exception is ``CancelledError`` is excluded from every total and
 counted separately. The common-task section keeps only tasks for which every
@@ -21,8 +24,8 @@ are read whole, but only when each is at most ``MAX_JSON_BYTES``; an over-limit
 trajectory is treated as unreadable, and its trial keeps the facts from
 ``result.json`` only.
 
-Stdlib only. ``--self-test`` runs ``tests/test_metrics.py`` on
-``tests/fixtures/jobs``; the same suite is a step of ``scripts/verify.sh``. See
+Stdlib only. ``--self-test`` runs ``tests/test_metrics.py`` on the checked-in
+fixture jobs; the same suite is a step of ``scripts/verify.sh``. See
 ``README.md`` for the column meanings.
 """
 
@@ -50,6 +53,23 @@ MAX_JSON_BYTES = 64 * 1024 * 1024
 # Reasoning lives in a provider-shaped usage sub-object. Radian keeps the
 # provider's own object in `details`; ATIF producers put it in `metrics.extra`.
 _REASONING_KEYS = ("reasoning_tokens", "reasoning_output_tokens", "thinking_tokens")
+
+# The rule that turns a producer's own output counter into `generated_tokens`
+# (visible output plus reasoning). The numbers cannot tell you which basis a
+# producer used, so the rule is a table keyed by the producer's name:
+#
+#   includes_reasoning  the output counter already counts reasoning
+#   excludes_reasoning  it does not, so the step's reasoning is added
+#
+# pi 1.4.0 counts reasoning in `completion_tokens`; opencode 1.19.4 does not (in
+# ab3, 200 of 415 opencode steps had more reasoning than completion, while 0 of
+# 464 pi steps did). A radian journal's `usage.output` counts reasoning.
+# An ATIF producer that is not in this table gets `gen_tok` `-`, never a guess.
+GENERATED_RULES = {
+    "opencode": "excludes_reasoning",
+    "pi": "includes_reasoning",
+    "radian": "includes_reasoning",
+}
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -276,6 +296,8 @@ def _journal_metrics(sessions_dir: Path) -> dict[str, Any]:
     return {
         "model_calls": model_calls,
         "output_tokens": output_tokens,
+        # A journal's `usage.output` already includes reasoning.
+        "generated_tokens": output_tokens,
         "reasoning_tokens": reasoning_tokens,
         "over_16k_calls": over_16k,
         "generation_minutes": generation / 60.0,
@@ -294,10 +316,18 @@ def _iter_steps(trajectory: dict[str, Any]) -> Iterator[dict[str, Any]]:
             yield from _iter_steps(subagent)
 
 
+def _producer_name(trajectory: dict[str, Any]) -> str:
+    """The ATIF producer's own name, normalized for the rule table."""
+    name = _dict(trajectory.get("agent")).get("name")
+    return name.strip().lower() if isinstance(name, str) else ""
+
+
 def _trajectory_metrics(trajectory: dict[str, Any]) -> dict[str, Any]:
     """Per-call metrics an ATIF producer reported, summed over its steps."""
+    producer = _producer_name(trajectory)
+    rule = GENERATED_RULES.get(producer)
     model_calls = 0
-    output_tokens = reasoning_tokens = cost_usd = None
+    output_tokens = reasoning_tokens = generated_tokens = cost_usd = None
     over_16k = 0
     seen = False
     for step in _iter_steps(trajectory):
@@ -307,35 +337,48 @@ def _trajectory_metrics(trajectory: dict[str, Any]) -> dict[str, Any]:
         seen = True
         count = _int(step.get("llm_call_count"))
         model_calls += count if count and count > 0 else 1
-        count = _int(metrics.get("completion_tokens"))
-        if count is not None:
-            output_tokens = _add(output_tokens, count)
-            if count > OVER_16K_TOKENS:
+        completion = _int(metrics.get("completion_tokens"))
+        if completion is not None:
+            output_tokens = _add(output_tokens, completion)
+            if completion > OVER_16K_TOKENS:
                 over_16k += 1
         count = _reasoning(_dict(metrics.get("extra")))
         if count is None:
             count = _reasoning(metrics)
         if count is not None:
             reasoning_tokens = _add(reasoning_tokens, count)
+        if completion is not None:
+            if rule == "includes_reasoning":
+                generated_tokens = _add(generated_tokens, completion)
+            elif rule == "excludes_reasoning":
+                # A step that reported no reasoning adds its completion only.
+                generated_tokens = _add(generated_tokens, completion + (count or 0))
         cost_usd = _add(cost_usd, _float(metrics.get("cost_usd")))
     if not seen:
         # A producer that wrote only aggregate metrics still reports tokens.
         final = _dict(trajectory.get("final_metrics"))
         output_tokens = _int(final.get("total_completion_tokens"))
         cost_usd = _float(final.get("total_cost_usd"))
+        # Without steps there is no per-step reasoning to add, so only a rule
+        # that includes reasoning in the output counter can give `gen_tok`.
+        generated_tokens = output_tokens if rule == "includes_reasoning" else None
         return {
             "model_calls": None,
             "output_tokens": output_tokens,
+            "generated_tokens": generated_tokens,
             "reasoning_tokens": None,
             "over_16k_calls": None,
             "cost_usd": cost_usd,
+            "unruled_producer": producer if rule is None else None,
         }
     return {
         "model_calls": model_calls,
         "output_tokens": output_tokens,
+        "generated_tokens": generated_tokens,
         "reasoning_tokens": reasoning_tokens,
         "over_16k_calls": over_16k,
         "cost_usd": cost_usd,
+        "unruled_producer": producer if rule is None else None,
     }
 
 
@@ -416,7 +459,9 @@ def load_trial(trial_dir: Path) -> dict[str, Any] | None:
         "cost_usd": cost_usd,
         "model_calls": source.get("model_calls"),
         "output_tokens": source.get("output_tokens"),
+        "generated_tokens": source.get("generated_tokens"),
         "reasoning_tokens": source.get("reasoning_tokens"),
+        "unruled_producer": source.get("unruled_producer"),
         "over_16k_calls": source.get("over_16k_calls"),
         "generation_minutes": generation_minutes,
         "tool_minutes": tool_minutes,
@@ -455,6 +500,7 @@ def summarize(trials: list[dict[str, Any]]) -> dict[str, Any]:
         "cost_usd": None,
         "model_calls": None,
         "output_tokens": None,
+        "generated_tokens": None,
         "reasoning_tokens": None,
         "over_16k_calls": None,
         "generation_minutes": None,
@@ -470,6 +516,7 @@ def summarize(trials: list[dict[str, Any]]) -> dict[str, Any]:
             "cost_usd",
             "model_calls",
             "output_tokens",
+            "generated_tokens",
             "reasoning_tokens",
             "over_16k_calls",
             "generation_minutes",
@@ -526,6 +573,10 @@ def build_report(jobs: Iterable[str | Path]) -> dict[str, Any]:
         "tasks": tasks,
         "trials": trials,
         "matrix": matrix,
+        # ATIF producers with no generated-token rule: their gen_tok is `-`.
+        "gen_unknown_agents": sorted(
+            {trial["unruled_producer"] for trial in trials if trial["unruled_producer"]}
+        ),
         "totals": {
             agent: summarize([t for t in trials if t["agent"] == agent])
             for agent in agents
@@ -595,6 +646,7 @@ def format_report(report: dict[str, Any]) -> str:
             _show(trial["model_calls"], ",d"),
             _show(trial["output_tokens"], ",d"),
             _show(trial["reasoning_tokens"], ",d"),
+            _show(trial["generated_tokens"], ",d"),
             _show(trial["over_16k_calls"], ",d"),
             _show(trial["generation_minutes"], ".2f"),
             _show(trial["tool_minutes"], ".2f"),
@@ -615,6 +667,7 @@ def format_report(report: dict[str, Any]) -> str:
                 "calls",
                 "out_tok",
                 "reason",
+                "gen_tok",
                 "over16k",
                 "gen_min",
                 "tool_min",
@@ -638,6 +691,7 @@ def format_report(report: dict[str, Any]) -> str:
                 _show(totals[agent]["model_calls"], ",d"),
                 _show(totals[agent]["output_tokens"], ",d"),
                 _show(totals[agent]["reasoning_tokens"], ",d"),
+                _show(totals[agent]["generated_tokens"], ",d"),
                 _show(totals[agent]["over_16k_calls"], ",d"),
                 _show(totals[agent]["generation_minutes"], ".2f"),
                 _show(totals[agent]["tool_minutes"], ".2f"),
@@ -658,6 +712,7 @@ def format_report(report: dict[str, Any]) -> str:
                 "calls",
                 "out_tok",
                 "reason",
+                "gen_tok",
                 "over16k",
                 "gen_min",
                 "tool_min",
@@ -667,6 +722,11 @@ def format_report(report: dict[str, Any]) -> str:
         )
 
     blocks.append(totals_table("AGENT TOTALS", report["totals"]))
+    unruled = report["gen_unknown_agents"]
+    if unruled:
+        blocks.append(
+            "gen_tok has no rule for: " + ", ".join(unruled) + " (reported as -)"
+        )
     common = report["common_tasks"]
     blocks.append(
         "COMMON TASKS (every agent finished one trial): "

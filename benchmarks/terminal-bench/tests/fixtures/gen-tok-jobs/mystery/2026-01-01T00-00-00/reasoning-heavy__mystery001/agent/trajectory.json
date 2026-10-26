@@ -1,0 +1,39 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "trajectory_id": "mystery-reasoning-heavy",
+  "session_id": "mystery-reasoning-heavy",
+  "agent": {
+    "name": "mystery-agent",
+    "version": "0.1.0",
+    "model_name": "opencode-go/deepseek-v4.1-flash"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "think hard"
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-01-01T00:00:20Z",
+      "source": "agent",
+      "model_name": "opencode-go/deepseek-v4.1-flash",
+      "message": "Done.",
+      "llm_call_count": 1,
+      "metrics": {
+        "prompt_tokens": 700,
+        "completion_tokens": 100,
+        "cost_usd": 0.002,
+        "extra": {
+          "reasoning_tokens": 40
+        }
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 700,
+    "total_completion_tokens": 100,
+    "total_cost_usd": 0.002,
+    "total_steps": 2
+  }
+}
