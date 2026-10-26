@@ -35,6 +35,7 @@ Implementation: `SessionJournal::set_tee` installs the sender under the write lo
 | `run_usage` | usage totals written by this process: same shape as `usage`, counts suffix only. No resume means byte-equal to `usage` |
 | `run_cost` | fee totals written by this process: same shape as `cost`, counts suffix only. `estimated` is always false. Resume recalculation runs only in memory (before tee install) and writes no new journal rows, so the suffix holds no recalculated old records, and its fees all compute live. No fee records means `null`, no resume means byte-equal to `cost` |
 | `text` | Last assistant message text joined. No assistant messages means `""` |
+| `model_error` | Present only when the run ended because a turn failed on a `ModelError`, absent on every other ending. Shape: `{"kind", "status", "retry_after_secs"}` (§2b) |
 | `unhandled_job_notices` | Job completion notices with no turn to meet: appears only on spent wake budget, all other outcomes own no such field |
 | `unhandled_stop_notices` | Stop continuation verdicts with no turn to meet (`exit 2` degraded by gates): appears only on spent wake budget **with** such notices, all other outcomes and pure job degrades own no such field |
 
@@ -50,6 +51,22 @@ Other off-path ends: `NotStarted` (input refused before turns) with stateless st
 `-p` exits at "one turn plus the chain it wakes". Finished turns with still-running background jobs keep exec waiting. Job ends wake next turns through ADR 0037 `followup`. Waiting ends with no running jobs and no pending wakes. Exit code with `Result` takes the last turn. No background jobs means behavior unchanged.
 
 Topped wake budgets (ADR 0037 decision 5 gates) make waiting pointless: degraded-to-inject-only notices never meet turns. Exec then ends the session. `outcome` reads `budget_exceeded`. `stop_reason` reads `wake_budget`. `unhandled_job_notices` counts those notices. Exit code is 3 (§3 budget class). Degraded `Stop` hook continuation verdicts work the same. No running jobs, no pending wakes, never busy. exec still ends the session. Exit code is 3. `unhandled_job_notices` counts job notices (can be 0), `unhandled_stop_notices` counts Stop verdicts. Timeout with SIGTERM behavior stays unchanged, no extra timers added.
+
+### 2b. `model_error`: the structured failure behind a failed turn
+
+When the run ended because a turn failed on a `ModelError` (ADR 0017), the `Result` object carries `model_error`:
+
+```json
+{"kind": "usage_limit", "status": null, "retry_after_secs": 6240}
+```
+
+- `kind` is one closed set, one value per `ModelError` variant, snake_case: `transport`, `protocol`, `unavailable`, `usage_limit`, `context_overflow`, `empty_response`. The list lives in code (`radian_core::MODEL_ERROR_KINDS`) and the serializer and the docs drift test both read it.
+- `status` is the HTTP status the variant carries (`Unavailable.status`), else `null`.
+- `retry_after_secs` is `Unavailable.retry_after` or `UsageLimit.resets_in` in whole seconds, rounded up, else `null`.
+- The field is absent on every other run end: completed, cancelled, budget, a hook error, a tool failure. It is never `null`.
+- It carries no message text: the message stays on stderr as before. Exit codes do not change.
+
+The field carries the `ModelError` itself from the failing turn to the `Result` writer; no host parses the message text.
 
 ### 3. Exit codes split by outcome (all exec modes, never jsonl-only)
 
@@ -75,7 +92,7 @@ Core `RunStatus` (`#[non_exhaustive]`, unnamed new states take the wildcard arm,
 
 ## Verification
 
-- Golden tests: one mock-session jsonl stdout passes row-by-row checks. Durable rows match journal files byte for byte, live rows carry deltas only, `Result` rows match their own fixture (`docs/schema/fixtures/exec-result.jsonl`, `check-fixtures.sh` Result sections check).
+- Golden tests: one mock-session jsonl stdout passes row-by-row checks. Durable rows match journal files byte for byte, live rows carry deltas only, `Result` rows match their own fixture (`docs/schema/fixtures/exec-result.jsonl`, `check-fixtures.sh` Result sections check). The fixture's `model_error` line is checked against `radian_core::MODEL_ERROR_KINDS`, and `docs/user/cli.md` names every kind value (the drift test reads the same list).
 - Five outcomes each own one exit-code test (0/1/3/4, plus two existing 130 tests with 2 usage tests staying pinned): any outcome falling back to 1 fails.
 - `-p -` reads stdin and starts after EOF. `-p` stdout matches pre-change bytes (jsonl rows leaking to default output fail).
 - Terminal-Bench adapters run `--output jsonl`, and read `exit_code`/`stop_reason` from `Result` rows.
