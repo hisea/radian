@@ -261,6 +261,39 @@ async fn retries_zero_fails_on_the_first_transient_error() {
     assert!(announced(&rec).is_empty());
 }
 
+/// A used-up plan window (ADR 0017) is not transient either: the same request cannot succeed
+/// before the window resets, so the turn makes one request, not four. Mutation:
+/// `UsageLimit` made transient → this fails (a retry is sent and announced).
+#[tokio::test]
+async fn a_usage_limit_error_is_never_retried() {
+    let model = ScriptedModel::new([
+        Reply::UsageLimit(
+            "HTTP 429: the plan window is used up".into(),
+            Some(Duration::from_secs(3516)),
+        ),
+        text("unused"),
+    ]);
+    let mut chat = agent_with_retries(Arc::clone(&model), 3)
+        .open_session()
+        .await
+        .unwrap();
+    let rec = Recorder::default();
+    let mut run = chat.start_turn("go").unwrap();
+
+    let err = run.run(&rec).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        RunError::Model(ModelError::UsageLimit {
+            resets_in: Some(wait),
+            ..
+        }) if wait == Duration::from_secs(3516)
+    ));
+    assert_eq!(model.requests().len(), 1, "one request, no retries");
+    assert!(announced(&rec).is_empty(), "no retry was announced");
+    assert_eq!(run.outcome().unwrap().status, RunStatus::Failed);
+}
+
 /// A non-transient error (a 400) is never retried, even with retries configured.
 #[tokio::test]
 async fn a_protocol_error_is_never_retried() {

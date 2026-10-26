@@ -40,6 +40,8 @@ pub enum Reply {
     Unavailable(String, Option<Duration>),
     /// Fails with a non-transient `Protocol` error (e.g. HTTP 400).
     Protocol(String),
+    /// Fails with a non-transient used-up plan window (ADR 0017), carrying the reset wait.
+    UsageLimit(String, Option<Duration>),
 }
 
 /// Returns scripted replies in order and records every request.
@@ -140,6 +142,9 @@ impl Model for ScriptedModel {
                 status: None,
             }),
             Some(Reply::Protocol(message)) => Err(ModelError::Protocol(message)),
+            Some(Reply::UsageLimit(message, resets_in)) => {
+                Err(ModelError::UsageLimit { message, resets_in })
+            }
             None => Err(ModelError::Protocol("script exhausted".into())),
         }
     }
