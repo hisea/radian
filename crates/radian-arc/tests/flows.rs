@@ -548,7 +548,8 @@ fn adopt_accepts_a_hand_edited_flow_before_the_first_attempt() {
 }
 
 /// A task whose flow was removed from `config.toml` is not claimed: it stays `todo.ready`,
-/// the loop names the task and the missing flow, and so does its queue reason.
+/// the loop and `confirm --dry-run` name the task and the missing flow, and `list` and
+/// `show` print no slot reason, because a missing flow is not a full limit.
 #[test]
 fn a_task_whose_flow_was_removed_stays_ready_and_says_so() {
     let (repo, store) = setup("flows-removed");
@@ -631,6 +632,33 @@ fn a_task_whose_flow_was_removed_stays_ready_and_says_so() {
         dry.stdout.contains("does not define"),
         "the queue reason says the flow is missing: {}",
         dry.stdout
+    );
+
+    // `list`'s task line and `show`'s `queue_reason` name a slot only when a full limit holds
+    // the task (ADR 0048 decision 13): a missing flow is not a limit, so neither prints one.
+    let list = repo.radian(&["arc", "list"]);
+    assert_eq!(list.code, 0, "list: {}", list.stderr);
+    let line = list
+        .stdout
+        .lines()
+        .find(|line| line.contains(task.as_str()))
+        .unwrap_or_else(|| panic!("`{task}` is listed: {}", list.stdout));
+    assert!(
+        !line.contains("waiting for a free"),
+        "a missing flow is not a full limit: {}",
+        list.stdout
+    );
+    let show = repo.radian(&["arc", "show", &task]);
+    assert_eq!(show.code, 0, "show: {}", show.stderr);
+    assert!(
+        show.stdout.contains("queue_reason: -"),
+        "`show` names no slot: {}",
+        show.stdout
+    );
+    assert!(
+        !show.stdout.contains("waiting for a free"),
+        "`show` names no slot: {}",
+        show.stdout
     );
 }
 
