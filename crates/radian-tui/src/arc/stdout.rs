@@ -16,8 +16,11 @@
 //! [`MAX_LINE_BYTES`]; a worker that prints without bound then costs a fixed amount of memory,
 //! and scrolling reaches the rows of that window. A line the worker is still writing is a row
 //! too, and is replaced when it completes; [`poll`](StdoutView::poll) drops its partial bytes
-//! when the file is truncated or replaced. Scrolling and following are the attach view's:
-//! `j`/`k` pause the follow when they leave the end, `f` returns to it.
+//! when the file is truncated or replaced. A truncation is a shorter file; a replacement is a
+//! file with another device or inode at the same path, even when it is not shorter. A rewrite
+//! of the same file to the same length is not observable and is read as no change. Scrolling
+//! and following are the attach view's: `j`/`k` pause the follow when they leave the end, `f`
+//! returns to it.
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
@@ -61,6 +64,9 @@ pub struct StdoutView {
     tail: Vec<u8>,
     /// How many bytes of the file are already in [`StdoutView::lines`] and [`StdoutView::tail`].
     offset: u64,
+    /// The device and inode of the file the offset belongs to, while it is known. A different
+    /// file at the same path is a replacement even when its length is not smaller.
+    identity: Option<(u64, u64)>,
     /// The first row the last frame drew.
     scroll: usize,
     /// The last row the last frame could draw, from its measured height.
@@ -81,6 +87,7 @@ impl StdoutView {
             lines: VecDeque::new(),
             tail: Vec::new(),
             offset: 0,
+            identity: None,
             scroll: 0,
             max_scroll: 0,
             follow: true,
@@ -109,23 +116,34 @@ impl StdoutView {
     }
 
     /// Reads the bytes appended since the last read, in chunks and up to [`READ_CAP`] of them. A
-    /// missing file is not an error: the worker may not have written anything yet. A file that
-    /// shrank was truncated or replaced, so the rows start over from its new content.
+    /// missing file is not an error: the worker may not have written anything yet. A shorter file
+    /// was truncated; a file with another device or inode is a replacement. Either way the rows
+    /// start over from its new content. A rewrite of the same file to the same length cannot be
+    /// told apart from an append and is read from the old offset.
     pub fn poll(&mut self) -> Result<bool, String> {
         let mut file = match std::fs::File::open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(format!("cannot read {}: {error}", self.path.display())),
         };
-        let len = file
+        let metadata = file
             .metadata()
-            .map_err(|error| format!("cannot read {}: {error}", self.path.display()))?
-            .len();
-        if len < self.offset {
+            .map_err(|error| format!("cannot read {}: {error}", self.path.display()))?;
+        let len = metadata.len();
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt as _;
+            (metadata.dev(), metadata.ino())
+        };
+        #[cfg(not(unix))]
+        let identity = (0, 0);
+        let replaced = self.identity.is_some_and(|known| known != identity);
+        if replaced || len < self.offset {
             self.lines.clear();
             self.tail.clear();
             self.offset = 0;
         }
+        self.identity = Some(identity);
         if len == self.offset {
             return Ok(false);
         }
@@ -569,6 +587,35 @@ mod tests {
         assert_eq!(view.lines[0].len(), MAX_LINE_BYTES);
         assert_eq!(view.lines[1], "the next line");
         assert!(view.tail.is_empty());
+    }
+
+    /// A file replaced at the same path starts over even when its length is not smaller: the
+    /// view compares the device and inode, not only the length.
+    ///
+    /// Mutation: compare only `len < offset` and the replaced bytes are read as an append (or
+    /// not at all when the lengths are equal).
+    #[test]
+    fn a_replaced_file_starts_over_when_it_is_not_shorter() {
+        let scratch = Scratch::new("replace");
+        let path = scratch.file();
+        let first = "first line\n";
+        fs::write(&path, first).unwrap();
+        let mut view = opened(&path);
+        assert_eq!(view.lines.len(), 1);
+        assert_eq!(view.offset, first.len() as u64);
+
+        // A different file of the same length, moved over the old one: a rename gives it
+        // another inode, and the length alone would see no change at all.
+        let replacement = "other line\n";
+        assert_eq!(replacement.len(), first.len());
+        let new_path = scratch.0.join("new.jsonl");
+        fs::write(&new_path, replacement).unwrap();
+        fs::rename(&new_path, &path).unwrap();
+
+        assert!(view.poll().unwrap(), "the replacement is read");
+        assert_eq!(view.lines.len(), 1);
+        assert_eq!(view.lines[0], "other line");
+        assert_eq!(view.offset, replacement.len() as u64);
     }
 
     fn path_len(path: &Path) -> u64 {

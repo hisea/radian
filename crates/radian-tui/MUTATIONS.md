@@ -3210,3 +3210,19 @@ restored with `cmp` identical to its copy.
 | TK0160-M4 | read the whole appended range at once, keep every line, and keep an unterminated line in full | ✅ 2 failed | `a_large_stdout_keeps_only_its_newest_rows` (`left: 131172, right: 4096`, "the rows are bounded"); `a_line_longer_than_the_cap_keeps_only_its_prefix` (`left: 8692, right: 8192`) |
 
 4/4 caught.
+
+## TK0163: a replaced command-worker stdout starts over (2026-10-25, branch `work/TK0163-arc-worker-command-followups`)
+
+The review found that only a shorter file was noticed, so a replacement at the same path whose
+length was equal to the read offset was not detected and its bytes were read as an append. The
+view now compares the file's device and inode as well as its length; a same-inode rewrite to the
+same length stays unobservable, and the module documents that. The mutation was applied by hand
+to `crates/radian-tui/src/arc/stdout.rs`, ran with `cargo nextest run -p radian-tui --locked
+--profile sandbox --lib -E '<the test below>'`, and the file was restored from
+`.radian/mut/stdout.rs.orig` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0163-M3 | `StdoutView::poll` ignores the file identity (`let replaced = false;`) | `arc::stdout::tests::a_replaced_file_starts_over_when_it_is_not_shorter` | ✅ failed |
+
+1/1 caught.
