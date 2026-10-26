@@ -170,14 +170,17 @@ those tasks. `--json` prints the same report as one object (`agents`, `tasks`,
 `trials`, `matrix`, `totals`, `common_tasks`, `common_totals`); a counter no
 record reported is `null`, never 0.
 
-A trial file is never read whole, because a long run's journal can be many
-GB. Journals and `radian-stdout.txt` are streamed line by line; a line over
-16 Mi characters (`MAX_LINE_CHARS`) is skipped and reading continues.
-`result.json` and `trajectory.json` are read only when they are at most 64 MiB
-(`MAX_JSON_BYTES`). An over-limit journal or trajectory is treated as
-unreadable: the trial keeps the facts from `result.json` and reports `-` for
-the counters that file would have supplied. An over-limit `result.json` is not
-a trial the report can read, so it is skipped like a missing one.
+Journals and `radian-stdout.txt` are the only files streamed: a long run's
+journal can be many GB, so it is read line by line under a per-line cap of
+16 Mi characters (`MAX_LINE_CHARS`) — an over-long line is drained and skipped,
+and the rest of the file is still read, however large the file is. There is no
+total-size limit on a journal. `result.json` and `trajectory.json` are
+summaries, so they are read whole, but only when they are at most 64 MiB
+(`MAX_JSON_BYTES`); that is a per-file bound on these two JSON inputs, never a
+journal bound. A `trajectory.json` over the cap is treated as unreadable: the
+trial keeps the facts from `result.json` and reports `-` for the counters the
+trajectory would have supplied. An over-limit `result.json` is not a trial the
+report can read, so it is skipped like a missing one.
 
 The fixtures under `tests/fixtures/jobs/` hold one trial per agent kind plus a
 cancelled and a timed-out trial; the commands to run their tests are in
