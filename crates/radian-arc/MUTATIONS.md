@@ -1198,3 +1198,20 @@ identical.
 | TK0177-M2 | the lock file lives in the worktree's own git dir (`fetch_lock_path` runs `rev-parse --absolute-git-dir`) | `fetch_lock::a_linked_worktree_shares_the_repositorys_fetch_lock` (`left: …/repo/.git/radian-arc-fetch.lock`, `right: …/repo/.git/worktrees/linked/radian-arc-fetch.lock`) | ✅ failed |
 
 2/2 caught.
+## TK0164: `[flows.<name>]` and the task `flow` field (2026-10-25, branch `work/TK0164-flows-config-and-task-flow`)
+
+ADR 0048 decisions 7, 14 and 15: a task's `flow` names the `[flows.<name>]` section whose worker
+every attempt starts, the config refuses two worker settings for the default flow, and every
+writer refuses a flow the file does not define. Each mutation was applied by hand to the named
+file. The named test ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test
+flows`; the end-to-end test also needed `cargo build -p radian-tui --bin radian` because it drives
+the binary. The file was restored from `.radian/<file>.bak` with `cp`, and `git diff` found it
+identical to the commit.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0164-M1 | the claim starts `[worker]`'s worker instead of the task's flow's (`claim_by` reads `config.worker` for `command`/`exec_args`) | `flows::each_task_runs_its_flows_worker_and_the_records_name_the_flow` (`TK0001-codex-1 terminated -> todo.retry_wait` instead of `review.awaiting_human`) | ✅ failed |
+| TK0164-M2 | `Store::add_task_in` skips `check_flow`, so `add_task` accepts an unknown flow | `flows::an_unknown_flow_is_refused_by_every_writer` (`add_task refuses an unknown flow: "TK0001-one"`) | ✅ failed |
+| TK0164-M3 | `check_flows` accepts `[flows.default]` together with `[worker] command` | `flows::a_broken_flow_config_is_refused_by_name` (`the config is refused` parsed the file) | ✅ failed |
+
+3/3 caught.

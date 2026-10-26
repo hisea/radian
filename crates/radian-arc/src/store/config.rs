@@ -24,11 +24,32 @@ pub use crate::gate::STAGE_NAMES;
 /// The configuration schema version this build writes and accepts.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// The flow a task with no `flow` field runs (`[flows.default]`).
+pub const DEFAULT_FLOW: &str = "default";
+
+/// The longest flow name, in characters.
+pub const FLOW_NAME_MAX_CHARS: usize = 32;
+
+/// The concurrency a flow has when its section leaves the key out.
+pub const DEFAULT_FLOW_CONCURRENCY: u32 = 1;
+
+/// A flow name: 1 to 32 characters from `[a-z0-9-]`, with no leading or trailing `-`.
+pub fn valid_flow_name(name: &str) -> bool {
+    let count = name.chars().count();
+    (1..=FLOW_NAME_MAX_CHARS).contains(&count)
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
 /// Keys whose default is "not set" rather than a value. The manual's table names each
 /// one, and the drift test checks that it does.
 pub const OPTIONAL_KEYS: &[&str] = &[
     "limits.max_cost_usd",
     "worker.command",
+    "flows.<name>.command",
     "gate.review.exec_args",
     "gate.review.prompt_file",
     "gate.review.first.exec_args",
@@ -48,6 +69,8 @@ pub struct Config {
     #[serde(default)]
     pub worker: Worker,
     #[serde(default)]
+    pub flows: BTreeMap<String, Flow>,
+    #[serde(default)]
     pub ids: Ids,
     #[serde(default = "default_gate")]
     pub gate: GateConfig,
@@ -55,13 +78,20 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        let gate = default_gate();
+        let worker = Worker::default();
+        let flows = BTreeMap::from([(
+            DEFAULT_FLOW.to_owned(),
+            Flow::from_worker(&worker, &gate.profile),
+        )]);
         Self {
             schema_version: SCHEMA_VERSION,
             repository: Repository::default(),
             limits: Limits::default(),
-            worker: Worker::default(),
+            worker,
+            flows,
             ids: Ids::default(),
-            gate: default_gate(),
+            gate,
         }
     }
 }
@@ -214,6 +244,79 @@ pub struct Worker {
     pub rework_session: ReworkSession,
 }
 
+/// One `[flows.<name>]` section: the worker and settings a task with `flow = "<name>"`
+/// runs with (ADR 0048 decision 15).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Flow {
+    /// Extra `radian exec` arguments, after the wrapper's fixed ones. Empty: the host's normal
+    /// model configuration. It belongs to the `radian exec` worker line only: a flow that sets
+    /// it together with [`Flow::command`] is refused.
+    pub exec_args: Vec<String>,
+    /// The program and its arguments of a worker that is not `radian exec`: the first element
+    /// is the program, the rest are its arguments, and no shell is involved. `None` keeps
+    /// `radian exec` with this flow's `exec_args`. An empty array is refused.
+    pub command: Option<Vec<String>>,
+    /// How many tasks of this flow may run at once. Parsed and validated, but every task still
+    /// counts against `[limits] concurrency`.
+    pub concurrency: u32,
+    /// The `[gate.profiles.<name>]` section this flow uses by default. Unset, it is the value
+    /// of `gate.profile`; the key is parsed and validated, and every task's gate still uses
+    /// `gate.profile`.
+    pub gate_profile: Option<String>,
+}
+
+impl Default for Flow {
+    fn default() -> Self {
+        Self {
+            exec_args: Vec::new(),
+            command: None,
+            concurrency: DEFAULT_FLOW_CONCURRENCY,
+            gate_profile: None,
+        }
+    }
+}
+
+impl Flow {
+    /// The `default` flow built from today's global keys: the worker line and the gate profile.
+    fn from_worker(worker: &Worker, gate_profile: &str) -> Self {
+        Self {
+            exec_args: worker.exec_args.clone(),
+            command: worker.command.clone(),
+            concurrency: DEFAULT_FLOW_CONCURRENCY,
+            gate_profile: Some(gate_profile.to_owned()),
+        }
+    }
+
+    /// The gate profile this flow names, or `gate.profile` when its section leaves it out.
+    pub fn gate_profile<'a>(&'a self, gate_profile: &'a str) -> &'a str {
+        self.gate_profile.as_deref().unwrap_or(gate_profile)
+    }
+}
+
+/// The flow `name` names, when the file defines it. `default` always exists after parsing.
+pub fn flow<'a>(config: &'a Config, name: &str) -> Option<&'a Flow> {
+    config.flows.get(name)
+}
+
+/// The refusal of an unknown flow, naming every flow the file defines.
+pub fn unknown_flow_message(name: &str, config: &Config) -> String {
+    format!(
+        "`{name}` is not a flow; flows are {}",
+        config
+            .flows
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The line the loop and `show`'s queue reason print for a task whose `flow` names no section.
+pub fn missing_flow_reason(task: &str, flow: &str) -> String {
+    format!("task `{task}` uses flow `{flow}`, which `config.toml` does not define")
+}
+
 /// `[ids]`: the prefix every new plan and task id starts with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -327,7 +430,8 @@ key_commands = []             # what the integration stage runs on the merge can
 pub fn parse(text: &str) -> Result<Config, String> {
     check_review_shape(text)?;
     check_worker_shape(text)?;
-    let config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
+    check_flows_shape(text)?;
+    let mut config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
     if config.schema_version != SCHEMA_VERSION {
         return Err(format!(
             "unsupported schema_version {} (this build reads {SCHEMA_VERSION})",
@@ -369,6 +473,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             config.gate.profile, config.gate.profile
         ));
     }
+    check_flows(&mut config)?;
     check_prefix("ids.plan_prefix", &config.ids.plan_prefix)?;
     check_prefix("ids.task_prefix", &config.ids.task_prefix)?;
     if config.ids.plan_prefix == config.ids.task_prefix {
@@ -446,6 +551,99 @@ fn check_worker_shape(text: &str) -> Result<(), String> {
              arguments)"
                 .to_owned(),
         );
+    }
+    Ok(())
+}
+
+/// `flows.<name>.command` must be an array of strings before the TOML deserializer reports a
+/// position without the key. A non-array value is refused by name.
+fn check_flows_shape(text: &str) -> Result<(), String> {
+    let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
+    let Some(flows) = document.get("flows").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    for (name, flow) in flows {
+        let Some(command) = flow.get("command") else {
+            continue;
+        };
+        if !command
+            .as_array()
+            .is_some_and(|items| items.iter().all(toml::Value::is_str))
+        {
+            return Err(format!(
+                "`flows.{name}.command` must be an array of strings (the program first, then its \
+                 arguments)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validates every `[flows.<name>]` section, refuses a `[flows.default]` beside `[worker]`'s
+/// worker keys, fills the `default` flow from those keys when the file has no
+/// `[flows.default]`, and resolves each flow's `gate_profile` from `gate.profile`.
+fn check_flows(config: &mut Config) -> Result<(), String> {
+    // One setting lives in one place: a `default` section means the worker comes from it, and
+    // today's `[worker]` keys that build the default flow may not also carry a value.
+    if config.flows.contains_key(DEFAULT_FLOW) {
+        if config.worker.command.is_some() {
+            return Err(format!(
+                "`flows.{DEFAULT_FLOW}` and `worker.command` are both set; the default flow's \
+                 worker is one place, so set one or the other"
+            ));
+        }
+        if !config.worker.exec_args.is_empty() {
+            return Err(format!(
+                "`flows.{DEFAULT_FLOW}` and `worker.exec_args` are both set; the default flow's \
+                 worker is one place, so set one or the other"
+            ));
+        }
+    }
+    for (name, flow) in &config.flows {
+        if !valid_flow_name(name) {
+            return Err(format!(
+                "`{name}` is not a flow name: 1 to {FLOW_NAME_MAX_CHARS} characters from \
+                 [a-z0-9-], with no leading or trailing -"
+            ));
+        }
+        if let Some(command) = &flow.command {
+            if command.is_empty() {
+                return Err(format!(
+                    "`flows.{name}.command` is empty; its first element must be the program"
+                ));
+            }
+            if !flow.exec_args.is_empty() {
+                return Err(format!(
+                    "`flows.{name}.command` and `flows.{name}.exec_args` are both set; \
+                     `flows.{name}.exec_args` belongs to the `radian exec` worker line only, so \
+                     set one or the other (the command is `{}`)",
+                    command[0]
+                ));
+            }
+        }
+        if flow.concurrency == 0 {
+            return Err(format!(
+                "`flows.{name}.concurrency` is 0; it must be 1 or more"
+            ));
+        }
+    }
+    if !config.flows.contains_key(DEFAULT_FLOW) {
+        let flow = Flow::from_worker(&config.worker, &config.gate.profile);
+        config.flows.insert(DEFAULT_FLOW.to_owned(), flow);
+    }
+    // An unset `gate_profile` is `gate.profile`, and every name must be one of the sections the
+    // file defines. `gate.profile` was checked above, so its own name resolves.
+    let gate_profile = config.gate.profile.clone();
+    for (name, flow) in &mut config.flows {
+        let profile = flow
+            .gate_profile
+            .get_or_insert_with(|| gate_profile.clone());
+        if !config.gate.profiles.contains_key(profile) {
+            return Err(format!(
+                "`flows.{name}.gate_profile` is `{profile}` but no [gate.profiles.{profile}] \
+                 section exists"
+            ));
+        }
     }
     Ok(())
 }
@@ -793,5 +991,127 @@ mod tests {
             .expect_err("a string is not an array");
         assert!(shape.contains("worker.command"), "{shape}");
         assert!(shape.contains("array of strings"), "{shape}");
+    }
+
+    /// A file without `[flows]` gets the `default` flow from today's keys, and the flow's
+    /// worker is the same one the file would have started before flows existed.
+    #[test]
+    fn a_file_without_flows_gets_the_default_flow_from_the_worker_keys() {
+        assert_eq!(
+            Config::default()
+                .flows
+                .get(DEFAULT_FLOW)
+                .map(|flow| (flow.exec_args.clone(), flow.command.clone())),
+            Some((Vec::new(), None)),
+            "the code's default is an empty `radian exec` flow"
+        );
+        let text =
+            default_text("main").replace("exec_args = []", "exec_args = [\"--model\", \"m\"]");
+        let config = parse(&text).expect("a file without [flows]");
+        let flow = config
+            .flows
+            .get(DEFAULT_FLOW)
+            .expect("the default flow exists");
+        assert_eq!(flow.exec_args, vec!["--model".to_owned(), "m".to_owned()]);
+        assert_eq!(flow.command, None);
+        assert_eq!(flow.gate_profile(DEFAULT_FLOW), "default");
+        assert_eq!(flow.concurrency, 1);
+
+        let configured = parse("schema_version = 1\n[worker]\ncommand = [\"/usr/bin/codex\"]\n")
+            .expect("a worker command becomes the default flow's");
+        assert_eq!(
+            configured
+                .flows
+                .get(DEFAULT_FLOW)
+                .and_then(|flow| flow.command.clone()),
+            Some(vec!["/usr/bin/codex".to_owned()])
+        );
+    }
+
+    /// A flow name is 1 to 32 characters from `[a-z0-9-]`, with no leading or trailing `-`.
+    #[test]
+    fn a_flow_name_follows_the_one_rule() {
+        for name in ["a", "default", "game-art", "a1-b2"] {
+            assert!(valid_flow_name(name), "{name}");
+        }
+        for name in ["", "-a", "a-", "A", "a_b", "a b"] {
+            assert!(!valid_flow_name(name), "{name}");
+        }
+        assert!(valid_flow_name(&"a".repeat(FLOW_NAME_MAX_CHARS)));
+        assert!(!valid_flow_name(&"a".repeat(FLOW_NAME_MAX_CHARS + 1)));
+        let text = "schema_version = 1\n[flows.\"Game_Art\"]\nexec_args = []\n";
+        let error = parse(text).expect_err("a bad name is refused");
+        assert!(error.contains("Game_Art"), "{error}");
+    }
+
+    /// `[flows.default]` and a `[worker]` worker key are one setting in two places: the file is
+    /// refused by both names. `[worker] rework_session` stays a `[worker]` key.
+    #[test]
+    fn the_default_flow_and_the_worker_keys_are_one_setting() {
+        for (worker, key) in [
+            ("command = [\"/usr/bin/codex\"]\n", "worker.command"),
+            ("exec_args = [\"--model\", \"m\"]\n", "worker.exec_args"),
+        ] {
+            let text =
+                format!("schema_version = 1\n[worker]\n{worker}[flows.default]\nexec_args = []\n");
+            let error = parse(&text).expect_err("one worker setting, two places");
+            assert!(error.contains("flows.default"), "{error}");
+            assert!(error.contains(key), "the error names `{key}`: {error}");
+        }
+        let text = "schema_version = 1\n[worker]\nrework_session = \"resume\"\n\
+                    [flows.default]\nexec_args = []\n";
+        let config = parse(text).expect("[worker] rework_session belongs to every flow");
+        assert_eq!(config.worker.rework_session, ReworkSession::Resume);
+        assert_eq!(
+            config
+                .flows
+                .get(DEFAULT_FLOW)
+                .map(|flow| flow.exec_args.clone()),
+            Some(Vec::new())
+        );
+    }
+
+    /// A flow's worker is checked like `[worker]`'s: an empty `command`, `command` beside
+    /// `exec_args`, `concurrency` 0 and a `gate_profile` with no section are each refused by
+    /// name.
+    #[test]
+    fn a_broken_flow_is_refused_by_name() {
+        for (table, key) in [
+            ("command = []\n", "flows.art.command"),
+            (
+                "command = [\"/usr/bin/codex\"]\nexec_args = [\"--model\", \"m\"]\n",
+                "flows.art.command",
+            ),
+            ("concurrency = 0\n", "flows.art.concurrency"),
+            ("gate_profile = \"missing\"\n", "flows.art.gate_profile"),
+        ] {
+            let text = format!("schema_version = 1\n[flows.art]\n{table}");
+            let error = parse(&text).expect_err("a broken flow is refused");
+            assert!(error.contains(key), "the error names `{key}`: {error}");
+        }
+        let both = "schema_version = 1\n[flows.art]\ncommand = [\"/usr/bin/codex\"]\n\
+                    exec_args = [\"--model\", \"m\"]\n";
+        let error = parse(both).expect_err("command beside exec_args");
+        assert!(error.contains("flows.art.exec_args"), "{error}");
+
+        let unknown = "schema_version = 1\n[flows.art]\nrunner = \"x\"\n";
+        assert!(parse(unknown).is_err(), "an unknown flow key is refused");
+    }
+
+    /// A flow's `gate_profile` defaults to `gate.profile` and is resolved when the file is read;
+    /// a named existing profile is kept. `exec_args` and `concurrency` take their defaults.
+    #[test]
+    fn a_flow_takes_gate_profile_from_the_gate_and_its_other_defaults() {
+        let text = "schema_version = 1\n[gate]\nprofile = \"strict\"\n\
+                    [gate.profiles.strict]\n\
+                    stages = [{ stage = \"commands\", required = true }]\n\
+                    [flows.art]\n";
+        let config = parse(text).expect("a flow with no keys");
+        let flow = config.flows.get("art").expect("the flow exists");
+        assert_eq!(flow.gate_profile("strict"), "strict");
+        assert_eq!(flow.gate_profile, Some("strict".to_owned()));
+        assert_eq!(flow.exec_args, Vec::<String>::new());
+        assert_eq!(flow.command, None);
+        assert_eq!(flow.concurrency, DEFAULT_FLOW_CONCURRENCY);
     }
 }

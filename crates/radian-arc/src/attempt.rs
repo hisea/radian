@@ -231,6 +231,7 @@ fn spawn_claim_with(
     // The configured command worker or the `radian exec` arguments, from the claim's one
     // immutable worker line: a config change after the claim cannot start a different worker
     // than `start.json` records (ADR 0048 decisions 4 and 7).
+    command.arg("--flow").arg(claim.worker.flow());
     add_worker_args(&mut command, &claim.worker)?;
     let stdout = File::create(&stdout_path).map_err(|error| {
         Error::Failed(format!("cannot create {}: {error}", stdout_path.display()))
@@ -282,15 +283,16 @@ fn spawn_claim_with(
 /// claim's [`WorkerLine`], never from a configuration read after the claim.
 fn add_worker_args(command: &mut Command, worker: &WorkerLine) -> Result<(), Error> {
     match worker {
-        WorkerLine::Command { command: words } => {
-            let json = serde_json::to_string(words)
-                .map_err(|error| Error::Failed(format!("cannot encode worker.command: {error}")))?;
+        WorkerLine::Command { command: words, .. } => {
+            let json = serde_json::to_string(words).map_err(|error| {
+                Error::Failed(format!("cannot encode the flow's command: {error}"))
+            })?;
             command.arg("--command").arg(json);
         }
         WorkerLine::Radian { .. } => {}
     }
     command.arg("--");
-    if let WorkerLine::Radian { exec_args } = worker {
+    if let WorkerLine::Radian { exec_args, .. } = worker {
         command.args(exec_args);
     }
     Ok(())
@@ -914,7 +916,7 @@ mod tests {
             .unwrap();
         crate::store::plan_ops::confirm(&store, &plan).expect("confirm");
         let claim = attempt_ops::claim(&store, &task_id).expect("claim");
-        let WorkerLine::Command { command } = &claim.worker else {
+        let WorkerLine::Command { command, .. } = &claim.worker else {
             panic!("the claim recorded the configured command");
         };
         assert_eq!(

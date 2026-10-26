@@ -1162,6 +1162,18 @@ fn propose_followups(store: &Store, transitions: &mut Transitions) -> Result<boo
     Ok(changed)
 }
 
+/// The reason a `todo.ready` task cannot be claimed because its `flow` names no
+/// `[flows.<name>]` section (ADR 0048 decision 15). `None` when the flow exists.
+fn missing_flow_reason(store: &Store, task: &model::TaskFile) -> Result<Option<String>, Error> {
+    let config = store.config()?;
+    let name = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    Ok((!config.flows.contains_key(name))
+        .then(|| crate::store::config::missing_flow_reason(&task.id, name)))
+}
+
 /// Whether every task in `after` is `done.merged`.
 fn after_merged(store: &Store, task: &model::TaskFile) -> Result<bool, Error> {
     for id in &task.after {
@@ -1256,7 +1268,9 @@ pub fn waiting_reason(
     let item = task;
     let reason = match (item.state, item.phase.as_str()) {
         (TaskState::Todo, "ready") => {
-            if plan.auto == "off" {
+            if let Some(reason) = missing_flow_reason(store, item)? {
+                reason
+            } else if plan.auto == "off" {
                 "waiting for you to start it (`auto` is `off`)".to_owned()
             } else {
                 let missing: Vec<&str> = item

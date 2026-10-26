@@ -52,8 +52,23 @@ A failed check fails the attempt with its reason in `runs/<task>/attempts/<attem
 ## Another agent as the worker
 
 `[worker] command` replaces the `radian exec` worker with one program of your choice for every attempt of every task ([`worker.command`](files.md#configtoml)).
+A task can pick a different worker with its `flow`: a `[flows.<name>]` section can set `command`, or `exec_args` for `radian exec`, and each task names the flow it runs ([the flow rows](files.md#configtoml)).
+A repository can then run, say, image tasks through a Codex script and code tasks through `radian exec` in the same plan:
+
+```toml
+[flows.codex]
+command = ["/absolute/path/to/codex-worker.sh"]
+
+[flows.default]
+exec_args = ["--model", "some-model", "--system-file", ".radian/arc/code.md"]
+```
+
+A task with `flow = "codex"` starts the script; a task with no `flow` uses `default`, here `radian exec` with those arguments.
+Without a `[flows.default]` section, `default` comes from the `[worker]` keys ([the flow rows](files.md#configtoml)).
+`[worker] rework_session` is a `[worker]` key, not a flow key, and it applies to every flow.
+The rest of this section describes the command worker; it applies to a flow's `command` exactly as it did to `[worker] command`.
 The array's first element is the program and the rest are its arguments; there is no shell in between, so a pipeline or a variable belongs in a script you pass as the program.
-Unset, the worker is `radian exec` and this section does not apply.
+Unset, a flow's worker is `radian exec` and this section does not apply to it.
 
 The program runs in the task's worktree, gets the same brief on stdin as a `radian exec` worker (the conflict section, the hand-off, the task body, then [`worker-brief.md`](files.md#worker-briefmd)), and its stdout goes to `runs/<task>/attempts/<attempt id>/result.jsonl` and its stderr to `stderr.log`.
 The arc TUI's conversation tab shows those rows while the attempt runs, under the program's name (see [the task page's conversation tab](tui.md#the-task-page)).
